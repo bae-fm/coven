@@ -182,8 +182,7 @@ enum ResolvedBlobAccess {
 
 impl ResolvedBlobAccess {
     /// Whichever access this connection resolved to, as the operations both
-    /// answer the same way. Naming the variant is only needed for what a
-    /// cloud-backed store alone can do.
+    /// answer the same way.
     fn access(&self) -> &dyn BlobAccess {
         match self {
             Self::Local(access) => access,

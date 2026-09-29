@@ -987,8 +987,9 @@ impl StoreBlobCache {
         }
     }
 
-    /// Delete the local-store blobs whose last row reference is gone, then
-    /// report whether any intent survived the pass and must be retried.
+    /// Delete the local blob copies named by committed cleanup intents. `true`
+    /// when some intent is held by an active Store-write lease and must be
+    /// retried.
     pub(crate) async fn drain_local_cleanup(&self) -> Result<bool, coven_database::DbError> {
         coven_database::LocalBlobCleanup::new(&self.database)
             .drain()

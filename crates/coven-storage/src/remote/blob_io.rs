@@ -222,7 +222,7 @@ pub(crate) enum ExactBlobOpening {
 
 /// Opens one stored blob as it arrives and withholds EOF until the source has
 /// ended, every chunk of the framing has opened, and the bytes that passed
-/// through are the ones the signed reference names.
+/// through match the stored size and hash in the blob's `StoredBlobRef`.
 ///
 /// Nothing here trusts a length declared inside the body: the header's
 /// plaintext length frames the chunks, and completion is the source ending

@@ -842,11 +842,15 @@ impl CovenHandle {
     /// seeking without loading the whole file. The ranged sibling of
     /// [`read_blob`](Self::read_blob), which stays the one-shot whole read.
     ///
-    /// Opening resolves the blob's locality, proves the plaintext's size and
-    /// content hash against the row, and holds the open file; every
-    /// [`BlobStream::read_at`] then costs only the bytes it returns. Hold the
-    /// stream for as long as the host is reading that blob — a stream per opened
-    /// file, not per range — since re-opening re-proves the whole blob.
+    /// Opening resolves the blob's source and holds it open; every
+    /// [`BlobStream::read_at`] then costs only the bytes it returns. Opening does
+    /// not hash a local file against the row: an external file's length is
+    /// checked, and a local-store or cache copy is served as it is. A sealed
+    /// Remote blob with no cache copy is read chunk by chunk, each chunk
+    /// authenticated as it opens; a browsable one is downloaded whole and
+    /// checked against the row's hash first. Use [`read_blob`](Self::read_blob)
+    /// or [`materialize_row_blob`](Self::materialize_row_blob) to check a local
+    /// copy's bytes. Hold one stream per blob being read, not one per range.
     pub async fn open_blob_stream(&self, blob: &RowBlobRef) -> Result<BlobStream, BlobCacheError> {
         self.blobs.open_stream(blob).await
     }
@@ -878,8 +882,8 @@ impl CovenHandle {
     /// An empty set is vacuously pinned. A blob not pinned (in the evictable cache
     /// or absent) makes the whole set unpinned; an existence-check failure is
     /// surfaced, never read as "not pinned". The answer comes from each kept
-    /// file's presence and size, without reading it; reading the blob verifies
-    /// its bytes.
+    /// file's presence and size, without reading it; [`read_blob`](Self::read_blob)
+    /// verifies its bytes.
     pub async fn is_pinned(&self, blobs: &[RowBlobRef]) -> Result<bool, BlobCacheError> {
         self.blobs.all_pinned(blobs).await
     }

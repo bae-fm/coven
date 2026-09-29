@@ -1,4 +1,5 @@
-//! Private local-file machinery used by storage and store-directory capabilities.
+//! Local-file primitives for blob storage: atomic staged writes, streamed
+//! size/SHA-256 facts, and positioned reads of an open file.
 
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -11,8 +12,8 @@ use tokio::io::AsyncReadExt;
 use crate::atomic_file::{FileError, FileSync};
 
 /// The filename prefix an atomic blob write gives its in-progress temp sibling
-/// (`.tmp.<uuid>`) before the owning durability policy and rename make it the
-/// committed destination.
+/// (`.tmp.` plus random characters) before the owning durability policy and
+/// rename make it the committed destination.
 pub const TEMP_BLOB_PREFIX: &str = crate::atomic_file::TEMP_FILE_PREFIX;
 
 /// Whether `path`'s file name marks it as an atomic-write temp sibling.
@@ -63,8 +64,8 @@ struct AtomicTempFile {
     armed: bool,
 }
 
-/// A provider download path that becomes visible at its destination only after
-/// the caller has verified the completed file.
+/// A temp file beside `destination` that becomes visible there only when
+/// committed. Callers check its contents before committing.
 pub struct AtomicStagedFile {
     destination: PathBuf,
     staged: Option<AtomicTempFile>,
@@ -160,18 +161,16 @@ impl AtomicStagedFile {
         file.write_all(bytes)
             .await
             .map_err(|source| FileError::at("write staged blob", &path, source))?;
-        // Finish Tokio's queued writes before this stage can be inspected or
-        // published. The owning durability policy separately decides whether
-        // the completed file also needs a physical barrier.
+        // Flush Tokio's queued writes, then fsync when this stage's file-sync
+        // policy is enabled, before the stage can be inspected or published.
         self.file_sync
             .finish_async_write(file)
             .await
             .map_err(|source| FileError::at("finish staged blob write", path, source))
     }
 
-    /// Fill this unpublished stage from a plaintext stream and apply its file
-    /// durability barrier. The caller verifies higher-level content facts
-    /// before publishing the stage.
+    /// Fill this unpublished stage from a plaintext stream. The caller checks
+    /// the content before publishing the stage.
     pub async fn write_plaintext<R: PlaintextChunkReader>(
         &mut self,
         source: &mut R,
@@ -203,9 +202,8 @@ impl AtomicStagedFile {
             })?;
             written += chunk.len() as u64;
         }
-        // Finish Tokio's queued writes before the caller verifies this stage.
-        // The owning durability policy separately decides whether the
-        // completed file also needs a physical barrier.
+        // Flush Tokio's queued writes, then fsync when this stage's file-sync
+        // policy is enabled, before the stage can be inspected or published.
         self.file_sync
             .finish_async_write(file)
             .await
@@ -245,9 +243,8 @@ impl AtomicStagedFile {
                 })?;
                 written += chunk.len() as u64;
             }
-            // Finish Tokio's queued writes before this stage can be inspected
-            // or published. The owning durability policy separately decides
-            // whether the completed file also needs a physical barrier.
+            // Flush Tokio's queued writes, then fsync when this stage's file-sync
+            // policy is enabled, before the stage can be inspected or published.
             self.file_sync
                 .finish_async_write(file)
                 .await
@@ -321,9 +318,8 @@ impl AtomicStagedFile {
                     .await
                     .map_err(|error| FileError::at("write copy stage", &staged.path, error))?;
             }
-            // Finish Tokio's queued writes before returning the hash and size.
-            // The owning durability policy separately decides whether the
-            // completed file also needs a physical barrier.
+            // Flush Tokio's queued writes, then fsync when this stage's file-sync
+            // policy is enabled, before the stage can be inspected or published.
             self.file_sync
                 .finish_async_write(staged.file_mut())
                 .await
@@ -393,9 +389,9 @@ impl AtomicStagedFile {
         }
     }
 
-    /// Publish a verified user-owned destination without replacing an existing
-    /// path. The staged file is a sibling, so the no-clobber rename exposes the
-    /// complete file atomically and fails if another file already owns the name.
+    /// Publish without replacing an existing path. The staged file is a
+    /// sibling, so the no-clobber rename exposes the complete file atomically
+    /// and fails if another file already owns the name.
     pub async fn commit_new(self) -> Result<(), CommitNewFileError> {
         let file_sync = self.file_sync.clone();
         self.commit_new_with_sync(|path| {
@@ -678,9 +674,7 @@ impl Drop for AtomicTempFile {
     }
 }
 
-/// Size and SHA-256 digest of the file at `path`, streamed. The one
-/// filesystem primitive for computing a file's identity facts; callers hold
-/// the protocol reference and compare.
+/// Size and SHA-256 digest of the file at `path`, streamed.
 pub async fn file_facts(path: &Path) -> Result<(u64, [u8; 32]), FileError> {
     let (_, size, digest) =
         read_selected_with_facts(path, ExactReadSelection::IdentityOnly).await?;
@@ -782,10 +776,8 @@ async fn read_open_file_with_facts_and_progress(
 
 /// One open file handle serving positioned reads of a local plaintext file.
 ///
-/// Opening reads no content: a local file's current bytes are the answer to a
-/// read of it, and the one place a blob's bytes are checked against the hash its
-/// row declares is publication, where they become canonical synced content.
-/// A read here is a read.
+/// Opening reads no content and checks nothing against a blob's row; callers
+/// that need the bytes checked read the whole file instead.
 ///
 /// The handle is held for the reader's life rather than reopened per range, and
 /// that is a property, not an optimization: a path can be replaced between two

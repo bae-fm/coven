@@ -1,14 +1,15 @@
-//! The device-local cache implementation for **Remote** blobs: bytes on disk, keyed by the exact
-//! locator hash,
-//! with the folder the file lives in as the only retention truth.
+//! The device-local cache for **Remote** blobs: bytes on disk, keyed by the
+//! exact locator hash, with the folder the file lives in as the only retention
+//! truth. This file holds the cloud access, the error type, and [`BlobStream`];
+//! the cache operations themselves are `StoreBlobCache` in the parent module.
 //!
 //! The cache holds copies of Remote blobs only — re-fetchable from the cloud,
 //! evictable to a size budget, kept-or-dropped per pin. A **Local** blob is not in
 //! the cache: a user-provided Local blob is the user's own file at a path (an
-//! external ref); a host-provided Local blob is in the local store (see
-//! the store directory's local-blob capability). So `CacheEager`/`CacheLazy`/pin/budget all
-//! describe a blob only while it is Remote. See the [blob concept tree](crate::blob)
-//! for where the cache sits in the whole storage model.
+//! external ref); a host-provided Local blob is in the local store
+//! (`storage/local`). So `CacheEager`/`CacheLazy`/pin/budget all describe a blob
+//! only while it is Remote. See the blob concept tree in
+//! [`coven_protocol::blob`] for where the cache sits in the whole storage model.
 //!
 //! There is no cache table. A cached Remote blob is in **exactly one** of two
 //! folders under the store dir, or in neither. Both are segmented by the blob's
@@ -18,62 +19,51 @@
 //! - `storage/pinned/<namespace>/{ab}/{cd}/<locator-hash>` — kept, budget-exempt. A Remote
 //!   blob's cache copy the user pinned for offline (kept from eviction).
 //! - `storage/cache/<namespace>/{ab}/{cd}/<locator-hash>` — opportunistic, evictable. A blob
-//!   fetched on read (`CacheLazy`) or eagerly on pull (`CacheEager`).
+//!   fetched on read (`CacheLazy`) or eagerly after pull (`CacheEager`).
 //! - neither — not cached. No file; fetched from the cloud on the next read.
 //!
 //! Presence is the file on disk; kept-ness is which folder. Nothing the two
 //! `readdir`s can't answer, so no metadata sidecar to keep in sync with the disk.
-//! Whole reads verify both plaintext size and content hash against the exact
-//! row-bound locator before trusting cached bytes; ranged reads do not (see
-//! below — a stream cannot afford a whole-file scan per range). A corrupt
-//! occupied path fails loudly and is never replaced. Pin/unpin stage a verified copy, publish it without replacing
-//! an occupied destination, then remove the source.
+//! A corrupt occupied path fails loudly and is never replaced. Pin/unpin stage
+//! a verified copy, publish it without replacing an occupied destination, then
+//! remove the source.
 //!
-//! Both reads **dispatch on coven's own authoritative state** — they never probe
-//! every store and take the first hit. The discriminator is the **locality root**
-//! plus the blob's intrinsic **provenance**, not "is there a local file here." Coven
-//! resolves the blob's backing row (found in the table its `namespace` declares) up
-//! to its gated root or remote root (see
-//! `Gates::root_kept_of`, then dispatches:
+//! Reads **dispatch on the reference's authority** — they never probe every
+//! store and take the first hit. The host passes a `RowBlobRef`; its authority
+//! comes from the row's audience when the reference was taken, and every read
+//! re-checks the reference against the live row before and after touching
+//! bytes. The authority plus the blob's **provenance** pick the source:
 //!
-//! - **Remote** with an exact locator ⇒ the bytes live in the cloud fronted by
-//!   the device cache. The first legitimate probe runs per-device cache
-//!   materialization — which no shared state records — checking `pinned/` then
-//!   `cache/`, then fetching the exact cloud object.
-//! - **PendingRemote** ⇒ the row's audience is remote but its exact cloud object is
-//!   not published yet. Provenance selects the verified upload source: the external
-//!   file for a user-provided blob or the local store for a host-provided blob.
+//! - **Remote** ⇒ the bytes live in the cloud fronted by the device cache:
+//!   check `pinned/` then `cache/`, then fetch the exact cloud object.
+//! - **PendingRemote** ⇒ the row's audience is Store or a Circle but no cloud
+//!   object is recorded for it yet. Reads use the same local source as Local.
 //! - **Local** ⇒ the bytes are on-device; provenance picks the copy. A
-//!   **user-provided** blob is the user's own external file (`local_blob_refs`), read
-//!   straight from its path and validated by size + content hash — its ref MUST exist
-//!   ([`BlobCacheError::NoExternalRef`] otherwise). A **host-provided** blob is in the
-//!   **local store** (owned by [`StoreDir`]), its only copy — a miss is
-//!   fail-loud corruption ([`BlobCacheError::NoLocalCopy`]). Neither falls through to
-//!   the cloud: a Local blob has no cloud copy.
+//!   **user-provided** blob is the user's own external file (`local_blob_refs`),
+//!   and its ref MUST exist ([`BlobCacheError::NoExternalRef`] otherwise). A
+//!   **host-provided** blob is in the **local store**, its only copy — a miss is
+//!   fail-loud corruption ([`BlobCacheError::NoLocalCopy`]). Neither falls
+//!   through to the cloud: a Local blob has no cloud copy.
 //!
 //! `read_blob` returns the entire blob in one call; `open_blob_stream` returns a
 //! [`BlobStream`] a host reads ranges from while streaming or seeking. Both resolve
 //! the source the same way, and each verifies what its own shape allows:
 //!
 //! - `read_blob` reads every byte, so it checks the plaintext's size and content
-//!   hash against the exact row-bound locator — including on a **cache hit**. That
-//!   check is not about cloud authenticity, which the AEAD already settled when the
-//!   bytes were fetched: a cache file is unsealed plaintext sitting on local disk,
-//!   carrying no tags of its own, so the row's hash is the only thing that can
-//!   refuse a file that rotted, was truncated by a partial write, or was edited.
-//!   It is free here precisely because this read touches every byte anyway. A cloud
-//!   miss fetches + decrypts the exact object once and populates `cache/`.
-//! - `open_blob_stream` costs each range its own bytes, so it cannot make that
-//!   check — re-hashing per range is the whole-file scan the stream exists to
-//!   avoid. A **local** source (including a cache hit) is read plain: its current
-//!   bytes are the answer to a read of it, and the one place a blob's bytes are
-//!   checked against the row's hash is publication, where they become canonical
-//!   synced content. A **Remote uncached** blob is read from the cloud object a
-//!   chunk at a time: each sealed chunk's tag covers its bytes, its index, and the
-//!   header framing the blob, so a chunk that opens is authentic and verification
-//!   is per chunk rather than per object. A blob stored in the clear (a browsable
-//!   home) has no tags to check a range against, so it takes the whole-object path
-//!   instead — see `open_blob_stream`.
+//!   hash against the row — from an external file, the local store, or a
+//!   **cache hit**. A cache file is plaintext on local disk with no tags of its
+//!   own, so the row's hash is the only thing that can refuse a file that
+//!   rotted, was truncated by a partial write, or was edited. A cloud miss
+//!   fetches the exact object once and populates `cache/`.
+//! - `open_blob_stream` costs each range its own bytes, so it does not hash a
+//!   local source. An external file's length is checked against its
+//!   registration and the row when it opens; a local-store or cache copy is
+//!   opened as it is. A **Remote uncached** blob is read from the cloud object
+//!   a chunk at a time: each sealed chunk's tag covers its bytes, its index,
+//!   and the header framing the blob, so a chunk that opens is authentic. A
+//!   blob stored in the clear (a browsable home) has no tags to check a range
+//!   against, so it is downloaded whole, hashed against the row, cached, and
+//!   streamed from the cached copy.
 //!
 //! A local stream holds the file it opened for its whole life. That is a property,
 //! not an optimization — a path can be swapped between two reads, a descriptor
@@ -81,19 +71,18 @@
 //! evicted, renamed, or replaced.
 //!
 //! The cache has a **per-namespace** size budget the host sets per device (see
-//! [`Database::set_cache_budget`]), so a small namespace (`covers`) is never wiped by
-//! pressure from a big one (`release_files`). A namespace's budget counts **only**
-//! the files under `cache/<namespace>/` — `pinned/` is structurally exempt, and
-//! `storage/local` (the local store) is never walked at all. After every populate
-//! into a namespace (`read_blob`'s miss-write and `write_blob`),
-//! [`evict_to_budget`] sums that namespace's `cache/<namespace>/` files and, if their
-//! total exceeds its budget, deletes the oldest by modification time until the total
-//! is back under it — touching only that namespace's subtree. Modification time is
-//! the recency proxy — there is no `last_accessed` column, the same folder-truth
-//! trade-off the whole cache makes; pinning retains the Remote blobs the user chose
-//! to keep local. With a namespace's budget unset eviction is off for it and its
-//! cache grows without bound. Tests can reset all of `cache/` in one sweep; a pinned
-//! blob (in `pinned/`) survives because it lives in the other folder.
+//! `StoreDatabase::set_cache_budget`), so a small namespace (`covers`) is never
+//! wiped by pressure from a big one (`release_files`). A namespace's budget
+//! counts **only** the files under `cache/<namespace>/` — `pinned/` is
+//! structurally exempt, and `storage/local` (the local store) is never walked
+//! at all. After a fetch or copy into `cache/<namespace>/` (not after unpin
+//! moves a file there), `enforce_budget` sums that namespace's files and, if
+//! their total exceeds its budget, deletes the oldest by modification time
+//! until the total is back under it, never the file just written.
+//! Modification time is the recency proxy — there is no `last_accessed`
+//! column, the same folder-truth trade-off the whole cache makes. With a
+//! namespace's budget unset eviction is off for it and its cache grows without
+//! bound.
 
 use coven_database::DbError;
 use coven_foundation::atomic_file::FileError;
@@ -196,20 +185,16 @@ pub enum BlobCacheError {
     /// A cloud read failed: the blob isn't in the cloud, or the backend errored
     /// (surfaced from the exact blob operations on `CloudSyncObjectStorage`).
     Storage(StorageError),
-    /// A Remote blob's bytes were needed from the cloud but no cloud home is
-    /// connected, so there is no storage to fetch them from. A home-less store
-    /// holds only Local blobs (external refs + the local store), which serve
-    /// straight off disk and never reach the cloud-miss path; reaching here means
-    /// a Remote blob was read with no provider connected — a real fault, surfaced
-    /// rather than masked.
+    /// A Remote blob has no copy on this device and no cloud home is connected
+    /// to fetch it from.
     NoCloudHome,
-    /// A local-disk failure: a cache write, a folder move, or a test cache reset.
+    /// A local file operation on a blob file failed.
     File(FileError),
     /// Publishing a staged cache file failed.
     Commit(CommitNewFileError),
-    /// A blob-metadata query failed — resolving the blob's locality, looking up its
-    /// external ref, or reading its cache budget or expected size. A database read
-    /// the blob path depends on, distinct from a disk I/O failure.
+    /// A database read the blob operation depends on failed, or the reference
+    /// no longer matches the live row: re-checking the reference, looking up
+    /// its external ref or Circle protection, or reading its cache budget.
     Metadata(DbError),
     /// Building the sync storage from config failed — missing credentials or cloud
     /// configuration — when a Remote blob needed it. A configuration fault, not a
@@ -244,27 +229,21 @@ pub enum BlobCacheError {
         expected_size: u64,
         actual_size: u64,
     },
-    /// A **Local** blob (its gated locality root's gate is off) has no copy in the
-    /// local store. A Local blob has no cloud copy, so there is nothing to fall back
-    /// to: the state is broken, not a cache miss. Surfaced loud rather than silently
-    /// fetching from the cloud — a make_local rollback leftover, an interrupted
-    /// materialize, or a lost local file would otherwise be papered over. The host
-    /// re-materializes or repairs.
+    /// A host-provided blob whose authority is Local or PendingRemote has no
+    /// file in the local store. That file is its only copy, so this is broken
+    /// state, not a cache miss, and is never answered from the cloud.
     NoLocalCopy { namespace: String, id: String },
-    /// A blob could not be resolved to a locality: its namespace declares no
-    /// blob-bearing table, or that table has no row with the id, or the row reaches no
-    /// gated root or remote root — so the source of Local-vs-Remote truth can't be
-    /// read. In a consistent store every readable blob has a locality root, so this
-    /// is a real fault — surfaced rather than guessing a source by probing.
+    /// An operation that needs the blob's cloud object (a cloud fetch, pin,
+    /// unpin, evict, or pinned check) got a reference that has none recorded:
+    /// its authority is Local or PendingRemote.
     LocalityUnresolved { id: String },
-    /// The gate resolved a blob to **Local + user-provided**, but no external-ref row
-    /// is registered for it. A user-provided Local blob's bytes live only at the user's
-    /// path, tracked by that ref; its absence is corruption (a lost or never-written
-    /// ref), not a cache miss to fall through — surfaced loud so the host repairs or
-    /// re-imports.
+    /// A user-provided blob whose authority is Local or PendingRemote has no
+    /// `local_blob_refs` row for this row version. Its bytes live only at the
+    /// registered path, so a missing ref is corruption, not a cache miss to fall
+    /// through — surfaced loud so the host repairs or re-imports.
     NoExternalRef { id: String },
-    /// An authoritative local plaintext file exists at the exact path but its
-    /// bytes differ from the row's signed size/hash.
+    /// A local plaintext file (an external file, a local-store copy, or a cache
+    /// copy) differs from the row's size/hash.
     LocalIntegrity {
         path: std::path::PathBuf,
         expected_size: u64,
@@ -503,22 +482,24 @@ impl From<coven_foundation::store_dir::LocalBlobStoreError> for BlobCacheError {
 /// reasons:
 ///
 /// - **Local** (an external file, the local store, or a cache copy) — the stream
-///   holds the open file and every range is one positioned read of it. No
-///   hashing: a local file's current bytes are the answer to a read of it, and a
-///   blob's bytes are checked against the hash its row declares at publication,
-///   which is where they become canonical synced content.
-/// - **Remote, uncached** — the stream fetches only the sealed chunks covering
-///   the range and opens them. A chunk that opens is authentic: the provider
+///   holds the open file and every range is one positioned read of it. Nothing
+///   is hashed against the row; opening an external file checks only its
+///   length. Whole reads, materialization, pinning, and upload preparation are
+///   what check a blob's bytes against the row's hash.
+/// - **Remote, uncached, sealed** — the stream fetches only the sealed chunks
+///   covering the range and opens them. A chunk that opens is authentic: the provider
 ///   holds no key and cannot forge a tag, and the tag covers the chunk's bytes,
 ///   its index, and the header framing the blob. So verification is per chunk,
-///   which is what lets a range cost a range rather than the object.
+///   which is what lets a range cost a range rather than the object. A blob in
+///   a browsable home has no tags, so opening it downloads it whole, checks it
+///   against the row's hash, caches it, and streams the cache copy.
 ///
 /// Holding the local descriptor is a property, not an optimization: a path can be
 /// replaced between two reads, a descriptor cannot, so the stream keeps serving
 /// the file it opened even if that file is later evicted, renamed, or replaced.
 /// An **in-place** rewrite of that same file does reach the stream — that is a
-/// file the user owns and edits; coven's own copies are published by rename or
-/// hard link and never written in place.
+/// file the user owns and edits; coven's own copies are published by rename and
+/// never written in place.
 pub struct BlobStream {
     blob: coven_protocol::blob::BlobRef,
     source: BlobStreamSource,
@@ -529,8 +510,8 @@ pub(super) enum BlobStreamSource {
     /// A file on this device: the user's own external file, the local store, or
     /// a cache copy of a Remote blob.
     Local(coven_foundation::local_file::OpenFile),
-    /// A Remote blob with no cache copy: ranges are served from the cloud object
-    /// a chunk at a time.
+    /// A sealed Remote blob with no cache copy: ranges are served from the cloud
+    /// object a chunk at a time.
     Remote(coven_storage::BlobRangeReader),
 }
 

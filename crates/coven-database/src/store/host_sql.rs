@@ -317,8 +317,9 @@ impl<'context, 'connection> SqlContext<'context, 'connection> {
     /// make-remote intent and queue one upload per row of `blob_rows`, in that
     /// order, in this transaction. The rows are `(table, row_id)` pairs and
     /// must be exactly the root's current blob-bearing rows as this write
-    /// leaves them; user-provided rows must already be registered in this
-    /// write. The root must be a gated root that is Local here.
+    /// leaves them; user-provided rows must already have a registered file for
+    /// their current row version. The root must be a gated root that is Local
+    /// here.
     ///
     /// Recording needs no cloud connection: the queue is durable, and the
     /// connection's drain uploads it whenever one exists. A host that creates a

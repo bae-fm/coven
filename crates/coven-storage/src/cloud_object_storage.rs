@@ -364,9 +364,12 @@ pub trait CloudSyncObjectStorage: Send + Sync {
         blob: &coven_protocol::blob::locator::StoredBlobRef,
     ) -> Result<(), StorageError>;
 
-    /// Download and exact-verify the stored object into the caller-owned stage,
-    /// open it under the audience-owned protection, and return the unpublished
-    /// plaintext only after its locator size and hash have also been verified.
+    /// Download the stored object, open it under the audience-owned protection
+    /// into the caller-owned stage, and return the unpublished plaintext once
+    /// the stored bytes match `blob`'s stored size and hash and the plaintext
+    /// has the locator's size. An opaque object's chunks are authenticated as
+    /// they open; a browsable object's plaintext is also checked against the
+    /// locator's hash.
     async fn stage_verified_blob_plaintext(
         &self,
         blob: &coven_protocol::blob::locator::StoredBlobRef,

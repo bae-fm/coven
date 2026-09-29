@@ -1,4 +1,5 @@
-//! The blob engine: coven's single owner of a blob's whole durability lifecycle.
+//! The blob vocabulary coven's crates and the host share: references, scopes,
+//! provenance, cache fill, row-bound references, and the transition observer.
 //!
 //! coven syncs blobs referenced by database rows. It owns the cloud layout and
 //! encryption; the host declares which rows carry blobs, their local plaintext
@@ -22,7 +23,7 @@
 //!              Remote→Local path requirement
 //!    ├─ user-provided   the user's file at a path; coven references it.
 //!    │                  Remote→Local writes the bytes back to a user file → NEEDS A PATH.
-//!    └─ host-provided   bae hands coven the data; coven keeps it in its local store.
+//!    └─ host-provided   the host hands coven the bytes; coven keeps them in its local store.
 //!                       Remote→Local restores it to the local store → no path.
 //!
 //! cache fill — its REMOTE story: how a device gets the bytes when the release is
@@ -64,25 +65,26 @@
 //! `CacheEager`/`CacheLazy`/pin/budget describe a blob only while it is Remote, never
 //! while it is Local.
 //!
-//! # The engine's halves
+//! # Where the work happens
 //!
-//! This module is the engine; its halves move a blob through its lifecycle:
+//! This module only defines types. The code that moves a blob through its
+//! lifecycle lives in `coven-replication` and `coven-foundation`:
 //!
-//! - `blob::cache` — the device-local cache for **Remote** blobs: bytes on disk keyed
-//!   by exact locator hash, with the folder a file lives in as the only retention truth
-//!   (`storage/pinned/` protected, `storage/cache/` evictable). Reads — one-shot
-//!   whole, which checks the plaintext against the row's hash because it reads
-//!   every byte anyway, or an opened stream whose ranges each cost their own
-//!   bytes: a positioned read of a local file, or the sealed chunks covering the
-//!   range fetched from the cloud object and opened — plus pin/unpin, clear, and
-//!   budget eviction.
+//! - `sync::store::blob` — reads, streams, materialization, and the device-local
+//!   cache for **Remote** blobs: bytes on disk keyed by exact locator hash, with
+//!   the folder a file lives in as the only retention truth (`storage/pinned/`
+//!   protected, `storage/cache/` evictable), plus pin/unpin and budget eviction.
+//!   A whole read checks the plaintext against the row's size and hash. A
+//!   stream does not hash a local file; its ranges each cost their own bytes (a
+//!   positioned read of a local file, or the sealed chunks covering the range
+//!   fetched and opened).
 //! - [`coven_foundation::store_dir::StoreDir`] — coven's own copy of a **host-provided Local**
 //!   blob, in `storage/local/<namespace>/<id>`. Never evicted; the budget sweep
 //!   never walks it.
-//! - `blob::upload` — the cloud write: drain the durable upload queue, sealing
-//!   each blob under its scope and writing it to the cloud with coalesced progress,
-//!   so a local-only blob becomes uploaded. The sync cycle calls the drain
-//!   each round before it pushes.
+//! - `sync::store::commit_publication::operation::blob_upload` — the upload
+//!   drain: seal each queued blob under its scope, checking the source against
+//!   the row's size and hash as it is read, and write it to the cloud. The sync
+//!   cycle runs the drain each round.
 //!
 //! Nothing here deletes a cloud blob. A row that stops naming one leaves an
 //! orphan, and accepted reclaim — the workflow that already retires superseded
@@ -91,18 +93,17 @@
 //! upload created before its Store write was accepted is the make_remote
 //! journal's instead: its unwind takes it back out.
 //!
-//! The types below ([`BlobRef`], [`BlobScope`], [`Provenance`],
-//! [`CacheFill`], [`BlobTransitionObserver`]) are the vocabulary the engine and
-//! the host speak. Which rows carry blobs is not a runtime callback but a per-table
-//! declaration ([`crate::synced_schema::BlobDecl`]) coven resolves into a
-//! the database's `BlobDecls` each cycle to derive the blob set itself.
+//! Which rows carry blobs is not a runtime callback but a per-table declaration
+//! ([`crate::synced_schema::BlobDecl`]) that the database resolves against its
+//! schema at open.
 //!
-//! coven also owns the two locality transitions (`blob::transition`): `make_remote`
-//! (Local → Remote: upload the bytes, then flip the gate) and `make_local`
-//! (Remote → Local: bring each blob back to a local file, then retract). The
-//! The upload drain advances the durable make-Remote intent after every exact
-//! object lands. The Store publication activates the resulting gate change;
-//! hosts observe both handoffs through the durable cloud-outbox query.
+//! coven also owns the two locality transitions (`coven-replication`'s
+//! `blob::transition`): `make_remote` (Local → Remote: upload the bytes, then
+//! flip the gate) and `make_local` (Remote → Local: bring each blob back to a
+//! local file, then retract). The upload drain advances the durable
+//! make-Remote intent after every exact object lands. The Store publication
+//! activates the resulting gate change; hosts observe both handoffs through the
+//! durable cloud-outbox query.
 
 pub mod locator;
 
@@ -111,25 +112,24 @@ mod row_ref_tests;
 
 use sha2::{Digest, Sha256};
 
-/// The content hash a blob-bearing row carries: the lowercase-hex SHA-256 of the
-/// blob's plaintext bytes, computed at import and stored in the row's blob columns
-/// alongside the declared size. The row is carried in a signed changeset (and in a
-/// signed snapshot), so this hash is signed by the row's author — that is what
-/// makes it authoritative: on download coven hashes the decrypted plaintext and
-/// requires equality with the row's hash, so the bytes are pinned by the author,
-/// not by the cloud key they happened to arrive under. A host computes this over a
-/// blob's plaintext at import and writes it into the row's declared hash column,
-/// the same way it writes the plaintext length into the size column.
+/// The content hash a blob-bearing row carries in its declared hash column: the
+/// lowercase-hex SHA-256 of the blob's plaintext. A host computes it with this
+/// function for a host-provided blob; for a user-provided blob coven computes it
+/// in `prepare_external_blob` and writes it into the row itself.
+///
+/// The row's author signs the hash only when the row is published to a Store or
+/// Circle audience, inside the commit that publishes it. A Local row is never
+/// published, so its hash stays a record on this device. coven checks bytes
+/// against the row's hash when it reads a whole blob, materializes or pins it,
+/// and when upload preparation reads the source file.
 pub fn content_hash(plaintext: &[u8]) -> String {
     hex::encode(Sha256::digest(plaintext))
 }
 
-/// An incremental SHA-256 over a blob's plaintext, so the streaming download path
-/// verifies a blob's content hash without holding the whole plaintext in memory:
-/// feed each decrypted chunk to [`update`](Self::update), call
-/// [`finish`](Self::finish), and compare the returned digest with the row's hash
-/// before committing the bytes to the cache. The hex-encoded digest matches
-/// [`content_hash`] over the same bytes.
+/// [`content_hash`] computed incrementally, for bytes that arrive in chunks and
+/// should not be held in memory whole. A browsable-home download uses it to
+/// check the plaintext against the row's hash before the reader reports the end
+/// of the blob.
 pub struct ContentHasher(Sha256);
 
 impl ContentHasher {
@@ -154,11 +154,9 @@ impl Default for ContentHasher {
     }
 }
 
-/// How many blob transfers coven runs at once in each of its two transfer loops:
-/// the upload drain and the pin/download loop. An
-/// open-time blob-engine tunable the host sets on the builder,
-/// carried on the `Database` alongside the other open-time
-/// blob config and read back by each loop, which holds `&Database`.
+/// How many blob transfers coven runs at once, one bound for uploads and one
+/// for downloads. The host sets it on the builder and can replace it on an open
+/// handle; each pass reads the current value when it starts.
 ///
 /// Each bound is a [`NonZeroUsize`], so a zero — which would leave a loop admitting
 /// nothing and never completing — is unrepresentable rather than clamped or rejected
@@ -168,9 +166,10 @@ impl Default for ContentHasher {
 /// [`NonZeroUsize`]: std::num::NonZeroUsize
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TransferLimits {
-    /// Maximum concurrent blob uploads in one upload-drain pass.
+    /// Maximum concurrent uploads in one upload-drain pass, or while creating
+    /// one Store write's packages and blobs.
     pub uploads: std::num::NonZeroUsize,
-    /// Maximum concurrent blob downloads (fetches) in one pin call.
+    /// Maximum concurrent downloads in one pin call or one eager-cache fill.
     pub downloads: std::num::NonZeroUsize,
 }
 
@@ -183,22 +182,6 @@ impl TransferLimits {
         }
     }
 }
-
-// The cache's own tests: real `Database` + `TestStore` over a temp store
-// dir, asserting hits/misses, the pinned/cache folder split, and pin/unpin/clear.
-// These drive a real temp directory on the filesystem. See `blob::cache`.
-// The upload drain's tests: real `Database` (the `cloud_outbox` queue) driven
-// against `InMemoryCloudHome`/`FailingCloudHome`, asserting record-and-continue,
-// per-entry backoff, scope-resolved sealing, and the observer callbacks. See
-// `blob::upload`.
-// The coven-owned make-Remote / make-Local transition tests: multi-device
-// make_remote + make_local through the real cycle, cancel both directions, the
-// drain's completion flip, durable cancellation, crash-idempotency at each commit
-// boundary, and a round-trip. Uses a `watch` cancel signal and retained test devices,
-// See `blob::transition`.
-// The local-files store's tests: store/read round-trip, a host-provided Local blob
-// surviving a budget sweep (the sweep never walks `local/`), and drop. These
-// drive a real temp directory through `StoreDir`.
 
 /// Which key encrypts a blob, as a host names it on a [`BlobRef`].
 ///
@@ -237,12 +220,12 @@ pub enum Provenance {
 /// to ANY blob regardless of [`Provenance`]. Orthogonal to provenance; a blob
 /// declares both.
 ///
-/// Both classes are declared per blob and are global (every device reads the same
-/// class from the blob's [`BlobRef`]); the difference is what a device does with
-/// the blob on pull. The distinction has to be a declared property and not a
-/// per-device choice: device B, deciding during its own pull whether to fetch a
-/// blob, can only read the blob's declared class — it cannot see what device A
-/// chose locally.
+/// Both classes are declared per blob-bearing table and are global (every device
+/// reads the same class from the blob's [`BlobRef`]); the difference is what a
+/// device does with the blob on pull. The distinction has to be a declared
+/// property and not a per-device choice: device B, deciding during its own pull
+/// whether to fetch a blob, can only read the blob's declared class — it cannot
+/// see what device A chose locally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CacheFill {
     /// Fetched into the cache on pull, right away, on every device — part of
@@ -300,7 +283,8 @@ pub struct BlobRef {
 }
 
 /// One exact blob-bearing row version. A reference becomes stale when the live
-/// row stamp or any declared blob value changes.
+/// row's stamp, any declared blob value, or its authority or cloud object
+/// changes; blob operations compare it with the live row and refuse a stale one.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RowBlobRef {
@@ -315,10 +299,12 @@ pub struct RowBlobRef {
     stored: Option<locator::StoredBlobRef>,
 }
 
-/// The authority state that determines where one row version's blob lives.
-/// A remote-audience blob remains `PendingRemote` while its verified plaintext
-/// is local and no cloud object has been created; `Remote` carries the exact
-/// package authority needed to open its committed object.
+/// Where one row version's blob lives, derived from the row's current audience.
+/// `Local`: the audience is Local and the bytes are on this device only.
+/// `PendingRemote`: the audience is Store or a Circle, but no cloud object is
+/// recorded for this row version yet (no activated locator, no Created upload),
+/// so reads still use the local source. `Remote`: carries the package authority
+/// needed to open the recorded cloud object.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum RowBlobAuthority {
@@ -641,8 +627,8 @@ pub enum RowBlobRefError {
 /// progress while a make_local copies files back, and the synchronous
 /// make-local completion the host turns into its own UI event.
 ///
-/// The host no longer drives the transition — coven owns flipping the gate and
-/// deciding when a cycle publishes — so this observer only *reports*. The upload
+/// coven flips the gate and decides when a cycle publishes, so this observer
+/// only *reports*. The upload
 /// callbacks fire as the drain works: preparation starts while the plaintext is
 /// verified and sealed into its durable spool, `on_blob_upload_started` fires
 /// only when that prepared spool is handed to the provider,
@@ -665,7 +651,6 @@ pub enum RowBlobRefError {
 /// the absolute state before admitting work, stops polling active preparation,
 /// and stops active provider request bodies from yielding bytes while paused;
 /// resume continues those same operations.
-///
 #[async_trait::async_trait]
 pub trait BlobTransitionObserver: Send + Sync {
     /// The plaintext source is being verified and sealed into its durable

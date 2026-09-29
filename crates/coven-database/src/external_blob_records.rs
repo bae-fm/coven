@@ -5,16 +5,24 @@ use rusqlite::{Connection, OptionalExtension};
 use super::{with_coven_sql_authority, DbError};
 use coven_protocol::blob::{RowBlobAuthority, RowBlobRef};
 
-/// An external user-owned file a blob id resolves to, read back from a
-/// `local_blob_refs` row. The blob's plaintext lives at `path` (an absolute file
-/// Coven references but does not own); `size` is its registered plaintext length,
-/// combined with the row's signed content hash to validate the exact file.
+/// A user-provided blob's registered file, read back from its `local_blob_refs`
+/// row. Coven reads the file at `path` but does not own it.
+///
+/// `prepare_external_blob` hashes the file, and registration writes that
+/// SHA-256 into the row's hash column. Registration requires the row to be
+/// Local, so at first the hash is a record on this device only. It reaches
+/// other devices, inside the signed commit that publishes it, only if the row
+/// is later published to a Store or Circle audience; a Local row's changes stay
+/// in the Local partition, which is never published.
+///
+/// Whole reads and `materialize_row_blob` hash the file again and fail if its
+/// size or hash differs from the row. A stream checks only the length when it
+/// opens.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalBlob {
-    /// Absolute path to the external file Coven reads but does not own.
     pub path: std::path::PathBuf,
-    /// The file's plaintext length at registration. A read fails loud if the
-    /// file's current length differs.
+    /// The file's length at registration, equal to the row's size column
+    /// (`load` fails otherwise).
     pub size: u64,
 }
 

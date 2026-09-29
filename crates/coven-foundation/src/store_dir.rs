@@ -637,9 +637,9 @@ impl StoreDir {
     /// Whether a kept copy of the blob is in the pinned folder, answered from
     /// the file's presence and size without reading it. Every file there was
     /// verified against its exact size and hash before an atomic rename put it
-    /// under its locator name, and reads verify the bytes again, so this is the
-    /// answer to "is it kept offline" that a host can ask for many rows at
-    /// once. A file of the wrong size is corruption and is an error.
+    /// under its locator name, and whole reads verify the bytes again, so this
+    /// is the answer to "is it kept offline" that a host can ask for many rows
+    /// at once. A file of the wrong size is corruption and is an error.
     pub async fn pinned_blob_is_present(
         &self,
         namespace: &str,

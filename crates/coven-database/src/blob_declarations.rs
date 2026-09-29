@@ -2,25 +2,25 @@
 //! carry blobs and where each blob's columns live.
 //!
 //! The gate-sibling of [`Gates`](crate::Gates). A host declares per
-//! table, via [`SyncedTable::carries_blob`], the columns that locate a blob (its
-//! id, optional readable cloud path, and encryption-scope column) plus the
-//! namespace and retention class. [`BlobDecls::from_tables`] resolves those column
-//! *names* to indices against the live schema for the database handle — the same
-//! `PRAGMA table_info` name→index resolution the gate runs — so coven reads a
-//! row's blob straight off a changeset row or a live `SELECT` with no per-row host
-//! callback.
+//! table, via [`SyncedTable::carries_blob`], the columns that hold a blob's id,
+//! size, content hash, and optional readable cloud path, plus the table's
+//! namespace, encryption scope, provenance, and cache fill.
+//! [`BlobDecls::from_tables`] resolves those column *names* to indices against
+//! the live schema at open — the same `PRAGMA table_info` name→index resolution
+//! the gate runs — so coven reads a row's blob straight off a changeset row or a
+//! live `SELECT` with no per-row host callback.
 //!
 //! From that one model coven derives every blob set it needs:
-//! [`BlobDecls::ref_from_change`] over a changeset row (push upload / pull
-//! download / apply-side local-copy drop),
+//! [`BlobDecls::ref_from_change`] over a changeset row (local-store cleanup
+//! when a row's blob is replaced or deleted),
 //! [`BlobDecls::publication_blobs_in_db`] over the whole database, and
-//! [`BlobDecls::row_for_blob_in_namespace`] to map a blob back to its row by namespace
-//! (the read-path locality dispatch and the make-Remote completion check).
+//! [`BlobDecls::row_for_blob_in_namespace`] to map a blob back to its row by
+//! namespace (a host write's `put_blob` and `delete_blob`).
 //!
 //! A declaration's three blob properties — [`Provenance`] (the Local story),
 //! [`CacheFill`] (the Remote story), and [`BlobReplacement`] (whether the row may be
 //! repointed at a different blob) — are described by the blob concept tree in
-//! the replication layer. Write-once updates are refused here, where the declaration
+//! [`coven_protocol::blob`]. Write-once updates are refused here, where the declaration
 //! and changed blob-id column are available. Immutable cloud-object identity comes
 //! from the blob locator and retained exact object reference.
 

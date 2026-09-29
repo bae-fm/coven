@@ -310,7 +310,7 @@ impl SyncedTable {
 
 /// Where a blob-bearing table's blob columns live, declared by the host so coven
 /// can derive every blob a row references without a runtime callback. Resolved
-/// against the live schema into the database's `BlobDecls` each cycle.
+/// against the live schema into the database's `BlobDecls` at open.
 ///
 /// A blob declares two orthogonal properties: [`provenance`](BlobDecl::provenance)
 /// (its Local story) and [`fill`](BlobDecl::fill) (its Remote story).
@@ -321,12 +321,9 @@ pub struct BlobDecl {
     pub id_column: String,
     /// The column holding the blob's plaintext length in bytes.
     pub size_column: String,
-    /// The column holding the blob's content hash — the lowercase-hex SHA-256 of
-    /// its plaintext, computed at import (see [`crate::blob::content_hash`]). The
-    /// row carries it in a signed changeset, so it is signed by the row's author;
-    /// on download coven hashes the decrypted plaintext and requires equality with
-    /// this value, so the bytes are pinned by the author, not by where they were
-    /// found. Defaults to `hash`.
+    /// The column holding the blob's content hash, the lowercase-hex SHA-256 of
+    /// its plaintext. See [`crate::blob::content_hash`] for who writes it, when
+    /// it is signed, and which reads check it. Defaults to `hash`.
     pub hash_column: String,
     /// Cloud namespace for the blob, e.g. `"images"` or `"audio"`.
     pub namespace: String,
