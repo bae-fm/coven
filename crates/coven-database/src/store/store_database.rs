@@ -220,13 +220,6 @@ impl StoreDatabase {
             .await
     }
 
-    pub fn blob_ref_from_change(
-        &self,
-        change: &coven_foundation::changeset::RowChange,
-    ) -> Result<Option<coven_protocol::blob::BlobRef>, crate::BlobDeclError> {
-        self.database.store_blob_ref_from_change(change)
-    }
-
     /// Validate the original column layout before ordered materialization converts it.
     pub async fn validate_source_changeset(
         &self,

@@ -76,21 +76,11 @@ pub enum RetryBlockedOperationError {
     Reclaim(#[from] crate::SyncError),
 }
 
-/// The cipher a store's app-data sealing runs under, resolved from `custody`.
-///
-/// A store whose custody unlocks `None` has no key to seal under or open with,
-/// which is [`SealError::Locked`] — the same discipline the sync engine's cipher
-/// resolution keeps, where an opaque home with no established key refuses to
-/// start rather than inventing one.
-///
-/// Shared by [`CovenHandle`] and [`CovenReadHandle`](crate::CovenReadHandle) so
-/// both resolve the identical keyring the identical way; a payload one seals, the
-/// other opens.
 /// The handle over one coven store.
 ///
 /// Open it once with [`Coven::builder`](crate::Coven::builder), then call methods. Cheap to
-/// [`clone`](Clone) — every field is shared (an `Arc`, a `Clone` handle, or a
-/// reference-counted lock), so a clone drives the same retained owners as the
+/// [`clone`](Clone) — every field is one of the store's owners, and a clone of
+/// an owner shares its state, so a clone drives the same retained owners as the
 /// original.
 ///
 /// # Using the handle

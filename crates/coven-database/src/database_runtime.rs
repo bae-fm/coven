@@ -160,13 +160,6 @@ impl Database {
         self.connection.store_hlc_high_water()
     }
 
-    pub(crate) fn store_blob_ref_from_change(
-        &self,
-        change: &coven_foundation::changeset::RowChange,
-    ) -> Result<Option<coven_protocol::blob::BlobRef>, BlobDeclError> {
-        self.connection.store_blob_ref_from_change(change)
-    }
-
     pub(crate) fn validate_store_local_blob_cleanup_changes(
         &self,
         old_changes: &[coven_foundation::changeset::RowChange],
