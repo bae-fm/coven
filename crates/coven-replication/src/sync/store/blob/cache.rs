@@ -310,7 +310,7 @@ impl std::fmt::Display for BlobCacheError {
             ),
             BlobCacheError::LocalityUnresolved { id } => write!(
                 f,
-                "cannot resolve locality for blob {id}: no locality root determines where it lives"
+                "blob {id} has no cloud object recorded for this row version: it is Local, or its upload is not recorded yet"
             ),
             BlobCacheError::NoExternalRef { id } => write!(
                 f,
