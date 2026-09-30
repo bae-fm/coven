@@ -1250,6 +1250,10 @@ impl StoreBlobCache {
         self.enforce_budget(namespace, Some(&destination)).await
     }
 
+    /// Move each pinned copy in `blobs` into the evictable cache, holding the
+    /// cache to its namespace budget after every move. No caller is waiting to
+    /// read an unpinned copy, so none is protected: a copy the budget cannot
+    /// hold is evicted like any other.
     pub(crate) async fn unpin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
         for reference in blobs {
             self.database.validate_row_blob_ref(reference).await?;
@@ -1270,6 +1274,7 @@ impl StoreBlobCache {
                 .await?
             {
                 self.move_exact(&pinned, &cached, reference).await?;
+                self.enforce_budget(locator.namespace(), None).await?;
             }
         }
         Ok(())
