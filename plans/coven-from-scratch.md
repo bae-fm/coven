@@ -41,8 +41,8 @@
 - **Convergence:** every device ends up with the same data:
   - a write made after seeing another wins over it on every device;
   - no device sees a write before the writes its author had seen;
-  - when concurrent writes set the same cell, the losing value is recorded,
-    not silently dropped.
+  - when a concurrent write replaces or deletes a value, that value is
+    recorded, not silently dropped.
 - **Durability:** a crash loses nothing:
   - every committed write is still uploaded;
   - every operation with several steps resumes and finishes, for example:
@@ -219,13 +219,29 @@ Two mechanisms order writes:
 
 - Merging is how a device applies writes from every device, its own
   included, to build its local database.
-- Coven keeps three internal tables for this:
-  - `coven_writes`: one row per write the device has applied, with the
-    write's timestamp, which includes its device, and its number;
-  - `coven_columns`: one row per synced column, naming its table and
-    column;
-  - `coven_cells`: one row per synced cell, naming the column, the row, and
-    the write that set it.
+- A *cell* is one column of one row: note 42's title is a cell.
+- Coven keeps five internal tables for this:
+  - `coven_writes`, one row per write the device has applied, naming:
+    - the write's timestamp, which includes its device;
+    - the write's number.
+  - `coven_columns`, one row per synced column, naming:
+    - its table;
+    - its column.
+  - `coven_rows`, one row per synced row, naming:
+    - its table;
+    - its primary key;
+    - whether it is deleted;
+    - the write that last set that.
+  - `coven_cells`, one row per synced cell, naming:
+    - its `coven_columns` row;
+    - its `coven_rows` row;
+    - the write that set it.
+  - `coven_lost`, one row per value a concurrent write replaced or
+    deleted, naming:
+    - the cell;
+    - the value that lost;
+    - the write that set it;
+    - the write that replaced it without having read it.
 - Note 42 on Ben's phone, after Ana's write 4 and its own write 9:
 
   ```
@@ -238,10 +254,14 @@ Two mechanisms order writes:
     1    notes   title
     2    notes   body
 
+  coven_rows
+    id   table   key   deleted   write
+    3    notes   42    no        1
+
   coven_cells
     column   row   write
-    1        42    7
-    2        42    1
+    1        3     7
+    2        3     1
 
   coven_writes
     id   timestamp                                number
@@ -251,7 +271,8 @@ Two mechanisms order writes:
 
 - To find which write set note 42's title:
   - in `coven_columns`, notes' title is column 1;
-  - in `coven_cells`, column 1 of row 42 points to write row 7;
+  - in `coven_rows`, notes row 42 is row 3;
+  - in `coven_cells`, column 1 of row 3 points to write row 7;
   - in `coven_writes`, write row 7 is Ben's phone's write 9, stamped
     13:01:00.000 #1.
 - Applying a row change to a cell keeps whichever value has the larger
@@ -336,41 +357,241 @@ Carol's tablet:
 
 - No cell overlaps, so both writes keep their cells on every device.
 - When concurrent writes set the same cell, the newer one wins, and coven
-  records the value that lost.
-  - Carol's "Shopping" replaced Ben's "Weekly groceries" without her write
-    having read it, so coven records "Weekly groceries".
+  records the value that lost in `coven_lost`.
+  - `coven_lost` keeps each value that lost, with the write that set it and
+    the write that replaced it.
   - The writes were concurrent when the winning write had not read the
     write that set the losing value.
-  - The app can read these records and offer to restore the lost value.
-  - Every device holds the same records, because they follow from the
-    writes alone.
+- Carol's "Shopping" replaced Ben's "Weekly groceries":
+
+  ```
+  coven_lost
+    cell            lost value          set by          replaced by
+    note 42 title   "Weekly groceries"  Ben's write 9   Carol's write 2
+  ```
+
+- The app can read `coven_lost` and offer to restore a lost value.
+- Every device holds the same `coven_lost` rows, because they follow from
+  the writes alone.
 
 ### 8.3 Deletes
 
-- Deleting a row sets its deleted mark.
-- The mark is one more cell, stamped with the delete's timestamp.
-- Editing other columns never touches the mark, so a concurrent edit
+- A row's `coven_rows` row is written when the row is first inserted, and
+  again only when the row is deleted or re-added.
+- Edits to the row's columns change only its `coven_cells` rows.
+- So the `write` in `coven_rows` is the write that last created, deleted or
+  re-added the row.
+- Deleting a row removes it from the app's table and sets `deleted` to yes
+  on its `coven_rows` row, pointing that row's write at the delete.
+- Its `coven_rows` row and `coven_cells` rows stay, so later writes to the
+  row still have stamps to compare against.
+- An edit to other columns never changes `deleted`, so a concurrent edit
   doesn't bring a deleted row back.
+- A delete records in `coven_lost` every cell of the row set by a write it
+  hadn't read.
   - At 16:00 Ana deletes note 43, "Hardware store".
-  - At the same time Ben, offline, edits its title.
-  - Note 43 stays deleted on every device.
-- Re-adding the row clears the mark with a newer timestamp.
-  - At 17:00 Ana undoes the delete, and note 43 is back on every device.
+  - At the same time Ben, offline, edits its title to "Hardware store,
+    Saturday".
+  - Note 43 stays deleted on every device, and every device records:
+
+    ```
+    coven_lost
+      cell           lost value                  set by        replaced by
+      note 43 title  "Hardware store, Saturday"  Ben's write   Ana's write 7
+    ```
+
+- Re-adding the row sets `deleted` back to no, with a newer timestamp.
+  - At 17:00 Ana re-adds note 43, and it is back on every device.
+- Note 43's `coven_rows` row on Carol's tablet, and whether `notes` holds
+  it:
+
+  ```
+  coven_rows
+    time    id   table   key   deleted   write
+    14:45   4    notes   43    no        16      Ana's write 5 creates it
+    16:00   4    notes   43    yes       18      Ana's write 7 deletes it
+    17:00   4    notes   43    no        19      Ana's write 8 re-adds it
+
+  notes
+    14:45   row 43 present
+    16:00   row 43 gone
+    17:00   row 43 present again
+  ```
+
+- Ana's write 6, between them, is her 15:00 edit to note 42's body
+  (§8.2), applied as row 17.
 
 ### 8.4 Foreign keys
 
-- A row's parent is always applied before it (§7.1).
-- A row pointing at a deleted row follows its foreign key's declared action,
-  whichever was applied first.
-  - Cascade deletes it.
-  - Set null clears the reference.
-- At 16:00, while Ana deletes note 43, Ben, offline, adds tag 9 to it.
-  - With cascade, tag 9 is deleted on every device.
-- If a deleted parent is re-added, do the rows deleted along with it come
-  back?
-  - When Ana undoes her delete at 17:00, does tag 9 come back?
-- What does a restrict foreign key do when the delete and the new child
-  were concurrent?
+- A foreign key makes one row point at another, its parent.
+  - E.g. tag 9's `note_id` points at note 43, so note 43 is tag 9's parent.
+- Every device applies a parent's insert before the row pointing at it,
+  through causality alone (§7.1):
+
+  ```
+  Ana's phone    write 5: insert note 43
+                    │
+                    │  Ben's phone applies write 5
+                    ▼
+  Ben's phone    write: insert tag 9, pointing at note 43
+                 had read: ana-phone 5
+                    │
+                    │  another device downloads Ben's write first
+                    ▼
+  that device    holds Ben's write
+                    → applies Ana's write 5, inserting note 43
+                    → applies Ben's write, inserting tag 9
+  ```
+
+- A row pointing at a deleted row follows its foreign key's declared action
+  on every device.
+- On the device that deletes the parent, SQLite runs the action, and the
+  write records it.
+  - E.g. if tags point at notes with cascade and links with set null,
+    deleting note 43 records:
+
+    ```
+    notes  row 43  delete
+    tags   row 8   delete                         cascade
+    links  row 5   update  note_id: 43 → null     set null
+    ```
+
+- When another device applies the parent's delete, each child is in one of
+  three cases:
+  - Case 1: the deleting device had the child;
+  - Case 2: the child's own device has it when the delete arrives;
+  - Case 3: the delete arrives before the child.
+
+#### Cascade
+
+- Case 1: Ana's phone, which deletes note 43, had the child, tag 8.
+  - At 15:30 Carol tags note 43 "hardware", as tag 8. Every device, Ana's
+    phone included, applies it.
+  - At 16:00 Ana's phone deletes note 43, SQLite cascades tag 8, and her
+    write record carries both:
+
+    ```
+    ana-phone, write 7, 2026-10-02 16:00:00.000 #0
+      had read: ben-phone 9, carol-tablet 3
+      notes  row 43  delete
+      tags   row 8   delete
+      links  row 5   update  note_id: 43 → null
+    signed by ana-phone
+    ```
+
+  - Carol's tablet applies write 7 like any other write: note 43 and tag 8
+    go, and link 5 loses its note.
+- Case 2: Ana's phone never saw the child, tag 9, but Ben's phone, which
+  created it, has it when Ana's delete arrives.
+
+  ```
+  Ben's phone
+    16:00  offline. Ben's write: insert tag 9 → note 43
+    16:30  online. Applies Ana's write 7: delete note 43
+             SQLite cascades: tag 9 deleted
+             coven_rows  tags  9  deleted: yes  write: Ana's write 7
+  ```
+
+  - Ben's phone applies write 7 like any other write, and SQLite's cascade
+    removes tag 9 with note 43. Coven records tag 9's delete as part of
+    write 7.
+- Case 3: Carol's tablet applies Ana's delete before tag 9 arrives.
+
+  ```
+  Carol's tablet
+    16:00  applies Ana's write 7: delete note 43
+             coven_rows  notes  43  deleted: yes  write: Ana's write 7
+    16:30  Ben's write arrives: insert tag 9 → note 43
+             note 43 is deleted in coven_rows, so cascade applies
+             tag 9 is never inserted into tags
+             coven_rows  tags  9  deleted: yes  write: Ana's write 7
+  ```
+
+  - SQLite would reject inserting a tag that points at a missing note.
+  - So coven never runs Ben's insert into `tags`.
+  - It only adds tag 9's `coven_rows` row, deleted, set by Ana's write 7.
+- Every device ends with note 43, tag 8 and tag 9 deleted.
+- Ana's write 7 hadn't read Ben's insert, so tag 9's cells are recorded in
+  `coven_lost`, replaced by write 7 (§8.3).
+- Re-adding a deleted parent doesn't bring back the rows deleted with it.
+  - Re-adding is a new insert. Any children the app wants back, it inserts
+    in the same write.
+  - At 17:00 Ana's write 8 re-inserts note 43 and tag 8.
+  - Ana's phone never had tag 9, so it can't re-insert it.
+
+#### Set null and set default
+
+- Set default works like set null, with the column's default in place of
+  null.
+- Case 1: Ana's phone had link 5, so write 7 carries `note_id: 43 → null`,
+  and every device applies it like any other write.
+- At 16:00, while Ana deletes note 43, Ben, offline, adds link 6 pointing
+  at it.
+
+  ```
+  Ben's phone, case 2
+    16:00  offline. Ben's write: insert link 6 → note 43
+    16:30  online. Applies Ana's write 7: delete note 43
+             SQLite sets link 6's note_id to null
+             coven_cells  link 6 note_id  write: Ana's write 7
+
+  Carol's tablet, case 3
+    16:00  applies Ana's write 7: delete note 43
+    16:30  Ben's write arrives: insert link 6 → note 43
+             note 43 is deleted, so coven inserts link 6 with note_id null
+             coven_cells  link 6 note_id  write: Ana's write 7
+  ```
+
+- Every device ends with link 6 present and pointing at nothing, its
+  `note_id` set by Ana's write 7.
+- Ana's write 7 hadn't read Ben's insert, so link 6's `note_id` 43 is
+  recorded in `coven_lost`, replaced by write 7.
+
+#### Restrict and no action
+
+- A restrict foreign key refuses to delete a parent that has children.
+  - On the deleting device, SQLite checks this as usual.
+  - E.g. if tags pointed at notes with restrict, Ana's phone could delete
+    note 43 only once it had no tags.
+- No action differs from restrict only in when SQLite checks it, so coven
+  treats both the same.
+  - Restrict is checked as soon as the parent is deleted.
+  - No action is checked at the end of the statement, or of the
+    transaction if the key is deferred.
+- A child added concurrently with its parent's delete is lost, as if it
+  had never been added.
+  - Restrict means no child is ever deleted for the app, so coven doesn't
+    delete it.
+  - It records the child's insert in `coven_lost`, replaced by the parent's
+    delete.
+- At 16:00 Ana's phone, with no tags on note 43, deletes it, while Ben,
+  offline, adds tag 9 "receipts" to it.
+
+  ```
+  Ben's phone, case 2
+    16:00  offline. Ben's write: insert tag 9 → note 43
+    16:30  online. Applies Ana's write 7: delete note 43
+             tag 9 would block the delete, so coven removes it first
+             coven_rows  tags  9  deleted: yes  write: Ana's write 7
+
+  Carol's tablet, case 3
+    16:00  applies Ana's write 7: delete note 43
+    16:30  Ben's write arrives: insert tag 9 → note 43
+             note 43 is deleted, so tag 9 is never inserted into tags
+             coven_rows  tags  9  deleted: yes  write: Ana's write 7
+  ```
+
+- Both devices end without tag 9, and with the same `coven_lost` rows:
+
+  ```
+  coven_lost
+    cell           lost value   set by        replaced by
+    tag 9 name     "receipts"   Ben's write   Ana's write 7
+    tag 9 note_id  43           Ben's write   Ana's write 7
+  ```
+
+- The app can show Ben that his tag was lost, and offer to add it to
+  another note.
 
 ### 8.5 Keys and uniqueness
 
@@ -472,7 +693,8 @@ Carol's tablet:
 - A new device loads the latest snapshot, then the logs after it.
 - A log object is deleted once a snapshot covers it and every member's
   posted position has passed it.
-- Deleted rows' marks are cleared the same way.
+- Deleted rows' `coven_rows` and `coven_cells` rows are cleared the same
+  way.
 - Who writes snapshots, and when?
 - How long do covered logs stay?
 
@@ -511,6 +733,63 @@ Carol's tablet:
 
 - Open, write, read, subscribed queries, files, membership, circles,
   pairing, sync status.
+
+## Appendix A. SQLite features across devices
+
+Each SQLite feature whose meaning changes when devices write offline and
+merge later.
+
+### Integer primary keys
+
+- Problem: two offline devices can pick the same id for different rows,
+  and coven would treat them as one row.
+- Status: synced tables use globally unique keys, such as UUIDs, or keys
+  derived from the content.
+- Could support: each device gets a slot `s` of `n`, and picks only ids
+  where `id mod n = s`.
+  - Slots must be unique; claiming one needs storage that can create an
+    object only if it doesn't exist yet, which §4 doesn't require.
+  - The app gets ids from coven, such as `coven_next_id('notes')`, since
+    SQLite picks the largest id plus one.
+  - `n` caps how many devices a store can have.
+
+### Unique constraints besides the primary key
+
+- Problem: two offline devices can each insert a row with the same value.
+- Status: coven refuses them on synced tables (§8.5); the app derives the
+  primary key from the unique value instead.
+- Could support: the row inserted with the smaller timestamp keeps the
+  value; the other write's cell is undone and recorded in `coven_lost`.
+
+### Restrict and no-action foreign keys
+
+- Problem: a device can delete a parent while another adds a child it
+  hasn't seen.
+- Status: the child is lost, recorded in `coven_lost` as replaced by the
+  parent's delete (§8.4).
+
+### CHECK constraints
+
+- Problem: two concurrent edits that each pass can merge into a row that
+  fails, such as one device setting `start` and another `end`.
+- Status: open.
+- Could support: the merged row keeps the older write's cells for that
+  row, and the rest is recorded in `coven_lost`.
+
+### Triggers that write synced tables
+
+- Problem: a trigger that runs again while coven applies a remote write
+  would repeat what the original device already sent.
+- Status: refused (§8.6).
+- Could support: writes a trigger makes while coven applies a remote write
+  aren't recorded as a new write.
+
+### Schema changes
+
+- Problem: devices running different app versions hold different schemas.
+- Status: synced schema changes only add tables and columns (§18).
+- Could support: dropping, renaming and retyping with a conversion per
+  schema version.
 
 ## Notes
 
