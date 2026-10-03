@@ -61,7 +61,7 @@
   - OneDrive;
   - iCloud, through CloudKit.
 - Every member reaches the storage using their own provider account.
-  - On S3, that means their own access key, not a shared one.
+- On S3, each member has their own access key.
 - What coven needs from a provider:
   - create an object;
   - read it, whole and by range;
@@ -87,7 +87,7 @@
 - A write record, for a write that fixes a note's title and deletes a tag:
 
   ```
-  ana-phone, write 3, 2026-10-02 13:04:12.003 #0
+  ana-phone, write 3, 2026-10-02 12:00:00.000 #0
     had read: ben-phone 8, carol-tablet 1
     notes  row 42  update  title: "Grocry list" → "Grocery list"
     tags   row 7   delete
@@ -124,7 +124,8 @@ Two mechanisms order writes:
 
 - Every write records how far its device had read every other device's
   log.
-  - Ana's write 3 had read Ben's log up to 8.
+  - Ana's write 3 had read Ben's log up to 8;
+  - and Carol's tablet's log up to 1.
 - A device applies a write only after it has applied everything that
   write's device had read.
 - So no device ever sees an effect before its cause:
@@ -134,34 +135,36 @@ Two mechanisms order writes:
     the note in his write 10.
   - No device ever has Ben's tag without Ana's note.
 - Two writes are concurrent when neither device had read the other's:
-  - Carol's tablet is offline all day. Its write 2, at 18:00, had read
-    Ben's log only up to 8.
+  - Carol's tablet goes offline before Ben's write 9. Its write 2, at
+    14:00, had read Ben's log only up to 8.
   - Ben's write 9 had read Carol's tablet's log only up to 1.
   - So Carol's write 2 and Ben's write 9 are concurrent.
 - A device can apply two concurrent writes in either order.
-  - Dana's laptop may apply Carol's write 2 before or after Ben's write 9.
+  - Ben's phone applies its own write 9 before Carol's write 2.
+  - Carol's tablet applies its own write 2 before Ben's write 9.
   - Neither waits for the other.
-  - Both orders converge on the same note (§8).
+  - Both orders converge on the same note.
 
 ### 7.2 Timestamps
 
 - Every write carries a timestamp: the device's wall clock time, plus a
   counter.
-  - Ana's write 3 (§5) is stamped 2026-10-02 13:04:12.003 #0.
+  - Ana's write 3 is stamped 2026-10-02 12:00:00.000 #0;
+  - 12:00:00.000 is the wall clock time, and #0 the counter.
 - A timestamp is 48 bits of milliseconds, a 16-bit counter, and the
   device's 64-bit id.
 - Timestamps sort by milliseconds, then counter, then device id.
-  - So no two devices' timestamps are ever equal.
+- So no two devices' timestamps are ever equal.
 - Every install, and every restored copy of a store, gets a new device id.
-- Each device keeps the latest timestamp it has seen, from its own writes
-  and every write it downloads, saved on disk.
-  - After write 3, Ana's phone's latest is 13:04:12.003 #0.
-- To stamp a new write:
-  - if its wall clock is past that, it uses the wall clock, counter 0;
-  - otherwise it uses that latest time, counter raised by one;
-  - a counter past its maximum moves to the next millisecond.
-- So a new write is always stamped later than everything its device had
-  seen, whatever the devices' wall clocks say.
+- The stamping rule:
+  - each device keeps the latest timestamp it has seen, from its own writes
+    and every write it downloads, saved on disk;
+  - to stamp a new write:
+    - if its wall clock is past that, it uses the wall clock, counter 0;
+    - otherwise it uses that latest time, counter raised by one;
+    - a counter past its maximum moves to the next millisecond.
+  - so a new write is always stamped later than everything its device had
+    seen, whatever the devices' wall clocks say.
 - A write stamped more than five minutes ahead of the receiving device's
   clock waits until that clock catches up, instead of being applied.
 
@@ -169,23 +172,23 @@ Two mechanisms order writes:
 
 - Suppose Ana's phone clock runs a minute fast, and Ben's is right. In
   real time:
-  - at 13:05:00, Ana edits a note:
-    - her phone reads 13:06:00;
-    - it stamps her write 13:06:00.000 #0;
+  - at 13:00:00, Ana edits a note:
+    - her phone reads 13:01:00;
+    - it stamps her write 13:01:00.000 #0;
     - it uploads the write record.
-  - at 13:05:20, Ben's phone downloads Ana's write record:
-    - its latest timestamp seen is now 13:06:00.000 #0;
+  - at 13:00:20, Ben's phone downloads Ana's write record:
+    - its latest timestamp seen is now 13:01:00.000 #0;
     - it has now read Ana's log up to 4.
-  - at 13:05:30, Ben edits the same note:
-    - his phone reads 13:05:30, behind 13:06:00.000;
-    - it stamps his write 13:06:00.000 #1;
+  - at 13:00:30, Ben edits the same note:
+    - his phone reads 13:00:30, behind 13:01:00.000;
+    - it stamps his write 13:01:00.000 #1;
     - it uploads the write record.
 - If these were Ana's phone's 4th write and Ben's phone's 9th, storage
   now holds:
   - `devices/ana-phone/4`:
 
     ```
-    ana-phone, write 4, 2026-10-02 13:06:00.000 #0
+    ana-phone, write 4, 2026-10-02 13:01:00.000 #0
       had read: ben-phone 8, carol-tablet 1
       notes  row 42  update  title: "Grocery list" → "Groceries"
     signed by ana-phone
@@ -194,100 +197,202 @@ Two mechanisms order writes:
   - `devices/ben-phone/9`:
 
     ```
-    ben-phone, write 9, 2026-10-02 13:06:00.000 #1
+    ben-phone, write 9, 2026-10-02 13:01:00.000 #1
       had read: ana-phone 4, carol-tablet 1
       notes  row 42  update  title: "Groceries" → "Weekly groceries"
     signed by ben-phone
     ```
 
-- Both mechanisms put Ben's write after Ana's:
-  - timestamp: same millisecond, but Ben's counter is 1 and Ana's is 0;
-  - had read: Ben's write had read Ana's log up to 4.
-- Suppose Dana's laptop downloads Ben's write 9 before Ana's write 4.
-  - Write 9 had read Ana's log up to 4.
-  - Dana's laptop holds write 9 until it has applied Ana's write 4.
+- Suppose Carol's tablet, coming back online, downloads Ben's write 9
+  before Ana's write 4.
+- Causality decides when it applies them:
+  - write 9 had read Ana's log up to 4;
+  - so Carol's tablet holds write 9 until it has applied write 4.
+- Timestamps decide which title the note keeps:
+  - same millisecond, but Ben's counter is 1 and Ana's is 0;
+  - so Ben's write is later than Ana's.
+- Whenever one write had read another, its timestamp is later, as here.
+- Timestamps also order concurrent writes, which "had read" can't. The
+  merge relies on that.
 
 ## 8. Merge
 
-- Each synced cell stores its value and the timestamp of the write that
-  set it, in coven's internal tables.
-- Applying a row change to a cell keeps whichever timestamp is larger.
-  - So each cell ends with the largest-stamped write it has received,
-    whatever the arrival order and however often a write repeats.
-- Every cell a write touches gets that write's timestamp.
-  - So a write wins or loses whole against a concurrent write to the same
-    cells.
-- Different columns of a row merge independently.
-  - Both phones are offline. Ana changes note 42's body; Ben changes its
-    title.
-  - Different columns, so both edits stay.
-- Deleting a row sets its deleted mark: one more cell, stamped with the
-  delete's timestamp.
-  - Editing other columns never touches the mark, so a concurrent edit
-    doesn't bring a deleted row back.
-    - Ana deletes note 42 while Ben, offline, edits its title.
-    - The note stays deleted on every device.
-  - Re-adding the row clears the mark with a newer timestamp.
-- When concurrent writes set the same cell, the newer one wins, and coven
-  records the value that lost (§8.1).
-  - The app can read these records and offer to restore the lost value.
-  - Every device holds the same records, because they follow from the
-    writes alone.
-- A row's parent always arrives before it (§7.1).
-- A row pointing at a deleted row is deleted too, whichever arrived first.
-  - Ana deletes note 42 while Ben, offline, adds tag 9 to it.
-  - Tag 9 is deleted on every device.
-- Primary keys never change. Changing one is a delete plus an insert.
-- A unique value that names a thing is the row's identity, so two inserts
-  of it are one row and merge.
-- Synced tables have no other unique constraints.
-- A trigger runs only on the device where its write happens.
-  - What it writes to synced tables is part of that write and syncs with
-    it.
-  - Applying remote writes doesn't run triggers.
-- If a deleted parent is re-added, do the rows deleted along with it come
-  back?
-- How does coven keep the app's triggers from running while it applies
-  remote writes?
+- Merging is how a device applies writes from every device, its own
+  included, to build its local database.
+- Coven keeps three internal tables for this:
+  - `coven_writes`: one row per write the device has applied, with the
+    write's timestamp, which includes its device, and its number;
+  - `coven_columns`: one row per synced column, naming its table and
+    column;
+  - `coven_cells`: one row per synced cell, naming the column, the row, and
+    the write that set it.
+- Note 42 on Ben's phone, after Ana's write 4 and its own write 9:
+
+  ```
+  notes                            the app's own table
+    id   title               body
+    42   "Weekly groceries"  "milk, eggs"
+
+  coven_columns
+    id   table   column
+    1    notes   title
+    2    notes   body
+
+  coven_cells
+    column   row   write
+    1        42    7
+    2        42    1
+
+  coven_writes
+    id   timestamp                                number
+    1    2026-10-01 09:12:40.511 #0  ana-phone    1
+    7    2026-10-02 13:01:00.000 #1  ben-phone    9
+  ```
+
+- To find which write set note 42's title:
+  - in `coven_columns`, notes' title is column 1;
+  - in `coven_cells`, column 1 of row 42 points to write row 7;
+  - in `coven_writes`, write row 7 is Ben's phone's write 9, stamped
+    13:01:00.000 #1.
+- Applying a row change to a cell keeps whichever value has the larger
+  timestamp.
 
 ### 8.1 Example
 
-- This follows note 42's title through the writes in §7.3.
-- Every device applies Ana's write 4, then Ben's write 9:
-  - write 4 sets the title to "Groceries", stamped 13:06:00.000 #0;
-  - write 9 is stamped 13:06:00.000 #1, larger, so the title becomes
-    "Weekly groceries".
-- With wall-clock stamps alone, Ben's write would be stamped 13:05:30:
-  - the title would keep Ana's "Groceries", although Ben's write had read
-    hers;
-  - the clock rule (§7.2) prevents this by keeping timestamps in agreement
-    with "had read".
-- Carol's tablet has been offline all day. At 18:00 Carol edits the same
-  note:
-  - her tablet reads 18:00, past anything it has seen;
-  - it stamps her write 18:00:00.000 #0;
-  - it uploads the write record when it comes back online.
-- Storage now also holds `devices/carol-tablet/2`:
+- Carol's tablet goes offline at 12:30, having read Ana's log up to 3 and
+  Ben's up to 8.
+- At 13:00 Ben sets the title to "Weekly groceries". His phone commits this
+  as its write 9.
+- At 14:00 Carol sets the title to "Shopping". Her tablet commits this as
+  its write 2:
 
   ```
-  carol-tablet, write 2, 2026-10-02 18:00:00.000 #0
+  carol-tablet, write 2, 2026-10-02 14:00:00.000 #0
     had read: ana-phone 3, ben-phone 8
     notes  row 42  update  title: "Grocery list" → "Shopping"
   signed by carol-tablet
   ```
 
-- Carol's write 2 and Ben's write 9 are concurrent (§7.1), so "had read"
-  can't order them.
-- Their timestamps can: 18:00 is later than 13:06.
-  - The title becomes "Shopping" on every device.
-  - Coven records that "Shopping" replaced "Weekly groceries" unseen.
-- Dana's laptop may apply Carol's write 2 before Ben's write 9:
-  - the title becomes "Shopping", stamped 18:00:00.000 #0;
-  - Ben's write 9 arrives with a smaller stamp, so the title stays;
-  - coven records the same lost value, "Weekly groceries".
-- Without timestamps, only an arbitrary rule could decide, such as the
-  larger device id winning, and Ben's earlier edit could beat Carol's
-  later one.
+- At 14:30 the tablet comes back online and uploads the write record to
+  `devices/carol-tablet/2`.
+- Carol's tablet never read Ben's write 9, and Ben's phone never read
+  Carol's write 2. The two writes are concurrent, so only their
+  timestamps can order them.
+- When a device applies one of these writes to the title, it:
+  - adds the write's row to `coven_writes`;
+  - compares the write's stamp with the stamp of the title's current write;
+  - if the new stamp is larger, sets the title in `notes` and points the
+    title's `coven_cells` row at the new write.
+- Each device has its own `coven_writes`, so one write gets a different row
+  on each device.
+- Ana's write 4, for example, is row 6 on Ben's phone and row 14 on Carol's
+  tablet.
+- Note 42's title on each device, in real time.
+
+Ben's phone:
+
+<table>
+  <tr><th>Time</th><th>Applies → <code>coven_writes</code> row</th><th>New stamp</th><th>Current stamp</th><th>Wins</th><th>Title</th><th>Title's <code>coven_cells</code> row → <code>coven_writes</code> row</th></tr>
+  <tr><td>13:00</td><td>Ana's write 4 → 6</td><td>13:01:00 #0</td><td>12:00:00 #0</td><td>yes</td><td>"Groceries"</td><td>6</td></tr>
+  <tr><td>13:00</td><td>its write 9 → 7</td><td>13:01:00 #1</td><td>13:01:00 #0</td><td>yes</td><td>"Weekly groceries"</td><td>7</td></tr>
+  <tr><td>14:30</td><td>Carol's write 2 → 8</td><td>14:00:00 #0</td><td>13:01:00 #1</td><td>yes</td><td>"Shopping"</td><td>8</td></tr>
+</table>
+
+Carol's tablet:
+
+<table>
+  <tr><th>Time</th><th>Applies → <code>coven_writes</code> row</th><th>New stamp</th><th>Current stamp</th><th>Wins</th><th>Title</th><th>Title's <code>coven_cells</code> row → <code>coven_writes</code> row</th></tr>
+  <tr><td colspan="7"><em>12:30 · goes offline</em></td></tr>
+  <tr><td>14:00</td><td>its write 2 → 13</td><td>14:00:00 #0</td><td>12:00:00 #0</td><td>yes</td><td>"Shopping"</td><td>13</td></tr>
+  <tr><td colspan="7"><em>14:30 · comes back online and uploads its write 2</em></td></tr>
+  <tr><td>14:30</td><td>Ana's write 4 → 14</td><td>13:01:00 #0</td><td>14:00:00 #0</td><td>no</td><td>"Shopping"</td><td>13, unchanged</td></tr>
+  <tr><td>14:30</td><td>Ben's write 9 → 15</td><td>13:01:00 #1</td><td>14:00:00 #0</td><td>no</td><td>"Shopping"</td><td>13, unchanged</td></tr>
+</table>
+
+- Ben's phone and Carol's tablet applied the same three writes in opposite
+  orders:
+  - Ben's phone was online, so it applied Ana's write and its own at 13:00,
+    and Carol's at 14:30;
+  - Carol's tablet was offline, so it applied its own write first, and
+    Ana's and Ben's at 14:30.
+- Both devices end with "Shopping": each cell holds the largest-stamped
+  write applied, whatever the order.
+
+### 8.2 Concurrent writes to one row
+
+- Two concurrent writes to one row can overlap or not:
+  - a cell both set goes to the write with the larger timestamp (§8.1);
+  - a cell only one sets keeps that write's value.
+- All cells a write sets share its timestamp, so between any two writes,
+  the one with the larger timestamp wins every cell they both set.
+- At 15:00, offline, Ben sets note 42's title and Ana sets its body:
+
+  ```
+                 title                body
+  Ana's write    ·                    "milk, eggs, bread"
+  Ben's write    "Weekend shopping"   ·
+  result         "Weekend shopping"   "milk, eggs, bread"
+  ```
+
+- No cell overlaps, so both writes keep their cells on every device.
+- When concurrent writes set the same cell, the newer one wins, and coven
+  records the value that lost.
+  - Carol's "Shopping" replaced Ben's "Weekly groceries" without her write
+    having read it, so coven records "Weekly groceries".
+  - The writes were concurrent when the winning write had not read the
+    write that set the losing value.
+  - The app can read these records and offer to restore the lost value.
+  - Every device holds the same records, because they follow from the
+    writes alone.
+
+### 8.3 Deletes
+
+- Deleting a row sets its deleted mark.
+- The mark is one more cell, stamped with the delete's timestamp.
+- Editing other columns never touches the mark, so a concurrent edit
+  doesn't bring a deleted row back.
+  - At 16:00 Ana deletes note 43, "Hardware store".
+  - At the same time Ben, offline, edits its title.
+  - Note 43 stays deleted on every device.
+- Re-adding the row clears the mark with a newer timestamp.
+  - At 17:00 Ana undoes the delete, and note 43 is back on every device.
+
+### 8.4 Foreign keys
+
+- A row's parent is always applied before it (§7.1).
+- A row pointing at a deleted row follows its foreign key's declared action,
+  whichever was applied first.
+  - Cascade deletes it.
+  - Set null clears the reference.
+- At 16:00, while Ana deletes note 43, Ben, offline, adds tag 9 to it.
+  - With cascade, tag 9 is deleted on every device.
+- If a deleted parent is re-added, do the rows deleted along with it come
+  back?
+  - When Ana undoes her delete at 17:00, does tag 9 come back?
+- What does a restrict foreign key do when the delete and the new child
+  were concurrent?
+
+### 8.5 Keys and uniqueness
+
+- A primary key change is recorded as a delete of the old row plus an
+  insert of the new one.
+- Where a value must be unique, the app makes it the primary key, or
+  derives the primary key from it.
+- Then two inserts of the same value are one row, and merge.
+  - Ana and Ben, both offline, each add the tag "urgent".
+  - The tag's key is derived from "urgent", so both inserts are one row.
+- Coven refuses to sync a table with any other unique constraint, checked
+  whenever the schema changes.
+
+### 8.6 Triggers
+
+- Triggers on synced tables may write only local tables.
+- They run on every device, for its own writes and applied ones alike.
+- So a local table a trigger maintains stays current everywhere.
+  - A trigger keeps a local search index of note titles.
+  - When Ben's phone applies Carol's write 2, the trigger updates Ben's
+    index to "Shopping".
+- Should triggers that write synced tables be allowed?
 
 ## 9. Rollback and fork detection
 
@@ -296,12 +401,20 @@ Two mechanisms order writes:
   of its own.
 - Something is being withheld when a device can't find a write that
   another device's position, or a write's "had read", says exists.
-  - Dana sees Ben's write 9 had read Ana's log up to 4.
-  - If storage shows Dana's laptop only Ana's writes 1 to 3, write 4 is
-    being withheld from her.
+  - Carol's tablet sees Ben's write 9 had read Ana's log up to 4.
+  - If storage shows Carol's tablet only Ana's writes 1 to 3, write 4 is
+    being withheld from it.
 - What does the app see when one is detected?
 
-## 10. Membership and roles
+## 10. Signatures
+
+- Every device has its own key pair: a private key it never shares, and a
+  public key the other members know.
+- Every write record is signed with the private key of the device that
+  wrote it, so who wrote what is authentic.
+- This is about authenticity, not trust.
+
+## 11. Membership and roles
 
 - Membership is a synced table.
 - Several equal admins.
@@ -309,24 +422,16 @@ Two mechanisms order writes:
 - Removing the last admin isn't allowed.
 - Every device works out the member list from all writes to the membership
   table, in timestamp order.
+- Devices check each write record's signature against the member list at
+  the write's timestamp (§10), which is what makes these rules hold.
 
-## 11. Removing a member
+## 12. Removing a member
 
 - Revoke their storage access.
 - Rotate the store key: make a new one and encrypt it to each remaining
-  device's public key (§12).
+  device's public key (§10).
 - So an ex-member's copy of the old store key reads nothing written after
   they left, even if they regain read access.
-
-## 12. Signatures
-
-- Every device has its own key pair: a private key it never shares, and a
-  public key the other members know.
-- Every write record is signed with the private key of the device that
-  wrote it, so who wrote what is authentic.
-- Devices check each write record's signature against the member list at
-  the write's timestamp, which is what makes the roles hold (§10).
-- This is about authenticity, not trust.
 
 ## 13. Joining, restore, and not losing the store key
 
