@@ -39,8 +39,10 @@
 - **Atomicity:** another device applies a write's changes all together or
   not at all.
 - **Convergence:** every device ends up with the same data:
-  - a change made after seeing another is ordered after it on every device;
-  - a row never shows up before the row it points to.
+  - a change made after seeing another wins over it on every device;
+  - no device sees a write before the writes its author had seen;
+  - when concurrent writes set the same cell, the losing value is recorded,
+    not silently dropped.
 - **Durability:** a crash loses nothing:
   - every committed write is still uploaded;
   - every operation with several steps resumes and finishes, for example:
@@ -82,7 +84,8 @@
 - A change record, for a write that fixes a note's title and deletes a tag:
 
   ```
-  ana-phone, write 4, 2026-10-02 13:05:12.003
+  ana-phone, write 3, 2026-10-02 13:04:12.003 #0
+    had read: ben-phone 8
     notes  row 42  update  title: "Grocry list" → "Grocery list"
     tags   row 7   delete
   signed by ana-phone
@@ -90,7 +93,8 @@
 
 - Reads run on several read-only connections at once.
 - The app can subscribe to a query; it reruns only when rows it read change.
-- Coven's own tables are out of the app's reach.
+- Coven keeps its own internal tables in the same database. The app can't
+  read or write them.
 
 ## 6. Syncing writes
 
@@ -105,57 +109,160 @@
     object for another.
   - A retried upload writes the same name with the same bytes.
 
-## 7. Order and merge
+## 7. Order
 
-- Every change carries a timestamp from a clock that combines the
-  wall clock with a counter, so a change made after seeing another always
-  sorts after it, whatever the devices' wall clocks say.
-- Per column, the newest change wins.
-- A delete beats an edit.
-- The result doesn't depend on arrival order, so remote changes apply
-  straight into the live database.
-- A row whose foreign-key parent hasn't arrived waits for it.
-- A unique value that names a thing is the row's identity, so two
-  inserts of it are one row and merge.
+- Every change carries a timestamp: the device's wall clock time, plus a
+  counter.
+  - Ana's write 3 in section 5 is stamped 2026-10-02 13:04:12.003 #0.
+- A timestamp is 48 bits of milliseconds, a 16-bit counter, and the
+  device's 64-bit id.
+- Timestamps sort by milliseconds, then counter, then device id.
+  - So no two devices' timestamps are ever equal.
+- Every install, and every restored copy of a store, gets a new device id.
+- Each device keeps the latest timestamp it has seen, from its own changes
+  and every change it downloads, saved on disk.
+  - After write 3, Ana's phone's latest is 13:04:12.003 #0.
+- To stamp a new change:
+  - if its wall clock is past that, it uses the wall clock, counter 0;
+  - otherwise it uses that latest time, counter raised by one;
+  - a counter past its maximum moves to the next millisecond.
+- So a new change is always stamped later than everything its device had
+  seen, whatever the devices' wall clocks say.
+- Every write also records how far its device had read every other
+  device's log.
+- A device applies a write only after it has applied everything that
+  write's device had read.
+  - So no device ever sees an effect before its cause.
+- Two writes are concurrent when neither device had read the other's.
+- Suppose Ana's phone clock runs a minute fast, and Ben's is right. In
+  real time:
+  - at 13:05:00, Ana edits a note:
+    - her phone reads 13:06:00;
+    - it stamps her change 13:06:00.000 #0;
+    - it uploads the change.
+  - at 13:05:20, Ben's phone downloads Ana's change:
+    - its latest timestamp seen is now 13:06:00.000 #0.
+  - at 13:05:30, Ben edits the same note:
+    - his phone reads 13:05:30, behind 13:06:00.000;
+    - it stamps his change 13:06:00.000 #1;
+    - it uploads the change.
+- Suppose these were Ana's phone's 4th write and Ben's phone's 9th. Each
+  phone numbers its own writes.
+- Storage now holds them as `devices/ana-phone/4` and
+  `devices/ben-phone/9`:
+
+  ```
+  ana-phone, write 4, 2026-10-02 13:06:00.000 #0
+    had read: ben-phone 8
+    notes  row 42  update  title: "Grocery list" → "Groceries"
+  signed by ana-phone
+
+  ben-phone, write 9, 2026-10-02 13:06:00.000 #1
+    had read: ana-phone 4
+    notes  row 42  update  title: "Groceries" → "Weekly groceries"
+  signed by ben-phone
+  ```
+
+- Ben's change sorts after Ana's on every device, so everyone ends up
+  with "Weekly groceries".
+- Stamped by his wall clock alone, at 13:05:30, Ben's later edit would
+  sort before Ana's, and her "Groceries" would win everywhere.
+- Suppose Dana's laptop downloads Ben's write 9 before Ana's write 4.
+  - Write 9 had read Ana's log up to 4.
+  - Dana's laptop holds write 9 until it has applied Ana's write 4.
+- A write stamped more than five minutes ahead of the receiving device's
+  clock waits until that clock catches up, instead of being applied.
+
+## 8. Merge
+
+- Each synced cell stores its value and the timestamp of the change that
+  set it, in coven's internal tables.
+- Applying a change to a cell keeps whichever timestamp is larger.
+  - So each cell ends with the largest-stamped change it has received,
+    whatever the arrival order and however often a change repeats.
+- Every cell a write touches gets that write's timestamp.
+  - So a write wins or loses whole against a concurrent write to the same
+    cells.
+- Different columns of a row merge independently.
+  - Both phones are offline. Ana changes note 42's body; Ben changes its
+    title.
+  - Different columns, so both edits stay.
+- Deleting a row sets its deleted mark: one more cell, stamped with the
+  delete's timestamp.
+  - Editing other columns never touches the mark, so a concurrent edit
+    doesn't bring a deleted row back.
+    - Ana deletes note 42 while Ben, offline, edits its title.
+    - The note stays deleted on every device.
+  - Re-adding the row clears the mark with a newer timestamp.
+- When concurrent writes set the same cell, the newer one wins, and coven
+  records the value that lost.
+  - Carol's tablet is offline all day. At 18:00 she sets note 42's title to
+    "Shopping".
+  - Her write had not read Ben's write 9, so the two are concurrent.
+  - Her title wins, and coven records that it replaced "Weekly groceries"
+    unseen.
+  - The app can read these records and offer to restore the lost value.
+  - Every device holds the same records, because they follow from the
+    writes alone.
+- A row's parent always arrives before it, because of the order in
+  section 7.
+- A row pointing at a deleted row is deleted too, whichever arrived first.
+  - Ana deletes note 42 while Ben, offline, adds tag 9 to it.
+  - Tag 9 is deleted on every device.
+- Primary keys never change. Changing one is a delete plus an insert.
+- A unique value that names a thing is the row's identity, so two inserts
+  of it are one row and merge.
 - Synced tables have no other unique constraints.
-- A timestamp per column, or one per row with the losing edit's columns kept
-  wherever the winning edit left them unchanged?
+- A trigger runs only on the device where its write happens.
+  - What it writes to synced tables is part of that write and syncs with
+    it.
+  - Applying remote writes doesn't run triggers.
+- If a deleted parent is re-added, do the rows deleted along with it come
+  back?
+- How does coven keep the app's triggers from running while it applies
+  remote writes?
 
-## 8. Rollback and fork detection
+## 9. Rollback and fork detection
 
-- Each device remembers how far it has read every device's log.
-- A gap or a step back means something was withheld.
-- Devices post how far they've read, so a fork shows up when they
-  compare.
+- Each device numbers its writes 1, 2, 3 and so on, with no gaps.
+- Each device remembers how far it has applied every device's log.
+- Each device also posts how far it has applied every log, as one object
+  of its own.
+- Something is being withheld when a device can't find a write that
+  another device's position, or a write's "had read", says exists.
+  - Dana sees Ben's write 9 had read Ana's log up to 4.
+  - If storage shows Dana's laptop only Ana's writes 1 to 3, write 4 is
+    being withheld from her.
 - What does the app see when one is detected?
 
-## 9. Membership and roles
+## 10. Membership and roles
 
 - Membership is a synced table.
 - Several equal admins.
 - Only admins change membership.
 - Removing the last admin isn't allowed.
-- Every device applies these rules while going through changes in order.
+- Every device works out the member list from all membership changes, in
+  timestamp order.
 
-## 10. Removing a member
+## 11. Removing a member
 
 - Revoke their storage access.
 - Rotate the store key: make a new one and encrypt it to each remaining
-  device's public key. Section 11 covers device keys.
+  device's public key. Section 12 covers device keys.
 - So an ex-member's copy of the old store key reads nothing written after
   they left, even if they regain read access.
 
-## 11. Signatures
+## 12. Signatures
 
 - Every device has its own key pair: a private key it never shares, and a
   public key the other members know.
 - Every change is signed with the private key of the device that wrote it,
   so who wrote what is authentic.
-- Devices check each change's signature against the member list in order,
-  which is what makes the roles in section 9 hold.
+- Devices check each change's signature against the member list at the
+  change's timestamp, which is what makes the roles in section 10 hold.
 - This is about authenticity, not trust.
 
-## 12. Joining, restore, and not losing the store key
+## 13. Joining, restore, and not losing the store key
 
 - An existing device pairs a new one over the local network.
 - Pairing hands over the store key and storage access.
@@ -172,7 +279,7 @@
 - How does a device that got the store key from the keychain add its own
   public key to the member list, since changes are checked against it?
 
-## 13. Circles
+## 14. Circles
 
 - A circle is a group of members inside a store who share rows the other
   members can't read.
@@ -186,16 +293,18 @@
 - Leaving a circle rotates the circle key.
 - What happens when a row references a row in another circle?
 
-## 14. Snapshots and bounded history
+## 15. Snapshots and bounded history
 
 - Any member writes a snapshot: the synced tables, encrypted, and
   how far into every log they reach.
 - A new device loads the latest snapshot, then the logs after it.
-- Log objects a snapshot covers are deleted after a while.
+- A log object is deleted once a snapshot covers it and every member's
+  posted position has passed it.
+- Deleted rows' marks are cleared the same way.
 - Who writes snapshots, and when?
 - How long do covered logs stay?
 
-## 15. Files
+## 16. Files
 
 - Files are what the app attaches to rows: audio, images, documents.
 - Each file is stored encrypted, named by a hash of its content.
@@ -209,7 +318,7 @@
 - How do files inside a circle work?
 - Which device deletes?
 
-## 16. Operations with several steps
+## 17. Operations with several steps
 
 - Upload, snapshot, deleting covered logs, and pairing each take several
   steps that a crash can interrupt.
@@ -218,11 +327,15 @@
 - Every step is safe to run twice.
 - A failure goes to whoever started the operation.
 
-## 17. Schema changes
+## 18. Schema changes
 
-- How does a synced schema change while devices run different app versions?
+- Synced schema changes only add tables and columns.
+- Every write records the schema version it was made with.
+- A device keeps writes from a newer schema version but holds them until
+  its app upgrades.
+- How do non-additive schema changes work, if at all?
 
-## 18. The API apps use
+## 19. The API apps use
 
 - Open, write, read, subscribed queries, files, membership, circles,
   pairing, sync status.
