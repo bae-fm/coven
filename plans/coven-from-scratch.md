@@ -117,32 +117,10 @@
 
 Two mechanisms order writes:
 
-- timestamps decide which write a cell keeps;
-- causality decides when a device may apply a write.
+- causality decides when a device may apply a write;
+- timestamps decide which write a cell keeps.
 
-### 7.1 Timestamps
-
-- Every write carries a timestamp: the device's wall clock time, plus a
-  counter.
-  - Ana's write 3 (§5) is stamped 2026-10-02 13:04:12.003 #0.
-- A timestamp is 48 bits of milliseconds, a 16-bit counter, and the
-  device's 64-bit id.
-- Timestamps sort by milliseconds, then counter, then device id.
-  - So no two devices' timestamps are ever equal.
-- Every install, and every restored copy of a store, gets a new device id.
-- Each device keeps the latest timestamp it has seen, from its own writes
-  and every write it downloads, saved on disk.
-  - After write 3, Ana's phone's latest is 13:04:12.003 #0.
-- To stamp a new write:
-  - if its wall clock is past that, it uses the wall clock, counter 0;
-  - otherwise it uses that latest time, counter raised by one;
-  - a counter past its maximum moves to the next millisecond.
-- So a new write is always stamped later than everything its device had
-  seen, whatever the devices' wall clocks say.
-- A write stamped more than five minutes ahead of the receiving device's
-  clock waits until that clock catches up, instead of being applied.
-
-### 7.2 Causality
+### 7.1 Causality
 
 - Every write records how far its device had read every other device's
   log.
@@ -164,6 +142,28 @@ Two mechanisms order writes:
   - Dana's laptop may apply Carol's write 2 before or after Ben's write 9.
   - Neither waits for the other.
   - Both orders converge on the same note (§8).
+
+### 7.2 Timestamps
+
+- Every write carries a timestamp: the device's wall clock time, plus a
+  counter.
+  - Ana's write 3 (§5) is stamped 2026-10-02 13:04:12.003 #0.
+- A timestamp is 48 bits of milliseconds, a 16-bit counter, and the
+  device's 64-bit id.
+- Timestamps sort by milliseconds, then counter, then device id.
+  - So no two devices' timestamps are ever equal.
+- Every install, and every restored copy of a store, gets a new device id.
+- Each device keeps the latest timestamp it has seen, from its own writes
+  and every write it downloads, saved on disk.
+  - After write 3, Ana's phone's latest is 13:04:12.003 #0.
+- To stamp a new write:
+  - if its wall clock is past that, it uses the wall clock, counter 0;
+  - otherwise it uses that latest time, counter raised by one;
+  - a counter past its maximum moves to the next millisecond.
+- So a new write is always stamped later than everything its device had
+  seen, whatever the devices' wall clocks say.
+- A write stamped more than five minutes ahead of the receiving device's
+  clock waits until that clock catches up, instead of being applied.
 
 ### 7.3 Example
 
@@ -233,7 +233,7 @@ Two mechanisms order writes:
   - The app can read these records and offer to restore the lost value.
   - Every device holds the same records, because they follow from the
     writes alone.
-- A row's parent always arrives before it (§7.2).
+- A row's parent always arrives before it (§7.1).
 - A row pointing at a deleted row is deleted too, whichever arrived first.
   - Ana deletes note 42 while Ben, offline, adds tag 9 to it.
   - Tag 9 is deleted on every device.
@@ -260,7 +260,7 @@ Two mechanisms order writes:
 - With wall-clock stamps alone, Ben's write would be stamped 13:05:30:
   - the title would keep Ana's "Groceries", although Ben's write had read
     hers;
-  - the clock rule (§7.1) prevents this by keeping timestamps in agreement
+  - the clock rule (§7.2) prevents this by keeping timestamps in agreement
     with "had read".
 - Carol's tablet has been offline all day. At 18:00 Carol edits the same
   note:
@@ -276,7 +276,7 @@ Two mechanisms order writes:
   signed by carol-tablet
   ```
 
-- Carol's write 2 and Ben's write 9 are concurrent (§7.2), so "had read"
+- Carol's write 2 and Ben's write 9 are concurrent (§7.1), so "had read"
   can't order them.
 - Their timestamps can: 18:00 is later than 13:06.
   - The title becomes "Shopping" on every device.
