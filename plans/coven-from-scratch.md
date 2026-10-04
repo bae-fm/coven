@@ -82,7 +82,8 @@
     - which device wrote it, its number, its timestamp, and what it had
       read;
     - the schema version it was made with;
-    - a signature over the record, made by the device that wrote it;
+    - a signature over the record, made with the key of the member whose
+      device wrote it;
   - so every committed write gets uploaded, even after a crash.
 - A write record, for a write that fixes a note's title and deletes a tag:
 
@@ -91,7 +92,7 @@
     had read: ben-phone 8, carol-tablet 1
     notes  row 42  update  title: "Grocry list" → "Grocery list"
     tags   row 7   delete
-  signed by ana-phone
+  signed with Ana's key
   ```
 
 - Reads run on several read-only connections at once.
@@ -194,7 +195,7 @@ Two mechanisms order writes:
     ana-phone, write 4, 2026-10-02 13:01:00.000 #0
       had read: ben-phone 8, carol-tablet 1
       notes  row 42  update  title: "Grocery list" → "Groceries"
-    signed by ana-phone
+    signed with Ana's key
     ```
 
   - `devices/ben-phone/9`:
@@ -203,7 +204,7 @@ Two mechanisms order writes:
     ben-phone, write 9, 2026-10-02 13:01:00.000 #1
       had read: ana-phone 4, carol-tablet 1
       notes  row 42  update  title: "Groceries" → "Weekly groceries"
-    signed by ben-phone
+    signed with Ben's key
     ```
 
 - Suppose Carol's tablet, coming back online, downloads Ben's write 9
@@ -327,7 +328,7 @@ Two mechanisms order writes:
   carol-tablet, write 2, 2026-10-02 14:00:00.000 #0
     had read: ana-phone 3, ben-phone 8
     notes  row 42  update  title: "Grocery list" → "Shopping"
-  signed by carol-tablet
+  signed with Carol's key
   ```
 
 - At 14:30 the tablet comes back online and uploads the write record to
@@ -424,7 +425,7 @@ Carol's tablet:
   ben-phone, write 10, 2026-10-02 16:00:00.000 #0
     had read: ana-phone 6, carol-tablet 2
     notes  row 43  generation 1  update  title: "Hardware store" → "Hardware store, Saturday"
-  signed by ben-phone
+  signed with Ben's key
   ```
 
 - Edits to a row's columns change only its `coven_cells` rows, never its
@@ -540,7 +541,7 @@ Carol's tablet:
       notes  row 43  generation 1  delete
       tags   row 8   generation 1  delete
       links  row 5   generation 1  update  note_id: 43 → null
-    signed by ana-phone
+    signed with Ana's key
     ```
 
   - Carol's tablet applies write 7 like any other write: note 43 and tag 8
@@ -821,7 +822,7 @@ Carol's tablet:
       had read: ben-phone 9, carol-tablet 2
       notes  row 42  generation 1  update  body: "milk, eggs" → "milk, eggs, bread"
       notes  row 42  generation 1  update  edited_at: → 2026-10-02 15:00    shared trigger
-    signed by ana-phone
+    signed with Ana's key
     ```
 
   - Ben's phone applies both without running the trigger.
@@ -854,24 +855,71 @@ Carol's tablet:
 ## 9. Members and roles
 
 - A member is a person in the store, using it from one or more devices.
-- Membership is a synced table listing each member, their role, and their
-  devices' public keys.
-- Several equal admins.
-- Only admins add and remove members, and change roles.
-- Each member adds and removes their own devices; admins can remove any
-  device.
-- Removing the last admin isn't allowed.
-- Every device works out the member list from all writes to the membership
-  table, in timestamp order.
+  - Each member has their own key pair, which identifies them.
+  - An admin adds a member by writing their public key to the membership
+    log.
+- Membership is its own log, separate from the app's writes.
+  - Each change is one *entry*: add or remove a member, change a role, add
+    or remove a device.
+  - An entry names the membership entries its author had read, and is
+    signed with its author's member key.
+  - Entries live at `membership/<device>/<n>`, numbered like a device's
+    writes (§6).
+  - The device in the path is only where the entry was written from.
+  - Each device numbers its own entries, so no two entries ever get the
+    same path.
+  - Whose entry it is comes from its signature: an entry signed with Ana's
+    key is Ana's, whichever of her devices wrote it.
+
+    ```
+    membership/ana-phone/1     create the store, Ana as admin       signed with Ana's key
+    membership/ana-phone/2     add member Ben, with his public key  signed with Ana's key
+                               had read: ana-phone 1
+    membership/ben-laptop/1    add device ben-phone                 signed with Ben's key
+                               had read: ana-phone 2
+    membership/ana-ipad/1      make Ben an admin                    signed with Ana's key
+                               had read: ana-phone 2
+    ```
+
+  - The store's first entry creates it, and names its first admin.
+- Roles:
+  - several equal admins;
+  - only admins add and remove members, and change roles;
+  - each member adds and removes their own devices, with their own key, and
+    admins can remove any device;
+  - the store always has at least one admin.
+- Every device that applied the same entries ends with the same member
+  list, whatever order they arrived in.
+- Applying an entry follows these rules:
+  - order: a device applies an entry once it has every entry that entry had
+    read, never by timestamps;
+  - authority: an entry applies only if its author's role allowed it, in
+    the member list the author had read;
+  - agreement: concurrent entries that don't conflict both apply, and two
+    saying the same thing combine;
+  - less access: of two concurrent entries that conflict, the one giving
+    less access applies;
+  - ties: when neither gives less access, the one with the smaller
+    timestamp applies;
+  - a dropped entry is shown to its author.
+- Two concurrent entries conflict when:
+  - they're about the same member or device and say different things;
+  - or applying both would break a role rule.
+- E.g. Ana adds Dan while Ben adds Eve: both apply.
+- E.g. Ana adds Ben's new phone while Ben removes it: the removal applies.
+- E.g. Ana makes Ben an admin while Carol makes him a member: he stays a
+  member.
+- E.g. Ana and Ben, both admins, remove each other while offline.
+  - Removing both would leave no admin, so they conflict.
+  - Neither gives less access than the other, so the earlier removal
+    applies.
 
 ## 10. Device identity
 
-- A device is one install of the app, with its own device id and key pair,
-  belonging to one member.
-  - Its private key never leaves it.
-  - The member list holds its public key (§9).
-- A device restored from a backup is a new device, with a new id and key
-  pair.
+- A device is one install of the app, with its own device id, belonging to
+  one member.
+  - Its member adds it to the membership log (§9).
+- A device restored from a backup is a new device, with a new id.
   - So it never reuses write numbers its backup's device already used.
   - E.g. Ana's phone is backed up after its write 5, writes 6 and 7, and is
     lost. Her new phone is restored from the backup:
@@ -889,55 +937,83 @@ Carol's tablet:
   - The restored phone downloads Ana's old phone's writes 6 and 7 like any
     other device's.
   - With the old id, its next write would be another write 6.
-- Every write record is signed with the private key of the device that
+- Every write record is signed with the key of the member whose device
   wrote it, so who wrote what is authentic.
 - This is about authenticity, not trust.
-- Devices check each write record's signature against the member list at
-  the write's timestamp (§9).
+- A device applies a write only if it is signed with the key of a member
+  the membership log has added, and comes from one of that member's
+  devices (§9).
   - So a write by Ana's phone counts as Ana's.
-  - A write the membership rules don't allow, such as a non-admin changing
-    membership, isn't applied.
+- A removed device's writes still count if they reached storage.
+  - Removing a device takes away its storage access, so nothing it writes
+    afterwards can reach other devices.
 
-## 11. Removing members and devices
+## 11. Keys
 
-- Removing a member removes them and all their devices.
-- Removing a device removes only it, such as Ana's lost phone.
-- Either way, the removal is a write to the membership table, and then:
-  - storage access is revoked;
-  - the store key is rotated.
-- Revoking storage access depends on whose it was.
-  - A removed member loses their own access (§4).
-  - A removed device holds its member's credentials, so they are replaced,
-    e.g. a new S3 access key, handed to that member's remaining devices.
-- Rotating the store key makes a new one, encrypted to each remaining
-  device's public key (§10).
-- So a removed device's copy of the old store key reads nothing written
-  after the removal, even if it regains read access.
+- Coven uses three kinds of key:
+  - the store key, which encrypts everything coven writes to storage;
+  - each member's key pair, which identifies them (§9), signs their writes
+    and membership entries, and opens the store key;
+  - storage credentials: each device's own sign-in to the provider, or on
+    S3 its member's access key (§4).
+- Each store key is sealed to every member's public key, and the sealed
+  copies are kept in storage.
+  - So a member's key alone gets the current store key: a device holding
+    it reads its member's sealed copy from storage and opens it.
+- The store key is replaced whenever a member is removed (§12).
+  - Writes made after that use the new key.
+  - Devices keep the old keys, to read writes made before.
+- Each device keeps its member's key in the OS keychain.
+- Storage access, not keys, is what keeps a removed device out.
 
-## 12. Joining, restore, and not losing the store key
+## 12. Removing members and devices
 
-- An existing device pairs a new one over the local network.
-- Pairing hands over the store key and storage access.
-- An admin re-invites a person who lost every device.
-- A one-person store has a restore code, written down by the
-  person, holding the store key and storage credentials.
-- Losing every device and the restore code loses the store for good, since
-  everything is encrypted.
-- Each device keeps the store key in the OS keychain.
-- Where the keychain syncs, as iCloud Keychain does, a new device of the
-  same person can open the store without pairing.
-- Setup makes saving the restore code part of creating a store.
-- What stands in for a synced keychain on Android, Windows and Linux?
-- How does a device that got the store key from the keychain add its own
-  public key to the member list, since write records are checked against
-  it?
+- Removing a device, such as Ana's lost phone, is an entry in the
+  membership log (§9), and cuts the device off from storage.
+- Providers can't cut off one device alone, so Ana cuts off all of hers,
+  and signs in again on the ones she keeps:
+  - Google Drive, Dropbox and OneDrive: she removes the app's access from
+    her provider account;
+  - iCloud: she removes the phone from her Apple account;
+  - S3: one of her devices replaces her access key, her other devices get
+    the new one by pairing, and she writes down a new restore code.
+- No keys change: the phone still holds Ana's key, but can't reach storage
+  to read or write anything new.
+- Removing a member removes them and all their devices, and then:
+  - their storage access is revoked (§4);
+  - the store key is rotated: a new one, sealed to each remaining member's
+    public key (§11).
+- So a removed member's copy of the old store key reads nothing written
+  after the removal, even if they regain read access.
+- A member added concurrently with a rotation doesn't get the new key.
+  - Their devices can't read anything written after the rotation.
+  - Removing them and adding them again gives them the current key.
 
-## 13. Circles
+## 13. Joining, restore, and not losing the store key
+
+- A person's new device needs their member key, which gets it the store key
+  (§11), in one of three ways:
+  - pairing: one of their existing devices hands it over, with storage
+    access, over the local network;
+  - on Apple platforms, iCloud Keychain syncs it, and the device opens the
+    store without pairing;
+  - on other platforms, the person enters their restore code.
+- The new device then adds itself to the membership log, signing with the
+  member key (§9).
+- A restore code holds the person's member key and storage credentials.
+  - The person writes it down when they create or join a store, as part of
+    setup.
+- An admin re-invites a person who lost every device and their restore
+  code.
+- Losing every member's devices and restore codes loses the store for good,
+  since everything is encrypted.
+
+## 14. Circles
 
 - A circle is a group of members inside a store who share rows the other
   members can't read.
-- Each circle has its own key, encrypted to each circle member's devices'
-  public keys.
+- Each circle has its own key, sealed to each circle member's public key,
+  like the store key (§11).
 - All members can see that a circle exists, who writes to it, when, and how
   much.
 - A circle's writes go in the same device logs, encrypted
@@ -946,7 +1022,7 @@ Carol's tablet:
 - Leaving a circle rotates the circle key.
 - What happens when a row references a row in another circle?
 
-## 14. Snapshots and bounded history
+## 15. Snapshots and bounded history
 
 - Any device writes a snapshot: the synced tables and coven's own tables,
   encrypted, and how far into every log they reach.
@@ -965,7 +1041,7 @@ Carol's tablet:
 - Who writes snapshots, and when?
 - How long do covered logs stay?
 
-## 15. Files
+## 16. Files
 
 - Files are what the app attaches to rows: audio, images, documents.
 - Each file is stored encrypted, named by a hash of its content.
@@ -979,7 +1055,7 @@ Carol's tablet:
 - How do files inside a circle work?
 - Which device deletes?
 
-## 16. Operations with several steps
+## 17. Operations with several steps
 
 - Upload, snapshot, deleting covered logs, and pairing each take several
   steps that a crash can interrupt.
@@ -988,7 +1064,7 @@ Carol's tablet:
 - Every step is safe to run twice.
 - A failure goes to whoever started the operation.
 
-## 17. Schema changes
+## 18. Schema changes
 
 - Synced schema changes only add tables and columns.
 - Every write records the schema version it was made with.
@@ -996,7 +1072,7 @@ Carol's tablet:
   its app upgrades.
 - How do non-additive schema changes work, if at all?
 
-## 18. Missing writes
+## 19. Missing writes
 
 - A device knows a write exists when any of these shows it:
   - a later write in the same log, since each log counts with no gaps;
@@ -1004,7 +1080,7 @@ Carol's tablet:
   - another device's posted position covering it;
   - for its own writes, its own count.
 - A write is missing when one of these shows it, storage doesn't have it,
-  and no snapshot covers it (§14).
+  and no snapshot covers it (§15).
   - E.g. Ben's write 9 had read Ana's log up to 4.
   - Storage shows Carol's tablet only Ana's writes 1 to 3.
   - Ana's write 4 is missing.
@@ -1015,7 +1091,7 @@ Carol's tablet:
 - How does a store recover from a missing write, or any other broken
   state?
 
-## 19. The API apps use
+## 20. The API apps use
 
 - Open, write, read, subscribed queries, files, membership, circles,
   pairing, sync status.
@@ -1068,7 +1144,7 @@ merge later.
 ### Schema changes
 
 - Problem: devices running different app versions hold different schemas.
-- Status: synced schema changes only add tables and columns (§17).
+- Status: synced schema changes only add tables and columns (§18).
 - Could support: dropping, renaming and retyping with a conversion per
   schema version.
 
