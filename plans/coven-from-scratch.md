@@ -32,8 +32,7 @@
   - a circle's contents are readable only by its members.
 - **Integrity:** members' data can't be tampered with:
   - members: no member can write as another member;
-  - outsiders: nobody without the store key can alter or forge it;
-  - rollback and forks are detected.
+  - outsiders: nobody without the store key can alter or forge it.
 - **Authorization:** only admins change membership, and every device
   enforces it.
 - **Atomicity:** another device applies a write all together or not at
@@ -112,6 +111,8 @@
   - Its name is part of its encryption, so the provider can't swap one
     object for another.
   - A retried upload writes the same name with the same bytes.
+- Each device remembers how far it has applied every device's log.
+- It also posts those positions to storage, as one object of its own.
 
 ## 7. Order
 
@@ -220,6 +221,21 @@ Two mechanisms order writes:
 - Merging is how a device applies writes from every device, its own
   included, to build its local database.
 - A *cell* is one column of one row: note 42's title is a cell.
+- A device's database is what applying every write it can apply, one at a
+  time in timestamp order, would produce.
+  - It can apply a write once it has every write that write had read
+    (§7.1).
+  - Each write applies under the rules in the rest of this section.
+  - A write's timestamp is later than every write it had read (§7.2), so
+    this order never puts an effect before its cause.
+- Devices that can apply the same writes apply them in the same order, so
+  they end with the same database, coven's own tables included.
+- A device applies writes as they arrive.
+  - A write can arrive after writes with larger timestamps.
+  - The device then redoes the rows it touches, in timestamp order, from
+    the write records it keeps.
+  - Cells alone never need this: keeping the larger timestamp gives the
+    same value in any order.
 - Coven keeps five internal tables for this:
   - `coven_writes`, one row per write the device has applied, naming:
     - the write's timestamp, which includes its device;
@@ -400,8 +416,14 @@ Carol's tablet:
       note 43 title  "Hardware store, Saturday"  Ben's write   Ana's write 7
     ```
 
-- Re-adding the row sets `deleted` back to no, with a newer timestamp.
+- Re-adding the row sets `deleted` back to no.
   - At 17:00 Ana re-adds note 43, and it is back on every device.
+- An insert brings back a deleted row only if it had read every delete of
+  that row.
+  - An insert concurrent with a delete loses to it, like an edit, and its
+    cells go to `coven_lost`.
+  - E.g. if Ben, offline, had also deleted note 43, Ana's 17:00 re-add,
+    which hadn't read Ben's delete, would lose.
 - Note 43's `coven_rows` row on Carol's tablet, and whether `notes` holds
   it:
 
@@ -532,8 +554,8 @@ Carol's tablet:
     sets its reference to null.
   - If the delete arrives before the child, coven inserts the child with
     its reference null.
-- At 16:00 Ana deletes note 43, which link 5 points at, while Ben, offline,
-  adds link 6 pointing at it.
+- E.g. at 16:00 Ana deletes note 43, which link 5 points at, while Ben,
+  offline, adds link 6 pointing at it.
 
   ```
   Ana's phone
@@ -574,8 +596,8 @@ Carol's tablet:
   - If another device has the child when the delete arrives, SQLite there
     would refuse the delete, so coven removes the child first.
   - If the delete arrives before the child, coven never inserts the child.
-- At 16:00 Ana deletes note 43, while Ben, offline, adds tag 9 "receipts"
-  to it.
+- E.g. at 16:00 Ana deletes note 43, while Ben, offline, adds tag 9
+  "receipts" to it.
 
   ```
   Ben's phone
@@ -605,66 +627,246 @@ Carol's tablet:
 
 ### 8.5 Keys and uniqueness
 
+#### Kinds of keys
+
+- Each synced table declares one of two kinds of primary key:
+  - independent: each new row gets a UUID, so rows made on different
+    devices never share a key;
+  - shared: the app derives the key from what makes the row unique, so
+    equal values are one row on every device.
+- Coven refuses, checked whenever the schema changes:
+  - an independent key that isn't a UUID;
+  - a key SQLite picks itself, such as an integer rowid;
+  - a synced table with no primary key.
+- Either kind can span several columns.
+  - E.g. `note_tags(note_id, tag_id)` is a shared key.
+  - Ana and Ben, both offline, each tag note 42 "urgent", and make one row.
+  - An independent key over several columns needs a UUID in one of them.
+- E.g. notes have independent keys, and tags have shared keys derived from
+  the tag's name.
+  - Ana and Ben, both offline, each add the tag "urgent".
+  - Both derive the same key, so their inserts are one row, and merge
+    (§8.2).
+- With shared keys, a device can insert a row another device is deleting.
+  - E.g. Ana deletes the tag "urgent" while Ben, offline, adds "urgent"
+    again.
+  - The two are concurrent, so the delete wins (§8.3), and Ben's cells go
+    to `coven_lost`.
+
+#### Key changes
+
 - A primary key change is recorded as a delete of the old row plus an
   insert of the new one.
-- Where a value must be unique, the app makes it the primary key, or
-  derives the primary key from it.
-- Then two inserts of the same value are one row, and merge.
-  - Ana and Ben, both offline, each add the tag "urgent".
-  - The tag's key is derived from "urgent", so both inserts are one row.
-- Coven refuses to sync a table with any other unique constraint, checked
-  whenever the schema changes.
+- The old key's `coven_rows` row also records which key replaced it.
+- Rows pointing at the old key follow their foreign key's `ON UPDATE`
+  action on every device.
+- If the device changing the key had the child, SQLite there runs the
+  action, and the write records it.
+- If it didn't have the child, coven runs the action itself, and records
+  the child's old reference in `coven_lost`.
+  - Cascade re-points the child to the new key.
+  - Set null and set default clear the reference, as in §8.4.
+  - Restrict and no action lose the child, as in §8.4.
+- E.g. notes point at tags with `ON UPDATE CASCADE`, and at 16:00 Ana
+  renames the tag "urgent" to "important", while Ben, offline, tags note
+  44 "urgent".
 
-### 8.6 Triggers
+  ```
+  Ana's phone
+    16:00  renames "urgent" to "important"
+             SQLite re-points note 42's tag to "important"
+             coven_rows  tags  "urgent"  deleted: yes  replaced by: "important"
 
-- Triggers on synced tables may write only local tables.
-- They run on every device, for its own writes and applied ones alike.
-- So a local table a trigger maintains stays current everywhere.
-  - A trigger keeps a local search index of note titles.
+  Ben's phone
+    16:00  offline. Ben's write: note 44 tag → "urgent"
+    16:30  online. Applies Ana's write
+             coven changes the key in place, so SQLite re-points note 44
+
+  Carol's tablet
+    16:00  applies Ana's write
+    16:30  Ben's write arrives: note 44 tag → "urgent"
+             "urgent" was replaced, so coven sets note 44's tag to "important"
+  ```
+
+- Every device ends with notes 42 and 44 tagged "important".
+- Two devices can change one key to different new keys concurrently.
+  - E.g. Ana renames "urgent" to "important" while Ben, offline, renames
+    it to "critical".
+  - Both new tags exist after the merge.
+  - A child still pointing at "urgent" follows the change with the larger
+    timestamp.
+  - As with any child the changing device didn't have, coven records its
+    old reference, "urgent", in `coven_lost`, replaced by that change.
+
+#### Unique constraints
+
+- On one device, SQLite refuses a write that repeats a unique value, so two
+  rows can claim one value only through concurrent writes.
+- Applying writes in timestamp order (§8), a write that would repeat a
+  unique value loses it, so the write with the smaller timestamp keeps it.
+  - A losing insert is lost, as if it had never been added.
+  - A losing edit keeps the cell at the value it had before.
+- Coven records what lost in `coven_lost`, replaced by the winning write.
+- E.g. note titles are unique, and Ana and Ben, both offline, each add a
+  note titled "Groceries".
+  - Ana's insert of note 45 is stamped 16:00, and Ben's of note 46 is
+    stamped 16:05.
+  - Every device keeps note 45, and records Ben's note 46 in `coven_lost`.
+
+### 8.6 CHECK constraints
+
+- A CHECK on one column can't fail after a merge, since each value passed
+  it on the device that wrote it.
+- A CHECK on several columns can, when concurrent writes each set some of
+  them.
+  - E.g. a row checks `start <= end`, Ana sets `start` and Ben, offline,
+    sets `end`:
+
+    ```
+                  start   end
+    before         5      12
+    Ana's write   10       ·
+    Ben's write    ·       8
+    merged        10       8     fails
+    ```
+
+- Applying writes in timestamp order (§8), a write whose cells would make
+  a row fail loses its cells on that row.
+  - They keep the values they had before it.
+  - Coven records the lost values in `coven_lost`, replaced by the write
+    they conflicted with.
+- If Ben's write is stamped later, every device ends with `10, 12`, and
+  records Ben's 8 in `coven_lost`.
+
+### 8.7 Triggers
+
+- The app declares each trigger on a synced table as local or shared.
+- A local trigger runs on every device, for its own writes and applied ones
+  alike, and writes only local tables.
+  - E.g. a local trigger keeps a search index of note titles:
+
+    ```sql
+    CREATE TRIGGER notes_title_index AFTER UPDATE OF title ON notes
+    BEGIN
+      UPDATE title_index SET title = new.title WHERE note_id = new.id;
+    END;
+    ```
+
   - When Ben's phone applies Carol's write 2, the trigger updates Ben's
     index to "Shopping".
-- Should triggers that write synced tables be allowed?
+- A shared trigger runs only on the device making the write, writes only
+  synced tables, and its writes become part of that write.
+  - E.g. a shared trigger sets a note's `edited_at` when its body changes:
 
-## 9. Rollback and fork detection
+    ```sql
+    CREATE TRIGGER notes_edited_at AFTER UPDATE OF body ON notes
+    WHEN NOT coven_applying()
+    BEGIN
+      UPDATE notes SET edited_at = datetime('now') WHERE id = new.id;
+    END;
+    ```
 
-- Each device remembers how far it has applied every device's log.
-- Each device also posts how far it has applied every log, as one object
-  of its own.
-- Something is being withheld when a device can't find a write that
-  another device's position, or a write's "had read", says exists.
-  - Carol's tablet sees Ben's write 9 had read Ana's log up to 4.
-  - If storage shows Carol's tablet only Ana's writes 1 to 3, write 4 is
-    being withheld from it.
-- What does the app see when one is detected?
+  - Ana's write 6 records her edit and the trigger's:
 
-## 10. Signatures
+    ```
+    ana-phone, write 6, 2026-10-02 15:00:00.000 #0
+      had read: ben-phone 9, carol-tablet 2
+      notes  row 42  update  body: "milk, eggs" → "milk, eggs, bread"
+      notes  row 42  update  edited_at: → 2026-10-02 15:00    shared trigger
+    signed by ana-phone
+    ```
 
-- Every device has its own key pair: a private key it never shares, and a
-  public key the other members know.
-- Every write record is signed with the private key of the device that
-  wrote it, so who wrote what is authentic.
-- This is about authenticity, not trust.
+  - Ben's phone applies both without running the trigger.
+- Coven skips shared triggers when it applies another device's write,
+  since the write already holds what they did.
+  - SQLite can't turn off one trigger, so coven provides the SQL function
+    `coven_applying()`, true while it applies another device's write.
+  - A shared trigger declares `WHEN NOT coven_applying()`, as above, and
+    coven refuses one that doesn't, checked whenever the schema changes.
+- A trigger's write to the wrong kind of table fails.
+  - SQLite's authorizer callback reports each table a statement would
+    write, with the trigger doing the write, when the statement is
+    prepared.
+  - Coven refuses the statement when a local trigger writes a synced table,
+    or a shared trigger a local one.
+- A shared trigger's writes merge like any other write, so a value it
+  derives can be wrong after concurrent writes.
+  - E.g. a shared trigger counts a note's tags, and Ana and Ben, both
+    offline, each add a tag to note 42:
 
-## 11. Membership and roles
+    ```
+                  tags on note 42      tag_count
+    Ana's write   adds tag 10          1 → 2
+    Ben's write   adds tag 11          1 → 2
+    merged        3 tags               2
+    ```
 
-- Membership is a synced table.
+  - A local trigger writing a local table counts 3 on every device.
+
+## 9. Members and roles
+
+- A member is a person in the store, using it from one or more devices.
+- Membership is a synced table listing each member, their role, and their
+  devices' public keys.
 - Several equal admins.
-- Only admins change membership.
+- Only admins add and remove members, and change roles.
+- Each member adds and removes their own devices; admins can remove any
+  device.
 - Removing the last admin isn't allowed.
 - Every device works out the member list from all writes to the membership
   table, in timestamp order.
+
+## 10. Device identity
+
+- A device is one install of the app, with its own device id and key pair,
+  belonging to one member.
+  - Its private key never leaves it.
+  - The member list holds its public key (§9).
+- A device restored from a backup is a new device, with a new id and key
+  pair.
+  - So it never reuses write numbers its backup's device already used.
+  - E.g. Ana's phone is backed up after its write 5, writes 6 and 7, and is
+    lost. Her new phone is restored from the backup:
+
+    ```
+    devices/ana-phone/
+      5   in the backup
+      6   written after the backup
+      7   written after the backup
+
+    devices/ana-phone-2/
+      1   the restored phone's first write
+    ```
+
+  - The restored phone downloads Ana's old phone's writes 6 and 7 like any
+    other device's.
+  - With the old id, its next write would be another write 6.
+- Every write record is signed with the private key of the device that
+  wrote it, so who wrote what is authentic.
+- This is about authenticity, not trust.
 - Devices check each write record's signature against the member list at
-  the write's timestamp (§10), which is what makes these rules hold.
+  the write's timestamp (§9).
+  - So a write by Ana's phone counts as Ana's.
+  - A write the membership rules don't allow, such as a non-admin changing
+    membership, isn't applied.
 
-## 12. Removing a member
+## 11. Removing members and devices
 
-- Revoke their storage access.
-- Rotate the store key: make a new one and encrypt it to each remaining
+- Removing a member removes them and all their devices.
+- Removing a device removes only it, such as Ana's lost phone.
+- Either way, the removal is a write to the membership table, and then:
+  - storage access is revoked;
+  - the store key is rotated.
+- Revoking storage access depends on whose it was.
+  - A removed member loses their own access (§4).
+  - A removed device holds its member's credentials, so they are replaced,
+    e.g. a new S3 access key, handed to that member's remaining devices.
+- Rotating the store key makes a new one, encrypted to each remaining
   device's public key (§10).
-- So an ex-member's copy of the old store key reads nothing written after
-  they left, even if they regain read access.
+- So a removed device's copy of the old store key reads nothing written
+  after the removal, even if it regains read access.
 
-## 13. Joining, restore, and not losing the store key
+## 12. Joining, restore, and not losing the store key
 
 - An existing device pairs a new one over the local network.
 - Pairing hands over the store key and storage access.
@@ -682,7 +884,7 @@ Carol's tablet:
   public key to the member list, since write records are checked against
   it?
 
-## 14. Circles
+## 13. Circles
 
 - A circle is a group of members inside a store who share rows the other
   members can't read.
@@ -696,7 +898,7 @@ Carol's tablet:
 - Leaving a circle rotates the circle key.
 - What happens when a row references a row in another circle?
 
-## 15. Snapshots and bounded history
+## 14. Snapshots and bounded history
 
 - Any member writes a snapshot: the synced tables, encrypted, and
   how far into every log they reach.
@@ -708,7 +910,7 @@ Carol's tablet:
 - Who writes snapshots, and when?
 - How long do covered logs stay?
 
-## 16. Files
+## 15. Files
 
 - Files are what the app attaches to rows: audio, images, documents.
 - Each file is stored encrypted, named by a hash of its content.
@@ -722,7 +924,7 @@ Carol's tablet:
 - How do files inside a circle work?
 - Which device deletes?
 
-## 17. Operations with several steps
+## 16. Operations with several steps
 
 - Upload, snapshot, deleting covered logs, and pairing each take several
   steps that a crash can interrupt.
@@ -731,13 +933,36 @@ Carol's tablet:
 - Every step is safe to run twice.
 - A failure goes to whoever started the operation.
 
-## 18. Schema changes
+## 17. Schema changes
 
 - Synced schema changes only add tables and columns.
 - Every write records the schema version it was made with.
 - A device keeps writes from a newer schema version but holds them until
   its app upgrades.
 - How do non-additive schema changes work, if at all?
+
+## 18. Missing writes
+
+- A device knows a write exists when any of these shows it:
+  - a later write in the same log, since each log counts with no gaps;
+  - another device's write whose "had read" covers it;
+  - another device's posted position covering it;
+  - for its own writes, its own count.
+- A write is missing when one of these shows it, storage doesn't have it,
+  and no snapshot covers it (§14).
+  - E.g. Ben's write 9 had read Ana's log up to 4.
+  - Storage shows Carol's tablet only Ana's writes 1 to 3.
+  - Ana's write 4 is missing.
+- Its author re-uploads it.
+- Any device that applied it can re-upload it too, since it is signed by
+  its author (§10).
+  - So a write survives its author's device being lost.
+  - Devices keep the write records they've applied until a snapshot covers
+    them.
+- Until then, a device holds back the missing write and every write that
+  had read it.
+  - Carol's tablet holds back Ben's write 9.
+  - The app sees which writes it is waiting for.
 
 ## 19. The API apps use
 
@@ -753,23 +978,20 @@ merge later.
 
 - Problem: two offline devices can pick the same id for different rows,
   and coven would treat them as one row.
-- Status: synced tables use globally unique keys, such as UUIDs, or keys
-  derived from the content.
-- Could support: each device gets a slot `s` of `n`, and picks only ids
-  where `id mod n = s`.
-  - Slots must be unique; claiming one needs storage that can create an
-    object only if it doesn't exist yet, which §4 doesn't require.
-  - The app gets ids from coven, such as `coven_next_id('notes')`, since
-    SQLite picks the largest id plus one.
-  - `n` caps how many devices a store can have.
+- Status: refused; synced tables use UUIDs or keys derived from the
+  content (§8.5).
+
+### Tables with no primary key
+
+- Problem: coven can't tell which row a change belongs to, and SQLite's
+  hidden rowid collides across devices like an integer key.
+- Status: refused (§8.5).
 
 ### Unique constraints besides the primary key
 
 - Problem: two offline devices can each insert a row with the same value.
-- Status: coven refuses them on synced tables (§8.5); the app derives the
-  primary key from the unique value instead.
-- Could support: the row inserted with the smaller timestamp keeps the
-  value; the other write's cell is undone and recorded in `coven_lost`.
+- Status: applying writes in timestamp order, a write that would repeat a
+  unique value loses it, recorded in `coven_lost` (§8.5).
 
 ### Restrict and no-action foreign keys
 
@@ -782,22 +1004,20 @@ merge later.
 
 - Problem: two concurrent edits that each pass can merge into a row that
   fails, such as one device setting `start` and another `end`.
-- Status: open.
-- Could support: the merged row keeps the older write's cells for that
-  row, and the rest is recorded in `coven_lost`.
+- Status: applying writes in timestamp order, a write that would make a
+  row fail loses its cells on that row, recorded in `coven_lost` (§8.6).
 
 ### Triggers that write synced tables
 
 - Problem: a trigger that runs again while coven applies a remote write
   would repeat what the original device already sent.
-- Status: refused (§8.6).
-- Could support: writes a trigger makes while coven applies a remote write
-  aren't recorded as a new write.
+- Status: allowed as shared triggers, which run only on the device making
+  the write (§8.7).
 
 ### Schema changes
 
 - Problem: devices running different app versions hold different schemas.
-- Status: synced schema changes only add tables and columns (§18).
+- Status: synced schema changes only add tables and columns (§17).
 - Could support: dropping, renaming and retyping with a conversion per
   schema version.
 
