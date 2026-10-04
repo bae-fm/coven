@@ -76,12 +76,13 @@
 - SQLite's session extension records the row changes each write makes.
 - Each write commits, together:
   - its rows, as they now stand;
-  - its *write record*, waiting to be uploaded:
+  - its *write record*, waiting to be uploaded in coven's `coven_uploads`
+    table:
     - its row changes: which rows, which columns, old and new values;
     - which device wrote it, its number, its timestamp, and what it had
       read;
     - the schema version it was made with;
-    - the device's signature;
+    - a signature over the record, made by the device that wrote it;
   - so every committed write gets uploaded, even after a crash.
 - A write record, for a write that fixes a note's title and deletes a tag:
 
@@ -111,6 +112,7 @@
   - Its name is part of its encryption, so the provider can't swap one
     object for another.
   - A retried upload writes the same name with the same bytes.
+- A write record leaves `coven_uploads` (§5) once its upload succeeds.
 - Each device remembers how far it has applied every device's log.
 - It also posts those positions to storage, as one object of its own.
 
@@ -223,37 +225,36 @@ Two mechanisms order writes:
 - A *cell* is one column of one row: note 42's title is a cell.
 - A device applies a write once it has every write that write had read
   (§7.1).
-- Applying a write follows these rules:
+- Every device that applied the same writes ends with the same database,
+  coven's own tables included, whatever order the writes arrived in.
+- Applying a write follows these rules, each of which gives the same
+  result in any arrival order:
   - cells: of two values for one cell, the one with the larger timestamp
     stays;
-  - deletes: a row change made before the row was last deleted or re-added
-    loses;
+  - deletes: a row change concurrent with a delete of its row loses;
   - foreign keys: a row pointing at a deleted row follows its key's action,
     even if the deleting device never saw it;
+    - under restrict, the row is lost;
   - key changes: a row pointing at a changed key follows its key's
-    `ON UPDATE` action, and of two changes to one key, the one with the
-    larger timestamp decides;
+    `ON UPDATE` action;
+    - of two changes to one key, the one with the larger timestamp decides
+      where those rows go;
   - unique values: of two rows claiming one value, the row whose write has
-    the smaller timestamp keeps it, since the first claim to a value keeps
-    it;
-  - CHECK constraints: when a row fails, the write with the largest
-    timestamp among those that set its cells loses them;
-  - whatever loses is recorded, so the app can show it and offer it back.
+    the smaller timestamp keeps it;
+    - the first claim to a value keeps it, and the other row is lost;
+  - CHECK constraints: a row that fails after a merge is lost.
+- A lost row is deleted, like any delete, and whatever loses is recorded,
+  so the app can show it and offer it back.
+- The result is the one applying every write in timestamp order would
+  give.
 - One rule's result can break another, so coven applies them until no row
   breaks any.
   - E.g. a note that loses a unique title is deleted, and its tags then
     follow their foreign key's action.
-  - E.g. a cell a CHECK puts back can repeat another row's unique value,
-    and then loses it.
-  - This always stops: each step takes something away from a losing write,
-    and never adds to one.
-- Each rule gives the same result in any order writes arrive.
-  - So devices that applied the same writes hold the same database, coven's
-    own tables included.
-  - The result is the one applying every write in timestamp order would
-    give.
-- When a write arriving late changes a row's result, coven makes the change
-  with ordinary SQL, which triggers see like any other.
+  - This always stops: each step only deletes rows.
+- When a write arrives after another and changes the result for a row
+  already applied, coven makes the change with ordinary SQL, which
+  triggers see like any other.
   - E.g. a write that wins a unique value from a row already applied makes
     coven delete that row.
 - Coven keeps five internal tables for this:
@@ -433,15 +434,14 @@ Carol's tablet:
 - Re-adding it moves its generation on to the next odd number.
 - Its `coven_rows` row and `coven_cells` rows stay while it is deleted, so
   later writes to it still have something to compare against.
-- A row change made at an older generation than the row has now loses.
-  - Its cells go to `coven_lost`, replaced by the write that moved the
-    generation on.
-  - So an edit concurrent with a delete never brings the row back, and
-    never reaches it once it is re-added.
-- A delete also records in `coven_lost` every cell of the row set by a
-  write it hadn't read.
-  - So a concurrent edit is recorded the same way whether it is applied
-    before the delete or after.
+- A row change concurrent with a delete of its row loses, and its cells go
+  to `coven_lost`, replaced by the delete.
+  - If the change arrives after the delete, coven sees it was made at an
+    older generation.
+  - If it arrives first, the delete finds the cells set by writes it
+    hadn't read.
+  - So a concurrent edit never brings the row back, and never reaches it
+    once it is re-added.
 - E.g. at 16:00 Ana deletes note 43, "Hardware store", while Ben, offline,
   edits its title, and at 17:00 Ana re-adds it.
   - Note 43 on Carol's tablet:
@@ -745,12 +745,12 @@ Carol's tablet:
 - On one device, SQLite refuses a write that repeats a unique value, so two
   rows can claim one value only through concurrent writes.
 - Of two rows claiming one value, the row whose write has the smaller
-  timestamp keeps it.
-  - A losing insert is lost, as if it had never been added.
-  - A losing edit keeps the cell at the value it had before.
-  - If the losing row was applied first, coven deletes it, or puts its cell
-    back, with ordinary SQL.
-- Coven records what lost in `coven_lost`, replaced by the winning write.
+  timestamp keeps it, since the first claim to a value keeps it.
+- The other row is lost, whether its write inserted it or edited it to
+  claim the value.
+  - Coven deletes it, whichever row arrived first.
+  - Coven records its cells in `coven_lost`, replaced by the winning
+    write.
 - E.g. note titles are unique, and Ana and Ben, both offline, each add a
   note titled "Groceries".
   - Ana's insert of note 45 is stamped 16:00, and Ben's of note 46 is
@@ -774,16 +774,14 @@ Carol's tablet:
     merged        10       8     fails
     ```
 
-- When a row fails, the write with the largest timestamp among those that
-  set its cells loses its cells on that row.
-  - They go back to the values they had before it, with an ordinary SQL
-    update.
-  - Those values are in the losing write's record, or in `coven_lost` if
-    it had beaten a concurrent value.
-  - Coven records the lost values in `coven_lost`, replaced by the write
-    they conflicted with.
-- If Ben's write is stamped later, every device ends with `10, 12`, and
-  records Ben's 8 in `coven_lost`.
+- A row that fails after a merge is lost.
+  - Coven deletes it, whichever write arrived first.
+  - Coven records its cells in `coven_lost`, each replaced by the other
+    conflicting write.
+- Until the second write arrives, each device's row passes, since it has
+  seen only one of them.
+- Every device ends without the row, and records Ana's 10 and Ben's 8 in
+  `coven_lost`.
 
 ### 8.7 Triggers
 
@@ -1010,16 +1008,12 @@ Carol's tablet:
   - E.g. Ben's write 9 had read Ana's log up to 4.
   - Storage shows Carol's tablet only Ana's writes 1 to 3.
   - Ana's write 4 is missing.
-- Its author re-uploads it.
-- Any device that applied it can re-upload it too, since it is signed by
-  its author (§10).
-  - So a write survives its author's device being lost.
-  - Devices keep the write records they've applied until a snapshot covers
-    them.
-- Until then, a device holds back the missing write and every write that
-  had read it.
+- A device holds back the missing write and every write that had read it.
   - Carol's tablet holds back Ben's write 9.
   - The app sees which writes it is waiting for.
+- Coven doesn't re-upload or patch a missing write.
+- How does a store recover from a missing write, or any other broken
+  state?
 
 ## 19. The API apps use
 
@@ -1048,7 +1042,7 @@ merge later.
 
 - Problem: two offline devices can each insert a row with the same value.
 - Status: the row whose write has the smaller timestamp keeps the value;
-  the other is recorded in `coven_lost` (§8.5).
+  the other row is lost, and recorded in `coven_lost` (§8.5).
 
 ### Restrict and no-action foreign keys
 
@@ -1061,8 +1055,8 @@ merge later.
 
 - Problem: two concurrent edits that each pass can merge into a row that
   fails, such as one device setting `start` and another `end`.
-- Status: the write with the largest timestamp among those that set the
-  failing row's cells loses them, recorded in `coven_lost` (§8.6).
+- Status: a row that fails after a merge is lost, and recorded in
+  `coven_lost` (§8.6).
 
 ### Triggers that write synced tables
 
