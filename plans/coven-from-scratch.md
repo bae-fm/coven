@@ -523,58 +523,68 @@ Carol's tablet:
 
 - Set default works like set null, with the column's default in place of
   null.
-- Case 1: Ana's phone had link 5, so write 7 carries `note_id: 43 → null`,
-  and every device applies it like any other write.
-- At 16:00, while Ana deletes note 43, Ben, offline, adds link 6 pointing
-  at it.
+- If the deleting device had the child, SQLite there sets the child's
+  reference to null, and the write records it.
+- If the deleting device didn't have the child, coven records the null as
+  set by the parent's delete, and the child's old reference in
+  `coven_lost`.
+  - If another device has the child when the delete arrives, SQLite there
+    sets its reference to null.
+  - If the delete arrives before the child, coven inserts the child with
+    its reference null.
+- At 16:00 Ana deletes note 43, which link 5 points at, while Ben, offline,
+  adds link 6 pointing at it.
 
   ```
-  Ben's phone, case 2
+  Ana's phone
+    16:00  deletes note 43
+             SQLite sets link 5's note_id to null
+             write 7 records: links row 5 update note_id: 43 → null
+
+  Ben's phone
     16:00  offline. Ben's write: insert link 6 → note 43
     16:30  online. Applies Ana's write 7: delete note 43
              SQLite sets link 6's note_id to null
              coven_cells  link 6 note_id  write: Ana's write 7
 
-  Carol's tablet, case 3
+  Carol's tablet
     16:00  applies Ana's write 7: delete note 43
     16:30  Ben's write arrives: insert link 6 → note 43
              note 43 is deleted, so coven inserts link 6 with note_id null
              coven_cells  link 6 note_id  write: Ana's write 7
   ```
 
-- Every device ends with link 6 present and pointing at nothing, its
-  `note_id` set by Ana's write 7.
-- Ana's write 7 hadn't read Ben's insert, so link 6's `note_id` 43 is
-  recorded in `coven_lost`, replaced by write 7.
+- Every device ends with links 5 and 6 present and pointing at nothing,
+  and with the same `coven_lost` row:
+
+  ```
+  coven_lost
+    cell           lost value   set by        replaced by
+    link 6 note_id 43           Ben's write   Ana's write 7
+  ```
 
 #### Restrict and no action
 
-- A restrict foreign key refuses to delete a parent that has children.
-  - On the deleting device, SQLite checks this as usual.
-  - E.g. if tags pointed at notes with restrict, Ana's phone could delete
-    note 43 only once it had no tags.
-- No action differs from restrict only in when SQLite checks it, so coven
-  treats both the same.
-  - Restrict is checked as soon as the parent is deleted.
-  - No action is checked at the end of the statement, or of the
-    transaction if the key is deferred.
-- A child added concurrently with its parent's delete is lost, as if it
-  had never been added.
-  - Restrict means no child is ever deleted for the app, so coven doesn't
-    delete it.
-  - It records the child's insert in `coven_lost`, replaced by the parent's
-    delete.
-- At 16:00 Ana's phone, with no tags on note 43, deletes it, while Ben,
-  offline, adds tag 9 "receipts" to it.
+- `RESTRICT` and `NO ACTION` both refuse to delete a parent that has
+  children.
+- If the deleting device had the child, SQLite refuses the delete there.
+- If the deleting device didn't have the child, the child is lost, as if
+  it had never been added, and coven records its insert in `coven_lost`,
+  replaced by the parent's delete.
+  - If another device has the child when the delete arrives, SQLite there
+    would refuse the delete, so coven removes the child first.
+  - If the delete arrives before the child, coven never inserts the child.
+- At 16:00 Ana deletes note 43, while Ben, offline, adds tag 9 "receipts"
+  to it.
 
   ```
-  Ben's phone, case 2
+  Ben's phone
     16:00  offline. Ben's write: insert tag 9 → note 43
     16:30  online. Applies Ana's write 7: delete note 43
              tag 9 would block the delete, so coven removes it first
              coven_rows  tags  9  deleted: yes  write: Ana's write 7
 
-  Carol's tablet, case 3
+  Carol's tablet
     16:00  applies Ana's write 7: delete note 43
     16:30  Ben's write arrives: insert tag 9 → note 43
              note 43 is deleted, so tag 9 is never inserted into tags
