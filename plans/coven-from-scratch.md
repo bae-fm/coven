@@ -941,7 +941,9 @@ Carol's tablet:
   - a dropped entry is shown to its author.
 - Two concurrent entries conflict when:
   - they're about the same member or device and say different things;
-  - or applying both would break a role rule.
+  - applying both would break a role rule;
+  - or one adds a member and the other removes one, which replaces the
+    store key ([§13](#13-removing-members-and-devices)).
 - Concurrent entries, and what applies:
 
   ```
@@ -949,6 +951,7 @@ Carol's tablet:
   Ben adds his new phone     Ana removes it             the removal: less access
   Ana makes Ben an admin     Carol makes him a member   member: less access
   Ana removes Ben            Ben removes Ana            the earlier: a tie
+  Ana adds Carol             Ben removes Dan            the removal: less access
   ```
 
 - In the last, both admins removing each other would leave no admin, so the
@@ -1123,9 +1126,15 @@ Carol's tablet:
     deleted ([§12.2](#122-adding-a-person)).
 - So a removed member's copy of the old store key reads nothing written
   after the removal, even if they regain read access.
-- A member added concurrently with a rotation doesn't get the new key.
-  - Their devices can't read anything written after the rotation.
-  - Removing them and adding them again gives them the current key.
+- Adding a member concurrently with a removal that rotates the key is a
+  conflict, so the add is dropped, by less access ([§9](#9-members-and-roles)).
+  - Otherwise the new member would hold only the old key, and couldn't
+    read anything written after the rotation.
+  - E.g. Ana adds Carol while Ben, offline, removes Dan: on every device
+    Carol's add is dropped, Ana is shown it, and she invites Carol again.
+  - Carol's phone reports the join as declined, and the storage access
+    her invite granted is taken back, as for a declined request
+    ([§12.2](#122-adding-a-person)).
 
 ## 14. Audiences
 
