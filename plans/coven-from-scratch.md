@@ -99,6 +99,8 @@
   ```
 
 - Reads run on several read-only connections at once.
+- Another process, such as a widget, can open the store for reading only
+  while the app has it open.
 - The app can subscribe to a query; it reruns only when rows it read change.
 - Coven keeps its own internal tables in the same database. The app can't
   read or write them.
@@ -1006,6 +1008,11 @@ Carol's tablet:
   - Devices keep the old keys, to read writes made before.
 - Each device keeps its member's key in the OS keychain.
 - Storage access, not keys, is what keeps a removed device out.
+- The app can use coven's keys for its own data on the device:
+  - it encrypts a value with the current store key, bound to where it is
+    kept, such as a row's key, since the local database isn't encrypted;
+  - it keeps its own secrets, such as an API token, in coven's keychain
+    entry, under the same access policy as coven's keys.
 
 ### 11.1 Cryptography
 
@@ -1381,6 +1388,9 @@ Carol's tablet:
 - Files are what the app attaches to rows: audio, images, documents.
 - The app declares, for each synced table that carries files:
   - which column refers to the file;
+  - which column holds its size in bytes, which a user-provided file is
+    checked against;
+  - whether a row, once it has a file, may be pointed at a different one;
   - which column holds the file's *content hash*, the SHA-256 of its
     bytes, which coven fills in when a write attaches the file;
   - which column holds where the file is, which coven fills in
@@ -1472,6 +1482,11 @@ Carol's tablet:
 
 ### 16.3 Reading ranges
 
+- The app reads a file through a *file reference*, taken from its row,
+  naming the file the row had then.
+  - A read checks the reference against the row first, so a row changed
+    since can't redirect it to another file.
+  - A write can check a reference the same way before changing the row.
 - The app reads any byte range of a file, at any offset, as a stream.
 - Playing a song and seeking in it are reads of different ranges.
 - A file on this device, or in the cache, is read with positioned reads of
@@ -1501,6 +1516,8 @@ Carol's tablet:
   own ([§20.8](#208-files-and-the-cache)).
 - The app can pin a file to keep it whole on the device regardless of the
   budget, and unpin it.
+- The app can also fetch an uploaded file into the cache ahead of reading
+  it, or remove it from the cache, which never touches storage.
 
 ### 16.5 Uploads and deletion
 
@@ -2142,10 +2159,6 @@ impl WriteBatch {
         id: impl Into<String>,
         bytes: impl Into<FileSource>,
     );
-
-    /// Deletes coven's copy of an app-provided file. The write fails if a row
-    /// still refers to the file after it.
-    pub fn delete_file(&mut self, namespace: impl Into<String>, id: impl Into<String>);
 }
 
 pub enum FileSource {
