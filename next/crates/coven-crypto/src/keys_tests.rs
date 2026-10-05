@@ -2,6 +2,58 @@ use super::*;
 use crate::{ContentHasher, MemberKeys};
 
 #[test]
+fn conflicts_at_every_secret_byte_preserve_both_key_kinds() {
+    let circle = CircleId(Uuid::from_u128(8));
+    let mut ring = StoreKeyring::new(StoreKey::from_bytes(1, [17; 32]).unwrap());
+    ring.insert_circle_key(CircleKey::from_bytes(circle, 1, [17; 32]).unwrap())
+        .unwrap();
+    let original = ring.to_secret_bytes();
+    for index in 0..32 {
+        let mut changed = [17; 32];
+        changed[index] ^= 1;
+        assert_eq!(
+            ring.insert_store_key(StoreKey::from_bytes(1, changed).unwrap()),
+            Err(MaterialError::StoreKeyConflict(1))
+        );
+        assert_eq!(
+            ring.insert_circle_key(CircleKey::from_bytes(circle, 1, changed).unwrap()),
+            Err(MaterialError::CircleKeyConflict { circle, number: 1 })
+        );
+        assert_eq!(ring.to_secret_bytes().as_bytes(), original.as_bytes());
+    }
+    ring.insert_store_key(StoreKey::from_bytes(1, [17; 32]).unwrap())
+        .unwrap();
+    ring.insert_circle_key(CircleKey::from_bytes(circle, 1, [17; 32]).unwrap())
+        .unwrap();
+    assert_eq!(ring.to_secret_bytes().as_bytes(), original.as_bytes());
+}
+
+#[test]
+fn app_data_uses_its_own_key_in_both_directions() {
+    let ring = StoreKeyring::new(StoreKey::from_bytes(7, [17; 32]).unwrap());
+    let sealed = ring.seal_app_data(b"private field", b"row/42").unwrap();
+    assert_eq!(&sealed[..5], b"CVAD\x01");
+    assert_eq!(&sealed[5..13], &7u64.to_le_bytes());
+    let context = cipher::context(&[&sealed[..13], b"row/42"]);
+    let app_key = derivation::derive(&[17; 32], b"coven/app-data/v1").unwrap();
+    let object_key = derivation::derive(&[17; 32], derivation::ENCRYPTION).unwrap();
+    assert_eq!(
+        cipher::open_random(&app_key, &context, &sealed[13..]).unwrap(),
+        b"private field"
+    );
+    assert!(matches!(
+        cipher::open_random(&object_key, &context, &sealed[13..]),
+        Err(CryptoError::Authentication)
+    ));
+    let mut object_sealed = sealed[..13].to_vec();
+    object_sealed.extend(cipher::seal_random(&object_key, &context, b"private field").unwrap());
+    assert!(matches!(
+        ring.open_app_data(&object_sealed, b"row/42"),
+        Err(SealError::Crypto(CryptoError::Authentication))
+    ));
+}
+
+#[test]
 fn keyring_keeps_numbered_store_and_circle_history_without_overwriting_conflicts() {
     let circle = CircleId(Uuid::from_u128(8));
     let mut ring = StoreKeyring::new(StoreKey::from_bytes(1, [1; 32]).unwrap());

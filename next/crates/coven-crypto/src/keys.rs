@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::num::NonZeroU64;
 
+use subtle::ConstantTimeEq;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -141,7 +142,7 @@ impl StoreKeyring {
     /// Keep an opened store key; a different key at the same number is an error.
     pub fn insert_store_key(&mut self, key: StoreKey) -> Result<(), MaterialError> {
         if let Some(existing) = self.stores.get(&key.number()) {
-            if existing.bytes != key.bytes {
+            if !bool::from(existing.bytes.as_ref().ct_eq(key.bytes.as_ref())) {
                 return Err(MaterialError::StoreKeyConflict(key.number()));
             }
         } else {
@@ -154,7 +155,7 @@ impl StoreKeyring {
     pub fn insert_circle_key(&mut self, key: CircleKey) -> Result<(), MaterialError> {
         let id = (key.circle(), key.number());
         if let Some(existing) = self.circles.get(&id) {
-            if existing.key.bytes != key.key.bytes {
+            if !bool::from(existing.key.bytes.as_ref().ct_eq(key.key.bytes.as_ref())) {
                 return Err(MaterialError::CircleKeyConflict {
                     circle: id.0,
                     number: id.1,
@@ -246,14 +247,15 @@ impl StoreKeyring {
         Ok(Self { stores, circles })
     }
 
-    /// Encrypt app data with the current store key, bound to its place (§20.11).
+    /// Encrypt app data with its own key derived from the current store key (§20.11).
+    /// The app's associated data binds the value to its place.
     /// The authenticated header records the store key number for later opening.
     pub fn seal_app_data(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, SealError> {
         let key = self.current_store_key()?;
         let mut header = b"CVAD\x01".to_vec();
         header.extend_from_slice(&key.number().to_le_bytes());
         let context = cipher::context(&[&header, aad]);
-        let encryption = derivation::derive(&key.bytes, derivation::ENCRYPTION)?;
+        let encryption = derivation::derive(&key.bytes, derivation::APP_DATA)?;
         let body = cipher::seal_random(&encryption, &context, plaintext)?;
         header.extend(body);
         Ok(header)
@@ -266,7 +268,7 @@ impl StoreKeyring {
         let number = wire::number(&mut bytes)?;
         let header = sealed.get(..13).ok_or(MaterialError::Encoding)?;
         let key = self.store_key(number)?;
-        let encryption = derivation::derive(&key.bytes, derivation::ENCRYPTION)?;
+        let encryption = derivation::derive(&key.bytes, derivation::APP_DATA)?;
         Ok(cipher::open_random(
             &encryption,
             &cipher::context(&[header, aad]),

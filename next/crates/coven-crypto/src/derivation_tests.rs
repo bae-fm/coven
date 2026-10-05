@@ -12,6 +12,11 @@ fn purpose_labels_and_hkdf_answers_are_pinned() {
             "6e4806cf1fac1920e0d53eaca1d210cf46e8f507ae4f145db33af65af7a81f60",
         ),
         (
+            APP_DATA,
+            b"coven/app-data/v1",
+            "871d415cbde4e9545645d52de9825f4db26b81419b460bf8f746edf5e39c4bf9",
+        ),
+        (
             NAMING,
             b"coven/naming/v1",
             "5bc6b49fd5a2bf93a95d600007f9964ad8ce2c2e3eccb9f708b444fc62522a6a",
@@ -47,7 +52,7 @@ fn purpose_labels_and_hkdf_answers_are_pinned() {
 }
 
 #[test]
-fn file_name_nonce_and_fingerprint_answers_are_pinned() {
+fn stored_file_name_nonce_chunk_and_fingerprint_answers_are_pinned() {
     let keys = StoreKey::from_bytes(1, [17; 32]).unwrap().derive().unwrap();
     let mut hash = ContentHasher::new();
     hash.update(b"hello file");
@@ -56,10 +61,15 @@ fn file_name_nonce_and_fingerprint_answers_are_pinned() {
         name.to_string(),
         "418312d742b95e056668ba4f91c034c0a49cb5159067a43f67b7cf73ce8c6956"
     );
-    assert_eq!(name.storage_path(), format!("files/{name}"));
     assert_eq!(
         hex::encode(keys.chunk_nonce(&name, 7).unwrap()),
         "12358369de655ceb9f1358b5720a43ce0700000000000000"
+    );
+    // Independently calculated with libsodium's XChaCha20-Poly1305, using
+    // length-framed domain, raw name bytes and the little-endian chunk index.
+    assert_eq!(
+        hex::encode(keys.seal_chunk(&name, 7, b"hello file").unwrap()),
+        "6ec239349217077c8df98772b3ef4c2dc6c69d9a26f9cae3363e"
     );
     let mut fingerprint = keys.fingerprint_hasher().unwrap();
     fingerprint.update(b"agreed state");
@@ -175,15 +185,21 @@ fn file_chunks_repeat_only_for_the_same_key_name_index_and_bytes() {
 }
 
 #[test]
-fn chunks_authenticate_the_storage_path_and_index_in_addition_to_the_nonce() {
+fn chunks_authenticate_the_name_and_index_in_addition_to_the_nonce() {
     let keys = StoreKey::from_bytes(1, [17; 32]).unwrap().derive().unwrap();
-    let name = FileName::from_bytes([8; 32]);
+    let name = StoredFileName::from_bytes([8; 32]);
     let sealed = keys.seal_chunk(&name, 7, b"payload").unwrap();
     let nonce = keys.chunk_nonce(&name, 7).unwrap();
+    let aad = cipher::context(&[b"coven/chunk/v1", name.as_bytes(), &7u64.to_le_bytes()]);
+    assert_eq!(
+        cipher::open(&keys.encryption.0, &nonce, &aad, &sealed).unwrap(),
+        b"payload"
+    );
     // Keep the right nonce and key: these failures specifically exercise AAD.
     for aad in [
         chunk_aad(&name, 8),
-        chunk_aad(&FileName::from_bytes([9; 32]), 7),
+        chunk_aad(&StoredFileName::from_bytes([9; 32]), 7),
+        cipher::context(&[b"coven/object/v1", name.as_bytes(), &7u64.to_le_bytes()]),
     ] {
         assert!(matches!(
             cipher::open(&keys.encryption.0, &nonce, &aad, &sealed),

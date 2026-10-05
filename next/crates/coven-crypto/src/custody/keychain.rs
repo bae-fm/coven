@@ -1,6 +1,7 @@
 //! One registered service, with independent entries for each store (§20.1).
 
-use super::{KeyError, KeychainError, SecretNameError, MEMBER_KEYS_ENTRY, STORE_KEYS_ENTRY};
+use super::platform::NativeKeychain;
+use super::{KeyError, SecretNameError, MEMBER_KEYS_ENTRY, STORE_KEYS_ENTRY};
 use crate::SecretBytes;
 use coven_foundation::id_source::StoreId;
 use std::{
@@ -41,15 +42,23 @@ fn validate_service(name: &str) -> Result<(), KeyError> {
     Ok(())
 }
 
+const RESTORE_CODE_ENTRY: &str = "restore-code";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub(crate) enum EntryScope {
+    DeviceOnly,
+    Synced,
+}
+
 enum Backend {
-    Native(Arc<keyring_core::CredentialStore>),
+    Native(NativeKeychain),
     #[cfg(any(test, feature = "test-utils"))]
     Memory(Mutex<MemoryEntries>),
 }
 
 #[cfg(any(test, feature = "test-utils"))]
 struct MemoryEntries {
-    entries: std::collections::BTreeMap<String, SecretBytes>,
+    entries: std::collections::BTreeMap<(EntryScope, String), SecretBytes>,
     fail_next: bool,
 }
 
@@ -82,81 +91,89 @@ impl Keychain {
             .ok_or(KeyError::ServiceNotRegistered)?;
         Ok(Arc::new(Self {
             name,
-            backend: Backend::Native(super::platform::store()?),
+            backend: Backend::Native(NativeKeychain::new()?),
         }))
     }
 
-    fn read(&self, account: &str) -> Result<Option<SecretBytes>, KeyError> {
-        match &self.backend {
-            Backend::Native(store) => {
-                let entry = store
-                    .build(&self.name, account, None)
-                    .map_err(KeychainError::from)?;
-                match entry.get_secret() {
-                    Ok(bytes) => Ok(Some(SecretBytes::new(bytes))),
-                    Err(keyring_core::Error::NoEntry) => {
-                        tracing::debug!(account, "keychain entry is absent");
-                        Ok(None)
+    /// List this service's synced restore codes without knowing any store ids (§12.1).
+    /// Apple searches the synced store by service; account prefixes are filtered
+    /// locally because its keyring API supports exact matches only. Results are
+    /// limited to the app's accessible keychain groups. Any read failure fails
+    /// the entire call; a missing or unreadable code is never silently omitted.
+    /// Native non-Apple keychains return `KeyError::Unsupported`.
+    pub fn synced_restore_codes(&self) -> Result<Vec<(StoreId, SecretBytes)>, KeyError> {
+        let codes = match &self.backend {
+            Backend::Native(native) => native.synced_restore_codes(&self.name)?,
+            #[cfg(any(test, feature = "test-utils"))]
+            Backend::Memory(memory) => {
+                let mut memory = memory.lock().map_err(|_| KeyError::Poisoned)?;
+                memory.check()?;
+                let mut codes = Vec::new();
+                for ((scope, account), bytes) in &memory.entries {
+                    if *scope == EntryScope::Synced {
+                        if let Some(store) = restore_code_store(account)? {
+                            codes.push((store, SecretBytes::new(bytes.as_bytes().to_vec())));
+                        }
                     }
-                    Err(error) => Err(KeychainError::from(error).into()),
                 }
+                codes
             }
+        };
+        let mut stores = std::collections::BTreeMap::new();
+        for (store, code) in codes {
+            if stores.insert(store, code).is_some() {
+                return Err(KeyError::AmbiguousRestoreCode(store));
+            }
+        }
+        Ok(stores.into_iter().collect())
+    }
+
+    fn read(&self, scope: EntryScope, account: &str) -> Result<Option<SecretBytes>, KeyError> {
+        match &self.backend {
+            Backend::Native(native) => native.read(scope, &self.name, account),
             #[cfg(any(test, feature = "test-utils"))]
             Backend::Memory(memory) => {
                 let mut memory = memory.lock().map_err(|_| KeyError::Poisoned)?;
                 memory.check()?;
                 Ok(memory
                     .entries
-                    .get(account)
+                    .get(&(scope, account.to_owned()))
                     .map(|bytes| SecretBytes::new(bytes.as_bytes().to_vec())))
             }
         }
     }
 
-    fn write(&self, account: &str, bytes: &[u8]) -> Result<(), KeyError> {
+    fn write(&self, scope: EntryScope, account: &str, bytes: &[u8]) -> Result<(), KeyError> {
         match &self.backend {
-            Backend::Native(store) => store
-                .build(&self.name, account, None)
-                .and_then(|entry| entry.set_secret(bytes))
-                .map_err(|e| KeychainError::from(e).into()),
+            Backend::Native(native) => native.write(scope, &self.name, account, bytes),
             #[cfg(any(test, feature = "test-utils"))]
             Backend::Memory(memory) => {
                 let mut memory = memory.lock().map_err(|_| KeyError::Poisoned)?;
                 memory.check()?;
-                memory
-                    .entries
-                    .insert(account.to_owned(), SecretBytes::new(bytes.to_vec()));
+                memory.entries.insert(
+                    (scope, account.to_owned()),
+                    SecretBytes::new(bytes.to_vec()),
+                );
                 Ok(())
             }
         }
     }
 
-    fn delete(&self, account: &str) -> Result<(), KeyError> {
+    fn delete(&self, scope: EntryScope, account: &str) -> Result<(), KeyError> {
         match &self.backend {
-            Backend::Native(store) => {
-                let entry = store
-                    .build(&self.name, account, None)
-                    .map_err(KeychainError::from)?;
-                match entry.delete_credential() {
-                    Ok(()) => Ok(()),
-                    Err(keyring_core::Error::NoEntry) => {
-                        tracing::debug!(account, "keychain entry is already absent");
-                        Ok(())
-                    }
-                    Err(error) => Err(KeychainError::from(error).into()),
-                }
-            }
+            Backend::Native(native) => native.delete(scope, &self.name, account),
             #[cfg(any(test, feature = "test-utils"))]
             Backend::Memory(memory) => {
                 let mut memory = memory.lock().map_err(|_| KeyError::Poisoned)?;
                 memory.check()?;
-                memory.entries.remove(account);
+                memory.entries.remove(&(scope, account.to_owned()));
                 Ok(())
             }
         }
     }
 
-    /// An isolated in-memory keychain; it never registers or touches the OS.
+    /// An isolated in-memory keychain with separate device-only and synced entries.
+    /// It models Apple sync on every test platform without touching the OS.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn in_memory(name: impl Into<String>) -> Result<Arc<Self>, KeyError> {
         let name = name.into();
@@ -170,7 +187,7 @@ impl Keychain {
         }))
     }
 
-    /// Make the fake refuse the next read, write or delete before changing state.
+    /// Make the fake refuse the next read, write, delete or list before changing state.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn fail_next_operation(&self) -> Result<(), KeyError> {
         match &self.backend {
@@ -189,7 +206,7 @@ impl std::fmt::Debug for Keychain {
     }
 }
 
-/// One store's keys and host secrets under the same service and access policy.
+/// One store's device-only keys and host secrets, and its synced restore code.
 pub struct StoreKeychain {
     keychain: Arc<Keychain>,
     store: StoreId,
@@ -205,13 +222,42 @@ impl StoreKeychain {
         format!("{name}:{}", self.store)
     }
     fn read(&self, name: &str) -> Result<Option<SecretBytes>, KeyError> {
-        self.keychain.read(&self.account(name))
+        self.keychain
+            .read(EntryScope::DeviceOnly, &self.account(name))
     }
     fn write(&self, name: &str, bytes: &[u8]) -> Result<(), KeyError> {
-        self.keychain.write(&self.account(name), bytes)
+        self.keychain
+            .write(EntryScope::DeviceOnly, &self.account(name), bytes)
     }
     fn remove(&self, name: &str) -> Result<(), KeyError> {
-        self.keychain.delete(&self.account(name))
+        self.keychain
+            .delete(EntryScope::DeviceOnly, &self.account(name))
+    }
+
+    /// Keep exactly the restore-code bytes in iCloud Keychain (§12.1).
+    /// The caller supplies the encoded member keys, store identity and storage
+    /// credentials; the crypto crate does not define the restore-code format.
+    /// Native non-Apple keychains return `KeyError::Unsupported`.
+    pub fn set_synced_restore_code(&self, code: &SecretBytes) -> Result<(), KeyError> {
+        self.keychain.write(
+            EntryScope::Synced,
+            &self.account(RESTORE_CODE_ENTRY),
+            code.as_bytes(),
+        )
+    }
+
+    /// Read the synced restore code, or `None` if absent (§12.1).
+    /// Native non-Apple keychains return `KeyError::Unsupported`.
+    pub fn synced_restore_code(&self) -> Result<Option<SecretBytes>, KeyError> {
+        self.keychain
+            .read(EntryScope::Synced, &self.account(RESTORE_CODE_ENTRY))
+    }
+
+    /// Delete the synced restore code; succeeds if absent (§12.1).
+    /// Native non-Apple keychains return `KeyError::Unsupported`.
+    pub fn delete_synced_restore_code(&self) -> Result<(), KeyError> {
+        self.keychain
+            .delete(EntryScope::Synced, &self.account(RESTORE_CODE_ENTRY))
     }
 
     /// Keeps an app secret in the same keychain and access policy as coven's keys.
@@ -246,6 +292,19 @@ impl std::fmt::Debug for StoreKeychain {
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "ios", test, feature = "test-utils"))]
+pub(crate) fn restore_code_store(account: &str) -> Result<Option<StoreId>, KeyError> {
+    match account.split_once(':') {
+        Some((RESTORE_CODE_ENTRY, id)) => uuid::Uuid::parse_str(id)
+            .map(|id| Some(StoreId(id)))
+            .map_err(KeyError::RestoreCodeStoreId),
+        _ => {
+            tracing::debug!(account, "skipping synced entry that is not a restore code");
+            Ok(None)
+        }
+    }
+}
+
 fn validate_host_name(name: &str) -> Result<(), SecretNameError> {
     if name.is_empty() {
         return Err(SecretNameError::Empty);
@@ -256,7 +315,7 @@ fn validate_host_name(name: &str) -> Result<(), SecretNameError> {
     if name.contains('\0') {
         return Err(SecretNameError::Nul);
     }
-    if [STORE_KEYS_ENTRY, MEMBER_KEYS_ENTRY].contains(&name) {
+    if [STORE_KEYS_ENTRY, MEMBER_KEYS_ENTRY, RESTORE_CODE_ENTRY].contains(&name) {
         return Err(SecretNameError::Reserved);
     }
     Ok(())

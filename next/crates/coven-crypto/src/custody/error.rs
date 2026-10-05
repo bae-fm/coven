@@ -61,6 +61,15 @@ pub enum KeyError {
     /// This target has no native credential store implementation.
     #[error("unsupported keyring platform")]
     UnsupportedKeyringPlatform,
+    /// Synced restore codes require an Apple keychain.
+    #[error("synced restore codes are unsupported on this platform")]
+    Unsupported,
+    /// A synced restore-code account contains an invalid store id.
+    #[error("invalid store id in synced restore-code entry: {0}")]
+    RestoreCodeStoreId(#[source] uuid::Error),
+    /// Multiple accessible keychain groups contain a restore code for one store.
+    #[error("multiple synced restore codes for store {0}")]
+    AmbiguousRestoreCode(coven_foundation::id_source::StoreId),
     /// The host name could collide with a coven entry or cannot name an entry.
     #[error("invalid host secret name: {0}")]
     SecretName(#[from] SecretNameError),

@@ -5,9 +5,10 @@ use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::{cipher, ContentHash, CryptoError, FileName, FingerprintHasher};
+use crate::{cipher, ContentHash, CryptoError, FingerprintHasher, StoredFileName};
 
 pub(crate) const ENCRYPTION: &[u8] = b"coven/encryption/v1";
+pub(crate) const APP_DATA: &[u8] = b"coven/app-data/v1";
 pub(crate) const NAMING: &[u8] = b"coven/naming/v1";
 pub(crate) const FILE_NONCES: &[u8] = b"coven/file-nonces/v1";
 pub(crate) const FINGERPRINTS: &[u8] = b"coven/fingerprints/v1";
@@ -85,10 +86,12 @@ impl DerivedKeys {
     }
 
     /// HMAC-SHA256 of a file's content hash with the naming key (§16.2).
-    pub fn file_name(&self, hash: &ContentHash) -> Result<FileName, CryptoError> {
+    pub fn file_name(&self, hash: &ContentHash) -> Result<StoredFileName, CryptoError> {
         let mut mac = mac(&self.naming)?;
         mac.update(hash.as_bytes());
-        Ok(FileName::from_bytes(mac.finalize().into_bytes().into()))
+        Ok(StoredFileName::from_bytes(
+            mac.finalize().into_bytes().into(),
+        ))
     }
 
     /// Start an incremental hash of the audience's agreed data (§19.1).
@@ -96,12 +99,13 @@ impl DerivedKeys {
         FingerprintHasher::new(&self.fingerprints)
     }
 
-    /// Seal one file chunk, binding `files/<name>` and its index (§11.1).
+    /// Seal one file chunk, binding its keyed name and index (§11.1).
+    /// Storage maps each name to one path, so binding the name binds that path.
     /// A name must identify immutable content with one fixed chunk partition:
     /// never reuse the same name and index for different plaintext bytes.
     pub fn seal_chunk(
         &self,
-        name: &FileName,
+        name: &StoredFileName,
         index: u64,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
@@ -116,7 +120,7 @@ impl DerivedKeys {
     /// Open one chunk only under its file's name and chunk index (§16.2).
     pub fn open_chunk(
         &self,
-        name: &FileName,
+        name: &StoredFileName,
         index: u64,
         sealed: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
@@ -128,7 +132,7 @@ impl DerivedKeys {
         )
     }
 
-    fn chunk_nonce(&self, name: &FileName, index: u64) -> Result<[u8; 24], CryptoError> {
+    fn chunk_nonce(&self, name: &StoredFileName, index: u64) -> Result<[u8; 24], CryptoError> {
         let mut mac = mac(&self.file_nonces)?;
         mac.update(name.as_bytes());
         let digest = mac.finalize().into_bytes();
@@ -145,12 +149,8 @@ impl std::fmt::Debug for DerivedKeys {
     }
 }
 
-fn chunk_aad(name: &FileName, index: u64) -> Vec<u8> {
-    cipher::context(&[
-        b"coven/chunk/v1",
-        name.storage_path().as_bytes(),
-        &index.to_le_bytes(),
-    ])
+fn chunk_aad(name: &StoredFileName, index: u64) -> Vec<u8> {
+    cipher::context(&[b"coven/chunk/v1", name.as_bytes(), &index.to_le_bytes()])
 }
 
 #[cfg(test)]

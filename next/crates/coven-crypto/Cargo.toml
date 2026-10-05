@@ -13,6 +13,7 @@ getrandom.workspace = true
 hex.workspace = true
 hkdf.workspace = true
 hmac = { workspace = true, features = ["zeroize"] }
+subtle.workspace = true
 sha2 = { workspace = true, features = ["zeroize"] }
 zeroize.workspace = true
 keyring-core.workspace = true

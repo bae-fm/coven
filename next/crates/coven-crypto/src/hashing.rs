@@ -44,9 +44,9 @@ impl std::fmt::Debug for ContentHasher {
 
 /// HMAC-SHA256 of the content hash with an audience's naming key (§16.2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct FileName([u8; 32]);
+pub struct StoredFileName([u8; 32]);
 
-impl FileName {
+impl StoredFileName {
     /// Decode a keyed name recorded in a file reference.
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
@@ -55,13 +55,9 @@ impl FileName {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
-    /// The exact path authenticated by every chunk: `files/<name>` (§16.2).
-    pub fn storage_path(&self) -> String {
-        format!("files/{self}")
-    }
 }
 
-impl std::fmt::Display for FileName {
+impl std::fmt::Display for StoredFileName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&hex::encode(self.0))
     }
