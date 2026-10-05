@@ -358,12 +358,14 @@ fn twenty_thousand_rows_cover_claims_audiences_and_deep_chains() {
         assert_rule(&partial, &row(n), Rule::ForeignKey("parent".into()));
     }
     assert_rule(&partial, &row(11_999), Rule::Check("valid".into()));
+    // Visit counts above prove linear group expansion; these bounds only
+    // catch a quadratic closure (minutes at this size), with room for a loaded CI.
     assert!(
-        full_elapsed < Duration::from_secs(1),
+        full_elapsed < Duration::from_secs(10),
         "removals: {full_elapsed:?}"
     );
     assert!(
-        partial_elapsed < Duration::from_secs(1),
+        partial_elapsed < Duration::from_secs(10),
         "recompute: {partial_elapsed:?}"
     );
 }
