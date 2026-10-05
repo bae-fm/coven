@@ -3,7 +3,7 @@
 # ships, unchanged.
 [workspace]
 resolver = "2"
-members = ["crates/coven-foundation", "crates/coven-crypto", "tools/owner-construction-check"]
+members = ["crates/coven-foundation", "crates/coven-crypto", "crates/coven-merge", "tools/owner-construction-check"]
 
 [workspace.package]
 edition = "2021"

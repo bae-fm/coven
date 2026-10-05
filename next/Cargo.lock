@@ -438,6 +438,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "coven-merge"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "cpubits"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

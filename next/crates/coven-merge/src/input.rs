@@ -1,0 +1,158 @@
+use crate::{MergeError, Timestamp};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// One device's numbered write (§5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WriteId {
+    /// The install's 64-bit device id.
+    pub device: u64,
+    /// The write's number in that device's log.
+    pub number: u64,
+}
+
+/// Every synced row reaches the store or one circle (§14).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Audience {
+    /// Every member can read the row.
+    Store,
+    /// Only members of this circle can read the row.
+    Circle(Vec<u8>),
+}
+
+/// A row is one table, primary key and audience, with generations of its own.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RowId {
+    /// The synced table's name.
+    pub table: String,
+    /// The primary key, encoded by the caller so byte order is key order.
+    pub key: Vec<u8>,
+    /// The store or circle that can read the row.
+    pub audience: Audience,
+}
+
+/// The parent and generation a reference names (§8.4). Written references
+/// carry odd incarnations; a resolved default carries the current generation,
+/// including an even generation while that parent is absent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Parent {
+    /// The referenced row, including its audience.
+    pub row: RowId,
+    /// The parent's generation.
+    pub generation: u64,
+}
+
+/// A column's value and the parent generations recorded with it.
+/// The metadata follows the winning setter, including for values kept as lost.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ColumnValue<V> {
+    /// The app's value; the merge does not interpret SQL values.
+    pub value: V,
+    /// Foreign-key names and their parents for this column's written value.
+    /// For a composite reference the database combines the winning columns.
+    pub parents: BTreeMap<String, Parent>,
+}
+
+/// One row's insert, update or delete. A delete cannot set columns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Operation<V> {
+    /// Start the next incarnation with these columns.
+    Insert(BTreeMap<String, ColumnValue<V>>),
+    /// Set these columns in the existing incarnation.
+    Update(BTreeMap<String, ColumnValue<V>>),
+    /// End the existing incarnation.
+    Delete,
+}
+
+impl<V> Operation<V> {
+    pub(crate) fn columns(&self) -> Option<&BTreeMap<String, ColumnValue<V>>> {
+        match self {
+            Self::Insert(c) | Self::Update(c) => Some(c),
+            Self::Delete => None,
+        }
+    }
+    pub(crate) fn advances(&self) -> bool {
+        !matches!(self, Self::Update(_))
+    }
+}
+
+/// A row change carries the generation on the authoring device (§8.3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Change<V> {
+    /// Generation at which the change was made.
+    pub generation: u64,
+    /// The change and the values it sets.
+    pub operation: Operation<V>,
+}
+
+impl<V> Change<V> {
+    /// The incarnation this change belongs to: generation + 1 for an insert,
+    /// generation for an update or delete. Invalid parity is a typed error.
+    pub fn incarnation(&self) -> Result<u64, MergeError> {
+        if matches!(self.operation, Operation::Insert(_)) != self.generation.is_multiple_of(2) {
+            return Err(MergeError::GenerationParity(self.generation));
+        }
+        if matches!(self.operation, Operation::Insert(_)) {
+            self.generation
+                .checked_add(1)
+                .ok_or(MergeError::GenerationExhausted)
+        } else {
+            Ok(self.generation)
+        }
+    }
+}
+
+/// A decoded write's merge inputs, independent of its storage encoding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Write<V> {
+    /// Device and log number.
+    pub id: WriteId,
+    /// Unique total-order timestamp (§7.2).
+    pub timestamp: Timestamp,
+    /// Every write the author had applied, including its own earlier writes.
+    /// A format/database adapter expands log positions to this relation.
+    pub had_read: BTreeSet<WriteId>,
+    /// At most one change for each table, key and audience.
+    pub changes: BTreeMap<RowId, Change<V>>,
+}
+
+/// Pure access to applied write metadata. The arriving write is not yet in
+/// this view. Implementations must report missing metadata, never invent it.
+/// No applied row-change history is required by the incremental step.
+pub trait WriteOracle {
+    /// The timestamp of an applied write, or `None` if it is not applied.
+    fn timestamp(&self, write: WriteId) -> Option<Timestamp>;
+    /// Whether an applied write had read another write.
+    fn had_read(&self, reader: WriteId, earlier: WriteId) -> Result<bool, MergeError>;
+}
+
+pub(crate) fn validate_change<V>(row: &RowId, change: &Change<V>) -> Result<(), MergeError> {
+    change.incarnation()?;
+    if change.operation.advances() {
+        change
+            .generation
+            .checked_add(1)
+            .ok_or(MergeError::GenerationExhausted)?;
+    }
+    if let Some(columns) = change.operation.columns() {
+        for value in columns.values() {
+            for parent in value.parents.values() {
+                validate_parent(row, parent)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_parent(row: &RowId, parent: &Parent) -> Result<(), MergeError> {
+    if parent.generation.is_multiple_of(2) {
+        return Err(MergeError::ParentGeneration(parent.generation));
+    }
+    validate_audience(row, &parent.row)
+}
+
+pub(crate) fn validate_audience(row: &RowId, parent: &RowId) -> Result<(), MergeError> {
+    if parent.audience != Audience::Store && parent.audience != row.audience {
+        return Err(MergeError::ReferenceAudience(row.clone()));
+    }
+    Ok(())
+}

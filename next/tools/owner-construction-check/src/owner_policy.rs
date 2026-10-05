@@ -9,7 +9,8 @@ pub(crate) const POLICY: Policy = Policy {
     // Rows are added as crates land, in §21.1's order: coven-foundation,
     // coven-crypto, coven-format, coven-merge, coven-database, coven-storage,
     // coven-sync, coven.
-    crate_order: &["coven-foundation", "coven-crypto"],
+    // coven-format goes between crypto and merge.
+    crate_order: &["coven-foundation", "coven-crypto", "coven-merge"],
     // coven-database and coven-storage never depend on each other; the pair is
     // added once both crates are in `crate_order`.
     separated_crates: &[],

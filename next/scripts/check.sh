@@ -69,5 +69,12 @@ if [ -n "$foreign" ]; then
     exit 1
 fi
 
+step "Rust / Lean differential merge test"
+runner="$(cd "$proof" && pwd)/.lake/build/bin/mergeRunner"
+if [ -f "$runner.exe" ]; then
+    runner="$runner.exe"
+fi
+COVEN_MERGE_LEAN="$runner" cargo test -p coven-merge --all-features lean_differential -- --ignored
+
 echo ""
 echo "✅ all checks passed"
