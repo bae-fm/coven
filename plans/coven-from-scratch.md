@@ -3297,12 +3297,17 @@ fn migrations() -> Vec<Migration> {
 - Each external dependency's version is set once, in the workspace, and
   crates name only the features they need.
 
-### 21.2 Capabilities and injection
+### 21.2 Capabilities, owners and lifetimes
 
-- Each outside capability is used in one place only:
+#### Capabilities
+
+- A *capability* is something outside the program's own memory: the
+  network, cryptography, SQLite, the OS keychain, the current time, new
+  ids, and files on disk.
+- Each capability is used directly in one place only:
 
   ```
-  network          coven-storage
+  network          coven-storage's providers
   cryptography     coven-crypto
   SQLite           coven-database
   OS keychain      coven-crypto's custody
@@ -3313,15 +3318,43 @@ fn migrations() -> Vec<Migration> {
   ```
 
 - Everything else reaches a capability through the object that owns it,
-  passed in when that object is built.
+  given to it when it is built.
   - The clock, the id source, key custody, the CloudKit calls and the
     OAuth clients are all set on the builder ([§20.1](#201-opening)), so
-    tests replace each one.
-- Objects that hold other objects are built in one place, the builder's
-  `open`, which passes each its collaborators; an object never builds
-  another long-lived object itself.
-- An object never hands out what it holds, such as its database
-  connection; callers ask it to do the work.
+    a test replaces each one.
+  - E.g. the snapshot writer never calls the system clock; it asks the
+    clock it was given, and a test gives it a fixed one.
+- A method never takes a raw capability as a parameter, such as a store
+  directory or a database connection; it calls the owner of it instead.
+
+#### Owners and operations
+
+- An *owner* is an object that holds a capability, or holds another
+  owner, and lives while the store is open.
+  - E.g. the database owner holds the SQLite connection, and the sync
+    owner holds the database owner and the storage owner.
+- An *operation* is a value that lives for one piece of work and is then
+  dropped, such as one sync pass, one upload or one reload from a
+  snapshot.
+  - It borrows the owners it needs for that work, and holds nothing past
+    it.
+- An owner never builds another owner; it is given its collaborators.
+  - E.g. the sync owner takes the database owner and the storage owner as
+    arguments, and doesn't open either itself.
+- Owners are built only at *composition roots*, listed in one policy
+  file: the builder's `open`, and the test fixtures that build the same
+  graph.
+- Each long-lived task has one *lifetime authority*, the only owner that
+  may start it, and that stops it when it is dropped.
+  - E.g. only the sync owner starts the sync loop, so closing the store
+    stops it, and nothing else can leave one running.
+- An owner never hands out what it holds, by returning it or by a public
+  field; callers ask it to do the work.
+  - E.g. nothing outside coven-database gets the SQLite connection; it
+    asks the database owner to run a write.
+- A struct built only to be taken apart again, with every field public
+  and no methods, is not used to pass collaborators; they are passed by
+  name.
 
 ### 21.3 Code conventions
 
@@ -3345,9 +3378,11 @@ fn migrations() -> Vec<Migration> {
   platform:
   - formatting, and clippy with warnings denied;
   - the dependency rules of [§21.1](#211-crates);
-  - the capability and construction rules of
-    [§21.2](#212-capabilities-and-injection), read from the syntax tree,
-    including inside macro calls;
+  - the rules of [§21.2](#212-capabilities-owners-and-lifetimes), by a
+    checker that reads the syntax tree of every crate, including inside
+    macro calls, against the policy file;
+  - the checker's own guard tests: every file, owner and composition
+    root the policy file names must exist, so the policy can't go stale;
   - the visibility and file-size rules of
     [§21.3](#213-code-conventions);
   - `cargo doc` with broken links denied;
@@ -3356,6 +3391,8 @@ fn migrations() -> Vec<Migration> {
   - the tests, with all features and with none;
   - the Lean proof, built from scratch, with no `sorry` and no axiom
     beyond Lean's own.
+- The checker is the first thing built, before any crate, so every rule
+  holds from the first line of code.
 - The pre-commit hook runs the fast ones: formatting, clippy, and the
   rules of [§21.1](#211-crates) to [§21.3](#213-code-conventions).
 
