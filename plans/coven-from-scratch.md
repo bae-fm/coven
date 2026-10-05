@@ -1012,6 +1012,15 @@ Carol's tablet:
   - after Ben's removal, Ana's would leave no admin, so it is dropped;
   - Ana's removal would have beaten Ben's new phone, but it was dropped,
     so the phone is added.
+- A dropped entry stays dropped for that replay even if what beat it is
+  dropped later; this only ever drops a change, never grants one.
+  - E.g. Ana and Ben are admins. Concurrently, Ana adds Carol as an admin,
+    Ben is made a member, and Ben removes Ana.
+  - Ben's removal beats Carol's add, which is dropped, and the replay
+    starts again; now removing Ana would leave no admin, so Ben's removal
+    is dropped too.
+  - Carol isn't added. Ana is shown her dropped add and invites Carol
+    again.
 
 ## 10. Device identity
 
