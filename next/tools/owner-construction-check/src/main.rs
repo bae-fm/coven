@@ -22,6 +22,7 @@ mod retained_capability_parameters;
 mod retained_services;
 mod sources;
 mod syntax;
+mod test_layout;
 
 use std::path::PathBuf;
 

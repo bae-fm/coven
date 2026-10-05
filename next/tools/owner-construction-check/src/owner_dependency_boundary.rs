@@ -587,19 +587,12 @@ fn collect_crate_root_session_fields(
 fn collect_receiver_methods(files: &[RustFile]) -> Vec<ReceiverMethod> {
     let mut methods = Vec::new();
     for file in files {
-        if is_test_source(&file.relative_path) && !is_test_support_source(&file.relative_path) {
+        if is_test_source(&file.relative_path) {
             continue;
         }
         collect_receiver_methods_in_items(&file.relative_path, &file.syntax.items, &mut methods);
     }
     methods
-}
-
-fn is_test_support_source(path: &str) -> bool {
-    path.contains("/test_support/")
-        || path.ends_with("/test_helpers.rs")
-        || path.ends_with("/test_owner_graph.rs")
-        || path.ends_with("/test_support.rs")
 }
 
 fn collect_receiver_methods_in_items(

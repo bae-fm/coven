@@ -4,6 +4,7 @@
 //! - `pub(in path)` and `super::super::` are not used: an item needed
 //!   elsewhere moves to where both callers can see it.
 //! - `coven` re-exports the API at its root and keeps every module private.
+//! - A source's tests live beside it in `<name>_tests.rs` (`test_layout.rs`).
 
 use std::collections::BTreeSet;
 
@@ -13,6 +14,7 @@ use syn::visit::{self, Visit};
 
 use crate::macros::token_paths;
 use crate::syntax::RustFile;
+use crate::test_layout::find_test_layout_violations;
 
 /// The crate whose root re-exports the API (§21.3).
 const API_CRATE_SOURCES: &str = "crates/coven/src/";
@@ -22,27 +24,30 @@ pub(crate) enum Convention {
     DeepParentPath,
     RestrictedVisibility,
     PublicApiModule,
+    /// A file named `<name>_test.rs`.
+    SingularTestFile,
+    /// A `<name>_tests.rs` with no `<name>.rs` beside it.
+    OrphanTestFile,
+    /// A `#[cfg(test)] mod … { … }` body inside a non-test source.
+    InlineTestModule,
+    /// A test-only module declaration other than
+    /// `#[cfg(test)] #[path = "<name>_tests.rs"] mod tests;`.
+    MisplacedTestModule,
 }
 
 impl Convention {
-    pub(crate) fn message(self) -> &'static str {
-        match self {
-            Convention::DeepParentPath => {
-                "paths cannot skip over the immediate parent module with super::super"
-            }
-            Convention::RestrictedVisibility => "pub(in path) visibility is forbidden",
-            Convention::PublicApiModule => {
-                "the coven crate keeps every module private and re-exports its API at its root"
-            }
-        }
-    }
-
     pub(crate) fn remedy(self) -> &'static str {
         match self {
             Convention::DeepParentPath | Convention::RestrictedVisibility => {
                 "move an item needed elsewhere to where both callers can see it"
             }
             Convention::PublicApiModule => "declare the module private and `pub use` its API items",
+            Convention::SingularTestFile
+            | Convention::OrphanTestFile
+            | Convention::InlineTestModule
+            | Convention::MisplacedTestModule => {
+                "a source's tests live beside it in <name>_tests.rs, declared `#[cfg(test)] #[path = \"<name>_tests.rs\"] mod tests;`"
+            }
         }
     }
 }
@@ -54,6 +59,37 @@ pub(crate) struct ConventionViolation {
     pub(crate) convention: Convention,
 }
 
+impl ConventionViolation {
+    pub(crate) fn message(&self) -> String {
+        let file = self.path.rsplit('/').next().unwrap_or(&self.path);
+        match self.convention {
+            Convention::DeepParentPath => {
+                "paths cannot skip over the immediate parent module with super::super".to_string()
+            }
+            Convention::RestrictedVisibility => "pub(in path) visibility is forbidden".to_string(),
+            Convention::PublicApiModule => {
+                "the coven crate keeps every module private and re-exports its API at its root"
+                    .to_string()
+            }
+            Convention::SingularTestFile => format!(
+                "test files are named <name>_tests.rs; rename {file} to {}",
+                file.replace("_test.rs", "_tests.rs")
+            ),
+            Convention::OrphanTestFile => format!(
+                "{file} has no {} beside it to hold the tests of",
+                file.replace("_tests.rs", ".rs")
+            ),
+            Convention::InlineTestModule => {
+                "a test module's body lives in the sibling <name>_tests.rs, not inline".to_string()
+            }
+            Convention::MisplacedTestModule => format!(
+                "a test module is declared `#[cfg(test)] #[path = \"{}\"] mod tests;`",
+                file.replace(".rs", "_tests.rs")
+            ),
+        }
+    }
+}
+
 pub(crate) fn find_convention_violations(files: &[RustFile]) -> Vec<ConventionViolation> {
     let mut violations = BTreeSet::new();
     for file in files {
@@ -63,6 +99,7 @@ pub(crate) fn find_convention_violations(files: &[RustFile]) -> Vec<ConventionVi
         };
         visitor.visit_file(&file.syntax);
     }
+    violations.extend(find_test_layout_violations(files));
     violations.into_iter().collect()
 }
 
