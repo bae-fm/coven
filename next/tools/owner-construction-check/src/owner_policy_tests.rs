@@ -304,56 +304,6 @@ fn native_keychain_acquisition_is_checked_at_its_real_factory_use_site() {
     assert_eq!(violations[0].capability, "Keychain");
 }
 
-/// Every type name the policy holds, with the row it came from.
-fn named_types(policy: &Policy) -> Vec<(&'static str, &'static str)> {
-    let lists: [(&str, &[&str]); 12] = [
-        ("capability_types", policy.capability_types),
-        (
-            "construction_only_capability_types",
-            policy.construction_only_capability_types,
-        ),
-        ("non_owner_types", policy.non_owner_types),
-        ("borrowed_facade_types", policy.borrowed_facade_types),
-        ("root_owner_types", policy.root_owner_types),
-        ("task_types", policy.task_types),
-        (
-            "internal_dependency_types",
-            policy.internal_dependency_types,
-        ),
-        ("always_forbidden_returns", policy.always_forbidden_returns),
-        ("closed_session_types", policy.closed_session_types),
-        ("field_capability_types", policy.field_capability_types),
-        (
-            "unexported_capability_types",
-            policy.unexported_capability_types,
-        ),
-        (
-            "exportable_capability_outputs",
-            policy.exportable_capability_outputs,
-        ),
-    ];
-    let mut named = lists
-        .into_iter()
-        .flat_map(|(row, names)| names.iter().map(move |name| (row, *name)))
-        .collect::<Vec<_>>();
-    for (service, authority) in policy.lifetime_authorities {
-        named.push(("lifetime_authorities", service));
-        named.push(("lifetime_authorities", authority));
-    }
-    for (_, owner, _, product) in policy.capability_factories {
-        named.push(("capability_factories", owner));
-        named.push(("capability_factories", product));
-    }
-    for (owner, _) in policy.raw_provider_operations {
-        named.push(("raw_provider_operations", owner));
-    }
-    for (derived, sources) in policy.derived_services {
-        named.push(("derived_services", derived));
-        named.extend(sources.iter().map(|source| ("derived_services", *source)));
-    }
-    named
-}
-
 #[test]
 fn every_type_the_policy_names_is_declared() {
     let workspace = load(&workspace_root()).expect("read the workspace");
@@ -363,7 +313,8 @@ fn every_type_the_policy_names_is_declared() {
         .filter(|file| file.is_crate_source())
         .collect::<Vec<_>>();
     let declared = collect_declared_types(&crate_files);
-    let missing = named_types(&POLICY)
+    let missing = POLICY
+        .named_types()
         .into_iter()
         .filter(|(_, name)| !declared.contains_key(*name))
         .map(|(row, name)| format!("{row}: {name}"))

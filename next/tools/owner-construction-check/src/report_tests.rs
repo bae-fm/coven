@@ -25,6 +25,83 @@ fn an_empty_workspace_passes() {
 }
 
 #[test]
+fn duplicate_capability_and_owner_names_report_every_declaration() {
+    const POLICY: Policy = Policy {
+        capability_types: &["Clock"],
+        ..Policy::EMPTY
+    };
+    for (name, first, second) in [
+        ("Clock", "trait Clock {}", "struct Clock;"),
+        (
+            "Worker",
+            "trait Clock {} struct Worker { clock: Box<dyn Clock> }",
+            "struct Worker;",
+        ),
+    ] {
+        let report = check(
+            &workspace(vec![
+                RustFile::fixture("crates/first/src/lib.rs", first),
+                RustFile::fixture("crates/second/src/lib.rs", second),
+            ]),
+            &POLICY,
+        );
+        assert!(!report.is_empty(), "accepted duplicate {name}");
+        assert_eq!(
+            report.lines(),
+            [
+                format!("type {name} is declared more than once: crates/first/src/lib.rs, crates/second/src/lib.rs"),
+                "type names used by the policy, construction-only capabilities and inferred owners must be unique across crates/".to_string(),
+            ],
+        );
+    }
+}
+
+#[test]
+fn duplicate_plain_value_names_pass() {
+    let report = check(
+        &workspace(vec![
+            RustFile::fixture("crates/first/src/lib.rs", "struct Value(u64);"),
+            RustFile::fixture("crates/second/src/lib.rs", "struct Value(String);"),
+        ]),
+        &Policy::EMPTY,
+    );
+    assert!(report.is_empty(), "{:?}", report.lines());
+}
+
+#[test]
+fn tool_declarations_do_not_make_crate_names_ambiguous() {
+    const POLICY: Policy = Policy {
+        capability_types: &["Clock"],
+        ..Policy::EMPTY
+    };
+    let report = check(
+        &workspace(vec![
+            RustFile::fixture("crates/first/src/lib.rs", "trait Clock {}"),
+            RustFile::fixture("tools/second/src/main.rs", "struct Clock;"),
+        ]),
+        &POLICY,
+    );
+    assert!(report.is_empty(), "{:?}", report.lines());
+}
+
+#[test]
+fn test_only_duplicate_capability_names_pass() {
+    const POLICY: Policy = Policy {
+        capability_types: &["Clock"],
+        ..Policy::EMPTY
+    };
+    let report = check(
+        &workspace(vec![
+            RustFile::fixture("crates/first/src/lib.rs", "trait Clock {}"),
+            RustFile::fixture("crates/second/src/lib.rs", "#[cfg(test)] struct Clock;"),
+            RustFile::fixture("crates/second/src/lib_tests.rs", "struct Clock;"),
+        ]),
+        &POLICY,
+    );
+    assert!(report.is_empty(), "{:?}", report.lines());
+}
+
+#[test]
 fn tools_answer_to_the_conventions_but_not_to_the_capability_table() {
     let report = check(
         &workspace(vec![RustFile::fixture(

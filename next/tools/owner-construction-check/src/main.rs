@@ -24,6 +24,7 @@ mod retained_services;
 mod sources;
 mod syntax;
 mod test_layout;
+mod unique_type_names;
 
 use std::path::PathBuf;
 

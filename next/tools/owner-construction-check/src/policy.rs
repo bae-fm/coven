@@ -157,9 +157,60 @@ impl Capability {
     };
 }
 
-#[cfg(test)]
 impl Policy {
+    /// Every type name the policy holds, with the row it came from.
+    pub(crate) fn named_types(&self) -> Vec<(&'static str, &'static str)> {
+        let lists: [(&str, &[&str]); 13] = [
+            ("capability_types", self.capability_types),
+            ("capability_traits", self.capability_traits),
+            (
+                "construction_only_capability_types",
+                self.construction_only_capability_types,
+            ),
+            ("non_owner_types", self.non_owner_types),
+            ("borrowed_facade_types", self.borrowed_facade_types),
+            ("root_owner_types", self.root_owner_types),
+            ("task_types", self.task_types),
+            ("internal_dependency_types", self.internal_dependency_types),
+            ("always_forbidden_returns", self.always_forbidden_returns),
+            ("closed_session_types", self.closed_session_types),
+            ("field_capability_types", self.field_capability_types),
+            (
+                "unexported_capability_types",
+                self.unexported_capability_types,
+            ),
+            (
+                "exportable_capability_outputs",
+                self.exportable_capability_outputs,
+            ),
+        ];
+        let mut named = lists
+            .into_iter()
+            .flat_map(|(row, names)| names.iter().map(move |name| (row, *name)))
+            .collect::<Vec<_>>();
+        for (_, owner, _) in self.composition_roots {
+            named.push(("composition_roots", *owner));
+        }
+        for (service, authority) in self.lifetime_authorities {
+            named.push(("lifetime_authorities", service));
+            named.push(("lifetime_authorities", authority));
+        }
+        for (_, owner, _, product) in self.capability_factories {
+            named.push(("capability_factories", owner));
+            named.push(("capability_factories", product));
+        }
+        for (owner, _) in self.raw_provider_operations {
+            named.push(("raw_provider_operations", owner));
+        }
+        for (derived, sources) in self.derived_services {
+            named.push(("derived_services", derived));
+            named.extend(sources.iter().map(|source| ("derived_services", *source)));
+        }
+        named
+    }
+
     /// A policy naming nothing, for tests to fill in the rows they exercise.
+    #[cfg(test)]
     pub(crate) const EMPTY: Policy = Policy {
         crate_order: &[],
         separated_crates: &[],

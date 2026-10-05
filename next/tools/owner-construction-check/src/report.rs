@@ -25,8 +25,10 @@ use crate::retained_services::{
 };
 use crate::sources::Workspace;
 use crate::syntax::{collect_declared_types, collect_structs, RustFile};
+use crate::unique_type_names::{find_unique_type_name_violations, UniqueTypeNameViolation};
 
 pub(crate) struct Report {
+    unique_type_names: Vec<UniqueTypeNameViolation>,
     crate_dependencies: Vec<CrateDependencyViolation>,
     owner_construction: Vec<OwnerConstructionViolation>,
     database_boundary: Vec<DatabaseBoundaryViolation>,
@@ -63,6 +65,7 @@ pub(crate) fn check(workspace: &Workspace, policy: &Policy) -> Report {
         policy,
     );
     Report {
+        unique_type_names: find_unique_type_name_violations(files, policy),
         crate_dependencies: find_crate_dependency_violations(workspace, policy),
         owner_construction: find_owner_construction_violations(
             files,
@@ -99,7 +102,8 @@ pub(crate) fn check(workspace: &Workspace, policy: &Policy) -> Report {
 
 impl Report {
     pub(crate) fn is_empty(&self) -> bool {
-        self.crate_dependencies.is_empty()
+        self.unique_type_names.is_empty()
+            && self.crate_dependencies.is_empty()
             && self.owner_construction.is_empty()
             && self.database_boundary.is_empty()
             && self.owner_dependency_leaks.is_empty()
@@ -117,6 +121,16 @@ impl Report {
     pub(crate) fn lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
         let mut remedies = Vec::new();
+        for violation in &self.unique_type_names {
+            lines.push(format!(
+                "type {} is declared more than once: {}",
+                violation.name,
+                violation.paths.join(", "),
+            ));
+        }
+        if !self.unique_type_names.is_empty() {
+            remedies.push("type names used by the policy, construction-only capabilities and inferred owners must be unique across crates/");
+        }
         for violation in &self.crate_dependencies {
             lines.push(match violation {
                 CrateDependencyViolation::NotFromWorkspace {
