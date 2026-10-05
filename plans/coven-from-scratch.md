@@ -3420,11 +3420,13 @@ fn migrations() -> Vec<Migration> {
                      directory and its lock
   coven-crypto       §11.1: ciphers, sealed boxes, derived keys, file
                      naming, member keys and their custody
+  coven-merge        §7, §8 and §14: timestamps, the merged state, the
+                     removal rules and lost values, as functions with
+                     no I/O
   coven-format       the bytes in storage: write records, store log
                      entries, snapshots, file headers and chunks,
-                     encoded, decoded and checked
-  coven-merge        §8 and §14: the merged state, the removal rules and
-                     lost values, as functions with no I/O
+                     encoded, decoded and checked, using merge's and
+                     crypto's types
   coven-database     §5: the SQLite connection, coven's internal tables,
                      applying the merge's results, triggers, live
                      queries, migrations
@@ -3440,10 +3442,12 @@ fn migrations() -> Vec<Migration> {
   `coven-database` and `coven-storage` never depend on each other.
 - So the database never reaches storage, and storage never reads the
   database; `coven-sync` is where the two meet.
-- `coven-format` and `coven-merge` read no clock, file, database or
+- `coven-merge` and `coven-format` read no clock, file, database or
   network.
 - So the merge is tested, and checked against the Lean model of
   [Appendix B](coven-merge-proof.md), without SQLite or storage.
+- Ids shared by several crates (store, device and circle ids) live in
+  `coven-foundation`; each concept has one type.
 - Each external dependency's version is set once, in the workspace, and
   crates name only the features they need.
 
