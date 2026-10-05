@@ -69,7 +69,11 @@
   - read it, whole and by range;
   - list a prefix;
   - delete;
-  - grant and revoke a member's access.
+  - grant and revoke a member's access, where the provider can: Google
+    Drive, Dropbox, OneDrive and iCloud share with an account.
+- S3 has no standard way to make or delete access keys; each S3 provider
+  has its own, so on S3 an admin makes and deletes members' keys in the
+  provider's console, and coven says when.
 
 ## 5. Local database
 
@@ -1072,7 +1076,8 @@ Carol's tablet:
   holding:
   - the store's id, name and location;
   - the invite's id, and a one-time *invite secret*;
-  - on S3, an access key made for the new person.
+  - on S3, an access key the admin made for the new person in the
+    provider's console and entered.
 - E.g. Ana adds Carol, on Google Drive:
   1. Ana enters Carol's Google account email and picks her role; her phone
      shares the store's folder with that account and shows the invite.
@@ -1093,7 +1098,8 @@ Carol's tablet:
 - Once the request is approved or declined, or the invite expires, Ana's
   device deletes the request object.
 - Declining the request, or letting the invite expire after a day, takes
-  back the storage access it granted.
+  back the storage access it granted; on S3, coven tells the admin to
+  delete the key in the provider's console.
 
 ### 12.3 Losing everything
 
@@ -1111,9 +1117,10 @@ Carol's tablet:
   - Google Drive, Dropbox and OneDrive: she removes the app's access from
     her provider account;
   - iCloud: she removes the phone from her Apple account;
-  - S3: one of her devices replaces her access key, which changes her
-    restore code; her other devices scan the new code to take the new key,
-    and she writes it down.
+  - S3: she makes a new access key in the provider's console and enters it
+    on one device, which changes her restore code; her other devices scan
+    the new code, she writes it down, and she deletes the old key in the
+    console.
 - No keys change: the phone still holds Ana's key, but can't reach storage
   to read or write anything new.
 - Removing a member removes them and all their devices, in this order
@@ -1122,8 +1129,9 @@ Carol's tablet:
     public key ([§11](#11-keys));
   - the store log entry removing them is written;
   - the storage access their invite granted is taken back: the store's
-    folder is unshared from their account, or on S3 their access key is
-    deleted ([§12.2](#122-adding-a-person)).
+    folder is unshared from their account, or on S3 coven tells the admin
+    to delete their key in the provider's console
+    ([§12.2](#122-adding-a-person)).
 - So a removed member's copy of the old store key reads nothing written
   after the removal, even if they regain read access.
 - Adding a member concurrently with a removal that rotates the key is a
@@ -1674,7 +1682,8 @@ Carol's tablet:
   1. make the new store key, and record it in the operation's row;
   2. upload the new key sealed to each remaining member;
   3. upload the store log entry removing the member;
-  4. revoke the member's storage access.
+  4. revoke the member's storage access, or on S3 tell the admin to delete
+     their key in the provider's console.
 - Removing someone from a circle ([§14.6](#146-leaving-a-circle)):
   1. make the circle's new key, and record it in the operation's row;
   2. upload it sealed to each remaining circle member;
@@ -2892,10 +2901,15 @@ impl CovenHandle {
     /// The members and their devices, as this device's store log has them.
     pub async fn get_members(&self) -> Result<Vec<MemberInfo>, SyncError>;
 
-    /// On S3: makes a new access key for this member, deletes the old one,
-    /// and returns their new restore code, for their other devices to scan
-    /// and for them to write down (§13).
-    pub async fn replace_access_key(&self) -> Result<String, SyncError>;
+    /// On S3: switches this member to the access key they made in the
+    /// provider's console, and returns their new restore code, for their
+    /// other devices to scan and for them to write down. They delete the old
+    /// key in the console (§13).
+    pub async fn replace_access_key(
+        &self,
+        access_key: String,
+        secret_key: String,
+    ) -> Result<String, SyncError>;
 
     /// On a device that already has the store open: takes the storage
     /// credentials from a new restore code of this member's, and keeps
@@ -2905,14 +2919,23 @@ impl CovenHandle {
     /// Changes a member's role, as an admin (§9).
     pub async fn set_member_role(&self, member: &MemberId, role: MemberRole) -> Result<(), SyncError>;
 
-    /// Removes a member and all their devices, revokes their storage access,
-    /// and rotates the store key (§13).
-    pub async fn remove_member(&self, member: &MemberId) -> Result<(), SyncError>;
+    /// Removes a member and all their devices, rotates the store key, and
+    /// revokes their storage access; on S3 the result says to delete their
+    /// key in the provider's console (§13).
+    pub async fn remove_member(&self, member: &MemberId) -> Result<MemberRemoval, SyncError>;
 
     /// Removes a device. The provider can't cut off one device alone, so the
     /// result says how its member signs out of the provider and signs in
     /// again on the devices they keep (§13).
     pub async fn remove_device(&self, device: DeviceId) -> Result<ProviderSignOut, SyncError>;
+}
+
+pub enum MemberRemoval {
+    /// Their storage access is revoked.
+    Revoked,
+    /// On S3: the admin deletes the key the member used, in the provider's
+    /// console.
+    DeleteAccessKey { access_key: String },
 }
 
 pub struct MemberInfo {
@@ -2933,8 +2956,9 @@ pub enum ProviderSignOut {
     RemoveAppAccess { provider: CloudProvider },
     /// Remove the device from the Apple account.
     RemoveFromAppleAccount,
-    /// Replace the S3 access key on one device, then scan the new restore
-    /// code on the others, and write it down.
+    /// Make a new S3 access key in the provider's console, enter it on one
+    /// device, scan the new restore code on the others, write it down, and
+    /// delete the old key in the console.
     ReplaceAccessKey,
 }
 ```
@@ -2959,15 +2983,9 @@ impl CovenHandle {
     /// until the person taps it, and asks them to write it down at setup.
     pub async fn restore_code(&self) -> Result<String, SyncError>;
 
-    /// Starts adding a person, as an admin: shares the storage with their
-    /// provider account, or on S3 makes an access key for them, and returns
-    /// the invite to show as a QR code. `provider_account_email` is required
-    /// except on S3. Expires after a day.
-    pub async fn create_invite(
-        &self,
-        role: MemberRole,
-        provider_account_email: Option<String>,
-    ) -> Result<Invite, SyncError>;
+    /// Starts adding a person, as an admin, and returns the invite to show as
+    /// a QR code. Expires after a day.
+    pub async fn create_invite(&self, role: MemberRole, access: InviteAccess) -> Result<Invite, SyncError>;
 
     /// Join requests waiting for approval, live. The first value is the
     /// current list.
@@ -2978,12 +2996,22 @@ impl CovenHandle {
     pub async fn approve_join_request(&self, request: &JoinRequest) -> Result<(), SyncError>;
 
     /// Declines the request, and takes back the storage access its invite
-    /// granted.
+    /// granted; on S3 the admin deletes the key in the provider's console.
     pub async fn decline_join_request(&self, request: &JoinRequest) -> Result<(), SyncError>;
 
     /// Cancels an invite before anyone joins with it, taking back the
-    /// storage access it granted.
+    /// storage access it granted; on S3 the admin deletes the key in the
+    /// provider's console.
     pub async fn cancel_invite(&self, invite: &InviteId) -> Result<(), SyncError>;
+}
+
+/// How the new person reaches storage (§12.2).
+pub enum InviteAccess {
+    /// Google Drive, Dropbox, OneDrive or iCloud: the store is shared with
+    /// this account.
+    ProviderAccount { email: String },
+    /// S3: an access key the admin made for them in the provider's console.
+    S3AccessKey { access_key: String, secret_key: String },
 }
 
 pub struct Invite {
@@ -3137,7 +3165,10 @@ Example, Ana adding Carol. On Ana's phone:
 
 ```rust
 let invite = handle
-    .create_invite(MemberRole::Member, Some("carol@example.com".into()))
+    .create_invite(
+        MemberRole::Member,
+        InviteAccess::ProviderAccount { email: "carol@example.com".into() },
+    )
     .await?;
 show_qr_code(&invite.code);
 
