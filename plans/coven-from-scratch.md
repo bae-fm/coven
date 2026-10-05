@@ -183,6 +183,11 @@ Two mechanisms order writes:
     - a counter past its maximum moves to the next millisecond.
   - so a new write is always stamped later than everything its device had
     seen, whatever the devices' wall clocks say.
+  - A wall clock before 1970 is never past the latest timestamp, so the
+    write takes the latest time with its counter raised.
+  - A wall clock past the last time 48 bits hold, in the year 10889, or a
+    latest timestamp already at that time with its counter at the maximum,
+    fails the write with `DbError::ClockOutOfRange`.
 - A write stamped more than five minutes ahead of the receiving device's
   clock waits until that clock catches up, instead of being applied.
 
@@ -2241,6 +2246,9 @@ pub enum DbError {
     TransactionEnded,
     /// SQLite kept another journal mode instead of WAL (§5).
     WalUnavailable { mode: String },
+    /// The wall clock reads past the last time a timestamp holds, or no
+    /// later timestamp is left (§7.2).
+    ClockOutOfRange,
     /// A local trigger wrote a synced table or a shared trigger a local one (§8.7).
     TriggerTarget { trigger: String, table: String },
     /// A reference points at a row outside the source row's audience (§14.5).
