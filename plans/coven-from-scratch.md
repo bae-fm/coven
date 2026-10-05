@@ -652,7 +652,7 @@ Carol's tablet:
 - E.g. note 46 loses its title to note 45 and is taken out; link 7, which
   points at note 46 with set null, is taken out with it, not set to null.
 - Coven refuses set null and set default on a primary key column, checked
-  when the database opens and after every migration, since nulling a key
+  when the database opens and after migrating, since nulling a key
   column changes the row's key: a delete plus an insert no write recorded.
 - A taken-out child's own generation never moves, so it comes back if its
   reference is later pointed at a parent that is present.
@@ -693,7 +693,7 @@ Carol's tablet:
     devices never share a key;
   - shared: the app derives the key from what makes the row unique, so
     equal values are one row on every device.
-- Coven refuses, checked when the database opens and after every migration:
+- Coven refuses, checked when the database opens and after migrating:
   - an independent key that isn't a UUID;
   - a key SQLite picks itself, such as an integer rowid;
   - a synced table with no primary key.
@@ -876,7 +876,7 @@ Carol's tablet:
     `coven_applying()`, true while it applies another device's write.
   - A shared trigger declares `WHEN NOT coven_applying()`, as above, and
     coven refuses one that doesn't, checked when the database opens and
-    after every migration.
+    after migrating.
 - A trigger's write to the wrong kind of table fails.
   - SQLite's authorizer callback reports each table a statement would
     write, with the trigger doing the write, when the statement is
@@ -1241,10 +1241,10 @@ Carol's tablet:
 - A descendant's declared foreign key is one column, into a synced table.
   - Its action can't be set null or set default, since the row would lose
     its audience; coven refuses it, checked when the database opens and
-    after every migration.
+    after migrating.
   - Following declared foreign keys from any descendant reaches a root,
     or a table in the store; a loop is refused, checked when the database
-    opens and after every migration.
+    opens and after migrating.
 - E.g. todos are descendants of lists, labels are in the store, and the
   join table `todo_labels` declares `todo_id`:
 
@@ -1269,7 +1269,7 @@ Carol's tablet:
     a circle note and Ben's on a store note would clash on Ana's device
     but not on Dan's, outside the circle; `UNIQUE(note_id, file_name)` is
     allowed.
-  - Coven checks this when the database opens and after every migration,
+  - Coven checks this when the database opens and after migrating,
     and refuses to open with an error naming the table and the constraint.
 
 ### 14.2 Moving rows
@@ -1653,6 +1653,11 @@ Carol's tablet:
     TO name`;
   - optionally, one changes a write made in the old version, e.g. turns
     "note 43, title: X" into "note 43, name: X".
+- An update runs every pending migration in one transaction, then checks
+  the schema rules against the tables the app declares, which describe
+  only the newest version; if a rule fails, nothing changes.
+  - E.g. migration 1 makes `notes(id)` and migration 2 renames `id` to
+    `note_id`: only the final schema has to match `key_columns(["note_id"])`.
 - A breaking change raises the store's schema version, which every device
   shares.
   - Whichever device's app updates first makes it, whoever's device it is.
@@ -2128,7 +2133,7 @@ pub enum DbError {
     Disk(DiskError),
 }
 
-/// A schema rule checked on open and after each migration (§8, §14.1).
+/// A schema rule checked on open and after migrating (§8, §14.1).
 pub enum SchemaError {
     /// A synced table has no primary key (§8.5).
     NoPrimaryKey { table: String },
