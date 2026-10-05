@@ -8,6 +8,7 @@
 //! can't be read.
 
 mod capability_boundaries;
+mod capability_construction;
 mod component_bundles;
 mod conventions;
 mod crate_dependencies;

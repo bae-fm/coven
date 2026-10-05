@@ -281,6 +281,20 @@ fn files_are_rejected_outside_the_file_writes_and_the_file_cache() {
 }
 
 #[test]
+fn platform_file_operations_obey_the_same_filesystem_boundary() {
+    for source in [
+        "use rustix::fs::{renameat_with, RenameFlags};",
+        "use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, SetFileAttributesW};",
+    ] {
+        assert_eq!(
+            kinds("crates/coven-sync/src/leak.rs", source),
+            BTreeSet::from(["filesystem"]),
+        );
+        assert!(kinds("crates/coven-foundation/src/files/atomic_file.rs", source).is_empty());
+    }
+}
+
+#[test]
 fn a_local_item_sharing_a_gated_crate_name_is_not_a_crate_reference() {
     assert!(kinds(
         "crates/coven-crypto/src/sealing.rs",

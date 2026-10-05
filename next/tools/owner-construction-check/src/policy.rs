@@ -50,7 +50,8 @@ pub(crate) struct Policy {
     /// an owner, is an owner.
     pub(crate) capability_types: &'static [&'static str],
     /// Raw capabilities fixed when the owner graph is built, such as the store
-    /// directory. Only constructors and composition roots accept them.
+    /// directory. Only constructors and composition roots accept them; unit
+    /// values such as `SystemClock` are constructed only at composition roots.
     pub(crate) construction_only_capability_types: &'static [&'static str],
     /// Values, configuration and proofs that name a capability in a field but
     /// do not own its lifetime.

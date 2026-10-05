@@ -3,7 +3,7 @@
 # ships, unchanged.
 [workspace]
 resolver = "2"
-members = ["tools/owner-construction-check"]
+members = ["crates/coven-foundation", "tools/owner-construction-check"]
 
 [workspace.package]
 edition = "2021"
@@ -17,6 +17,13 @@ proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
 syn = { version = "3.0.3", features = ["full", "visit"] }
 thiserror = "2.0"
 toml = "1.1"
+uuid = "1.27.0"
+serde = "1.0.229"
+serde_json = "1.0.151"
+tempfile = "3.27.0"
+tracing = "0.1.44"
+windows-sys = "0.61.2"
+rustix = "1.1.5"
 
 [workspace.lints.rust]
 # Every `pub` not reachable from the crate's own root must be `pub(crate)` or
@@ -24,6 +31,7 @@ toml = "1.1"
 # what lets an unused internal item show up as dead.
 unreachable_pub = "deny"
 dead_code = "deny"
+missing_docs = "deny"
 
 [workspace.lints.clippy]
 # Composition roots and owner constructors take their collaborators by name

@@ -3,6 +3,9 @@
 use crate::capability_boundaries::{
     find_capability_boundary_violations, CapabilityBoundaryViolation,
 };
+use crate::capability_construction::{
+    find_capability_construction_violations, CapabilityConstructionViolation,
+};
 use crate::component_bundles::{find_component_bundle_violations, ComponentBundleViolation};
 use crate::conventions::{find_convention_violations, ConventionViolation};
 use crate::crate_dependencies::{find_crate_dependency_violations, CrateDependencyViolation};
@@ -33,6 +36,7 @@ pub(crate) struct Report {
     retained_capability_parameters: Vec<RetainedCapabilityParameterViolation>,
     component_bundles: Vec<ComponentBundleViolation>,
     capability_boundaries: Vec<CapabilityBoundaryViolation>,
+    capability_construction: Vec<CapabilityConstructionViolation>,
     conventions: Vec<ConventionViolation>,
 }
 
@@ -88,6 +92,7 @@ pub(crate) fn check(workspace: &Workspace, policy: &Policy) -> Report {
         ),
         component_bundles: find_component_bundle_violations(files),
         capability_boundaries: find_capability_boundary_violations(files, policy),
+        capability_construction: find_capability_construction_violations(files, policy),
         conventions: find_convention_violations(&workspace.files),
     }
 }
@@ -103,6 +108,7 @@ impl Report {
             && self.retained_capability_parameters.is_empty()
             && self.component_bundles.is_empty()
             && self.capability_boundaries.is_empty()
+            && self.capability_construction.is_empty()
             && self.conventions.is_empty()
     }
 
@@ -240,6 +246,15 @@ impl Report {
         }
         if !self.capability_boundaries.is_empty() {
             remedies.push("reach a capability through the owner that holds it, given to you when you are built");
+        }
+        for violation in &self.capability_construction {
+            lines.push(format!(
+                "{}:{}: constructs capability {} outside a composition root",
+                violation.path, violation.line, violation.capability
+            ));
+        }
+        if !self.capability_construction.is_empty() {
+            remedies.push("construct unit capabilities at composition roots; elsewhere use the capability given to the owner");
         }
         for violation in &self.conventions {
             lines.push(format!(

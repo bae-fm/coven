@@ -9,7 +9,7 @@ pub(crate) const POLICY: Policy = Policy {
     // Rows are added as crates land, in §21.1's order: coven-foundation,
     // coven-crypto, coven-format, coven-merge, coven-database, coven-storage,
     // coven-sync, coven.
-    crate_order: &[],
+    crate_order: &["coven-foundation"],
     // coven-database and coven-storage never depend on each other; the pair is
     // added once both crates are in `crate_order`.
     separated_crates: &[],
@@ -18,8 +18,28 @@ pub(crate) const POLICY: Policy = Policy {
     database_schema: None,
     composition_roots: &[],
     lifetime_authorities: &[],
-    capability_types: &[],
-    construction_only_capability_types: &[],
+    // These are the leaf capabilities. Owners retaining them receive them
+    // through constructors; their implementations keep raw OS handles private.
+    capability_types: &[
+        "Clock",
+        "ClockRef",
+        "SystemClock",
+        "IdSource",
+        "IdSourceRef",
+        "UuidIds",
+        "StoreLayout",
+        "StoreDir",
+        "AtomicFile",
+        "StoreLock",
+    ],
+    construction_only_capability_types: &[
+        "StoreDir",
+        "AtomicFile",
+        "ClockRef",
+        "IdSourceRef",
+        "SystemClock",
+        "UuidIds",
+    ],
     non_owner_types: &[],
     borrowed_facade_types: &[],
     root_owner_types: &[],
@@ -202,6 +222,8 @@ const CAPABILITIES: Capabilities = Capabilities {
                 &["tokio", "fs"],
                 &["unix", "fs"],
                 &["windows", "fs"],
+                &["rustix", "fs"],
+                &["windows_sys", "Win32", "Storage", "FileSystem"],
             ],
             method_patterns: &[],
         }],

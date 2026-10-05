@@ -54,3 +54,53 @@ fn crates_answer_to_every_rule() {
         ],
     );
 }
+
+#[test]
+fn concrete_clock_and_ids_cannot_be_constructed_outside_composition_roots() {
+    for expression in [
+        "SystemClock.now()",
+        "UuidIds.new_id()",
+        "std::sync::Arc::new(SystemClock)",
+        "std::sync::Arc::new(UuidIds)",
+    ] {
+        let source = format!("fn acquire() {{ let _ = {expression}; }}");
+        let report = check(
+            &workspace(vec![RustFile::fixture(
+                "crates/coven/src/runtime.rs",
+                &source,
+            )]),
+            &POLICY,
+        );
+        assert!(!report.is_empty(), "accepted {expression}");
+        assert!(report
+            .lines()
+            .iter()
+            .any(|line| line.contains("outside a composition root")));
+    }
+}
+
+#[test]
+fn composition_roots_can_construct_and_use_concrete_clock_and_ids() {
+    const ROOT_POLICY: crate::policy::Policy = crate::policy::Policy {
+        composition_roots: &[("crates/coven/src/builder.rs", "Builder", "open")],
+        ..POLICY
+    };
+    let report = check(
+        &workspace(vec![RustFile::fixture(
+            "crates/coven/src/builder.rs",
+            r#"
+            struct Builder;
+            impl Builder {
+                fn open() {
+                    let clock = std::sync::Arc::new(SystemClock);
+                    let ids = std::sync::Arc::new(UuidIds);
+                    let _ = SystemClock.now();
+                    let _ = UuidIds.new_id();
+                }
+            }
+            "#,
+        )]),
+        &ROOT_POLICY,
+    );
+    assert!(report.is_empty(), "{:?}", report.lines());
+}
