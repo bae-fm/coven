@@ -1825,7 +1825,11 @@ pub enum Audience {
 ### 20.1 Opening
 
 - A store lives in one directory on the device, its `StoreDir`, which holds
-  the database, coven's copies of files, and the cache.
+  the database, coven's copies of files, the cache, and the store's
+  settings: its id and name, this device's id, and its storage settings.
+- Creating, restoring or joining a store makes the directory and writes
+  the settings, so the app never handles a device id ([§10](#10-device-identity)).
+- A `StoreLayout` says where an app's stores live on disk.
 - Opening a store needs its declared tables ([§20.2](#202-declaring-synced-tables))
   and its migrations ([§20.13](#2013-migrations)).
 - *Key custody* is where this device keeps the store keys and circle keys
@@ -1839,13 +1843,32 @@ pub enum Audience {
 /// Called once at startup, before any store opens.
 pub fn set_keyring_service(name: impl Into<String>) -> Result<(), KeyError>;
 
+impl StoreLayout {
+    /// The stores under `app_dir`, one directory each.
+    pub fn new(app_dir: PathBuf) -> Self;
+
+    /// The stores on this device, by id and name.
+    pub async fn stores(&self) -> Result<Vec<StoreInfo>, StoreLayoutError>;
+
+    /// The directory of the store with `id`.
+    pub fn store_dir(&self, id: &StoreId) -> StoreDir;
+}
+
 pub struct Coven;
 
 impl Coven {
-    /// Starts opening the store in `store_dir`. `config` is a `Config`, or a
-    /// closure that returns the current `Config` and is called on each use, so
-    /// the app can change storage settings without reopening.
-    pub fn builder(store_dir: StoreDir, config: impl Into<CovenConfig>) -> CovenBuilder;
+    /// Makes a new store on this device, named `name`: its directory, its id
+    /// and this device's id, both from `ids`. Storage is set up after opening
+    /// (§20.5).
+    pub async fn create_store(
+        layout: &StoreLayout,
+        name: &str,
+        ids: IdSourceRef,
+    ) -> Result<StoreDir, StoreCreationError>;
+
+    /// Starts opening the store in `store_dir`, with the settings coven keeps
+    /// there.
+    pub fn builder(store_dir: StoreDir) -> CovenBuilder;
 
     /// Deletes a closed store from this device: every keychain entry coven
     /// holds for it, including the named host secrets, then its directory.
@@ -1853,7 +1876,6 @@ impl Coven {
     /// again finishes a deletion that failed partway.
     pub async fn delete_store(
         store_dir: &StoreDir,
-        store_id: &str,
         host_secret_names: &[&str],
     ) -> Result<(), StoreDeletionError>;
 }
@@ -1873,7 +1895,7 @@ impl CovenBuilder {
     /// The wall clock that timestamps use (§7.2). Defaults to the system clock.
     pub fn clock(self, clock: ClockRef) -> Self;
 
-    /// The source of new ids (§21.2). Defaults to random UUIDs.
+    /// The source of new ids (§21.2). Defaults to `UuidIds`, random UUIDs.
     pub fn id_source(self, ids: IdSourceRef) -> Self;
 
     /// The app's own OAuth clients for Google Drive, Dropbox and OneDrive.
@@ -1952,9 +1974,9 @@ Example:
 coven::set_keyring_service("com.example.notes")?;
 
 let layout = StoreLayout::new(app_dir);
-let config = Config::with_defaults(store_id.clone(), device_id, "Household".into());
+let store_dir = Coven::create_store(&layout, "Household", Arc::new(UuidIds)).await?;
 
-let handle = Coven::builder(layout.store_dir(&store_id), config)
+let handle = Coven::builder(store_dir)
     .synced_tables(tables())                        // §20.2
     .migrations(migrations())                       // §20.13
     .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
@@ -2400,9 +2422,9 @@ impl CovenHandle {
         storage: StorageConfig,
     ) -> Result<ConnectedStorage, StorageSetupError>;
 
-    /// Checks that the storage `config` describes can be reached and used,
+    /// Checks that the storage `storage` describes can be reached and used,
     /// without connecting to it.
-    pub async fn probe_storage(&self, config: &Config) -> Result<(), SyncError>;
+    pub async fn probe_storage(&self, storage: &StorageConfig) -> Result<(), SyncError>;
 
     /// Opens the current store key from its copy sealed to this member in
     /// storage (§11), keeps it in key custody, and connects.
@@ -2904,7 +2926,7 @@ pub enum ProviderSignOut {
   ([§12.2](#122-adding-a-person)).
 - Each call that opens the store on a new device makes the store
   directory, puts the keys in custody, loads the store, and returns the
-  `Config` the app then opens the store with.
+  store's directory, which the app then opens.
 - Each takes the same tables, migrations and custody choices as the
   builder, and `cancel`, which stops it.
 
@@ -2974,10 +2996,10 @@ pub async fn restore_from_code(
     identity_custody: IdentityCustody,
     oauth_tokens: Option<OAuthTokens>,
     layout: &StoreLayout,
-    /* transfer limits, OAuth clients, CloudKit calls, clock */
+    /* transfer limits, OAuth clients, CloudKit calls, clock, id source */
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
-) -> Result<Config, BootstrapError>;
+) -> Result<StoreDir, BootstrapError>;
 
 /// Opens the store on a new Apple device from the iCloud Keychain item,
 /// which holds what a restore code holds (§12.1). `None` when the keychain
@@ -2990,10 +3012,10 @@ pub async fn restore_from_keychain(
     identity_custody: IdentityCustody,
     oauth_tokens: Option<OAuthTokens>,
     layout: &StoreLayout,
-    /* transfer limits, OAuth clients, CloudKit calls, clock */
+    /* transfer limits, OAuth clients, CloudKit calls, clock, id source */
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
-) -> Result<Option<Config>, BootstrapError>;
+) -> Result<Option<StoreDir>, BootstrapError>;
 
 /// On the new person's device: makes their member keys, writes a join
 /// request to storage, and waits for the admin to approve it, then loads
@@ -3009,10 +3031,10 @@ pub async fn join_with_invite(
     identity_custody: IdentityCustody,
     oauth_tokens: Option<OAuthTokens>,
     layout: &StoreLayout,
-    /* transfer limits, OAuth clients, CloudKit calls, clock */
+    /* transfer limits, OAuth clients, CloudKit calls, clock, id source */
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
-) -> Result<Option<Config>, BootstrapError>;
+) -> Result<Option<StoreDir>, BootstrapError>;
 
 impl OAuthClients {
     /// The app's own OAuth client ids for Google Drive, Dropbox and OneDrive,
@@ -3063,7 +3085,7 @@ let tokens = if info.needs_oauth {
 } else {
     None
 };
-let config = restore_from_code(
+let store_dir = restore_from_code(
     &scanned,
     &tables(),
     &migrations(),
@@ -3076,11 +3098,12 @@ let config = restore_from_code(
     oauth_clients.clone(),
     cloudkit_ops.clone(),
     clock.clone(),
+    ids.clone(),
     |step| show_step(step),
     &cancel_rx,
 )
 .await?;
-let handle = Coven::builder(layout.store_dir(&config.store_id), config)
+let handle = Coven::builder(store_dir)
     .synced_tables(tables())
     .migrations(migrations())
     .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
@@ -3129,12 +3152,13 @@ match join_with_invite(
     oauth_clients.clone(),
     cloudkit_ops.clone(),
     clock.clone(),
+    ids.clone(),
     |step| show_step(step),
     &cancel_rx,
 )
 .await?
 {
-    Some(config) => open_store(config),
+    Some(store_dir) => open_store(store_dir),
     None => show_declined(),
 }
 ```
