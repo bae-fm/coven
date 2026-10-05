@@ -261,16 +261,18 @@ Two mechanisms order writes:
     reference that made it a parent's child is pointed elsewhere.
 - A removed row's `coven_lost` row names every rule that holds for it once
   the rules have run, and it comes back only when none holds.
-  - A unique value's loser counts the unique rule as holding, from the
-    step that judged it.
   - E.g. todos need `start <= end`, and todo 7 is in list 3.
   - Ana deletes list 3, while Ben moves todo 7's start past its end.
   - Todo 7 is held for both reasons, on every device, whichever rule a
     device ran first.
+  - A unique value's loser counts the unique rule as holding, from the
+    step that judged it.
 - The app can't see a removed row, so it can insert the same shared key
   again; the write records that insert as an update of the removed row,
   setting every column, and the row comes back if the new values clear its
   reasons, as a local insert's always do.
+  - E.g. tag "urgent" is held after a merge; Ana adds "urgent" again, and
+    every device puts the held row back with her values.
 - Every rule but the unique one keeps firing when more rows are removed,
   so applying them in any order ends with the same rows removed.
 - The unique rule is judged once, between two passes of the others:
@@ -579,8 +581,13 @@ Carol's tablet:
   - The cell is recorded as set by the parent's delete, the write
     `coven_rows` records for the deleted generation, and nothing is
     recorded as lost, as when SQLite sets it on the deleting device.
+  - E.g. links point at notes with set null; while Ana deletes note 43,
+    Ben adds link 6 to it, and every device ends with link 6's `note_id`
+    null, set by Ana's delete.
 - Where SQLite would refuse the null or the default, such as on a `NOT NULL`
   column, the child is taken out as under restrict.
+  - E.g. if link 6's `note_id` were `NOT NULL`, link 6 would be held
+    instead.
 - A reference set to its default points at whichever generation of the
   default parent is current, and is never stale.
   - If that parent is deleted or taken out, the child is taken out as
@@ -599,6 +606,8 @@ Carol's tablet:
 
 - A child whose parent is taken out by a rule, rather than deleted, is
   taken out with it under every action, and comes back with it.
+  - E.g. note 46 loses its title to note 45 and is held; link 7, which
+    points at note 46 with set null, is held with it, not set to null.
 - Coven refuses set null and set default on a primary key column, checked
   whenever the schema changes, since the change would be a key change no
   write made.
@@ -1133,6 +1142,8 @@ Carol's tablet:
     the smaller timestamp wins, the write `coven_rows` records for it.
   - A device in both circles can show a different row for that key than a
     device in one, since each reads different rows.
+  - E.g. Ana moves note 1 into her circle while Ben re-adds note 1 in the
+    store: Ana's devices show the store's note 1 and hold the circle's.
 
 ### 14.3 Circles
 
@@ -1349,6 +1360,11 @@ Carol's tablet:
   - The uploaded copy is then deleted like any unused file.
 - Concurrent changes to where a file is follow [§8.2](#82-concurrent-writes-to-one-row):
   the later write wins.
+  - E.g. an album is uploaded; at 10:00 Ana's laptop keeps it on the
+    laptop, while her phone, offline, keeps it on the phone at 10:05.
+  - Both download it first; the phone's later write wins, so every device
+    shows the album on the phone, and the uploaded copy goes once nothing
+    refers to it as uploaded.
   - An uploaded copy stays while any write still refers to it as uploaded
     ([§16.5](#165-uploads-and-deletion)), so the winner always finds the
     file where its row says.
