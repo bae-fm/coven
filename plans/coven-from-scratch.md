@@ -21,6 +21,9 @@
 - Current members trust each other: each has access to the storage and
   isn't hostile on it.
 - An ex-member may keep a copy of the store key they had.
+- Each person keeps their restore code to themselves, on paper or shown on
+  a screen ([§12](#12-joining-and-restore)); anyone who sees it can open
+  the store.
 
 ## 3. Guarantees
 
@@ -246,8 +249,8 @@ Two mechanisms order writes:
     parent is taken out is taken out with it, under every action
     ([§8.4](#84-foreign-keys));
   - CHECK constraints: a row whose merged values fail is taken out ([§8.6](#86-check-constraints));
-  - ancestors: an ancestor that no present shared row the device can read
-    points at is taken out ([§14](#14-audiences));
+  - deleted circles: a row in a circle the store log has deleted is taken
+    out ([§14.7](#147-deleting-a-circle));
   - unique values: of two rows claiming one value, the row whose write has
     the larger timestamp is taken out, since the first claim keeps it
     ([§8.5](#85-keys-and-uniqueness)).
@@ -258,6 +261,8 @@ Two mechanisms order writes:
     reference that made it a parent's child is pointed elsewhere.
 - A removed row's `coven_lost` row names every rule that holds for it once
   the rules have run, and it comes back only when none holds.
+  - A unique value's loser counts the unique rule as holding, from the
+    step that judged it.
   - E.g. todos need `start <= end`, and todo 7 is in list 3.
   - Ana deletes list 3, while Ben moves todo 7's start past its end.
   - Todo 7 is held for both reasons, on every device, whichever rule a
@@ -271,10 +276,10 @@ Two mechanisms order writes:
 - The unique rule is judged once, between two passes of the others:
   1. apply the other rules until none fires;
   2. judge unique values among the rows still present;
-  3. apply the other rules again, to the losers' children and ancestors.
+  3. apply the other rules again, to the losers' children.
 - So every device that applied the same writes sees the same rows, whatever
   order the writes arrived in, and whatever order the rules ran in.
-  - The proof is in [Appendix B](#appendix-b-proof-of-convergence),
+  - The proof is [Appendix B](coven-merge-proof.md), in its own file,
     checked by machine for the merged state and the removal rules.
 - When a write changes which rows are removed, coven makes the change in
   the app's table with ordinary SQL, which triggers see like any other.
@@ -571,8 +576,27 @@ Carol's tablet:
   - The reference is null or the default wherever coven keeps it, in the
     app's table and in `coven_lost`, so every device stores the same value
     whichever write arrived first.
+  - The cell is recorded as set by the parent's delete, the write
+    `coven_rows` records for the deleted generation, and nothing is
+    recorded as lost, as when SQLite sets it on the deleting device.
 - Where SQLite would refuse the null or the default, such as on a `NOT NULL`
   column, the child is taken out as under restrict.
+- A reference set to its default points at whichever generation of the
+  default parent is current, and is never stale.
+  - If that parent is deleted or taken out, the child is taken out as
+    under restrict, as SQLite would refuse it, and comes back once the
+    parent is there again.
+  - E.g. notes point at folders with set default, and the default is
+    "Inbox".
+
+    ```
+    16:00  Ana deletes "Work"; Ben, offline, puts note 50 in "Work"
+    16:10  Carol deletes "Inbox"
+    16:30  every device: note 50's folder would be "Inbox", but there is
+           none, so note 50 is taken out and recorded in coven_lost
+    17:00  Carol re-adds "Inbox"; note 50 comes back, in Inbox
+    ```
+
 - A child whose parent is taken out by a rule, rather than deleted, is
   taken out with it under every action, and comes back with it.
 - Coven refuses set null and set default on a primary key column, checked
@@ -705,8 +729,8 @@ Carol's tablet:
     keeps the value and note 2 is taken out.
 - Of two claims with the same timestamp, the row with the smaller primary
   key keeps the value.
-- A loser comes back when the winner is deleted, or taken out for a reason
-  other than the loser itself.
+- A loser comes back only when the winner is deleted, or taken out before
+  unique values are judged ([§8](#8-merge)).
   - E.g. notes are unique by title, and a sub-note points at its parent
     note with cascade.
 
@@ -824,8 +848,9 @@ Carol's tablet:
 - The *store log* records changes to the store itself, separate from the
   app's writes.
   - Each change is one *entry*: add or remove a member, change a role, add
-    or remove a device, raise the store's schema or format version, or
-    reset the store or a circle to a snapshot.
+    or remove a device, make or delete a circle or change its members,
+    raise the store's schema or format version, or reset the store or a
+    circle to a snapshot.
   - An entry names the store log entries its author had read, and is
     signed with its author's member key.
   - Entries live at `store-log/<device>/<n>`, numbered like a device's
@@ -960,24 +985,49 @@ Carol's tablet:
 
 ## 12. Joining and restore
 
-- A person's new device needs their member key, which gets it the store key
-  ([§11](#11-keys)), in one of three ways:
-  - pairing: one of their existing devices hands it over, with storage
-    access, over the local network;
-  - on Apple platforms, iCloud Keychain syncs it, and the device opens the
-    store without pairing;
-  - on other platforms, the person enters their restore code.
-- A restore code holds the person's member key, the store's id and name,
-  and storage credentials.
-  - The person writes it down when they create or join a store, as part of
-    setup.
-  - Where storage needs a sign-in, such as Google Drive, the device signs
-    in first.
-- On Apple platforms, the iCloud Keychain item holds exactly what a restore
-  code holds, so a new device on the same Apple account finds the store
-  and opens it the same way.
+### 12.1 A person's new device
+
+- A person's new device needs their *restore code*, which holds:
+  - their member key, which gets it the store key ([§11](#11-keys));
+  - the store's id and name;
+  - storage credentials.
+- It gets the code in one of three ways:
+  - by scanning it as a QR code on one of the person's devices that has
+    the store open;
+  - on Apple platforms, from iCloud Keychain, which holds the same
+    contents, so a new device on the same Apple account opens the store
+    with no step at all;
+  - by the person typing it in.
+- The QR code is blurred until the person taps to show it.
+- Where storage needs a sign-in, such as Google Drive, the new device
+  signs in to the person's own account first.
 - The new device then adds itself to the store log, signing with the
   member key ([§9](#9-members-and-roles)).
+- The person writes the code down when they create or join a store, as
+  part of setup.
+
+### 12.2 Adding a person
+
+- An admin adds a person with an *invite*, a code shown as a QR code,
+  holding the store's id, name and location, and on S3 an access key made
+  for the new person.
+- E.g. Ana adds Carol, on Google Drive:
+  1. Ana enters Carol's Google account email and picks her role; her phone
+     shares the store's folder with that account and shows the invite.
+  2. Carol's phone scans it, signs in to her own Google account, makes
+     Carol's member keys, and writes a join request to storage, holding
+     her public key and her device's name.
+  3. Ana's phone shows the request, and Ana approves it.
+  4. Ana's phone writes "add member Carol" to the store log, and seals the
+     store key to Carol's public key ([§11](#11-keys)).
+  5. Carol's phone opens the store key, adds itself to the store log, and
+     Carol writes down her own restore code.
+- The invite only lets a device ask; Ana's approval is what lets Carol in.
+- Declining the request, or letting the invite expire after a day, takes
+  back the storage access it granted.
+
+### 12.3 Losing everything
+
 - An admin re-invites a person who lost every device and their restore
   code.
 - Losing every member's devices and restore codes loses the store for good,
@@ -992,12 +1042,15 @@ Carol's tablet:
   - Google Drive, Dropbox and OneDrive: she removes the app's access from
     her provider account;
   - iCloud: she removes the phone from her Apple account;
-  - S3: one of her devices replaces her access key, her other devices get
-    the new one by pairing, and she writes down a new restore code.
+  - S3: one of her devices replaces her access key, which changes her
+    restore code; her other devices scan the new code to take the new key,
+    and she writes it down.
 - No keys change: the phone still holds Ana's key, but can't reach storage
   to read or write anything new.
 - Removing a member removes them and all their devices, and then:
-  - their storage access is revoked ([§4](#4-storage-providers-and-access));
+  - the storage access their invite granted is taken back: the store's
+    folder is unshared from their account, or on S3 their access key is
+    deleted ([§12.2](#122-adding-a-person));
   - the store key is rotated: a new one, sealed to each remaining member's
     public key ([§11](#11-keys)).
 - So a removed member's copy of the old store key reads nothing written
@@ -1008,95 +1061,62 @@ Carol's tablet:
 
 ## 14. Audiences
 
-- Every synced row has an *audience*: the store, one circle, or this device
-  only.
+- Every synced row has an *audience*: the store, or one circle.
   - A row in the store reaches every member's devices.
   - A row in a circle reaches only that circle's members' devices.
-  - A row on this device only never leaves it, though its table syncs.
-  - E.g. a household's notes are the store's, each person pins notes in a
-    circle of their own, and a draft stays on the device that wrote it.
-- A row is *shared* when its audience is the store or a circle.
+  - E.g. a household's notes are the store's, and each person pins notes
+    in a circle of their own.
 - The app declares, for each synced table, how its rows get their audience:
-  - a *root* table names a column holding each row's audience: `store`, a
-    circle's id, or `device`, and never NULL;
+  - a *root* table names a column holding each row's audience: `store` or
+    a circle's id, and never NULL;
   - a *descendant* table names one foreign key, and each row takes the
     audience of the row it points at;
-  - an *ancestor* table has no audience of its own: a row is in the store
-    while a present shared row points at it, and a device shows it only
-    while a present shared row that device can read points at it;
-  - a table that declares none of these is in the store.
+  - a table that declares neither is in the store, every row of it.
 - Audience is defined once, from these declarations, and everything that
   decides where a row goes uses that one definition: writes, snapshots and
   files.
 
-### 14.1 Roots, descendants and ancestors
+### 14.1 Roots and descendants
 
 - A descendant's declared foreign key is one column, into a synced table.
   - Its action can't be set null or set default, since the row would lose
     its audience; coven refuses it when the database opens.
-  - Following declared foreign keys from any descendant reaches a root or
-    an ancestor; a loop is refused when the database opens.
-- The rows that keep an ancestor are those of every other synced table
-  with a foreign key into it, except:
-  - a table whose declared foreign key points at the ancestor, since it
-    takes its audience from the ancestor instead;
-  - an *asset* table, a descendant declared never to keep anything alive,
-    such as cover images;
-  - the ancestor's own table.
-  - Only a table's first foreign key into the ancestor counts.
-- E.g. todos are descendants of lists, labels are an ancestor, and the
+  - Following declared foreign keys from any descendant reaches a root,
+    or a table in the store; a loop is refused when the database opens.
+- E.g. todos are descendants of lists, labels are in the store, and the
   join table `todo_labels` declares `todo_id`:
 
   ```
-  lists         root         audience column: store or device
+  lists         root         audience column: store or a circle
   todos         descendant   through list_id
-  todo_labels   descendant   through todo_id, so a label is kept by it
-  labels        ancestor     kept while a shared todo wears it
+  todo_labels   descendant   through todo_id
+  labels        store
   ```
 
-- An ancestor that no table could keep is refused when the database opens.
-- Devices that read different circles can differ on whether they show an
-  ancestor.
-  - E.g. a label worn only by a todo in Ana's circle is in the store.
-  - Ana's device shows it.
-  - Dan, outside the circle, can't see that todo, so his device holds the
-    label.
 - A unique constraint or shared key ([§8.5](#85-keys-and-uniqueness)) must not span audiences, since a
   device outside a circle can't see the circle's claim to a value.
   - On a root table, it must include the audience column, e.g.
     `UNIQUE(audience, title)`, so the same title in the store and in a
     circle are two separate claims.
-  - On a descendant or ancestor table whose rows can be in different
-    audiences, it is refused, since there is no audience column to
-    include.
+  - On a descendant table whose rows can be in different audiences, it is
+    refused, since there is no audience column to include.
   - Coven checks this when the database opens, and after every migration,
     and refuses to open with an error naming the table and the constraint.
-- When a write shares a row, every row it points at that isn't shared yet
-  goes with it in the same write.
-  - A root row is never shared this way; a write that would need it is
-    refused.
-  - So no device ever receives a row whose parent never arrives.
 
 ### 14.2 Moving rows
 
-- A row moves when:
-  - its root's audience column changes, or a root row is inserted with
-    an audience other than `device`;
-  - a descendant is pointed at a parent with another audience;
-  - an ancestor gains its first present shared child, or loses its last.
-- Moving rows into the store or a circle sends them there as full inserts:
-  the root, its descendants, and the ancestors they keep.
-  - So other devices receive the whole subtree, not changes to rows they
-    never had.
-- Moving rows out of an audience is, for the devices that lose them, a
-  delete.
-  - The moving device keeps its rows, now on this device only.
-  - A row still kept by another root stays.
-  - Which rows leave is worked out against the database as it was before
+- A row moves when its root's audience column changes, or a descendant is
+  pointed at a parent with another audience.
+- A move is a delete of the root and its descendants in the old audience,
+  and a full insert of them in the new one.
+  - So devices in the new audience receive the whole subtree, not changes
+    to rows they never had.
+  - Devices that read only the old audience see a delete.
+  - Which rows move is worked out against the database as it was before
     the write.
   - Moving them back later is a re-add ([§8.3](#83-deletes)).
-- Moving a row from one circle to another is a delete in the first and an
-  insert in the second.
+- E.g. Ana moves note 42 and its attachments from the store into her
+  circle: Ben's devices delete them, and Ana's insert them in the circle.
 - A row's generations ([§8.3](#83-deletes)) are counted per audience, so
   `coven_rows` has one row per table, key, audience and generation.
   - A move ends the row in one audience and starts it in the other.
@@ -1109,19 +1129,10 @@ Carol's tablet:
   shows one of them, and the other is removed like a unique value's loser
   ([§8](#8-merge)):
   - the store's row wins over a circle's;
-  - of two circles' rows, the one whose insert has the smaller timestamp
-    wins.
+  - of two circles' rows, the one whose current generation started with
+    the smaller timestamp wins, the write `coven_rows` records for it.
   - A device in both circles can show a different row for that key than a
     device in one, since each reads different rows.
-- An ancestor leaving other devices is never a delete: each device works
-  out from the children it has whether the ancestor is present, by the
-  ancestor rule of [§8](#8-merge).
-  - E.g. Ana unshares the last shared todo wearing the label "urgent",
-    while Ben gives "urgent" to a new shared todo.
-  - Ben's write carries the label too, so every device that has his todo
-    has the label.
-  - Every device ends with Ben's todo present, so every device has the
-    label, whatever order the writes arrived in.
 
 ### 14.3 Circles
 
@@ -1158,8 +1169,6 @@ Carol's tablet:
     encrypted bytes.
 - A skipped part counts as applied, so a device never waits on a write it
   can't read ([§7.1](#71-causality)).
-- Changes to rows on this device only are left out of the write record
-  altogether, before it is signed and uploaded.
 - All members can see that a circle exists, who writes to it, when, and how
   much.
 
@@ -1167,7 +1176,6 @@ Carol's tablet:
 
 - A row may only point at rows that everyone who can read it can also
   read.
-  - A row on this device only may point at anything on the device.
   - A circle's row may point at rows in the same circle, or the store's.
   - A store row may point only at store rows.
 - Coven refuses a write that breaks this, on the device making it.
@@ -1198,6 +1206,32 @@ Carol's tablet:
     with the old circle key.
   - Only trust keeps him from claiming he hadn't read his removal, and
     members are trusted not to be hostile ([§2](#2-threat-model)).
+
+### 14.7 Deleting a circle
+
+- Any member of a circle can delete it.
+- Deleting a circle is two things, made together:
+  - a write deleting each of the circle's rows the device has, like any
+    delete, encrypted with the circle's key;
+  - a store log entry removing the circle ([§9](#9-members-and-roles)).
+- A row added to the circle concurrently, which the write doesn't name, is
+  taken out by a removal rule when it arrives, and recorded as lost.
+- E.g. Ana and Ben share a circle "Gifts", holding notes 7 and 8; Ben
+  deletes it while Ana, offline, adds note 9 to it.
+
+  ```
+  ben-phone, write 31
+    notes  row 7  generation 1  delete
+    notes  row 8  generation 1  delete
+  store-log/ben-phone/4   delete circle Gifts
+  ```
+
+  - Notes 7 and 8 are deleted on both devices.
+  - Note 9 arrives in a deleted circle, so it is taken out and recorded in
+    `coven_lost`, and Ana's app can offer to put it somewhere else.
+- Devices outside the circle see only the store log entry.
+- The circle's files and log objects go like those of any deleted row
+  ([§15](#15-snapshots), [§16.5](#165-uploads-and-deletion)).
 
 ## 15. Snapshots
 
@@ -1268,11 +1302,15 @@ Carol's tablet:
   - which column refers to the file;
   - which column holds the file's *content hash*, the SHA-256 of its
     bytes, which coven fills in when a write attaches the file;
+  - which column holds where the file is, which coven fills in
+    ([§16.1](#161-kinds-and-where-files-are));
   - the file's kind, user-provided or app-provided;
-  - whether devices download it as soon as its row arrives, or on first
-    read.
+  - whether a file is uploaded when it is attached, or only when the app
+    asks;
+  - whether devices download an uploaded file as soon as its row arrives,
+    or on first read.
 
-### 16.1 Kinds and locality
+### 16.1 Kinds and where files are
 
 - A *user-provided* file is the user's own file at a path on their device,
   such as a song in their music folder.
@@ -1285,32 +1323,47 @@ Carol's tablet:
   owns them.
   - The app can hand them over as a stream, so a large file never has to
     fit in memory.
-- A file follows its row's audience ([§14](#14-audiences)).
-  - A row on this device only has a *local* file: the user's original, or
-    coven's own copy of app-provided bytes.
-  - A shared row has a *remote* file: uploaded, encrypted, and read the
-    same way on every device.
-- So user-provided or app-provided says where a local file's bytes are,
-  and downloading as soon as the row arrives, or on first read, says how a
-  remote file reaches each device.
-- Moving a row into the store or a circle uploads its file first, then
-  writes the move.
+- Every row of a synced table syncs, but each file is in one of two
+  places:
+  - *uploaded*: stored encrypted, and read the same way on every device;
+  - *on one device*: only on the device that has it, as the user's
+    original or coven's own copy, and never uploaded.
+- The row's where-column says which: `uploaded`, or the id of the device
+  that has the file.
+  - So every device knows where each file is, and can say so.
+  - Reading a file that is on another device fails with an error of its
+    own, naming that device.
+- E.g. Ana imports 2 TB of music on her laptop, into a table whose files
+  upload only when the app asks:
+  - every album syncs to her phone, which shows them as on her laptop;
+  - she uploads twenty albums, which then play on her phone too.
+- Uploading a file stores it ([§16.5](#165-uploads-and-deletion)), then
+  writes `uploaded` to its row.
   - A user-provided original stays where it is.
-  - From then on the file is remote, and every device reads it as remote,
-    the one it came from included; coven never reads the original again.
-- Moving a row back to this device only downloads its file first, then
-  writes the move.
+  - From then on every device reads the uploaded copy, the one it came
+    from included; coven never reads the original again.
+- Keeping an uploaded file on one device downloads it there first, then
+  writes that device's id to its row.
   - A user-provided file is written to a path the user picks, which must
-    not already exist; an app-provided one goes back into coven's own
-    folder.
+    not already exist; an app-provided one goes into coven's own folder.
   - The uploaded copy is then deleted like any unused file.
+- Concurrent changes to where a file is follow [§8.2](#82-concurrent-writes-to-one-row):
+  the later write wins.
+  - An uploaded copy stays while any write still refers to it as uploaded
+    ([§16.5](#165-uploads-and-deletion)), so the winner always finds the
+    file where its row says.
+- An uploaded file is encrypted with its row's audience's key
+  ([§14](#14-audiences)).
+  - Moving a row between the store and a circle uploads its file again
+    under the new audience's key, then writes the move.
+  - A file on one device stays where it is.
 
 ### 16.2 Storage and naming
 
 - The content hash travels in the row, inside encrypted writes, like any
   other column.
   - Every device checks a downloaded file against it.
-- Each remote file is stored encrypted at `files/<name>`, where the name is
+- Each uploaded file is stored encrypted at `files/<name>`, where the name is
   a keyed hash of its content hash.
   - A keyed hash, such as HMAC-SHA256, can't be computed without a secret
     key, so the provider can't hash a file it knows and look for its name.
@@ -1335,9 +1388,9 @@ Carol's tablet:
 
 - The app reads any byte range of a file, at any offset, as a stream.
   - Playing a song and seeking in it are just reads of different ranges.
-- A local file, or one in the cache, is read with positioned reads of the
-  file on disk.
-- A remote file not in the cache is read by fetching only the chunks that
+- A file on this device, or in the cache, is read with positioned reads of
+  the file on disk.
+- An uploaded file not in the cache is read by fetching only the chunks that
   cover the range, with ranged requests to the provider.
   - The header is fetched once per open file.
   - Neighbouring chunks are fetched together, up to 1 MiB per request.
@@ -1352,7 +1405,7 @@ Carol's tablet:
 
 ### 16.4 Cache
 
-- Each device caches remote files and chunks of them, within a size budget
+- Each device caches uploaded files and chunks of them, within a size budget
   the app sets.
   - When the cache is over budget, the least recently used files and chunks
     go first.
@@ -1369,11 +1422,11 @@ Carol's tablet:
     request.
   - The upload session is recorded, so after a crash the upload continues
     from the last part stored, instead of starting over.
-- A write that refers to a remote file is uploaded only after the file is
+- A write that marks a file uploaded is uploaded only after the file is
   stored.
-  - So no device ever sees a row whose file isn't there yet.
-- A file is deleted once nothing in the latest snapshot or the writes after
-  it refers to it.
+  - So no device ever sees a row whose uploaded file isn't there yet.
+- An uploaded file is deleted once nothing in the latest snapshot or the
+  writes after it refers to it as uploaded.
   - They are deleted by the same devices as logs ([§15](#15-snapshots)).
 - Deleting a row deletes only coven's copies of its file, never a
   user-provided original.
@@ -1521,10 +1574,19 @@ Carol's tablet:
      version is newer ([§17](#17-schema-changes)).
 - Writing a snapshot, then deleting the log objects and files it lets go
   ([§15](#15-snapshots), [§16](#16-files)).
-- Moving rows that carry files ([§14](#14-audiences), [§16](#16-files)):
-  1. upload each file, or download it, for a move back to this device;
+- Moving rows that carry uploaded files between the store and a circle
+  ([§14.2](#142-moving-rows), [§16.1](#161-kinds-and-where-files-are)):
+  1. upload each file under the new audience's key;
   2. write the move.
-- Pairing a new device ([§12](#12-joining-and-restore)).
+- Changing where a file is ([§16.1](#161-kinds-and-where-files-are)):
+  1. upload it, or download it to the device keeping it;
+  2. write its row's where-column.
+- Inviting a person ([§12.2](#122-adding-a-person)):
+  1. share the storage with their account, or make their access key, and
+     record the invite;
+  2. once Ana approves the request, write the store log entry and seal the
+     store key to them;
+  3. on decline or expiry, take back the access instead.
 - Uploading a large file in parts ([§16](#16-files)):
   1. start the provider's upload session, and record it in the
      operation's row;
@@ -1588,11 +1650,11 @@ Carol's tablet:
     - each row's generations;
     - which write set each cell, named by device and number;
     - its `coven_lost` rows;
-  - and nothing that differs between devices by design, such as
-    `coven_uploads`, `coven_operations`, local row ids, or whether an
-    ancestor or a key present in two audiences is shown or recorded as lost,
-    which depends on
-    the circles a device reads ([§14](#14-audiences));
+  - all computed as if the rule for a key present in two audiences didn't
+    exist, since which row it shows depends on which circles a device
+    reads ([§14.2](#142-moving-rows));
+  - and nothing else that differs between devices by design, such as
+    `coven_uploads`, `coven_operations`, or local row ids;
   - it is keyed with a key derived from the store's or circle's key, so the
     provider learns nothing from it;
   - each device posts its fingerprints with its positions ([§6](#6-syncing-writes));
@@ -1661,11 +1723,10 @@ pub struct WriteId {
     pub number: u64,
 }
 
-/// Where a row goes: the store, one circle, or this device only (§14).
+/// Where a row goes: the store, or one circle (§14).
 pub enum Audience {
     Store,
     Circle(CircleId),
-    Device,
 }
 ```
 
@@ -1805,9 +1866,8 @@ let handle = Coven::builder(layout.store_dir(&store_id), config)
 - Each synced table declares its kind of key ([§8.5](#85-keys-and-uniqueness)),
   how its rows get their audience ([§14](#14-audiences)), and whether its rows
   carry a file ([§16](#16-files)).
-- A table declares at most one of `gated_by`, `scoped_by`, `remote_root`,
-  `gated_through` and `gated_by_descendants`; a table that declares none is
-  in the store.
+- A table declares at most one of `scoped_by` and `gated_through`; a table
+  that declares neither is in the store.
 
 ```rust
 pub enum RowIdentity {
@@ -1829,28 +1889,13 @@ impl SyncedTable {
         I: IntoIterator<Item = S>,
         S: Into<String>;
 
-    /// A root whose boolean `column` holds each row's audience: true for the
-    /// store, false for this device. Never NULL.
-    pub fn gated_by(self, column: impl Into<String>) -> Self;
-
-    /// A root whose text `column` holds each row's audience: `store`, a
-    /// circle's id, or `device`. Never NULL.
+    /// A root whose text `column` holds each row's audience: `store` or a
+    /// circle's id. Never NULL.
     pub fn scoped_by(self, column: impl Into<String>) -> Self;
-
-    /// A root whose rows are always the store's.
-    pub fn remote_root(self) -> Self;
 
     /// A descendant: each row takes the audience of the row its
     /// `foreign_key` column points at (§14.1).
     pub fn gated_through(self, foreign_key: impl Into<String>) -> Self;
-
-    /// An ancestor: a row is in the store while a present shared row points
-    /// at it, and a device shows it only while a shared row that device can
-    /// read does (§14).
-    pub fn gated_by_descendants(self) -> Self;
-
-    /// Marks a descendant as an asset, which never keeps an ancestor present.
-    pub fn asset(self) -> Self;
 
     /// The table's rows carry a file, declared by `declaration`.
     pub fn carries_blob(self, declaration: BlobDecl) -> Self;
@@ -1865,19 +1910,29 @@ pub enum Provenance {
 }
 
 pub enum CacheFill {
-    /// Devices download the file as soon as its row arrives.
+    /// Devices download an uploaded file as soon as its row arrives.
     CacheEager,
     /// Devices download it on first read.
     CacheLazy,
 }
 
+pub enum Uploads {
+    /// A file is uploaded when a write attaches it, and the write uploads
+    /// after it (§16.5).
+    WhenAttached,
+    /// A file stays on the device that attached it until the app uploads it
+    /// (§16.1).
+    WhenAsked,
+}
+
 impl BlobDecl {
     /// Declares the file a table's rows carry: its namespace, which groups
-    /// files in the cache and in storage, its kind, and when devices download
-    /// it.
+    /// files in the cache and in storage, its kind, when it is uploaded, and
+    /// when devices download it.
     pub fn new(
         namespace: impl Into<String>,
         provenance: Provenance,
+        uploads: Uploads,
         fill: CacheFill,
     ) -> Self;
 
@@ -1890,6 +1945,11 @@ impl BlobDecl {
     /// The column holding the file's content hash, the SHA-256 of its bytes,
     /// which coven fills in (§16.2). Defaults to `hash`.
     pub fn with_hash_column(self, column: impl Into<String>) -> Self;
+
+    /// The column holding where the file is, which coven fills in:
+    /// `uploaded`, or the id of the device that has it (§16.1). Defaults to
+    /// `location`.
+    pub fn with_location_column(self, column: impl Into<String>) -> Self;
 
     /// Encrypts the file with a key derived for `scope`, instead of the
     /// audience's own key.
@@ -1905,19 +1965,18 @@ Example:
 ```rust
 fn tables() -> Vec<SyncedTable> {
     vec![
-        // A root: each note is the store's, a circle's, or this device's.
+        // A root: each note is the store's or a circle's.
         SyncedTable::new("notes", RowIdentity::IndependentUuid).scoped_by("audience"),
         // Descendants of notes. Each attachment carries the user's own file.
         SyncedTable::new("attachments", RowIdentity::IndependentUuid)
             .gated_through("note_id")
-            .carries_blob(BlobDecl::new("attachments", Provenance::UserProvided, CacheFill::CacheLazy)),
-        // An asset: a thumbnail the app makes, which never keeps an ancestor present.
+            .carries_blob(BlobDecl::new("attachments", Provenance::UserProvided, Uploads::WhenAsked, CacheFill::CacheLazy)),
+        // A thumbnail the app makes, in the note's audience.
         SyncedTable::new("thumbnails", RowIdentity::IndependentUuid)
             .gated_through("note_id")
-            .asset()
-            .carries_blob(BlobDecl::new("thumbnails", Provenance::HostProvided, CacheFill::CacheEager)),
-        // An ancestor, with keys from the tag's name, kept while a shared note wears it.
-        SyncedTable::new("tags", RowIdentity::SharedKey).gated_by_descendants(),
+            .carries_blob(BlobDecl::new("thumbnails", Provenance::HostProvided, Uploads::WhenAttached, CacheFill::CacheEager)),
+        // In the store, with keys from the tag's name.
+        SyncedTable::new("tags", RowIdentity::SharedKey),
         // A key over two columns; note_id holds a UUID.
         SyncedTable::new("note_tags", RowIdentity::IndependentUuid)
             .key_columns(["note_id", "tag_id"])
@@ -2006,15 +2065,6 @@ impl SqlContext<'_, '_> {
     /// current file; the write fails if it doesn't. Called before changing
     /// or deleting the row.
     pub fn validate_row_blob_ref(&self, reference: &RowBlobRef) -> Result<(), DbError>;
-
-    /// Sets the audience of a root row this write creates. A shared audience
-    /// uploads the row's files before the write is uploaded (§16.5).
-    pub fn set_audience(
-        &self,
-        table: &str,
-        key: impl Into<RowKey>,
-        audience: Audience,
-    ) -> Result<(), DbError>;
 }
 
 /// Reads a user's file once, before the write, for its size and content.
@@ -2037,7 +2087,7 @@ let prepared = prepare_external_blob(&path, |read| show_progress(read)).await?;
 handle
     .write(move |sql| {
         sql.execute(
-            "INSERT INTO notes (id, title, audience) VALUES (?1, ?2, 'device')",
+            "INSERT INTO notes (id, title, audience) VALUES (?1, ?2, 'store')",
             (&note_id, "Paint colors"),
         )?;
         sql.execute(
@@ -2163,8 +2213,12 @@ pub enum Replacement {
 pub enum RemovalRule {
     ForeignKey { column: String },
     Check { constraint: String },
+    /// The row is in a deleted circle (§14.7).
+    DeletedCircle,
+    /// The same key is present in another audience, whose row is shown
+    /// (§14.2).
+    OtherAudience,
     Unique { columns: Vec<String> },
-    Ancestor,
 }
 
 /// A handle that only reads, opened with `open_read_only`.
@@ -2419,26 +2473,23 @@ pub struct BlockedOperation {
 
 ### 20.7 Audiences and uploads
 
-- *Moving* a root row sends it, its descendants and the ancestors they keep
-  to another audience ([§14.2](#142-moving-rows)).
-- A move into the store or a circle uploads the rows' files first, then
-  writes the move; a move back to this device downloads them first
-  ([§16.1](#161-kinds-and-locality)).
-- A move is an operation ([§18.1](#181-operations)): the call records it and
-  returns, and the move finishes whenever storage can be reached.
+- *Moving* a root row sends it and its descendants to another audience
+  ([§14.2](#142-moving-rows)).
+- A move uploads the rows' uploaded files again under the new audience's
+  key, then writes the move ([§16.1](#161-kinds-and-where-files-are)).
+- Uploading a file, and keeping an uploaded file on one device, change
+  where it is ([§16.1](#161-kinds-and-where-files-are)).
+- Each of these is an operation ([§18.1](#181-operations)): the call
+  records it and returns, and it finishes whenever storage can be reached.
 
 ```rust
 impl CovenHandle {
-    /// Moves a root row to `audience`. For a move back to this device,
-    /// `destinations` maps each user-provided file's id to the path it is
-    /// written to, which must not already exist; other moves pass an empty
-    /// map.
+    /// Moves a root row and its descendants to `audience`.
     pub async fn set_audience(
         &self,
         table: &str,
         key: impl Into<RowKey>,
         audience: Audience,
-        destinations: &HashMap<String, PathBuf>,
     ) -> Result<(), AudienceMoveError>;
 
     /// Records several moves at once, in one transaction.
@@ -2451,6 +2502,19 @@ impl CovenHandle {
         table: &str,
         key: impl Into<RowKey>,
     ) -> Result<(), AudienceMoveError>;
+
+    /// Uploads files that are on this device, then marks them uploaded.
+    pub async fn upload_files(&self, files: &[RowBlobRef]) -> Result<(), OperationError>;
+
+    /// Downloads uploaded files to this device, marks them as on this
+    /// device, and lets the uploaded copies go. `destinations` maps each
+    /// user-provided file's id to the path it is written to, which must not
+    /// already exist.
+    pub async fn keep_files_on_this_device(
+        &self,
+        files: &[RowBlobRef],
+        destinations: &HashMap<String, PathBuf>,
+    ) -> Result<(), OperationError>;
 
     /// A live query over the upload queue: every file waiting to upload, with
     /// its progress, and every move in progress. The first result is the
@@ -2469,7 +2533,6 @@ pub struct AudienceChange {
     pub table: String,
     pub key: RowKey,
     pub audience: Audience,
-    pub destinations: HashMap<String, PathBuf>,
 }
 
 impl UploadsLiveQuery {
@@ -2516,7 +2579,6 @@ pub struct AudienceMove {
 
 pub enum MovePhase {
     Uploading,
-    Downloading,
     /// Every file is in place; the move's write is next.
     Writing,
     /// Cancelled; its uploaded files are being deleted.
@@ -2534,9 +2596,14 @@ pub enum DrainOutcome {
 Example:
 
 ```rust
-// Share a note: its attachments and thumbnails upload, then the move is written.
+// Upload a note's attachment, which was on this device only.
+let attachment = handle.row_blob_ref("attachments", attachment_id.as_str()).await?;
+handle.upload_files(&[attachment]).await?;
+
+// Move the note into Ana's circle: its uploaded files go up again under the
+// circle's key, then the move is written.
 handle
-    .set_audience("notes", note_id.as_str(), Audience::Store, &HashMap::new())
+    .set_audience("notes", note_id.as_str(), Audience::Circle(anas_circle))
     .await?;
 
 let note_key = RowKey::from(note_id.as_str());
@@ -2550,7 +2617,7 @@ loop {
     }
     let moving = state.moves.iter().any(|m| m.table == "notes" && m.key == note_key);
     if !moving {
-        break; // the note is now in the store
+        break; // the note is now in the circle
     }
 }
 ```
@@ -2574,15 +2641,15 @@ impl CovenHandle {
     /// against its row once; keep the stream for as long as the file is read.
     pub async fn open_blob_stream(&self, file: &RowBlobRef) -> Result<BlobStream, BlobCacheError>;
 
-    /// Makes sure a file's bytes are on this device: a remote file is
-    /// downloaded into the cache, and a local one is checked.
+    /// Makes sure a file's bytes are on this device: an uploaded file is
+    /// downloaded into the cache, and one kept on this device is checked.
     pub async fn materialize_row_blob(&self, file: &RowBlobRef) -> Result<(), BlobCacheError>;
 
     /// The path, size and modification time coven recorded for a row's
     /// user-provided file, or `None` when the row has none.
     pub async fn external_blob(&self, table: &str, key: impl Into<RowKey>) -> Result<Option<ExternalBlob>, DbError>;
 
-    /// Keeps remote files whole on this device regardless of the cache
+    /// Keeps uploaded files whole on this device regardless of the cache
     /// budget, downloading what is missing. `on_progress` is called before
     /// the first download, as bytes arrive, and as each file is kept.
     pub async fn pin(
@@ -2605,8 +2672,9 @@ impl CovenHandle {
     /// The same answers, live. `set_rows` changes which rows it watches.
     pub fn subscribe_rows_pinned(&self, table: &str, keys: Vec<RowKey>) -> RowsPinnedLiveQuery;
 
-    /// Removes a remote file's copies from the cache, pinned or not. Never
-    /// touches a local file or storage; a later read downloads it again.
+    /// Removes an uploaded file's copies from the cache, pinned or not. Never
+    /// touches a file kept on this device, or storage; a later read
+    /// downloads it again.
     pub async fn evict_blob(&self, file: &RowBlobRef) -> Result<(), BlobCacheError>;
 
     /// The cache budget for one namespace, in bytes; each namespace evicts
@@ -2630,8 +2698,16 @@ impl RowBlobRef {
     pub fn column(&self) -> &str;
     /// The file's size in bytes.
     pub fn plaintext_size(&self) -> u64;
-    /// The row's audience, which the file follows (§16.1).
+    /// The row's audience, whose key encrypts the file once uploaded (§16.1).
     pub fn audience(&self) -> Audience;
+    /// Where the file is (§16.1).
+    pub fn location(&self) -> FileLocation;
+}
+
+pub enum FileLocation {
+    Uploaded,
+    /// Only on this device, which has it.
+    OnDevice(DeviceId),
 }
 
 impl BlobStream {
@@ -2646,14 +2722,16 @@ impl BlobStream {
 pub enum BlobCacheError {
     /// The range needs chunks that aren't cached, and storage can't be reached.
     Offline { id: String },
-    /// A remote file was read with no storage connected.
+    /// An uploaded file was read with no storage connected.
     NoCloudHome,
+    /// The file is only on another device, which the app can name.
+    OnOtherDevice { id: String, device: DeviceId },
     /// A user-provided file is gone from its recorded path.
     ExternalMissing { id: String, path: PathBuf },
     /// A user-provided file's size or modification time no longer matches
     /// what coven recorded.
     ExternalChanged { id: String, path: PathBuf },
-    /// A chunk, or a local copy, failed its check.
+    /// A chunk, or a copy on this device, failed its check.
     Integrity { id: String },
     /// The range lies outside the file.
     RangeOutOfBounds { id: String, offset: u64, end: u64, size: u64 },
@@ -2692,6 +2770,19 @@ impl CovenHandle {
     /// The members and their devices, as this device's store log has them.
     pub async fn get_members(&self) -> Result<Vec<MemberInfo>, SyncError>;
 
+    /// On S3: makes a new access key for this member, deletes the old one,
+    /// and returns their new restore code, for their other devices to scan
+    /// and for them to write down (§13).
+    pub async fn replace_access_key(&self) -> Result<String, SyncError>;
+
+    /// On a device that already has the store open: takes the storage
+    /// credentials from a new restore code of this member's, and keeps
+    /// everything else.
+    pub async fn update_credentials(&self, code: &str) -> Result<(), SyncError>;
+
+    /// Changes a member's role, as an admin (§9).
+    pub async fn set_member_role(&self, member: &MemberId, role: MemberRole) -> Result<(), SyncError>;
+
     /// Removes a member and all their devices, revokes their storage access,
     /// and rotates the store key (§13).
     pub async fn remove_member(&self, member: &MemberId) -> Result<(), SyncError>;
@@ -2720,105 +2811,82 @@ pub enum ProviderSignOut {
     RemoveAppAccess { provider: CloudProvider },
     /// Remove the device from the Apple account.
     RemoveFromAppleAccount,
-    /// Replace the S3 access key on one device, pair the others, and write
-    /// down a new restore code.
+    /// Replace the S3 access key on one device, then scan the new restore
+    /// code on the others, and write it down.
     ReplaceAccessKey,
 }
 ```
 
 ### 20.10 Joining and restore
 
-- A new device of a person already in the store gets their member keys, which
-  get it the store key, by pairing, from a synced keychain, or from their
-  restore code ([§12](#12-joining-and-restore)).
-- Each of these makes the store directory, puts the keys in custody, loads
-  the store, and returns the `Config` the app then opens the store with.
-- Each takes the same tables, migrations and custody choices as the builder,
-  and `cancel`, which stops it.
+- A person's new device opens the store from their restore code: scanned
+  as a QR code, typed in, or read from iCloud Keychain
+  ([§12.1](#121-a-persons-new-device)).
+- An admin adds a person with an invite, and approves their join request
+  ([§12.2](#122-adding-a-person)).
+- Each call that opens the store on a new device makes the store
+  directory, puts the keys in custody, loads the store, and returns the
+  `Config` the app then opens the store with. Each takes the same tables,
+  migrations and custody choices as the builder, and `cancel`, which stops
+  it.
 
 ```rust
 impl CovenHandle {
-    /// On an existing device: starts a pairing session on the local network.
-    /// The session shows a code for the new device to scan, and lasts 15
-    /// minutes.
-    pub async fn start_device_pairing(&self) -> Result<DevicePairingHost, StartDevicePairingError>;
+    /// This member's restore code: their member key, the store's id and
+    /// name, and storage credentials. The app shows it as a QR code, blurred
+    /// until the person taps it, and asks them to write it down at setup.
+    pub async fn restore_code(&self) -> Result<String, SyncError>;
 
-    /// Hands the new device this member's keys and storage access, once the
-    /// person has confirmed its request, and waits until it has added itself
-    /// to the store log.
-    pub async fn approve_device_pairing(
+    /// Starts adding a person, as an admin: shares the storage with their
+    /// provider account, or on S3 makes an access key for them, and returns
+    /// the invite to show as a QR code. `provider_account_email` is required
+    /// except on S3. Expires after a day.
+    pub async fn create_invite(
         &self,
-        host: &DevicePairingHost,
-        request: &DevicePairingRequest,
-        on_progress: &(dyn Fn(AdmittingDeviceJoinProgress) + Send + Sync),
-        cancel: watch::Receiver<bool>,
-    ) -> Result<(), ApproveDevicePairingError>;
-
-    /// Cancels a pairing session, and waits for an approval in progress to
-    /// stop.
-    pub async fn cancel_device_pairing(&self, host: &DevicePairingHost) -> Result<(), ApproveDevicePairingError>;
-
-    /// Makes the person's restore code: their member keys and storage
-    /// credentials. They write it down as part of setup.
-    pub async fn generate_restore_code(&self) -> Result<String, SyncError>;
-}
-
-impl DevicePairingHost {
-    /// The code the new device scans.
-    pub fn pairing_code(&self) -> String;
-
-    /// Waits for the new device's signed request.
-    pub async fn wait_for_request(&self) -> Result<DevicePairingRequest, DevicePairingTransportError>;
-}
-
-impl DevicePairingRequest {
-    /// The provider account the new device signed in with, for the person to
-    /// confirm.
-    pub fn provider_account_email(&self) -> Option<&str>;
-}
-
-impl PreparedDevicePairing {
-    /// On the new device: starts pairing from a scanned code, or picks up the
-    /// pairing already started from it. Kept on disk, so pairing resumes after
-    /// a restart.
-    pub fn open_or_create(
-        pairing_code: &str,
+        role: MemberRole,
         provider_account_email: Option<String>,
-        layout: &StoreLayout,
-    ) -> Result<Self, DevicePairingError>;
+    ) -> Result<Invite, SyncError>;
 
-    /// The pairings this app started and hasn't finished.
-    pub fn pending(layout: &StoreLayout) -> Result<Vec<Self>, DevicePairingError>;
+    /// Join requests waiting for approval, live. The first value is the
+    /// current list.
+    pub fn subscribe_join_requests(&self) -> watch::Receiver<Vec<JoinRequest>>;
+
+    /// Adds the person who sent `request` as a member with the invite's role,
+    /// and seals the store key to them.
+    pub async fn approve_join_request(&self, request: &JoinRequest) -> Result<(), SyncError>;
+
+    /// Declines the request, and takes back the storage access its invite
+    /// granted.
+    pub async fn decline_join_request(&self, request: &JoinRequest) -> Result<(), SyncError>;
+
+    /// Cancels an invite before anyone joins with it, taking back the
+    /// storage access it granted.
+    pub async fn cancel_invite(&self, invite: &InviteId) -> Result<(), SyncError>;
 }
 
-/// On the new device: receives the member's keys, adds this device to the
-/// store log, and loads the store.
-pub async fn join_with_device_pairing(
-    pairing: &PreparedDevicePairing,
-    layout: StoreLayout,
-    synced_tables: Vec<SyncedTable>,
-    migrations: Vec<Migration>,
-    coven_migration_policy: CovenMigrationPolicy,
-    key_custody: KeyCustody,
-    identity_custody: IdentityCustody,
-    oauth_tokens: Option<OAuthTokens>,
-    /* transfer limits, OAuth clients, CloudKit calls, clock */
-    on_progress: JoiningDeviceJoinProgressObserver,
-    cancel: &watch::Receiver<bool>,
-) -> Result<DeviceJoinTransportOutcome, BootstrapError>;
-
-pub enum DeviceJoinTransportOutcome {
-    Joined(Config),
-    /// The existing device cancelled the pairing.
-    Abandoned(DeviceJoinAbandonment),
+pub struct Invite {
+    pub id: InviteId,
+    /// The code to show as a QR code.
+    pub code: String,
+    pub role: MemberRole,
+    pub expires_at: SystemTime,
 }
 
-/// What a restore code is for, before using it: the store's id and name, its
-/// provider, and whether the provider needs a sign-in first.
-pub fn decode_restore_code_info(code: &str) -> Result<RestoreCodeInfo, RestoreCodeError>;
+pub struct JoinRequest {
+    pub invite: InviteId,
+    /// The new member's public key.
+    pub member: MemberId,
+    /// The name the new device gave itself, for the admin to check.
+    pub device_name: String,
+    pub provider_account_email: Option<String>,
+}
 
-/// Opens the store on a new device from the person's restore code.
-/// `oauth_tokens` is the provider sign-in, when `needs_oauth`.
+/// What a restore code or invite is for, before using it: the store's id and
+/// name, its provider, and whether the provider needs a sign-in first.
+pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError>;
+
+/// Opens the store on a new device from the person's restore code, scanned
+/// or typed. `oauth_tokens` is the provider sign-in, when `needs_oauth`.
 pub async fn restore_from_code(
     code: &str,
     synced_tables: &[SyncedTable],
@@ -2828,28 +2896,44 @@ pub async fn restore_from_code(
     identity_custody: IdentityCustody,
     oauth_tokens: Option<OAuthTokens>,
     layout: &StoreLayout,
-    /* transfer limits, OAuth clients, CloudKit calls, clock, ids */
+    /* transfer limits, OAuth clients, CloudKit calls, clock */
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Config, BootstrapError>;
 
-/// Opens the store on a new device from the iCloud Keychain item, which holds
-/// what a restore code holds (§12): `store_id`, `store_name` and `source`
-/// come from it.
-pub async fn restore_from_cloud(
-    store_id: &str,
-    store_name: &str,
-    source: RestoreSource,
+/// Opens the store on a new Apple device from the iCloud Keychain item,
+/// which holds what a restore code holds (§12.1). `None` when the keychain
+/// holds no store.
+pub async fn restore_from_keychain(
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
     coven_migration_policy: CovenMigrationPolicy,
     key_custody: KeyCustody,
     identity_custody: IdentityCustody,
     layout: &StoreLayout,
-    /* transfer limits, clock, ids */
+    /* transfer limits, CloudKit calls, clock */
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
-) -> Result<Config, BootstrapError>;
+) -> Result<Option<Config>, BootstrapError>;
+
+/// On the new person's device: makes their member keys, writes a join
+/// request to storage, and waits for the admin to approve it, then loads
+/// the store. Picks up where it left off after a restart. Returns `None`
+/// when the request is declined or the invite expires.
+pub async fn join_with_invite(
+    code: &str,
+    device_name: &str,
+    synced_tables: &[SyncedTable],
+    migrations: &[Migration],
+    coven_migration_policy: CovenMigrationPolicy,
+    key_custody: KeyCustody,
+    identity_custody: IdentityCustody,
+    oauth_tokens: Option<OAuthTokens>,
+    layout: &StoreLayout,
+    /* transfer limits, OAuth clients, CloudKit calls, clock */
+    on_status: impl Fn(&str),
+    cancel: &watch::Receiver<bool>,
+) -> Result<Option<Config>, BootstrapError>;
 
 impl OAuthClients {
     /// Runs the provider's sign-in in the browser, with a redirect to a local
@@ -2876,60 +2960,24 @@ impl OAuthClients {
 }
 ```
 
-Example, on the existing device:
+Example, adding Ana's laptop. On her phone:
 
 ```rust
-let host = handle.start_device_pairing().await?;
-show_qr_code(&host.pairing_code());
-
-let request = host.wait_for_request().await?;
-if confirm_new_device(request.provider_account_email()).await {
-    handle
-        .approve_device_pairing(&host, &request, &|step| show_step(step), cancel_rx)
-        .await?;
-} else {
-    handle.cancel_device_pairing(&host).await?;
-}
+let code = handle.restore_code().await?;
+show_blurred_qr_code(&code);
 ```
 
-On the new device:
+On the laptop:
 
 ```rust
-let pairing = PreparedDevicePairing::open_or_create(&scanned_code, account_email, &layout)?;
-let outcome = join_with_device_pairing(
-    &pairing,
-    layout.clone(),
-    tables(),
-    migrations(),
-    CovenMigrationPolicy::ApplyPending,
-    KeyCustody::Keyring,
-    IdentityCustody::Keyring,
-    oauth_tokens,
-    /* … */
-    Arc::new(|step| show_step(step)),
-    &cancel_rx,
-)
-.await?;
-if let DeviceJoinTransportOutcome::Joined(config) = outcome {
-    let handle = Coven::builder(layout.store_dir(&config.store_id), config)
-        .synced_tables(tables())
-        .migrations(migrations())
-        .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
-        .open()?;
-}
-```
-
-From a restore code:
-
-```rust
-let info = decode_restore_code_info(&code)?;
+let info = decode_code_info(&scanned)?;
 let tokens = if info.needs_oauth {
     Some(oauth_clients.authorize(info.cloud_provider, cancel_rx.clone(), &SystemClock).await?)
 } else {
     None
 };
 let config = restore_from_code(
-    &code,
+    &scanned,
     &tables(),
     &migrations(),
     CovenMigrationPolicy::ApplyPending,
@@ -2942,6 +2990,59 @@ let config = restore_from_code(
     &cancel_rx,
 )
 .await?;
+let handle = Coven::builder(layout.store_dir(&config.store_id), config)
+    .synced_tables(tables())
+    .migrations(migrations())
+    .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
+    .open()?;
+```
+
+Example, Ana adding Carol. On Ana's phone:
+
+```rust
+let invite = handle
+    .create_invite(MemberRole::Member, Some("carol@example.com".into()))
+    .await?;
+show_qr_code(&invite.code);
+
+let mut requests = handle.subscribe_join_requests();
+loop {
+    for request in requests.borrow_and_update().clone() {
+        if request.invite == invite.id {
+            if confirm(&request.device_name).await {
+                handle.approve_join_request(&request).await?;
+            } else {
+                handle.decline_join_request(&request).await?;
+            }
+        }
+    }
+    requests.changed().await?;
+}
+```
+
+On Carol's phone:
+
+```rust
+let tokens = oauth_clients.authorize(CloudProvider::GoogleDrive, cancel_rx.clone(), &SystemClock).await?;
+match join_with_invite(
+    &scanned,
+    "Carol's phone",
+    &tables(),
+    &migrations(),
+    CovenMigrationPolicy::ApplyPending,
+    KeyCustody::Keyring,
+    IdentityCustody::Keyring,
+    Some(tokens),
+    &layout,
+    /* … */
+    |step| show_step(step),
+    &cancel_rx,
+)
+.await?
+{
+    Some(config) => open_store(config),
+    None => show_declined(),
+}
 ```
 
 ### 20.11 Keys and secrets
@@ -3015,7 +3116,8 @@ impl Circles<'_> {
     /// Renames a circle. Its key, members and rows don't change.
     pub async fn rename(&self, circle: CircleId, name: &str) -> Result<(), CircleError>;
 
-    /// Deletes a circle.
+    /// Deletes a circle: deletes each of its rows this device has, and
+    /// removes the circle in the store log (§14.7).
     pub async fn delete(&self, circle: CircleId) -> Result<(), CircleError>;
 
     /// Adds a store member to the circle. They get its current and earlier
@@ -3180,431 +3282,3 @@ merge later.
 - Problem: devices running different app versions hold different schemas.
 - Status: additions sync with no change of version; any other change
   raises the store's version, and every device updates and reloads ([§17](#17-schema-changes)).
-
-## Appendix B. Proof of convergence
-
-- This appendix proves the convergence guarantee of [§3](#3-guarantees) for the merge of [§8](#8-merge)
-  and the audiences of [§14](#14-audiences).
-- The proof is checked by machine: a Lean 4 development in
-  `plans/proofs/merge/`, which has no unproven step and uses no axiom beyond
-  Lean's own.
-- Each claim names the Lean theorem that checks it; [B11](#b11-what-lean-checks-and-what-is-prose) lists what is argued
-  only here.
-
-### B1 The claim
-
-- Two devices that read the same audiences and applied the same writes, each
-  in an order that respects causality, hold the same database:
-  - the same `coven_rows` and `coven_cells`;
-  - the same rows in the app's tables, with the same values;
-  - the same `coven_lost` rows, for lost values and removed rows alike.
-- This holds whatever order each device ran the removal rules in.
-- Two devices that read different audiences agree on every row both read,
-  except what depends on rows only one of them reads: whether an ancestor is
-  shown, which row shows for a key present in two audiences, and the rows
-  taken out with those ([B9](#b9-audiences)).
-- `coven_writes` holds the same writes on both, under row ids of each
-  device's own ([§8.1](#81-example)).
-
-### B2 Terms
-
-- *Write*, *row change*, *cell*, *generation*, *audience*: as in [§5](#5-local-database), [§8](#8-merge),
-  [§8.3](#83-deletes) and [§14](#14-audiences).
-- *Row*: one table, key and audience. The store's note 1 and a circle's note
-  1 are two rows, each with its own generations ([§14.2](#142-moving-rows)).
-- *Had read*: write `w` had read write `a` when `w`'s device had applied `a`
-  before making `w`; a device has always read its own earlier writes ([§7.1](#71-causality)).
-- *Causal order*: an order of applying writes in which each write comes after
-  every write it had read. Every device applies writes in a causal order.
-- *Closed set*: a set of writes that holds every write any of them had read.
-  The writes a device has applied form a closed set.
-- *Incarnation*: one lifetime of a row. An insert made at generation `g`
-  starts incarnation `g + 1`; an update or delete made at generation `g` acts
-  on incarnation `g`.
-  - E.g. Ana creates note 43 at generation 0, so it lives in incarnation 1;
-    she deletes it, and re-adds it at generation 2, starting incarnation 3.
-- *Setter*: a write that sets a cell. Its value is the cell's value in that
-  write.
-- *Replacer* of a value: a write that sets the same cell of the same
-  incarnation with a larger timestamp, or deletes that incarnation.
-- *Merged state*: each row's generation, the write `coven_rows` names for
-  each generation, each cell's value and the write that set it, and the lost
-  values ([§8](#8-merge)).
-- *Removed row*: a row present in the merged state that a removal rule takes
-  out of the app's table.
-
-### B3 Model and assumptions
-
-- A write is an identifier with:
-  - its timestamp, a number;
-  - which writes it had read;
-  - for each row it changes, one row change: insert, update or delete, the
-    generation it was made at, and which columns it sets.
-- A cell's value is identified with the write that set it, since a write
-  sets one value per cell.
-- The writes satisfy, by [§7.1](#71-causality), [§7.2](#72-timestamps) and [§8.3](#83-deletes):
-  - **assumption 1**: timestamps are unique;
-  - **assumption 2**: a write's timestamp is larger than that of every write
-    it had read;
-  - **assumption 3**: a change's generation was reached on the authoring
-    device: it is 0, or some write the author had read moved the row to it;
-  - **assumption 4**: an insert is made at an even generation, an update or
-    delete at an odd one.
-- What a device stores for the merged state:
-  - each row's current generation;
-  - per generation, the write `coven_rows` names: of the writes that moved
-    the row there, the one with the smallest timestamp;
-  - per cell, the write that set its value;
-  - per value, its `coven_lost` row: the incarnation it was set in, and the
-    write recorded as replacing it.
-- In Lean: `Writes`, `Valid`, `St`, in `Model.lean`.
-
-### B4 The merged state as a function of the writes
-
-For a closed set `S` of writes, each part of the merged state is defined from
-`S` alone, with no order of application:
-
-- **Generation** of a row: the largest generation any write in `S` moved it
-  to by an insert or delete; 0 if none.
-- **Write per generation**: of the writes in `S` that moved the row to that
-  generation, the one with the smallest timestamp ([§8.3](#83-deletes)).
-- **Cell**: of the writes in `S` that set the cell in the current
-  incarnation, the one with the largest timestamp; nothing while the row is
-  deleted ([§8.1](#81-example), [§8.2](#82-concurrent-writes-to-one-row)).
-- **Lost**: a value is lost when some write in `S` replaced it and no write
-  in `S` that replaced it had read it ([§8](#8-merge)).
-- **Replaced by**, for a lost value of incarnation `k`:
-  - if `k` was deleted: its earliest delete, which is the write `coven_rows`
-    names for generation `k + 1`;
-  - otherwise: the cell's current winning write.
-- E.g. the writes of [§8.1](#81-example) on note 42's title:
-
-  ```
-  write             value               stamp          had read
-  Ana's write 1     "Grocery list"      12:00:00 #0
-  Ana's write 4     "Groceries"         13:01:00 #0    Ana 1
-  Ben's write 9     "Weekly groceries"  13:01:00 #1    Ana 1, Ana 4
-  Carol's write 2   "Shopping"          14:00:00 #0    Ana 1
-  ```
-
-  - the title: Carol's write 2, the largest stamp;
-  - "Grocery list": replaced by Ana 4, Ben 9 and Carol 2, which all had read
-    it; not lost;
-  - "Groceries": replaced by Ben 9 and Carol 2, and Ben 9 had read it; not
-    lost;
-  - "Weekly groceries": replaced by Carol 2 only, which hadn't read it; lost,
-    replaced by Carol's write 2.
-- In Lean: `IsSpec` in `Model.lean`.
-
-### B5 Applying one write
-
-A device applies an arriving write `w` to each row `r` it changes. Let `G` be
-`r`'s generation on the device, and `g` the generation `w`'s change was made
-at.
-
-- **Generation**: an insert or delete with `g = G` moves the row to `G + 1`.
-  Any other change leaves it.
-- **Write per generation**: an insert or delete made at `g` competes for
-  generation `g + 1`'s `coven_rows` row: the smaller timestamp stays.
-- **Cells**:
-  - a delete with `g = G` empties the row's cells;
-  - an insert with `g = G` starts a new incarnation with its values;
-  - an update at `G`, or an insert at `G - 1` concurrent with the one that
-    started the current incarnation, competes per cell: the larger timestamp
-    stays ([§8.2](#82-concurrent-writes-to-one-row), [§8.3](#83-deletes));
-  - a change made at an older incarnation changes no cell.
-- **`coven_lost`**, for each value `a` of each cell of `r`:
-  - `w`'s own value:
-    - made at an incarnation already deleted: lost, replaced by the write
-      `coven_rows` names for that incarnation's delete ([§8.3](#83-deletes));
-    - made at the current incarnation with a smaller stamp than the cell's
-      value: lost, replaced by the cell's winning write;
-    - otherwise not lost;
-  - a value already lost that `w` replaces:
-    - if `w` had read it: no longer lost ([§8.2](#82-concurrent-writes-to-one-row));
-    - otherwise still lost, and "replaced by" becomes the earlier delete or
-      the later setter, by [B4](#b4-the-merged-state-as-a-function-of-the-writes);
-  - the cell's current value, which `w` replaces without having read it:
-    lost, replaced by `w`;
-  - anything else: unchanged.
-- The step reads only the device's state, the timestamps of writes it has
-  applied, and the arriving write's record.
-- In Lean: `step` in `Model.lean`.
-
-### B6 Proof for the merged state
-
-- **Step lemma**: let `S` be closed, the state be [B4](#b4-the-merged-state-as-a-function-of-the-writes)'s result for `S`, and
-  `w` a write not in `S` whose had-read writes are all in `S`. Then applying
-  `w` gives [B4](#b4-the-merged-state-as-a-function-of-the-writes)'s result for `S` plus `w`. Lean: `step_spec`.
-- The step lemma rests on these facts:
-  - no write in `S` had read `w`, since `S` is closed and `w` is not in it;
-    so any replacer already applied hadn't read `w`;
-  - `g ≤ G`, by assumption 3;
-  - every generation from 1 to `G` was reached by a write in `S`, so with
-    assumption 4 an incarnation was deleted exactly when it is older than
-    `G`;
-  - a value nobody replaced is the cell's current value;
-  - the largest or smallest of a set, by timestamp, changes as the step
-    does when `w` joins the set.
-- **Induction**: applying a causal order write by write keeps [B4](#b4-the-merged-state-as-a-function-of-the-writes)'s result,
-  from the empty database or from a snapshot. Lean: `foldl_isSpec`,
-  `run_isSpec`.
-- **Uniqueness**: two states that are both [B4](#b4-the-merged-state-as-a-function-of-the-writes)'s result for one set are equal.
-  Lean: `isSpec_unique`.
-- **Convergence**: two causal orders of the same writes give the same merged
-  state. Lean: `merge_converges`.
-- **Snapshots** ([§15](#15-snapshots)): loading a snapshot and applying the writes after it,
-  with the covered writes counting as applied, gives the same merged state
-  as applying every write from the start. Lean: `snapshot_converges`.
-- **Timestamp order** is one causal order, by assumption 2, so every causal
-  order gives the state applying the writes in timestamp order gives. Lean:
-  `causalOrder_of_ts_sorted`.
-- E.g. Lean runs the step on the writes of [§8.1](#81-example), [§8.2](#82-concurrent-writes-to-one-row) and [§8.3](#83-deletes), in the
-  arrival orders they describe:
-  - Ben's phone and Carol's tablet both end with "Shopping" and one
-    `coven_lost` row, "Weekly groceries" replaced by Carol's write 2. Lean:
-    `example_8_1`.
-  - On Carol's tablet, "Groceries" is lost after Ana's write 4 arrives, and
-    no longer lost after Ben's write 9. Lean: `example_8_2`.
-  - Ben's edit of note 43 is lost, replaced by Ana's write 7, whether it
-    arrives before Ana's delete or after her re-add, and generation 2's
-    `coven_rows` row names write 7. Lean: `example_8_3`.
-
-### B7 The removal rules
-
-- The removal rules read only the merged state, so what they read is a
-  function of the set of writes:
-  - which rows are present: an odd generation;
-  - each row's references: the parent each points at, and whether it is
-    *stale*: the parent's generation it carries has been deleted since
-    ([§8.4](#84-foreign-keys));
-  - whether the row's merged values fail a CHECK ([§8.6](#86-check-constraints));
-  - which rows are ancestors, and through which reference a row keeps one
-    ([§14.1](#141-roots-descendants-and-ancestors));
-  - which rows are shared;
-  - each row's unique claims, each with a stamp: the timestamp of the latest
-    write that set any of the constraint's columns in it ([§8.5](#85-keys-and-uniqueness)).
-- A reference under set null or set default whose parent's generation was
-  deleted holds null or the default in the merged state itself ([§8.4](#84-foreign-keys)). It is
-  a value like any other, which CHECK and unique constraints see, not a
-  reference the rules follow.
-  - E.g. at 16:00 Ana deletes note 43 while Ben, offline, adds link 6
-    pointing at it, under set null. Every device stores link 6 with
-    `note_id` null, whether Ben's write or Ana's arrived first. Lean:
-    `example_8_4`.
-  - Where SQLite would refuse that value, such as on a `NOT NULL` column,
-    the reference stays and counts as stale.
-- The rules other than the unique one take a present row out when:
-  - **foreign keys**: one of its references is stale, or its parent is
-    absent or taken out;
-  - **CHECK**: its merged values fail;
-  - **ancestors**: it is an ancestor and no row keeps it: a present row,
-    not taken out, shared, whose keeping reference points at it. A row whose
-    audience comes from an ancestor is shared while that ancestor is present
-    and not taken out.
-- **Unique values**: a row loses when a row still present claims the same
-  value of the same constraint with a smaller stamp, or an equal stamp and a
-  smaller primary key.
-  - A key present in two audiences on one device is a claim too, the store's
-    first ([B9](#b9-audiences)).
-- [§8](#8-merge)'s three steps:
-  1. apply the rules other than the unique one until none fires;
-  2. judge unique values among the rows still present;
-  3. apply the other rules again until none fires.
-- A removed row's `coven_lost` row names every rule that holds for it once
-  the steps end, and the unique rule if it lost in step 2.
-- In Lean: `Inputs`, `fires`, `rivalBefore`, `removal`, `view`, in
-  `Removal.lean`.
-
-### B8 Proof for the removal rules
-
-- **Monotone**: a rule is monotone when it keeps firing for a row as more
-  rows are removed.
-- Every rule other than the unique one is monotone:
-  - a stale reference stays stale, and a parent taken out stays out when
-    more rows are removed;
-  - a CHECK result doesn't depend on removals;
-  - a row stops keeping an ancestor only when it, or the ancestor its own
-    audience comes from, is taken out; so an ancestor with no keeper still
-    has none when more rows are removed.
-  - Lean: `fires_monotone`.
-- For monotone rules over a finite set of rows:
-  - **termination**: each step removes a row, so applying rules stops. Lean:
-    `killStep_terminating`;
-  - **local confluence**: two steps from one state, removing `x` and `y`,
-    meet again: after removing `x`, the rule for `y` still fires, by
-    monotonicity, and the reverse. Lean: `killStep_locallyConfluent`;
-  - **one result**: by Newman's lemma, a terminating, locally confluent
-    system ends in one state from each start, whatever order the steps take.
-    Lean: `newman`, `kill_unique_normal`;
-  - **least fixpoint**: that state is the smallest set of removed rows that
-    contains the start and leaves no rule firing. Lean: `normal_least`.
-- No pair of rules needs checking on its own: monotonicity covers every
-  pair, and any rule added later that is monotone.
-- **Why unique values are judged once**: the unique rule isn't monotone,
-  since taking the winner out stops it firing for the loser. Applied as one
-  more rule, it can end two ways:
-  - Ana deletes folder 0; note 1 is in it, under cascade; note 2 is not; both
-    are titled "Plan", note 1's claim first;
-  - cascade first takes note 1 out, and note 2 then has no rival: note 2
-    stays;
-  - unique first takes note 2 out, then cascade takes note 1 out: neither
-    stays.
-  - Lean: `unique_with_others`.
-- **[§8](#8-merge)'s three steps have one result**: steps 1 and 3 have one result each
-  by monotonicity, and step 2 is a function of step 1's result. In the
-  example above, step 1 takes note 1 out, so note 2 keeps "Plan" on every
-  device. Lean: `stratified_unique`, `judged_once`.
-- **Any order**: coven's run of the rules is one of the orders the three
-  steps allow, so every order gives the same removed rows. Lean:
-  `removal_stratified`, `any_order_removal`.
-- **When a unique loser comes back**: when its winner is deleted, or taken
-  out in step 1. A winner taken out in step 3 doesn't bring it back.
-  - E.g. notes are unique by title, and a sub-note points at its parent
-    under cascade. Note 1 is "Ideas"; at 10:00 Ana adds note 2, "Plan", as a
-    sub-note of note 1; at 11:00 Ben, not having seen it, renames note 1 to
-    "Plan".
-    - Step 2: note 2's claim from 10:00 keeps "Plan"; note 1 is taken out.
-    - Step 3: note 2 goes with its parent, by cascade.
-    - Note 1 stays out: back, it would bring note 2 back, and lose to it
-      again. Lean: `example_8_5_subnote`.
-  - E.g. the same, but note 2 is a sub-note of note 3, "Ideas" since 12:00,
-    and note 4 has been "Ideas" since 09:00.
-    - Step 2: note 1 loses "Plan" to note 2, and note 3 loses "Ideas" to note
-      4.
-    - Step 3: note 2 goes with note 3.
-    - Note 1 stays out: it lost in step 2, when note 2 was present. Lean:
-      `example_8_5_step3`.
-- **Every removed row names a rule**: a row removed by a run of monotone
-  rules still meets a rule once the run ends. Lean: `star_fires`,
-  `removed_has_rule`.
-  - E.g. todos need `start <= end`, and todo 7 is in list 3. Ana deletes
-    list 3 while Ben moves todo 7's start past its end. Todo 7's `coven_lost`
-    row names the foreign key and the CHECK, on every device, whichever rule
-    a device ran first. Lean: `example_8`.
-- **End to end**: the merged state converges ([B6](#b6-proof-for-the-merged-state)), and the rules, and
-  therefore the app's tables and the removed rows' `coven_lost` rows, are
-  functions of it. Lean: `device_converges`, `rule_order_converges`.
-- E.g. Lean runs the writes of [§8.4](#84-foreign-keys), [§8.5](#85-keys-and-uniqueness) and [§8.6](#86-check-constraints), with the rules reading
-  the merged state it computes, in both arrival orders:
-  - [§8.4](#84-foreign-keys): Carol's tablet applies Ana's delete of note 43, then Ben's tag 9
-    on it: tag 9 is taken out, and its `coven_lost` row names the foreign
-    key. Ben's move of tag 9 to note 44 arrives: tag 9 is back. Ben's phone,
-    which gets Ana's delete last, never takes it out. Lean: `example_8_4`.
-  - [§8.5](#85-keys-and-uniqueness): Ana renames the tag "urgent" to "important" while Ben tags note 44
-    "urgent". Note 42 ends tagged "important", and Ben's `(44, "urgent")` is
-    taken out, naming the foreign key, in either order. Lean:
-    `example_8_5_key`.
-  - [§8.5](#85-keys-and-uniqueness): notes are unique by folder and title. Ana adds note 1, "Plan" in
-    Work, at 10:00; Ben renames note 2 "Plan" at 11:00; Carol moves note 2 to
-    Work at 12:00. Note 2's claim dates from 12:00, so note 1 keeps the
-    value. Lean: `example_8_5_stamp`.
-  - [§8.6](#86-check-constraints): Ana sets start 10 while Ben sets end 8: the row is taken out,
-    naming the CHECK. Ben's later end of 20 brings it back. Lean:
-    `example_8_6`.
-
-### B9 Audiences
-
-- A row is one table, key and audience, with its own generations ([§14.2](#142-moving-rows)).
-  Each row change sits in the part of its row's audience; a device applies
-  the parts it can read and counts the rest as applied ([§14.4](#144-writes)).
-- E.g. Ana moves note 1 into her circle, while Ben, outside it, re-adds note
-  1 in the store, and then Carol, in the circle, edits the circle's note 1.
-  - The store's note 1 is deleted by Ana's move and re-added by Ben: it ends
-    at generation 3 with Ben's values, on Carol's device and on Dan's, who
-    is outside the circle.
-  - The circle's note 1 is a row of its own, at generation 1 with Carol's
-    edit; only circle members have it.
-  - Lean: `Moved.agree`.
-- **Same audiences**: the writes as a device sees them still meet [B3](#b3-model-and-assumptions)'s
-  assumptions, since a change's generation was reached by a change to the
-  same row, in the same audience. So two devices that read the same
-  audiences hold the same merged state. Lean: `valid_project`,
-  `audience_converges`.
-- **Different audiences**: a row's merged state depends only on the changes
-  to that row, so devices agree on the merged state of every row both read.
-  Lean: `fold_atRow`, `audiences_agree`.
-- **Removals on devices with different rows**: two devices take out the same
-  rows among any set of rows both have that holds, for each of its rows:
-  - every parent its references point at;
-  - every row whose unique claim rivals its own;
-  - if it is an ancestor, every row that keeps it, and the ancestor those
-    rows take their audience from.
-  - Lean: `removal_local`.
-- [§14.5](#145-references) gives the parents: a row points only at rows every reader of it can
-  read.
-- [§14.1](#141-roots-descendants-and-ancestors) gives the rivals: a unique constraint on a root table includes the
-  audience column, so rivals share an audience; constraints that could span
-  audiences are refused. Lean: `rivals_closed`.
-- Two rules read rows outside that set, so devices that read different
-  circles can differ on them:
-  - **ancestors**: a device shows an ancestor only while a present shared row
-    that device can read points at it ([§14](#14-audiences)).
-    - E.g. a label worn only by a todo in Ana's circle is a store row. Ana's
-      device shows it; Dan's, outside the circle, takes it out, and with it
-      the label's cover image, a store row in an asset table whose audience
-      comes from the label. Lean: `AncestorAcross.differs`.
-  - **a key present in two audiences**: the store's row wins over a
-    circle's; of two circles' rows, the one whose insert has the smaller
-    timestamp wins; the other is taken out like a unique loser, in step 2
-    ([§14.2](#142-moving-rows)).
-    - E.g. in the move above, Carol's device has note 1 in the store and in
-      the circle. The store's shows; the circle's is taken out, naming the
-      unique rule. Dan's device has only the store's, which shows. Lean:
-      `Moved.store_wins`.
-    - The store's row never loses, so devices agree on every store row.
-    - A device in two circles can show a different circle row for one key
-      than a device in only one of them.
-- **Fingerprints** ([§19.1](#191-noticing)): with the ancestor rule and the rule for a key in
-  two audiences left out, two devices take out the same rows in every
-  audience both read. So a fingerprint that leaves out what those two rules
-  decide, including the rows taken out with the rows they take out, is the
-  same on every device that applied the same writes. Lean:
-  `fingerprint_local`, `AncestorAcross.fingerprint_agrees`.
-  - E.g. without the ancestor rule, Ana's device and Dan's both show the
-    label and its cover image.
-
-### B10 The spec's examples, checked
-
-- [§8](#8-merge): todo 7 names both rules. Lean: `example_8`.
-- [§8.1](#81-example): both orders end with "Shopping" and one lost value. Lean:
-  `example_8_1`.
-- [§8.2](#82-concurrent-writes-to-one-row): "Groceries" is lost on Carol's tablet until Ben's write 9 arrives.
-  Lean: `example_8_2`.
-- [§8.3](#83-deletes): Ben's edit is replaced by Ana's write 7 in every order. Lean:
-  `example_8_3`.
-- [§8.4](#84-foreign-keys): tag 9 is taken out, then back when Ben's move arrives; link 6 holds
-  null. Lean: `example_8_4`.
-- [§8.5](#85-keys-and-uniqueness): a key change leaves Ben's `(44, "urgent")` taken out; note 2's claim
-  dates from 12:00; a loser whose winner leaves in step 3 stays out. Lean:
-  `example_8_5_key`, `example_8_5_stamp`, `example_8_5_subnote`,
-  `example_8_5_step3`.
-- [§8.6](#86-check-constraints): the row is taken out, then back when Ben sets end 20. Lean:
-  `example_8_6`.
-- [§14.2](#142-moving-rows): a label whose last shared todo leaves stays while Ben's new shared
-  todo wears it, on every device; the store's note 1 wins over the circle's.
-  Lean: `example_14_2`, `Moved.store_wins`.
-
-### B11 What Lean checks, and what is prose
-
-- Lean checks every theorem named above, with no unproven step. The axioms
-  they use are only Lean's own: `propext`, `Classical.choice`, `Quot.sound`.
-  `CovenMerge/Axioms.lean` prints them.
-- What Lean models abstractly:
-  - a write's values: a cell's value is the write that set it;
-  - the removal rules' inputs: any function of the merged state, in the
-    shape of [B7](#b7-the-removal-rules). The examples compute them from the merged state Lean
-    builds.
-- Argued here only:
-  - that coven computes the rules' inputs from the merged state as [B7](#b7-the-removal-rules) says:
-    presence from generations, stale references by comparing generations,
-    null or the default for a set null or set default reference whose
-    parent's generation was deleted, CHECK on merged values, claim stamps
-    from the cells' writes;
-  - that two devices compute the same inputs for a row when the merged
-    states of the rows those inputs read agree, which [B9](#b9-audiences)'s locality theorem
-    then uses;
-  - local triggers: they converge when they compute a function of the
-    current rows, since every change coven makes is ordinary SQL ([§8.7](#87-triggers));
-  - schema changes ([§17](#17-schema-changes)), files ([§16](#16-files)) and resets ([§19.3](#193-resetting-a-store)), which the model
-    doesn't include.
