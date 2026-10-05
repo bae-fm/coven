@@ -108,8 +108,7 @@
 - Reads run on several read-only connections at once.
 - Another process, such as a widget, can open the store for reading only
   while the app has it open.
-- The app can subscribe to a query; it reruns only when a write changes a
-  column it read.
+- The app can subscribe to a query; it reruns only when rows it read change.
 - Coven keeps its own internal tables in the same database. The app can't
   read or write them.
 
@@ -2895,10 +2894,7 @@ handle
 
 - Reads run on several read-only connections at once ([§5](#5-local-database)).
 - A *live query* runs once, then again whenever a write commits that changes
-  a column it read, in any row, since a new row can join its result.
-  - A run whose result equals the last one returns nothing new.
-  - E.g. a query for notes titled "Plan" reruns when any note's title
-    changes, or a note is added or deleted, but not when a body changes.
+  rows it read.
 
 ```rust
 /// SQL access to one read-only database snapshot (§5, §20.4).
@@ -2974,8 +2970,8 @@ impl CovenHandle {
         F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static;
 
-    /// A live query. Coven records the tables and columns the query reads,
-    /// and reruns it only for writes that change them.
+    /// A live query. Coven records the tables, columns and keys the query
+    /// reads, and reruns it only for writes that touch them.
     pub fn subscribe<F, R>(&self, query: F) -> LiveQuery<R>
     where
         F: Fn(SqlReadContext<'_>) -> CovenResult<R> + Send + Sync + 'static,
