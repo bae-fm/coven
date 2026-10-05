@@ -105,10 +105,18 @@ pub(crate) fn collect_associated_factories(
     files: &[RustFile],
     owners: &BTreeSet<String>,
 ) -> BTreeMap<(String, String), BTreeSet<String>> {
+    let mut trait_outputs = BTreeMap::new();
+    for file in files {
+        TraitFactoryCollector {
+            outputs: &mut trait_outputs,
+        }
+        .visit_file(&file.syntax);
+    }
     let mut factories = BTreeMap::new();
     for file in files {
         let mut collector = AssociatedFactoryCollector {
             owners,
+            trait_outputs: &trait_outputs,
             factories: &mut factories,
         };
         collector.visit_file(&file.syntax);
@@ -118,6 +126,7 @@ pub(crate) fn collect_associated_factories(
 
 struct AssociatedFactoryCollector<'a> {
     owners: &'a BTreeSet<String>,
+    trait_outputs: &'a BTreeMap<String, Vec<(String, BTreeSet<String>)>>,
     factories: &'a mut BTreeMap<(String, String), BTreeSet<String>>,
 }
 
@@ -126,6 +135,17 @@ impl Visit<'_> for AssociatedFactoryCollector<'_> {
         let Some(factory) = type_name(&node.self_ty) else {
             return;
         };
+        if let Some((trait_path, _)) = &node.trait_ {
+            if let Some(methods) = trait_path
+                .segments
+                .last()
+                .and_then(|name| self.trait_outputs.get(&name.ident.to_string()))
+            {
+                for (method, names) in methods {
+                    self.record(&factory, method, names);
+                }
+            }
+        }
         for item in &node.items {
             let syn::ImplItem::Fn(method) = item else {
                 continue;
@@ -134,20 +154,45 @@ impl Visit<'_> for AssociatedFactoryCollector<'_> {
                 continue;
             };
             let names = type_names(output);
-            let mut returned_owners = names
-                .intersection(self.owners)
-                .cloned()
-                .collect::<BTreeSet<_>>();
-            if names.contains("Self") && self.owners.contains(&factory) {
-                returned_owners.insert(factory.clone());
-            }
-            if !returned_owners.is_empty() {
-                self.factories
-                    .entry((factory.clone(), method.sig.ident.to_string()))
-                    .or_default()
-                    .extend(returned_owners);
+            self.record(&factory, &method.sig.ident.to_string(), &names);
+        }
+        visit::visit_item_impl(self, node);
+    }
+}
+
+impl AssociatedFactoryCollector<'_> {
+    fn record(&mut self, factory: &str, method: &str, names: &BTreeSet<String>) {
+        let mut returned_owners = names
+            .intersection(self.owners)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if names.contains("Self") && self.owners.contains(factory) {
+            returned_owners.insert(factory.to_string());
+        }
+        if !returned_owners.is_empty() {
+            self.factories
+                .entry((factory.to_string(), method.to_string()))
+                .or_default()
+                .extend(returned_owners);
+        }
+    }
+}
+
+struct TraitFactoryCollector<'a> {
+    outputs: &'a mut BTreeMap<String, Vec<(String, BTreeSet<String>)>>,
+}
+
+impl Visit<'_> for TraitFactoryCollector<'_> {
+    fn visit_item_trait(&mut self, node: &syn::ItemTrait) {
+        let methods = self.outputs.entry(node.ident.to_string()).or_default();
+        for item in &node.items {
+            if let syn::TraitItem::Fn(method) = item {
+                if let syn::ReturnType::Type(_, output) = &method.sig.output {
+                    methods.push((method.sig.ident.to_string(), type_names(output)));
+                }
             }
         }
+        visit::visit_item_trait(self, node);
     }
 }
 

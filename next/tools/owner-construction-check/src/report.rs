@@ -4,7 +4,7 @@ use crate::capability_boundaries::{
     find_capability_boundary_violations, CapabilityBoundaryViolation,
 };
 use crate::capability_construction::{
-    find_capability_construction_violations, CapabilityConstructionViolation,
+    find_capability_construction_violations, CapabilityConstructionViolation, ConstructionKind,
 };
 use crate::component_bundles::{find_component_bundle_violations, ComponentBundleViolation};
 use crate::conventions::{find_convention_violations, ConventionViolation};
@@ -248,13 +248,23 @@ impl Report {
             remedies.push("reach a capability through the owner that holds it, given to you when you are built");
         }
         for violation in &self.capability_construction {
+            let action = match violation.kind {
+                ConstructionKind::Value => "constructs capability",
+                ConstructionKind::DefaultImplementation => "implements Default for capability",
+            };
+            let reason = match violation.kind {
+                ConstructionKind::Value => "outside a composition root",
+                ConstructionKind::DefaultImplementation => {
+                    "which permits implicit construction through Default::default()"
+                }
+            };
             lines.push(format!(
-                "{}:{}: constructs capability {} outside a composition root",
-                violation.path, violation.line, violation.capability
+                "{}:{}: {action} {} {reason}",
+                violation.path, violation.line, violation.capability,
             ));
         }
         if !self.capability_construction.is_empty() {
-            remedies.push("construct unit capabilities at composition roots; elsewhere use the capability given to the owner");
+            remedies.push("construct capabilities explicitly at composition roots; elsewhere use the capability given to the owner; capability types must not implement or derive Default");
         }
         for violation in &self.conventions {
             lines.push(format!(

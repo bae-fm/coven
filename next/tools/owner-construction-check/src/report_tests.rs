@@ -9,6 +9,16 @@ fn workspace(files: Vec<RustFile>) -> Workspace {
     }
 }
 
+fn capability_implementations() -> RustFile {
+    RustFile::fixture(
+        "crates/coven-foundation/src/implementations.rs",
+        r#"
+        impl Clock for SystemClock {}
+        impl IdSource for UuidIds {}
+    "#,
+    )
+}
+
 #[test]
 fn an_empty_workspace_passes() {
     assert!(check(&workspace(Vec::new()), &POLICY).is_empty());
@@ -65,10 +75,10 @@ fn concrete_clock_and_ids_cannot_be_constructed_outside_composition_roots() {
     ] {
         let source = format!("fn acquire() {{ let _ = {expression}; }}");
         let report = check(
-            &workspace(vec![RustFile::fixture(
-                "crates/coven/src/runtime.rs",
-                &source,
-            )]),
+            &workspace(vec![
+                capability_implementations(),
+                RustFile::fixture("crates/coven/src/runtime.rs", &source),
+            ]),
             &POLICY,
         );
         assert!(!report.is_empty(), "accepted {expression}");
@@ -86,9 +96,11 @@ fn composition_roots_can_construct_and_use_concrete_clock_and_ids() {
         ..POLICY
     };
     let report = check(
-        &workspace(vec![RustFile::fixture(
-            "crates/coven/src/builder.rs",
-            r#"
+        &workspace(vec![
+            capability_implementations(),
+            RustFile::fixture(
+                "crates/coven/src/builder.rs",
+                r#"
             struct Builder;
             impl Builder {
                 fn open() {
@@ -99,8 +111,36 @@ fn composition_roots_can_construct_and_use_concrete_clock_and_ids() {
                 }
             }
             "#,
-        )]),
+            ),
+        ]),
         &ROOT_POLICY,
     );
     assert!(report.is_empty(), "{:?}", report.lines());
+}
+
+#[test]
+fn inferred_default_construction_is_prevented_at_its_implementation() {
+    let report = check(
+        &workspace(vec![
+            RustFile::fixture(
+                "crates/coven-foundation/src/clock.rs",
+                r#"
+                struct SuppliedClock(u64);
+                #[cfg(feature = "test-utils")] impl Clock for SuppliedClock {}
+                impl Default for SuppliedClock { fn default() -> Self { Self(17) } }
+            "#,
+            ),
+            RustFile::fixture(
+                "crates/coven/src/runtime.rs",
+                "fn run() { let clock: SuppliedClock = Default::default(); }",
+            ),
+        ]),
+        &POLICY,
+    );
+    assert!(!report.is_empty());
+    assert_eq!(report.capability_construction.len(), 1);
+    assert!(report
+        .lines()
+        .iter()
+        .any(|line| line.contains("implements Default for capability SuppliedClock")));
 }

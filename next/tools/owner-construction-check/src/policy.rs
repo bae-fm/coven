@@ -49,9 +49,13 @@ pub(crate) struct Policy {
     /// Types that hold a capability. A type holding one of these, or holding
     /// an owner, is an owner.
     pub(crate) capability_types: &'static [&'static str],
+    /// Capability interfaces. Every workspace implementation is construction-only,
+    /// including generic implementations and feature-gated test support.
+    pub(crate) capability_traits: &'static [&'static str],
     /// Raw capabilities fixed when the owner graph is built, such as the store
-    /// directory. Only constructors and composition roots accept them; unit
-    /// values such as `SystemClock` are constructed only at composition roots.
+    /// directory, which have no capability trait. These and the implementations
+    /// of `capability_traits` may be acquired only at composition roots, and
+    /// accepted as parameters only by constructors and composition roots.
     pub(crate) construction_only_capability_types: &'static [&'static str],
     /// Values, configuration and proofs that name a capability in a field but
     /// do not own its lifetime.
@@ -167,6 +171,7 @@ impl Policy {
         composition_roots: &[],
         lifetime_authorities: &[],
         capability_types: &[],
+        capability_traits: &[],
         construction_only_capability_types: &[],
         non_owner_types: &[],
         borrowed_facade_types: &[],

@@ -12,7 +12,7 @@ use syn::visit::{self, Visit};
 use super::POLICY;
 use crate::policy::Policy;
 use crate::sources::load;
-use crate::syntax::{collect_declared_types, type_name};
+use crate::syntax::{collect_declared_types, type_name, RustFile};
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -215,6 +215,70 @@ fn every_type_the_policy_names_is_declared() {
         "the policy names types no crate declares:\n{}",
         missing.join("\n")
     );
+}
+
+fn missing_capability_traits(files: &[RustFile], policy: &Policy) -> Vec<String> {
+    struct Traits(BTreeSet<String>);
+
+    impl<'ast> Visit<'ast> for Traits {
+        fn visit_item_trait(&mut self, node: &'ast syn::ItemTrait) {
+            self.0.insert(node.ident.to_string());
+            visit::visit_item_trait(self, node);
+        }
+    }
+
+    let mut traits = Traits(BTreeSet::new());
+    for file in files {
+        traits.visit_file(&file.syntax);
+    }
+    policy
+        .capability_traits
+        .iter()
+        .filter(|name| !traits.0.contains(**name))
+        .map(|name| (*name).to_string())
+        .collect()
+}
+
+#[test]
+fn every_capability_trait_the_policy_names_is_a_declared_trait() {
+    let workspace = load(&workspace_root()).expect("read the workspace");
+    let files = workspace
+        .files
+        .into_iter()
+        .filter(RustFile::is_crate_source)
+        .collect::<Vec<_>>();
+    let missing = missing_capability_traits(&files, &POLICY);
+    assert!(
+        missing.is_empty(),
+        "capability_traits names interfaces no crate declares: {missing:?}"
+    );
+}
+
+#[test]
+fn capability_trait_guards_reject_other_types_and_missing_names() {
+    const POLICY: Policy = Policy {
+        capability_traits: &["Clock", "IdSource", "Missing"],
+        ..Policy::EMPTY
+    };
+    let files = [RustFile::fixture(
+        "crates/coven-foundation/src/lib.rs",
+        r#"
+        struct Clock;
+        type IdSource = Clock;
+    "#,
+    )];
+    assert_eq!(
+        missing_capability_traits(&files, &POLICY),
+        ["Clock", "IdSource", "Missing"]
+    );
+    let files = [RustFile::fixture(
+        "crates/coven-foundation/src/lib.rs",
+        r#"
+        mod clock { trait Clock {} }
+        #[cfg(feature = "test-utils")] mod ids { trait IdSource {} }
+    "#,
+    )];
+    assert_eq!(missing_capability_traits(&files, &POLICY), ["Missing"]);
 }
 
 #[test]

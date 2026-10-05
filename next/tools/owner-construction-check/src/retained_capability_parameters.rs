@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 
 use syn::spanned::Spanned;
 
+use crate::capability_construction::construction_only_types;
 use crate::owner_construction::Constructor;
 use crate::policy::Policy;
 use crate::syntax::{is_test_only, is_test_source, type_name, type_names, RustFile};
@@ -26,6 +27,7 @@ pub(crate) fn find_retained_capability_parameter_violations(
     constructors: &BTreeSet<Constructor>,
     policy: &Policy,
 ) -> Vec<RetainedCapabilityParameterViolation> {
+    let capabilities = construction_only_types(files, policy);
     let mut violations = BTreeSet::new();
     for file in files {
         if is_test_source(&file.relative_path) {
@@ -37,6 +39,7 @@ pub(crate) fn find_retained_capability_parameter_violations(
             owners,
             constructors,
             policy,
+            &capabilities,
             &mut violations,
         );
     }
@@ -49,6 +52,7 @@ fn find_in_items(
     owners: &BTreeSet<String>,
     constructors: &BTreeSet<Constructor>,
     policy: &Policy,
+    capabilities: &BTreeSet<String>,
     violations: &mut BTreeSet<RetainedCapabilityParameterViolation>,
 ) {
     for item in items {
@@ -90,14 +94,14 @@ fn find_in_items(
                             continue;
                         };
                         let names = type_names(&input.ty);
-                        for capability in policy.construction_only_capability_types {
-                            if names.contains(*capability) {
+                        for capability in capabilities {
+                            if names.contains(capability) {
                                 violations.insert(RetainedCapabilityParameterViolation {
                                     path: path.to_string(),
                                     line: input.span().start().line,
                                     owner: owner.clone(),
                                     method: method.sig.ident.to_string(),
-                                    capability: (*capability).to_string(),
+                                    capability: capability.clone(),
                                 });
                             }
                         }
@@ -109,7 +113,15 @@ fn find_in_items(
                     continue;
                 }
                 if let Some((_, items)) = &item.content {
-                    find_in_items(path, items, owners, constructors, policy, violations);
+                    find_in_items(
+                        path,
+                        items,
+                        owners,
+                        constructors,
+                        policy,
+                        capabilities,
+                        violations,
+                    );
                 }
             }
             _ => {}
