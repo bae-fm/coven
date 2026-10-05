@@ -1,629 +1,427 @@
-# Appendix: convergence of coven's merge
+## Appendix B. Proof of convergence
 
-This appendix checks the merge rules of `coven-from-scratch.md` §8 against
-the claim that every device that applied the same writes ends with the same
-database (§3, §8). It has two parts:
+- This appendix proves the convergence guarantee of §3 for the merge of §8
+  and the audiences of §14.
+- The proof is checked by machine: a Lean 4 development in
+  `plans/proofs/merge/`, which has no unproven step and uses no axiom beyond
+  Lean's own.
+- Each claim names the Lean theorem that checks it; B11 lists what is argued
+  only here.
 
-- a proof, checked by Lean 4, that the core of the merge converges: cells,
-  deletes and generations, and `coven_lost`, with three corrections to the
-  spec;
-- counterexamples, also checked by Lean, showing that the rules that remove
-  rows after a merge — foreign key actions for rows the deleting device never
-  had, unique values, CHECK constraints, and the ancestor rule for places —
-  do not converge as written; and the general structure that makes them
-  converge, with its proof.
+### B1 The claim
 
-The Lean development is in `proofs/merge/`. A11 lists exactly what it
-proves and what is argued here only in prose.
+- Two devices that read the same audiences and applied the same writes, each
+  in an order that respects causality, hold the same database:
+  - the same `coven_rows` and `coven_cells`;
+  - the same rows in the app's tables, with the same values;
+  - the same `coven_lost` rows, for lost values and removed rows alike.
+- This holds whatever order each device ran the removal rules in.
+- Two devices that read different audiences agree on every row both read,
+  except what depends on rows only one of them reads: whether an ancestor is
+  shown, which row shows for a key present in two audiences, and the rows
+  taken out with those (B9).
+- `coven_writes` holds the same writes on both, under row ids of each
+  device's own (§8.1).
 
-`§` refers to sections of `coven-from-scratch.md`; `A` to sections of this
-appendix.
+### B2 Terms
 
-## A1. Results
-
-- **Core: proven.** Cells, generations and `coven_lost` converge: any two
-  orders that respect causality give the same state. The state is a function
-  of the set of writes alone, and applying a snapshot then the writes after
-  it gives the same state as applying everything.
-- **Three corrections the core needs**, each shown necessary by a checked
-  counterexample (A8):
-  - `coven_lost`: the per-arrival recording rule of §8.1–8.2 diverges on the
-    spec's own example. The fix: a value is lost when some write replaced it
-    and no write that replaced it had read it.
-  - `coven_rows`: "the write that last changed its generation" depends on
-    arrival order for concurrent deletes or re-adds of one generation. The
-    fix: of the writes that moved the row to a generation, the one with the
-    smallest timestamp.
-  - `coven_rows` keeps only the latest generation change, so a late change
-    made at an older generation can't name the delete it lost to, which
-    §8.3's example requires. The fix: keep the write for every generation
-    change.
-- **Rules that remove rows after a merge: not convergent as written.** Six
-  counterexamples checked by Lean and one argued in prose (A8.4–A8.10). Two
-  causes:
-  - a removal is stored like a delete and kept for good, though whether it
-    happens depends on which concurrent writes have arrived;
-  - the unique rule is judged among rows still present, so the order in which
-    rules run changes the result.
-- **General structure: proven.** If every removal rule fires on a condition
-  that stays true when more rows are removed, the rules have exactly one end
-  result in any order, and that result is the smallest set of removed rows
-  closed under the rules. No pairwise checking of rules is needed. The unique
-  rule fails this condition; judging it once, among the rows that survive the
-  other rules, restores it.
-- **Places: the ancestor retraction rule diverges** (A8.10). An ancestor's
-  presence should be derived from its present shared children, which is a
-  rule of the convergent kind above.
-
-## A2. Terms
-
-- **Write**: one transaction, with its device, number, timestamp, had-read
-  positions and row changes (§5).
-- **Row change**: one row's insert, update or delete within a write. A write
-  makes at most one change per row.
-- **Had read**: write `w` had read write `a` when `w`'s device had applied
-  `a` before making `w` (§7.1). A device's own earlier writes count.
-- **Concurrent**: neither of two writes had read the other.
-- **Causal order**: an order of applying writes in which each write comes
-  after every write it had read. Every device applies writes in some causal
-  order (§7.1).
-- **Applied set**: the set of writes a device has applied. It is *closed*: it
-  holds every write any of its writes had read.
-- **Generation**: per row, as in §8.3. Odd while the row exists, even while
-  it is deleted, 0 before it is created.
-- **Incarnation**: one lifetime of a row between generation changes. An insert
-  made at generation `g` creates incarnation `g + 1`; an update or delete
-  made at generation `g` acts on incarnation `g`.
-- **Setter**: a write that sets a cell. Its value is the cell's value in that
-  write. Two setters of one cell in one incarnation compete by timestamp.
-- **Replacer** of a value: a write that sets the same cell in the same
+- *Write*, *row change*, *cell*, *generation*, *audience*: as in §5, §8,
+  §8.3 and §14.
+- *Row*: one table, key and audience. The store's note 1 and a circle's note
+  1 are two rows, each with its own generations (§14.2).
+- *Had read*: write `w` had read write `a` when `w`'s device had applied `a`
+  before making `w`; a device has always read its own earlier writes (§7.1).
+- *Causal order*: an order of applying writes in which each write comes after
+  every write it had read. Every device applies writes in a causal order.
+- *Closed set*: a set of writes that holds every write any of them had read.
+  The writes a device has applied form a closed set.
+- *Incarnation*: one lifetime of a row. An insert made at generation `g`
+  starts incarnation `g + 1`; an update or delete made at generation `g` acts
+  on incarnation `g`.
+  - E.g. Ana creates note 43 at generation 0, so it lives in incarnation 1;
+    she deletes it, and re-adds it at generation 2, starting incarnation 3.
+- *Setter*: a write that sets a cell. Its value is the cell's value in that
+  write.
+- *Replacer* of a value: a write that sets the same cell of the same
   incarnation with a larger timestamp, or deletes that incarnation.
-- **Lost value**: a value recorded in `coven_lost`.
-- **Post-rule**: a rule that removes a row, or changes a reference, because
-  of other rows: foreign key actions, unique values, CHECK constraints, the
-  ancestor rule.
-- **Removed row**: a row a post-rule takes out of the app's table.
+- *Merged state*: each row's generation, the write `coven_rows` names for
+  each generation, each cell's value and the write that set it, and the lost
+  values (§8).
+- *Removed row*: a row present in the merged state that a removal rule takes
+  out of the app's table.
 
-## A3. Model and assumptions
+### B3 Model and assumptions
 
-- Writes are abstract identifiers with three pieces of metadata:
-  - `ts w`: the timestamp, a number;
-  - `past w a`: whether `w` had read `a`;
-  - `chg w r`: `w`'s change to row `r`, if any: its kind, the generation it
-    was made at, and which columns it sets.
-- A cell's value is identified with the write that set it, since a write sets
-  one value per cell. The app's value is that write's value.
-- Assumptions, all guaranteed by §7.2 and §8.3:
-  - **Assumption 1**: timestamps are unique;
-  - **Assumption 2**: a write's timestamp is larger than that of every write
+- A write is an identifier with:
+  - its timestamp, a number;
+  - which writes it had read;
+  - for each row it changes, one row change: insert, update or delete, the
+    generation it was made at, and which columns it sets.
+- A cell's value is identified with the write that set it, since a write
+  sets one value per cell.
+- The writes satisfy, by §7.1, §7.2 and §8.3:
+  - **assumption 1**: timestamps are unique;
+  - **assumption 2**: a write's timestamp is larger than that of every write
     it had read;
-  - **Assumption 3**: a change's generation was reached on the authoring
+  - **assumption 3**: a change's generation was reached on the authoring
     device: it is 0, or some write the author had read moved the row to it;
-  - **Assumption 4**: an insert is made at an even generation, an update or a
+  - **assumption 4**: an insert is made at an even generation, an update or
     delete at an odd one.
-- Assumption 3 is weaker than "the author's current generation", so the
-  theorem covers any write whose generation the author had seen.
-- Rows are independent in the core: a row's state depends only on the
-  changes to that row. Foreign keys, unique values, CHECK constraints and
-  places are post-rules, treated in A9.
-- What a device stores, the state:
-  - `gen r`: row `r`'s generation, as in `coven_rows`;
-  - `genWrite r n`: the write recorded for generation `n` of row `r`. The
-    spec keeps this only for the current generation; the model keeps it for
-    every generation (A8.3);
-  - `cell r c`: the write whose value cell `c` of row `r` holds, as in
-    `coven_cells`; empty while the row is deleted;
-  - `lost r c a`: the `coven_lost` row for the value write `a` set in cell
-    `c` of row `r`: the incarnation it was set in, and the write recorded as
-    replacing it. The spec's `coven_lost` has no incarnation column; it is
-    needed to tell which lost rows a delete affects.
+- What a device stores for the merged state:
+  - each row's current generation;
+  - per generation, the write `coven_rows` names: of the writes that moved
+    the row there, the one with the smallest timestamp;
+  - per cell, the write that set its value;
+  - per value, its `coven_lost` row: the incarnation it was set in, and the
+    write recorded as replacing it.
+- In Lean: `Writes`, `Valid`, `St`, in `Model.lean`.
 
-## A4. The theorem
+### B4 The merged state as a function of the writes
 
-- **Convergence.** Let `L₁` and `L₂` be two causal orders of the same set of
-  writes. Applying `L₁` to the empty database and applying `L₂` to the
-  empty database give the same state: the same generations, generation
-  records, cells and `coven_lost` rows. Lean: `merge_converges`.
-- **The state is a function of the set.** For every causal order `L`, the
-  state after applying `L` is the declarative result for the set of writes in
-  `L` (A5), and there is only one such state. Lean: `run_isSpec`,
-  `isSpec_unique`.
-- **Snapshots** (§15). Device A applies a causal order `L₀` and writes a
-  snapshot. Device B loads it and applies `L₁`, in an order where the
-  snapshot's writes count as applied. Device C applies `L₂` from scratch. If
-  B and C applied the same set, they hold the same state. Lean:
-  `snapshot_converges`.
-- **Timestamp order.** A list of writes sorted by timestamp, holding
-  everything its writes had read, is a causal order. So every causal order
-  gives the result of applying the writes in timestamp order. Lean:
-  `causalOrder_of_ts_sorted`.
+For a closed set `S` of writes, each part of the merged state is defined from
+`S` alone, with no order of application:
 
-## A5. The result, as a function of the set of writes
-
-For a closed set `S` of writes, each part of the state is defined from `S`
-alone:
-
-- **Generation** of row `r`: the largest generation any write in `S` moved
-  `r` to, by an insert or a delete; 0 if none. Every generation below it was
-  reached by some write in `S`.
-- **Generation record** for generation `n` of row `r`: of the writes in `S`
-  that moved `r` to `n`, the one with the smallest timestamp. This is the
-  write that does it first when the writes are applied in timestamp order.
-- **Cell** `c` of row `r`: of the writes in `S` that set `c` in the current
-  incarnation, the one with the largest timestamp. Nothing while the row is
-  deleted.
-- **Lost**: the value write `a` set in cell `c`, incarnation `k`, is lost
-  exactly when:
-  - some write in `S` replaced it; and
-  - no write in `S` that replaced it had read `a`.
+- **Generation** of a row: the largest generation any write in `S` moved it
+  to by an insert or delete; 0 if none.
+- **Write per generation**: of the writes in `S` that moved the row to that
+  generation, the one with the smallest timestamp (§8.3).
+- **Cell**: of the writes in `S` that set the cell in the current
+  incarnation, the one with the largest timestamp; nothing while the row is
+  deleted (§8.1, §8.2).
+- **Lost**: a value is lost when some write in `S` replaced it and no write
+  in `S` that replaced it had read it (§8).
 - **Replaced by**, for a lost value of incarnation `k`:
-  - if `k` was deleted: the earliest delete of `k`, which is the generation
-    record for `k + 1`;
-  - otherwise: the cell's current value's write.
+  - if `k` was deleted: its earliest delete, which is the write `coven_rows`
+    names for generation `k + 1`;
+  - otherwise: the cell's current winning write.
+- E.g. the writes of §8.1 on note 42's title:
 
-Example, the §8.1 writes on note 42's title:
+  ```
+  write             value               stamp          had read
+  Ana's write 1     "Grocery list"      12:00:00 #0
+  Ana's write 4     "Groceries"         13:01:00 #0    Ana 1
+  Ben's write 9     "Weekly groceries"  13:01:00 #1    Ana 1, Ana 4
+  Carol's write 2   "Shopping"          14:00:00 #0    Ana 1
+  ```
 
-```
-Ana's write 1   "Grocery list"       12:00:00.000 #0
-Ana's write 4   "Groceries"          13:01:00.000 #0   had read Ana 1
-Ben's write 9   "Weekly groceries"   13:01:00.000 #1   had read Ana 1, Ana 4
-Carol's write 2 "Shopping"           14:00:00.000 #0   had read Ana 1
-```
+  - the title: Carol's write 2, the largest stamp;
+  - "Grocery list": replaced by Ana 4, Ben 9 and Carol 2, which all had read
+    it; not lost;
+  - "Groceries": replaced by Ben 9 and Carol 2, and Ben 9 had read it; not
+    lost;
+  - "Weekly groceries": replaced by Carol 2 only, which hadn't read it; lost,
+    replaced by Carol's write 2.
+- In Lean: `IsSpec` in `Model.lean`.
 
-- Cell: Carol's write 2, the largest timestamp.
-- Ana's "Grocery list": replaced by Ana 4, Ben 9 and Carol 2, all of which
-  had read it. Not lost.
-- Ana's "Groceries": replaced by Ben 9 and Carol 2. Ben 9 had read it. Not
-  lost.
-- Ben's "Weekly groceries": replaced by Carol 2 only, which hadn't read it.
-  Lost, replaced by Carol's write 2.
-- This is the single row §8.2 shows. Lean runs the proven step on both of
-  §8.1's orders and gets it: `example_8_1`.
+### B5 Applying one write
 
-Why "no replacer had read it":
+A device applies an arriving write `w` to each row `r` it changes. Let `G` be
+`r`'s generation on the device, and `g` the generation `w`'s change was made
+at.
 
-- If a write that replaced the value had read it, that write's device had
-  the value, either in the cell or in `coven_lost`, where the app could show
-  it. So the value wasn't silently dropped.
-- §8.3's rule for two concurrent deletes, "a value is lost only if neither
-  had read it", is this rule for deletes. The rule here extends it to cells.
-- It is the rule a device can keep without storing old values. A value's
-  status changes in only two ways as writes arrive:
-  - a value nobody replaced, which is always the cell's current value,
-    becomes lost when a write replaces it without having read it;
-  - a lost value stops being lost when a write replaces it having read it.
-  A value replaced and not lost stays not lost, since the replacer that had
-  read it stays in the set. So a device needs only the current cells and
-  `coven_lost`.
-
-## A6. The step: applying one write
-
-A device applies an arriving write `w` to each row `r` it changes. Let `G`
-be `r`'s generation on the device and `g` the generation `w`'s change was
-made at.
-
-- **Generation.** An insert or delete with `g = G` moves the row to `G + 1`.
-  Any other change leaves `G` alone.
-- **Generation record.** An insert or delete made at `g` competes for the
-  record of `g + 1`: the smaller timestamp stays.
-- **Cells.**
-  - A delete with `g = G` empties the row's cells.
-  - An insert with `g = G` starts a new incarnation with its own values.
-  - An update at `G`, or an insert at `G - 1` concurrent with the one that
-    created the current incarnation, competes per cell: the larger timestamp
-    stays (§8.2).
-  - A change made at an older incarnation changes no cell.
+- **Generation**: an insert or delete with `g = G` moves the row to `G + 1`.
+  Any other change leaves it.
+- **Write per generation**: an insert or delete made at `g` competes for
+  generation `g + 1`'s `coven_rows` row: the smaller timestamp stays.
+- **Cells**:
+  - a delete with `g = G` empties the row's cells;
+  - an insert with `g = G` starts a new incarnation with its values;
+  - an update at `G`, or an insert at `G - 1` concurrent with the one that
+    started the current incarnation, competes per cell: the larger timestamp
+    stays (§8.2, §8.3);
+  - a change made at an older incarnation changes no cell.
 - **`coven_lost`**, for each value `a` of each cell of `r`:
   - `w`'s own value:
-    - made at an incarnation already deleted: lost, replaced by that
-      incarnation's generation record;
-    - made at the current incarnation with a smaller timestamp than the
-      cell's value: lost, replaced by the cell's value's write;
-    - otherwise not lost.
-  - a value already lost, which `w` replaces:
-    - if `w` had read it: no longer lost;
+    - made at an incarnation already deleted: lost, replaced by the write
+      `coven_rows` names for that incarnation's delete (§8.3);
+    - made at the current incarnation with a smaller stamp than the cell's
+      value: lost, replaced by the cell's winning write;
+    - otherwise not lost;
+  - a value already lost that `w` replaces:
+    - if `w` had read it: no longer lost (§8.2);
     - otherwise still lost, and "replaced by" becomes the earlier delete or
-      the later setter, by the rule in A5.
+      the later setter, by B4;
   - the cell's current value, which `w` replaces without having read it:
-    lost, replaced by `w`.
+    lost, replaced by `w`;
   - anything else: unchanged.
-- The step reads only:
-  - the device's state;
-  - the timestamps of writes it has applied, which `coven_writes` holds;
-  - the arriving write's own record: its changes and its had-read positions.
+- The step reads only the device's state, the timestamps of writes it has
+  applied, and the arriving write's record.
+- In Lean: `step` in `Model.lean`.
 
-## A7. Proof of the core
+### B6 Proof for the merged state
 
-### A7.1 Structure
+- **Step lemma**: let `S` be closed, the state be B4's result for `S`, and
+  `w` a write not in `S` whose had-read writes are all in `S`. Then applying
+  `w` gives B4's result for `S` plus `w`. Lean: `step_spec`.
+- The step lemma rests on these facts:
+  - no write in `S` had read `w`, since `S` is closed and `w` is not in it;
+    so any replacer already applied hadn't read `w`;
+  - `g ≤ G`, by assumption 3;
+  - every generation from 1 to `G` was reached by a write in `S`, so with
+    assumption 4 an incarnation was deleted exactly when it is older than
+    `G`;
+  - a value nobody replaced is the cell's current value;
+  - the largest or smallest of a set, by timestamp, changes as the step
+    does when `w` joins the set.
+- **Induction**: applying a causal order write by write keeps B4's result,
+  from the empty database or from a snapshot. Lean: `foldl_isSpec`,
+  `run_isSpec`.
+- **Uniqueness**: two states that are both B4's result for one set are equal.
+  Lean: `isSpec_unique`.
+- **Convergence**: two causal orders of the same writes give the same merged
+  state. Lean: `merge_converges`.
+- **Snapshots** (§15): loading a snapshot and applying the writes after it,
+  with the covered writes counting as applied, gives the same merged state
+  as applying every write from the start. Lean: `snapshot_converges`.
+- **Timestamp order** is one causal order, by assumption 2, so every causal
+  order gives the state applying the writes in timestamp order gives. Lean:
+  `causalOrder_of_ts_sorted`.
+- E.g. Lean runs the step on the writes of §8.1, §8.2 and §8.3, in the
+  arrival orders they describe:
+  - Ben's phone and Carol's tablet both end with "Shopping" and one
+    `coven_lost` row, "Weekly groceries" replaced by Carol's write 2. Lean:
+    `example_8_1`.
+  - On Carol's tablet, "Groceries" is lost after Ana's write 4 arrives, and
+    no longer lost after Ben's write 9. Lean: `example_8_2`.
+  - Ben's edit of note 43 is lost, replaced by Ana's write 7, whether it
+    arrives before Ana's delete or after her re-add, and generation 2's
+    `coven_rows` row names write 7. Lean: `example_8_3`.
 
-- Define `IsSpec S st`: state `st` is the result of A5 for set `S`. It is a
-  list of "if and only if" statements, one per part of the state, that
-  mention only `S` and the writes' metadata.
-- **Step lemma**, Lean `step_spec`: if `S` is closed, `st` is the result for `S`,
-  `w` is not in `S`, and everything `w` had read is in `S`, then applying `w`
-  to `st` gives the result for `S` plus `w`.
-- **Induction**, Lean `foldl_isSpec`: applying a causal order write by write
-  keeps the invariant, from the empty database or from a snapshot.
-- **Uniqueness**, Lean `isSpec_unique`: two states that are both the result for
-  one set are equal, part by part.
-- Convergence follows: both orders end in the result for the same set, and
-  there is only one.
-- Newman's lemma is not needed for the core: the core has no chained rules.
-  Order independence is one theorem about the set, instead of a check of
-  each pair of rules.
+### B7 The removal rules
 
-### A7.2 Facts the step lemma uses
+- The removal rules read only the merged state, so what they read is a
+  function of the set of writes:
+  - which rows are present: an odd generation;
+  - each row's references: the parent each points at, and whether it is
+    *stale*: the parent's generation it carries has been deleted since
+    (§8.4);
+  - whether the row's merged values fail a CHECK (§8.6);
+  - which rows are ancestors, and through which reference a row keeps one
+    (§14.1);
+  - which rows are shared;
+  - each row's unique claims, each with a stamp: the timestamp of the latest
+    write that set any of the constraint's columns in it (§8.5).
+- A reference under set null or set default whose parent's generation was
+  deleted holds null or the default in the merged state itself (§8.4). It is
+  a value like any other, which CHECK and unique constraints see, not a
+  reference the rules follow.
+  - E.g. at 16:00 Ana deletes note 43 while Ben, offline, adds link 6
+    pointing at it, under set null. Every device stores link 6 with
+    `note_id` null, whether Ben's write or Ana's arrived first. Lean:
+    `example_8_4`.
+  - Where SQLite would refuse that value, such as on a `NOT NULL` column,
+    the reference stays and counts as stale.
+- The rules other than the unique one take a present row out when:
+  - **foreign keys**: one of its references is stale, or its parent is
+    absent or taken out;
+  - **CHECK**: its merged values fail;
+  - **ancestors**: it is an ancestor and no row keeps it: a present row,
+    not taken out, shared, whose keeping reference points at it. A row whose
+    audience comes from an ancestor is shared while that ancestor is present
+    and not taken out.
+- **Unique values**: a row loses when a row still present claims the same
+  value of the same constraint with a smaller stamp, or an equal stamp and a
+  smaller primary key.
+  - A key present in two audiences on one device is a claim too, the store's
+    first (B9).
+- §8's three steps:
+  1. apply the rules other than the unique one until none fires;
+  2. judge unique values among the rows still present;
+  3. apply the other rules again until none fires.
+- A removed row's `coven_lost` row names every rule that holds for it once
+  the steps end, and the unique rule if it lost in step 2.
+- In Lean: `Inputs`, `fires`, `rivalBefore`, `removal`, `view`, in
+  `Removal.lean`.
 
-- **Nothing applied had read the arriving write.** Every write in `S` had
-  read only writes in `S`, since `S` is closed, and `w` is not in `S`. So any
-  replacer already applied hadn't read `w`.
-- **A change is never ahead of the device.** `g ≤ G`: by assumption 3, `g` is 0 or
-  some write `w` had read moved the row to `g`, and that write is in `S`.
-- **Generations go up one at a time.** If the row's generation is `G`, every
-  generation from 1 to `G` was reached by some write in `S`. With assumption 4, an odd
-  incarnation `k` was deleted exactly when `k < G`, and the generation
-  record for `k + 1` is its earliest delete.
-- **A value nobody replaced is the cell's current value**, in the current
-  incarnation. Lean: `unreplaced`.
-- **Every set value has a "replaced by" write** to name. Lean: `canon_exists`.
+### B8 Proof for the removal rules
 
-### A7.3 The cases
-
-- Generation and generation record: the largest and smallest of a set, and
-  adding `w` to the set changes them as the step does. Lean: `isMaxBy_insert`,
-  `isMinBy_insert`.
-- Cells: three cases — the row moves to a new generation, `w` sets the cell
-  in the current incarnation, or neither.
-- `coven_lost`, for each value `a`:
-  - `a` is `w`'s own value: three cases by `w`'s incarnation against `G`.
-  - `a` is already lost:
-    - `w` replaces it having read it: no longer lost;
-    - `w` replaces it without having read it: still lost; four cases for
-      "replaced by", by whether `w` is a delete and whether `a`'s
-      incarnation is deleted;
-    - `w` doesn't replace it: unchanged, including when `w` sets the same
-      cell with a smaller timestamp than `a`.
-  - `a` is not lost: if some write in `S` replaced it, one of them had read
-    it, and it stays not lost; otherwise `a` is the current value, and it
-    becomes lost exactly when `w` replaces it without having read it.
-
-## A8. Counterexamples to the spec as written
-
-Each is two causal orders of the same writes that end differently. All are
-checked in Lean by running an executable reading of the spec's rules
-in `Counterexamples.lean`, namespace `Literal`. A12 lists how it reads the spec.
-
-### A8.1 `coven_lost` depends on arrival order (§8.1, §8.2)
-
-- The writes of A5's example.
-- Ben's phone applies Ana 1, Ana 4, Ben 9, Carol 2:
-  - Ben 9 replaces Ana 4 having read it: nothing recorded;
-  - Carol 2 replaces Ben 9 without having read it: records "Weekly
-    groceries".
-- Carol's tablet applies Ana 1, Carol 2, Ana 4, Ben 9:
-  - Ana 4 loses to Carol 2, which hadn't read it: records "Groceries";
-  - Ben 9 loses to Carol 2: records "Weekly groceries".
-- Ben's phone holds one `coven_lost` row, Carol's tablet two. The spec shows
-  one and says every device holds the same rows.
-- The cause: Ben 9 had read Ana 4 and replaces it, but arrives after Ana 4
-  was recorded, and nothing takes the row back out.
-- Fix: A5's rule. A write removes the lost rows of values it replaces and
-  had read. Lean: `ce1_bens_phone`, `ce1_carols_tablet`.
-
-### A8.2 `coven_rows.write` depends on arrival order (§8.3)
-
-- Note 43 at generation 1; Ana's write 5 and Ben's write 6 delete it
-  concurrently, stamped 50 and 60.
-- Applied 5 then 6: `coven_rows` names write 5, since the second delete
-  changes nothing. Applied 6 then 5: it names write 6.
-- Fix: the generation record is the write with the smallest timestamp among
-  those that moved the row to that generation. Same for concurrent re-adds.
-  Lean: `ce2_gen_write`.
-
-### A8.3 "Replaced by" after a re-add (§8.3)
-
-- §8.3's example: Ana's write 5 creates note 43, her write 7 deletes it, her
-  write 8 re-adds it; Ben's concurrent edit at generation 1 is stamped after
-  17:00.
-- The spec says every device records Ben's value as replaced by Ana's write
-  7.
-- A device that gets Ben's edit after Ana's write 8 has only write 8 in
-  `coven_rows`, which keeps the latest generation change. It records write 8.
-  A device that gets Ben's edit before Ana's write 7 records write 7.
-- Fix: keep the write for every generation change of a row, one small row
-  each. Lean: `ce3_replaced_by`.
-
-### A8.4 Cascade for a child the deleter never had (§8.4)
-
-- Tags point at notes with `ON DELETE CASCADE`.
-- Writes:
-  - Ana 1: insert notes 43 and 44;
-  - Ana 2, had read Ana 1: insert tag 9 on note 43;
-  - Ben 3, had read Ana 1, Ana 2: move tag 9 to note 44;
-  - Carol 4, had read Ana 1 only: delete note 43.
-- Ben's phone, 1 2 3 4: tag 9 is on note 44 when Carol's delete arrives, and
-  stays.
-- Carol's tablet, 1 4 2 3: tag 9 arrives pointing at a deleted note 43, so it
-  is removed, its generation moved to 2. Ben's move, made at generation 1,
-  then loses.
-- Ben's phone has tag 9; Carol's tablet doesn't.
-- The cause: §8.4's three cases consider only the child's insert, not a
-  concurrent write that points the child elsewhere. Restrict gives the same
-  result. Lean: `ce4_cascade`.
-
-### A8.5 Set null for a child the deleter never had (§8.4)
-
-- The same writes with link 6 through an `ON DELETE SET NULL` key.
-- Ben's phone, 1 2 3 4: link 6 points at note 44.
-- Carol's tablet, 1 4 2 3: link 6 arrives dangling, and coven sets it to null
-  "set by the parent's delete", stamped 4. Ben's move, stamped 3, loses to
-  that null.
-- `ON UPDATE CASCADE` for a key change (§8.5) has the same shape: coven's
-  re-pointing is stamped with the key change and competes with concurrent
-  re-pointing by the child's own writes. Lean: `ce5_set_null`; the key
-  change case is argued only here.
-
-### A8.6 A unique loser is removed for good (§8.5)
-
-- Note names are unique.
-- Writes:
-  - Ana 10: insert note 45, name "Groceries";
-  - Ben 11: insert note 46, name "Groceries";
-  - Ben 12, had read Ben 11 only: rename note 46 "Groceries 2".
-- Ana's phone, 10 11 12: note 46 loses the name and is removed, generation 2.
-  Ben's rename, made at generation 1, loses.
-- Ben's phone, 11 12 10: no two notes share a name when Ana's arrives. Both
-  stay. Lean: `ce6_unique`.
-
-### A8.7 A CHECK loser is removed for good (§8.6)
-
-- §8.6's example, `start <= end`, start 5, end 12. Ana sets start 10; Ben
-  sets end 8, then end 20 before seeing Ana's write.
-- Applied Ana, Ben 8, Ben 20: the row fails after Ben 8 and is removed; Ben
-  20 loses.
-- Applied Ben 8, Ben 20, Ana: start 10, end 20 passes; the row stays. Lean:
-  `ce7_check`.
-
-### A8.8 Unique and cascade chained (§8)
-
-- Writes:
-  - Ana 1: insert folder 70;
-  - Ana 10: insert note 45 in folder 70, name "Groceries";
-  - Ben 11: insert note 46, name "Groceries";
-  - Carol 12: delete folder 70.
-- Ana's phone, 1 10 11 12: note 46 loses the name to note 45; then the folder
-  goes and note 45 cascades. Neither note remains.
-- Carol's tablet, 1 12 10 11: note 45 arrives in a deleted folder and is
-  removed; note 46 has no rival and stays.
-- This one fails even within a single device's rule runs: from the state
-  "folder deleted, notes 45 and 46 present", running cascade first leaves
-  note 46, running unique first removes both. Lean: `ce8_unique_cascade`,
-  and `spec_unique_not_confluent` for the rule-order version.
-
-### A8.9 Unique values across circles (§14)
-
-- Argued here only, not in Lean.
-- A unique constraint on a table whose rows can be in different circles:
-  Ana's row A in her circle and Ben's store row B claim one value, A's write
-  earlier.
-- Ana's device sees both and removes B. A device outside Ana's circle sees
-  only B and keeps it. They disagree on a store row.
-- Shared keys have the same problem: one key inserted concurrently in two
-  places is one row on a device that reads both, and two different things
-  elsewhere.
-- Fix options: scope unique constraints and shared keys to one place, for
-  example by including the place column, or refuse them on tables whose rows
-  can be in different places.
-
-### A8.10 Ancestor retraction for places
-
-- The rule under test: an ancestor row has no place; it is shared when some
-  shared child references it. When Ana's last shared child of ancestor 80
-  leaves the store, her write retracts 80, a delete on other devices.
-  Receivers ignore that delete while any present row references 80. Ben's
-  write adding a new shared child carries 80 too.
-- Writes:
-  - write 1: insert ancestor 80 and child 81 pointing at it;
-  - Ana 10: child 81 leaves the store, so delete 81 and retract 80;
-  - Ben 11, concurrent: insert child 82 pointing at 80, carrying 80 at
-    generation 1.
-- Applied 1 10 11: when the retraction arrives no present row references 80,
-  so 80 goes to generation 2. Ben's carried 80, made at generation 1, loses.
-  Child 82 points at generation 1 of a row now at 2, so it follows its
-  foreign key's action and is removed.
-- Applied 1 11 10: child 82 references 80 when the retraction arrives, so it
-  is ignored. 80 and 82 stay.
-- The cause: whether the retraction applies depends on whether Ben's child
-  has arrived, but once applied it moves the generation, which can't be
-  undone. Lean: `ce9_ancestor`.
-- Answer to the design question: an ancestor's presence should be derived
-  from the merged children, not stored as a delete. "An ancestor is removed
-  when every row referencing it is removed" is a rule of the kind in A9, so
-  it converges with the foreign key rules, in any order. Ana's write then
-  carries no delete of 80; every device computes 80's presence.
-
-## A9. Post-rules: the general structure
-
-### A9.1 Two requirements
-
-- **Not stored.** A post-rule's result must not move a row's generation or
-  be stored like a write. It must be recomputed from the merged state of A5
-  whenever that state changes, and a removed row must come back when the
-  reason goes away. A8.4–A8.7 and A8.10 fail this: each removal depends on
-  which concurrent writes have arrived, and storing it makes it permanent.
-- **One result from one merged state.** Running the rules in different
-  orders must end in the same set of removed rows. A8.8 fails this.
-
-### A9.2 Monotone rules have one result
-
-- Model: a set `D` of removed rows; a rule `fires D x` says row `x` must be
-  removed given `D`. One step removes some present row for which a rule
-  fires.
-- **Monotone**: if a rule fires for `x` given `D`, it also fires for `x`
-  given any larger set. Removing more rows never stops a rule from firing.
-- Theorems, for monotone rules over a finite set of rows:
-  - **Termination**: each step removes a row, so the steps stop, as §8
-    says. Lean: `killStep_terminating`.
-  - **Local confluence**: two steps from one state, removing `x` and `y`,
+- **Monotone**: a rule is monotone when it keeps firing for a row as more
+  rows are removed.
+- Every rule other than the unique one is monotone:
+  - a stale reference stays stale, and a parent taken out stays out when
+    more rows are removed;
+  - a CHECK result doesn't depend on removals;
+  - a row stops keeping an ancestor only when it, or the ancestor its own
+    audience comes from, is taken out; so an ancestor with no keeper still
+    has none when more rows are removed.
+  - Lean: `fires_monotone`.
+- For monotone rules over a finite set of rows:
+  - **termination**: each step removes a row, so applying rules stops. Lean:
+    `killStep_terminating`;
+  - **local confluence**: two steps from one state, removing `x` and `y`,
     meet again: after removing `x`, the rule for `y` still fires, by
-    monotonicity, and the reverse; both paths end with `x` and `y` removed.
-    This is the only pair to check, whatever the rules are. Lean:
-    `killStep_locallyConfluent`.
-  - **Newman's lemma**: a terminating, locally confluent system has one end
-    result from each state. Lean: `newman`, `kill_unique_normal`.
-  - **Least fixpoint**: that end result is the smallest set containing the
-    starting removals that is closed under the rules. Lean: `normal_least`. It
-    can be stated without any order of application.
-- So no list of rule pairs is needed: checking that each rule is monotone
-  covers every pair, including ones not yet thought of.
+    monotonicity, and the reverse. Lean: `killStep_locallyConfluent`;
+  - **one result**: by Newman's lemma, a terminating, locally confluent
+    system ends in one state from each start, whatever order the steps take.
+    Lean: `newman`, `kill_unique_normal`;
+  - **least fixpoint**: that state is the smallest set of removed rows that
+    contains the start and leaves no rule firing. Lean: `normal_least`.
+- No pair of rules needs checking on its own: monotonicity covers every
+  pair, and any rule added later that is monotone.
+- **Why unique values are judged once**: the unique rule isn't monotone,
+  since taking the winner out stops it firing for the loser. Applied as one
+  more rule, it can end two ways:
+  - Ana deletes folder 0; note 1 is in it, under cascade; note 2 is not; both
+    are titled "Plan", note 1's claim first;
+  - cascade first takes note 1 out, and note 2 then has no rival: note 2
+    stays;
+  - unique first takes note 2 out, then cascade takes note 1 out: neither
+    stays.
+  - Lean: `unique_with_others`.
+- **§8's three steps have one result**: steps 1 and 3 have one result each
+  by monotonicity, and step 2 is a function of step 1's result. In the
+  example above, step 1 takes note 1 out, so note 2 keeps "Plan" on every
+  device. Lean: `stratified_unique`, `judged_once`.
+- **Any order**: coven's run of the rules is one of the orders the three
+  steps allow, so every order gives the same removed rows. Lean:
+  `removal_stratified`, `any_order_removal`.
+- **When a unique loser comes back**: when its winner is deleted, or taken
+  out in step 1. A winner taken out in step 3 doesn't bring it back.
+  - E.g. notes are unique by title, and a sub-note points at its parent
+    under cascade. Note 1 is "Ideas"; at 10:00 Ana adds note 2, "Plan", as a
+    sub-note of note 1; at 11:00 Ben, not having seen it, renames note 1 to
+    "Plan".
+    - Step 2: note 2's claim from 10:00 keeps "Plan"; note 1 is taken out.
+    - Step 3: note 2 goes with its parent, by cascade.
+    - Note 1 stays out: back, it would bring note 2 back, and lose to it
+      again. Lean: `example_8_5_subnote`.
+  - E.g. the same, but note 2 is a sub-note of note 3, "Ideas" since 12:00,
+    and note 4 has been "Ideas" since 09:00.
+    - Step 2: note 1 loses "Plan" to note 2, and note 3 loses "Ideas" to note
+      4.
+    - Step 3: note 2 goes with note 3.
+    - Note 1 stays out: it lost in step 2, when note 2 was present. Lean:
+      `example_8_5_step3`.
+- **Every removed row names a rule**: a row removed by a run of monotone
+  rules still meets a rule once the run ends. Lean: `star_fires`,
+  `removed_has_rule`.
+  - E.g. todos need `start <= end`, and todo 7 is in list 3. Ana deletes
+    list 3 while Ben moves todo 7's start past its end. Todo 7's `coven_lost`
+    row names the foreign key and the CHECK, on every device, whichever rule
+    a device ran first. Lean: `example_8`.
+- **End to end**: the merged state converges (B6), and the rules, and
+  therefore the app's tables and the removed rows' `coven_lost` rows, are
+  functions of it. Lean: `device_converges`, `rule_order_converges`.
+- E.g. Lean runs the writes of §8.4, §8.5 and §8.6, with the rules reading
+  the merged state it computes, in both arrival orders:
+  - §8.4: Carol's tablet applies Ana's delete of note 43, then Ben's tag 9
+    on it: tag 9 is taken out, and its `coven_lost` row names the foreign
+    key. Ben's move of tag 9 to note 44 arrives: tag 9 is back. Ben's phone,
+    which gets Ana's delete last, never takes it out. Lean: `example_8_4`.
+  - §8.5: Ana renames the tag "urgent" to "important" while Ben tags note 44
+    "urgent". Note 42 ends tagged "important", and Ben's `(44, "urgent")` is
+    taken out, naming the foreign key, in either order. Lean:
+    `example_8_5_key`.
+  - §8.5: notes are unique by folder and title. Ana adds note 1, "Plan" in
+    Work, at 10:00; Ben renames note 2 "Plan" at 11:00; Carol moves note 2 to
+    Work at 12:00. Note 2's claim dates from 12:00, so note 1 keeps the
+    value. Lean: `example_8_5_stamp`.
+  - §8.6: Ana sets start 10 while Ben sets end 8: the row is taken out,
+    naming the CHECK. Ben's later end of 20 brings it back. Lean:
+    `example_8_6`.
 
-### A9.3 Which rules are monotone
+### B9 Audiences
 
-Judged against the merged state of A5, and the set `D`:
+- A row is one table, key and audience, with its own generations (§14.2).
+  Each row change sits in the part of its row's audience; a device applies
+  the parts it can read and counts the rest as applied (§14.4).
+- E.g. Ana moves note 1 into her circle, while Ben, outside it, re-adds note
+  1 in the store, and then Carol, in the circle, edits the circle's note 1.
+  - The store's note 1 is deleted by Ana's move and re-added by Ben: it ends
+    at generation 3 with Ben's values, on Carol's device and on Dan's, who
+    is outside the circle.
+  - The circle's note 1 is a row of its own, at generation 1 with Carol's
+    edit; only circle members have it.
+  - Lean: `Moved.agree`.
+- **Same audiences**: the writes as a device sees them still meet B3's
+  assumptions, since a change's generation was reached by a change to the
+  same row, in the same audience. So two devices that read the same
+  audiences hold the same merged state. Lean: `valid_project`,
+  `audience_converges`.
+- **Different audiences**: a row's merged state depends only on the changes
+  to that row, so devices agree on the merged state of every row both read.
+  Lean: `fold_atRow`, `audiences_agree`.
+- **Removals on devices with different rows**: two devices take out the same
+  rows among any set of rows both have that holds, for each of its rows:
+  - every parent its references point at;
+  - every row whose unique claim rivals its own;
+  - if it is an ancestor, every row that keeps it, and the ancestor those
+    rows take their audience from.
+  - Lean: `removal_local`.
+- §14.5 gives the parents: a row points only at rows every reader of it can
+  read.
+- §14.1 gives the rivals: a unique constraint on a root table includes the
+  audience column, so rivals share an audience; constraints that could span
+  audiences are refused. Lean: `rivals_closed`.
+- Two rules read rows outside that set, so devices that read different
+  circles can differ on them:
+  - **ancestors**: a device shows an ancestor only while a present shared row
+    that device can read points at it (§14).
+    - E.g. a label worn only by a todo in Ana's circle is a store row. Ana's
+      device shows it; Dan's, outside the circle, takes it out, and with it
+      the label's cover image, a store row in an asset table whose audience
+      comes from the label. Lean: `AncestorAcross.differs`.
+  - **a key present in two audiences**: the store's row wins over a
+    circle's; of two circles' rows, the one whose insert has the smaller
+    timestamp wins; the other is taken out like a unique loser, in step 2
+    (§14.2).
+    - E.g. in the move above, Carol's device has note 1 in the store and in
+      the circle. The store's shows; the circle's is taken out, naming the
+      unique rule. Dan's device has only the store's, which shows. Lean:
+      `Moved.store_wins`.
+    - The store's row never loses, so devices agree on every store row.
+    - A device in two circles can show a different circle row for one key
+      than a device in only one of them.
+- **Fingerprints** (§19.1): with the ancestor rule and the rule for a key in
+  two audiences left out, two devices take out the same rows in every
+  audience both read. So a fingerprint that leaves out what those two rules
+  decide, including the rows taken out with the rows they take out, is the
+  same on every device that applied the same writes. Lean:
+  `fingerprint_local`, `AncestorAcross.fingerprint_agrees`.
+  - E.g. without the ancestor rule, Ana's device and Dan's both show the
+    label and its cover image.
 
-- **Cascade and restrict**: a child is removed when its winning reference
-  names a parent generation the parent has left, or its parent is in `D`.
-  Monotone.
-- **CHECK**: a row is removed when its merged values fail. Doesn't depend on
-  `D`. Monotone.
-- **Ancestor**: an ancestor is removed when every row referencing it is in
-  `D`. Monotone.
-- Lean: `monoFires_monotone`.
-- **Unique, as the spec states it**: a row is removed when a row still
-  present claims its value with a smaller timestamp. "Still present" means
-  "not in `D`": removing a row can stop the rule from firing for another.
-  Not monotone, and A8.8 shows two end results.
-- Worse, with unique values and foreign keys in a cycle there can be no
-  fixpoint at all, so the result can't be stated without an order. Rows A,
-  P, Q: A is P's child and Q is A's child, both by cascade; P and Q claim one
-  value, Q's claim earlier. In a fixpoint, A is removed exactly when P is, P
-  exactly when Q is present, and Q exactly when A is removed. So A is removed
-  exactly when A is present.
-- **Set null, set default, `ON UPDATE CASCADE`**: these change a reference,
-  not a row's presence. They converge when the reference the app sees is
-  computed from `D` and the merged reference, for example "the reference
-  reads null while its parent is removed or its parent generation is stale".
-  They must not feed the CHECK or unique rules, since nulling a column can
-  make a CHECK pass or fail.
+### B10 The spec's examples, checked
 
-### A9.4 A rule set with one result
+- §8: todo 7 names both rules. Lean: `example_8`.
+- §8.1: both orders end with "Shopping" and one lost value. Lean:
+  `example_8_1`.
+- §8.2: "Groceries" is lost on Carol's tablet until Ben's write 9 arrives.
+  Lean: `example_8_2`.
+- §8.3: Ben's edit is replaced by Ana's write 7 in every order. Lean:
+  `example_8_3`.
+- §8.4: tag 9 is taken out, then back when Ben's move arrives; link 6 holds
+  null. Lean: `example_8_4`.
+- §8.5: a key change leaves Ben's `(44, "urgent")` taken out; note 2's claim
+  dates from 12:00; a loser whose winner leaves in step 3 stays out. Lean:
+  `example_8_5_key`, `example_8_5_stamp`, `example_8_5_subnote`,
+  `example_8_5_step3`.
+- §8.6: the row is taken out, then back when Ben sets end 20. Lean:
+  `example_8_6`.
+- §14.2: a label whose last shared todo leaves stays while Ben's new shared
+  todo wears it, on every device; the store's note 1 wins over the circle's.
+  Lean: `example_14_2`, `Moved.store_wins`.
 
-- Lean defines one, `Stratified`:
-  1. run the monotone rules of A9.3 to the end;
-  2. remove each row whose unique value is claimed, with a smaller
-     timestamp, by a row still present after step 1. Judge this once, all at
-     once;
-  3. run the monotone rules to the end again, removing the children and
-     unsupported ancestors of step 2's losers.
-- It has exactly one result, and always has one. Lean: `stratified_unique`,
-  `stratified_exists`.
-- Freed values in step 3 don't re-open step 2. In A8.8, step 1 removes note
-  45 in the deleted folder, and note 46 keeps the name on every device.
-- **End to end**, Lean `end_to_end`: the post-rules read any function of the core
-  state; since the core state is a function of the set of writes, so is the
-  set of removed rows.
-- Other rule sets work too, as long as each layer is monotone given the
-  layers before it.
-- This changes a claim of §8: "the result is the one applying every write in
-  timestamp order would give" holds for the core but not for post-rules.
-  In A8.8, timestamp order removes both notes; the stratified rules keep note
-  46. Timestamp order with permanent removals is a function of the set too,
-  but a late write with an old timestamp would require replaying everything
-  after it, back to the oldest write ever, since §15 lets old writes arrive a
-  year late.
+### B11 What Lean checks, and what is prose
 
-## A10. Places and the rest of §8
-
-- **Moving a row between places**: a delete for other devices, a re-add on
-  return (§14). For the moved row this is its own change, covered by the
-  core. For children another device added concurrently, it is the cascade of
-  A8.4, with the same requirement: derived, not stored.
-- **Circles** (§14.1): a device that can't read a circle's part skips it. In
-  the core, a row's state depends only on changes to that row, which all
-  sit in its circle's part, so devices agree on every row they can both read.
-  Foreign keys keep this through §14.2. Unique values don't; see A8.9.
-- **Key changes** (§8.5): a key change is a delete plus an insert, covered by
-  the core. Which new key a child follows must be a function of the set: the
-  spec picks the change with the larger timestamp, which is one. The
-  re-pointing itself is the case of A8.5.
-- **Triggers** (§8.7): a shared trigger's writes are ordinary writes, covered
-  by the core. A local trigger sees every SQL change coven makes; its local
-  table converges only if it computes a function of the current rows, such
-  as an index or a count of rows, and not of the history of changes.
-
-## A11. What Lean checks, and what is prose
-
-Checked by Lean, with no `sorry`, no `admit` and no axioms beyond Lean's
-built-in `propext`, `Classical.choice` and `Quot.sound`:
-
-- `merge_converges`, `snapshot_converges`, `run_isSpec`, `isSpec_unique`,
-  `causalOrder_of_ts_sorted`: A4, for the model of A3 and the result of A5.
-- `newman`, `kill_unique_normal`, `kill_exists_normal`, `normal_least`:
-  A9.2, for any monotone rules.
-- `monoFires_monotone`: the rules of A9.3, stated over abstract inputs —
-  which rows fail CHECK, each row's parent and whether its reference is
-  stale, which rows are ancestors and who references them.
-- `spec_unique_not_confluent`: two end results of the spec's rules, A8.8.
-- `stratified_unique`, `stratified_exists`, `end_to_end`: A9.4.
-- `ce1_…` to `ce9_…`: the counterexamples of A8.1–A8.8 and A8.10, by evaluating
-  the executable reading of the spec.
-- `example_8_1`: the proven step on §8.1's writes, in both orders.
-
-Argued here only:
-
-- That `Literal` reads the spec as written; A12 lists its choices.
-- That the post-rule inputs — CHECK results, parents, stale references,
-  unique claims, ancestor references — are functions of the core state.
-  `end_to_end` holds for any such function; the reasoning that coven's
-  actual inputs are such functions is prose.
-- Set null, set default and `ON UPDATE CASCADE` as derived references
-  (A9.3); key changes and concurrent renames (A10).
-- Unique values and shared keys across circles (A8.9); circles generally
-  (A10).
-- That a device can carry out the step: the step reads only the state,
-  applied writes' timestamps and the arriving write's record, which a reader
-  of `Model.lean` can check, but no theorem states it.
-- Local triggers (A10). Schema changes (§17), files and the writes "marked
-  lost" of §17 are not modeled.
-
-## A12. Interpretations of the spec
-
-- "Had read" includes the device's own earlier writes.
-- Every device applies a write after everything it had read, so the
-  applied set is closed. Snapshots cover closed sets (§15).
-- "Replaced by" names the earliest delete of the value's incarnation if it
-  was deleted, otherwise the cell's current winner. The spec doesn't say
-  which write when several replaced a value.
-- An insert arriving at a row whose generation is one past the insert's is a
-  concurrent re-add, and its cells merge (§8.3).
-- In `Literal`, the executable reading used for A8:
-  - a lost row is deleted like any delete: its generation moves on, and its
-    coven_rows row names the parent's delete, the winning write, or the
-    failing CHECK, as §8 says: "a lost row is deleted, like any delete";
-  - post-rules run after each write, one violation at a time, until none is
-    left; in every counterexample only one rule can fire at each point, so
-    rule order doesn't matter there;
-  - set null is a cell value set by the parent's delete, with its
-    timestamp, as §8.4 says: "coven records the null as set by the parent's
-    delete";
-  - unique values are compared among rows present at the time (§8.5);
-  - the ancestor carried in Ben's write is an update at its current
-    generation.
-
-## A13. Building
-
-```
-cd plans/proofs/merge
-lake build                            # builds everything; no sorry
-lake env lean CovenMerge/Axioms.lean  # prints each main result's axioms
-```
-
-- Toolchain: `leanprover/lean4:v4.34.1`, core Lean only, no Mathlib.
-- Files:
-  - `Model.lean`: writes, assumptions, the result of A5, the state, the step;
-  - `Lemmas.lean`, `Step.lean`, `StepLost.lean`: the step lemma;
-  - `Converge.lean`: A4;
-  - `Rewriting.lean`: Newman's lemma;
-  - `PostRules.lean`: A9;
-  - `Counterexamples.lean`: A8 and `example_8_1`;
-  - `Axioms.lean`: the axiom report.
+- Lean checks every theorem named above, with no unproven step. The axioms
+  they use are only Lean's own: `propext`, `Classical.choice`, `Quot.sound`.
+  `CovenMerge/Axioms.lean` prints them.
+- What Lean models abstractly:
+  - a write's values: a cell's value is the write that set it;
+  - the removal rules' inputs: any function of the merged state, in the
+    shape of B7. The examples compute them from the merged state Lean
+    builds.
+- Argued here only:
+  - that coven computes the rules' inputs from the merged state as B7 says:
+    presence from generations, stale references by comparing generations,
+    null or the default for a set null or set default reference whose
+    parent's generation was deleted, CHECK on merged values, claim stamps
+    from the cells' writes;
+  - that two devices compute the same inputs for a row when the merged
+    states of the rows those inputs read agree, which B9's locality theorem
+    then uses;
+  - local triggers: they converge when they compute a function of the
+    current rows, since every change coven makes is ordinary SQL (§8.7);
+  - schema changes (§17), files (§16) and resets (§19.3), which the model
+    doesn't include.

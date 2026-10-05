@@ -4,5 +4,8 @@ import CovenMerge.Step
 import CovenMerge.StepLost
 import CovenMerge.Converge
 import CovenMerge.Rewriting
-import CovenMerge.PostRules
-import CovenMerge.Counterexamples
+import CovenMerge.ListLemmas
+import CovenMerge.Fixpoint
+import CovenMerge.Removal
+import CovenMerge.Audience
+import CovenMerge.Examples

@@ -1,24 +1,20 @@
 /-!
-# The merge model: writes, the declarative result, and the incremental step
+# The merged state: writes, the result as a function of a set of writes, and
+# the step that applies one write
 
-This file defines
+* `Writes`: writes and their metadata (timestamp, had-read, one row change
+  per touched row).
+* `Valid`: what §7.1, §7.2 and §8.3 guarantee about that metadata.
+* The result for a set `S` of writes, as predicates that mention only `S`
+  and the writes' metadata: each row's generation, the writes recorded for
+  each generation, each cell's winning write, and the lost values.
+* `St`: what a device stores for the merged state: `coven_rows` (one row per
+  generation), `coven_cells`, and `coven_lost`.
+* `step`: how a device applies one arriving write. It reads only its state,
+  the timestamps of writes (`coven_writes`) and the arriving write's record.
 
-* `Writes`: a finite-or-infinite universe of writes with their metadata
-  (timestamp, had-read, and one row change per touched row);
-* `Valid`: what the stamping rule and the authoring device guarantee about
-  that metadata (§7.2, §8.3);
-* the *declarative* result: predicates that say, for a set `S` of writes,
-  which generation each row has, which write set each cell, and which values
-  are lost. They mention only the set `S` and the writes' metadata, never an
-  order of application;
-* `St`: what a device stores (the app's cells, `coven_rows` generations with
-  the write per generation change, `coven_lost`);
-* `step`: how a device applies one arriving write to its state. It reads only
-  the state, the timestamps of writes (`coven_writes`), and the arriving
-  write's own record (its row changes and its had-read set).
-
-`Core.lean` proves that `step`, applied in any causal order, lands in the
-state the declarative predicates describe.
+`Converge.lean` proves that `step`, applied in any causal order, lands in the
+state the predicates describe.
 -/
 
 namespace CovenMerge
@@ -47,7 +43,8 @@ def Change.inc {Col : Type} (ch : Change Col) : Nat :=
 * `ts w`: its timestamp, as a number (milliseconds, counter, device id).
 * `past w a`: write `w` had read write `a` (§7.1).
 * `chg w r`: the change `w` makes to row `r`, if any. A write makes at most one
-  change per row, as SQLite's session extension records it. -/
+  change per row, as SQLite's session extension records it. A row is one
+  table, key and audience (§14.2). -/
 structure Writes (W Row Col : Type) where
   ts : W → Nat
   past : W → W → Bool
@@ -56,9 +53,11 @@ structure Writes (W Row Col : Type) where
 section Defs
 variable {W Row Col : Type} (M : Writes W Row Col)
 
-/-- What the stamping rule (§7.2) and the authoring device (§8.3) guarantee.
+/-- What the stamping rule (§7.2), causality (§7.1) and the authoring device
+(§8.3) guarantee.
 * timestamps are unique;
-* a write is stamped later than every write it had read;
+* a write is stamped later than every write it had read, its device's own
+  earlier writes included;
 * a change's generation was reached on the authoring device: it is `0`, or
   some write the author had read moved the row to it;
 * an insert is made at an even generation (row absent), an update or delete
@@ -133,11 +132,10 @@ end Defs
 
 /-! ## What a device stores -/
 
-/-- A device's merge state.
-* `gen r`: row `r`'s generation (`coven_rows`).
-* `genWrite r n`: the write recorded for generation `n` of row `r`. The spec's
-  `coven_rows` keeps this only for the current generation; the model keeps it
-  per generation, which §8.3's example needs (see the appendix).
+/-- A device's merged state.
+* `gen r`: row `r`'s current generation.
+* `genWrite r n`: generation `n`'s `coven_rows` row: the write that moved the
+  row there, or of several, the one with the smallest timestamp (§8.3).
 * `cell r c`: the write whose value cell `(r, c)` holds (`coven_cells`), or
   `none` while the row is absent or the cell was never set. The app's value
   is that write's value for the cell.
