@@ -11,6 +11,7 @@ use proc_macro2::Span;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
+use crate::macros::token_paths;
 use crate::syntax::RustFile;
 
 /// The crate whose root re-exports the API (§21.3).
@@ -78,14 +79,24 @@ impl ConventionVisitor<'_> {
             convention,
         });
     }
-}
 
-impl ConventionVisitor<'_> {
     fn check_tokens(&mut self, tokens: proc_macro2::TokenStream) {
+        for path in token_paths(tokens.clone()) {
+            if path.segments.len() >= 2 && path.segments[..2] == ["super", "super"] {
+                self.record(Convention::DeepParentPath, path.span);
+            }
+        }
+        self.check_restricted_visibility(tokens);
+    }
+
+    /// `pub` directly followed by a parenthesized group starting with `in`.
+    fn check_restricted_visibility(&mut self, tokens: proc_macro2::TokenStream) {
         let trees = tokens.into_iter().collect::<Vec<_>>();
         for (index, tree) in trees.iter().enumerate() {
             match tree {
-                proc_macro2::TokenTree::Group(group) => self.check_tokens(group.stream()),
+                proc_macro2::TokenTree::Group(group) => {
+                    self.check_restricted_visibility(group.stream());
+                }
                 proc_macro2::TokenTree::Ident(ident) if ident == "pub" => {
                     if let Some(proc_macro2::TokenTree::Group(group)) = trees.get(index + 1) {
                         let restricted_in = group.delimiter()
@@ -97,24 +108,6 @@ impl ConventionVisitor<'_> {
                         if restricted_in {
                             self.record(Convention::RestrictedVisibility, ident.span());
                         }
-                    }
-                }
-                proc_macro2::TokenTree::Ident(ident) if ident == "super" => {
-                    let skips_parent = matches!(
-                        (trees.get(index + 1), trees.get(index + 2), trees.get(index + 3)),
-                        (
-                            Some(proc_macro2::TokenTree::Punct(first)),
-                            Some(proc_macro2::TokenTree::Punct(second)),
-                            Some(proc_macro2::TokenTree::Ident(next)),
-                        ) if first.as_char() == ':' && second.as_char() == ':' && next == "super"
-                    );
-                    let follows_separator = index >= 2
-                        && matches!(
-                            &trees[index - 1],
-                            proc_macro2::TokenTree::Punct(punct) if punct.as_char() == ':'
-                        );
-                    if skips_parent && !follows_separator {
-                        self.record(Convention::DeepParentPath, ident.span());
                     }
                 }
                 _ => {}

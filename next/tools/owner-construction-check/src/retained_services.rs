@@ -8,18 +8,19 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use proc_macro2::Span;
+use proc_macro2::{Delimiter, Span};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
+use crate::macros::{parse_macro_body, token_paths};
 use crate::owner_construction::{
     collect_associated_factories, collect_free_constructors, Constructor,
 };
 use crate::policy::Policy;
 use crate::syntax::{
     collect_declared_types, could_be_free_function_path, could_be_local_associated_function_path,
-    is_test_only, is_test_source, type_name, type_names, visibility_crosses_owner, RustFile,
-    StructInfo,
+    is_test_only, is_test_source, path_names, type_name, type_names, visibility_crosses_owner,
+    RustFile, StructInfo,
 };
 
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
@@ -324,6 +325,35 @@ impl ServiceConstructionSiteVisitor<'_> {
             });
     }
 
+    /// A call through a local associated factory or a free function that
+    /// returns a retained service.
+    fn check_call(&mut self, segments: &[String], span: Span) {
+        if could_be_local_associated_function_path(segments) {
+            if let [.., owner, method] = segments {
+                self.record_associated_factory(owner, method, span);
+            }
+        }
+        if could_be_free_function_path(segments) {
+            if let Some(services) = segments
+                .last()
+                .and_then(|function| self.free_constructors.get(function))
+                .cloned()
+            {
+                for service in &services {
+                    self.record(service, span);
+                }
+            }
+        }
+    }
+
+    /// `self.method(…)`: a factory of the caller's own type.
+    fn check_own_method_call(&mut self, method: &str, span: Span) {
+        if let Some(caller) = &self.current_callable {
+            let owner = caller.owner.clone();
+            self.record_associated_factory(&owner, method, span);
+        }
+    }
+
     fn record_associated_factory(&mut self, owner: &str, method: &str, span: Span) {
         let Some(services) = self
             .associated_factories
@@ -381,51 +411,48 @@ impl<'ast> Visit<'ast> for ServiceConstructionSiteVisitor<'_> {
 
     fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
         if let syn::Expr::Path(function) = node.func.as_ref() {
-            let segments = function.path.segments.iter().collect::<Vec<_>>();
-            if could_be_local_associated_function_path(&segments) {
-                self.record_associated_factory(
-                    &segments[segments.len() - 2].ident.to_string(),
-                    &segments[segments.len() - 1].ident.to_string(),
-                    node.span(),
-                );
-            }
-            if could_be_free_function_path(&segments) {
-                let method = segments
-                    .last()
-                    .expect("free function path has at least one segment");
-                if let Some(services) = self.free_constructors.get(&method.ident.to_string()) {
-                    for service in services {
-                        self.record(service, node.span());
-                    }
-                }
-            }
+            self.check_call(&path_names(&function.path), node.span());
         }
         visit::visit_expr_call(self, node);
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         if matches!(node.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident("self")) {
-            if let Some(caller) = &self.current_callable {
-                self.record_associated_factory(
-                    &caller.owner.clone(),
-                    &node.method.to_string(),
-                    node.span(),
-                );
-            }
+            self.check_own_method_call(&node.method.to_string(), node.span());
         }
         visit::visit_expr_method_call(self, node);
     }
 
     fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
-        if node.path.segments.len() == 1 {
-            let service = node
-                .path
-                .segments
-                .last()
-                .expect("single-segment struct path has a segment");
-            self.record(&service.ident.to_string(), node.span());
+        if let [service] = path_names(&node.path).as_slice() {
+            self.record(service, node.span());
         }
         visit::visit_expr_struct(self, node);
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        match parse_macro_body(node) {
+            Some(body) => body.visit(self),
+            None => {
+                for path in token_paths(node.tokens.clone()) {
+                    match (path.followed_by, path.after_dot, path.segments.as_slice()) {
+                        (Some(Delimiter::Parenthesis), true, [method])
+                            if path.receiver.as_deref() == Some("self") =>
+                        {
+                            self.check_own_method_call(method, path.span);
+                        }
+                        (Some(Delimiter::Parenthesis), false, segments) => {
+                            self.check_call(segments, path.span);
+                        }
+                        (Some(Delimiter::Brace), false, [service]) => {
+                            self.record(service, path.span);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        visit::visit_macro(self, node);
     }
 }
 

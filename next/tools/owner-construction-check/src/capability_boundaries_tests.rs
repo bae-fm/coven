@@ -317,3 +317,46 @@ fn doc_comments_do_not_trip_capability_boundaries() {
     )
     .is_empty());
 }
+
+#[test]
+fn a_capability_used_inside_a_macro_call_is_a_direct_use() {
+    let source = r#"fn label() -> String { format!("{}", uuid::Uuid::new_v4()) }"#;
+    assert_eq!(
+        kinds("crates/coven-sync/src/label.rs", source),
+        BTreeSet::from(["id generation (uuid)"])
+    );
+    assert!(kinds("crates/coven-foundation/src/id_source.rs", source).is_empty());
+}
+
+#[test]
+fn nested_macro_calls_and_method_calls_inside_them_are_read() {
+    assert_eq!(
+        kinds(
+            "crates/coven-sync/src/upload.rs",
+            r#"
+            fn start(handle: tokio::runtime::Handle) {
+                assert!(vec![handle.spawn(async {})].len() == 1);
+                debug_assert_eq!(std::time::SystemTime::now(), std::time::UNIX_EPOCH);
+            }
+            "#,
+        ),
+        BTreeSet::from(["system clock", "thread or task spawn"])
+    );
+}
+
+#[test]
+fn a_macro_rules_body_is_read_as_tokens() {
+    assert_eq!(
+        kinds(
+            "crates/coven-sync/src/macros.rs",
+            r#"
+            macro_rules! stamp {
+                ($handle:expr) => {
+                    $handle.spawn(async move { ::std::fs::write("stamp", ::std::time::SystemTime::now()) })
+                };
+            }
+            "#,
+        ),
+        BTreeSet::from(["filesystem", "system clock", "thread or task spawn"])
+    );
+}

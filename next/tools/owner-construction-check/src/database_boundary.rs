@@ -12,6 +12,7 @@ use proc_macro2::Span;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
+use crate::macros::{parse_macro_body, token_paths, token_strings};
 use crate::policy::Policy;
 use crate::syntax::RustFile;
 
@@ -69,6 +70,15 @@ impl DatabaseBoundaryVisitor<'_> {
             kind: kind.to_string(),
         });
     }
+
+    fn check_sql(&mut self, literal: &syn::LitStr) {
+        if let Some(table) = coven_table_in_sql(&literal.value(), self.coven_tables) {
+            self.record(
+                &format!("coven-owned SQL for table {table}"),
+                literal.span(),
+            );
+        }
+    }
 }
 
 impl<'ast> Visit<'ast> for DatabaseBoundaryVisitor<'_> {
@@ -99,13 +109,24 @@ impl<'ast> Visit<'ast> for DatabaseBoundaryVisitor<'_> {
         if let Some(capability) = forbidden_sqlite_path(&node.path) {
             self.record(capability, node.span());
         }
+        match parse_macro_body(node) {
+            Some(body) => body.visit(self),
+            None => {
+                for path in token_paths(node.tokens.clone()) {
+                    if let Some(capability) = forbidden_sqlite_segments(&path.segments) {
+                        self.record(capability, path.span);
+                    }
+                }
+                for string in token_strings(node.tokens.clone()) {
+                    self.check_sql(&string);
+                }
+            }
+        }
         visit::visit_macro(self, node);
     }
 
     fn visit_lit_str(&mut self, node: &'ast syn::LitStr) {
-        if let Some(table) = coven_table_in_sql(&node.value(), self.coven_tables) {
-            self.record(&format!("coven-owned SQL for table {table}"), node.span());
-        }
+        self.check_sql(node);
         visit::visit_lit_str(self, node);
     }
 }
@@ -250,23 +271,24 @@ fn record_import(
 }
 
 fn forbidden_sqlite_path(path: &syn::Path) -> Option<&'static str> {
-    let mut under_rusqlite = false;
-    for segment in &path.segments {
-        if segment.ident == "rusqlite" {
-            under_rusqlite = true;
-            continue;
-        }
-        if !under_rusqlite {
-            continue;
-        }
-        if let Some((_, kind)) = RAW_SQLITE_HANDLES
+    forbidden_sqlite_segments(
+        &path
+            .segments
             .iter()
-            .find(|(handle, _)| segment.ident == handle)
-        {
-            return Some(*kind);
-        }
-    }
-    None
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// A raw handle named anywhere after `rusqlite` in a path.
+fn forbidden_sqlite_segments(segments: &[String]) -> Option<&'static str> {
+    let rusqlite = segments.iter().position(|segment| segment == "rusqlite")?;
+    segments[rusqlite + 1..].iter().find_map(|segment| {
+        RAW_SQLITE_HANDLES
+            .iter()
+            .find(|(handle, _)| segment == handle)
+            .map(|(_, kind)| *kind)
+    })
 }
 
 #[cfg(test)]

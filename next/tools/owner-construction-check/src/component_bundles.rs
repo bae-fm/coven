@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
+use crate::macros::parse_macro_body;
 use crate::syntax::{
     is_test_only, is_test_source, output_contains_owner, type_name, visibility_crosses_owner,
     RustFile,
@@ -155,6 +156,13 @@ impl<'ast> Visit<'ast> for ComponentBundleVisitor<'_> {
             });
         }
         visit::visit_local(self, node);
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        if let Some(body) = parse_macro_body(node) {
+            body.visit(self);
+        }
+        visit::visit_macro(self, node);
     }
 }
 

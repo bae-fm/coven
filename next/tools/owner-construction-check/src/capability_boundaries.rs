@@ -4,7 +4,8 @@
 //! capability through the owner that holds it.
 //!
 //! The check is syntactic: naming the crate or the path is the violation, so a
-//! new direct use fails before compilation and review. Test sources and
+//! new direct use fails before compilation and review. It reads inside macro
+//! calls too, so `format!("{}", Uuid::new_v4())` is a direct use. Test sources and
 //! `cfg(test)` items are exempt — fixtures may assemble raw material.
 
 use std::collections::BTreeSet;
@@ -13,6 +14,7 @@ use proc_macro2::Span;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
+use crate::macros::{parse_macro_body, token_paths};
 use crate::policy::{Capability, Gate, Policy};
 use crate::syntax::{flatten_use_tree, is_test_only, is_test_source, RustFile};
 
@@ -89,6 +91,14 @@ impl<'p> CapabilityBoundaryVisitor<'_, 'p> {
         }
     }
 
+    fn check_method(&mut self, name: &str, span: Span) {
+        for &(capability, gate) in self.gated {
+            if gate.method_patterns.contains(&name) {
+                self.record(capability, gate, span);
+            }
+        }
+    }
+
     /// `is_import` distinguishes `use` trees from expression, type, and macro
     /// paths. In an import, a bare crate name (`use open;`) references the
     /// crate; in an expression, a single-segment path (`open(...)`) is a local
@@ -113,12 +123,7 @@ impl<'p> CapabilityBoundaryVisitor<'_, 'p> {
 
 impl<'ast> Visit<'ast> for CapabilityBoundaryVisitor<'_, '_> {
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        let name = node.method.to_string();
-        for &(capability, gate) in self.gated {
-            if gate.method_patterns.iter().any(|pattern| *pattern == name) {
-                self.record(capability, gate, node.method.span());
-            }
-        }
+        self.check_method(&node.method.to_string(), node.method.span());
         visit::visit_expr_method_call(self, node);
     }
 
@@ -183,6 +188,18 @@ impl<'ast> Visit<'ast> for CapabilityBoundaryVisitor<'_, '_> {
             .map(|segment| segment.ident.to_string())
             .collect::<Vec<_>>();
         self.check_segments(&segments, false, node.span());
+        match parse_macro_body(node) {
+            Some(body) => body.visit(self),
+            None => {
+                for path in token_paths(node.tokens.clone()) {
+                    if path.after_dot {
+                        self.check_method(&path.segments[0], path.span);
+                    } else {
+                        self.check_segments(&path.segments, false, path.span);
+                    }
+                }
+            }
+        }
         visit::visit_macro(self, node);
     }
 }

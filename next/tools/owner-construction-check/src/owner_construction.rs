@@ -10,13 +10,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use proc_macro2::Span;
+use proc_macro2::{Delimiter, Span};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
+use crate::macros::{parse_macro_body, token_paths};
 use crate::policy::Policy;
 use crate::syntax::{
-    could_be_free_function_path, output_contains_owner, type_name, type_names, RustFile, StructInfo,
+    could_be_free_function_path, output_contains_owner, path_names, type_name, type_names,
+    RustFile, StructInfo,
 };
 
 #[derive(Clone, Ord, PartialOrd, Eq, PartialEq)]
@@ -236,6 +238,37 @@ struct ConstructionVisitor<'a> {
 }
 
 impl ConstructionVisitor<'_> {
+    /// A call through an associated factory or a free function that returns
+    /// an owner.
+    fn check_call(&mut self, segments: &[String], span: Span) {
+        if let [.., owner, method] = segments {
+            if let Some(returned_owners) = self
+                .associated_factories
+                .get(&(owner.clone(), method.clone()))
+            {
+                for returned_owner in returned_owners {
+                    self.record(returned_owner, span);
+                }
+            }
+        }
+        if could_be_free_function_path(segments) {
+            if let Some(owners) = segments
+                .last()
+                .and_then(|function| self.free_constructors.get(function))
+            {
+                for owner in owners {
+                    self.record(owner, span);
+                }
+            }
+        }
+    }
+
+    fn check_struct_literal(&mut self, name: &str, span: Span) {
+        if self.owners.contains(name) {
+            self.record(name, span);
+        }
+    }
+
     fn record(&mut self, child: &str, span: Span) {
         let Some(parent) = &self.current_constructor else {
             return;
@@ -287,38 +320,38 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
 
     fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
         if let syn::Expr::Path(function) = node.func.as_ref() {
-            let segments = function.path.segments.iter().collect::<Vec<_>>();
-            if segments.len() >= 2 {
-                let owner = segments[segments.len() - 2].ident.to_string();
-                let method = segments[segments.len() - 1].ident.to_string();
-                if let Some(returned_owners) = self.associated_factories.get(&(owner, method)) {
-                    for returned_owner in returned_owners {
-                        self.record(returned_owner, node.span());
-                    }
-                }
-            }
-            if could_be_free_function_path(&segments) {
-                let method = segments
-                    .last()
-                    .expect("free function path has at least one segment");
-                if let Some(owners) = self.free_constructors.get(&method.ident.to_string()) {
-                    for owner in owners {
-                        self.record(owner, node.span());
-                    }
-                }
-            }
+            self.check_call(&path_names(&function.path), node.span());
         }
         visit::visit_expr_call(self, node);
     }
 
     fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
         if let Some(segment) = node.path.segments.last() {
-            let owner = segment.ident.to_string();
-            if self.owners.contains(&owner) {
-                self.record(&owner, node.span());
-            }
+            self.check_struct_literal(&segment.ident.to_string(), node.span());
         }
         visit::visit_expr_struct(self, node);
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        match parse_macro_body(node) {
+            Some(body) => body.visit(self),
+            None => {
+                for path in token_paths(node.tokens.clone()) {
+                    match path.followed_by {
+                        Some(Delimiter::Parenthesis) if !path.after_dot => {
+                            self.check_call(&path.segments, path.span);
+                        }
+                        Some(Delimiter::Brace) if !path.after_dot => {
+                            if let Some(name) = path.segments.last() {
+                                self.check_struct_literal(name, path.span);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        visit::visit_macro(self, node);
     }
 }
 
