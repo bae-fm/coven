@@ -314,7 +314,8 @@ Two mechanisms order writes:
 - Merging uses five of coven's internal tables:
   - `coven_writes`, one row per write the device has applied, naming:
     - the write's timestamp, which includes its device;
-    - the write's number.
+    - the write's number;
+    - the writes it had read.
   - `coven_columns`, one row per synced column, naming:
     - its table;
     - its column.
@@ -329,7 +330,10 @@ Two mechanisms order writes:
   - `coven_cells`, one row per synced cell, naming:
     - its `coven_columns` row;
     - its `coven_rows` row;
-    - the write that set it.
+    - the write that set it;
+    - for a reference, the generation of the row it points at
+      ([§8.4](#84-foreign-keys)).
+  - A present row's values are in the app's table, and only there.
   - `coven_lost`, one row per lost value or removed row, naming:
     - the cell, or the row;
     - the value that lost, or every value of the removed row;
@@ -472,7 +476,8 @@ Carol's tablet:
       note 42 title   "Weekly groceries"  Ben's write 9   Carol's write 2
     ```
 
-- The app can read `coven_lost` and offer to restore a lost value.
+- The app reads lost values through `lost_values`
+  ([§20.4](#204-reading)) and can offer to restore one.
 - Every device holds the same `coven_lost` rows, because they follow from
   the writes alone.
 
@@ -2227,6 +2232,15 @@ pub enum DbError {
     DamagedDatabase,
     /// A synced table declaration or schema is invalid.
     Schema(SchemaError),
+    /// App SQL read, changed or defined one of coven's internal objects (§5).
+    InternalTable { table: String },
+    /// App SQL tried transaction control, a PRAGMA, ATTACH or loading an
+    /// extension (§5, §20.13).
+    StatementForbidden { operation: &'static str },
+    /// SQLite rolled a migration's transaction back itself, so it can't go on (§20.13).
+    TransactionEnded,
+    /// SQLite kept another journal mode instead of WAL (§5).
+    WalUnavailable { mode: String },
     /// A local trigger wrote a synced table or a shared trigger a local one (§8.7).
     TriggerTarget { trigger: String, table: String },
     /// A reference points at a row outside the source row's audience (§14.5).
@@ -2245,10 +2259,24 @@ pub enum DbError {
     UserFileChanged { path: PathBuf },
     /// Reading or keeping file bytes failed (§20.3).
     Disk(DiskError),
+    /// A transaction failed and rolling it back failed too.
+    Rollback { operation: Box<DbError>, rollback: rusqlite::Error },
+    /// Closing failed for these connections, after every one was tried (§20.1).
+    Closing { failures: Vec<DbError> },
 }
 
 /// A schema rule checked on open and after migrating (§8, §14.1).
 pub enum SchemaError {
+    /// A declared synced table isn't in the database (§20.2).
+    MissingTable { table: String },
+    /// Two declarations name one table (§20.2).
+    DuplicateTable { table: String },
+    /// A table declares both `audience_column` and `audience_from` (§20.2).
+    TwoAudiences { table: String },
+    /// A declared file column isn't in the table (§20.2).
+    FileColumn { table: String, column: String },
+    /// A trigger declared shared isn't on the table (§8.7).
+    MissingTrigger { table: String, trigger: String },
     /// A synced table has no primary key (§8.5).
     NoPrimaryKey { table: String },
     /// SQLite chooses the primary key itself (§8.5).
@@ -2595,8 +2623,9 @@ let handle = Coven::builder(store_dir)
 - Each synced table declares its kind of key ([§8.5](#85-keys-and-uniqueness)),
   how its rows get their audience ([§14](#14-audiences)), and whether its rows
   carry a file ([§16](#16-files)).
-- A table declares at most one of `audience_column` and `audience_from`; a table
-  that declares neither is in the store.
+- A table declares at most one of `audience_column` and `audience_from`;
+  opening refuses both with `SchemaError::TwoAudiences`. A table that
+  declares neither is in the store.
 
 ```rust
 pub enum RowIdentity {
