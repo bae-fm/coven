@@ -14,6 +14,7 @@ pub(crate) const POLICY: Policy = Policy {
         "coven-crypto",
         "coven-merge",
         "coven-format",
+        "coven-storage",
     ],
     // coven-database and coven-storage never depend on each other; the pair is
     // added once both crates are in `crate_order`.
@@ -21,7 +22,11 @@ pub(crate) const POLICY: Policy = Policy {
     capabilities: CAPABILITIES,
     // Added with coven-database's schema file.
     database_schema: None,
-    composition_roots: &[],
+    composition_roots: &[(
+        "crates/coven-storage/src/providers/s3.rs",
+        "S3Storage",
+        "new",
+    )],
     lifetime_authorities: &[],
     // These methods derive a scoped capability from their injected directory.
     // They do not acquire an unrelated directory or file for another owner.
@@ -69,8 +74,19 @@ pub(crate) const POLICY: Policy = Policy {
         "KeyringCustody",
         "StoreKeyCustody",
         "MemberKeyCustody",
+        "Storage",
+        "CloudKitOps",
+        "OAuthClients",
+        "OAuthSession",
     ],
-    capability_traits: &["Clock", "IdSource", "StoreKeyCustody", "MemberKeyCustody"],
+    capability_traits: &[
+        "Clock",
+        "IdSource",
+        "StoreKeyCustody",
+        "MemberKeyCustody",
+        "Storage",
+        "CloudKitOps",
+    ],
     construction_only_capability_types: &[
         "StoreDir",
         "AtomicFile",
@@ -78,6 +94,8 @@ pub(crate) const POLICY: Policy = Policy {
         "IdSourceRef",
         "Keychain",
         "StoreKeychain",
+        "OAuthClients",
+        "OAuthSession",
     ],
     non_owner_types: &["KeyCustody", "IdentityCustody"],
     borrowed_facade_types: &[],

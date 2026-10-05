@@ -24,4 +24,4 @@ pub use keys::{CircleKey, InviteSecret, StoreKey, StoreKeyring};
 pub use member::{
     seal_circle_key, seal_store_key, MemberId, MemberKeys, SealingPublicKey, Signature,
 };
-pub use secret::SecretBytes;
+pub use secret::{SecretBytes, SecretText};

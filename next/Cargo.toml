@@ -3,7 +3,7 @@
 # ships, unchanged.
 [workspace]
 resolver = "2"
-members = ["crates/coven-foundation", "crates/coven-crypto", "crates/coven-merge", "crates/coven-format", "tools/owner-construction-check"]
+members = ["crates/coven-foundation", "crates/coven-crypto", "crates/coven-merge", "crates/coven-format", "crates/coven-storage", "tools/owner-construction-check"]
 
 [workspace.package]
 edition = "2021"
@@ -16,6 +16,16 @@ version = "0.1.0"
 coven-foundation = { path = "crates/coven-foundation" }
 coven-crypto = { path = "crates/coven-crypto" }
 coven-merge = { path = "crates/coven-merge" }
+async-trait = "0.1.92"
+tokio = "1.53.2"
+url = "2.5.8"
+reqwest = { version = "0.13.5", default-features = false }
+oauth2 = { version = "5.0.0", default-features = false }
+open = "5.4.4"
+axum = "0.8.9"
+aws-sdk-s3 = { version = "1.152.0", default-features = false }
+aws-credential-types = "1.3.0"
+aws-smithy-async = "1.3.0"
 argon2 = { version = "0.6.0", default-features = false }
 chacha20poly1305 = { version = "0.11.0", default-features = false }
 ed25519-dalek = { version = "3.0.0", default-features = false }

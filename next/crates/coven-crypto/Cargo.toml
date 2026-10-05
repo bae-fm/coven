@@ -15,7 +15,8 @@ hkdf.workspace = true
 hmac = { workspace = true, features = ["zeroize"] }
 subtle.workspace = true
 sha2 = { workspace = true, features = ["zeroize"] }
-zeroize.workspace = true
+zeroize = { workspace = true, features = ["serde"] }
+serde = { workspace = true, features = ["derive"] }
 keyring-core.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -34,6 +35,7 @@ windows-native-keyring-store.workspace = true
 zbus-secret-service-keyring-store = { workspace = true, features = ["crypto-rust"] }
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile.workspace = true
 coven-foundation = { workspace = true, features = ["test-utils"] }
 
