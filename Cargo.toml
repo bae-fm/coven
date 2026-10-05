@@ -10,6 +10,8 @@ members = [
     "crates/coven-storage",
     "tools/owner-construction-check",
 ]
+# `next/` is the from-scratch coven, a workspace of its own; the two never mix.
+exclude = ["next"]
 resolver = "2"
 
 # One version pin per external dependency for the whole workspace. Members

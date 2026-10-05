@@ -1,0 +1,53 @@
+# The from-scratch coven of plans/coven-from-scratch.md. A workspace of its own:
+# the root workspace excludes this directory and keeps building the coven bae
+# ships, unchanged.
+[workspace]
+resolver = "2"
+members = ["tools/owner-construction-check"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+
+# One version per external dependency for the whole workspace (§21.1). Members
+# name these with `workspace = true` and the features they need; they never
+# restate a version. The checker refuses a member dependency that does.
+[workspace.dependencies]
+proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
+syn = { version = "3.0.3", features = ["full", "visit"] }
+thiserror = "2.0"
+toml = "1.1"
+
+[workspace.lints.rust]
+# Every `pub` not reachable from the crate's own root must be `pub(crate)` or
+# narrower (§21.3). `pub` silences `dead_code` unconditionally, so this is also
+# what lets an unused internal item show up as dead.
+unreachable_pub = "deny"
+dead_code = "deny"
+
+[workspace.lints.clippy]
+# Composition roots and owner constructors take their collaborators by name
+# (§21.2), so long argument lists are the intended shape there.
+too_many_arguments = "allow"
+new_without_default = "allow"
+# Error enums carry their causes inline so callers match them without
+# indirection (§21.3).
+large_enum_variant = "allow"
+result_large_err = "allow"
+
+[profile.dev]
+# Checkouts build into one shared target dir through sccache, which cannot
+# cache incremental compiles; incremental state only grows that dir.
+incremental = false
+# Line tables keep backtraces' file:line and keep every rlib small, which is
+# what stops a shared target dir from filling a disk when several checkouts
+# build. Local-variable inspection under lldb is what this gives up.
+debug = "line-tables-only"
+
+[profile.test]
+incremental = false
+opt-level = 1
+debug = "line-tables-only"
+
+[profile.test.package."*"]
+opt-level = 3
