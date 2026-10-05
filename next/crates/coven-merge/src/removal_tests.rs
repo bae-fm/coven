@@ -45,6 +45,78 @@ fn pointing(g: u64, kind: u8, p: RowId, pg: u64) -> Change<String> {
 }
 
 #[test]
+fn default_generation_is_a_required_caller_input_only_when_substituting() {
+    let mut reference = Reference {
+        parent: Parent {
+            row: row(1),
+            generation: 1,
+        },
+        on_delete: OnDelete::SetDefault {
+            parent: Some(row(2)),
+            permitted: true,
+        },
+    };
+    assert_eq!(
+        resolve_reference(&row(3), &reference, 2, None),
+        Err(MergeError::MissingDefaultGeneration(row(2)))
+    );
+    assert_eq!(
+        resolve_reference(&row(3), &reference, 1, None).unwrap(),
+        ReferenceValue::Original {
+            parent: reference.parent.clone(),
+            stale: false
+        }
+    );
+    assert_eq!(
+        resolve_reference(&row(3), &reference, 2, Some(0)).unwrap(),
+        ReferenceValue::Default(Some(Parent {
+            row: row(2),
+            generation: 0
+        }))
+    );
+    reference.on_delete = OnDelete::SetDefault {
+        parent: None,
+        permitted: true,
+    };
+    assert_eq!(
+        resolve_reference(&row(3), &reference, 2, None).unwrap(),
+        ReferenceValue::Default(None)
+    );
+    reference.on_delete = OnDelete::SetDefault {
+        parent: Some(row(2)),
+        permitted: false,
+    };
+    assert_eq!(
+        resolve_reference(&row(3), &reference, 2, None).unwrap(),
+        ReferenceValue::Original {
+            parent: reference.parent,
+            stale: true
+        }
+    );
+}
+
+#[test]
+fn a_region_omitting_the_default_parent_is_not_closed() {
+    let mut view = MemoryView::default();
+    view.data
+        .insert(row(1), RemovalRow::Absent { generation: 2 });
+    view.present(row(3), 1, stamp(3));
+    view.reference(
+        &row(3),
+        row(1),
+        1,
+        OnDelete::SetDefault {
+            parent: Some(row(2)),
+            permitted: true,
+        },
+    );
+    assert_eq!(
+        super::evaluate(&view, [row(1), row(3)].into(), &[row(1), row(3)]),
+        Err(MergeError::RegionNotClosed(row(2)))
+    );
+}
+
+#[test]
 fn todo_records_every_reason_after_rules_finish_and_reinsert_can_clear_checks() {
     let writes = vec![
         write(

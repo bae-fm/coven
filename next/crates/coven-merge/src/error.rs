@@ -53,6 +53,9 @@ pub enum MergeError {
     /// A reference reaches an audience some readers of the child cannot read.
     #[error("reference from {0:?} reaches an unreadable audience")]
     ReferenceAudience(RowId),
+    /// The caller omitted the current generation of a substituted default parent.
+    #[error("default parent generation was not supplied for {0:?}")]
+    MissingDefaultGeneration(RowId),
     /// A removal view omitted a parent from the region it declared closed.
     #[error("removal region does not contain parent {0:?}")]
     RegionNotClosed(RowId),

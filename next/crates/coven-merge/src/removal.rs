@@ -64,7 +64,8 @@ impl ReferenceValue {
 
 /// Resolve a reference against parent generations, before CHECK and unique
 /// evaluation. `default_generation` is required only for a substituted,
-/// non-null default. Use this for retained lost values as well as winning
+/// non-null default; omitting it returns [`MergeError::MissingDefaultGeneration`].
+/// Use this for retained lost values as well as winning
 /// cells: their references read null/default under the same rule (§8.4).
 /// Deleted/removed default parents take the child out;
 /// re-adding the default parent lets it return.
@@ -89,7 +90,7 @@ pub fn resolve_reference(
                         Some(Parent {
                             row: row.clone(),
                             generation: default_generation
-                                .ok_or_else(|| MergeError::RegionNotClosed(row.clone()))?,
+                                .ok_or_else(|| MergeError::MissingDefaultGeneration(row.clone()))?,
                         })
                     }
                     None => None,
