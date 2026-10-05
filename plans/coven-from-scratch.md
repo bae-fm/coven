@@ -935,37 +935,62 @@ Carol's tablet:
   - each member adds and removes their own devices, with their own key, and
     admins can remove any device;
   - the store always has at least one admin.
-- Every device that applied the same entries ends with the same member
-  list, whatever order they arrived in.
-- Applying an entry follows these rules:
-  - order: a device applies an entry once it has every entry that entry had
-    read, never by timestamps;
-  - authority: an entry applies only if its author's role allowed it, in
-    the member list the author had read;
-  - agreement: concurrent entries that don't conflict both apply, and two
-    saying the same thing combine;
-  - less access: of two concurrent entries that conflict, the one giving
-    less access applies;
-  - ties: when neither gives less access, the one with the smaller
-    timestamp applies;
-  - a dropped entry is shown to its author.
+- Every device that has the same entries ends with the same member list,
+  whatever order they arrived in.
+- A device applies an entry once it has every entry that entry had read.
+- The member list is what you get by replaying the applied entries in
+  timestamp order, from the first. At its place in the replay, an entry
+  applies only if:
+  - its author's role allowed it, in the member list the author had read;
+  - the member, device or circle it changes still exists, and the store
+    still has an admin after it;
+  - it beats every concurrent entry already applied that it conflicts
+    with.
+- When an entry beats one already applied, that one is dropped, and the
+  replay starts again without it.
+- A dropped entry stays dropped, and is shown to its author.
 - Two concurrent entries conflict when:
   - they're about the same member or device and say different things;
-  - applying both would break a role rule;
-  - or one adds a member and the other removes one, which replaces the
-    store key ([§13](#13-removing-members-and-devices)).
+  - one adds a member and the other removes one, which replaces the store
+    key ([§13](#13-removing-members-and-devices));
+  - they give one circle different names;
+  - one deletes a circle and the other changes it or its members;
+  - one adds someone to a circle and the other removes someone from it,
+    which replaces the circle key ([§14.6](#146-leaving-a-circle)).
+- Of two conflicting entries, the one that beats the other is:
+  - removing a member, a device or someone from a circle, or deleting a
+    circle, over anything else;
+  - anything else over making someone an admin;
+  - otherwise, the one with the smaller timestamp.
+- Two concurrent entries saying the same thing both apply, and take effect
+  once.
 - Concurrent entries, and what applies:
 
   ```
   Ana adds Dan               Ben makes Carol an admin   both: no conflict
-  Ben adds his new phone     Ana removes it             the removal: less access
-  Ana makes Ben an admin     Carol makes him a member   member: less access
-  Ana removes Ben            Ben removes Ana            the earlier: a tie
-  Ana adds Carol             Ben removes Dan            the removal: less access
+  Ben adds his new phone     Ana removes it             the removal
+  Ana makes Ben an admin     Carol makes him a member   member: an admin
+                                                        grant loses
+  Ana removes Ben            Ben removes Ana            the earlier
+  Ana adds Carol             Ben removes Dan            the removal
   ```
 
-- In the last, both admins removing each other would leave no admin, so the
-  entries conflict, and neither gives less access than the other.
+- E.g. Ana, Ben and Carol are admins, and each, offline, removes another:
+
+  ```
+  first stamp    Ana removes Ben
+  second stamp   Ben removes Carol
+  third stamp    Carol removes Ana
+  ```
+
+  - No two conflict: each pair leaves an admin.
+  - The replay applies Ana's and Ben's removals; Carol's would leave no
+    admin, so it is dropped, and Ana stays an admin.
+- E.g. Ana and Ben are admins. Concurrently, Ben removes Ana, Ana removes
+  Ben a moment later, and Ben adds his new phone:
+  - Ben's removal is earlier, so it beats Ana's, which is dropped;
+  - Ana's removal would have beaten Ben's new phone, but it was dropped,
+    so the phone is added.
 
 ## 10. Device identity
 
@@ -1141,7 +1166,8 @@ Carol's tablet:
 - So a removed member's copy of the old store key reads nothing written
   after the removal, even if they regain read access.
 - Adding a member concurrently with a removal that rotates the key is a
-  conflict, so the add is dropped, by less access ([§9](#9-members-and-roles)).
+  conflict, and the removal beats the add, which is dropped
+  ([§9](#9-members-and-roles)).
   - Otherwise the new member would hold only the old key, and couldn't
     read anything written after the rotation.
   - E.g. Ana adds Carol while Ben, offline, removes Dan: on every device
