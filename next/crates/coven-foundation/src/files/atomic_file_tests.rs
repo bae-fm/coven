@@ -1,6 +1,24 @@
 use super::*;
 
 #[test]
+fn removal_is_idempotent_and_does_not_hide_operating_system_errors() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = AtomicFile::new(directory.path().join("secret"));
+    file.remove().unwrap();
+    file.replace(b"secret").unwrap();
+    file.remove().unwrap();
+    file.remove().unwrap();
+    assert!(file.read_optional().unwrap().is_none());
+    let error = AtomicFile::new(directory.path().to_owned())
+        .remove()
+        .unwrap_err();
+    assert!(matches!(error, FileError::Io { .. }));
+    AtomicFile::new(directory.path().join("absent-parent/file"))
+        .remove()
+        .unwrap();
+}
+
+#[test]
 fn a_crash_after_writing_the_temporary_sibling_leaves_the_old_target() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("settings");

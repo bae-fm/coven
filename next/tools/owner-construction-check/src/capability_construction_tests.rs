@@ -36,6 +36,158 @@ const CAPABILITIES: &str = r#"
 "#;
 
 #[test]
+fn test_factories_do_not_assign_capability_types_to_production_values() {
+    let source = "fn work(file: File, directory: Path) {\n    consume(file);\n    consume(directory);\n    let _ = AtomicFile::new(path);\n}";
+    let files = [
+        RustFile::fixture("crates/coven/src/work.rs", source),
+        RustFile::fixture(
+            "crates/coven/src/values.rs",
+            "fn file() -> Value { todo!() } fn read() { file(); }",
+        ),
+        RustFile::fixture(
+            "crates/coven/src/work_tests.rs",
+            "fn file() -> AtomicFile { todo!() } fn directory() -> StoreDir { todo!() }",
+        ),
+    ];
+    let violations = find_capability_construction_violations(&files, &POLICY);
+    assert_eq!(
+        violations,
+        [CapabilityConstructionViolation {
+            path: "crates/coven/src/work.rs".into(),
+            line: 4,
+            capability: "AtomicFile".into(),
+            kind: ConstructionKind::Value,
+        }]
+    );
+}
+
+#[test]
+fn test_only_factories_do_not_change_production_factory_results() {
+    let source = r#"
+        #[cfg(test)] fn file() -> AtomicFile { todo!() }
+        #[cfg(not(test))] fn file() -> Value { todo!() }
+        fn read() { file(); }
+        #[cfg(test)] mod fixtures {
+            fn directory() -> StoreDir { todo!() }
+            impl Factory { fn build() -> AtomicFile { todo!() } }
+        }
+        impl Factory {
+            #[cfg(test)] fn build() -> AtomicFile { todo!() }
+            #[cfg(not(test))]
+            fn build() -> Value { todo!() }
+        }
+        fn work(file: File, directory: Path) {
+            consume(file);
+            consume(directory);
+            Factory::build();
+        }
+    "#;
+    assert!(check("crates/coven/src/work.rs", source).is_empty());
+}
+
+#[test]
+fn local_bindings_shadow_factory_names_but_factory_references_still_count() {
+    let source = r#"
+        fn file() -> AtomicFile { AtomicFile::new(path) }
+        fn supplied(file: File) { consume(file); }
+        fn work() {
+            { let file = supplied_value; consume(file); }
+            let acquire = file;
+            let file = supplied_value;
+            consume(file);
+            let _ = |file| consume(file);
+            for file in files { consume(file); }
+            match input { Some(file) => consume(file), None => {} }
+        }
+    "#;
+    let violations = check("crates/coven/src/work.rs", source);
+    assert_eq!(violations.len(), 1, "{violations:?}");
+    assert_eq!(violations[0].line, 6);
+    assert_eq!(violations[0].capability, "AtomicFile");
+}
+
+#[test]
+fn binding_scopes_do_not_hide_factory_references_after_they_end() {
+    for statement in [
+        "{ let file = supplied; consume(file); }",
+        "let _ = |file| consume(file);",
+        "for file in files { consume(file); }",
+        "match input { Some(file) => consume(file), None => {} }",
+        "if let Some(file) = input { consume(file); }",
+        "while let Some(file) = input { consume(file); }",
+    ] {
+        let source = format!("fn file() -> AtomicFile {{ AtomicFile::new(path) }}\nfn work() {{\n{statement}\nlet factory = file;\n}}");
+        let violations = check("crates/coven/src/work.rs", &source);
+        assert_eq!(violations.len(), 1, "{source}: {violations:?}");
+        assert_eq!(violations[0].line, 4, "{source}");
+    }
+    let source = "fn file() -> AtomicFile { AtomicFile::new(path) }\nfn work() {\nlet file = file;\nconsume(file);\n}";
+    let violations = check("crates/coven/src/work.rs", source);
+    assert_eq!(violations.len(), 1, "{violations:?}");
+    assert_eq!(violations[0].line, 3);
+}
+
+#[test]
+fn injected_owner_factory_authority_is_explicit_and_limited_to_its_product() {
+    const DERIVED: Policy = Policy {
+        capability_types: &["StoreDir"],
+        capability_factories: &[(
+            "crates/coven-foundation/src/directory.rs",
+            "StoreDir",
+            "file",
+            "AtomicFile",
+        )],
+        ..POLICY
+    };
+    assert_eq!(DERIVED.capability_factories.len(), 1);
+    let source = r#"
+        impl StoreDir {
+            fn file(&self) -> AtomicFile { AtomicFile::new(self.path()) }
+            fn unrelated(&self) -> AtomicFile { AtomicFile::new(path) }
+        }
+        fn use_injected(dir: &StoreDir) {
+            let _ = dir.file();
+            let _ = StoreDir::file(dir);
+        }
+    "#;
+    for (path, expected_lines) in [
+        ("crates/coven-foundation/src/directory.rs", vec![4]),
+        ("crates/coven-foundation/src/other.rs", vec![3, 4]),
+    ] {
+        let violations =
+            find_capability_construction_violations(&[RustFile::fixture(path, source)], &DERIVED);
+        assert_eq!(
+            violations.iter().map(|v| v.line).collect::<Vec<_>>(),
+            expected_lines,
+            "{violations:?}"
+        );
+    }
+    let source = r#"
+        impl StoreDir {
+            fn file(&self) -> AtomicFile {
+                let _ = StoreDir::new(path);
+                fn nested() { let _ = AtomicFile::new(path); }
+                AtomicFile::new(self.path())
+            }
+        }
+    "#;
+    let violations = find_capability_construction_violations(
+        &[RustFile::fixture(
+            "crates/coven-foundation/src/directory.rs",
+            source,
+        )],
+        &DERIVED,
+    );
+    assert_eq!(
+        violations
+            .iter()
+            .map(|v| (v.line, v.capability.as_str()))
+            .collect::<Vec<_>>(),
+        [(4, "StoreDir"), (5, "AtomicFile")]
+    );
+}
+
+#[test]
 fn unit_value_paths_and_empty_literals_are_construction() {
     for (capability, expressions) in [
         (

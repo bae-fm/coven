@@ -4,15 +4,20 @@
 //! silently covers nothing — so each one is resolved against the workspace
 //! here instead.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use syn::visit::{self, Visit};
 
 use super::POLICY;
+use crate::capability_construction::{
+    construction_only_types, find_capability_construction_violations,
+};
 use crate::policy::Policy;
 use crate::sources::load;
-use crate::syntax::{collect_declared_types, type_name, RustFile};
+use crate::syntax::{
+    collect_declared_types, is_test_only, is_test_source, type_name, type_names, RustFile,
+};
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -97,45 +102,72 @@ fn a_home_is_skipped_until_its_crate_lands_and_checked_after() {
     assert_eq!(stranded, foundation_homes);
 }
 
-#[test]
-fn every_composition_root_names_an_existing_method() {
+fn declared_methods(
+    files: &[RustFile],
+    include_tests: bool,
+) -> BTreeMap<(String, String, String), syn::Signature> {
     struct MethodCollector<'a> {
         path: &'a str,
-        methods: &'a mut BTreeSet<(String, String, String)>,
+        methods: &'a mut BTreeMap<(String, String, String), syn::Signature>,
+        include_tests: bool,
     }
 
     impl Visit<'_> for MethodCollector<'_> {
+        fn visit_item_mod(&mut self, node: &syn::ItemMod) {
+            if self.include_tests || !is_test_only(&node.attrs) {
+                visit::visit_item_mod(self, node);
+            }
+        }
+
         fn visit_item_impl(&mut self, node: &syn::ItemImpl) {
+            if !self.include_tests && is_test_only(&node.attrs) {
+                return;
+            }
             let Some(owner) = type_name(&node.self_ty) else {
                 return;
             };
             for item in &node.items {
                 if let syn::ImplItem::Fn(method) = item {
-                    self.methods.insert((
-                        self.path.to_string(),
-                        owner.clone(),
-                        method.sig.ident.to_string(),
-                    ));
+                    if self.include_tests || !is_test_only(&method.attrs) {
+                        self.methods.insert(
+                            (
+                                self.path.to_string(),
+                                owner.clone(),
+                                method.sig.ident.to_string(),
+                            ),
+                            method.sig.clone(),
+                        );
+                    }
                 }
             }
             visit::visit_item_impl(self, node);
         }
     }
 
-    let workspace = load(&workspace_root()).expect("read the workspace");
-    let mut methods = BTreeSet::new();
-    for file in &workspace.files {
+    let mut methods = BTreeMap::new();
+    for file in files
+        .iter()
+        .filter(|file| include_tests || !is_test_source(&file.relative_path))
+    {
         MethodCollector {
             path: &file.relative_path,
             methods: &mut methods,
+            include_tests,
         }
         .visit_file(&file.syntax);
     }
+    methods
+}
+
+#[test]
+fn every_composition_root_names_an_existing_method() {
+    let workspace = load(&workspace_root()).expect("read the workspace");
+    let methods = declared_methods(&workspace.files, true);
     let missing = POLICY
         .composition_roots
         .iter()
         .filter(|(path, owner, method)| {
-            !methods.contains(&(
+            !methods.contains_key(&(
                 (*path).to_string(),
                 (*owner).to_string(),
                 (*method).to_string(),
@@ -148,6 +180,128 @@ fn every_composition_root_names_an_existing_method() {
         "composition roots name methods that do not exist:\n{}",
         missing.join("\n")
     );
+}
+
+#[test]
+fn composition_root_guards_can_name_test_fixture_methods() {
+    let path = "crates/coven/src/builder_tests.rs";
+    let files = [RustFile::fixture(path, "impl Fixture { fn open() {} }")];
+    assert!(declared_methods(&files, true).contains_key(&(
+        path.into(),
+        "Fixture".into(),
+        "open".into()
+    )));
+    assert!(declared_methods(&files, false).is_empty());
+}
+
+fn invalid_capability_factories(files: &[RustFile], policy: &Policy) -> Vec<String> {
+    let methods = declared_methods(files, false);
+    let capabilities = construction_only_types(files, policy);
+    policy
+        .capability_factories
+        .iter()
+        .filter(|(path, owner, method, product)| {
+            let signature = methods.get(&(path.to_string(), owner.to_string(), method.to_string()));
+            !policy.capability_types.contains(owner)
+                || !capabilities.contains(*product)
+                || !signature.is_some_and(|signature| {
+                    signature.receiver().is_some()
+                        && match &signature.output {
+                            syn::ReturnType::Type(_, output) => {
+                                type_names(output).contains(*product)
+                            }
+                            syn::ReturnType::Default => false,
+                        }
+                })
+        })
+        .map(|(path, owner, method, product)| format!("{path}: {owner}::{method} -> {product}"))
+        .collect()
+}
+
+#[test]
+fn every_capability_factory_names_a_receiver_and_its_capability_product() {
+    let workspace = load(&workspace_root()).expect("read the workspace");
+    let invalid = invalid_capability_factories(&workspace.files, &POLICY);
+    assert!(
+        invalid.is_empty(),
+        "invalid capability factories: {invalid:?}"
+    );
+}
+
+#[test]
+fn capability_factory_guards_reject_stale_or_unscoped_authority() {
+    const FACTORIES: Policy = Policy {
+        capability_types: &["StoreDir"],
+        construction_only_capability_types: &["AtomicFile"],
+        capability_factories: &[(
+            "crates/coven-foundation/src/directory.rs",
+            "StoreDir",
+            "file",
+            "AtomicFile",
+        )],
+        ..Policy::EMPTY
+    };
+    for (path, declaration, valid) in [
+        (
+            "crates/coven-foundation/src/directory.rs",
+            "impl StoreDir { fn file(&self) -> AtomicFile {} }",
+            true,
+        ),
+        (
+            "crates/coven-foundation/src/renamed.rs",
+            "impl StoreDir { fn file(&self) -> AtomicFile {} }",
+            false,
+        ),
+        (
+            "crates/coven-foundation/src/directory.rs",
+            "impl Other { fn file(&self) -> AtomicFile {} }",
+            false,
+        ),
+        (
+            "crates/coven-foundation/src/directory.rs",
+            "impl StoreDir { fn renamed(&self) -> AtomicFile {} }",
+            false,
+        ),
+        (
+            "crates/coven-foundation/src/directory.rs",
+            "impl StoreDir { fn file() -> AtomicFile {} }",
+            false,
+        ),
+        (
+            "crates/coven-foundation/src/directory.rs",
+            "impl StoreDir { fn file(&self) -> Other {} }",
+            false,
+        ),
+        (
+            "crates/coven-foundation/src/directory.rs",
+            "impl StoreDir { #[cfg(test)] fn file(&self) -> AtomicFile {} }",
+            false,
+        ),
+    ] {
+        let invalid =
+            invalid_capability_factories(&[RustFile::fixture(path, declaration)], &FACTORIES);
+        assert_eq!(invalid.is_empty(), valid, "{path}: {declaration}");
+    }
+}
+
+#[test]
+fn native_keychain_acquisition_is_checked_at_its_real_factory_use_site() {
+    const ROOTED: Policy = Policy {
+        composition_roots: &[("crates/coven/src/builder.rs", "Builder", "open")],
+        ..POLICY
+    };
+    let mut files = load(&workspace_root())
+        .expect("read the workspace")
+        .files
+        .into_iter()
+        .filter(RustFile::is_crate_source)
+        .collect::<Vec<_>>();
+    files.push(RustFile::fixture("crates/coven/src/builder.rs", "impl Builder {\n    fn open() { let _ = Keychain::registered(); }\n    fn run(&self) { let _ = Keychain::registered(); }\n}"));
+    let violations = find_capability_construction_violations(&files, &ROOTED);
+    assert_eq!(violations.len(), 1, "{violations:?}");
+    assert_eq!(violations[0].path, "crates/coven/src/builder.rs");
+    assert_eq!(violations[0].line, 3);
+    assert_eq!(violations[0].capability, "Keychain");
 }
 
 /// Every type name the policy holds, with the row it came from.
@@ -185,6 +339,10 @@ fn named_types(policy: &Policy) -> Vec<(&'static str, &'static str)> {
     for (service, authority) in policy.lifetime_authorities {
         named.push(("lifetime_authorities", service));
         named.push(("lifetime_authorities", authority));
+    }
+    for (_, owner, _, product) in policy.capability_factories {
+        named.push(("capability_factories", owner));
+        named.push(("capability_factories", product));
     }
     for (owner, _) in policy.raw_provider_operations {
         named.push(("raw_provider_operations", owner));

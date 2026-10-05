@@ -17,8 +17,8 @@ use syn::visit::{self, Visit};
 use crate::macros::{parse_macro_body, token_paths};
 use crate::policy::Policy;
 use crate::syntax::{
-    could_be_free_function_path, output_contains_owner, path_names, type_name, type_names,
-    RustFile, StructInfo,
+    could_be_free_function_path, is_test_only, is_test_source, output_contains_owner, path_names,
+    type_name, type_names, RustFile, StructInfo,
 };
 
 #[derive(Clone, Ord, PartialOrd, Eq, PartialEq)]
@@ -90,7 +90,10 @@ pub(crate) fn collect_free_constructors(
     owners: &BTreeSet<String>,
 ) -> BTreeMap<String, BTreeSet<String>> {
     let mut constructors = BTreeMap::new();
-    for file in files {
+    for file in files
+        .iter()
+        .filter(|file| !is_test_source(&file.relative_path))
+    {
         let mut collector = FreeConstructorCollector {
             owners,
             constructors: &mut constructors,
@@ -106,14 +109,20 @@ pub(crate) fn collect_associated_factories(
     owners: &BTreeSet<String>,
 ) -> BTreeMap<(String, String), BTreeSet<String>> {
     let mut trait_outputs = BTreeMap::new();
-    for file in files {
+    for file in files
+        .iter()
+        .filter(|file| !is_test_source(&file.relative_path))
+    {
         TraitFactoryCollector {
             outputs: &mut trait_outputs,
         }
         .visit_file(&file.syntax);
     }
     let mut factories = BTreeMap::new();
-    for file in files {
+    for file in files
+        .iter()
+        .filter(|file| !is_test_source(&file.relative_path))
+    {
         let mut collector = AssociatedFactoryCollector {
             owners,
             trait_outputs: &trait_outputs,
@@ -131,7 +140,16 @@ struct AssociatedFactoryCollector<'a> {
 }
 
 impl Visit<'_> for AssociatedFactoryCollector<'_> {
+    fn visit_item_mod(&mut self, node: &syn::ItemMod) {
+        if !is_test_only(&node.attrs) {
+            visit::visit_item_mod(self, node);
+        }
+    }
+
     fn visit_item_impl(&mut self, node: &syn::ItemImpl) {
+        if is_test_only(&node.attrs) {
+            return;
+        }
         let Some(factory) = type_name(&node.self_ty) else {
             return;
         };
@@ -150,6 +168,9 @@ impl Visit<'_> for AssociatedFactoryCollector<'_> {
             let syn::ImplItem::Fn(method) = item else {
                 continue;
             };
+            if is_test_only(&method.attrs) {
+                continue;
+            }
             let syn::ReturnType::Type(_, output) = &method.sig.output else {
                 continue;
             };
@@ -183,10 +204,22 @@ struct TraitFactoryCollector<'a> {
 }
 
 impl Visit<'_> for TraitFactoryCollector<'_> {
+    fn visit_item_mod(&mut self, node: &syn::ItemMod) {
+        if !is_test_only(&node.attrs) {
+            visit::visit_item_mod(self, node);
+        }
+    }
+
     fn visit_item_trait(&mut self, node: &syn::ItemTrait) {
+        if is_test_only(&node.attrs) {
+            return;
+        }
         let methods = self.outputs.entry(node.ident.to_string()).or_default();
         for item in &node.items {
             if let syn::TraitItem::Fn(method) = item {
+                if is_test_only(&method.attrs) {
+                    continue;
+                }
                 if let syn::ReturnType::Type(_, output) = &method.sig.output {
                     methods.push((method.sig.ident.to_string(), type_names(output)));
                 }
@@ -202,7 +235,16 @@ struct FreeConstructorCollector<'a> {
 }
 
 impl Visit<'_> for FreeConstructorCollector<'_> {
+    fn visit_item_mod(&mut self, node: &syn::ItemMod) {
+        if !is_test_only(&node.attrs) {
+            visit::visit_item_mod(self, node);
+        }
+    }
+
     fn visit_item_fn(&mut self, node: &syn::ItemFn) {
+        if is_test_only(&node.attrs) {
+            return;
+        }
         let syn::ReturnType::Type(_, output) = &node.sig.output else {
             return;
         };

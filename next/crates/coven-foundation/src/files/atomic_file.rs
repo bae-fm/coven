@@ -27,6 +27,15 @@ pub enum FileError {
         #[source]
         source: io::Error,
     },
+    /// The file is absent, but syncing its directory failed.
+    #[error("sync directory after removing {}: {source}", path.display())]
+    AfterRemove {
+        /// The removed file.
+        path: PathBuf,
+        /// The operating system's error.
+        #[source]
+        source: io::Error,
+    },
     /// Removing an unpublished temporary file also failed.
     #[error("{operation}; removing temporary file failed: {cleanup}")]
     Cleanup {
@@ -79,6 +88,33 @@ impl AtomicFile {
     /// barrier; Win32 does not offer POSIX directory fsync.
     pub fn replace(&self, bytes: &[u8]) -> Result<(), FileError> {
         replace(&self.path, bytes)
+    }
+
+    /// Remove the owned file; an absent file is success. On Unix, sync the
+    /// directory even on a retry after an earlier directory-sync failure.
+    /// A missing parent is already absent and needs no durability barrier.
+    pub fn remove(&self) -> Result<(), FileError> {
+        match fs::remove_file(&self.path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                tracing::debug!(path = %self.path.display(), "file is already absent");
+            }
+            Err(source) => return Err(FileError::at("remove file", &self.path, source)),
+        }
+        #[cfg(unix)]
+        match sync_directory(parent(&self.path)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                tracing::debug!(path = %self.path.display(), "file's parent is absent");
+            }
+            Err(source) => {
+                return Err(FileError::AfterRemove {
+                    path: self.path.clone(),
+                    source,
+                })
+            }
+        }
+        Ok(())
     }
 }
 

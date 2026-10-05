@@ -21,6 +21,15 @@ fn named_file_capabilities_stay_in_their_own_areas() {
     let storage = store.owned_file(StoreFile::StorageSettings);
     assert_eq!(storage.read_optional().unwrap(), None);
     storage.replace(b"provider-owned format").unwrap();
+    let store_keys = store.owned_file(StoreFile::StoreKeys);
+    let member_keys = store.owned_file(StoreFile::MemberKeys);
+    store_keys.replace(b"store keys").unwrap();
+    member_keys.replace(b"member keys").unwrap();
+    assert_eq!(store_keys.read_optional().unwrap().unwrap(), b"store keys");
+    assert_eq!(
+        member_keys.read_optional().unwrap().unwrap(),
+        b"member keys"
+    );
     assert_eq!(
         storage.read_optional().unwrap().unwrap(),
         b"provider-owned format"

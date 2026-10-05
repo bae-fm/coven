@@ -3,8 +3,8 @@
 //! a construction-only type. Explicit non-trait capabilities join the same set.
 //!
 //! Factory definitions may build their declared result, and their use sites are
-//! checked. Receiver operations may derive non-trait file capabilities from an
-//! injected owner. Test sources and `cfg(test)` items may assemble capabilities.
+//! checked. Only the policy's named receiver factories may derive capabilities
+//! from an injected owner. Test sources and `cfg(test)` items may assemble capabilities.
 //! `Default` is forbidden on capability types: inferred `Default::default()`
 //! cannot be resolved by a syntax checker.
 
@@ -102,6 +102,7 @@ pub(crate) fn find_capability_construction_violations(
             associated_factories: &associated_factories,
             free_factories: &free_factories,
             current_type: None,
+            bindings: BTreeSet::new(),
             scope: ConstructionScope::Outside,
             violations: &mut violations,
         };
@@ -123,6 +124,7 @@ struct ConstructionVisitor<'a> {
     associated_factories: &'a BTreeMap<(String, String), BTreeSet<String>>,
     free_factories: &'a BTreeMap<String, BTreeSet<String>>,
     current_type: Option<String>,
+    bindings: BTreeSet<String>,
     scope: ConstructionScope,
     violations: &'a mut BTreeSet<CapabilityConstructionViolation>,
 }
@@ -156,6 +158,9 @@ impl ConstructionVisitor<'_> {
     }
 
     fn check_value_path(&mut self, segments: &[String], span: Span) {
+        if matches!(segments, [name] if self.bindings.contains(name)) {
+            return;
+        }
         if let Some(name) = segments.last() {
             // Unit values and tuple constructors, including constructor values
             // passed to another function without immediately being called.
@@ -166,9 +171,20 @@ impl ConstructionVisitor<'_> {
             if matches!(method.as_str(), "new" | "default") {
                 self.record(&owner, span, ConstructionKind::Value);
             }
-            if let Some(results) = self.associated_factories.get(&(owner, method.clone())) {
+            if let Some(results) = self
+                .associated_factories
+                .get(&(owner.clone(), method.clone()))
+            {
                 for result in results {
-                    self.record(result, span, ConstructionKind::Value);
+                    // A declared receiver factory uses an already supplied
+                    // owner, including when called as Owner::method(&owner).
+                    if !self.policy.capability_factories.iter().any(
+                        |(_, factory, name, product)| {
+                            *factory == owner && *name == method && *product == result
+                        },
+                    ) {
+                        self.record(result, span, ConstructionKind::Value);
+                    }
                 }
             }
         }
@@ -199,17 +215,15 @@ impl ConstructionVisitor<'_> {
             .map(|name| self.resolve_self(name).to_string())
             .filter(|name| self.capabilities.contains(name))
             .filter(|name| {
-                // An injected file owner can derive a file or store directory.
-                // A receiver method on a trait implementation cannot acquire a
-                // new clock/id source in place of using its injected instance.
                 signature.receiver().is_none()
-                    || (self
-                        .policy
-                        .construction_only_capability_types
-                        .contains(&name.as_str())
-                        && self.current_type.as_ref().is_some_and(|owner| {
-                            self.policy.capability_types.contains(&owner.as_str())
-                        }))
+                    || self.policy.capability_factories.iter().any(
+                        |(path, owner, method, product)| {
+                            *path == self.path
+                                && self.current_type.as_deref() == Some(*owner)
+                                && signature.ident == *method
+                                && *product == name
+                        },
+                    )
             })
             .collect()
     }
@@ -222,6 +236,25 @@ impl ConstructionVisitor<'_> {
                     attribute.span(),
                     ConstructionKind::DefaultImplementation,
                 );
+            }
+        }
+    }
+
+    fn bind_pattern(&mut self, pattern: &syn::Pat) {
+        struct Bindings<'a>(&'a mut BTreeSet<String>);
+        impl<'ast> Visit<'ast> for Bindings<'_> {
+            fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
+                self.0.insert(node.ident.to_string());
+                visit::visit_pat_ident(self, node);
+            }
+        }
+        Bindings(&mut self.bindings).visit_pat(pattern);
+    }
+
+    fn bind_inputs(&mut self, signature: &syn::Signature) {
+        for input in &signature.inputs {
+            if let syn::FnArg::Typed(input) = input {
+                self.bind_pattern(&input.pat);
             }
         }
     }
@@ -265,7 +298,9 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
             ConstructionScope::Outside
         };
         let previous = std::mem::replace(&mut self.scope, scope);
+        let bindings = std::mem::take(&mut self.bindings);
         visit::visit_item(self, node);
+        self.bindings = bindings;
         self.scope = previous;
     }
 
@@ -287,7 +322,10 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
         if !is_test_only(&node.attrs) {
             let scope = ConstructionScope::Factory(self.factory_results(&node.sig));
             let previous = std::mem::replace(&mut self.scope, scope);
+            let bindings = std::mem::take(&mut self.bindings);
+            self.bind_inputs(&node.sig);
             visit::visit_trait_item_fn(self, node);
+            self.bindings = bindings;
             self.scope = previous;
         }
     }
@@ -296,6 +334,7 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
         if !is_test_only(&node.attrs) {
             let scope = ConstructionScope::Factory(self.factory_results(&node.sig));
             let previous = std::mem::replace(&mut self.scope, scope);
+            self.bind_inputs(&node.sig);
             visit::visit_item_fn(self, node);
             self.scope = previous;
         }
@@ -379,8 +418,69 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
             ConstructionScope::Factory(self.factory_results(&node.sig))
         };
         let previous = std::mem::replace(&mut self.scope, scope);
+        let bindings = std::mem::take(&mut self.bindings);
+        self.bind_inputs(&node.sig);
         visit::visit_impl_item_fn(self, node);
+        self.bindings = bindings;
         self.scope = previous;
+    }
+
+    fn visit_block(&mut self, node: &'ast syn::Block) {
+        let bindings = self.bindings.clone();
+        visit::visit_block(self, node);
+        self.bindings = bindings;
+    }
+
+    fn visit_local(&mut self, node: &'ast syn::Local) {
+        // The initializer (and let-else branch) sees the previous binding.
+        visit::visit_local(self, node);
+        self.bind_pattern(&node.pat);
+    }
+
+    fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
+        let bindings = self.bindings.clone();
+        for input in &node.inputs {
+            self.bind_pattern(input);
+        }
+        visit::visit_expr_closure(self, node);
+        self.bindings = bindings;
+    }
+
+    fn visit_arm(&mut self, node: &'ast syn::Arm) {
+        let bindings = self.bindings.clone();
+        self.bind_pattern(&node.pat);
+        visit::visit_arm(self, node);
+        self.bindings = bindings;
+    }
+
+    fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
+        self.visit_expr(&node.expr);
+        let bindings = self.bindings.clone();
+        self.bind_pattern(&node.pat);
+        self.visit_block(&node.body);
+        self.bindings = bindings;
+    }
+
+    fn visit_expr_let(&mut self, node: &'ast syn::ExprLet) {
+        self.visit_expr(&node.expr);
+        self.bind_pattern(&node.pat);
+    }
+
+    fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
+        let bindings = self.bindings.clone();
+        self.visit_expr(&node.cond);
+        self.visit_block(&node.then_branch);
+        self.bindings = bindings;
+        if let Some((_, branch)) = &node.else_branch {
+            self.visit_expr(branch);
+        }
+    }
+
+    fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
+        let bindings = self.bindings.clone();
+        self.visit_expr(&node.cond);
+        self.visit_block(&node.body);
+        self.bindings = bindings;
     }
 
     fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {

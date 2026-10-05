@@ -1,0 +1,83 @@
+//! Failures callers distinguish without parsing error text.
+
+/// A cryptographic operation could not produce or authenticate its result.
+#[derive(Debug, thiserror::Error)]
+pub enum CryptoError {
+    /// The operating system could not supply cryptographic randomness.
+    #[error("operating-system randomness failed: {0}")]
+    Random(#[from] getrandom::Error),
+    /// HKDF refused the requested output length.
+    #[error("key derivation failed")]
+    Derivation,
+    /// The cipher refused to encrypt the supplied message.
+    #[error("encryption failed")]
+    Encryption,
+    /// The ciphertext, key, path, index or associated data did not authenticate.
+    #[error("ciphertext authentication failed")]
+    Authentication,
+    /// A sealed value was truncated or had invalid framing.
+    #[error("invalid sealed value")]
+    Malformed,
+    /// Every storage object must have a nonempty storage path.
+    #[error("storage path is empty")]
+    EmptyPath,
+    /// X25519 produced a non-contributory shared secret.
+    #[error("X25519 public key has low order")]
+    WeakSealingKey,
+    /// The Ed25519 public key does not identify a member.
+    #[error("invalid or weak Ed25519 public key")]
+    InvalidMemberId,
+    /// The member's signature did not verify.
+    #[error("signature verification failed")]
+    Signature,
+    /// Authenticated key material did not have the expected shape.
+    #[error("invalid key material: {0}")]
+    Material(#[from] MaterialError),
+}
+
+/// A numbered key or serialized secret violates its representation.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum MaterialError {
+    /// Store and circle key numbers start at one.
+    #[error("key number must be nonzero")]
+    ZeroKeyNumber,
+    /// The byte representation was truncated, trailing, or of another kind.
+    #[error("invalid key material encoding")]
+    Encoding,
+    /// The keyring must contain a store key.
+    #[error("keyring contains no store key")]
+    EmptyKeyring,
+    /// A different key already has this store key number.
+    #[error("conflicting store key number {0}")]
+    StoreKeyConflict(u64),
+    /// A different key already has this circle id and key number.
+    #[error("conflicting key number {number} for circle {circle}")]
+    CircleKeyConflict {
+        /// The circle whose number was reused.
+        circle: crate::CircleId,
+        /// The conflicting key number.
+        number: u64,
+    },
+    /// The keyring does not hold this store key.
+    #[error("unknown store key number {0}")]
+    UnknownStoreKey(u64),
+    /// The keyring does not hold this circle key.
+    #[error("unknown key number {number} for circle {circle}")]
+    UnknownCircleKey {
+        /// The circle whose key is missing.
+        circle: crate::CircleId,
+        /// The missing key number.
+        number: u64,
+    },
+}
+
+/// App data could not be sealed or opened with the store key it names (§20.11).
+#[derive(Debug, thiserror::Error)]
+pub enum SealError {
+    /// The keyring does not hold the key the value names.
+    #[error("store key unavailable: {0}")]
+    Key(#[from] MaterialError),
+    /// The cipher refused the value or its app-supplied context.
+    #[error("app data cryptography failed: {0}")]
+    Crypto(#[from] CryptoError),
+}

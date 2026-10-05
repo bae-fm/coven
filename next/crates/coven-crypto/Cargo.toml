@@ -1,0 +1,43 @@
+[package]
+name = "coven-crypto"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+coven-foundation.workspace = true
+argon2 = { workspace = true, features = ["zeroize"] }
+chacha20poly1305 = { workspace = true, features = ["alloc", "zeroize"] }
+ed25519-dalek = { workspace = true, features = ["fast", "zeroize"] }
+x25519-dalek = { workspace = true, features = ["static_secrets", "zeroize"] }
+getrandom.workspace = true
+hex.workspace = true
+hkdf.workspace = true
+hmac = { workspace = true, features = ["zeroize"] }
+sha2 = { workspace = true, features = ["zeroize"] }
+zeroize.workspace = true
+keyring-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+apple-native-keyring-store = { workspace = true, features = ["protected"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-native-keyring-store.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus-secret-service-keyring-store = { workspace = true, features = ["crypto-rust"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+coven-foundation = { workspace = true, features = ["test-utils"] }
+
+[features]
+test-utils = []
+
+[lints]
+workspace = true

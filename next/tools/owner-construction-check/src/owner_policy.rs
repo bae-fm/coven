@@ -9,7 +9,7 @@ pub(crate) const POLICY: Policy = Policy {
     // Rows are added as crates land, in §21.1's order: coven-foundation,
     // coven-crypto, coven-format, coven-merge, coven-database, coven-storage,
     // coven-sync, coven.
-    crate_order: &["coven-foundation"],
+    crate_order: &["coven-foundation", "coven-crypto"],
     // coven-database and coven-storage never depend on each other; the pair is
     // added once both crates are in `crate_order`.
     separated_crates: &[],
@@ -18,6 +18,34 @@ pub(crate) const POLICY: Policy = Policy {
     database_schema: None,
     composition_roots: &[],
     lifetime_authorities: &[],
+    // These methods derive a scoped capability from their injected directory.
+    // They do not acquire an unrelated directory or file for another owner.
+    capability_factories: &[
+        (
+            "crates/coven-foundation/src/files/layout.rs",
+            "StoreLayout",
+            "store_dir",
+            "StoreDir",
+        ),
+        (
+            "crates/coven-foundation/src/files/layout.rs",
+            "StoreLayout",
+            "create_store_dir",
+            "StoreDir",
+        ),
+        (
+            "crates/coven-foundation/src/files/directory.rs",
+            "StoreDir",
+            "owned_file",
+            "AtomicFile",
+        ),
+        (
+            "crates/coven-foundation/src/files/directory.rs",
+            "StoreDir",
+            "file",
+            "AtomicFile",
+        ),
+    ],
     // These are the leaf capabilities. Owners retaining them receive them
     // through constructors; their implementations keep raw OS handles private.
     capability_types: &[
@@ -31,10 +59,22 @@ pub(crate) const POLICY: Policy = Policy {
         "StoreDir",
         "AtomicFile",
         "StoreLock",
+        "Keychain",
+        "StoreKeychain",
+        "KeyringCustody",
+        "StoreKeyCustody",
+        "MemberKeyCustody",
     ],
-    capability_traits: &["Clock", "IdSource"],
-    construction_only_capability_types: &["StoreDir", "AtomicFile", "ClockRef", "IdSourceRef"],
-    non_owner_types: &[],
+    capability_traits: &["Clock", "IdSource", "StoreKeyCustody", "MemberKeyCustody"],
+    construction_only_capability_types: &[
+        "StoreDir",
+        "AtomicFile",
+        "ClockRef",
+        "IdSourceRef",
+        "Keychain",
+        "StoreKeychain",
+    ],
+    non_owner_types: &["KeyCustody", "IdentityCustody"],
     borrowed_facade_types: &[],
     root_owner_types: &[],
     task_types: &[],

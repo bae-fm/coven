@@ -16,6 +16,10 @@ pub(crate) const CACHE: &str = "cache";
 pub enum StoreFile {
     /// coven-storage's provider settings, encoded and interpreted by that crate.
     StorageSettings,
+    /// coven-crypto's passphrase-sealed store and circle keys (§20.1).
+    StoreKeys,
+    /// coven-crypto's passphrase-sealed member key pairs (§20.1).
+    MemberKeys,
 }
 
 /// The two places coven keeps file bytes inside a store (§20.1).
@@ -118,6 +122,8 @@ impl StoreDir {
     pub fn owned_file(&self, file: StoreFile) -> AtomicFile {
         let name = match file {
             StoreFile::StorageSettings => "storage.json",
+            StoreFile::StoreKeys => "store-keys.sealed",
+            StoreFile::MemberKeys => "member-keys.sealed",
         };
         AtomicFile::new(self.path.join(name))
     }

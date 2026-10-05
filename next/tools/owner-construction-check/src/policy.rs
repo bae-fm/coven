@@ -20,6 +20,11 @@ pub(crate) type CompositionRoot = (&'static str, &'static str, &'static str);
 /// while the store is open, such as the sync owner starting its sync loop.
 pub(crate) type LifetimeAuthority = (&'static str, &'static str);
 
+/// `(source file, owner, receiver method, capability)`: an owner may derive
+/// this capability from the one it was given, such as a directory naming one
+/// of its files. This grants no authority to construct unrelated capabilities.
+pub(crate) type CapabilityFactory = (&'static str, &'static str, &'static str, &'static str);
+
 /// `(trait or owner, methods)`: raw provider operations an owner never offers.
 pub(crate) type RawProviderOperations = (&'static str, &'static [&'static str]);
 
@@ -46,6 +51,7 @@ pub(crate) struct Policy {
     pub(crate) database_schema: Option<DatabaseSchema>,
     pub(crate) composition_roots: &'static [CompositionRoot],
     pub(crate) lifetime_authorities: &'static [LifetimeAuthority],
+    pub(crate) capability_factories: &'static [CapabilityFactory],
     /// Types that hold a capability. A type holding one of these, or holding
     /// an owner, is an owner.
     pub(crate) capability_types: &'static [&'static str],
@@ -170,6 +176,7 @@ impl Policy {
         database_schema: None,
         composition_roots: &[],
         lifetime_authorities: &[],
+        capability_factories: &[],
         capability_types: &[],
         capability_traits: &[],
         construction_only_capability_types: &[],
