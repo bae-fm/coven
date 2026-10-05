@@ -134,6 +134,7 @@ Two mechanisms order writes:
   - and Carol's tablet's log up to 1.
 - A device applies a write only after it has applied everything that
   write's device had read.
+  - A device has always read its own earlier writes.
 - So no device ever sees an effect before its cause:
   - cause: every write a write's device had read when making it;
   - effect: the write itself;
@@ -230,59 +231,75 @@ Two mechanisms order writes:
   (§7.1).
 - Every device that applied the same writes ends with the same database,
   coven's own tables included, whatever order the writes arrived in.
-- Applying a write follows these rules, each of which gives the same
-  result in any arrival order:
+- Merging has two layers.
+  - The *merged state* comes from the writes themselves: each row's
+    generation, and each cell's winning value.
+  - The *removal rules* then decide which rows the app sees, from the
+    merged state alone.
+- The merged state follows two rules:
   - cells: of two values for one cell, the one with the larger timestamp
     stays;
-  - deletes: a row change concurrent with a delete of its row loses;
-  - foreign keys: a row pointing at a deleted row follows its key's action,
-    even if the deleting device never saw it;
-    - under restrict, the row is lost;
-  - key changes: a row pointing at a changed key follows its key's
-    `ON UPDATE` action;
-    - of two changes to one key, the one with the larger timestamp decides
-      where those rows go;
+  - deletes: a row change concurrent with a delete of its row loses
+    (§8.3).
+- A value is *lost* when some write replaced it, and no write that replaced
+  it had read it.
+  - A lost value is recorded, so the app can show it and offer it back.
+  - It stops being lost if a later write replaces it having read it.
+- The removal rules take a row out of the app's table while a reason holds:
+  - foreign keys: a row whose parent is gone, or was deleted and re-added
+    since the row last pointed at it, follows its key's action: cascade and
+    restrict take it out, set null and set default make its reference read
+    null or the default (§8.4);
+  - CHECK constraints: a row whose merged values fail is taken out (§8.6);
+  - ancestors: an ancestor that no shared row points at is taken out
+    (§14);
   - unique values: of two rows claiming one value, the row whose write has
-    the smaller timestamp keeps it;
-    - the first claim to a value keeps it, and the other row is lost;
-  - CHECK constraints: a row that fails after a merge is lost.
-- A lost row is deleted, like any delete, and whatever loses is recorded,
-  so the app can show it and offer it back.
-- The result is the one applying every write in timestamp order would
-  give.
-- One rule's result can break another, so coven applies them until no row
-  breaks any.
-  - E.g. a note that loses a unique title is deleted, and its tags then
-    follow their foreign key's action.
-  - This always stops: each step only deletes rows.
-- When a write arrives after another and changes the result for a row
-  already applied, coven makes the change with ordinary SQL, which
-  triggers see like any other.
-  - E.g. a write that wins a unique value from a row already applied makes
-    coven delete that row.
-- Coven keeps five internal tables for this:
+    the larger timestamp is taken out, since the first claim keeps it
+    (§8.5).
+- A removal is never stored as a delete.
+  - Coven keeps a removed row's values, and puts it back when the reason
+    goes away, e.g. when the reference that made it a parent's child is
+    pointed elsewhere.
+  - A removed row is recorded as lost while it is out.
+- Every rule but the unique one keeps firing when more rows are removed,
+  so applying them in any order ends with the same rows removed.
+- The unique rule is judged once, between two passes of the others:
+  1. apply the other rules until none fires;
+  2. judge unique values among the rows still present;
+  3. apply the other rules again, to the losers' children and ancestors.
+- So every device that applied the same writes sees the same rows, whatever
+  order the writes arrived in, and whatever order the rules ran in.
+  - The proof is in `coven-merge-proof.md`, checked by machine for the
+    merged state and the removal rules.
+- When a write changes which rows are removed, coven makes the change in
+  the app's table with ordinary SQL, which triggers see like any other.
+- Coven keeps six internal tables for this:
   - `coven_writes`, one row per write the device has applied, naming:
     - the write's timestamp, which includes its device;
     - the write's number.
   - `coven_columns`, one row per synced column, naming:
     - its table;
     - its column.
-  - `coven_rows`, one row per synced row, naming:
+  - `coven_rows`, one row per generation of each synced row, naming:
     - its table;
     - its primary key;
-    - its generation: how many times it has been created, deleted or
+    - the generation: how many times the row had been created, deleted or
       re-added;
-    - the write that last changed its generation.
+    - the write that moved it there, or of several concurrent ones, the one
+      with the smallest timestamp.
   - `coven_cells`, one row per synced cell, naming:
     - its `coven_columns` row;
     - its `coven_rows` row;
     - the write that set it.
-  - `coven_lost`, one row per value a concurrent write replaced or
-    deleted, naming:
-    - the cell;
+  - `coven_lost`, one row per lost value or removed row, naming:
+    - the cell, or the row;
     - the value that lost;
     - the write that set it;
-    - the write that replaced it without having read it.
+    - the write that replaced it without having read it, or the rule that
+      removed the row.
+  - `coven_held`, one row per row a removal rule has taken out of the app's
+    table, holding its values, and one per reference a rule makes read
+    null or a default, holding the real one.
 - Note 42 on Ben's phone, after Ana's write 4 and its own write 9:
 
   ```
@@ -395,19 +412,29 @@ Carol's tablet:
   ```
 
 - No cell overlaps, so both writes keep their cells on every device.
-- When concurrent writes set the same cell, the newer one wins, and coven
-  records the value that lost in `coven_lost`.
-  - `coven_lost` keeps each value that lost, with the write that set it and
-    the write that replaced it.
-  - The writes were concurrent when the winning write had not read the
-    write that set the losing value.
-- Carol's "Shopping" replaced Ben's "Weekly groceries":
+- When concurrent writes set the same cell, the newer one wins.
+- The value it replaced is lost when no write that replaced it had read it
+  (§8).
+- In §8.1, note 42's title went through four values:
 
   ```
-  coven_lost
-    cell            lost value          set by          replaced by
-    note 42 title   "Weekly groceries"  Ben's write 9   Carol's write 2
+  value               set by          replaced by                     lost?
+  "Grocery list"      Ana's write 1   Ana 4, Ben 9, Carol 2           no: all had read it
+  "Groceries"         Ana's write 4   Ben 9, Carol 2                  no: Ben 9 had read it
+  "Weekly groceries"  Ben's write 9   Carol 2                         yes
+  "Shopping"          Carol's write 2  nothing                        the current value
   ```
+
+  - On Carol's tablet, Ana's write 4 arrives after Carol's write 2, so
+    "Groceries" is lost at first; Ben's write 9, which had read it, then
+    takes it back out.
+  - Every device ends with one row:
+
+    ```
+    coven_lost
+      cell            lost value          set by          replaced by
+      note 42 title   "Weekly groceries"  Ben's write 9   Carol's write 2
+    ```
 
 - The app can read `coven_lost` and offer to restore a lost value.
 - Every device holds the same `coven_lost` rows, because they follow from
@@ -418,8 +445,8 @@ Carol's tablet:
 - A row's *generation* counts how many times it has been created, deleted
   or re-added.
   - It is odd while the row exists and even while it is deleted.
-  - It lives on the row's `coven_rows` row, with the write that last
-    changed it.
+  - Each generation has its own `coven_rows` row, naming the write that
+    moved the row there.
 - Each row change in a write record carries the generation the row had on
   the device that wrote it:
 
@@ -435,7 +462,7 @@ Carol's tablet:
 - Deleting a row removes it from the app's table and moves its generation
   on to the next even number.
 - Re-adding it moves its generation on to the next odd number.
-- Its `coven_cells` rows go with it, but its `coven_rows` row stays, so
+- Its `coven_cells` rows go with it, but its `coven_rows` rows stay, so
   later writes to it still have a generation to lose to.
 - A row change concurrent with a delete of its row loses, and its cells go
   to `coven_lost`, replaced by the delete.
@@ -446,10 +473,12 @@ Carol's tablet:
   - So a concurrent edit never brings the row back, and never reaches it
     once it is re-added.
 - When two deletes of one generation are concurrent, a value is lost only
-  if neither had read it.
+  if neither had read it, by the rule of §8.
   - The first delete to arrive records what it hadn't read.
   - If the second had read one of those values, it removes that value's
     `coven_lost` row, which needs nothing from the deleted row.
+  - The generation's `coven_rows` row names the delete with the smaller
+    timestamp, whichever arrived first.
 - E.g. at 16:00 Ana deletes note 43, "Hardware store", while Ben, offline,
   edits its title, and at 17:00 Ana re-adds it.
   - Note 43 on Carol's tablet:
@@ -458,8 +487,8 @@ Carol's tablet:
     coven_rows
       time    id   table   key   generation   write
       14:45   4    notes   43    1            16      Ana's write 5 creates it
-      16:00   4    notes   43    2            18      Ana's write 7 deletes it
-      17:00   4    notes   43    3            19      Ana's write 8 re-adds it
+      16:00   5    notes   43    2            18      Ana's write 7 deletes it
+      17:00   6    notes   43    3            19      Ana's write 8 re-adds it
 
     notes
       14:45   row 43 present
@@ -469,6 +498,8 @@ Carol's tablet:
 
   - Ben's edit was made at generation 1, so it loses whenever it arrives,
     even if a fast clock stamps it after 17:00.
+  - Generation 2's row names write 7, so even a device that gets Ben's edit
+    after the re-add records it as replaced by write 7.
   - Every device records:
 
     ```
@@ -509,38 +540,13 @@ Carol's tablet:
                     → applies Ben's write, inserting tag 9
   ```
 
-- A row pointing at a deleted row follows its foreign key's declared action
-  on every device.
 - A row change that points at a parent also carries the parent's
   generation (§8.3).
-  - If the parent has moved to a newer generation, the child is handled as
-    pointing at a deleted parent, even if the parent was re-added since.
-  - E.g. Ben tags note 43 at its generation 1, while Ana deletes it and
-    then re-adds it: Ben's tag still follows the delete.
-- On the device that deletes the parent, SQLite runs the action, and the
-  write records it.
-  - E.g. if tags point at notes with cascade and links with set null,
-    deleting note 43 records:
-
-    ```
-    notes  row 43  delete
-    tags   row 8   delete                         cascade
-    links  row 5   update  note_id: 43 → null     set null
-    ```
-
-- When another device applies the parent's delete, each child is in one of
-  three cases:
-  - Case 1: the deleting device had the child;
-  - Case 2: the child's own device has it when the delete arrives;
-  - Case 3: the delete arrives before the child.
-
-#### Cascade
-
-- Case 1: Ana's phone, which deletes note 43, had the child, tag 8.
-  - At 15:30 Carol tags note 43 "hardware", as tag 8. Every device, Ana's
-    phone included, applies it.
-  - At 16:00 Ana's phone deletes note 43, SQLite cascades tag 8, and her
-    write record carries both:
+- On the device that deletes a parent, SQLite runs each child's foreign key
+  action, and the write records the results as ordinary row changes.
+  - E.g. tags point at notes with cascade, and links with set null; Carol
+    tagged note 43 "hardware" as tag 8 at 15:30, and every device has it.
+  - At 16:00 Ana deletes note 43, and her write records:
 
     ```
     ana-phone, write 7, 2026-10-02 16:00:00.000 #0
@@ -551,129 +557,43 @@ Carol's tablet:
     signed with Ana's key
     ```
 
-  - Carol's tablet applies write 7 like any other write: note 43 and tag 8
-    go, and link 5 loses its note.
-- Case 2: Ana's phone never saw the child, tag 9, but Ben's phone, which
-  created it, has it when Ana's delete arrives.
+- A `RESTRICT` or `NO ACTION` key makes SQLite refuse that delete instead,
+  if the deleting device has a child.
+- A child the deleting device didn't have, because it was added or pointed
+  at the parent concurrently, is handled by the removal rule of §8.
+  - The rule applies while its parent is gone, or at a newer generation
+    than the one the child points at.
+  - Under cascade, restrict or no action, the child is taken out of the
+    app's table, held in `coven_held`, and recorded as lost.
+  - Under set null or set default, the child stays, and its reference reads
+    null or the default, with the real one held.
+- The child's own generation never moves, so it comes back if its
+  reference is later pointed at a parent that is present.
+- E.g. at 16:00, while Ana deletes note 43, Ben, offline, adds tag 9 to it,
+  then moves tag 9 to note 44:
 
   ```
   Ben's phone
-    16:00  offline. Ben's write: insert tag 9 → note 43
+    16:00  offline. Ben's write 10: insert tag 9 → note 43
+    16:05  Ben's write 11: tag 9 → note 44
     16:30  online. Applies Ana's write 7: delete note 43
-             SQLite cascades: tag 9 deleted
-             coven_rows  tags  9  generation 2  write: Ana's write 7
-  ```
+             tag 9 points at note 44, so no rule applies
 
-  - Ben's phone applies write 7 like any other write, and SQLite's cascade
-    removes tag 9 with note 43. Coven records tag 9's delete as part of
-    write 7.
-- Case 3: Carol's tablet applies Ana's delete before tag 9 arrives.
-
-  ```
   Carol's tablet
     16:00  applies Ana's write 7: delete note 43
-             coven_rows  notes  43  generation 2  write: Ana's write 7
-    16:30  Ben's write arrives: insert tag 9 → note 43
-             note 43 is deleted in coven_rows, so cascade applies
-             tag 9 is never inserted into tags
-             coven_rows  tags  9  generation 2  write: Ana's write 7
+    16:30  Ben's write 10 arrives: tag 9 → note 43
+             note 43 is gone, so tag 9 is held, and recorded as lost
+           Ben's write 11 arrives: tag 9 → note 44
+             the reason is gone, so tag 9 is put back
   ```
 
-  - SQLite would reject inserting a tag that points at a missing note.
-  - So coven never runs Ben's insert into `tags`.
-  - It only adds tag 9's `coven_rows` row, deleted, set by Ana's write 7.
-- Every device ends with note 43, tag 8 and tag 9 deleted.
-- Ana's write 7 hadn't read Ben's insert, so tag 9's cells are recorded in
-  `coven_lost`, replaced by write 7 (§8.3).
-- Re-adding a deleted parent doesn't bring back the rows deleted with it.
+  - Both devices end with tag 9 on note 44, and nothing lost.
+  - Had Ben not moved it, both would end with tag 9 held, and the same
+    `coven_lost` row, so the app can offer to put it on another note.
+- Re-adding a deleted parent doesn't bring back the rows held with it,
+  since they point at its old generation.
   - Re-adding is a new insert. Any children the app wants back, it inserts
     in the same write.
-  - At 17:00 Ana's write 8 re-inserts note 43 and tag 8.
-  - Ana's phone never had tag 9, so it can't re-insert it.
-
-#### Set null and set default
-
-- Set default works like set null, with the column's default in place of
-  null.
-- If the deleting device had the child, SQLite there sets the child's
-  reference to null, and the write records it.
-- If the deleting device didn't have the child, coven records the null as
-  set by the parent's delete, and the child's old reference in
-  `coven_lost`.
-  - If another device has the child when the delete arrives, SQLite there
-    sets its reference to null.
-  - If the delete arrives before the child, coven inserts the child with
-    its reference null.
-- E.g. at 16:00 Ana deletes note 43, which link 5 points at, while Ben,
-  offline, adds link 6 pointing at it.
-
-  ```
-  Ana's phone
-    16:00  deletes note 43
-             SQLite sets link 5's note_id to null
-             write 7 records: links row 5 update note_id: 43 → null
-
-  Ben's phone
-    16:00  offline. Ben's write: insert link 6 → note 43
-    16:30  online. Applies Ana's write 7: delete note 43
-             SQLite sets link 6's note_id to null
-             coven_cells  link 6 note_id  write: Ana's write 7
-
-  Carol's tablet
-    16:00  applies Ana's write 7: delete note 43
-    16:30  Ben's write arrives: insert link 6 → note 43
-             note 43 is deleted, so coven inserts link 6 with note_id null
-             coven_cells  link 6 note_id  write: Ana's write 7
-  ```
-
-- Every device ends with links 5 and 6 present and pointing at nothing,
-  and with the same `coven_lost` row:
-
-  ```
-  coven_lost
-    cell           lost value   set by        replaced by
-    link 6 note_id 43           Ben's write   Ana's write 7
-  ```
-
-#### Restrict and no action
-
-- `RESTRICT` and `NO ACTION` both refuse to delete a parent that has
-  children.
-- If the deleting device had the child, SQLite refuses the delete there.
-- If the deleting device didn't have the child, the child is lost, as if
-  it had never been added, and coven records its insert in `coven_lost`,
-  replaced by the parent's delete.
-  - If another device has the child when the delete arrives, SQLite there
-    would refuse the delete, so coven removes the child first.
-  - If the delete arrives before the child, coven never inserts the child.
-- E.g. at 16:00 Ana deletes note 43, while Ben, offline, adds tag 9
-  "receipts" to it.
-
-  ```
-  Ben's phone
-    16:00  offline. Ben's write: insert tag 9 → note 43
-    16:30  online. Applies Ana's write 7: delete note 43
-             tag 9 would block the delete, so coven removes it first
-             coven_rows  tags  9  generation 2  write: Ana's write 7
-
-  Carol's tablet
-    16:00  applies Ana's write 7: delete note 43
-    16:30  Ben's write arrives: insert tag 9 → note 43
-             note 43 is deleted, so tag 9 is never inserted into tags
-             coven_rows  tags  9  generation 2  write: Ana's write 7
-  ```
-
-- Both devices end without tag 9, and with the same `coven_lost` rows:
-
-  ```
-  coven_lost
-    cell           lost value   set by        replaced by
-    tag 9 name     "receipts"   Ben's write   Ana's write 7
-    tag 9 note_id  43           Ben's write   Ana's write 7
-  ```
-
-- The app can show Ben that his tag was lost, and offer to add it to
-  another note.
 
 ### 8.5 Keys and uniqueness
 
@@ -712,11 +632,13 @@ Carol's tablet:
   action on every device.
 - If the device changing the key had the child, SQLite there runs the
   action, and the write records it.
-- If it didn't have the child, coven runs the action itself, and records
-  the child's old reference in `coven_lost`.
-  - Cascade re-points the child to the new key.
-  - Set null and set default clear the reference, as in §8.4.
-  - Restrict and no action lose the child, as in §8.4.
+- If it didn't have the child, the action is a removal rule (§8), and the
+  child's real reference is held in `coven_held`:
+  - under cascade, the reference reads the new key;
+  - under set null and set default, it reads null or the default, as in
+    §8.4;
+  - under restrict and no action, the child is taken out and held, as in
+    §8.4.
 - E.g. notes point at tags with `ON UPDATE CASCADE`, and at 16:00 Ana
   renames the tag "urgent" to "important", while Ben, offline, tags note
   44 "urgent".
@@ -730,12 +652,12 @@ Carol's tablet:
   Ben's phone
     16:00  offline. Ben's write: note 44 tag → "urgent"
     16:30  online. Applies Ana's write
-             coven changes the key in place, so SQLite re-points note 44
+             note 44's tag reads "important"
 
   Carol's tablet
     16:00  applies Ana's write
     16:30  Ben's write arrives: note 44 tag → "urgent"
-             "urgent" was replaced, so coven sets note 44's tag to "important"
+             "urgent" was replaced, so note 44's tag reads "important"
   ```
 
 - Every device ends with notes 42 and 44 tagged "important".
@@ -745,8 +667,6 @@ Carol's tablet:
   - Both new tags exist after the merge.
   - A child still pointing at "urgent" follows the change with the larger
     timestamp.
-  - As with any child the changing device didn't have, coven records its
-    old reference, "urgent", in `coven_lost`, replaced by that change.
 
 #### Unique constraints
 
@@ -754,11 +674,12 @@ Carol's tablet:
   rows can claim one value only through concurrent writes.
 - Of two rows claiming one value, the row whose write has the smaller
   timestamp keeps it, since the first claim to a value keeps it.
-- The other row is lost, whether its write inserted it or edited it to
-  claim the value.
-  - Coven deletes it, whichever row arrived first.
-  - Coven records its cells in `coven_lost`, replaced by the winning
-    write.
+- The other row is taken out and held, whether its write inserted it or
+  edited it to claim the value, and recorded as lost.
+  - It comes back if the reason goes away, e.g. its own value is changed,
+    or the winning row is removed.
+  - Unique values are judged after the other removal rules, among the rows
+    they leave (§8).
 - E.g. note titles are unique, and Ana and Ben, both offline, each add a
   note titled "Groceries".
   - Ana's insert of note 45 is stamped 16:00, and Ben's of note 46 is
@@ -782,14 +703,13 @@ Carol's tablet:
     merged        10       8     fails
     ```
 
-- A row that fails after a merge is lost.
-  - Coven deletes it, whichever write arrived first.
-  - Coven records its cells in `coven_lost`, each replaced by the other
-    conflicting write.
+- A row that fails after a merge is taken out and held, and recorded as
+  lost.
+  - It comes back if a later write makes it pass, e.g. Ben setting `end`
+    to 20.
 - Until the second write arrives, each device's row passes, since it has
   seen only one of them.
-- Every device ends without the row, and records Ana's 10 and Ben's 8 in
-  `coven_lost`.
+- Every device ends with the row held, and the same `coven_lost` row.
 
 ### 8.7 Triggers
 
@@ -862,7 +782,7 @@ Carol's tablet:
 ## 9. Members and roles
 
 - A member is a person in the store, using it from one or more devices.
-  - Each member has their own key pair, which identifies them.
+  - Each member has their own keys, which identify them (§11).
   - An admin adds a member by writing their public key to the store log.
 - The *store log* records changes to the store itself, separate from the
   app's writes.
@@ -959,8 +879,8 @@ Carol's tablet:
 
 - Coven uses three kinds of key:
   - the store key, which encrypts everything coven writes to storage;
-  - each member's key pair, which identifies them (§9), signs their writes
-    and store log entries, and opens the store key;
+  - each member's keys, which identify them (§9), sign their writes and
+    store log entries, and open the store key;
   - storage credentials: each device's own sign-in to the provider, or on
     S3 its member's access key (§4).
 - Each store key is sealed to every member's public key, and the sealed
@@ -973,6 +893,29 @@ Carol's tablet:
   - Devices keep the old keys, to read writes made before.
 - Each device keeps its member's key in the OS keychain.
 - Storage access, not keys, is what keeps a removed device out.
+
+### 11.1 Cryptography
+
+- A member's keys are two key pairs, kept together:
+  - an Ed25519 pair, which signs;
+  - an X25519 pair, which opens keys sealed to the member.
+- Everything coven writes to storage is encrypted with XChaCha20-Poly1305:
+  write records, store log entries, snapshots, sealed keys and file
+  chunks.
+  - Each object's storage path is bound into its authentication, so the
+    provider can't swap one object for another.
+  - Each file chunk also binds its index.
+- Nonces:
+  - for a file's chunks, derived from the key and the file's name, combined
+    with the chunk's index, so the same file under the same key encrypts to
+    the same bytes;
+  - for everything else, random.
+- A key is sealed to a member with an anonymous sealed box: X25519 with
+  XChaCha20-Poly1305.
+- Keys for each purpose are derived from the store key, or a circle's key,
+  with HKDF-SHA256 and a label per purpose: encryption, naming, file
+  nonces.
+- A file's storage name is HMAC-SHA256 of its content, with the naming key.
 
 ## 12. Removing members and devices
 
@@ -997,7 +940,7 @@ Carol's tablet:
   - Their devices can't read anything written after the rotation.
   - Removing them and adding them again gives them the current key.
 
-## 13. Joining, restore, and not losing the store key
+## 13. Joining and restore
 
 - A person's new device needs their member key, which gets it the store key
   (§11), in one of three ways:
@@ -1016,17 +959,102 @@ Carol's tablet:
 - Losing every member's devices and restore codes loses the store for good,
   since everything is encrypted.
 
-## 14. Circles
+## 14. Audiences
+
+- Every synced row has an *audience*: the store, one circle, or this device
+  only.
+  - A row in the store reaches every member's devices.
+  - A row in a circle reaches only that circle's members' devices.
+  - A row on this device only never leaves it, though its table syncs.
+  - E.g. a household's notes are the store's, each person pins notes in a
+    circle of their own, and a draft stays on the device that wrote it.
+- The app declares, for each synced table, how its rows get their audience:
+  - a *root* table names a column holding each row's audience: `store`, a
+    circle's id, or `device`, and never NULL;
+  - a *descendant* table names one foreign key, and each row takes the
+    audience of the row it points at;
+  - an *ancestor* table has no audience of its own: a row is in the store
+    exactly while a present row in the store or a circle points at it;
+  - a table that declares none of these is in the store.
+- Audience is defined once, from these declarations, and everything that
+  decides where a row goes uses that one definition: writes, snapshots and
+  files.
+
+### 14.1 Roots, descendants and ancestors
+
+- A descendant's declared foreign key is one column, into a synced table.
+  - Following declared foreign keys from any descendant reaches a root or
+    an ancestor; a loop is refused when the database opens.
+- The rows that keep an ancestor are those of every other synced table
+  with a foreign key into it, except:
+  - a table whose declared foreign key points at the ancestor, since it
+    takes its audience from the ancestor instead;
+  - an *asset* table, a descendant declared never to keep anything alive,
+    such as cover images;
+  - the ancestor's own table.
+  - Only a table's first foreign key into the ancestor counts.
+- E.g. todos are descendants of lists, labels are an ancestor, and the
+  join table `todo_labels` declares `todo_id`:
+
+  ```
+  lists         root         audience column: store or device
+  todos         descendant   through list_id
+  todo_labels   descendant   through todo_id, so a label is kept by it
+  labels        ancestor     kept while a shared todo wears it
+  ```
+
+- An ancestor that no table could keep is refused when the database opens.
+- A row is *shared* when its audience is the store or a circle.
+- A unique constraint or shared key (§8.5) must not span audiences, since a
+  device outside a circle can't see the circle's claim to a value.
+  - On a root table, it must include the audience column, e.g.
+    `UNIQUE(audience, title)`, so the same title in the store and in a
+    circle are two separate claims.
+  - On a descendant or ancestor table whose rows can be in different
+    audiences, it is refused, since there is no audience column to
+    include.
+  - Coven checks this when the database opens, and after every migration,
+    and refuses to open with an error naming the table and the constraint.
+- When a write shares a row, every row it points at that isn't shared yet
+  goes with it in the same write.
+  - A root row is never shared this way; a write that would need it is
+    refused.
+  - So no device ever receives a row whose parent never arrives.
+
+### 14.2 Moving rows
+
+- A row moves when:
+  - its root's audience column changes, or a root row is inserted with
+    an audience other than `device`;
+  - a descendant is pointed at a parent with another audience;
+  - an ancestor gains its first present shared child, or loses its last.
+- Moving rows into the store or a circle sends them there as full inserts:
+  the root, its descendants, and the ancestors they keep.
+  - So other devices receive the whole subtree, not changes to rows they
+    never had.
+- Moving rows out of an audience is, for the devices that lose them, a
+  delete.
+  - The moving device keeps its rows, now on this device only.
+  - A row still kept by another root stays.
+  - Which rows leave is worked out against the database as it was before
+    the write.
+  - Moving them back later is a re-add (§8.3).
+- Moving a row from one circle to another is a delete in the first and an
+  insert in the second.
+- An ancestor leaving other devices is never a delete: each device works
+  out from the children it has whether the ancestor is present, by the
+  ancestor rule of §8.
+  - E.g. Ana unshares the last shared todo wearing the label "urgent",
+    while Ben gives "urgent" to a new shared todo.
+  - Ben's write carries the label too, so every device that has his todo
+    has the label.
+  - Every device ends with Ben's todo present, so every device has the
+    label, whatever order the writes arrived in.
+
+### 14.3 Circles
 
 - A circle is a group of members inside a store who share rows the other
   members can't read.
-  - E.g. each person pins notes in a circle of their own, while the notes
-    themselves stay the store's.
-- Each row is either the store's, or one circle's.
-  - The app names a row's circle in a column it declares for the table,
-    such as `circle`.
-  - Moving a row to another circle is a delete plus an insert, like a key
-    change (§8.5).
 - Circles are made, and members added to and removed from them, by entries
   in the store log, under its rules (§9).
   - A circle's own members add and remove its members.
@@ -1036,7 +1064,7 @@ Carol's tablet:
   - Someone joining a circle gets its earlier keys too, so they can read its
     history.
 
-### 14.1 Writes
+### 14.4 Writes
 
 - A circle's row changes go in the same device logs, encrypted with the
   circle's key.
@@ -1058,13 +1086,16 @@ Carol's tablet:
     encrypted bytes.
 - A skipped part counts as applied, so a device never waits on a write it
   can't read (§7.1).
+- Changes to rows on this device only are left out of the write record
+  altogether, before it is signed and uploaded.
 - All members can see that a circle exists, who writes to it, when, and how
   much.
 
-### 14.2 References
+### 14.5 References
 
 - A row may only point at rows that everyone who can read it can also
   read.
+  - A row on this device only may point at anything on the device.
   - A circle's row may point at rows in the same circle, or the store's.
   - A store row may point only at store rows.
 - Coven refuses a write that breaks this, on the device making it.
@@ -1083,7 +1114,7 @@ Carol's tablet:
 - Which circle a row is in never depends on who is in the circle, so a
   change of members never breaks a reference.
 
-### 14.3 Leaving a circle
+### 14.6 Leaving a circle
 
 - E.g. Ana and Ben share a circle, and Ana removes Ben from it.
   - The circle key is replaced, sealed to Ana alone.
@@ -1096,7 +1127,7 @@ Carol's tablet:
   - Only trust keeps him from claiming he hadn't read his removal, and
     members are trusted not to be hostile (§2).
 
-## 15. Snapshots and bounded history
+## 15. Snapshots
 
 - A snapshot is the synced tables and coven's own tables as one device
   has them, encrypted, with how far into every log they reach.
@@ -1116,7 +1147,8 @@ Carol's tablet:
 
   - A new device loads either, then fetches every write after its
     positions, and ends up in the same place.
-- A device snapshots only what it can read.
+- A device snapshots only what it can read, and never rows on a device
+  only.
   - Any device snapshots the store's rows.
   - A device of one of a circle's members snapshots that circle's rows,
     separately, sealed with the circle's key (§14).
@@ -1160,8 +1192,49 @@ Carol's tablet:
 ## 16. Files
 
 - Files are what the app attaches to rows: audio, images, documents.
-- Each file is stored encrypted at `files/<name>`, where the name is a
-  keyed hash of its content.
+- The app declares, for each synced table that carries files:
+  - which column refers to the file;
+  - the file's kind, user-provided or app-provided;
+  - whether devices download it as soon as its row arrives, or on first
+    read.
+
+### 16.1 Kinds and locality
+
+- A *user-provided* file is the user's own file at a path on their device,
+  such as a song in their music folder.
+  - Coven records its path, size and modification time, and doesn't copy
+    it.
+  - Coven never changes or deletes it.
+  - If it moves or changes, coven reports it as missing or changed, before
+    reading any of it.
+- An *app-provided* file is bytes the app hands to coven, which keeps and
+  owns them.
+  - The app can hand them over as a stream, so a large file never has to
+    fit in memory.
+- A file follows its row's audience (§14).
+  - A row on this device only has a *local* file: the user's original, or
+    coven's own copy of app-provided bytes.
+  - A shared row has a *remote* file: uploaded, encrypted, and read the
+    same way on every device.
+- So user-provided or app-provided says where a local file's bytes are,
+  and downloading as soon as the row arrives, or on first read, says how a
+  remote file reaches each device.
+- Moving a row into the store or a circle uploads its file first, then
+  writes the move.
+  - A user-provided original stays where it is.
+  - From then on the file is remote, and every device reads it as remote,
+    the one it came from included; coven never reads the original again.
+- Moving a row back to this device only downloads its file first, then
+  writes the move.
+  - A user-provided file is written to a path the user picks, which must
+    not already exist; an app-provided one goes back into coven's own
+    folder.
+  - The uploaded copy is then deleted like any unused file.
+
+### 16.2 Storage and naming
+
+- Each remote file is stored encrypted at `files/<name>`, where the name is
+  a keyed hash of its content.
   - A keyed hash, such as HMAC-SHA256, can't be computed without a secret
     key, so the provider can't hash a file it knows and look for its name.
   - The key is a *naming key* derived from the store key, separate from the
@@ -1175,14 +1248,58 @@ Carol's tablet:
   - The same file in the store and in a circle gets two different names.
 - After a key is replaced, a file added again gets a new name, and is
   stored again.
-- Files are encrypted in fixed-size chunks, so any range can be read and
-  checked on its own.
-- A local cache has a size budget; the app can pin a file to keep it on
-  the device regardless of the budget.
+- A file is encrypted in chunks, 64 KiB by default, recorded in its
+  header.
+  - Each chunk is encrypted and authenticated on its own, with its index
+    bound in, so a chunk can't be altered, swapped or reordered unnoticed.
+  - So any chunk can be read and checked without the rest of the file.
+
+### 16.3 Reading ranges
+
+- The app reads any byte range of a file, at any offset, as a stream.
+  - Playing a song and seeking in it are just reads of different ranges.
+- A local file, or one in the cache, is read with positioned reads of the
+  file on disk.
+- A remote file not in the cache is read by fetching only the chunks that
+  cover the range, with ranged requests to the provider.
+  - The header is fetched once per open file.
+  - Neighbouring chunks are fetched together, up to 1 MiB per request.
+  - Each chunk is checked as it arrives; a failed check fails the read.
+- Fetched chunks go into the cache, so reading a range again costs nothing.
+- While a file is read in order, coven fetches the chunks ahead of the
+  reader, so playback doesn't wait on the network.
+- Seeking costs only the chunks under the new position.
+- Reading a range whose chunks aren't cached, while offline, fails with an
+  error of its own, which the app can show.
+  - Pinning a file ahead of time is how it becomes available offline.
+
+### 16.4 Cache
+
+- Each device caches remote files and chunks of them, within a size budget
+  the app sets.
+  - When the cache is over budget, the least recently used files and chunks
+    go first.
+  - Freeing space never fails a read.
+- The app can pin a file to keep it whole on the device regardless of the
+  budget, and unpin it.
+
+### 16.5 Uploads and deletion
+
 - A file waits in a local upload queue until it is stored.
+- A large file goes up through the provider's resumable or multipart
+  upload, in parts.
+  - Providers require it above a size, such as Google Drive above 5 MB per
+    request.
+  - The upload session is recorded, so after a crash the upload continues
+    from the last part stored, instead of starting over.
+- A write that refers to a remote file is uploaded only after the file is
+  stored.
+  - So no device ever sees a row whose file isn't there yet.
 - A file is deleted once nothing in the latest snapshot or the writes after
   it refers to it.
   - They are deleted by the same devices as logs (§15).
+- Deleting a row deletes only coven's copies of its file, never a
+  user-provided original.
 
 ## 17. Schema changes
 
@@ -1247,7 +1364,7 @@ Carol's tablet:
 - Coven keeps the migrations for every older format, since a device can
   come back with waiting writes from any of them.
 
-## 18. Operations with several steps
+## 18. Operations
 
 - An *operation* is work that takes several steps, any of which a crash can
   interrupt, such as removing a member.
@@ -1322,10 +1439,18 @@ Carol's tablet:
      version is newer (§17).
 - Writing a snapshot, then deleting the log objects and files it lets go
   (§15, §16).
+- Moving rows that carry files (§14, §16):
+  1. upload each file, or download it, for a move back to this device;
+  2. write the move.
 - Pairing a new device (§13).
-- Uploading a write or a file is not an operation: each is one object,
-  which waits in its queue until stored, and starts over if interrupted
-  (§6, §16).
+- Uploading a large file in parts (§16):
+  1. start the provider's upload session, and record it in the
+     operation's row;
+  2. send each part, recording the last one stored;
+  3. finish the session.
+- Uploading a write, or a file small enough for one request, is not an
+  operation: it waits in its queue until stored, and starts over if
+  interrupted (§6, §16).
 
 ### 18.2 Example
 
@@ -1367,12 +1492,172 @@ Carol's tablet:
 - How does a store recover from a missing write, or any other broken
   state?
 
-## 20. The API apps use
+## 20. API
 
-- Open, write, read, subscribed queries, files, membership, circles,
-  pairing, sync status.
+- Signatures are abbreviated: parameters by name, and `async` left out.
 
-## Appendix A. SQLite features across devices
+### 20.1 Opening
+
+```rust
+Coven::builder(store_dir, config)          // config: a Config, or a closure re-read on each use
+  .synced_tables(tables)
+  .migrations(migrations)
+  .coven_migration_policy(ApplyPending | RefusePending)
+  .clock(clock)
+  .oauth_clients(clients)
+  .apply_cloudkit_ops(ops)
+  .max_concurrent_uploads(n)
+  .max_concurrent_downloads(n)
+  .key_custody(custody)
+  .identity_custody(custody)                // the member's keys (§11)
+  .open() -> CovenHandle
+  .open_read_only() -> CovenReadHandle
+Coven::delete_store(store_dir)
+handle.close()
+```
+
+### 20.2 Declaring synced tables
+
+```rust
+SyncedTable::new(name, RowIdentity::IndependentUuid | RowIdentity::SharedKey)
+  .key_columns(columns)                     // keys may span columns (§8.5)
+  .gated_by(column)                         // audience root: boolean, never NULL (§14)
+  .scoped_by(column)                        // audience root: store, a circle, or device (§14)
+  .remote_root()                            // audience root: always the store (§14)
+  .gated_through(foreign_key)               // descendant (§14.1)
+  .gated_by_descendants()                   // ancestor (§14.1)
+  .asset()                                  // never keeps an ancestor (§14.1)
+  .carries_blob(BlobDecl)
+
+BlobDecl::new(namespace, Provenance::UserProvided | HostProvided,
+              CacheFill::CacheEager | CacheLazy)
+  .with_id_column(column)
+  .with_size_column(column)
+  .with_scope(scope)
+  .write_once()
+```
+
+### 20.3 Writing and reading
+
+```rust
+handle.write(|sql| …) -> WriteReceipt<R>
+handle.write_with_blobs(|batch| …, |sql| …)
+  batch.put_blob(namespace, id, bytes | stream)
+  batch.delete_blob(namespace, id)
+sql.execute(…) / sql.query(…) / sql.query_row(…)
+sql.insert_external_blob(…)
+sql.register_external_blob(…)
+sql.clear_external_blob(…)
+sql.validate_row_blob_ref(…)
+sql.set_audience(table, id, audience)     // inside the write that creates the rows
+prepare_external_blob(path, on_consumed)
+
+handle.read(|sql| …) -> Read
+handle.subscribe(query) -> LiveQuery
+handle.subscribe_reconfigurable(query) -> ReconfigurableLiveQuery
+handle.lost_values() -> Vec<LostValue>                 // coven_lost (§8)
+handle.subscribe_lost_values() -> LostValuesLiveQuery
+```
+
+### 20.4 Sync
+
+```rust
+handle.setup_s3_cloud_home(…) / setup_oauth_cloud_home(…) / setup_cloudkit_cloud_home()
+handle.probe_cloud_home(…)
+handle.unlock_cloud_home(…)
+handle.cloud_home_key_state()
+handle.disconnect_cloud_home()
+handle.forget_master_key()
+handle.connect_sync(…)                        // CloudKit operations come only from the builder
+handle.start_sync() / stop_sync() / disconnect_sync()
+handle.sync_now()
+handle.subscribe_sync_status() -> SyncStatusLiveQuery  // its first result is the current status
+handle.retry_blocked_operation(operation)     // coven_operations (§18)
+handle.discard_blocked_operation(operation)
+handle.subscribe_eager_cache_fill_status()
+handle.cancel_eager_cache_fill()
+handle.transfer_limits() / set_transfer_limits(limits)
+handle.set_host_secret(…) / host_secret() / delete_host_secret()
+handle.initialize_identity(…)
+handle.seal_app_data(…) / open_app_data(…)
+```
+
+- The sync status says whether the device is connected and syncing, and
+  names the writes it is waiting for (§19).
+
+### 20.5 Audiences and uploads
+
+```rust
+handle.set_audience(table, id, audience, destination)  // store, a circle, or device (§14.2)
+handle.set_audiences(moves)                              // several roots at once
+handle.cancel_set_audience(table, id)
+
+handle.subscribe_uploads() -> UploadsLiveQuery
+  // each result: every queued upload with its phase, attempts, last
+  // failure and live byte progress, and every audience move in progress;
+  // the first result is the current state
+handle.retry_uploads_now() -> RetryOutcome   // Drained | QueueEmpty | AllInBackoff | Paused
+handle.set_uploads_paused(paused)
+```
+
+- `destination` is the path a user-provided file is written to when its
+  row moves back to this device (§16.1); it is unused otherwise.
+- Upload progress comes in the same results as the queue, so an app never
+  joins two sources.
+
+### 20.6 Files and the cache
+
+```rust
+handle.row_blob_ref(table, id) -> RowBlobRef
+handle.read_blob(ref)
+handle.open_blob_stream(ref) -> BlobStream     // read_at(offset, len), plaintext_size()
+handle.materialize_row_blob(…)
+handle.external_blob(…)
+handle.pin(refs, on_progress) / unpin(refs) / is_pinned(ref)
+handle.rows_pinned() / subscribe_rows_pinned()
+handle.evict_blob(ref)
+handle.set_cache_budget(…) / get_cache_budget()
+```
+
+- Reading an uncached range of a remote file while offline fails with
+  `BlobCacheError::Offline` (§16).
+
+### 20.7 Members, devices and restore
+
+```rust
+handle.get_members()
+handle.remove_member(member)
+handle.remove_device(device)                  // and how to sign it out (§12)
+handle.start_device_pairing() / approve_device_pairing(…) / cancel_device_pairing()
+join_with_device_pairing(…) -> PreparedDevicePairing
+handle.generate_restore_code()
+restore_from_code(code) / decode_restore_code_info(code)
+restore_from_cloud(…)
+```
+
+- Roles are admin and member (§9).
+
+### 20.8 Circles
+
+```rust
+handle.circles()
+  .create(…) / rename(…) / delete(…)
+  .add_member(…) / remove_member(…)
+  .list() / members(…)
+```
+
+- A circle change with several steps, such as removing a member, is an
+  operation like any other, retried or discarded with the calls of §20.4.
+
+### 20.9 Migrations
+
+```rust
+Migration::sql(…) / Migration::run(…)
+  .writes(…)        // the optional second part, for waiting writes (§17.1)
+CovenMigrationPolicy::ApplyPending | RefusePending
+```
+
+## Appendix A. SQLite features
 
 Each SQLite feature whose meaning changes when devices write offline and
 merge later.
@@ -1394,21 +1679,22 @@ merge later.
 
 - Problem: two offline devices can each insert a row with the same value.
 - Status: the row whose write has the smaller timestamp keeps the value;
-  the other row is lost, and recorded in `coven_lost` (§8.5).
+  the other row is taken out and held while it conflicts, and recorded in
+  `coven_lost` (§8.5).
 
 ### A.4 Restrict and no-action foreign keys
 
 - Problem: a device can delete a parent while another adds a child it
   hasn't seen.
-- Status: the child is lost, recorded in `coven_lost` as replaced by the
-  parent's delete (§8.4).
+- Status: the child is taken out and held while its parent is gone, and
+  recorded in `coven_lost` (§8.4).
 
 ### A.5 CHECK constraints
 
 - Problem: two concurrent edits that each pass can merge into a row that
   fails, such as one device setting `start` and another `end`.
-- Status: a row that fails after a merge is lost, and recorded in
-  `coven_lost` (§8.6).
+- Status: a row that fails after a merge is taken out and held until it
+  passes, and recorded in `coven_lost` (§8.6).
 
 ### A.6 Triggers that write synced tables
 

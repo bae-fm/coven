@@ -1,0 +1,8 @@
+name = "covenMerge"
+defaultTargets = ["CovenMerge"]
+
+[leanOptions]
+linter.unusedSectionVars = false
+
+[[lean_lib]]
+name = "CovenMerge"
