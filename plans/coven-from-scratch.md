@@ -29,6 +29,8 @@
   wait on sync.
 - **Confidentiality:** members' data can't be read by those it isn't for:
   - the provider and outsiders can't read any of it;
+  - nothing the provider sees is computed from content without a secret
+    key, so it can't test whether you store a file or value it knows;
   - a circle's contents are readable only by its members.
 - **Integrity:** members' data can't be tampered with:
   - members: no member can write as another member;
@@ -433,16 +435,21 @@ Carol's tablet:
 - Deleting a row removes it from the app's table and moves its generation
   on to the next even number.
 - Re-adding it moves its generation on to the next odd number.
-- Its `coven_rows` row and `coven_cells` rows stay while it is deleted, so
-  later writes to it still have something to compare against.
+- Its `coven_cells` rows go with it, but its `coven_rows` row stays, so
+  later writes to it still have a generation to lose to.
 - A row change concurrent with a delete of its row loses, and its cells go
   to `coven_lost`, replaced by the delete.
   - If the change arrives after the delete, coven sees it was made at an
     older generation.
-  - If it arrives first, the delete finds the cells set by writes it
-    hadn't read.
+  - If it arrives first, the delete records the cells set by writes it
+    hadn't read, before the row goes.
   - So a concurrent edit never brings the row back, and never reaches it
     once it is re-added.
+- When two deletes of one generation are concurrent, a value is lost only
+  if neither had read it.
+  - The first delete to arrive records what it hadn't read.
+  - If the second had read one of those values, it removes that value's
+    `coven_lost` row, which needs nothing from the deleted row.
 - E.g. at 16:00 Ana deletes note 43, "Hardware store", while Ben, offline,
   edits its title, and at 17:00 Ana re-adds it.
   - Note 43 on Carol's tablet:
@@ -856,14 +863,14 @@ Carol's tablet:
 
 - A member is a person in the store, using it from one or more devices.
   - Each member has their own key pair, which identifies them.
-  - An admin adds a member by writing their public key to the membership
-    log.
-- Membership is its own log, separate from the app's writes.
+  - An admin adds a member by writing their public key to the store log.
+- The *store log* records changes to the store itself, separate from the
+  app's writes.
   - Each change is one *entry*: add or remove a member, change a role, add
-    or remove a device.
-  - An entry names the membership entries its author had read, and is
+    or remove a device, or raise the store's schema or format version.
+  - An entry names the store log entries its author had read, and is
     signed with its author's member key.
-  - Entries live at `membership/<device>/<n>`, numbered like a device's
+  - Entries live at `store-log/<device>/<n>`, numbered like a device's
     writes (§6).
   - The device in the path is only where the entry was written from.
   - Each device numbers its own entries, so no two entries ever get the
@@ -872,12 +879,12 @@ Carol's tablet:
     key is Ana's, whichever of her devices wrote it.
 
     ```
-    membership/ana-phone/1     create the store, Ana as admin       signed with Ana's key
-    membership/ana-phone/2     add member Ben, with his public key  signed with Ana's key
+    store-log/ana-phone/1      create the store, Ana as admin       signed with Ana's key
+    store-log/ana-phone/2      add member Ben, with his public key  signed with Ana's key
                                had read: ana-phone 1
-    membership/ben-laptop/1    add device ben-phone                 signed with Ben's key
+    store-log/ben-laptop/1     add device ben-phone                 signed with Ben's key
                                had read: ana-phone 2
-    membership/ana-ipad/1      make Ben an admin                    signed with Ana's key
+    store-log/ana-ipad/1       make Ben an admin                    signed with Ana's key
                                had read: ana-phone 2
     ```
 
@@ -918,7 +925,7 @@ Carol's tablet:
 
 - A device is one install of the app, with its own device id, belonging to
   one member.
-  - Its member adds it to the membership log (§9).
+  - Its member adds it to the store log (§9).
 - A device restored from a backup is a new device, with a new id.
   - So it never reuses write numbers its backup's device already used.
   - E.g. Ana's phone is backed up after its write 5, writes 6 and 7, and is
@@ -941,7 +948,7 @@ Carol's tablet:
   wrote it, so who wrote what is authentic.
 - This is about authenticity, not trust.
 - A device applies a write only if it is signed with the key of a member
-  the membership log has added, and comes from one of that member's
+  the store log has added, and comes from one of that member's
   devices (§9).
   - So a write by Ana's phone counts as Ana's.
 - A removed device's writes still count if they reached storage.
@@ -953,11 +960,12 @@ Carol's tablet:
 - Coven uses three kinds of key:
   - the store key, which encrypts everything coven writes to storage;
   - each member's key pair, which identifies them (§9), signs their writes
-    and membership entries, and opens the store key;
+    and store log entries, and opens the store key;
   - storage credentials: each device's own sign-in to the provider, or on
     S3 its member's access key (§4).
 - Each store key is sealed to every member's public key, and the sealed
-  copies are kept in storage.
+  copies are kept in storage, at `keys/store/<n>/<member>` for the store's
+  `n`th key.
   - So a member's key alone gets the current store key: a device holding
     it reads its member's sealed copy from storage and opens it.
 - The store key is replaced whenever a member is removed (§12).
@@ -969,7 +977,7 @@ Carol's tablet:
 ## 12. Removing members and devices
 
 - Removing a device, such as Ana's lost phone, is an entry in the
-  membership log (§9), and cuts the device off from storage.
+  store log (§9), and cuts the device off from storage.
 - Providers can't cut off one device alone, so Ana cuts off all of hers,
   and signs in again on the ones she keeps:
   - Google Drive, Dropbox and OneDrive: she removes the app's access from
@@ -998,7 +1006,7 @@ Carol's tablet:
   - on Apple platforms, iCloud Keychain syncs it, and the device opens the
     store without pairing;
   - on other platforms, the person enters their restore code.
-- The new device then adds itself to the membership log, signing with the
+- The new device then adds itself to the store log, signing with the
   member key (§9).
 - A restore code holds the person's member key and storage credentials.
   - The person writes it down when they create or join a store, as part of
@@ -1012,72 +1020,340 @@ Carol's tablet:
 
 - A circle is a group of members inside a store who share rows the other
   members can't read.
-- Each circle has its own key, sealed to each circle member's public key,
+  - E.g. each person pins notes in a circle of their own, while the notes
+    themselves stay the store's.
+- Each row is either the store's, or one circle's.
+  - The app names a row's circle in a column it declares for the table,
+    such as `circle`.
+  - Moving a row to another circle is a delete plus an insert, like a key
+    change (§8.5).
+- Circles are made, and members added to and removed from them, by entries
+  in the store log, under its rules (§9).
+  - A circle's own members add and remove its members.
+- Each circle has its own key, sealed to each of its members' public keys,
   like the store key (§11).
+  - It is replaced whenever someone leaves the circle.
+  - Someone joining a circle gets its earlier keys too, so they can read its
+    history.
+
+### 14.1 Writes
+
+- A circle's row changes go in the same device logs, encrypted with the
+  circle's key.
+  - A write that changes rows in the store and in a circle keeps each part
+    encrypted with its own key, in one object.
+  - A device applies the parts it can open, and skips the rest.
+  - E.g. Ana adds a note and pins it, in one transaction:
+
+    ```
+    devices/ana-phone/12
+      header, sealed with the store key:    ana-phone, write 12, timestamp, had read …
+      part 1, sealed with the store key:    notes  row 47  insert "Paint colors"
+      part 2, sealed with Ana's circle key: pins   row 4   insert note → 47
+      signed with Ana's key, over all of the above
+    ```
+
+  - Ana's other devices apply both parts in one transaction; Ben's apply
+    part 1, and can still check the signature, which covers part 2's
+    encrypted bytes.
+- A skipped part counts as applied, so a device never waits on a write it
+  can't read (§7.1).
 - All members can see that a circle exists, who writes to it, when, and how
   much.
-- A circle's writes go in the same device logs, encrypted
-  with its key.
-- Devices outside a circle skip what they can't open.
-- Leaving a circle rotates the circle key.
-- What happens when a row references a row in another circle?
+
+### 14.2 References
+
+- A row may only point at rows that everyone who can read it can also
+  read.
+  - A circle's row may point at rows in the same circle, or the store's.
+  - A store row may point only at store rows.
+- Coven refuses a write that breaks this, on the device making it.
+
+  ```
+  store          notes  row 42   "Groceries"
+  Ana's circle   pins   row 3    note → 42        allowed
+  store          tags   row 10   pin → 3          refused: Ben can't read pin 3
+  Ben's circle   pins   row 2    pin → 3          refused: Ben can't read pin 3
+  ```
+
+- So every device that reads a row can check its foreign keys, and §8.4
+  applies unchanged.
+  - E.g. when note 42 is deleted, the devices in Ana's circle apply its
+    foreign key's action to pin 3.
+- Which circle a row is in never depends on who is in the circle, so a
+  change of members never breaks a reference.
+
+### 14.3 Leaving a circle
+
+- E.g. Ana and Ben share a circle, and Ana removes Ben from it.
+  - The circle key is replaced, sealed to Ana alone.
+  - Ben keeps the circle's rows he already had, but can't read anything
+    written to it afterwards.
+- A write Ben made to the circle before he had read his removal still
+  counts, as with any concurrent entry (§9).
+  - Ben is still in the store, so storage access doesn't stop him writing
+    with the old circle key.
+  - Only trust keeps him from claiming he hadn't read his removal, and
+    members are trusted not to be hostile (§2).
 
 ## 15. Snapshots and bounded history
 
-- Any device writes a snapshot: the synced tables and coven's own tables,
-  encrypted, and how far into every log they reach.
-- A new device loads the latest snapshot, then the logs after it.
+- A snapshot is the synced tables and coven's own tables as one device
+  has them, encrypted, with how far into every log they reach.
+  - Snapshots live at `snapshots/<device>/<n>`.
+  - A snapshot *covers* a write when the write is within its positions:
+    `snapshots/ana-phone/3` covers ana-phone's writes 1 to 40.
+- A device writes one once the writes after the latest snapshot it knows of
+  add up to more bytes than that snapshot.
+  - So loading a snapshot and the writes after it costs at most about
+    twice the snapshot.
+- Two devices can write one at the same time, and both are correct:
+
+  ```
+  snapshots/ana-phone/3     ana-phone up to 40, ben-laptop up to 22
+  snapshots/ben-laptop/1    ana-phone up to 38, ben-laptop up to 25
+  ```
+
+  - A new device loads either, then fetches every write after its
+    positions, and ends up in the same place.
+- A device snapshots only what it can read.
+  - Any device snapshots the store's rows.
+  - A device of one of a circle's members snapshots that circle's rows,
+    separately, sealed with the circle's key (§14).
+- A new device loads the store's latest snapshot and its member's circles',
+  then the writes after them.
 - Each device posts its positions only after uploading its own earlier
   writes.
-- A log object is deleted once a snapshot covers it and every device's
-  posted position has passed it.
-- A deleted row's `coven_rows` and `coven_cells` rows are cleared once
-  every device's posted position has passed the delete, and this device
-  has applied every log up to those positions.
-  - Until then, a write made at the row's old generation could still
-    arrive, and needs the generation to lose to.
-  - Any such write was made before its device applied the delete, so it is
-    within that device's posted position, and already applied.
-- Who writes snapshots, and when?
-- How long do covered logs stay?
+- A log object is deleted once snapshots cover every part of it, and either
+  every device's posted position has passed it or storage has held it for
+  30 days.
+  - Each device deletes its own log objects.
+  - A removed device's are deleted by another device of the same member,
+    since they were uploaded with that member's account.
+  - A removed member's are deleted by a device of the member whose provider
+    account holds the store.
+  - On Google Drive only an uploader can delete their files, so a removed
+    member's just leave the store's folder, and stay in their own account.
+  - A device that never comes back keeps its covered log objects until it
+    is removed.
+- A device that needs writes already deleted loads the latest snapshot
+  instead, like a new device.
+  - Its own writes still waiting in `coven_uploads` keep their numbers, and
+    it uploads them after.
+  - Every device then applies them like any late write: they had read only
+    writes the snapshot covers, which count as applied.
+  - E.g. Ana's old phone made writes 31 to 33 offline, then sat in a drawer
+    for a year:
+
+    ```
+    1. it loads the latest snapshot, which reaches ana-old-phone up to 30
+    2. it downloads the writes after the snapshot
+    3. it uploads 31 to 33 from coven_uploads
+    4. every device applies 31 to 33 under the rules of §8
+    ```
+
+  - An edit to a cell changed since loses on its stamp, and an edit to a
+    row deleted since loses on its generation.
+- A deleted row's `coven_rows` row stays for good, at one small row each,
+  so a write made at its old generation loses however late it arrives.
 
 ## 16. Files
 
 - Files are what the app attaches to rows: audio, images, documents.
-- Each file is stored encrypted, named by a hash of its content.
-- Encrypted in fixed-size chunks, so any range can be read and
+- Each file is stored encrypted at `files/<name>`, where the name is a
+  keyed hash of its content.
+  - A keyed hash, such as HMAC-SHA256, can't be computed without a secret
+    key, so the provider can't hash a file it knows and look for its name.
+  - The key is a *naming key* derived from the store key, separate from the
+    key that encrypts.
+  - So identical files in the store share one copy.
+- A plain hash of content is never part of anything the provider can see:
+  not a path, a name, or metadata.
+- A file attached to a circle's row is encrypted with the circle's key, and
+  named with a naming key derived from it.
+  - Only the circle's members can read it.
+  - The same file in the store and in a circle gets two different names.
+- After a key is replaced, a file added again gets a new name, and is
+  stored again.
+- Files are encrypted in fixed-size chunks, so any range can be read and
   checked on its own.
-- A local cache with a size budget; the app can pin a file to keep
-  it on the device regardless of the budget.
+- A local cache has a size budget; the app can pin a file to keep it on
+  the device regardless of the budget.
 - A file waits in a local upload queue until it is stored.
-- A file is deleted once nothing in the latest snapshot or the
-  logs after it refers to it.
-- How do files inside a circle work?
-- Which device deletes?
+- A file is deleted once nothing in the latest snapshot or the writes after
+  it refers to it.
+  - They are deleted by the same devices as logs (§15).
 
-## 17. Operations with several steps
+## 17. Schema changes
 
-- Upload, snapshot, deleting covered logs, and pairing each take several
-  steps that a crash can interrupt.
-- One shared mechanism records each operation's progress on disk
-  and resumes it after a crash.
-- Every step is safe to run twice.
-- A failure goes to whoever started the operation.
+### 17.1 Host application
 
-## 18. Schema changes
-
-- Synced schema changes only add tables and columns.
 - Every write records the schema version it was made with.
-- A device keeps writes from a newer schema version but holds them until
-  its app upgrades.
-- How do non-additive schema changes work, if at all?
+- Adding tables or columns is an *addition*.
+  - Writes from devices on older versions still apply everywhere; they
+    just don't set the new columns.
+  - A device holds writes from a newer version until its app updates, then
+    applies them.
+  - E.g. Ana's app adds `color` to notes; Ben's older app keeps editing
+    titles, and those edits reach Ana as usual.
+- Any other change is a *breaking change*: renaming, retyping or dropping a
+  column or table, or changing its constraints.
+- For each breaking change, the app supplies a *migration* in two parts:
+  - one changes the database, e.g. `ALTER TABLE notes RENAME COLUMN title
+    TO name`;
+  - optionally, one changes a write made in the old version, e.g. turns
+    "note 43, title: X" into "note 43, name: X".
+- A breaking change raises the store's schema version, which every device
+  shares.
+  - Whichever device's app updates first makes it, whoever's device it is.
+  - That device runs the migration's first part on its database, writes a
+    snapshot in the new version (§15), and records the store's new version
+    in the store log (§9).
+  - A device whose app is older can't sync until it updates; it then
+    reloads from that snapshot.
+- A device that updates runs the migration's second part on its own
+  writes still waiting in `coven_uploads`, then uploads them.
+  - Without a second part, it uploads them marked lost, and every device
+    records them in `coven_lost` without applying them.
+  - E.g. Ana's app renames `title` to `name`, while Ben's phone, offline,
+    edits a title; when Ben updates, his edit becomes a `name` edit, and
+    reaches every device.
+- Writes already uploaded in the old version that the breaking change
+  hadn't read are lost: every device records them in `coven_lost`, and
+  none applies them.
+  - This happens only when a device uploads just as another makes the
+    breaking change.
+- If two devices make the same breaking change at once, the one with the
+  smaller timestamp counts, and the other's snapshot is ignored.
+
+### 17.2 Coven's schema
+
+- Coven's own tables in the local database, such as `coven_rows`, are
+  local only.
+  - A newer coven migrates them in place when the app starts.
+- What coven writes to storage has a *format*: write records, store log
+  entries, snapshots, paths.
+  - Every object records the format version it was written in.
+- A format change works like a breaking change of the app's schema, with
+  coven supplying both parts of the migration.
+  - The first device with the newer coven writes a snapshot in the new
+    format, and records the store's new format version in the store
+    log (§9).
+  - A device with an older coven can't sync until its app ships the newer
+    one; it then reloads from that snapshot.
+  - Its writes still waiting to upload are migrated to the new format.
+  - Writes uploaded in the old format that the change hadn't read are
+    migrated too, so a format change never loses anything.
+- Coven keeps the migrations for every older format, since a device can
+  come back with waiting writes from any of them.
+
+## 18. Operations with several steps
+
+- An *operation* is work that takes several steps, any of which a crash can
+  interrupt, such as removing a member.
+- Coven keeps every unfinished operation in one local table:
+
+  ```sql
+  CREATE TABLE coven_operations (
+    id          INTEGER PRIMARY KEY,
+    kind        TEXT NOT NULL,     -- 'remove member', 'reload from snapshot', …
+    last_step   INTEGER NOT NULL,  -- 0 before the first step completes
+    data        BLOB NOT NULL,     -- what this kind's steps need, in its own shape
+    started_by  TEXT NOT NULL,     -- the app call that started it, or 'coven'
+    failure     TEXT               -- set when a step fails for good
+  );
+  ```
+
+- Each kind defines its own steps and the shape of its `data`, so one table
+  holds any operation:
+
+  ```
+  id   kind                   last_step   data                                started_by
+  1    remove member          2           member: ben, new store key: …       remove_member call
+  2    reload from snapshot   1           snapshot: snapshots/ana-phone/7,    coven
+                                          temporary file: …
+  ```
+
+- A step that changes the local database updates `last_step` in the same
+  transaction:
+
+  ```
+  BEGIN
+    ALTER TABLE notes RENAME COLUMN title TO name
+    UPDATE coven_operations SET last_step = 1 WHERE id = 3
+  COMMIT
+  ```
+
+  - A crash before the commit undoes both, so the step runs again.
+  - The migration can never be done while the row says it isn't, which
+    would run it twice.
+- A step that changes storage is safe to run twice.
+  - Writing an object writes the same path with the same bytes.
+  - Deleting an object that is already gone succeeds.
+- Steps are ordered so other devices never see a half-done operation.
+  - Anything another device reads, such as a store log entry, is uploaded
+    last, after everything it refers to.
+- When the app starts, coven resumes every unfinished operation from the
+  step after its last completed one.
+- A step that fails for good, rather than for lack of network, stops its
+  operation, and sets its `failure`.
+  - The failure goes to the app call that started it, or as an event to
+    the app if coven started it.
+  - The app can retry or abandon it.
+- An operation's row is deleted when its last step completes.
+
+### 18.1 Operations
+
+- Removing a member (§12):
+  1. make the new store key, and record it in the operation's row;
+  2. upload the new key sealed to each remaining member;
+  3. upload the store log entry removing the member;
+  4. revoke the member's storage access.
+- Removing someone from a circle (§14): the same, with the circle's key.
+- A breaking schema or format change (§17):
+  1. migrate the database, in one transaction;
+  2. upload a snapshot in the new version;
+  3. upload the store log entry raising the version.
+- Reloading from a snapshot (§15):
+  1. download the snapshot to a temporary file;
+  2. replace the synced tables and coven's tables with it, in one
+     transaction;
+  3. migrate the writes waiting in `coven_uploads`, if the snapshot's
+     version is newer (§17).
+- Writing a snapshot, then deleting the log objects and files it lets go
+  (§15, §16).
+- Pairing a new device (§13).
+- Uploading a write or a file is not an operation: each is one object,
+  which waits in its queue until stored, and starts over if interrupted
+  (§6, §16).
+
+### 18.2 Example
+
+- Ana removes Ben, and her phone crashes after uploading the sealed keys:
+
+  ```
+  coven_operations
+    kind            last step   data              started by
+    remove member   2           new store key     Ana's "remove Ben"
+
+  storage
+    keys/store/4/ana     uploaded
+    keys/store/4/carol   uploaded
+    store-log/ana-phone/9   not yet: the removal entry
+  ```
+
+- No other device sees anything yet: the sealed keys are unreferenced until
+  the entry exists.
+- When the phone restarts, coven resumes at step 3 with the recorded key.
+- If it made a new key instead, the sealed copies already uploaded would
+  hold a different one; recording it in step 1 is what prevents that.
 
 ## 19. Missing writes
 
 - A device knows a write exists when any of these shows it:
   - a later write in the same log, since each log counts with no gaps;
-  - another device's write whose "had read" covers it;
-  - another device's posted position covering it;
+  - another device's write that had read it;
+  - another device's posted position reaching it;
   - for its own writes, its own count.
 - A write is missing when one of these shows it, storage doesn't have it,
   and no snapshot covers it (§15).
@@ -1101,52 +1377,51 @@ Carol's tablet:
 Each SQLite feature whose meaning changes when devices write offline and
 merge later.
 
-### Integer primary keys
+### A.1 Integer primary keys
 
 - Problem: two offline devices can pick the same id for different rows,
   and coven would treat them as one row.
 - Status: refused; synced tables use UUIDs or keys derived from the
   content (§8.5).
 
-### Tables with no primary key
+### A.2 Tables with no primary key
 
 - Problem: coven can't tell which row a change belongs to, and SQLite's
   hidden rowid collides across devices like an integer key.
 - Status: refused (§8.5).
 
-### Unique constraints besides the primary key
+### A.3 Unique constraints besides the primary key
 
 - Problem: two offline devices can each insert a row with the same value.
 - Status: the row whose write has the smaller timestamp keeps the value;
   the other row is lost, and recorded in `coven_lost` (§8.5).
 
-### Restrict and no-action foreign keys
+### A.4 Restrict and no-action foreign keys
 
 - Problem: a device can delete a parent while another adds a child it
   hasn't seen.
 - Status: the child is lost, recorded in `coven_lost` as replaced by the
   parent's delete (§8.4).
 
-### CHECK constraints
+### A.5 CHECK constraints
 
 - Problem: two concurrent edits that each pass can merge into a row that
   fails, such as one device setting `start` and another `end`.
 - Status: a row that fails after a merge is lost, and recorded in
   `coven_lost` (§8.6).
 
-### Triggers that write synced tables
+### A.6 Triggers that write synced tables
 
 - Problem: a trigger that runs again while coven applies a remote write
   would repeat what the original device already sent.
 - Status: allowed as shared triggers, which run only on the device making
   the write (§8.7).
 
-### Schema changes
+### A.7 Schema changes
 
 - Problem: devices running different app versions hold different schemas.
-- Status: synced schema changes only add tables and columns (§18).
-- Could support: dropping, renaming and retyping with a conversion per
-  schema version.
+- Status: additions sync with no change of version; any other change
+  raises the store's version, and every device updates and reloads (§17).
 
 ## Notes
 
