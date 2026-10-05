@@ -1,0 +1,24 @@
+[package]
+name = "coven-database"
+version.workspace = true
+edition.workspace = true
+
+[features]
+test-utils = []
+
+[dependencies]
+coven-foundation.workspace = true
+rusqlite = { workspace = true, features = ["bundled", "session", "hooks", "functions"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
+uuid.workspace = true
+
+[dev-dependencies]
+coven-foundation = { workspace = true, features = ["test-utils"] }
+coven-merge.workspace = true
+coven-format.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

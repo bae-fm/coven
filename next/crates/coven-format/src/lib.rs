@@ -7,6 +7,7 @@
 pub mod codes;
 pub mod error;
 pub mod key;
+pub mod merge_fields;
 mod merge_wire;
 pub mod objects;
 pub mod snapshot;

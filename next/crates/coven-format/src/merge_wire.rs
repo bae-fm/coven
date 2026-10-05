@@ -4,7 +4,7 @@ use crate::error::Error;
 use crate::value::{name, positive, row, Value};
 use crate::wire::{wire_struct, Decoder, Encoder, Wire};
 use coven_merge::{Cell, ColumnValue, LostKey, LostValue, Parent, Rule};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 wire_struct!(Parent, row, generation);
 wire_struct!(ColumnValue<Value>, value, parents);
@@ -48,7 +48,11 @@ impl Wire for Rule {
 
 pub(crate) fn column(value: &ColumnValue<Value>) -> Result<(), Error> {
     value.value.validate()?;
-    for (constraint, parent) in &value.parents {
+    parents(&value.parents)
+}
+
+pub(crate) fn parents(values: &BTreeMap<String, Parent>) -> Result<(), Error> {
+    for (constraint, parent) in values {
         name(constraint)?;
         row(&parent.row)?;
     }
@@ -78,6 +82,24 @@ pub(crate) fn state(state: &coven_merge::RowState<Value>) -> Result<(), Error> {
         positive(key.write.number)?;
         positive(value.replaced_by.number)?;
         column(&value.value)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn setters(values: &BTreeMap<String, coven_merge::WriteId>) -> Result<(), Error> {
+    for (column, write) in values {
+        name(column)?;
+        positive(write.number)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn rules(values: &BTreeSet<Rule>) -> Result<(), Error> {
+    for rule in values {
+        match rule {
+            Rule::ForeignKey(n) | Rule::Check(n) | Rule::Unique(n) => name(n)?,
+            Rule::DeletedCircle | Rule::OtherAudience => {}
+        }
     }
     Ok(())
 }

@@ -124,7 +124,7 @@ fn sqlite_beneath_rusqlite_is_rejected_outside_coven_database() {
             "crates/coven-sync/src/leak.rs",
             "fn open() { unsafe { libsqlite3_sys::sqlite3_initialize(); } }",
         ),
-        BTreeSet::from(["SQLite library (libsqlite3-sys)"]),
+        BTreeSet::from(["SQLite library (rusqlite / libsqlite3-sys)"]),
     );
 }
 
@@ -373,4 +373,14 @@ fn a_macro_rules_body_is_read_as_tokens() {
         ),
         BTreeSet::from(["filesystem", "system clock", "thread or task spawn"])
     );
+}
+
+#[test]
+fn rusqlite_is_used_only_by_the_database_crate() {
+    let source = "use rusqlite::Connection; fn open() { let _ = Connection::open_in_memory(); }";
+    assert_eq!(
+        kinds("crates/coven-storage/src/leak.rs", source),
+        BTreeSet::from(["SQLite library (rusqlite / libsqlite3-sys)"])
+    );
+    assert!(kinds("crates/coven-database/src/sqlite.rs", source).is_empty());
 }

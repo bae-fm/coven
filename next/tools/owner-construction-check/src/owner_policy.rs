@@ -14,23 +14,37 @@ pub(crate) const POLICY: Policy = Policy {
         "coven-crypto",
         "coven-merge",
         "coven-format",
+        "coven-database",
         "coven-storage",
     ],
-    // coven-database and coven-storage never depend on each other; the pair is
-    // added once both crates are in `crate_order`.
-    separated_crates: &[],
+    separated_crates: &[("coven-database", "coven-storage")],
     capabilities: CAPABILITIES,
-    // Added with coven-database's schema file.
-    database_schema: None,
-    composition_roots: &[(
-        "crates/coven-storage/src/providers/s3.rs",
-        "S3Storage",
-        "new",
-    )],
+    database_schema: Some((
+        "crates/coven-database/src/internal_schema.rs",
+        &["coven_tables"],
+    )),
+    composition_roots: &[
+        (
+            "crates/coven-storage/src/providers/s3.rs",
+            "S3Storage",
+            "new",
+        ),
+        (
+            "crates/coven-database/src/database.rs",
+            "DatabaseBuilder",
+            "open_graph",
+        ),
+    ],
     lifetime_authorities: &[],
     // These methods derive a scoped capability from their injected directory.
     // They do not acquire an unrelated directory or file for another owner.
     capability_factories: &[
+        (
+            "crates/coven-foundation/src/files/directory.rs",
+            "StoreDir",
+            "lock_exclusive",
+            "StoreLock",
+        ),
         (
             "crates/coven-foundation/src/files/layout.rs",
             "StoreLayout",
@@ -78,6 +92,7 @@ pub(crate) const POLICY: Policy = Policy {
         "CloudKitOps",
         "OAuthClients",
         "OAuthSession",
+        "DatabaseConnection",
     ],
     capability_traits: &[
         "Clock",
@@ -89,6 +104,7 @@ pub(crate) const POLICY: Policy = Policy {
     ],
     construction_only_capability_types: &[
         "StoreDir",
+        "StoreLock",
         "AtomicFile",
         "ClockRef",
         "IdSourceRef",
@@ -96,14 +112,15 @@ pub(crate) const POLICY: Policy = Policy {
         "StoreKeychain",
         "OAuthClients",
         "OAuthSession",
+        "DatabaseConnection",
     ],
     non_owner_types: &["KeyCustody", "IdentityCustody"],
-    borrowed_facade_types: &[],
-    root_owner_types: &[],
-    task_types: &[],
-    internal_dependency_types: &[],
+    borrowed_facade_types: &["MigrationContext", "SqlTransaction", "ReaderLease"],
+    root_owner_types: &["Database"],
+    task_types: &["SqlTransaction", "ReaderLease"],
+    internal_dependency_types: &["DatabaseConnection"],
     always_forbidden_returns: &[],
-    closed_session_types: &[],
+    closed_session_types: &["MigrationContext"],
     field_capability_types: &[],
     raw_provider_operations: &[],
     derived_services: &[],
@@ -208,8 +225,8 @@ const CAPABILITIES: Capabilities = Capabilities {
         name: "SQLite",
         homes: &["crates/coven-database/src/"],
         gates: &[Gate {
-            kind: "SQLite library (libsqlite3-sys)",
-            crates: &["libsqlite3_sys"],
+            kind: "SQLite library (rusqlite / libsqlite3-sys)",
+            crates: &["rusqlite", "libsqlite3_sys"],
             path_patterns: &[],
             method_patterns: &[],
         }],
@@ -285,11 +302,11 @@ const CAPABILITIES: Capabilities = Capabilities {
             method_patterns: &[],
         }],
     },
-    // Lifetime authorities add their files here as they land; until then no
-    // crate builds a runtime or starts work that outlives its call.
+    // Database calls await blocking work while retaining the database owner.
+    // There is no long-lived task or runtime construction in this graph.
     runtimes: Capability {
         name: "runtimes and spawned work",
-        homes: &[],
+        homes: &["crates/coven-database/src/database.rs"],
         gates: &[
             Gate {
                 kind: "runtime construction",

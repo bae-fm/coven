@@ -286,8 +286,10 @@ fn capability_factory_guards_reject_stale_or_unscoped_authority() {
 
 #[test]
 fn native_keychain_acquisition_is_checked_at_its_real_factory_use_site() {
-    const ROOTED: Policy = Policy {
-        composition_roots: &[("crates/coven/src/builder.rs", "Builder", "open")],
+    let mut roots = POLICY.composition_roots.to_vec();
+    roots.push(("crates/coven/src/builder.rs", "Builder", "open"));
+    let rooted = Policy {
+        composition_roots: Box::leak(roots.into_boxed_slice()),
         ..POLICY
     };
     let mut files = load(&workspace_root())
@@ -297,7 +299,7 @@ fn native_keychain_acquisition_is_checked_at_its_real_factory_use_site() {
         .filter(RustFile::is_crate_source)
         .collect::<Vec<_>>();
     files.push(RustFile::fixture("crates/coven/src/builder.rs", "impl Builder {\n    fn open() { let _ = Keychain::registered(); }\n    fn run(&self) { let _ = Keychain::registered(); }\n}"));
-    let violations = find_capability_construction_violations(&files, &ROOTED);
+    let violations = find_capability_construction_violations(&files, &rooted);
     assert_eq!(violations.len(), 1, "{violations:?}");
     assert_eq!(violations[0].path, "crates/coven/src/builder.rs");
     assert_eq!(violations[0].line, 3);

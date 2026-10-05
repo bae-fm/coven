@@ -2,7 +2,7 @@
 //! have a separate record because they were never applied to that state.
 
 use crate::error::{require, Error, Rule as FormatRule};
-use crate::value::{name, positive, row, EntryId, Value, WritePositions};
+use crate::value::{positive, row, EntryId, Value, WritePositions};
 use crate::wire::{wire_struct, Decoder, Encoder, Wire};
 use crate::write::{WriteDisposition, WriteRecord};
 use coven_merge::{ColumnValue, RowId, RowState, Rule, Timestamp, WriteId, WriteOracle};
@@ -105,9 +105,10 @@ impl MergeRow {
             "removed row",
             FormatRule::Generation,
         )?;
+        crate::merge_wire::rules(&self.removed)?;
         for rule in &self.removed {
             match rule {
-                Rule::ForeignKey(n) | Rule::Check(n) | Rule::Unique(n) => name(n)?,
+                Rule::ForeignKey(_) | Rule::Check(_) | Rule::Unique(_) => {}
                 Rule::DeletedCircle | Rule::OtherAudience => require(
                     matches!(self.state.row().audience, coven_merge::Audience::Circle(_)),
                     "removed audience",

@@ -255,6 +255,22 @@ The consumer commits staged records only after `finish` succeeds. Cross-section
 completeness, SQL schema rules and app-row visibility are database concerns.
 No local row ids, uploads, operations or storage paths occur in a snapshot.
 
+### Fields stored in SQLite
+
+`merge_fields` exposes the snapshot field encodings without a frame prefix:
+`Timestamp`, `WriteId`, `WritePositions`, parent maps, `ColumnValue<Value>`,
+column maps, setter maps (`map<text, WriteId>`), removal-rule sets, and
+`LostWriteCause`. The database's schema version identifies their format.
+These functions use the same binary primitives and validation as snapshots;
+they do not define another encoding. Each call has the same collection and
+byte bounds and rejects trailing bytes. Cross-field relationships still need
+merge's validation.
+
+Present values live only in the app's tables. `coven_cells` retains setters and
+reference parents; `coven_lost` retains lost values and removed rows. The database
+round-trip tests use these codecs with the actual tables, without a production
+merge adapter.
+
 ### Restore and invite codes
 
 Restore codes hold crypto's `MemberKeys`. Their bytes come only from
