@@ -241,23 +241,18 @@ impl Report {
         if !self.capability_boundaries.is_empty() {
             remedies.push("reach a capability through the owner that holds it, given to you when you are built");
         }
-        let mut conventions = Vec::new();
         for violation in &self.conventions {
             lines.push(format!(
                 "{}:{}: {}",
                 violation.path,
                 violation.line,
-                violation.convention.message()
+                violation.message()
             ));
-            if !conventions.contains(&violation.convention) {
-                conventions.push(violation.convention);
+            let remedy = violation.convention.remedy();
+            if !remedies.contains(&remedy) {
+                remedies.push(remedy);
             }
         }
-        remedies.extend(
-            conventions
-                .into_iter()
-                .map(|convention| convention.remedy()),
-        );
         lines.extend(remedies.into_iter().map(str::to_string));
         lines
     }

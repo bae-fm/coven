@@ -220,26 +220,61 @@ pub(crate) fn could_be_local_associated_function_path(segments: &[String]) -> bo
                 .is_some_and(|name| matches!(name.as_str(), "crate" | "self" | "super")))
 }
 
+/// The test layout of §21.3: a source's tests live beside it in
+/// `<name>_tests.rs`, and integration tests in a crate's `tests/` directory.
+/// Nothing else is test code — test-support modules behind a `test-utils`
+/// feature are production sources and answer to every rule.
 pub(crate) fn is_test_source(path: &str) -> bool {
-    path.contains("/tests/")
-        || path.contains("/test_support/")
-        || path.contains("_tests/")
-        || path.ends_with("/tests.rs")
-        || path.ends_with("_tests.rs")
-        || path
-            .rsplit('/')
-            .next()
-            .is_some_and(|name| name.starts_with("test_"))
-        || path.ends_with("/test_helpers.rs")
-        || path.ends_with("/test_support.rs")
+    is_integration_test_source(path) || path.ends_with("_tests.rs")
 }
 
+/// A file under a crate's or tool's own `tests/` directory.
+pub(crate) fn is_integration_test_source(path: &str) -> bool {
+    let mut segments = path.split('/');
+    matches!(
+        (segments.next(), segments.next(), segments.next()),
+        (Some("crates" | "tools"), Some(_), Some("tests"))
+    )
+}
+
+/// Whether an item compiles only into tests: a `#[test]` (or `#[tokio::test]`
+/// and the like), or a `#[cfg(…)]` whose predicate holds only under `test`.
+/// `cfg(not(test))`, `cfg(any(test, feature = "…"))` and
+/// `cfg(feature = "test-utils")` all compile into production builds.
 pub(crate) fn is_test_only(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attribute| {
-        attribute.path().is_ident("test")
+        attribute
+            .path()
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "test")
             || (attribute.path().is_ident("cfg")
-                && matches!(&attribute.meta, syn::Meta::List(list) if list.tokens.to_string().contains("test")))
+                && attribute
+                    .parse_args::<syn::Meta>()
+                    .is_ok_and(|predicate| cfg_requires_test(&predicate)))
     })
+}
+
+/// Whether a `cfg` predicate can hold only when `test` does.
+fn cfg_requires_test(predicate: &syn::Meta) -> bool {
+    match predicate {
+        syn::Meta::Path(path) => path.is_ident("test"),
+        syn::Meta::List(list) => {
+            let Ok(children) = list.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            ) else {
+                return false;
+            };
+            if list.path.is_ident("all") {
+                children.iter().any(cfg_requires_test)
+            } else if list.path.is_ident("any") {
+                !children.is_empty() && children.iter().all(cfg_requires_test)
+            } else {
+                false
+            }
+        }
+        syn::Meta::NameValue(_) => false,
+    }
 }
 
 /// Every path a `use` tree imports, one segment list per leaf. A glob yields
