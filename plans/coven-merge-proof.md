@@ -38,8 +38,8 @@
 - *Incarnation*: one lifetime of a row. An insert made at generation `g`
   starts incarnation `g + 1`; an update or delete made at generation `g` acts
   on incarnation `g`.
-  - E.g. Ana creates note 43 at generation 0, so it lives in incarnation 1;
-    she deletes it, and re-adds it at generation 2, starting incarnation 3.
+- E.g. Ana creates note 43 at generation 0, so it lives in incarnation 1;
+  she deletes it, and re-adds it at generation 2, starting incarnation 3.
 - *Setter*: a write that sets a cell. Its value is the cell's value in that
   write.
 - *Replacer* of a value: a write that sets the same cell of the same
@@ -98,10 +98,10 @@ For a closed set `S` of writes, each part of the merged state is defined from
 
   ```
   write             value               stamp          had read
-  Ana's write 1     "Grocery list"      12:00:00 #0
-  Ana's write 4     "Groceries"         13:01:00 #0    Ana 1
-  Ben's write 9     "Weekly groceries"  13:01:00 #1    Ana 1, Ana 4
-  Carol's write 2   "Shopping"          14:00:00 #0    Ana 1
+  Ana's write 3     "Grocery list"      12:00:00 #0
+  Ana's write 4     "Groceries"         13:01:00 #0    Ana 3
+  Ben's write 9     "Weekly groceries"  13:01:00 #1    Ana 3, Ana 4
+  Carol's write 2   "Shopping"          14:00:00 #0    Ana 3
   ```
 
   - the title: Carol's write 2, the largest stamp;
@@ -189,8 +189,8 @@ at.
 
 ### B7 The removal rules
 
-- The removal rules read the merged state and the store log, never which
-  rows are removed:
+- The removal rules' inputs come from the merged state and the store log,
+  never from which rows are removed:
   - which rows are present: an odd generation;
   - each row's references: the parent each points at, and whether it is
     *stale*: the parent's generation it carries has been deleted since
@@ -213,13 +213,15 @@ at.
     `note_id` null, whichever write arrived first. Lean: `example_8_4`.
   - E.g. Ben adds link 6 at 16:00 pointing at note 43; Dan, having read
     Ben's write, points it at note 44 at 16:10; Ana, having read neither,
-    deletes note 43 at 16:20. A device that gets Ana's delete and Ben's
-    insert first reads link 6 as null, with the cell naming Ben's write;
-    Dan's write then wins over Ben's, so every device ends with link 6 on
-    note 44. Lean: `example_8_4_later`.
+    deletes note 43 at 16:20.
+  - A device that gets Ana's delete and Ben's insert first reads link 6 as
+    null, with the cell naming Ben's write; Dan's write then wins over
+    Ben's, so every device ends with link 6 on note 44. Lean:
+    `example_8_4_later`.
   - Where SQLite would refuse the null or the default, such as on a
     `NOT NULL` column, the reference stays and counts as stale.
-- The rules other than the unique ones take a present row out when:
+- The rules other than unique values and keys in two audiences take a
+  present row out when:
   - **foreign keys**: one of its references is stale, or its parent is
     absent or taken out;
   - **CHECK**: its merged values fail;
@@ -231,7 +233,7 @@ at.
   wins over a circle's, and of two circles' rows, the one whose current
   generation started with the smaller timestamp.
 - [§8](coven-from-scratch.md#8-merge)'s three steps:
-  1. apply the rules other than the unique ones until none fires;
+  1. apply the other rules until none fires;
   2. judge unique values and keys in two audiences among the rows still
      present;
   3. apply the other rules again until none fires.
@@ -244,7 +246,8 @@ at.
 
 - **Monotone**: a rule is monotone when it keeps firing for a row as more
   rows are removed.
-- Every rule other than the unique ones is monotone:
+- Every rule other than unique values and keys in two audiences is
+  monotone:
   - a stale reference stays stale, and a parent taken out stays out when
     more rows are removed;
   - CHECK and deleted-circle results don't depend on removals.
@@ -279,8 +282,8 @@ at.
 - **Any order**: coven's run of the rules is one of the orders the three
   steps allow, so every order gives the same removed rows. Lean:
   `removal_stratified`, `any_order_removal`.
-- **A unique loser comes back** only when the winner is deleted, or taken
-  out before unique values are judged.
+- **A unique loser whose value is unchanged comes back** only when the
+  winner is deleted, or taken out before unique values are judged.
   - E.g. notes are unique by title, and a sub-note points at its parent
     under cascade. Note 1 is "Ideas"; at 10:00 Ana adds note 2, "Plan", as a
     sub-note of note 1; at 11:00 Ben, not having seen it, renames note 1 to
@@ -299,10 +302,10 @@ at.
 - **Every removed row names a rule**: a row removed by a run of monotone
   rules still meets a rule once the run ends, and a step 2 loser counts its
   rule from that step. Lean: `star_fires`, `removed_has_rule`.
-  - E.g. todos need `start <= end`, and todo 7 is in list 3. Ana deletes
-    list 3 while Ben moves todo 7's start past its end. Todo 7's `coven_lost`
-    row names the foreign key and the CHECK, on every device, whichever rule
-    a device ran first. Lean: `example_8`.
+- E.g. todos need `start <= end`, and todo 7 is in list 3. Ana deletes
+  list 3 while Ben moves todo 7's start past its end. Todo 7's `coven_lost`
+  row names the foreign key and the CHECK, on every device, whichever rule a
+  device ran first. Lean: `example_8`.
 - **End to end**: the merged state converges ([B6](#b6-proof-for-the-merged-state)), and the rules, and
   therefore the app's tables and the removed rows' `coven_lost` rows, are
   functions of it and the store log. Lean: `device_converges`,
@@ -310,10 +313,12 @@ at.
 - E.g. Lean runs the writes of [§8.4](coven-from-scratch.md#84-foreign-keys), [§8.5](coven-from-scratch.md#85-keys-and-uniqueness), [§8.6](coven-from-scratch.md#86-check-constraints) and [§14.7](coven-from-scratch.md#147-deleting-a-circle), with the
   rules reading the merged state it computes, in more than one arrival
   order:
-  - [§8.4](coven-from-scratch.md#84-foreign-keys): Carol's tablet applies Ana's delete of note 43, then Ben's tag 9
-    on it: tag 9 is taken out, and its `coven_lost` row names the foreign
-    key. Ben's move of tag 9 to note 44 arrives: tag 9 is back. Ben's phone,
-    which gets Ana's delete last, never takes it out. Lean: `example_8_4`.
+  - [§8.4](coven-from-scratch.md#84-foreign-keys): Carol's tablet applies Ana's delete of note 43, then Ben's
+    attachment 9 on it: attachment 9 is taken out, and its `coven_lost` row
+    names the foreign key.
+  - Ben's move of attachment 9 to note 44 then arrives: attachment 9 is
+    back. Ben's phone, which gets Ana's delete last, never takes it out.
+    Lean: `example_8_4`.
   - [§8.4](coven-from-scratch.md#84-foreign-keys): notes point at folders with set default "Inbox". Ana deletes "Work"
     while Ben puts note 50 in it; Carol deletes "Inbox": note 50 is taken
     out, naming the foreign key. Carol re-adds "Inbox": note 50 is back.
@@ -338,8 +343,9 @@ at.
 - A row is one table, key and audience, with its own generations ([§14.2](coven-from-scratch.md#142-moving-rows)).
   Each row change sits in the part of its row's audience; a device applies
   the parts it can read and counts the rest as applied ([§14.4](coven-from-scratch.md#144-writes)).
-- E.g. Ana moves note 1 into her circle, while Ben, outside it, re-adds note
-  1 in the store, and then Carol, in the circle, edits the circle's note 1.
+- E.g. Ana moves note 1 into her circle; Ben, outside it, sees it deleted
+  and re-adds note 1 in the store; then Carol, in the circle, edits the
+  circle's note 1.
   - The store's note 1 is deleted by Ana's move and re-added by Ben: it ends
     at generation 3 with Ben's values, on Carol's device and on Dan's, who
     is outside the circle.
@@ -348,9 +354,9 @@ at.
   - Lean: `Moved.agree`.
 - **Same audiences**: the writes as a device sees them still meet [B3](#b3-model-and-assumptions)'s
   assumptions, since a change's generation was reached by a change to the
-  same row, in the same audience. So two devices that read the same
-  audiences hold the same merged state. Lean: `valid_project`,
-  `audience_converges`.
+  same row, in the same audience.
+- So two devices that read the same audiences hold the same merged state.
+  Lean: `valid_project`, `audience_converges`.
 - **Different audiences**: a row's merged state depends only on the changes
   to that row, so devices agree on the merged state of every row both read.
   Lean: `fold_atRow`, `audiences_agree`.
@@ -361,8 +367,9 @@ at.
 - [§14.5](coven-from-scratch.md#145-references) gives the parents: a row points only at rows every reader of it can
   read.
 - [§14.1](coven-from-scratch.md#141-roots-and-descendants) gives the unique rivals: a unique constraint on a root table
-  includes the audience column, so rivals share an audience; constraints
-  that could span audiences are refused. Lean: `rivals_closed`.
+  includes the audience column, and one on a descendant table includes the
+  foreign key it takes its audience from, so rivals share an audience;
+  constraints that could span audiences are refused. Lean: `rivals_closed`.
 - Every member's devices read the store log, so they agree on which circles
   are deleted.
 - **Keys in two audiences** are the one rule that reads rows another device
@@ -388,9 +395,9 @@ at.
   Lean: `example_8_2`.
 - [§8.3](coven-from-scratch.md#83-deletes): Ben's edit is replaced by Ana's write 7 in every order. Lean:
   `example_8_3`.
-- [§8.4](coven-from-scratch.md#84-foreign-keys): tag 9 is taken out, then back when Ben's move arrives; link 6 holds
-  null, then ends on note 44 once Dan's write arrives; note 50 is taken out
-  while "Inbox" is gone. Lean: `example_8_4`, `example_8_4_later`,
+- [§8.4](coven-from-scratch.md#84-foreign-keys): attachment 9 is taken out, then back when Ben's move arrives;
+  link 6 holds null, then ends on note 44 once Dan's write arrives; note 50
+  is taken out while "Inbox" is gone. Lean: `example_8_4`, `example_8_4_later`,
   `example_8_4_default`.
 - [§8.5](coven-from-scratch.md#85-keys-and-uniqueness): a key change leaves Ben's `(44, "urgent")` taken out; note 2's claim
   dates from 12:00; a loser whose winner leaves in step 3 stays out. Lean:
@@ -415,10 +422,12 @@ at.
     merged state Lean builds.
 - Argued here only:
   - that coven computes the rules' inputs from the merged state as [B7](#b7-the-removal-rules) says:
-    presence from generations, stale references by comparing generations,
-    null or the default for a set null or set default reference whose
-    parent's generation was deleted, CHECK on merged values, claim stamps
-    from the cells' writes;
+    - presence from generations;
+    - stale references by comparing generations;
+    - null or the default for a set null or set default reference whose
+      parent's generation was deleted;
+    - CHECK on merged values;
+    - claim stamps from the cells' writes;
   - that two devices compute the same inputs for a row when the merged
     states of the rows those inputs read agree, which [B9](#b9-audiences)'s locality theorem
     then uses;
