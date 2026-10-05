@@ -973,10 +973,14 @@ Carol's tablet:
   - they give one circle different names;
   - one deletes a circle and the other changes it, its members, or resets
     it;
-  - one adds someone to a circle and the other removes someone from it,
-    or removes from the store a member who is in it, which replaces the
-    circle key ([§13](#13-removing-members-and-devices),
-    [§14.6](#146-leaving-a-circle));
+  - one adds someone to a circle and the other replaces that circle's key:
+    by removing someone from it ([§14.6](#146-leaving-a-circle)), or by
+    removing from the store a member the removal names as in it
+    ([§13](#13-removing-members-and-devices));
+    - e.g. Ana's tablet adds Ben, then Carol, to Gifts, while her phone,
+      which hadn't seen either, removes Ben from the store: the removal
+      doesn't name Gifts, so Carol's add applies; Ben's own add is about
+      Ben, so the removal beats it;
   - they raise the schema or format to the same version with different
     snapshots, or reset the same audience to different snapshots
     ([§17](#17-schema-changes), [§19.3](#193-resetting-a-store)).
