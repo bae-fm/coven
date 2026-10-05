@@ -33,6 +33,20 @@ impl std::fmt::Display for CircleId {
     }
 }
 
+/// An invitation's identity, independent of its one-time secret (§12.2).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct InviteId(
+    /// The invite's UUID, supplied by the id source.
+    pub Uuid,
+);
+
+impl std::fmt::Display for InviteId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// One install of the app, by its 64-bit device id (§10).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(transparent)]

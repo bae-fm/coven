@@ -424,6 +424,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "coven-format"
+version = "0.1.0"
+dependencies = [
+ "coven-crypto",
+ "coven-foundation",
+ "coven-merge",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "coven-foundation"
 version = "0.1.0"
 dependencies = [

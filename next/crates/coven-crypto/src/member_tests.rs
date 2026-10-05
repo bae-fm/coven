@@ -3,6 +3,22 @@ use crate::CircleId;
 use uuid::Uuid;
 
 #[test]
+fn member_public_bytes_round_trip_through_each_constructor() {
+    let text = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+    let bytes: [u8; 32] = hex::decode(text).unwrap().try_into().unwrap();
+    let member = MemberId::from_bytes(bytes).unwrap();
+    assert_eq!(member.to_bytes(), bytes);
+    assert_eq!(member.as_str(), text);
+    assert_eq!(text.parse::<MemberId>().unwrap().to_bytes(), bytes);
+    assert_eq!(MemberId::from_bytes(member.to_bytes()).unwrap(), member);
+
+    let keys = MemberKeys::generate().unwrap();
+    let member = keys.member_id();
+    assert_eq!(member.to_bytes(), keys.signing.verifying_key().to_bytes());
+    assert_eq!(MemberId::from_bytes(member.to_bytes()).unwrap(), member);
+}
+
+#[test]
 fn member_signatures_and_both_key_pairs_survive_custody_encoding() {
     let keys = MemberKeys::generate().unwrap();
     let restored = MemberKeys::from_secret_bytes(keys.to_secret_bytes().as_bytes()).unwrap();

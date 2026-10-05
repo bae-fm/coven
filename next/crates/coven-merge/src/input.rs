@@ -42,6 +42,19 @@ pub struct Parent {
     pub generation: u64,
 }
 
+impl Parent {
+    /// Validate a written reference from `child`: it must name an odd
+    /// incarnation in the child's audience or the store (§8.4, §14.1).
+    /// Resolved default references may name even generations and are not
+    /// written references; this check does not apply to those substitutions.
+    pub fn validate_written(&self, child: &RowId) -> Result<(), MergeError> {
+        if self.generation.is_multiple_of(2) {
+            return Err(MergeError::ParentGeneration(self.generation));
+        }
+        validate_audience(child, &self.row)
+    }
+}
+
 /// A column's value and the parent generations recorded with it.
 /// The metadata follows the winning setter, including for values kept as lost.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,6 +99,27 @@ pub struct Change<V> {
 }
 
 impl<V> Change<V> {
+    /// Validate generation parity, advancement without overflow, and every
+    /// written parent's generation and audience for this row (§8.3–§8.4, §14).
+    /// Values and their encodings are opaque here. Generation witnesses and
+    /// causal history require [`crate::History`] or [`crate::apply`].
+    pub fn validate(&self, row: &RowId) -> Result<(), MergeError> {
+        self.incarnation()?;
+        if self.operation.advances() {
+            self.generation
+                .checked_add(1)
+                .ok_or(MergeError::GenerationExhausted)?;
+        }
+        if let Some(columns) = self.operation.columns() {
+            for value in columns.values() {
+                for parent in value.parents.values() {
+                    parent.validate_written(row)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The incarnation this change belongs to: generation + 1 for an insert,
     /// generation for an update or delete. Invalid parity is a typed error.
     pub fn incarnation(&self) -> Result<u64, MergeError> {
@@ -126,34 +160,13 @@ pub trait WriteOracle {
     fn had_read(&self, reader: WriteId, earlier: WriteId) -> Result<bool, MergeError>;
 }
 
-pub(crate) fn validate_change<V>(row: &RowId, change: &Change<V>) -> Result<(), MergeError> {
-    change.incarnation()?;
-    if change.operation.advances() {
-        change
-            .generation
-            .checked_add(1)
-            .ok_or(MergeError::GenerationExhausted)?;
-    }
-    if let Some(columns) = change.operation.columns() {
-        for value in columns.values() {
-            for parent in value.parents.values() {
-                validate_parent(row, parent)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_parent(row: &RowId, parent: &Parent) -> Result<(), MergeError> {
-    if parent.generation.is_multiple_of(2) {
-        return Err(MergeError::ParentGeneration(parent.generation));
-    }
-    validate_audience(row, &parent.row)
-}
-
 pub(crate) fn validate_audience(row: &RowId, parent: &RowId) -> Result<(), MergeError> {
     if parent.audience != Audience::Store && parent.audience != row.audience {
         return Err(MergeError::ReferenceAudience(row.clone()));
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "input_tests.rs"]
+mod tests;

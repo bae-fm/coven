@@ -1,4 +1,4 @@
-use crate::input::{validate_audience, validate_parent};
+use crate::input::validate_audience;
 use crate::{Audience, MergeError, Parent, RowId, Timestamp};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -75,7 +75,7 @@ pub fn resolve_reference(
     parent_generation: u64,
     default_generation: Option<u64>,
 ) -> Result<ReferenceValue, MergeError> {
-    validate_parent(child, &reference.parent)?;
+    reference.parent.validate_written(child)?;
     let stale = parent_generation != reference.parent.generation;
     if stale {
         match &reference.on_delete {

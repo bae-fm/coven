@@ -26,11 +26,18 @@ impl MemberId {
         &self.0
     }
 
+    /// The validated Ed25519 public key's 32 bytes.
+    pub fn to_bytes(&self) -> [u8; 32] {
+        let mut bytes = [0; 32];
+        hex::decode_to_slice(&self.0, &mut bytes)
+            .expect("MemberId constructors store a canonical 32-byte hexadecimal key");
+        bytes
+    }
+
     /// Verify a detached signature against this member's public key (§10).
     pub fn verify(&self, message: &[u8], signature: &Signature) -> Result<(), CryptoError> {
-        let mut bytes = [0; 32];
-        hex::decode_to_slice(&self.0, &mut bytes).map_err(|_| CryptoError::InvalidMemberId)?;
-        let key = VerifyingKey::from_bytes(&bytes).map_err(|_| CryptoError::InvalidMemberId)?;
+        let key =
+            VerifyingKey::from_bytes(&self.to_bytes()).map_err(|_| CryptoError::InvalidMemberId)?;
         key.verify_strict(message, &ed25519_dalek::Signature::from_bytes(&signature.0))
             .map_err(|_| CryptoError::Signature)
     }

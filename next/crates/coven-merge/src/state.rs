@@ -1,4 +1,3 @@
-use crate::input::{validate_change, validate_parent};
 use crate::{ColumnValue, MergeError, Operation, RowId, Timestamp, Write, WriteId, WriteOracle};
 use std::collections::BTreeMap;
 
@@ -89,7 +88,7 @@ impl<V> RowState<V> {
                 return Err(MergeError::CellBeforeIncarnation(column.clone()));
             }
             for parent in cell.value.parents.values() {
-                validate_parent(&row, parent)?;
+                parent.validate_written(&row)?;
             }
         }
         for (key, value) in &lost {
@@ -117,7 +116,7 @@ impl<V> RowState<V> {
                 return Err(invalid());
             }
             for parent in value.value.parents.values() {
-                validate_parent(&row, parent)?;
+                parent.validate_written(&row)?;
             }
         }
         Ok(Self {
@@ -230,7 +229,7 @@ pub fn apply<V: Clone + Eq>(
         .changes
         .get(&state.row)
         .ok_or_else(|| MergeError::MissingChange(state.row.clone()))?;
-    validate_change(&state.row, change)?;
+    change.validate(&state.row)?;
     if change.generation > state.generation {
         return Err(MergeError::GenerationAhead {
             row: state.row.clone(),

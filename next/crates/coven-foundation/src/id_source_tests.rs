@@ -1,6 +1,17 @@
 use super::*;
 
 #[test]
+fn invite_identity_serializes_as_its_uuid() {
+    let uuid = Uuid::from_u128(0x00112233_4455_6677_8899_aabbccddeeff);
+    let invite = InviteId(uuid);
+    let encoded = serde_json::to_string(&invite).unwrap();
+    assert_eq!(encoded, serde_json::to_string(&uuid).unwrap());
+    assert_eq!(serde_json::from_str::<InviteId>(&encoded).unwrap(), invite);
+    assert_eq!(invite.to_string(), "00112233-4455-6677-8899-aabbccddeeff");
+    assert!(serde_json::from_str::<InviteId>("\"01\"").is_err());
+}
+
+#[test]
 fn circle_identity_serializes_as_its_uuid() {
     let uuid = Uuid::from_u128(0x00112233_4455_6677_8899_aabbccddeeff);
     let circle = CircleId(uuid);

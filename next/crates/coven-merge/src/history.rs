@@ -1,4 +1,3 @@
-use crate::input::validate_change;
 use crate::{
     Cell, LostKey, LostValue, MergeError, Operation, RowId, RowState, Timestamp, Write, WriteId,
     WriteOracle,
@@ -29,7 +28,7 @@ impl<V> History<V> {
                 return Err(MergeError::DuplicateTimestamp(other, write.id));
             }
             for (row, change) in &write.changes {
-                validate_change(row, change)?;
+                change.validate(row)?;
             }
             by_id.insert(write.id, write);
         }

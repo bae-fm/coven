@@ -1,0 +1,17 @@
+[package]
+name = "coven-format"
+version.workspace = true
+edition.workspace = true
+
+[features]
+test-utils = []
+
+[dependencies]
+coven-foundation.workspace = true
+coven-crypto.workspace = true
+coven-merge.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+
+[lints]
+workspace = true

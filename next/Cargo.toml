@@ -3,7 +3,7 @@
 # ships, unchanged.
 [workspace]
 resolver = "2"
-members = ["crates/coven-foundation", "crates/coven-crypto", "crates/coven-merge", "tools/owner-construction-check"]
+members = ["crates/coven-foundation", "crates/coven-crypto", "crates/coven-merge", "crates/coven-format", "tools/owner-construction-check"]
 
 [workspace.package]
 edition = "2021"
@@ -14,6 +14,8 @@ version = "0.1.0"
 # restate a version. The checker refuses a member dependency that does.
 [workspace.dependencies]
 coven-foundation = { path = "crates/coven-foundation" }
+coven-crypto = { path = "crates/coven-crypto" }
+coven-merge = { path = "crates/coven-merge" }
 argon2 = { version = "0.6.0", default-features = false }
 chacha20poly1305 = { version = "0.11.0", default-features = false }
 ed25519-dalek = { version = "3.0.0", default-features = false }
