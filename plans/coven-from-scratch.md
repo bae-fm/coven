@@ -74,6 +74,9 @@
 - S3 has no standard way to make or delete access keys; each S3 provider
   has its own, so on S3 an admin makes and deletes members' keys in the
   provider's console, and coven says when.
+- Posted positions live at `positions/<device>` ([§6](#6-syncing-writes)).
+- Sealed circle keys live at `keys/circles/<circle>/<n>/<member>`
+  ([§14.3](#143-circles)).
 
 ## 5. Local database
 
@@ -124,7 +127,8 @@
   - A retried upload writes the same name with the same bytes.
 - A write record leaves `coven_uploads` ([§5](#5-local-database)) once its upload succeeds.
 - Each device remembers how far it has applied every device's log.
-- It also posts those positions to storage, as one object of its own.
+- It also posts those positions to storage at `positions/<device>`,
+  replacing its own object when the positions advance.
 
 ## 7. Order
 
@@ -1073,6 +1077,8 @@ Carol's tablet:
 - Each store key is sealed to every member's public key, and the sealed
   copies are kept in storage, at `keys/store/<n>/<member>` for the store's
   `n`th key.
+- Sealed circle keys live at `keys/circles/<circle>/<n>/<member>` for the
+  circle's `n`th key ([§14.3](#143-circles)).
 - So a member's key alone gets the current store key: a device holding it
   reads its member's sealed copy from storage and opens it.
 - The store key is replaced whenever a member is removed.
@@ -1323,6 +1329,7 @@ Carol's tablet:
   it ([§14.7](#147-deleting-a-circle)); an admin outside the circle can't.
 - Each circle has its own key, sealed to each of its members' public keys,
   like the store key ([§11](#11-keys)).
+  - Its sealed copies live at `keys/circles/<circle>/<n>/<member>`.
   - It is replaced whenever someone leaves the circle.
   - Someone joining a circle gets its earlier keys too, so they can read its
     history.
@@ -1918,10 +1925,13 @@ Carol's tablet:
 
 ```rust
 // External types used by the declarations below.
-use std::{collections::HashMap, future::Future, num::NonZeroUsize, ops::Range,
+use std::{collections::HashMap, future::Future, num::{NonZeroU64, NonZeroUsize},
           path::{Path, PathBuf}, pin::Pin, sync::Arc, time::SystemTime};
+use async_trait::async_trait;
+use coven_crypto::StoredFileName;
 use rusqlite::{Params, ToSql};
 use tokio::{io::AsyncRead, sync::watch};
+use url::Url;
 use uuid::Uuid;
 
 /// A row's primary key: one value per key column, in the order the table
@@ -1973,6 +1983,13 @@ pub enum Audience {
   writes made under older ones.
 - *Identity custody* is where this device keeps its member's two key pairs
   ([§11.1](#111-cryptography)).
+- The app's `CloudKitOps` maps paths to stable record names in the configured
+  container, owner and zone; all bytes it receives are encrypted.
+- The bridge creates objects once and replaces posted positions atomically.
+  Large uploads use bounded CKAssets, keep their ids and parts across
+  restarts, and publish a record only after all parts are stored.
+- Bridge failures keep their native cause in `StorageError::Provider`,
+  classified with `CloudProvider::CloudKit` and a `StorageFailure`.
 
 ```rust
 /// A store's UUID, independent of its name and location (§20.1).
@@ -2061,29 +2078,122 @@ pub struct StoreKeyring { /* private fields */ }
 /// The app's provider clients and shared clock, kept private (§20.10).
 pub struct OAuthClients { /* private fields */ }
 
-/// One asynchronous CloudKit call made by the app (§4, §20.1).
-pub type CloudKitCall<'a, T> = Pin<Box<dyn Future<Output = Result<T, StorageError>> + Send + 'a>>;
+/// A validated encrypted-object path in the store (§4).
+pub struct ObjectPath { /* private fields */ }
 
-/// The app's CloudKit access; paths are relative to the named container (§4).
+impl ObjectPath {
+    /// A device's create-once write record (§6).
+    pub fn device_log(device: DeviceId, number: NonZeroU64) -> Self;
+    /// A device's create-once store log entry (§9).
+    pub fn store_log(device: DeviceId, number: NonZeroU64) -> Self;
+    /// A snapshot written by a device (§15).
+    pub fn snapshot(device: DeviceId, number: NonZeroU64) -> Self;
+    /// A device's posted positions (§6).
+    pub fn positions(device: DeviceId) -> Self;
+    /// A sealed store key for a member (§11).
+    pub fn store_key(number: NonZeroU64, member: &MemberId) -> Self;
+    /// A sealed circle key for a member (§14.3).
+    pub fn circle_key(circle: CircleId, number: NonZeroU64, member: &MemberId) -> Self;
+    /// Encrypted file bytes named by their keyed hash (§16.2).
+    pub fn file(name: &StoredFileName) -> Self;
+    /// An encrypted join request under its invite id (§12.2).
+    pub fn join_request(invite: InviteId) -> Self;
+    /// Parses a listed or recorded path, refusing paths outside the store's layout.
+    pub fn parse(value: &str) -> Result<Self, StorageError>;
+    /// The path bound into the object's encryption.
+    pub fn as_str(&self) -> &str;
+    /// Whether this is a posted-positions path, the only kind that may be replaced.
+    pub fn is_replaceable(&self) -> bool;
+    /// The device named by a log, snapshot or positions path.
+    pub fn device(&self) -> Option<DeviceId>;
+}
+
+/// A prefix of the validated object layout (§4).
+pub struct ObjectPrefix { /* private fields */ }
+
+impl ObjectPrefix {
+    /// Every object in the store's location.
+    pub fn all() -> Self;
+    /// Every write of a device.
+    pub fn device_log(device: DeviceId) -> Self;
+    /// Every store log entry of a device.
+    pub fn store_log(device: DeviceId) -> Self;
+    /// Every snapshot.
+    pub fn snapshots() -> Self;
+    /// Every stored file.
+    pub fn files() -> Self;
+    /// Every waiting join request.
+    pub fn join_requests() -> Self;
+    /// Every sealed key.
+    pub fn keys() -> Self;
+    /// Every device's posted positions.
+    pub fn positions() -> Self;
+    /// The prefix supplied to the provider.
+    pub fn as_str(&self) -> &str;
+    /// Whether a validated path is under this prefix.
+    pub fn contains(&self, path: &ObjectPath) -> bool;
+}
+
+/// A nonempty byte range, including its start and excluding its end (§16.3).
+pub struct ByteRange { /* private fields */ }
+
+impl ByteRange {
+    /// Validates that the start is before the end.
+    pub fn new(start: u64, end: u64) -> Result<Self, StorageError>;
+    /// The first byte included.
+    pub fn start(self) -> u64;
+    /// The first byte excluded; a read refuses an end beyond the object.
+    pub fn end(self) -> u64;
+    /// The number of requested bytes.
+    pub fn len(self) -> u64;
+    /// Always false for a validated range.
+    pub fn is_empty(self) -> bool;
+}
+
+/// A durable upload prepared by the app's CloudKit bridge (§16.5).
+pub struct CloudKitUpload {
+    /// The bridge's recorded session capability, erased on drop.
+    pub id: SecretText,
+    /// The maximum part size the bridge accepts.
+    pub part_size: usize,
+}
+
+/// The bridge's confirmed upload state (§16.5).
+pub enum CloudKitUploadStatus {
+    /// Bytes stored before publishing the complete object.
+    Uploading {
+        /// The contiguous stored prefix, in bytes.
+        confirmed: u64,
+    },
+    /// This session's object has been published in the zone.
+    Complete,
+}
+
+/// Native CloudKit calls implemented by the app (§4, §20.1).
+#[async_trait]
 pub trait CloudKitOps: Send + Sync {
-    /// Creates an object; a retry uses the same path and bytes (§6).
-    fn put<'a>(&'a self, container: &'a str, path: &'a str, bytes: Vec<u8>) -> CloudKitCall<'a, ()>;
-    /// Reads the whole object, or the given byte range (§16.3).
-    fn get<'a>(&'a self, container: &'a str, path: &'a str, range: Option<Range<u64>>) -> CloudKitCall<'a, Vec<u8>>;
-    /// Lists object paths under the prefix (§4).
-    fn list<'a>(&'a self, container: &'a str, prefix: &'a str) -> CloudKitCall<'a, Vec<String>>;
-    /// Deletes an object; an already absent object succeeds (§18).
-    fn delete<'a>(&'a self, container: &'a str, path: &'a str) -> CloudKitCall<'a, ()>;
-    /// Grants this account access to the store's prefix (§12.2).
-    fn grant_access<'a>(&'a self, container: &'a str, prefix: &'a str, account: &'a str) -> CloudKitCall<'a, ()>;
-    /// Takes back that account's access (§13).
-    fn revoke_access<'a>(&'a self, container: &'a str, prefix: &'a str, account: &'a str) -> CloudKitCall<'a, ()>;
-    /// Starts a large upload; the returned session is recorded for restart (§16.5).
-    fn start_upload<'a>(&'a self, container: &'a str, path: &'a str, size: u64) -> CloudKitCall<'a, String>;
-    /// Stores one numbered part; retrying a part uses the same bytes (§18.1).
-    fn upload_part<'a>(&'a self, container: &'a str, session: &'a str, part: u64, bytes: Vec<u8>) -> CloudKitCall<'a, ()>;
-    /// Finishes the recorded session, making the object readable (§16.5).
-    fn finish_upload<'a>(&'a self, container: &'a str, session: &'a str) -> CloudKitCall<'a, ()>;
+    /// Creates complete encrypted bytes using the server's create-only policy.
+    async fn create(&self, location: &StorageConfig, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError>;
+    /// Replaces a complete posted-positions object atomically (§6).
+    async fn replace(&self, location: &StorageConfig, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError>;
+    /// Reads the whole object or only the asset parts covering the range (§16.3).
+    async fn read(&self, location: &StorageConfig, path: &ObjectPath, range: Option<ByteRange>) -> Result<Vec<u8>, StorageError>;
+    /// Lists every object under the prefix, following every native query cursor.
+    async fn list(&self, location: &StorageConfig, prefix: &ObjectPrefix) -> Result<Vec<ObjectPath>, StorageError>;
+    /// Deletes an object and its parts; an already absent object succeeds (§18).
+    async fn delete(&self, location: &StorageConfig, path: &ObjectPath) -> Result<(), StorageError>;
+    /// Sets read/write sharing for the named Apple account (§12.2, §13).
+    async fn set_access(&self, location: &StorageConfig, email: &str, granted: bool) -> Result<(), StorageError>;
+    /// Prepares a durable upload without publishing its destination (§16.5).
+    async fn begin_upload(&self, location: &StorageConfig, path: &ObjectPath, total: u64) -> Result<CloudKitUpload, StorageError>;
+    /// Returns confirmed progress, including parts whose replies were lost.
+    async fn upload_status(&self, location: &StorageConfig, id: &SecretText) -> Result<CloudKitUploadStatus, StorageError>;
+    /// Stores a part at its byte offset; retrying identical bytes is idempotent.
+    async fn upload_part(&self, location: &StorageConfig, id: &SecretText, offset: u64, bytes: &[u8]) -> Result<(), StorageError>;
+    /// Publishes all parts atomically; a retry succeeds without replacing another object.
+    async fn finish_upload(&self, location: &StorageConfig, id: &SecretText) -> Result<(), StorageError>;
+    /// Discards pending parts without deleting a published object.
+    async fn abort_upload(&self, location: &StorageConfig, id: &SecretText) -> Result<(), StorageError>;
 }
 
 /// A database or store call's result, retaining its typed cause (§21.3).
@@ -2273,13 +2383,23 @@ pub enum KeyError {
 }
 
 /// Secret bytes crossing custody or code boundaries, erased when dropped (§11, §12).
-pub struct SecretBytes(/* private */);
+pub struct SecretBytes { /* private fields */ }
 
 impl SecretBytes {
     /// Takes ownership of bytes, including their allocation capacity.
     pub fn new(bytes: Vec<u8>) -> Self;
     /// Borrows bytes for custody or a restore code.
     pub fn as_bytes(&self) -> &[u8];
+}
+
+/// Secret text, erased when dropped and redacted in diagnostics (§11, §20.10).
+pub struct SecretText { /* private fields */ }
+
+impl SecretText {
+    /// Takes ownership of text, including its allocation capacity.
+    pub fn new(text: String) -> Self;
+    /// Borrows text for a provider request or key custody.
+    pub fn as_str(&self) -> &str;
 }
 
 /// A native keychain cause whose diagnostics do not expose secret bytes (§11).
@@ -2972,7 +3092,7 @@ while let Ok(values) = lost.next().await {
 ```rust
 /// The provider holding a store (§4).
 pub enum CloudProvider {
-    /// An S3-compatible provider.
+    /// S3, including compatible providers.
     S3,
     /// Google Drive.
     GoogleDrive,
@@ -2986,16 +3106,39 @@ pub enum CloudProvider {
 
 /// A store's location, with credentials kept separately (§4, §20.5).
 pub enum StorageConfig {
-    /// An S3 endpoint, region, bucket and store prefix.
-    S3 { endpoint: String, region: String, bucket: String, prefix: String },
+    /// An existing S3 bucket and the prefix reserved for this store.
+    S3 {
+        /// The bucket's name.
+        bucket: String,
+        /// The signing region.
+        region: String,
+        /// A compatible provider's endpoint, or None for AWS's regional endpoint.
+        endpoint: Option<Url>,
+        /// The store's prefix, without leading or trailing slashes.
+        prefix: String,
+    },
     /// A store folder in Google Drive.
     GoogleDrive { folder_id: String },
-    /// A store folder in Dropbox.
-    Dropbox { path: String },
+    /// A Dropbox shared folder namespace, independent of each member's mount path.
+    Dropbox { namespace_id: String },
     /// A store folder in a OneDrive drive.
     OneDrive { drive_id: String, folder_id: String },
-    /// A store prefix in an iCloud container.
-    CloudKit { container: String, prefix: String },
+    /// The CloudKit zone reached by the app's bridge.
+    CloudKit {
+        /// The app's CloudKit container.
+        container: String,
+        /// The owner's CloudKit record name.
+        owner: String,
+        /// The custom zone containing the store.
+        zone: String,
+    },
+}
+
+impl StorageConfig {
+    /// The provider of this location.
+    pub fn provider(&self) -> CloudProvider;
+    /// Refuses missing or invalid location information before making a request.
+    pub fn validate(&self) -> Result<(), StorageError>;
 }
 
 /// Limits for concurrent file transfers (§20.1, §20.5).
@@ -3006,36 +3149,86 @@ pub struct TransferLimits {
     pub downloads: NonZeroUsize,
 }
 
-/// A provider refused or failed a storage request (§4, §20.5).
-pub enum StorageError {
-    /// The provider rejected the credentials.
+/// A storage failure the app can act on, classified by `failure()` (§21.3).
+pub enum StorageFailure {
+    /// No route to the provider, a timeout, or an interrupted response.
+    Network,
+    /// Credentials were refused or must be refreshed.
     Authentication,
-    /// The account lacks the requested access.
+    /// The account is signed in but cannot perform this operation.
     PermissionDenied,
-    /// The configured bucket, folder or container does not exist.
+    /// The requested object is absent.
+    NotFound,
+    /// A create-once path is occupied.
+    AlreadyExists,
+    /// The bucket, folder or zone is absent.
     ContainerNotFound,
-    /// The requested object is absent (§19.1).
-    ObjectNotFound { path: String },
-    /// The S3 bucket is in a different region.
+    /// The S3 endpoint or signing region is wrong.
     RegionMismatch,
-    /// The provider's quota is exhausted.
+    /// The provider has no space left.
     QuotaExceeded,
-    /// The location or provider configuration is invalid.
+    /// The provider requests a later retry.
+    RateLimited,
+    /// The request's configuration is invalid.
     InvalidConfiguration,
-    /// Storage could not be reached; retain the transport's cause.
-    Network(Arc<dyn std::error::Error + Send + Sync>),
-    /// The provider failed internally; retain its cause.
-    Internal(Arc<dyn std::error::Error + Send + Sync>),
+    /// The provider refused the request for another reason.
+    Refused,
+    /// The response or recorded session is malformed.
+    Protocol,
+}
+
+/// A storage error that preserves its typed cause (§4, §20.5).
+pub enum StorageError {
+    /// A classified provider failure with its original cause.
+    Provider {
+        /// The provider that failed.
+        provider: CloudProvider,
+        /// The failure the app can act on.
+        failure: StorageFailure,
+        /// The original transport, SDK or bridge error.
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// The location settings are invalid.
+    InvalidConfiguration(&'static str),
+    /// An object path is outside the store's layout.
+    InvalidPath,
+    /// A range is empty, reversed or beyond the object's end.
+    InvalidRange,
+    /// An object does not exist.
+    NotFound,
+    /// The path already holds an object; creation never replaces it.
+    AlreadyExists,
+    /// The upload session belongs to another provider or location.
+    SessionMismatch,
+    /// The provider no longer retains the recorded upload.
+    SessionExpired,
+    /// A part disagrees with the session's offset, size or alignment.
+    InvalidPart,
+    /// A response violates the provider's protocol.
+    Protocol(&'static str),
+    /// Parsing recorded data failed.
+    Encoding(serde_json::Error),
+    /// Persisting provider settings failed.
+    File(FileError),
+    /// Cleanup failed too; both causes are retained.
+    Cleanup { operation: Box<StorageError>, cleanup: Box<StorageError> },
+}
+
+impl StorageError {
+    /// The failure the app can act on.
+    pub fn failure(&self) -> StorageFailure;
+    /// True only for network interruptions and provider throttling.
+    pub fn retryable(&self) -> bool;
 }
 
 /// Storage setup failed before committing credentials and keys (§20.5).
 pub enum StorageSetupError {
+    /// Another store already occupies the location.
+    LocationOccupied,
     /// The provider refused or failed setup.
     Storage(StorageError),
     /// Sign-in failed or was cancelled.
     OAuth(OAuthError),
-    /// Another store already occupies the location.
-    LocationOccupied,
     /// This device does not hold its member's keys.
     MemberKeysMissing,
     /// Keeping credentials or keys failed.
@@ -3050,7 +3243,7 @@ pub enum StorageSetupFailure {
     Authentication,
     /// The account lacks access.
     PermissionDenied,
-    /// The configured container is absent.
+    /// The bucket, folder or zone is absent.
     ContainerNotFound,
     /// The S3 bucket is in a different region.
     RegionMismatch,
@@ -3210,8 +3403,8 @@ impl CovenHandle {
     pub async fn setup_s3_storage(
         &self,
         storage: StorageConfig,
-        access_key: String,
-        secret_key: String,
+        access_key_id: String,
+        secret_access_key: SecretText,
     ) -> Result<ConnectedStorage, StorageSetupError>;
 
     /// Sets up storage on Google Drive, Dropbox or OneDrive, running the
@@ -3328,11 +3521,7 @@ pub enum StoreKeyState {
 }
 
 impl StorageSetupError {
-    /// What went wrong, for the app to show: `Authentication`,
-    /// `PermissionDenied`, `ContainerNotFound`, `RegionMismatch`,
-    /// `QuotaExceeded`, `InvalidConfiguration`, `LocationOccupied` when the
-    /// location holds another store, `Network`, `MemberKeysMissing`,
-    /// `SecureStorage` or `Internal`.
+    /// The setup failure the app presents, with its cause retained in this error.
     pub fn failure(&self) -> StorageSetupFailure;
 }
 
@@ -3349,7 +3538,7 @@ pub enum SyncFailure {
 Example:
 
 ```rust
-match handle.setup_s3_storage(storage, access_key, secret_key).await {
+match handle.setup_s3_storage(storage, access_key_id, SecretText::new(secret_access_key)).await {
     Ok(connected) => remember(connected.storage),
     Err(error) => return show_setup_failure(error.failure()),
 }
@@ -3788,8 +3977,8 @@ impl CovenHandle {
     /// key in the console (§13).
     pub async fn replace_access_key(
         &self,
-        access_key: String,
-        secret_key: String,
+        access_key_id: String,
+        secret_access_key: SecretText,
     ) -> Result<String, SyncError>;
 
     /// On a device that already has the store open: takes the storage
@@ -3811,12 +4000,20 @@ impl CovenHandle {
     pub async fn remove_device(&self, device: DeviceId) -> Result<ProviderSignOut, SyncError>;
 }
 
+/// The member's provider account or the public id of their S3 key (§4).
+pub enum MemberAccess {
+    /// The member's provider account email.
+    ProviderAccount(String),
+    /// An S3 key the admin made in the provider's console.
+    S3AccessKey { access_key_id: String },
+}
+
+/// Revoked sharing or the instruction to delete an S3 key (§13).
 pub enum MemberRemoval {
-    /// Their storage access is revoked.
+    /// The provider no longer shares with the account.
     Revoked,
-    /// On S3: the admin deletes the key the member used, in the provider's
-    /// console.
-    DeleteAccessKey { access_key: String },
+    /// The admin deletes the key with this public id in the provider's console.
+    DeleteAccessKey { access_key_id: String },
 }
 
 pub struct MemberInfo {
@@ -3832,14 +4029,13 @@ pub enum MemberRole {
     Member,
 }
 
+/// How a removed device's member cuts off its provider access (§13).
 pub enum ProviderSignOut {
-    /// Remove the app's access from the provider account, then sign in again.
+    /// Remove the app's access from Google Drive, Dropbox or OneDrive, then sign in again.
     RemoveAppAccess { provider: CloudProvider },
     /// Remove the device from the Apple account.
     RemoveFromAppleAccount,
-    /// Make a new S3 access key in the provider's console, enter it on one
-    /// device, scan the new restore code on the others, write it down, and
-    /// delete the old key in the console.
+    /// Enter a new S3 key, update retained devices and the written restore code, then delete the old key.
     ReplaceAccessKey,
 }
 ```
@@ -3912,30 +4108,46 @@ pub enum BootstrapError {
 /// Provider sign-in tokens, held as secrets rather than printed (§20.10).
 pub struct OAuthTokens {
     /// The token authorizing provider requests.
-    pub access_token: SecretBytes,
+    pub access_token: SecretText,
     /// A renewal token, if the provider supplied one.
-    pub refresh_token: Option<SecretBytes>,
-    /// The access token's expiry, if the provider supplied one.
+    pub refresh_token: Option<SecretText>,
+    /// Expiry calculated with the injected clock, or None for a non-expiring token.
     pub expires_at: Option<SystemTime>,
 }
 
 /// A browser request plus private state retained to check its redirect (§20.10).
 pub struct AuthorizeRequest {
     /// The URL the app opens for sign-in.
-    pub url: String,
+    pub auth_url: String,
     /* private fields */
 }
 
 /// Provider sign-in could not finish (§20.5, §20.10).
 pub enum OAuthError {
+    /// This provider is not an OAuth provider or the app supplied no client id.
+    Unavailable(CloudProvider),
+    /// The request's provider, redirect or client id does not match the exchange.
+    RequestMismatch,
+    /// The redirect state is missing or different.
+    StateMismatch,
+    /// The provider declined sign-in.
+    Denied,
+    /// The callback omitted its authorization code.
+    MissingCode,
     /// The person cancelled sign-in.
     Cancelled,
-    /// This provider is not an OAuth provider or the app supplied no client id.
-    InvalidConfiguration { provider: CloudProvider },
-    /// The local redirect listener failed.
-    Redirect(Box<dyn std::error::Error + Send + Sync>),
-    /// The redirect did not belong to the authorization request.
-    StateMismatch,
+    /// No callback arrived before the deadline.
+    Timeout,
+    /// The current tokens have expired; refresh and commit them before reuse.
+    Expired,
+    /// A new provider sign-in is required.
+    Reauthorize,
+    /// The redirect URI or callback request is malformed.
+    InvalidRedirect,
+    /// The provider's expiry cannot be represented.
+    InvalidExpiry,
+    /// The browser or local redirect listener failed.
+    Io(std::io::Error),
     /// The provider refused sign-in or token exchange, or could not be reached.
     Storage(StorageError),
 }
@@ -3974,7 +4186,7 @@ pub enum InviteAccess {
     /// this account.
     ProviderAccount { email: String },
     /// S3: an access key the admin made for them in the provider's console.
-    S3AccessKey { access_key: String, secret_key: String },
+    S3AccessKey { access_key_id: String, secret_access_key: SecretText },
 }
 
 pub struct Invite {
@@ -4050,9 +4262,7 @@ pub async fn join_with_invite(
 ) -> Result<Option<StoreDir>, BootstrapError>;
 
 impl OAuthClients {
-    /// The app's own OAuth client ids for Google Drive, Dropbox and OneDrive,
-    /// `None` for a provider the app doesn't offer, and the clock the
-    /// sign-ins read.
+    /// Sets client ids (None for providers the app does not offer) and the sign-in clock.
     pub fn new(
         google_drive_client_id: Option<String>,
         dropbox_client_id: Option<String>,
@@ -4060,17 +4270,16 @@ impl OAuthClients {
         clock: ClockRef,
     ) -> Self;
 
-    /// Runs the provider's sign-in in the browser, with a redirect to a local
-    /// port, and returns its tokens.
+    /// Runs browser sign-in with a local redirect; cancellation or dropping it closes the listener.
     pub async fn authorize(
         &self,
         provider: CloudProvider,
         cancel: watch::Receiver<bool>,
     ) -> Result<OAuthTokens, OAuthError>;
 
-    /// For an app that handles the redirect itself: the request to open, and
-    /// the call that turns the redirect's code into tokens.
+    /// Builds the URL and private proof for an app that handles its own redirect.
     pub fn build_authorize_request(&self, provider: CloudProvider, redirect_uri: &str) -> Result<AuthorizeRequest, OAuthError>;
+    /// Checks the redirect's state and exchanges its code using this client's clock.
     pub async fn exchange_code(
         &self,
         provider: CloudProvider,
@@ -4079,7 +4288,24 @@ impl OAuthClients {
         request: &AuthorizeRequest,
         redirect_uri: &str,
     ) -> Result<OAuthTokens, OAuthError>;
+
+    /// Gets replacement tokens, retaining the old refresh token when the provider omits it.
+    pub async fn refresh(&self, provider: CloudProvider, tokens: &OAuthTokens) -> Result<OAuthTokens, OAuthError>;
 }
+```
+
+- Refreshed tokens are committed to key custody before the provider session
+  uses them.
+
+Example, when the app handles the sign-in redirect:
+
+```rust
+let request = oauth_clients.build_authorize_request(provider, redirect_uri)?;
+open_sign_in(&request.auth_url);
+let (code, callback_state) = receive_sign_in_redirect().await?;
+let tokens = oauth_clients
+    .exchange_code(provider, &code, callback_state.as_deref(), &request, redirect_uri)
+    .await?;
 ```
 
 Example, adding Ana's laptop. On her phone:
