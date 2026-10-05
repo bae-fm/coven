@@ -578,12 +578,21 @@ Carol's tablet:
   - The reference is null or the default wherever coven keeps it, in the
     app's table and in `coven_lost`, so every device stores the same value
     whichever write arrived first.
-  - The cell is recorded as set by the parent's delete, the write
-    `coven_rows` records for the deleted generation, and nothing is
-    recorded as lost, as when SQLite sets it on the deleting device.
-  - E.g. links point at notes with set null; while Ana deletes note 43,
-    Ben adds link 6 to it, and every device ends with link 6's `note_id`
-    null, set by Ana's delete.
+  - The cell still names the write whose reference won; it only reads as
+    null or the default, and later writes to it compete with that write's
+    timestamp, as with any cell. Nothing is recorded as lost.
+  - E.g. links point at notes with set null, and three writes happen:
+
+    ```
+    16:00  Ben adds link 6 → note 43
+    16:10  Dan, having read Ben's write, points link 6 at note 44
+    16:20  Ana, having read neither, deletes note 43
+    ```
+
+  - A device that gets Ana's delete and Ben's insert first reads link 6
+    as null, with the cell still naming Ben's write.
+  - Dan's write then wins over Ben's, so every device ends with link 6 on
+    note 44, whatever order the writes arrived in.
 - Where SQLite would refuse the null or the default, such as on a `NOT NULL`
   column, the child is taken out as under restrict.
   - E.g. if link 6's `note_id` were `NOT NULL`, link 6 would be held
@@ -1227,6 +1236,8 @@ Carol's tablet:
   - a store log entry removing the circle ([§9](#9-members-and-roles)).
 - A row added to the circle concurrently, which the write doesn't name, is
   taken out by a removal rule when it arrives, and recorded as lost.
+- A device that has applied the deletion refuses a write into the circle,
+  as SQLite refuses a broken foreign key.
 - E.g. Ana and Ben share a circle "Gifts", holding notes 7 and 8; Ben
   deletes it while Ana, offline, adds note 9 to it.
 

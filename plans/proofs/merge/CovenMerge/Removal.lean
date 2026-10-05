@@ -6,12 +6,12 @@ import CovenMerge.Converge
 
 What the rules read from the merged state is collected in `Inputs`: which
 rows are present, each row's references, whether its merged values fail a
-CHECK, ancestors and the rows that keep them, and unique claims. `Inputs` is
-computed from the merged state; nothing in it depends on which rows the rules
-remove.
+CHECK, whether it is in a deleted circle, and its claims. `Inputs` is computed
+from the merged state and the store log; nothing in it depends on which rows
+the rules remove.
 
-* `fires`: the rules other than the unique one: foreign keys, CHECK, and
-  ancestors (§8, §8.4, §8.6, §14).
+* `fires`: the rules other than the unique ones: foreign keys, CHECK, and
+  deleted circles (§8, §8.4, §8.6, §14.7).
 * `fires_monotone`: each keeps firing when more rows are removed.
 * `removal`: §8's three steps, run executably; `removal_stratified` shows
   it is one of the orders `Stratified` allows, so by `any_order_removal`
@@ -32,44 +32,39 @@ namespace CovenMerge
 * `parent`: the row it points at;
 * `stale`: the parent's generation it carries was deleted since (§8.4).
 
-A reference under set null or set default whose parent's generation was
-deleted holds null or the default in the merged state (§8.4), so it is no
-reference here; where SQLite would refuse that value, it stays here, stale,
-and is taken out as under restrict. -/
+A reference under set null whose parent's generation was deleted holds null
+in the merged state, so it is no reference here. One under set default points
+at the default parent's current generation, never stale. Where SQLite would
+refuse the null or the default, the reference stays here, stale, and the row
+is taken out as under restrict (§8.4). -/
 structure Ref (Row : Type) where
   parent : Row
   stale : Bool
 
-/-- One unique claim: the constraint, the value claimed, and the claim's
-stamp. A key present in two audiences is a claim too, with the store's
-claim first (§14.2). -/
+/-- One claim: the constraint, the value claimed, the claim's stamp, and
+whether it is a key present in two audiences (§8.5, §14.2). -/
 structure Claim (K : Type) where
   con : Nat
   key : K
   ts : Nat
+  other : Bool
 
-/-- What the removal rules read, computed from the merged state.
+/-- What the removal rules read, computed from the merged state and the store
+log.
 * `rows`: the synced rows the device has;
 * `present`: the row's generation is odd;
 * `refs`: its references;
 * `checkFails`: its merged values fail a CHECK (§8.6);
-* `isAncestor`: it is in an ancestor table (§14.1);
-* `keepRef`: the reference through which it keeps an ancestor, if its table
-  keeps one;
-* `sharedBase`: its audience is the store or a circle, when that doesn't
-  come from an ancestor;
-* `audienceFrom`: the ancestor its audience comes from, if it does;
-* `claims`: its unique claims (§8.5, §14.2);
+* `inDeletedCircle`: its audience is a circle the store log has deleted
+  (§14.7);
+* `claims`: its claims (§8.5, §14.2);
 * `rank`: its primary key's order, which breaks ties between claims. -/
 structure Inputs (Row K : Type) where
   rows : List Row
   present : Row → Bool
   refs : Row → List (Ref Row)
   checkFails : Row → Bool
-  isAncestor : Row → Bool
-  keepRef : Row → Option (Ref Row)
-  sharedBase : Row → Bool
-  audienceFrom : Row → Option Row
+  inDeletedCircle : Row → Bool
   claims : Row → List (Claim K)
   rank : Row → Nat
 
@@ -77,39 +72,23 @@ section
 variable {Row K : Type} [DecidableEq Row] [DecidableEq K] (I : Inputs Row K)
 
 /-- Foreign keys: a reference whose parent's generation was deleted since,
-under cascade, restrict or no action, or whose parent is absent or taken
-out, under every action (§8, §8.4). -/
+or whose parent is absent or taken out (§8, §8.4). -/
 def fkFires (D : Row → Bool) (x : Row) : Bool :=
   (I.refs x).any (fun r => r.stale || D r.parent)
 
-/-- The row is shared: its audience is the store or a circle. A row whose
-audience comes from an ancestor is shared while that ancestor is present. -/
-def sharedGiven (D : Row → Bool) (y : Row) : Bool :=
-  match I.audienceFrom y with
-  | none => I.sharedBase y
-  | some a => I.present a && !D a
-
-/-- Row `y` keeps ancestor `x`: it is present, not removed, shared, and its
-keeping reference points at `x`. -/
-def keeps (D : Row → Bool) (y x : Row) : Bool :=
-  match I.keepRef y with
-  | some r => decide (r.parent = x) && !r.stale && I.present y && !D y && sharedGiven I D y
-  | none => false
-
-/-- Ancestors: no shared row the device has keeps it (§14). -/
-def ancestorFires (D : Row → Bool) (x : Row) : Bool :=
-  I.isAncestor x && !(I.rows.any (fun y => keeps I D y x))
-
-/-- Every rule but the unique one. -/
+/-- Every rule but the unique ones. -/
 def fires (D : Row → Bool) (x : Row) : Bool :=
-  I.checkFails x || fkFires I D x || ancestorFires I D x
+  I.checkFails x || fkFires I D x || I.inDeletedCircle x
 
-/-- Row `y`'s claim to a value comes before row `x`'s: same constraint, same
-value, smaller stamp, or equal stamps and smaller key. -/
-def rivalBefore (y x : Row) : Bool :=
-  decide (y ≠ x) && (I.claims x).any (fun c => (I.claims y).any (fun c' =>
-    decide (c'.con = c.con) && decide (c'.key = c.key) &&
+/-- Row `y`'s claim of kind `other` comes before row `x`'s: same constraint,
+same value, smaller stamp, or equal stamps and smaller key. -/
+def rivalOf (other : Bool) (y x : Row) : Bool :=
+  decide (y ≠ x) && (I.claims x).any (fun c => decide (c.other = other) && (I.claims y).any (fun c' =>
+    decide (c'.other = other) && decide (c'.con = c.con) && decide (c'.key = c.key) &&
       (decide (c'.ts < c.ts) || (decide (c'.ts = c.ts) && decide (I.rank y < I.rank x)))))
+
+/-- Row `y`'s claim comes before row `x`'s, of either kind. -/
+def rivalBefore (y x : Row) : Bool := rivalOf I false y x || rivalOf I true y x
 
 /-- Rows absent by their own generation. In `D`, absent and removed rows
 alike are "out". -/
@@ -118,40 +97,12 @@ def start : Row → Bool := fun x => !I.present x
 /-- §8's step 1: the other rules until none fires. -/
 def pass1 : Row → Bool := close I.rows (fires I) (start I)
 
-/-- §8's steps 2 and 3: unique values judged among `pass1`'s survivors, then
-the other rules again. The result: every absent or removed row. -/
+/-- §8's steps 2 and 3: unique values and keys in two audiences judged among
+`pass1`'s survivors, then the other rules again. The result: every absent or
+removed row. -/
 def removal : Row → Bool := close I.rows (fires I) (uniqueLosers I.rows (rivalBefore I) (pass1 I))
 
-/-! ### Monotonicity -/
-
-theorem sharedGiven_anti {D D' : Row → Bool} (h : ∀ y, D y = true → D' y = true) {y : Row}
-    (hs : sharedGiven I D' y = true) : sharedGiven I D y = true := by
-  unfold sharedGiven at *
-  cases ha : I.audienceFrom y with
-  | none => rw [ha] at hs; exact hs
-  | some a =>
-    rw [ha] at hs
-    simp only [Bool.and_eq_true, Bool.not_eq_true'] at hs ⊢
-    refine ⟨hs.1, ?_⟩
-    cases hD : D a
-    · rfl
-    · have := h a hD; rw [hs.2] at this; cases this
-
-theorem keeps_anti {D D' : Row → Bool} (h : ∀ y, D y = true → D' y = true) {y x : Row}
-    (hk : keeps I D' y x = true) : keeps I D y x = true := by
-  unfold keeps at *
-  cases hr : I.keepRef y with
-  | none => rw [hr] at hk; exact hk
-  | some r =>
-    rw [hr] at hk
-    simp only [Bool.and_eq_true, Bool.not_eq_true'] at hk ⊢
-    obtain ⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩ := hk
-    refine ⟨⟨⟨⟨h1, h2⟩, h3⟩, ?_⟩, sharedGiven_anti I h h5⟩
-    cases hD : D y
-    · rfl
-    · have := h y hD; rw [h4] at this; cases this
-
-/-- **Every rule but the unique one keeps firing when more rows are
+/-- **Every rule but the unique ones keeps firing when more rows are
 removed.** -/
 theorem fires_monotone : MonotoneRules (FiresP (fires I)) := by
   intro D D' x h hf
@@ -164,13 +115,7 @@ theorem fires_monotone : MonotoneRules (FiresP (fires I)) := by
     simp only [List.any_eq_true, Bool.or_eq_true] at h1 ⊢
     obtain ⟨r, hr, hg⟩ := h1
     exact ⟨r, hr, hg.elim Or.inl (fun hd => Or.inr (h _ hd))⟩
-  · refine Or.inr ?_
-    unfold ancestorFires at *
-    simp only [Bool.and_eq_true, Bool.not_eq_true', List.any_eq_false] at h1 ⊢
-    refine ⟨h1.1, fun y hy hk => ?_⟩
-    exact h1.2 y hy (by simpa using keeps_anti I h (by simpa using hk))
-
-/-! ### The result -/
+  · exact Or.inr h1
 
 theorem removal_stratified :
     Stratified I.rows (FiresP (fires I)) (rivalBefore I) (start I) (removal I) :=
@@ -185,18 +130,24 @@ theorem any_order_removal {D : Row → Bool}
 inductive Rule where
   | foreignKey
   | check
+  | deletedCircle
+  | otherAudience
   | unique
-  | ancestor
   deriving DecidableEq, Repr
 
+/-- Lost in step 2 to a claim of kind `other`. -/
+def lostIn2 (other : Bool) (x : Row) : Bool :=
+  !pass1 I x && I.rows.any (fun y => rivalOf I other y x && !pass1 I y)
+
 /-- The rules for a removed row: every rule that holds for it once the rules
-have run, and `unique` if it lost a unique value in step 2. -/
+have run, and a unique rule from the step that judged it. -/
 def rulesOf (x : Row) : List Rule :=
   let D := removal I
   (if fkFires I D x then [Rule.foreignKey] else []) ++
   (if I.checkFails x then [Rule.check] else []) ++
-  (if !pass1 I x && I.rows.any (fun y => rivalBefore I y x && !pass1 I y) then [Rule.unique] else []) ++
-  (if ancestorFires I D x then [Rule.ancestor] else [])
+  (if I.inDeletedCircle x then [Rule.deletedCircle] else []) ++
+  (if lostIn2 I true x then [Rule.otherAudience] else []) ++
+  (if lostIn2 I false x then [Rule.unique] else [])
 
 /-- What the app sees.
 * `shown`: in the app's table;
@@ -234,8 +185,22 @@ theorem removed_has_rule {x : Row} (h : (view I).removed x = true) : (view I).ru
       rcases hf' with (a | a) | a <;> simp [a]
     · have hr : (I.rows.any fun y => rivalBefore I y x && !pass1 I y) = true := by
         simpa [uniqueLosers, h1] using hu
-      unfold rulesOf
-      simp [h1, hr]
+      have h1' : pass1 I x = false := by simpa using h1
+      simp only [List.any_eq_true, Bool.and_eq_true, Bool.not_eq_true', rivalBefore,
+        Bool.or_eq_true] at hr
+      obtain ⟨y, hy, hk | hk, hpy⟩ := hr
+      · have : lostIn2 I false x = true := by
+          simp only [lostIn2, h1', Bool.not_false, Bool.true_and, List.any_eq_true,
+            Bool.and_eq_true, Bool.not_eq_true']
+          exact ⟨y, hy, hk, hpy⟩
+        unfold rulesOf
+        simp [this]
+      · have : lostIn2 I true x = true := by
+          simp only [lostIn2, h1', Bool.not_false, Bool.true_and, List.any_eq_true,
+            Bool.and_eq_true, Bool.not_eq_true']
+          exact ⟨y, hy, hk, hpy⟩
+        unfold rulesOf
+        simp [this]
   · have hf0 := star_fires (fires_monotone I) (close_star I.rows (fires I) _) x hx
       (by simpa using hu)
     have hf : fires I (removal I) x = true := hf0
@@ -307,11 +272,8 @@ def I : Inputs Nat Nat where
   present x := x != 0
   refs x := if x = 1 then [⟨0, false⟩] else []
   checkFails _ := false
-  isAncestor _ := false
-  keepRef _ := none
-  sharedBase _ := true
-  audienceFrom _ := none
-  claims x := if x = 1 then [⟨0, 7, 10⟩] else if x = 2 then [⟨0, 7, 11⟩] else []
+  inDeletedCircle _ := false
+  claims x := if x = 1 then [⟨0, 7, 10, false⟩] else if x = 2 then [⟨0, 7, 11, false⟩] else []
   rank x := x
 
 /-- The unique rule as one more rule: a row is removed while a present row

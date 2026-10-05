@@ -15,15 +15,14 @@ the rest as applied (§14.4).
   changes to that row, so devices that read different audiences agree on
   every row both read.
 * `restrict`, `removal_local`: removal agrees on a set of rows both devices
-  have, closed under parents, unique rivals, and for ancestors their keepers.
+  have, closed under parents and rivals.
 * `rivals_closed`: when every unique claim includes the audience, unique
   rivals share an audience (§14.1).
-* `fingerprint_local`: without the ancestor rule and the rule for a key in
-  two audiences, removal agrees on every audience both devices read.
-* `Moved.agree`: Ana moves note 1 into her circle while Ben re-adds it in the
-  store; devices in and out of the circle agree on the store's note 1.
-* `AncestorAcross.differs`: a store ancestor kept only by a circle's row is
-  shown on the circle members' devices and removed on the others.
+* `fingerprint_local`: without the rule for a key in two audiences, removal
+  agrees on every audience both devices read (§19.1).
+* `Moved.agree`, `Moved.store_wins`: Ana moves note 1 into her circle while
+  Ben re-adds it in the store; devices in and out of the circle agree on the
+  store's note 1, which wins over the circle's.
 -/
 
 namespace CovenMerge
@@ -133,9 +132,6 @@ structure Closure (G : Inputs Row K) (visA visB R : Row → Bool) : Prop where
   visible : ∀ x, R x = true → visA x = true ∧ visB x = true
   parents : ∀ x, R x = true → ∀ r ∈ G.refs x, R r.parent = true
   rivals : ∀ x, R x = true → ∀ y ∈ G.rows, rivalBefore G y x = true → R y = true
-  keepers : ∀ x, R x = true → G.isAncestor x = true → ∀ y ∈ G.rows, ∀ r,
-    G.keepRef y = some r → r.parent = x →
-      R y = true ∧ ∀ a, G.audienceFrom y = some a → R a = true
 
 theorem present_restrict {G : Inputs Row K} {vis : Row → Bool} {x : Row} (h : vis x = true) :
     (restrict G vis).present x = G.present x := by simp [restrict, h]
@@ -149,44 +145,8 @@ theorem fires_restrict_eq {G : Inputs Row K} {visA visB R : Row → Bool}
     apply any_congr_mem
     intro r hr
     rw [hD _ (hc.parents x hx r hr)]
-  have hanc : ancestorFires (restrict G visA) D x = ancestorFires (restrict G visB) D' x := by
-    unfold ancestorFires
-    show (G.isAncestor x && _) = (G.isAncestor x && _)
-    cases hax : G.isAncestor x
-    · rfl
-    · simp only [Bool.true_and]
-      congr 1
-      simp only [restrict, List.any_filter]
-      apply any_congr_mem
-      intro y hy
-      unfold keeps sharedGiven
-      show (visA y && match G.keepRef y with
-        | some r => decide (r.parent = x) && !r.stale && (visA y && G.present y) && !D y &&
-            (match G.audienceFrom y with
-              | none => G.sharedBase y
-              | some a => (visA a && G.present a) && !D a)
-        | none => false) = (visB y && match G.keepRef y with
-        | some r => decide (r.parent = x) && !r.stale && (visB y && G.present y) && !D' y &&
-            (match G.audienceFrom y with
-              | none => G.sharedBase y
-              | some a => (visB a && G.present a) && !D' a)
-        | none => false)
-      cases hk : G.keepRef y with
-      | none => simp
-      | some r =>
-        simp only
-        by_cases hpx : r.parent = x
-        · obtain ⟨hyR, haR⟩ := hc.keepers x hx hax y hy r hk hpx
-          have hv := hc.visible y hyR
-          rw [hv.1, hv.2, hD y hyR]
-          cases ha : G.audienceFrom y with
-          | none => rfl
-          | some a =>
-            have hva := hc.visible a (haR a ha)
-            simp only [hva.1, hva.2, hD a (haR a ha)]
-        · simp [hpx]
   unfold fires
-  rw [hfk, hanc]
+  rw [hfk]
   rfl
 
 theorem rivals_restrict_eq {G : Inputs Row K} {visA visB R : Row → Bool}
@@ -207,7 +167,7 @@ theorem rivals_restrict_eq {G : Inputs Row K} {visA visB R : Row → Bool}
 
 /-- **Removal is local.** Two devices that have different rows of the same
 merged state end with the same removals on any set of rows both have that is
-closed under parents, unique rivals, and for ancestors, their keepers. -/
+closed under parents and rivals. -/
 theorem removal_local {G : Inputs Row K} {visA visB R : Row → Bool}
     (hc : Closure G visA visB R) :
     ∀ x, R x = true → removal (restrict G visA) x = removal (restrict G visB) x := by
@@ -231,32 +191,50 @@ theorem removal_local {G : Inputs Row K} {visA visB R : Row → Bool}
 /-- When every unique claim includes the claiming row's audience, as §14.1
 requires, a row's unique rivals share its audience. -/
 theorem rivals_closed {A V : Type} [DecidableEq A] [DecidableEq V] (G : Inputs Row (A × V))
-    (aud : Row → A) (hkey : ∀ x, ∀ c ∈ G.claims x, c.key.1 = aud x) {x y : Row}
-    (h : rivalBefore G y x = true) : aud y = aud x := by
-  unfold rivalBefore at h
+    (aud : Row → A) (hkey : ∀ x, ∀ c ∈ G.claims x, c.other = false → c.key.1 = aud x) {x y : Row}
+    (h : rivalOf G false y x = true) : aud y = aud x := by
+  unfold rivalOf at h
   simp only [Bool.and_eq_true, List.any_eq_true, decide_eq_true_eq] at h
-  obtain ⟨_, c, hc, c', hc', ⟨⟨_, hk⟩, _⟩⟩ := h
-  rw [← hkey y c' hc', ← hkey x c hc, hk]
+  obtain ⟨_, c, hc, hco, c', hc', ⟨⟨⟨hco', _⟩, hk⟩, _⟩⟩ := h
+  rw [← hkey y c' hc' hco', ← hkey x c hc hco, hk]
 
-/-- The inputs a fingerprint uses: the ancestor rule and the claims of keys
-present in two audiences left out, the two things devices that read
-different circles can differ on (§14.1, §14.2, §19.1). -/
-def forFingerprint (G : Inputs Row K) (twoAudience : Claim K → Bool) : Inputs Row K :=
-  { G with isAncestor := fun _ => false, claims := fun x => (G.claims x).filter (fun c => !twoAudience c) }
+/-- The inputs a fingerprint uses: the claims of keys present in two
+audiences left out, since which row shows for such a key depends on which
+circles a device reads (§14.2, §19.1). -/
+def forFingerprint (G : Inputs Row K) : Inputs Row K :=
+  { G with claims := fun x => (G.claims x).filter (fun c => !c.other) }
+
+/-- Without the claims of keys in two audiences, a rival is a unique rival. -/
+theorem rivalBefore_forFingerprint {G : Inputs Row K} {x y : Row} :
+    rivalBefore (forFingerprint G) y x = rivalOf G false y x := by
+  have h : rivalOf (forFingerprint G) true y x = false := by
+    unfold rivalOf
+    simp only [forFingerprint, Bool.and_eq_false_iff, List.any_eq_false, List.mem_filter]
+    right
+    intro c ⟨_, hc⟩ h
+    simp only [Bool.not_eq_true'] at hc
+    simp [hc] at h
+  have h2 : rivalOf (forFingerprint G) false y x = rivalOf G false y x := by
+    have nb : ∀ (b t : Bool), (!b && (decide (b = false) && t)) = (decide (b = false) && t) := by
+      intro b t; cases b <;> rfl
+    unfold rivalOf
+    simp only [forFingerprint, List.any_filter, Bool.and_assoc, nb]
+    rfl
+  unfold rivalBefore
+  rw [h, h2, Bool.or_false]
 
 /-- **Fingerprints agree.** Two devices end with the same removals, computed
 for the fingerprint, on any set of rows both have that is closed under
 parents and unique rivals: every row of an audience both read, by §14.5 and
 `rivals_closed`. -/
-theorem fingerprint_local {G : Inputs Row K} {twoAudience : Claim K → Bool}
-    {visA visB R : Row → Bool}
+theorem fingerprint_local {G : Inputs Row K} {visA visB R : Row → Bool}
     (hvis : ∀ x, R x = true → visA x = true ∧ visB x = true)
     (hpar : ∀ x, R x = true → ∀ r ∈ G.refs x, R r.parent = true)
     (hriv : ∀ x, R x = true → ∀ y ∈ G.rows,
-      rivalBefore (forFingerprint G twoAudience) y x = true → R y = true) :
-    ∀ x, R x = true → removal (restrict (forFingerprint G twoAudience) visA) x =
-      removal (restrict (forFingerprint G twoAudience) visB) x :=
-  removal_local ⟨hvis, hpar, hriv, fun _ _ h => by simp [forFingerprint] at h⟩
+      rivalBefore (forFingerprint G) y x = true → R y = true) :
+    ∀ x, R x = true → removal (restrict (forFingerprint G) visA) x =
+      removal (restrict (forFingerprint G) visB) x :=
+  removal_local ⟨hvis, hpar, hriv⟩
 
 end
 
@@ -306,68 +284,13 @@ def carolInputs : Inputs Nat Nat where
   present _ := true
   refs _ := []
   checkFails _ := false
-  isAncestor _ := false
-  keepRef _ := none
-  sharedBase _ := true
-  audienceFrom _ := none
-  claims r := if r = 1 then [⟨0, 1, 0⟩] else [⟨0, 1, 20⟩]
+  inDeletedCircle _ := false
+  claims r := if r = 1 then [⟨0, 1, 0, true⟩] else [⟨0, 1, 20, true⟩]
   rank r := r
 
 theorem store_wins : (view carolInputs).shown 1 = true ∧ (view carolInputs).removed 2 = true ∧
-    (view carolInputs).rules 2 = [Rule.unique] := by decide
+    (view carolInputs).rules 2 = [Rule.otherAudience] := by decide
 
 end Moved
-
-/-! ## A store ancestor kept only by a circle's row
-
-Label 0 is in an ancestor table. Todo 1 is in Ana's circle and wears it; it is
-the label's only keeper. Image 2 is the label's cover, in an asset table: a
-store row whose audience comes from the label, and which keeps nothing. Ana's
-device reads the circle; Dan's doesn't. -/
-
-namespace AncestorAcross
-
-def G : Inputs Nat Nat where
-  rows := [0, 1, 2]
-  present _ := true
-  refs x := if x = 1 ∨ x = 2 then [⟨0, false⟩] else []
-  checkFails _ := false
-  isAncestor x := x = 0
-  keepRef x := if x = 1 then some ⟨0, false⟩ else none
-  sharedBase _ := true
-  audienceFrom x := if x = 2 then some 0 else none
-  claims _ := []
-  rank x := x
-
-def anaSees (_ : Nat) : Bool := true
-def danSees (x : Nat) : Bool := x ≠ 1
-
-def ana : Inputs Nat Nat := restrict G anaSees
-def dan : Inputs Nat Nat := restrict G danSees
-
-/-- Ana's device shows the label and its cover; Dan's removes both (§14.1). -/
-theorem differs : (view ana).shown 0 = true ∧ (view ana).shown 2 = true ∧
-    (view dan).removed 0 = true ∧ (view dan).removed 2 = true := by decide
-
-/-- Without the ancestor rule, both devices agree on the label and its
-cover. -/
-theorem fingerprint_agrees :
-    removal (restrict (forFingerprint G (fun _ => false)) anaSees) 0 =
-      removal (restrict (forFingerprint G (fun _ => false)) danSees) 0 ∧
-    removal (restrict (forFingerprint G (fun _ => false)) anaSees) 2 =
-      removal (restrict (forFingerprint G (fun _ => false)) danSees) 2 :=
-  let R : Nat → Bool := fun x => x ≠ 1
-  have h := fingerprint_local (G := G) (twoAudience := fun _ => false) (visA := anaSees)
-    (visB := danSees) (R := R)
-    (fun x hx => ⟨rfl, hx⟩)
-    (fun x _ r hr => by
-      simp only [G] at hr
-      split at hr
-      · simp only [List.mem_singleton] at hr; subst hr; rfl
-      · simp at hr)
-    (fun x _ y _ h => by revert h; simp only [rivalBefore, forFingerprint, G]; simp)
-  ⟨h 0 rfl, h 2 rfl⟩
-
-end AncestorAcross
 
 end CovenMerge

@@ -10,16 +10,16 @@
 
 ### B1 The claim
 
-- Two devices that read the same audiences and applied the same writes, each
-  in an order that respects causality, hold the same database:
+- Two devices that read the same audiences and applied the same writes and
+  store log entries, each in an order that respects causality, hold the same
+  database:
   - the same `coven_rows` and `coven_cells`;
   - the same rows in the app's tables, with the same values;
   - the same `coven_lost` rows, for lost values and removed rows alike.
 - This holds whatever order each device ran the removal rules in.
-- Two devices that read different audiences agree on every row both read,
-  except what depends on rows only one of them reads: whether an ancestor is
-  shown, which row shows for a key present in two audiences, and the rows
-  taken out with those ([B9](#b9-audiences)).
+- Two devices that read different circles agree on every row both read,
+  except which row shows for a key present in two audiences, and the rows
+  taken out with it ([B9](#b9-audiences)).
 - `coven_writes` holds the same writes on both, under row ids of each
   device's own ([§8.1](coven-from-scratch.md#81-example)).
 
@@ -45,8 +45,8 @@
 - *Replacer* of a value: a write that sets the same cell of the same
   incarnation with a larger timestamp, or deletes that incarnation.
 - *Merged state*: each row's generation, the write `coven_rows` names for
-  each generation, each cell's value and the write that set it, and the lost
-  values ([§8](coven-from-scratch.md#8-merge)).
+  each generation, each cell's winning write and value, and the lost values
+  ([§8](coven-from-scratch.md#8-merge)).
 - *Removed row*: a row present in the merged state that a removal rule takes
   out of the app's table.
 
@@ -71,7 +71,7 @@
   - each row's current generation;
   - per generation, the write `coven_rows` names: of the writes that moved
     the row there, the one with the smallest timestamp;
-  - per cell, the write that set its value;
+  - per cell, the write whose value won;
   - per value, its `coven_lost` row: the incarnation it was set in, and the
     write recorded as replacing it.
 - In Lean: `Writes`, `Valid`, `St`, in `Model.lean`.
@@ -127,8 +127,8 @@ at.
   - a delete with `g = G` empties the row's cells;
   - an insert with `g = G` starts a new incarnation with its values;
   - an update at `G`, or an insert at `G - 1` concurrent with the one that
-    started the current incarnation, competes per cell: the larger timestamp
-    stays ([§8.2](coven-from-scratch.md#82-concurrent-writes-to-one-row), [§8.3](coven-from-scratch.md#83-deletes));
+    started the current incarnation, competes per cell with the cell's
+    winning write: the larger timestamp stays ([§8.2](coven-from-scratch.md#82-concurrent-writes-to-one-row), [§8.3](coven-from-scratch.md#83-deletes));
   - a change made at an older incarnation changes no cell.
 - **`coven_lost`**, for each value `a` of each cell of `r`:
   - `w`'s own value:
@@ -189,47 +189,54 @@ at.
 
 ### B7 The removal rules
 
-- The removal rules read only the merged state, so what they read is a
-  function of the set of writes:
+- The removal rules read the merged state and the store log, never which
+  rows are removed:
   - which rows are present: an odd generation;
   - each row's references: the parent each points at, and whether it is
     *stale*: the parent's generation it carries has been deleted since
     ([§8.4](coven-from-scratch.md#84-foreign-keys));
   - whether the row's merged values fail a CHECK ([§8.6](coven-from-scratch.md#86-check-constraints));
-  - which rows are ancestors, and through which reference a row keeps one
-    ([§14.1](coven-from-scratch.md#141-roots-descendants-and-ancestors));
-  - which rows are shared;
+  - whether the row is in a circle the store log has deleted ([§14.7](coven-from-scratch.md#147-deleting-a-circle));
   - each row's unique claims, each with a stamp: the timestamp of the latest
-    write that set any of the constraint's columns in it ([§8.5](coven-from-scratch.md#85-keys-and-uniqueness)).
-- A reference under set null or set default whose parent's generation was
-  deleted holds null or the default in the merged state itself ([§8.4](coven-from-scratch.md#84-foreign-keys)). It is
-  a value like any other, which CHECK and unique constraints see, not a
-  reference the rules follow.
+    write that set any of the constraint's columns in it ([§8.5](coven-from-scratch.md#85-keys-and-uniqueness));
+  - each key present in two audiences on the device ([§14.2](coven-from-scratch.md#142-moving-rows)).
+- **Set null and set default** for a child whose parent's generation was
+  deleted are part of the merged state, not the rules ([§8.4](coven-from-scratch.md#84-foreign-keys)):
+  - under set null, the cell holds null, which CHECK and unique constraints
+    see like any value;
+  - under set default, it points at whichever generation of the default
+    parent is current, and is never stale;
+  - later writes to the cell compete with the stamp of the write whose
+    reference won, as with any cell.
   - E.g. at 16:00 Ana deletes note 43 while Ben, offline, adds link 6
     pointing at it, under set null. Every device stores link 6 with
-    `note_id` null, whether Ben's write or Ana's arrived first. Lean:
-    `example_8_4`.
-  - Where SQLite would refuse that value, such as on a `NOT NULL` column,
-    the reference stays and counts as stale.
-- The rules other than the unique one take a present row out when:
+    `note_id` null, whichever write arrived first. Lean: `example_8_4`.
+  - E.g. Ben adds link 6 at 16:00 pointing at note 43; Dan, having read
+    Ben's write, points it at note 44 at 16:10; Ana, having read neither,
+    deletes note 43 at 16:20. A device that gets Ana's delete and Ben's
+    insert first reads link 6 as null, with the cell naming Ben's write;
+    Dan's write then wins over Ben's, so every device ends with link 6 on
+    note 44. Lean: `example_8_4_later`.
+  - Where SQLite would refuse the null or the default, such as on a
+    `NOT NULL` column, the reference stays and counts as stale.
+- The rules other than the unique ones take a present row out when:
   - **foreign keys**: one of its references is stale, or its parent is
     absent or taken out;
   - **CHECK**: its merged values fail;
-  - **ancestors**: it is an ancestor and no row keeps it: a present row,
-    not taken out, shared, whose keeping reference points at it. A row whose
-    audience comes from an ancestor is shared while that ancestor is present
-    and not taken out.
+  - **deleted circles**: it is in a circle the store log has deleted.
 - **Unique values**: a row loses when a row still present claims the same
   value of the same constraint with a smaller stamp, or an equal stamp and a
   smaller primary key.
-  - A key present in two audiences on one device is a claim too, the store's
-    first ([B9](#b9-audiences)).
+- **Keys in two audiences**: of two present rows with one key, the store's
+  wins over a circle's, and of two circles' rows, the one whose current
+  generation started with the smaller timestamp.
 - [§8](coven-from-scratch.md#8-merge)'s three steps:
-  1. apply the rules other than the unique one until none fires;
-  2. judge unique values among the rows still present;
+  1. apply the rules other than the unique ones until none fires;
+  2. judge unique values and keys in two audiences among the rows still
+     present;
   3. apply the other rules again until none fires.
 - A removed row's `coven_lost` row names every rule that holds for it once
-  the steps end, and the unique rule if it lost in step 2.
+  the steps end, and the unique or other-audience rule from step 2.
 - In Lean: `Inputs`, `fires`, `rivalBefore`, `removal`, `view`, in
   `Removal.lean`.
 
@@ -237,13 +244,10 @@ at.
 
 - **Monotone**: a rule is monotone when it keeps firing for a row as more
   rows are removed.
-- Every rule other than the unique one is monotone:
+- Every rule other than the unique ones is monotone:
   - a stale reference stays stale, and a parent taken out stays out when
     more rows are removed;
-  - a CHECK result doesn't depend on removals;
-  - a row stops keeping an ancestor only when it, or the ancestor its own
-    audience comes from, is taken out; so an ancestor with no keeper still
-    has none when more rows are removed.
+  - CHECK and deleted-circle results don't depend on removals.
   - Lean: `fires_monotone`.
 - For monotone rules over a finite set of rows:
   - **termination**: each step removes a row, so applying rules stops. Lean:
@@ -275,8 +279,8 @@ at.
 - **Any order**: coven's run of the rules is one of the orders the three
   steps allow, so every order gives the same removed rows. Lean:
   `removal_stratified`, `any_order_removal`.
-- **When a unique loser comes back**: when its winner is deleted, or taken
-  out in step 1. A winner taken out in step 3 doesn't bring it back.
+- **A unique loser comes back** only when the winner is deleted, or taken
+  out before unique values are judged.
   - E.g. notes are unique by title, and a sub-note points at its parent
     under cascade. Note 1 is "Ideas"; at 10:00 Ana adds note 2, "Plan", as a
     sub-note of note 1; at 11:00 Ben, not having seen it, renames note 1 to
@@ -290,28 +294,33 @@ at.
     - Step 2: note 1 loses "Plan" to note 2, and note 3 loses "Ideas" to note
       4.
     - Step 3: note 2 goes with note 3.
-    - Note 1 stays out: it lost in step 2, when note 2 was present. Lean:
-      `example_8_5_step3`.
+    - Note 1 stays out: note 2 was present when unique values were judged.
+      Lean: `example_8_5_step3`.
 - **Every removed row names a rule**: a row removed by a run of monotone
-  rules still meets a rule once the run ends. Lean: `star_fires`,
-  `removed_has_rule`.
+  rules still meets a rule once the run ends, and a step 2 loser counts its
+  rule from that step. Lean: `star_fires`, `removed_has_rule`.
   - E.g. todos need `start <= end`, and todo 7 is in list 3. Ana deletes
     list 3 while Ben moves todo 7's start past its end. Todo 7's `coven_lost`
     row names the foreign key and the CHECK, on every device, whichever rule
     a device ran first. Lean: `example_8`.
 - **End to end**: the merged state converges ([B6](#b6-proof-for-the-merged-state)), and the rules, and
   therefore the app's tables and the removed rows' `coven_lost` rows, are
-  functions of it. Lean: `device_converges`, `rule_order_converges`.
-- E.g. Lean runs the writes of [§8.4](coven-from-scratch.md#84-foreign-keys), [§8.5](coven-from-scratch.md#85-keys-and-uniqueness) and [§8.6](coven-from-scratch.md#86-check-constraints), with the rules reading
-  the merged state it computes, in both arrival orders:
+  functions of it and the store log. Lean: `device_converges`,
+  `rule_order_converges`.
+- E.g. Lean runs the writes of [§8.4](coven-from-scratch.md#84-foreign-keys), [§8.5](coven-from-scratch.md#85-keys-and-uniqueness), [§8.6](coven-from-scratch.md#86-check-constraints) and [§14.7](coven-from-scratch.md#147-deleting-a-circle), with the
+  rules reading the merged state it computes, in more than one arrival
+  order:
   - [§8.4](coven-from-scratch.md#84-foreign-keys): Carol's tablet applies Ana's delete of note 43, then Ben's tag 9
     on it: tag 9 is taken out, and its `coven_lost` row names the foreign
     key. Ben's move of tag 9 to note 44 arrives: tag 9 is back. Ben's phone,
     which gets Ana's delete last, never takes it out. Lean: `example_8_4`.
+  - [§8.4](coven-from-scratch.md#84-foreign-keys): notes point at folders with set default "Inbox". Ana deletes "Work"
+    while Ben puts note 50 in it; Carol deletes "Inbox": note 50 is taken
+    out, naming the foreign key. Carol re-adds "Inbox": note 50 is back.
+    Lean: `example_8_4_default`.
   - [§8.5](coven-from-scratch.md#85-keys-and-uniqueness): Ana renames the tag "urgent" to "important" while Ben tags note 44
     "urgent". Note 42 ends tagged "important", and Ben's `(44, "urgent")` is
-    taken out, naming the foreign key, in either order. Lean:
-    `example_8_5_key`.
+    taken out, naming the foreign key. Lean: `example_8_5_key`.
   - [§8.5](coven-from-scratch.md#85-keys-and-uniqueness): notes are unique by folder and title. Ana adds note 1, "Plan" in
     Work, at 10:00; Ben renames note 2 "Plan" at 11:00; Carol moves note 2 to
     Work at 12:00. Note 2's claim dates from 12:00, so note 1 keeps the
@@ -319,6 +328,10 @@ at.
   - [§8.6](coven-from-scratch.md#86-check-constraints): Ana sets start 10 while Ben sets end 8: the row is taken out,
     naming the CHECK. Ben's later end of 20 brings it back. Lean:
     `example_8_6`.
+  - [§14.7](coven-from-scratch.md#147-deleting-a-circle): Ben deletes the circle "Gifts" and its notes 7 and 8, while Ana
+    adds note 9 to it. Notes 7 and 8 are deleted, and note 9 is taken out
+    with its title in `coven_lost`, naming the deleted circle. Lean:
+    `example_14_7`.
 
 ### B9 Audiences
 
@@ -342,44 +355,29 @@ at.
   to that row, so devices agree on the merged state of every row both read.
   Lean: `fold_atRow`, `audiences_agree`.
 - **Removals on devices with different rows**: two devices take out the same
-  rows among any set of rows both have that holds, for each of its rows:
-  - every parent its references point at;
-  - every row whose unique claim rivals its own;
-  - if it is an ancestor, every row that keeps it, and the ancestor those
-    rows take their audience from.
-  - Lean: `removal_local`.
+  rows among any set of rows both have that holds, for each of its rows,
+  every parent its references point at and every row whose claim rivals its
+  own. Lean: `removal_local`.
 - [§14.5](coven-from-scratch.md#145-references) gives the parents: a row points only at rows every reader of it can
   read.
-- [§14.1](coven-from-scratch.md#141-roots-descendants-and-ancestors) gives the rivals: a unique constraint on a root table includes the
-  audience column, so rivals share an audience; constraints that could span
-  audiences are refused. Lean: `rivals_closed`.
-- Two rules read rows outside that set, so devices that read different
-  circles can differ on them:
-  - **ancestors**: a device shows an ancestor only while a present shared row
-    that device can read points at it ([§14](coven-from-scratch.md#14-audiences)).
-    - E.g. a label worn only by a todo in Ana's circle is a store row. Ana's
-      device shows it; Dan's, outside the circle, takes it out, and with it
-      the label's cover image, a store row in an asset table whose audience
-      comes from the label. Lean: `AncestorAcross.differs`.
-  - **a key present in two audiences**: the store's row wins over a
-    circle's; of two circles' rows, the one whose insert has the smaller
-    timestamp wins; the other is taken out like a unique loser, in step 2
-    ([§14.2](coven-from-scratch.md#142-moving-rows)).
-    - E.g. in the move above, Carol's device has note 1 in the store and in
-      the circle. The store's shows; the circle's is taken out, naming the
-      unique rule. Dan's device has only the store's, which shows. Lean:
-      `Moved.store_wins`.
-    - The store's row never loses, so devices agree on every store row.
-    - A device in two circles can show a different circle row for one key
-      than a device in only one of them.
-- **Fingerprints** ([§19.1](coven-from-scratch.md#191-noticing)): with the ancestor rule and the rule for a key in
-  two audiences left out, two devices take out the same rows in every
-  audience both read. So a fingerprint that leaves out what those two rules
-  decide, including the rows taken out with the rows they take out, is the
-  same on every device that applied the same writes. Lean:
-  `fingerprint_local`, `AncestorAcross.fingerprint_agrees`.
-  - E.g. without the ancestor rule, Ana's device and Dan's both show the
-    label and its cover image.
+- [§14.1](coven-from-scratch.md#141-roots-and-descendants) gives the unique rivals: a unique constraint on a root table
+  includes the audience column, so rivals share an audience; constraints
+  that could span audiences are refused. Lean: `rivals_closed`.
+- Every member's devices read the store log, so they agree on which circles
+  are deleted.
+- **Keys in two audiences** are the one rule that reads rows another device
+  may not have:
+  - E.g. in the move above, Carol's device has note 1 in the store and in
+    the circle. The store's shows; the circle's is taken out, naming the
+    other-audience rule. Dan's device has only the store's, which shows.
+    Lean: `Moved.store_wins`.
+  - The store's row never loses, so devices agree on every store row.
+  - A device in two circles can show a different circle row for one key
+    than a device in only one of them, since each reads different rows.
+- **Fingerprints** ([§19.1](coven-from-scratch.md#191-noticing)): computed as if the rule for keys in two audiences
+  didn't exist, removal agrees on every row of every audience both devices
+  read, so the fingerprint is the same on every device that applied the same
+  writes. Lean: `rivalBefore_forFingerprint`, `fingerprint_local`.
 
 ### B10 The spec's examples, checked
 
@@ -391,16 +389,19 @@ at.
 - [§8.3](coven-from-scratch.md#83-deletes): Ben's edit is replaced by Ana's write 7 in every order. Lean:
   `example_8_3`.
 - [§8.4](coven-from-scratch.md#84-foreign-keys): tag 9 is taken out, then back when Ben's move arrives; link 6 holds
-  null. Lean: `example_8_4`.
+  null, then ends on note 44 once Dan's write arrives; note 50 is taken out
+  while "Inbox" is gone. Lean: `example_8_4`, `example_8_4_later`,
+  `example_8_4_default`.
 - [§8.5](coven-from-scratch.md#85-keys-and-uniqueness): a key change leaves Ben's `(44, "urgent")` taken out; note 2's claim
   dates from 12:00; a loser whose winner leaves in step 3 stays out. Lean:
   `example_8_5_key`, `example_8_5_stamp`, `example_8_5_subnote`,
   `example_8_5_step3`.
 - [§8.6](coven-from-scratch.md#86-check-constraints): the row is taken out, then back when Ben sets end 20. Lean:
   `example_8_6`.
-- [§14.2](coven-from-scratch.md#142-moving-rows): a label whose last shared todo leaves stays while Ben's new shared
-  todo wears it, on every device; the store's note 1 wins over the circle's.
-  Lean: `example_14_2`, `Moved.store_wins`.
+- [§14.2](coven-from-scratch.md#142-moving-rows): the store's note 1 wins over the circle's. Lean: `Moved.agree`,
+  `Moved.store_wins`.
+- [§14.7](coven-from-scratch.md#147-deleting-a-circle): note 9, added to a deleted circle, is taken out. Lean:
+  `example_14_7`.
 
 ### B11 What Lean checks, and what is prose
 
@@ -409,9 +410,9 @@ at.
   `CovenMerge/Axioms.lean` prints them.
 - What Lean models abstractly:
   - a write's values: a cell's value is the write that set it;
-  - the removal rules' inputs: any function of the merged state, in the
-    shape of [B7](#b7-the-removal-rules). The examples compute them from the merged state Lean
-    builds.
+  - the removal rules' inputs: any function of the merged state and the
+    store log, in the shape of [B7](#b7-the-removal-rules). The examples compute them from the
+    merged state Lean builds.
 - Argued here only:
   - that coven computes the rules' inputs from the merged state as [B7](#b7-the-removal-rules) says:
     presence from generations, stale references by comparing generations,
@@ -423,5 +424,7 @@ at.
     then uses;
   - local triggers: they converge when they compute a function of the
     current rows, since every change coven makes is ordinary SQL ([§8.7](coven-from-scratch.md#87-triggers));
-  - schema changes ([§17](coven-from-scratch.md#17-schema-changes)), files ([§16](coven-from-scratch.md#16-files)) and resets ([§19.3](coven-from-scratch.md#193-resetting-a-store)), which the model
-    doesn't include.
+  - files: where a file is ([§16.1](coven-from-scratch.md#161-kinds-and-where-files-are)) is an ordinary cell, which the merged state
+    covers; uploading and caching aren't modelled;
+  - schema changes ([§17](coven-from-scratch.md#17-schema-changes)) and resets ([§19.3](coven-from-scratch.md#193-resetting-a-store)), which the model doesn't
+    include.

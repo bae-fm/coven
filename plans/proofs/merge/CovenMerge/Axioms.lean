@@ -30,8 +30,6 @@ open CovenMerge
 #print axioms fingerprint_local
 #print axioms Moved.agree
 #print axioms Moved.store_wins
-#print axioms AncestorAcross.differs
-#print axioms AncestorAcross.fingerprint_agrees
 -- the spec's examples
 #print axioms Title.example_8_1
 #print axioms Title.example_8_2
@@ -43,4 +41,6 @@ open CovenMerge
 #print axioms Comeback.example_8_5_subnote
 #print axioms Comeback.example_8_5_step3
 #print axioms Check.example_8_6
-#print axioms Kept.example_14_2
+#print axioms SetDefault.example_8_4_default
+#print axioms DeletedCircle.example_14_7
+#print axioms SetNull.example_8_4_later

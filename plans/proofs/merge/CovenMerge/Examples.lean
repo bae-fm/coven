@@ -89,10 +89,7 @@ def I : Inputs Nat Nat where
   present x := x = 7
   refs x := if x = 7 then [⟨3, true⟩] else []
   checkFails x := x = 7
-  isAncestor _ := false
-  keepRef _ := none
-  sharedBase _ := true
-  audienceFrom _ := none
+  inDeletedCircle _ := false
   claims _ := []
   rank x := x
 
@@ -143,10 +140,7 @@ def inputs (st : St Nat Nat Nat) : Inputs Nat Nat where
       | none => []
     else []
   checkFails _ := false
-  isAncestor _ := false
-  keepRef _ := none
-  sharedBase _ := true
-  audienceFrom _ := none
+  inDeletedCircle _ := false
   claims _ := []
   rank r := r
 
@@ -198,10 +192,7 @@ def inputs (st : St Nat Nat Nat) : Inputs Nat Nat where
   present r := st.gen r % 2 == 1
   refs r := if r ≥ 20 then [⟨tagOf r, decide (st.gen (tagOf r) ≠ 1)⟩] else []
   checkFails _ := false
-  isAncestor _ := false
-  keepRef _ := none
-  sharedBase _ := true
-  audienceFrom _ := none
+  inDeletedCircle _ := false
   claims _ := []
   rank r := r
 
@@ -246,7 +237,7 @@ def val (w r c : Nat) : Nat :=
 
 def claimOf (st : St Nat Nat Nat) (r : Nat) : List (Claim Nat) :=
   match st.cell r 0, st.cell r 1 with
-  | some a, some b => [⟨0, val a r 0 * 100 + val b r 1, max (M.ts a) (M.ts b)⟩]
+  | some a, some b => [⟨0, val a r 0 * 100 + val b r 1, max (M.ts a) (M.ts b), false⟩]
   | _, _ => []
 
 def inputs (st : St Nat Nat Nat) : Inputs Nat Nat where
@@ -254,10 +245,7 @@ def inputs (st : St Nat Nat Nat) : Inputs Nat Nat where
   present r := st.gen r % 2 == 1
   refs _ := []
   checkFails _ := false
-  isAncestor _ := false
-  keepRef _ := none
-  sharedBase _ := true
-  audienceFrom _ := none
+  inDeletedCircle _ := false
   claims := claimOf st
   rank r := r
 
@@ -284,11 +272,8 @@ def subNote : Inputs Nat Nat where
   present _ := true
   refs x := if x = 2 then [⟨1, false⟩] else []
   checkFails _ := false
-  isAncestor _ := false
-  keepRef _ := none
-  sharedBase _ := true
-  audienceFrom _ := none
-  claims x := if x = 1 then [⟨0, 7, 1100⟩] else [⟨0, 7, 1000⟩]
+  inDeletedCircle _ := false
+  claims x := if x = 1 then [⟨0, 7, 1100, false⟩] else [⟨0, 7, 1000, false⟩]
   rank x := x
 
 /-- Note 1 loses "Plan" and is removed; note 2 goes with it by cascade; note
@@ -306,13 +291,10 @@ def otherLoser : Inputs Nat Nat where
   present _ := true
   refs x := if x = 2 then [⟨3, false⟩] else []
   checkFails _ := false
-  isAncestor _ := false
-  keepRef _ := none
-  sharedBase _ := true
-  audienceFrom _ := none
+  inDeletedCircle _ := false
   claims x :=
-    if x = 1 then [⟨0, 7, 1100⟩] else if x = 2 then [⟨0, 7, 1000⟩]
-    else if x = 3 then [⟨0, 8, 1200⟩] else [⟨0, 8, 900⟩]
+    if x = 1 then [⟨0, 7, 1100, false⟩] else if x = 2 then [⟨0, 7, 1000, false⟩]
+    else if x = 3 then [⟨0, 8, 1200, false⟩] else [⟨0, 8, 900, false⟩]
   rank x := x
 
 theorem example_8_5_step3 :
@@ -352,10 +334,7 @@ def inputs (st : St Nat Nat Nat) : Inputs Nat Nat where
     match st.cell r 0, st.cell r 1 with
     | some a, some b => decide (val b 1 < val a 0)
     | _, _ => false
-  isAncestor _ := false
-  keepRef _ := none
-  sharedBase _ := true
-  audienceFrom _ := none
+  inDeletedCircle _ := false
   claims _ := []
   rank r := r
 
@@ -369,30 +348,124 @@ theorem example_8_6 :
 
 end Check
 
-/-! ## §14.2: an ancestor kept by a new child
+/-! ## §8.4: set default
 
-Label 0 is an ancestor. Todo 1 was its last shared keeper, and Ana moved it
-to her device only; Ben, concurrently, added shared todo 2 wearing the label.
-Dan's device no longer has todo 1; Ana's still has it, on her device only. -/
+Notes point at folders with set default, and the default is "Inbox". Row 1 is
+the folder "Work", row 2 "Inbox", row 50 note 50; cell 0 of note 50 is its
+folder.
 
-namespace Kept
+* write 0: insert "Work" and "Inbox".
+* write 1, Ana, 16:00, had read write 0: delete "Work".
+* write 2, Ben, 16:00, offline, had read write 0: put note 50 in "Work".
+* write 3, Carol, 16:10, had read writes 0 and 1: delete "Inbox".
+* write 4, Carol, 17:00, had read writes 0, 1 and 3: re-add "Inbox". -/
 
-def G (todo1Present : Bool) : Inputs Nat Nat where
-  rows := [0, 1, 2]
-  present x := if x = 1 then todo1Present else true
+namespace SetDefault
+
+def M : Writes Nat Nat Nat where
+  ts w := if w = 0 then 1 else if w = 1 then 1600 else if w = 2 then 1601 else if w = 3 then 1610
+    else 1700
+  past w a := (w = 1 && a = 0) || (w = 2 && a = 0) || (w = 3 && (a = 0 || a = 1)) ||
+    (w = 4 && (a = 0 || a = 1 || a = 3))
+  chg w r :=
+    if w = 0 ∧ (r = 1 ∨ r = 2) then some ⟨.ins, 0, fun _ => false⟩
+    else if w = 1 ∧ r = 1 then some ⟨.del, 1, fun _ => false⟩
+    else if w = 2 ∧ r = 50 then some ⟨.ins, 0, fun c => c = 0⟩
+    else if w = 3 ∧ r = 2 then some ⟨.del, 1, fun _ => false⟩
+    else if w = 4 ∧ r = 2 then some ⟨.ins, 2, fun _ => false⟩
+    else none
+
+/-- Note 50's folder reference: "Work" at generation 1, or, once that
+generation is deleted, the default "Inbox", at whatever generation is
+current, never stale. -/
+def inputs (st : St Nat Nat Nat) : Inputs Nat Nat where
+  rows := [1, 2, 50]
+  present r := st.gen r % 2 == 1
+  refs r :=
+    if r = 50 ∧ st.cell 50 0 = some 2 then
+      (if st.gen 1 = 1 then [⟨1, false⟩] else [⟨2, false⟩])
+    else []
+  checkFails _ := false
+  inDeletedCircle _ := false
+  claims _ := []
+  rank r := r
+
+/-- Once "Inbox" is deleted, note 50 is taken out, naming the foreign key;
+once Carol re-adds "Inbox", note 50 is back, in either arrival order. -/
+theorem example_8_4_default :
+    (device M inputs [0, 1, 2, 3]).view.rules 50 = [Rule.foreignKey] ∧
+    (device M inputs [0, 2, 1, 3]).view.rules 50 = [Rule.foreignKey] ∧
+    (device M inputs [0, 1, 2, 3, 4]).view.shown 50 = true ∧
+    (device M inputs [0, 1, 3, 4, 2]).view.shown 50 = true := by decide
+
+end SetDefault
+
+/-! ## §14.7: a row added to a deleted circle
+
+Ana and Ben share the circle "Gifts", holding notes 7 and 8. Ben deletes it:
+write 31 deletes notes 7 and 8, and the store log records the circle deleted.
+Ana, offline, adds note 9 to it in write 5. -/
+
+namespace DeletedCircle
+
+def M : Writes Nat Nat Nat where
+  ts w := if w = 1 then 1 else if w = 31 then 1600 else 1601
+  past w a := (w = 31 && a = 1) || (w = 5 && a = 1)
+  chg w r :=
+    if w = 1 ∧ (r = 7 ∨ r = 8) then some ⟨.ins, 0, fun c => c = 0⟩
+    else if w = 31 ∧ (r = 7 ∨ r = 8) then some ⟨.del, 1, fun _ => false⟩
+    else if w = 5 ∧ r = 9 then some ⟨.ins, 0, fun c => c = 0⟩
+    else none
+
+/-- The store log has deleted "Gifts", which holds notes 7, 8 and 9. -/
+def inputs (st : St Nat Nat Nat) : Inputs Nat Nat where
+  rows := [7, 8, 9]
+  present r := st.gen r % 2 == 1
   refs _ := []
   checkFails _ := false
-  isAncestor x := x = 0
-  keepRef x := if x = 1 ∨ x = 2 then some ⟨0, false⟩ else none
-  sharedBase x := x ≠ 1
-  audienceFrom _ := none
+  inDeletedCircle r := r = 7 ∨ r = 8 ∨ r = 9
   claims _ := []
-  rank x := x
+  rank r := r
 
-/-- Both devices show the label. -/
-theorem example_14_2 : (view (G false)).shown 0 = true ∧ (view (G true)).shown 0 = true := by
-  decide
+/-- Notes 7 and 8 are deleted; note 9 is taken out, naming the deleted
+circle, with its title in `coven_lost`, in either arrival order. -/
+theorem example_14_7 :
+    (device M inputs [1, 31, 5]).merged.gen 7 = 2 ∧
+    (device M inputs [1, 5, 31]).merged.gen 8 = 2 ∧
+    (device M inputs [1, 31, 5]).removedLost 9 0 = some (5, [Rule.deletedCircle]) ∧
+    (device M inputs [1, 5, 31]).removedLost 9 0 = some (5, [Rule.deletedCircle]) := by decide
 
-end Kept
+end DeletedCircle
+
+/-! ## §8.4: a later write to a set null reference
+
+Links point at notes with set null. Row 6 is link 6, cell 0 its `note_id`;
+row 43 is note 43.
+
+* write 10, Ben, 16:00: add link 6 → note 43.
+* write 11, Dan, 16:10, had read Ben's write: point link 6 at note 44.
+* write 7, Ana, 16:20, had read neither: delete note 43. -/
+
+namespace SetNull
+
+def M : Writes Nat Nat Nat where
+  ts w := if w = 10 then 1600 else if w = 11 then 1610 else 1620
+  past w a := w = 11 && a = 10
+  chg w r :=
+    if w = 10 ∧ r = 6 then some ⟨.ins, 0, fun c => c = 0⟩
+    else if w = 11 ∧ r = 6 then some ⟨.upd, 1, fun c => c = 0⟩
+    else if w = 7 ∧ r = 43 then some ⟨.del, 1, fun _ => false⟩
+    else none
+
+/-- A device that gets Ana's delete and Ben's insert first has the cell
+naming Ben's write, reading null; Dan's write then wins over Ben's. Every
+order ends with the cell naming Dan's write, which points at note 44. -/
+theorem example_8_4_later :
+    ([7, 10].foldl (step M) (St.init : St Nat Nat Nat)).cell 6 0 = some 10 ∧
+    ([7, 10, 11].foldl (step M) (St.init : St Nat Nat Nat)).cell 6 0 = some 11 ∧
+    ([10, 11, 7].foldl (step M) (St.init : St Nat Nat Nat)).cell 6 0 = some 11 ∧
+    ([10, 7, 11].foldl (step M) (St.init : St Nat Nat Nat)).cell 6 0 = some 11 := by decide
+
+end SetNull
 
 end CovenMerge
