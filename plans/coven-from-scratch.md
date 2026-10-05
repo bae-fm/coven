@@ -944,12 +944,13 @@ Carol's tablet:
     the first, so the result depends only on which entries it has.
   - The member list an entry's author had read is the replay of just the
     entries that entry had read.
-- At its place in the replay, an entry whose change is already in place
-  applies and changes nothing.
+- At its place in the replay, an entry applies only if its author's role
+  allowed it, in the member list the author had read.
+- Then, an entry whose change is already in place applies and changes
+  nothing.
   - E.g. Ana and Ben both add Dan: both apply, Dan is added once, and
     neither is reported.
-- Otherwise an entry applies only if:
-  - its author's role allowed it, in the member list the author had read;
+- Otherwise it applies only if:
   - what it needs exists: the member it changes, the device it removes,
     the member a new device belongs to, the circle it changes, the circle
     member it removes;
