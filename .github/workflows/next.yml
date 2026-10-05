@@ -1,0 +1,59 @@
+name: next
+
+# The from-scratch coven in next/: one script runs every check of §21.4, and
+# this runs that same script on every platform.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "next/**"
+      - "plans/proofs/**"
+      - ".github/workflows/next.yml"
+
+concurrency:
+  group: next-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+      # The pinned toolchain and components come from next/rust-toolchain.toml
+      # on the first cargo invocation inside next/.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: next -> target
+          shared-key: next-${{ hashFiles('next/Cargo.lock', 'next/Cargo.toml', 'next/**/Cargo.toml', 'next/rust-toolchain.toml') }}
+      # elan reads the Lean toolchain from plans/proofs/merge/lean-toolchain the
+      # first time lake runs there; the cache keeps that toolchain. The proof
+      # itself is built from scratch every run (next/scripts/check.sh).
+      - name: Restore elan and the Lean toolchain
+        id: elan-cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.elan
+          key: elan-${{ runner.os }}-${{ hashFiles('plans/proofs/merge/lean-toolchain') }}
+      - name: Install elan
+        if: steps.elan-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o elan-init.sh
+          sh elan-init.sh -y --no-modify-path --default-toolchain none
+          rm elan-init.sh
+      - name: Put elan on the path
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            echo "$USERPROFILE\\.elan\\bin" >> "$GITHUB_PATH"
+          else
+            echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          fi
+      - name: next/scripts/check.sh
+        run: next/scripts/check.sh

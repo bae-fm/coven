@@ -1,0 +1,14 @@
+[package]
+name = "owner-construction-check"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+proc-macro2.workspace = true
+syn.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+
+[lints]
+workspace = true
