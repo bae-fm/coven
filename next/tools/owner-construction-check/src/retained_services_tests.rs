@@ -253,3 +253,29 @@ fn closed_clock_key_and_image_tasks_are_not_retained_service_getters() {
         .is_empty()
     );
 }
+
+#[test]
+fn a_retained_service_built_inside_a_macro_call_is_rejected() {
+    const POLICY: Policy = Policy {
+        capability_types: &["Database"],
+        root_owner_types: &["Root"],
+        ..Policy::EMPTY
+    };
+    let violations = constructions(
+        r#"
+        struct Database;
+        struct Child { database: Database }
+        impl Child { fn new(database: Database) -> Self { Self { database } } }
+        struct Root { child: Child }
+        struct Wrong { database: Database }
+        impl Wrong {
+            fn build(&self, database: Database) { drop(vec![Child::new(database)]); }
+        }
+        "#,
+        &POLICY,
+    );
+
+    assert_eq!(violations.len(), 1);
+    assert_eq!(violations[0].owner, "Wrong");
+    assert_eq!(violations[0].service, "Child");
+}

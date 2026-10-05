@@ -196,3 +196,46 @@ fn a_composition_root_builds_the_owner_graph() {
     assert!(check("crates/coven/src/builder.rs").is_empty());
     assert_eq!(check("crates/coven/src/elsewhere.rs").len(), 1);
 }
+
+#[test]
+fn an_owner_built_inside_a_macro_call_is_rejected() {
+    let violations = violations(
+        r#"
+        struct Database;
+        struct Child { database: Database }
+        impl Child { fn new(database: Database) -> Self { Self { database } } }
+        struct Parent { children: Vec<Child> }
+        impl Parent {
+            fn new(database: Database) -> Self { Self { children: vec![Child::new(database)] } }
+        }
+        "#,
+    );
+    assert_eq!(violations.len(), 1);
+    assert_eq!(violations[0].parent, "Parent::new");
+    assert_eq!(violations[0].child, "Child");
+}
+
+#[test]
+fn an_owner_built_inside_a_macro_rules_body_is_rejected() {
+    let violations = violations(
+        r#"
+        struct Database;
+        struct Child { database: Database }
+        impl Child { fn new(database: Database) -> Self { Self { database } } }
+        struct Parent { first: Child, second: Child }
+        impl Parent {
+            fn new(database: Database, other: Database) -> Self {
+                macro_rules! child {
+                    ($database:expr) => { Child::new($database) };
+                    (literal $database:expr) => { Child { database: $database } };
+                }
+                Self { first: child!(database), second: child!(literal other) }
+            }
+        }
+        "#,
+    );
+    assert_eq!(violations.len(), 2);
+    assert!(violations
+        .iter()
+        .all(|violation| violation.child == "Child"));
+}

@@ -188,12 +188,19 @@ pub(crate) fn visibility_crosses_owner(visibility: &syn::Visibility) -> bool {
     }
 }
 
+/// The identifiers of a path's segments.
+pub(crate) fn path_names(path: &syn::Path) -> Vec<String> {
+    path.segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect()
+}
+
 /// A call path that could name a free function: one segment, or segments that
 /// are all modules (`crate`, `self`, `super` or lowercase names).
-pub(crate) fn could_be_free_function_path(segments: &[&syn::PathSegment]) -> bool {
+pub(crate) fn could_be_free_function_path(segments: &[String]) -> bool {
     segments.len() == 1
-        || segments[..segments.len() - 1].iter().all(|segment| {
-            let name = segment.ident.to_string();
+        || segments[..segments.len() - 1].iter().all(|name| {
             matches!(name.as_str(), "crate" | "self" | "super")
                 || name
                     .chars()
@@ -205,14 +212,12 @@ pub(crate) fn could_be_free_function_path(segments: &[&syn::PathSegment]) -> boo
 /// A call path that could name an associated function of a local type:
 /// `Type::function`, or one rooted at `crate`, `self` or `super`. An external
 /// crate's `Store::new` does not match a local `Store`.
-pub(crate) fn could_be_local_associated_function_path(segments: &[&syn::PathSegment]) -> bool {
+pub(crate) fn could_be_local_associated_function_path(segments: &[String]) -> bool {
     segments.len() == 2
-        || segments.first().is_some_and(|segment| {
-            matches!(
-                segment.ident.to_string().as_str(),
-                "crate" | "self" | "super"
-            )
-        })
+        || (segments.len() > 2
+            && segments
+                .first()
+                .is_some_and(|name| matches!(name.as_str(), "crate" | "self" | "super")))
 }
 
 pub(crate) fn is_test_source(path: &str) -> bool {
@@ -270,3 +275,7 @@ pub(crate) fn flatten_use_tree(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "syntax_tests.rs"]
+mod tests;

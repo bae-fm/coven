@@ -12,6 +12,7 @@ mod component_bundles;
 mod conventions;
 mod crate_dependencies;
 mod database_boundary;
+mod macros;
 mod owner_construction;
 mod owner_dependency_boundary;
 mod owner_policy;

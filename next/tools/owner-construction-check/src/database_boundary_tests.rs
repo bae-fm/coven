@@ -148,3 +148,44 @@ fn coven_owned_sql_is_rejected_outside_the_database_crate() {
         ]),
     );
 }
+
+#[test]
+fn raw_handles_and_coven_sql_inside_macro_calls_are_rejected() {
+    let files = vec![
+        RustFile::fixture(
+            "crates/coven-database/src/schema.rs",
+            r#"
+            macro_rules! coven_tables {
+                ($visit:ident) => {
+                    $visit!(coven_writes, "key TEXT PRIMARY KEY");
+                };
+            }
+            "#,
+        ),
+        RustFile::fixture(
+            "crates/coven-sync/src/leak.rs",
+            r#"
+            fn leak(sql: SqlWrite<'_>, id: &str) {
+                sql.execute(&format!("DELETE FROM coven_writes WHERE id = '{id}'"), []).unwrap();
+                let connections = vec![rusqlite::Connection::open_in_memory()];
+            }
+            macro_rules! wipe {
+                ($sql:expr) => { $sql.execute("DELETE FROM coven_writes", []) };
+            }
+            "#,
+        ),
+    ];
+
+    let violations = find_database_boundary_violations(&files, &POLICY)
+        .into_iter()
+        .map(|violation| (violation.line, violation.kind))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        violations,
+        vec![
+            (3, "coven-owned SQL for table coven_writes".to_string()),
+            (4, "raw SQLite connection".to_string()),
+            (7, "coven-owned SQL for table coven_writes".to_string()),
+        ],
+    );
+}
