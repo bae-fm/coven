@@ -1,4 +1,5 @@
 use crate::MergeError;
+use coven_foundation::id_source::DeviceId;
 
 /// §7.2: 48-bit milliseconds, a 16-bit counter, and a 64-bit device id,
 /// ordered in that order. No clock is read here.
@@ -6,7 +7,7 @@ use crate::MergeError;
 pub struct Timestamp {
     milliseconds: u64,
     counter: u16,
-    device: u64,
+    device: DeviceId,
 }
 
 impl Timestamp {
@@ -14,7 +15,7 @@ impl Timestamp {
     pub const MAX_MILLISECONDS: u64 = (1_u64 << 48) - 1;
 
     /// Construct a timestamp, refusing milliseconds outside its 48-bit range.
-    pub fn new(milliseconds: u64, counter: u16, device: u64) -> Result<Self, MergeError> {
+    pub fn new(milliseconds: u64, counter: u16, device: DeviceId) -> Result<Self, MergeError> {
         if milliseconds > Self::MAX_MILLISECONDS {
             return Err(MergeError::MillisecondsOutOfRange(milliseconds));
         }
@@ -28,7 +29,7 @@ impl Timestamp {
     /// Stamp a new write after the latest timestamp seen, including downloaded
     /// writes not yet applied. The caller persists that latest timestamp.
     /// A counter overflow advances the millisecond; exhaustion is an error.
-    pub fn next(latest: Option<Self>, clock_ms: u64, device: u64) -> Result<Self, MergeError> {
+    pub fn next(latest: Option<Self>, clock_ms: u64, device: DeviceId) -> Result<Self, MergeError> {
         if clock_ms > Self::MAX_MILLISECONDS {
             return Err(MergeError::MillisecondsOutOfRange(clock_ms));
         }
@@ -62,7 +63,7 @@ impl Timestamp {
     }
 
     /// The writing device's id.
-    pub fn device(self) -> u64 {
+    pub fn device(self) -> DeviceId {
         self.device
     }
 }

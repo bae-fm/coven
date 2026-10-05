@@ -1,5 +1,7 @@
 use crate::*;
+use coven_foundation::id_source::{CircleId, DeviceId};
 use std::collections::{BTreeMap, BTreeSet};
+use uuid::Uuid;
 
 pub(crate) fn row(n: u64) -> RowId {
     RowId {
@@ -10,18 +12,36 @@ pub(crate) fn row(n: u64) -> RowId {
 }
 pub(crate) fn circle(n: u64, audience: u8) -> RowId {
     RowId {
-        audience: Audience::Circle(vec![audience]),
+        audience: Audience::Circle(CircleId(Uuid::from_u128(audience.into()))),
         ..row(n)
     }
 }
+
+#[test]
+fn audiences_order_store_then_uuid_bytes() {
+    let mut bytes = vec![[0; 16], [255; 16]];
+    for i in 0..16 {
+        let mut id = [0; 16];
+        id[i] = 1;
+        bytes.push(id);
+    }
+    bytes.sort();
+    let audiences: Vec<_> = bytes
+        .into_iter()
+        .map(|bytes| Audience::Circle(CircleId(Uuid::from_bytes(bytes))))
+        .collect();
+    assert!(Audience::Store < audiences[0]);
+    assert!(audiences.windows(2).all(|pair| pair[0] < pair[1]));
+}
+
 pub(crate) fn id(n: u64) -> WriteId {
     WriteId {
-        device: n,
+        device: DeviceId(n),
         number: 1,
     }
 }
 pub(crate) fn stamp(n: u64) -> Timestamp {
-    Timestamp::new(n, 0, n).unwrap()
+    Timestamp::new(n, 0, DeviceId(n)).unwrap()
 }
 pub(crate) fn columns(values: &[(&str, &str)]) -> BTreeMap<String, ColumnValue<String>> {
     values
@@ -60,7 +80,7 @@ pub(crate) fn write(
 ) -> Write<String> {
     Write {
         id: id(n),
-        timestamp: Timestamp::new(ms, 0, n).unwrap(),
+        timestamp: Timestamp::new(ms, 0, DeviceId(n)).unwrap(),
         had_read: past.iter().copied().map(id).collect(),
         changes: changes.into_iter().collect(),
     }
@@ -348,7 +368,7 @@ impl Generator {
             }
             numbers[device] += 1;
             let id = WriteId {
-                device: device as u64 + 1,
+                device: DeviceId(device as u64 + 1),
                 number: numbers[device],
             };
             let latest = writes
@@ -450,7 +470,7 @@ pub(crate) fn generated_view(
                 }
             }
             if let RemovalRow::Present { deleted_circle, .. } = view.data.get_mut(r).unwrap() {
-                *deleted_circle = r.audience == Audience::Circle(vec![2]) && seed.is_multiple_of(7);
+                *deleted_circle = r.audience == circle(0, 2).audience && seed.is_multiple_of(7);
             }
         }
     }
@@ -503,7 +523,7 @@ mod differential {
     use std::process::{Command, Stdio};
 
     fn scalar(ts: Timestamp) -> u128 {
-        ((ts.milliseconds() as u128) << 80) | ((ts.counter() as u128) << 64) | ts.device() as u128
+        ((ts.milliseconds() as u128) << 80) | ((ts.counter() as u128) << 64) | ts.device().0 as u128
     }
     fn rule_number(rule: &Rule) -> u64 {
         match rule {

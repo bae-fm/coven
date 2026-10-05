@@ -19,6 +19,20 @@ impl std::fmt::Display for StoreId {
     }
 }
 
+/// A circle's identity, independent of its name or current key (§14.3).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CircleId(
+    /// The circle's UUID, supplied by the id source.
+    pub Uuid,
+);
+
+impl std::fmt::Display for CircleId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// One install of the app, by its 64-bit device id (§10).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(transparent)]

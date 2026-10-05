@@ -8,20 +8,9 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::{cipher, derivation, randomness, wire};
-use crate::{CryptoError, DerivedKeys, EncryptionKey, MaterialError, SealError, SecretBytes};
-
-/// A circle's identity, independent of its name or current key (§14.3).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct CircleId(
-    /// The circle's UUID, supplied by the id source.
-    pub Uuid,
-);
-
-impl fmt::Display for CircleId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
+use crate::{
+    CircleId, CryptoError, DerivedKeys, EncryptionKey, MaterialError, SealError, SecretBytes,
+};
 
 /// The store's `n`th 32-byte key (§11), erased on drop.
 /// Cloning supplies an independent unlocked snapshot to in-memory custody.

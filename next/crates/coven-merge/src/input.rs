@@ -1,11 +1,12 @@
 use crate::{MergeError, Timestamp};
+use coven_foundation::id_source::{CircleId, DeviceId};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// One device's numbered write (§5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WriteId {
     /// The install's 64-bit device id.
-    pub device: u64,
+    pub device: DeviceId,
     /// The write's number in that device's log.
     pub number: u64,
 }
@@ -16,7 +17,7 @@ pub enum Audience {
     /// Every member can read the row.
     Store,
     /// Only members of this circle can read the row.
-    Circle(Vec<u8>),
+    Circle(CircleId),
 }
 
 /// A row is one table, primary key and audience, with generations of its own.

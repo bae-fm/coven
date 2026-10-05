@@ -1,4 +1,5 @@
 use crate::{tests::*, *};
+use coven_foundation::id_source::DeviceId;
 
 #[test]
 fn invalid_histories_have_typed_errors() {
@@ -41,7 +42,7 @@ fn invalid_histories_have_typed_errors() {
         Err(MergeError::GenerationExhausted)
     ));
     let mut wrong_device = insert.clone();
-    wrong_device.id.device = 8;
+    wrong_device.id.device = DeviceId(8);
     assert!(matches!(
         History::new(vec![wrong_device]),
         Err(MergeError::TimestampDevice(_))

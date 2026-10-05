@@ -1,4 +1,5 @@
 use crate::{tests::*, *};
+use coven_foundation::id_source::DeviceId;
 
 #[test]
 fn grocery_titles_and_a_lost_value_that_stops_being_lost() {
@@ -180,7 +181,7 @@ fn second_delete_can_clear_a_lost_title_or_change_its_replacer() {
     let states = agree(&writes, &[&[0, 1, 2, 3], &[0, 1, 3, 2], &[0, 2, 1, 3]]);
     assert!(states[&row(43)].lost().is_empty());
     writes[3].had_read.remove(&id(2));
-    writes[3].timestamp = Timestamp::new(3, 0, 4).unwrap();
+    writes[3].timestamp = Timestamp::new(3, 0, DeviceId(4)).unwrap();
     let states = agree(&writes, &[&[0, 1, 2, 3], &[0, 3, 2, 1]]);
     assert_eq!(states[&row(43)].generations()[&2], id(4));
     assert_eq!(

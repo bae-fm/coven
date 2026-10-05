@@ -441,8 +441,10 @@ dependencies = [
 name = "coven-merge"
 version = "0.1.0"
 dependencies = [
+ "coven-foundation",
  "serde_json",
  "thiserror 2.0.21",
+ "uuid",
 ]
 
 [[package]]
