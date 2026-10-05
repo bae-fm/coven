@@ -87,6 +87,7 @@ pub(crate) fn load(root: &Path) -> Result<Workspace, LoadError> {
             Ok(RustFile {
                 relative_path: relative(root, &path)?,
                 syntax,
+                lines: source.lines().count(),
             })
         })
         .collect::<Result<Vec<_>, LoadError>>()?;

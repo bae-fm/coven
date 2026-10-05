@@ -11,6 +11,8 @@ pub(crate) struct RustFile {
     /// Relative to the workspace root, with `/` separators.
     pub(crate) relative_path: String,
     pub(crate) syntax: syn::File,
+    /// How many lines the source holds.
+    pub(crate) lines: usize,
 }
 
 impl RustFile {
@@ -19,6 +21,7 @@ impl RustFile {
         RustFile {
             relative_path: relative_path.to_string(),
             syntax: syn::parse_file(source).expect("parse fixture"),
+            lines: source.lines().count(),
         }
     }
 

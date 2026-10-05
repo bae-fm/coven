@@ -4,6 +4,7 @@
 //! - `pub(in path)` and `super::super::` are not used: an item needed
 //!   elsewhere moves to where both callers can see it.
 //! - `coven` re-exports the API at its root and keeps every module private.
+//! - A source file holds at most 1,000 lines.
 //! - A source's tests live beside it in `<name>_tests.rs` (`test_layout.rs`).
 
 use std::collections::BTreeSet;
@@ -19,11 +20,18 @@ use crate::test_layout::find_test_layout_violations;
 /// The crate whose root re-exports the API (§21.3).
 const API_CRATE_SOURCES: &str = "crates/coven/src/";
 
+/// The most lines a source file holds (§21.3). There is no exception list.
+const MAX_FILE_LINES: usize = 1_000;
+
 #[derive(Debug, Clone, Copy, Ord, PartialOrd, Eq, PartialEq)]
 pub(crate) enum Convention {
     DeepParentPath,
     RestrictedVisibility,
     PublicApiModule,
+    /// A source file longer than `MAX_FILE_LINES`.
+    LongFile {
+        lines: usize,
+    },
     /// A file named `<name>_test.rs`.
     SingularTestFile,
     /// A `<name>_tests.rs` with no `<name>.rs` beside it.
@@ -42,6 +50,9 @@ impl Convention {
                 "move an item needed elsewhere to where both callers can see it"
             }
             Convention::PublicApiModule => "declare the module private and `pub use` its API items",
+            Convention::LongFile { .. } => {
+                "split a long file along its domain and ownership boundaries, without exposing an owner's state to make the split compile"
+            }
             Convention::SingularTestFile
             | Convention::OrphanTestFile
             | Convention::InlineTestModule
@@ -71,6 +82,9 @@ impl ConventionViolation {
                 "the coven crate keeps every module private and re-exports its API at its root"
                     .to_string()
             }
+            Convention::LongFile { lines } => {
+                format!("holds {lines} lines; a source file holds at most {MAX_FILE_LINES}")
+            }
             Convention::SingularTestFile => format!(
                 "test files are named <name>_tests.rs; rename {file} to {}",
                 file.replace("_test.rs", "_tests.rs")
@@ -93,6 +107,13 @@ impl ConventionViolation {
 pub(crate) fn find_convention_violations(files: &[RustFile]) -> Vec<ConventionViolation> {
     let mut violations = BTreeSet::new();
     for file in files {
+        if file.lines > MAX_FILE_LINES {
+            violations.insert(ConventionViolation {
+                path: file.relative_path.clone(),
+                line: MAX_FILE_LINES + 1,
+                convention: Convention::LongFile { lines: file.lines },
+            });
+        }
         let mut visitor = ConventionVisitor {
             path: &file.relative_path,
             violations: &mut violations,
