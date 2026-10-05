@@ -1885,22 +1885,37 @@ Carol's tablet:
   columns, in order ([§8.5](#85-keys-and-uniqueness)).
 
 ```rust
+// External types used by the declarations below.
+use std::{collections::HashMap, future::Future, num::NonZeroUsize, ops::Range,
+          path::{Path, PathBuf}, pin::Pin, sync::Arc, time::SystemTime};
+use rusqlite::{Params, ToSql};
+use tokio::{io::AsyncRead, sync::watch};
+use uuid::Uuid;
+
 /// A row's primary key: one value per key column, in the order the table
 /// declares them (§8.5).
-pub struct RowKey(Vec<rusqlite::types::Value>);
+pub struct RowKey(/* private */);
 
 impl From<&str> for RowKey { /* a one-column text key */ }
 impl<A: ToSql, B: ToSql> From<(A, B)> for RowKey { /* a two-column key */ }
 
 /// One install of the app, by its 64-bit device id (§10).
-pub struct DeviceId(u64);
+pub struct DeviceId(/* private */);
 
 /// A member, by the public half of their Ed25519 key pair (§11.1).
-pub struct MemberId(String);
+pub struct MemberId(/* private */);
 
 /// One write: the device that made it and its number in that device's log (§6).
 pub struct WriteId {
     pub device: DeviceId,
+    pub number: u64,
+}
+
+/// One store log entry: the device that wrote it and its number in that device's store log (§9).
+pub struct EntryId {
+    /// The device that wrote the entry.
+    pub device: DeviceId,
+    /// Its entry number, starting at one.
     pub number: u64,
 }
 
@@ -1928,6 +1943,356 @@ pub enum Audience {
   ([§11.1](#111-cryptography)).
 
 ```rust
+/// A store's UUID, independent of its name and location (§20.1).
+pub struct StoreId(pub Uuid);
+
+/// A circle's UUID, independent of its name and key (§14.3).
+pub struct CircleId(pub Uuid);
+
+/// The wall clock used for timestamps (§7.2).
+pub trait Clock: Send + Sync {
+    /// The wall clock's current time.
+    fn now(&self) -> SystemTime;
+}
+
+/// A shared clock supplied when opening a store (§21.2).
+pub type ClockRef = Arc<dyn Clock>;
+
+/// The system wall clock used unless the app supplies another (§20.1).
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> SystemTime;
+}
+
+/// The source of fresh ids, supplied when creating or opening a store (§21.2).
+pub trait IdSource: Send + Sync {
+    /// A fresh UUID; distinct calls must yield distinct ids.
+    fn new_id(&self) -> Uuid;
+    /// The default implementation derives a fresh 64-bit device id from this source (§10).
+    fn new_device_id(&self) -> DeviceId;
+}
+
+/// A shared source of ids (§21.2).
+pub type IdSourceRef = Arc<dyn IdSource>;
+
+/// Random UUIDv4 ids, independent of the clock (§20.1).
+pub struct UuidIds;
+
+impl IdSource for UuidIds {
+    fn new_id(&self) -> Uuid;
+}
+
+/// One store's directory; its path and store id are private (§20.1).
+pub struct StoreDir { /* private fields */ }
+
+/// The app directory under which each store has its own directory (§20.1).
+pub struct StoreLayout { /* private fields */ }
+
+/// A store on this device (§20.1).
+pub struct StoreInfo {
+    /// The store's identity.
+    pub id: StoreId,
+    /// The store's name.
+    pub name: String,
+}
+
+/// The choices collected before opening a store (§20.1).
+pub struct CovenBuilder { /* private fields */ }
+
+/// A shared handle to the open store and its running work (§21.2).
+pub struct CovenHandle { /* private fields */ }
+
+/// A handle that only reads an already open store (§5, §20.1).
+pub struct CovenReadHandle { /* private fields */ }
+
+/// A table's name, key, audience, file and shared-trigger declarations (§20.2).
+pub struct SyncedTable { /* private fields */ }
+
+/// A numbered database migration and its optional waiting-write conversion (§17.1).
+pub struct Migration { /* private fields */ }
+
+/// A passphrase owned by custody and erased when dropped (§20.1).
+pub struct Passphrase(/* private */);
+
+impl Passphrase {
+    /// Takes ownership of the passphrase without exposing it again.
+    pub fn new(secret: String) -> Self;
+}
+
+/// The member's Ed25519 and X25519 pairs, erased when dropped (§11.1).
+pub struct MemberKeys { /* private fields */ }
+
+/// Every opened store and circle key, including older keys (§11, §14.3).
+pub struct StoreKeyring { /* private fields */ }
+
+/// The app's provider clients and shared clock, kept private (§20.10).
+pub struct OAuthClients { /* private fields */ }
+
+/// One asynchronous CloudKit call made by the app (§4, §20.1).
+pub type CloudKitCall<'a, T> = Pin<Box<dyn Future<Output = Result<T, StorageError>> + Send + 'a>>;
+
+/// The app's CloudKit access; paths are relative to the named container (§4).
+pub trait CloudKitOps: Send + Sync {
+    /// Creates an object; a retry uses the same path and bytes (§6).
+    fn put<'a>(&'a self, container: &'a str, path: &'a str, bytes: Vec<u8>) -> CloudKitCall<'a, ()>;
+    /// Reads the whole object, or the given byte range (§16.3).
+    fn get<'a>(&'a self, container: &'a str, path: &'a str, range: Option<Range<u64>>) -> CloudKitCall<'a, Vec<u8>>;
+    /// Lists object paths under the prefix (§4).
+    fn list<'a>(&'a self, container: &'a str, prefix: &'a str) -> CloudKitCall<'a, Vec<String>>;
+    /// Deletes an object; an already absent object succeeds (§18).
+    fn delete<'a>(&'a self, container: &'a str, path: &'a str) -> CloudKitCall<'a, ()>;
+    /// Grants this account access to the store's prefix (§12.2).
+    fn grant_access<'a>(&'a self, container: &'a str, prefix: &'a str, account: &'a str) -> CloudKitCall<'a, ()>;
+    /// Takes back that account's access (§13).
+    fn revoke_access<'a>(&'a self, container: &'a str, prefix: &'a str, account: &'a str) -> CloudKitCall<'a, ()>;
+    /// Starts a large upload; the returned session is recorded for restart (§16.5).
+    fn start_upload<'a>(&'a self, container: &'a str, path: &'a str, size: u64) -> CloudKitCall<'a, String>;
+    /// Stores one numbered part; retrying a part uses the same bytes (§18.1).
+    fn upload_part<'a>(&'a self, container: &'a str, session: &'a str, part: u64, bytes: Vec<u8>) -> CloudKitCall<'a, ()>;
+    /// Finishes the recorded session, making the object readable (§16.5).
+    fn finish_upload<'a>(&'a self, container: &'a str, session: &'a str) -> CloudKitCall<'a, ()>;
+}
+
+/// A database or store call's result, retaining its typed cause (§21.3).
+pub type CovenResult<T> = Result<T, CovenError>;
+
+/// Failures of opening, reading and writing a store (§5, §20.1, §20.3).
+pub enum CovenError {
+    /// The database or a write's validation failed.
+    Database(DbError),
+    /// An app migration failed or cannot run on this schema.
+    Migration(MigrationError),
+    /// Coven's tables need a migration this open cannot run.
+    CovenMigration(CovenMigrationError),
+    /// The directory's settings could not be read.
+    Settings(SettingsError),
+    /// The writer's lock could not be acquired.
+    Lock(StoreLockError),
+    /// A required builder choice was not supplied (§20.1).
+    MissingConfiguration { field: &'static str },
+    /// Reloading from storage failed (§19.2).
+    Sync(SyncError),
+}
+
+/// A failed database call or a write the database refuses (§5, §8, §14, §16).
+pub enum DbError {
+    /// This handle or a clone has closed the store (§20.1).
+    StoreClosed,
+    /// SQLite refused or failed a statement, preserving its error.
+    Sqlite(rusqlite::Error),
+    /// SQLite's opening integrity check found damage (§19.1).
+    DamagedDatabase,
+    /// A synced table declaration or schema is invalid.
+    Schema(SchemaError),
+    /// A local trigger wrote a synced table or a shared trigger a local one (§8.7).
+    TriggerTarget { trigger: String, table: String },
+    /// A reference points at a row outside the source row's audience (§14.5).
+    ReferenceAudience { table: String, key: RowKey, column: String },
+    /// A write targets a circle whose deletion has been applied (§14.7).
+    DeletedCircle(CircleId),
+    /// A write changes a file declared write-once (§20.2).
+    FileWriteOnce { table: String, key: RowKey },
+    /// A file reference no longer names the row's file (§16.3).
+    FileRefChanged { table: String, key: RowKey },
+    /// The row's declared size differs from the prepared file (§16).
+    FileSizeMismatch { expected: u64, actual: u64 },
+    /// The user's file is no longer at the recorded path (§16.1).
+    UserFileMissing { path: PathBuf },
+    /// The user's file changed during preparation or since it was prepared (§20.3).
+    UserFileChanged { path: PathBuf },
+    /// Reading or keeping file bytes failed (§20.3).
+    Disk(DiskError),
+}
+
+/// A schema rule checked on open and after each migration (§8, §14.1).
+pub enum SchemaError {
+    /// A synced table has no primary key (§8.5).
+    NoPrimaryKey { table: String },
+    /// SQLite chooses the primary key itself (§8.5).
+    GeneratedPrimaryKey { table: String },
+    /// An independent key does not contain a UUID (§8.5).
+    IndependentKeyNotUuid { table: String },
+    /// Declared key columns do not match the table's primary key (§20.2).
+    KeyColumns { table: String },
+    /// SET NULL or SET DEFAULT acts on a primary-key column (§8.4).
+    PrimaryKeyAction { table: String, column: String },
+    /// The audience root column is nullable or is not text (§14, §20.2).
+    AudienceColumn { table: String, column: String },
+    /// The audience foreign key spans more than one column (§14.1).
+    AudienceForeignKeyColumns { table: String },
+    /// The audience foreign key does not point into a synced table (§14.1).
+    AudienceForeignKeyTarget { table: String, column: String },
+    /// The audience foreign key uses SET NULL or SET DEFAULT (§14.1).
+    AudienceForeignKeyAction { table: String, column: String },
+    /// Following audience foreign keys forms a loop (§14.1).
+    AudienceCycle { table: String },
+    /// A unique constraint or shared key spans audiences (§14.1).
+    AudienceConstraint { table: String, constraint: String },
+    /// A shared trigger lacks WHEN NOT coven_applying() (§8.7).
+    SharedTriggerGuard { table: String, trigger: String },
+}
+
+/// Coven's local tables cannot be used at this version (§17.2, §20.1).
+pub enum CovenMigrationError {
+    /// Opening would need to migrate, but this open refuses it.
+    Pending,
+    /// A migration failed and its transaction rolled back.
+    Failed { source: Box<DbError> },
+}
+
+/// A filesystem failure, including whether bytes already changed (§20.1, §21.3).
+pub enum FileError {
+    /// The operation failed without replacing its target.
+    Io { operation: &'static str, path: PathBuf, source: Box<dyn std::error::Error + Send + Sync> },
+    /// Replacement is visible, but syncing its directory failed.
+    AfterReplace { path: PathBuf, source: Box<dyn std::error::Error + Send + Sync> },
+    /// Removal is visible, but syncing its directory failed.
+    AfterRemove { path: PathBuf, source: Box<dyn std::error::Error + Send + Sync> },
+    /// Removing an unpublished temporary file failed too.
+    Cleanup { operation: Box<FileError>, cleanup: Box<dyn std::error::Error + Send + Sync> },
+}
+
+/// File reads and custody report the same filesystem failures (§16, §20.1).
+pub type DiskError = FileError;
+
+/// The store's directory settings could not be read or written (§20.1).
+pub enum SettingsError {
+    /// No settings file exists.
+    Missing(StoreId),
+    /// The settings do not contain the declared data.
+    Corrupt(Box<dyn std::error::Error + Send + Sync>),
+    /// Settings name a different store from the directory.
+    WrongStore { expected: StoreId, actual: StoreId },
+    /// The settings path is not a regular file.
+    NotRegularFile(StoreId),
+    /// The filesystem operation failed.
+    File(FileError),
+}
+
+/// The writer's lock could not be taken (§20.1).
+pub enum StoreLockError {
+    /// Another handle or process holds the lock.
+    AlreadyOpen(StoreId),
+    /// Opening or locking the lock file failed.
+    File(FileError),
+}
+
+/// Listing the app's stores failed (§20.1).
+pub enum StoreLayoutError {
+    /// Listing directories or reading settings failed.
+    File(FileError),
+}
+
+/// Creating a store failed, with publication and rollback made explicit (§20.1).
+pub enum StoreCreationError {
+    /// A directory or file already occupies this store id.
+    AlreadyExists(StoreId),
+    /// A file operation failed before publication.
+    File(FileError),
+    /// Writing the store's settings failed before publication.
+    Settings(SettingsError),
+    /// The store is visible, but syncing its parent directory failed.
+    Published { id: StoreId, source: Box<dyn std::error::Error + Send + Sync> },
+    /// Removing the unpublished directory failed too.
+    Rollback { operation: Box<StoreCreationError>, cleanup: Box<dyn std::error::Error + Send + Sync> },
+}
+
+/// Deleting the local store stopped at a step the caller may retry (§20.1).
+pub enum StoreDeletionError {
+    /// The store is open or its lock could not be taken.
+    Lock(StoreLockError),
+    /// Removing a keychain entry failed.
+    Key(KeyError),
+    /// Removing the store directory failed.
+    File(FileError),
+}
+
+/// Unlocking, keeping or forgetting keys or host secrets failed (§20.1, §20.11).
+pub enum KeyError {
+    /// The custody file operation failed.
+    File(FileError),
+    /// A cryptographic service was unavailable or stored bytes failed validation.
+    Crypto(CryptoError),
+    /// The opened key material was malformed.
+    Material(MaterialError),
+    /// The passphrase was wrong or the custody file was altered.
+    PassphraseAuthentication,
+    /// The passphrase file's header was malformed or unsupported.
+    PassphraseHeader,
+    /// The stored passphrase settings exceed accepted resource bounds.
+    PassphraseParameters,
+    /// The device lacks resources needed to unlock or keep keys.
+    Unavailable(Box<dyn std::error::Error + Send + Sync>),
+    /// The OS credential store refused the call.
+    Keychain(KeychainError),
+    /// The keyring service was not registered at startup.
+    ServiceNotRegistered,
+    /// A different service name was already registered.
+    ServiceAlreadyRegistered,
+    /// The service name is empty or contains NUL.
+    InvalidServiceName,
+    /// This platform has no native credential store.
+    UnsupportedKeyringPlatform,
+    /// The host secret name cannot name an app entry.
+    SecretName(SecretNameError),
+    /// A stored host secret is not UTF-8.
+    HostSecretEncoding,
+}
+
+/// Secret bytes crossing custody or code boundaries, erased when dropped (§11, §12).
+pub struct SecretBytes(/* private */);
+
+impl SecretBytes {
+    /// Takes ownership of bytes, including their allocation capacity.
+    pub fn new(bytes: Vec<u8>) -> Self;
+    /// Borrows bytes for custody or a restore code.
+    pub fn as_bytes(&self) -> &[u8];
+}
+
+/// A native keychain cause whose diagnostics do not expose secret bytes (§11).
+pub struct KeychainError(/* private */);
+
+/// A host secret name is invalid (§20.11).
+pub enum SecretNameError {
+    /// The name is empty.
+    Empty,
+    /// The name contains a colon.
+    Separator,
+    /// The name is reserved for coven.
+    Reserved,
+    /// Native credential APIs cannot represent NUL in a name.
+    Nul,
+}
+
+/// A cryptographic operation failed (§11.1).
+pub enum CryptoError {
+    /// The device cannot provide a cryptographic service needed by this call.
+    Unavailable(Box<dyn std::error::Error + Send + Sync>),
+    /// The ciphertext, key, path, index or associated data did not authenticate.
+    Authentication,
+    /// A sealed value was truncated or had invalid framing.
+    Malformed,
+    /// The X25519 public key has low order.
+    WeakSealingKey,
+    /// The Ed25519 public key is invalid or weak.
+    InvalidMemberId,
+    /// The member's signature did not verify.
+    Signature,
+    /// Authenticated key material had the wrong shape.
+    Material(MaterialError),
+}
+
+/// A numbered key or encoded secret has an invalid representation (§11).
+pub enum MaterialError {
+    /// The encoded secret or sealed value is malformed.
+    Encoding,
+    /// The keyring does not hold this store key.
+    UnknownStoreKey(u64),
+    /// The keyring does not hold this circle key.
+    UnknownCircleKey { circle: CircleId, number: u64 },
+}
+
 /// Registers the OS keychain service every key and secret is stored under.
 /// Called once at startup, before any store opens.
 pub fn set_keyring_service(name: impl Into<String>) -> Result<(), KeyError>;
@@ -2142,6 +2507,9 @@ pub enum Uploads {
     WhenAsked,
 }
 
+/// One table's file columns, namespace, kind, upload and cache choices (§16, §20.2).
+pub struct FileDecl { /* private fields */ }
+
 impl FileDecl {
     /// Declares the file a table's rows carry: its namespace, which groups
     /// files in the cache, each with its own budget (§20.8), its kind, when
@@ -2205,6 +2573,28 @@ fn tables() -> Vec<SyncedTable> {
   back, files included.
 
 ```rust
+/// App-provided files staged for one write; a failure discards them (§20.3).
+pub struct WriteBatch { /* private fields */ }
+
+/// A transaction's SQL access, borrowing its connection and write's file state (§5, §20.3).
+pub struct SqlContext<'connection, 'write> { /* private fields */ }
+
+/// A user's file checked before a write; callers cannot change its recorded facts (§20.3).
+pub struct PreparedUserFile { /* private fields */ }
+
+/// The facts recorded for a user's original file (§16.1).
+pub struct UserFile {
+    /// The user's path, which coven never changes or deletes.
+    pub path: PathBuf,
+    /// Its size in bytes.
+    pub size: u64,
+    /// Its recorded modification time.
+    pub modified_at: SystemTime,
+}
+
+/// A row's file at the time it was read; its captured facts are private (§16.3).
+pub struct FileRef { /* private fields */ }
+
 impl CovenHandle {
     /// Runs one write.
     pub async fn write<F, R>(&self, sql: F) -> CovenResult<R>
@@ -2316,6 +2706,71 @@ handle
   rows it read.
 
 ```rust
+/// SQL access to one read-only database snapshot (§5, §20.4).
+pub struct SqlReadContext<'connection> { /* private fields */ }
+
+/// An awaitable read that keeps its store borrow until it finishes (§20.4).
+pub struct Read<'a, F> { /* private fields */ }
+
+impl<F, R> Future for Read<'_, F>
+where
+    F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
+    R: Send + 'static,
+{
+    type Output = CovenResult<R>;
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output>;
+}
+
+/// A subscription's results and lifetime; dropping it ends the query (§20.4).
+pub struct LiveQuery<T> { /* private fields */ }
+
+/// A subscription whose request may be replaced while it runs (§20.4).
+pub struct ReconfigurableLiveQuery<Q, T> { /* private fields */ }
+
+/// Shared access to replacing a live query's request (§20.4).
+pub struct LiveQueryRequests<Q> { /* private fields */ }
+
+/// A request revision assigned by one live query (§20.4).
+pub struct LiveQueryRevision(pub u64);
+
+/// The query was dropped before its request could be replaced (§20.4).
+pub struct LiveQueryClosed;
+
+/// A result together with the request that produced it (§20.4).
+pub struct ReconfigurableLiveQueryEvent<Q, T> {
+    /// The request used by this run.
+    pub request: Q,
+    /// The revision assigned to that request.
+    pub revision: LiveQueryRevision,
+    /// A new request, changed rows, or both.
+    pub cause: LiveQueryCause,
+    /// The query's result, including failures that do not end the query.
+    pub result: CovenResult<T>,
+}
+
+/// Why a reconfigurable live query ran; its first run answers the initial request (§20.4).
+pub enum LiveQueryCause {
+    /// A new request, including the initial one.
+    Request,
+    /// A write changed rows the query read.
+    Write,
+    /// A new request and a relevant write arrived before this run.
+    RequestAndWrite,
+}
+
+/// An open file with checked identity, header and range-reading state (§16.3).
+pub struct FileStream { /* private fields */ }
+
+/// App data could not be sealed or opened with its store key (§11, §20.11).
+pub enum SealError {
+    /// The keyring lacks the named key or the encoded material is invalid.
+    Key(MaterialError),
+    /// The cipher refused the bytes or their associated data.
+    Crypto(CryptoError),
+    /// Lazy unlocking from custody failed (§20.1).
+    Custody(KeyError),
+}
+
 impl CovenHandle {
     /// A read of one consistent snapshot, run when awaited. Attach `process`
     /// to work on the result after the connection is released.
@@ -2415,9 +2870,9 @@ pub enum Replacement {
     /// §8.6, §14).
     Rules(Vec<RemovalRule>),
     /// A breaking schema change the write hadn't read (§17.1).
-    SchemaChange,
+    SchemaChange(EntryId),
     /// A reset the write hadn't read (§19.3).
-    Reset,
+    Reset(EntryId),
 }
 
 pub enum RemovalRule {
@@ -2483,6 +2938,241 @@ while let Ok(values) = lost.next().await {
   ([§3](#3-guarantees)); its writes wait in `coven_uploads`.
 
 ```rust
+/// The provider holding a store (§4).
+pub enum CloudProvider {
+    /// An S3-compatible provider.
+    S3,
+    /// Google Drive.
+    GoogleDrive,
+    /// Dropbox.
+    Dropbox,
+    /// OneDrive.
+    OneDrive,
+    /// iCloud through the app's CloudKit calls.
+    CloudKit,
+}
+
+/// A store's location, with credentials kept separately (§4, §20.5).
+pub enum StorageConfig {
+    /// An S3 endpoint, region, bucket and store prefix.
+    S3 { endpoint: String, region: String, bucket: String, prefix: String },
+    /// A store folder in Google Drive.
+    GoogleDrive { folder_id: String },
+    /// A store folder in Dropbox.
+    Dropbox { path: String },
+    /// A store folder in a OneDrive drive.
+    OneDrive { drive_id: String, folder_id: String },
+    /// A store prefix in an iCloud container.
+    CloudKit { container: String, prefix: String },
+}
+
+/// Limits for concurrent file transfers (§20.1, §20.5).
+pub struct TransferLimits {
+    /// Maximum file uploads running at once.
+    pub uploads: NonZeroUsize,
+    /// Maximum file downloads a pin runs at once.
+    pub downloads: NonZeroUsize,
+}
+
+/// A provider refused or failed a storage request (§4, §20.5).
+pub enum StorageError {
+    /// The provider rejected the credentials.
+    Authentication,
+    /// The account lacks the requested access.
+    PermissionDenied,
+    /// The configured bucket, folder or container does not exist.
+    ContainerNotFound,
+    /// The requested object is absent (§19.1).
+    ObjectNotFound { path: String },
+    /// The S3 bucket is in a different region.
+    RegionMismatch,
+    /// The provider's quota is exhausted.
+    QuotaExceeded,
+    /// The location or provider configuration is invalid.
+    InvalidConfiguration,
+    /// Storage could not be reached; retain the transport's cause.
+    Network(Arc<dyn std::error::Error + Send + Sync>),
+    /// The provider failed internally; retain its cause.
+    Internal(Arc<dyn std::error::Error + Send + Sync>),
+}
+
+/// Storage setup failed before committing credentials and keys (§20.5).
+pub enum StorageSetupError {
+    /// The provider refused or failed setup.
+    Storage(StorageError),
+    /// Sign-in failed or was cancelled.
+    OAuth(OAuthError),
+    /// Another store already occupies the location.
+    LocationOccupied,
+    /// This device does not hold its member's keys.
+    MemberKeysMissing,
+    /// Keeping credentials or keys failed.
+    SecureStorage(KeyError),
+    /// Local setup failed, with its cause.
+    Internal(Box<dyn std::error::Error + Send + Sync>),
+}
+
+/// The setup failure the app presents, classified by `failure()` (§20.5).
+pub enum StorageSetupFailure {
+    /// Sign-in did not complete or the credentials were rejected.
+    Authentication,
+    /// The account lacks access.
+    PermissionDenied,
+    /// The configured container is absent.
+    ContainerNotFound,
+    /// The S3 bucket is in a different region.
+    RegionMismatch,
+    /// The provider's quota is exhausted.
+    QuotaExceeded,
+    /// A provider or sign-in setting is invalid.
+    InvalidConfiguration,
+    /// Another store already occupies this location.
+    LocationOccupied,
+    /// Storage cannot be reached.
+    Network,
+    /// This device lacks its member's keys.
+    MemberKeysMissing,
+    /// Key or credential custody failed.
+    SecureStorage,
+    /// A setup step failed internally.
+    Internal,
+}
+
+/// Opening the member's sealed store key failed (§11, §20.5).
+pub enum StoreKeyUnlockError {
+    /// No storage is connected.
+    NoStorage,
+    /// Identity custody has no member keys.
+    MemberKeysMissing,
+    /// Reading the sealed key failed.
+    Storage(StorageError),
+    /// The sealed key could not be opened or checked.
+    Crypto(CryptoError),
+    /// Unlocking or keeping keys in custody failed.
+    SecureStorage(KeyError),
+}
+
+/// Sync or a store-log change failed (§9, §13, §17, §20.5).
+pub enum SyncError {
+    /// No storage is connected for a call that requires it.
+    NoStorage,
+    /// The provider refused or failed the call.
+    Storage(StorageError),
+    /// The local database failed.
+    Database(DbError),
+    /// Reading or removing credentials or keys failed.
+    SecureStorage(KeyError),
+    /// Opening the store key failed.
+    Unlock(StoreKeyUnlockError),
+    /// Making or checking signed or encrypted bytes failed.
+    Crypto(CryptoError),
+    /// The member's role does not permit this entry (§9).
+    PermissionDenied,
+    /// Removing or demoting the member would leave no admin (§9).
+    LastAdmin,
+    /// The store needs a newer schema or format (§17).
+    UpdateRequired,
+    /// A restore code could not be decoded (§20.9).
+    Code(CodeError),
+    /// A credential update's code names another store (§20.9).
+    WrongStore { expected: StoreId, actual: StoreId },
+    /// A credential update's code names another member (§20.9).
+    WrongMember { expected: MemberId, actual: MemberId },
+    /// A multi-step operation stopped (§18).
+    Operation(Box<OperationError>),
+}
+
+/// How far this device has applied one device's writes (§6, §20.5).
+pub struct DeviceActivity {
+    /// The authoring device.
+    pub device: DeviceId,
+    /// The last applied write number; zero means none.
+    pub applied_through: u64,
+}
+
+/// An object that failed a check when read (§19.1).
+pub struct DamagedObject {
+    /// The object's path in storage.
+    pub path: String,
+    /// Which check failed, retaining its cause.
+    pub failure: ObjectCheckFailure,
+}
+
+/// The checks whose failure makes a stored object damaged (§19.1).
+pub enum ObjectCheckFailure {
+    /// The object would not decrypt or authenticate.
+    Decryption(CryptoError),
+    /// Its member signature did not verify.
+    Signature(CryptoError),
+    /// Its bytes could not be parsed.
+    Parse(Arc<dyn std::error::Error + Send + Sync>),
+}
+
+/// Another device differs at the same applied write positions (§19.1).
+pub struct Disagreement {
+    /// The device whose fingerprint differs from this device's.
+    pub device: DeviceId,
+    /// The audience compared.
+    pub audience: Audience,
+    /// The last applied write of each log included in the comparison.
+    pub positions: Vec<WriteId>,
+}
+
+/// This member's store log entry that was dropped during replay (§9).
+pub struct DroppedEntry {
+    /// The dropped entry.
+    pub entry: EntryId,
+    /// What it would have done.
+    pub change: StoreLogChange,
+    /// Why the replay dropped it.
+    pub reason: DropReason,
+}
+
+/// Why a store log entry was dropped (§9).
+pub enum DropReason {
+    /// A conflicting concurrent entry beat it.
+    BeatenBy(EntryId),
+    /// At its place in the replay, the member, device or circle it changes
+    /// no longer existed.
+    TargetGone,
+    /// Applying it would have left the store without an admin.
+    NoAdminLeft,
+    /// Its author's role didn't allow it, in the member list they had read.
+    NotAllowed,
+}
+
+/// What a dropped store log entry would have changed, for its author to see (§9).
+pub enum StoreLogChange {
+    /// Creates the store and names its first admin.
+    CreateStore { store: StoreId, name: String, admin: MemberId },
+    /// Adds a member with this role.
+    AddMember { member: MemberId, role: MemberRole },
+    /// Removes the member and their devices (§13).
+    RemoveMember { member: MemberId },
+    /// Sets the member's role.
+    SetMemberRole { member: MemberId, role: MemberRole },
+    /// Adds a device belonging to this member (§10).
+    AddDevice { member: MemberId, device: DeviceId },
+    /// Removes a device.
+    RemoveDevice { device: DeviceId },
+    /// Makes a named circle with its creator as a member (§20.12).
+    CreateCircle { circle: CircleId, name: String, member: MemberId },
+    /// Renames a circle (§20.12).
+    RenameCircle { circle: CircleId, name: String },
+    /// Deletes a circle (§14.7).
+    DeleteCircle { circle: CircleId },
+    /// Adds a store member to a circle (§14.3).
+    AddCircleMember { circle: CircleId, member: MemberId },
+    /// Removes a circle member and replaces its key (§14.6).
+    RemoveCircleMember { circle: CircleId, member: MemberId },
+    /// Raises the schema version and names its snapshot path (§17.1).
+    SchemaChange { version: u32, snapshot: String },
+    /// Raises the format version and names its snapshot path (§17.2).
+    FormatChange { version: u32, snapshot: String },
+    /// Resets the audience to the named snapshot path (§19.3).
+    Reset { audience: Audience, snapshot: String },
+}
+
 impl CovenHandle {
     /// Sets up storage on S3 with this member's access key (§4).
     pub async fn setup_s3_storage(
@@ -2581,7 +3271,7 @@ pub struct SyncReport {
     pub disagreements: Vec<Disagreement>,
     /// Operations that failed for good (§18).
     pub blocked_operations: Vec<BlockedOperation>,
-    /// This member's store log entries that another entry won over (§9).
+    /// This member's store log entries dropped during replay, with their reasons (§9).
     pub dropped_entries: Vec<DroppedEntry>,
     /// The rows the sync's writes changed, as a hint for refreshing views
     /// that aren't live queries. Not a complete list.
@@ -2653,6 +3343,59 @@ loop {
   that call waits; otherwise it is reported in the sync status.
 
 ```rust
+/// The local integer primary key of one unfinished operation (§18).
+pub struct OperationId(pub i64);
+
+/// The work represented by an unfinished operation (§18.1, §19.3).
+pub enum OperationKind {
+    /// Remove a member and replace the store key.
+    RemoveMember,
+    /// Remove a circle member and replace its key.
+    RemoveCircleMember,
+    /// Migrate the schema, snapshot it and raise the version.
+    SchemaChange,
+    /// Migrate the format, snapshot it and raise the version.
+    FormatChange,
+    /// Replace this device's synced data from a snapshot.
+    ReloadFromSnapshot,
+    /// Write a snapshot and delete covered logs and unused files.
+    Snapshot,
+    /// Upload a file or keep it on this device.
+    ChangeFileLocation,
+    /// Grant access, approve or decline a join, and settle the invite.
+    Invite,
+    /// Upload a file in parts using a recorded provider session.
+    MultipartUpload,
+    /// Snapshot and reset an audience (§19.3).
+    Reset,
+}
+
+/// Who initiated an operation (§18).
+pub enum StartedBy {
+    /// The app call, named as in coven_operations.started_by.
+    AppCall(String),
+    /// Coven's own running work.
+    Coven,
+}
+
+/// A multi-step operation stopped with a failure the app can act on (§18).
+pub enum OperationError {
+    /// Reading or committing the operation's state failed.
+    Database(DbError),
+    /// A storage step failed.
+    Storage(StorageError),
+    /// Reading or keeping keys failed.
+    SecureStorage(KeyError),
+    /// Making or checking encrypted or signed bytes failed.
+    Crypto(CryptoError),
+    /// Reading a file needed by the operation failed (§16.1).
+    File(FileReadError),
+    /// A user-provided download destination already exists (§16.1).
+    DestinationExists { path: PathBuf },
+    /// The member lacks authority for the operation (§9, §14.3, §19.3).
+    PermissionDenied,
+}
+
 impl CovenHandle {
     /// Runs a failed operation again from the step after its last completed
     /// one. An operation whose cause still stands fails again.
@@ -2699,6 +3442,24 @@ pub struct BlockedOperation {
   returns, and it finishes whenever storage can be reached.
 
 ```rust
+/// Live upload-queue results, ending when the store closes (§20.7).
+pub struct UploadsLiveQuery { /* private fields */ }
+
+/// A file upload attempt failed (§16.5, §20.7).
+pub enum UploadFailure {
+    /// Reading or checking the source file failed.
+    File(FileReadError),
+    /// The provider refused or failed the upload.
+    Storage(StorageError),
+    /// Encrypting the file failed.
+    Crypto(CryptoError),
+    /// Unlocking the file's audience key failed.
+    SecureStorage(KeyError),
+}
+
+/// The failed files and their causes from one upload drain (§20.7).
+pub type UploadFailures = Vec<(FileRef, UploadFailure)>;
+
 impl CovenHandle {
     /// Uploads files that are on this device, then marks them uploaded.
     pub async fn upload_files(&self, files: &[FileRef]) -> Result<(), OperationError>;
@@ -2814,6 +3575,40 @@ loop {
   copy, the cache, or storage ([§16](#16-files)).
 
 ```rust
+/// Progress while keeping files whole on this device (§16.4, §20.8).
+pub struct PinProgress {
+    /// Files whose bytes have all been kept.
+    pub files_completed: u64,
+    /// Files requested, including those already present.
+    pub files_total: u64,
+    /// Bytes downloaded by this call so far.
+    pub bytes_downloaded: u64,
+    /// Bytes this call needs to download, excluding bytes already cached.
+    pub bytes_total: u64,
+}
+
+/// A live query of whether each requested row's file is pinned (§20.8).
+pub struct RowsPinnedLiveQuery { /* private fields */ }
+
+impl RowsPinnedLiveQuery {
+    /// Replaces the table and keys whose pin state is watched.
+    pub fn set_rows(&self, table: &str, keys: Vec<RowKey>) -> Result<(), LiveQueryClosed>;
+    /// The current answers, in key order, then each change (§20.8).
+    pub async fn next(&mut self) -> Result<Vec<Option<bool>>, FileReadError>;
+}
+
+/// Downloads of files declared CacheEager (§16.4, §20.8).
+pub enum EagerCacheFillStatus {
+    /// No files are waiting to download.
+    Idle,
+    /// Files are being fetched into the cache.
+    Downloading(PinProgress),
+    /// The app stopped these downloads.
+    Cancelled(PinProgress),
+    /// A download failed, with the progress reached before it failed.
+    Failed { progress: PinProgress, error: Arc<FileReadError> },
+}
+
 impl CovenHandle {
     /// The file a row carries, as of the row's current version.
     pub async fn file_ref(&self, table: &str, key: impl Into<RowKey>) -> Result<FileRef, DbError>;
@@ -3031,6 +3826,88 @@ pub enum ProviderSignOut {
   builder, and `cancel`, which stops it.
 
 ```rust
+/// A one-time invite's UUID, also naming its join-request object (§12.2).
+pub struct InviteId(pub Uuid);
+
+/// What the app may show before using a scanned or typed code (§20.10).
+pub struct CodeInfo {
+    /// Whether this is the person's restore code or an invite.
+    pub kind: CodeKind,
+    /// The store named by the code.
+    pub store_id: StoreId,
+    /// The store's name.
+    pub store_name: String,
+    /// The provider holding the store.
+    pub cloud_provider: CloudProvider,
+    /// Whether this provider requires sign-in before using the code.
+    pub needs_oauth: bool,
+}
+
+/// The two codes used to open a store on a new device (§12).
+pub enum CodeKind {
+    /// Holds the person's member keys and storage credentials.
+    Restore,
+    /// Holds an invite id and secret; approval is still required.
+    Invite,
+}
+
+/// A scanned or typed code cannot be used for this call (§12, §20.10).
+pub enum CodeError {
+    /// The code does not contain valid restore or invite data.
+    Invalid,
+    /// The call needs the other kind of code.
+    WrongKind { expected: CodeKind, actual: CodeKind },
+}
+
+/// Opening a store on a new device failed (§12, §20.10).
+pub enum BootstrapError {
+    /// The person cancelled the call.
+    Cancelled,
+    /// The code cannot be used.
+    Code(CodeError),
+    /// Creating the local store directory failed.
+    CreateStore(StoreCreationError),
+    /// Loading or opening the store failed.
+    Store(CovenError),
+    /// Provider sign-in failed.
+    OAuth(OAuthError),
+    /// Reading or keeping credentials or identity keys failed.
+    SecureStorage(KeyError),
+    /// Opening the member's sealed store key failed.
+    Unlock(StoreKeyUnlockError),
+}
+
+/// Provider sign-in tokens, held as secrets rather than printed (§20.10).
+pub struct OAuthTokens {
+    /// The token authorizing provider requests.
+    pub access_token: SecretBytes,
+    /// A renewal token, if the provider supplied one.
+    pub refresh_token: Option<SecretBytes>,
+    /// The access token's expiry, if the provider supplied one.
+    pub expires_at: Option<SystemTime>,
+}
+
+/// A browser request plus private state retained to check its redirect (§20.10).
+pub struct AuthorizeRequest {
+    /// The URL the app opens for sign-in.
+    pub url: String,
+    /* private fields */
+}
+
+/// Provider sign-in could not finish (§20.5, §20.10).
+pub enum OAuthError {
+    /// The person cancelled sign-in.
+    Cancelled,
+    /// This provider is not an OAuth provider or the app supplied no client id.
+    InvalidConfiguration { provider: CloudProvider },
+    /// The local redirect listener failed.
+    Redirect(Box<dyn std::error::Error + Send + Sync>),
+    /// The redirect did not belong to the authorization request.
+    StateMismatch,
+    /// The provider refused sign-in or token exchange, or could not be reached.
+    Storage(StorageError),
+}
+
 impl CovenHandle {
     /// This member's restore code: their member key, the store's id and
     /// name, and storage credentials. The app shows it as a QR code, blurred
@@ -3273,6 +4150,30 @@ match join_with_invite(
 ### 20.11 Keys and secrets
 
 ```rust
+/// Initializing this device's member identity failed (§20.11).
+pub enum IdentityError {
+    /// Custody already holds member keys.
+    AlreadyInitialized,
+    /// Making the two key pairs failed.
+    Crypto(CryptoError),
+    /// Reading or persisting identity custody failed.
+    Custody(KeyError),
+}
+
+impl MemberKeys {
+    /// Encodes both private seeds for custody or a restore code (§12.1).
+    pub fn to_secret_bytes(&self) -> SecretBytes;
+    /// Restores both pairs from custody or a restore code.
+    pub fn from_secret_bytes(bytes: &[u8]) -> Result<Self, MaterialError>;
+}
+
+impl StoreKeyring {
+    /// Encodes every opened store and circle key for custody (§11).
+    pub fn to_secret_bytes(&self) -> SecretBytes;
+    /// Reads custody bytes, rejecting malformed, duplicate or empty keyrings.
+    pub fn from_secret_bytes(bytes: &[u8]) -> Result<Self, MaterialError>;
+}
+
 impl CovenHandle {
     /// Makes this member's two key pairs and puts them in identity custody,
     /// for the person creating a store. Fails if custody already holds keys.
@@ -3330,6 +4231,21 @@ pub trait MemberKeyCustody: Send + Sync {
   the calls of [§20.6](#206-operations-and-recovery).
 
 ```rust
+/// Circle calls borrowing the open store that owns their work (§14, §20.12).
+pub struct Circles<'a> { /* private fields */ }
+
+/// A circle call failed (§14, §20.12).
+pub enum CircleError {
+    /// The caller is not a member of the circle (§14.3).
+    NotMember(CircleId),
+    /// The circle has been deleted (§14.7).
+    Deleted(CircleId),
+    /// Only a member of the store may be added (§20.12).
+    NotStoreMember(MemberId),
+    /// Sync, keys or a multi-step operation failed.
+    Sync(SyncError),
+}
+
 impl CovenHandle {
     pub fn circles(&self) -> Circles<'_>;
 }
@@ -3401,6 +4317,19 @@ impl Migration {
     pub fn writes<F>(self, f: F) -> Self
     where
         F: Fn(&mut RowChange) -> Result<(), DbError> + Send + Sync + 'static;
+}
+
+/// SQL access inside the transaction applying a migration (§17.1, §20.13).
+pub struct MigrationContext<'connection> { /* private fields */ }
+
+/// What one row change does (§5).
+pub enum ChangeOp {
+    /// Inserts the row.
+    Insert,
+    /// Changes columns of the row.
+    Update,
+    /// Deletes the row.
+    Delete,
 }
 
 impl MigrationContext<'_> {
