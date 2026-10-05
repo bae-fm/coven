@@ -1,5 +1,6 @@
 use super::*;
 use crate::StoreKey;
+use std::num::NonZeroU64;
 
 #[test]
 fn incremental_content_hash_matches_sha256_known_answers() {
@@ -28,17 +29,17 @@ fn incremental_content_hash_matches_sha256_known_answers() {
 
 #[test]
 fn fingerprints_are_incremental_and_depend_on_the_audience_key() {
-    let key = StoreKey::generate(1).unwrap().derive().unwrap();
-    let mut whole = key.fingerprint_hasher().unwrap();
+    let key = StoreKey::generate(NonZeroU64::MIN).unwrap().derive();
+    let mut whole = key.fingerprint_hasher();
     whole.update(b"agreed state");
-    let mut stream = key.fingerprint_hasher().unwrap();
+    let mut stream = key.fingerprint_hasher();
     for byte in b"agreed state" {
         stream.update(&[*byte]);
     }
     let fingerprint = whole.finish();
     assert_eq!(fingerprint, stream.finish());
-    let other = StoreKey::generate(1).unwrap().derive().unwrap();
-    let mut foreign = other.fingerprint_hasher().unwrap();
+    let other = StoreKey::generate(NonZeroU64::MIN).unwrap().derive();
+    let mut foreign = other.fingerprint_hasher();
     foreign.update(b"agreed state");
     assert_ne!(fingerprint, foreign.finish());
     assert_eq!(

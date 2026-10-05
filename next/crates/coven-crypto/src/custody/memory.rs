@@ -1,6 +1,5 @@
 //! Custody for one session only (§20.1).
 
-use super::KeyError;
 use std::sync::Mutex;
 
 /// In-memory custody for `StoreKeyring` or `MemberKeys`, erased with the session.
@@ -16,19 +15,26 @@ impl<T: Clone> InMemoryCustody<T> {
         }
     }
 
-    pub(crate) fn read(&self) -> Result<Option<T>, KeyError> {
+    pub(crate) fn read(&self) -> Option<T> {
         // The custody traits return owned keys while custody keeps its copy.
-        Ok(self.secret.lock().map_err(|_| KeyError::Poisoned)?.clone())
+        self.secret
+            .lock()
+            .expect("in-memory custody secret lock is poisoned")
+            .clone()
     }
 
-    pub(crate) fn write(&self, secret: &T) -> Result<(), KeyError> {
-        *self.secret.lock().map_err(|_| KeyError::Poisoned)? = Some(secret.clone());
-        Ok(())
+    pub(crate) fn write(&self, secret: &T) {
+        *self
+            .secret
+            .lock()
+            .expect("in-memory custody secret lock is poisoned") = Some(secret.clone());
     }
 
-    pub(crate) fn remove(&self) -> Result<(), KeyError> {
-        *self.secret.lock().map_err(|_| KeyError::Poisoned)? = None;
-        Ok(())
+    pub(crate) fn remove(&self) {
+        *self
+            .secret
+            .lock()
+            .expect("in-memory custody secret lock is poisoned") = None;
     }
 }
 
@@ -37,3 +43,7 @@ impl<T> std::fmt::Debug for InMemoryCustody<T> {
         f.write_str("InMemoryCustody([REDACTED])")
     }
 }
+
+#[cfg(test)]
+#[path = "memory_tests.rs"]
+mod tests;

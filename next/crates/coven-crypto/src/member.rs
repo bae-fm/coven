@@ -9,7 +9,7 @@ use zeroize::Zeroizing;
 
 /// A member, by the public half of their Ed25519 key pair (§20).
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct MemberId(String);
+pub struct MemberId([u8; 32]);
 
 impl MemberId {
     /// Validate a member's public key, refusing weak Ed25519 points.
@@ -18,26 +18,18 @@ impl MemberId {
         if key.is_weak() {
             return Err(CryptoError::InvalidMemberId);
         }
-        Ok(Self(hex::encode(bytes)))
-    }
-
-    /// The canonical lowercase hexadecimal public key naming this member.
-    pub fn as_str(&self) -> &str {
-        &self.0
+        Ok(Self(bytes))
     }
 
     /// The validated Ed25519 public key's 32 bytes.
     pub fn to_bytes(&self) -> [u8; 32] {
-        let mut bytes = [0; 32];
-        hex::decode_to_slice(&self.0, &mut bytes)
-            .expect("MemberId constructors store a canonical 32-byte hexadecimal key");
-        bytes
+        self.0
     }
 
     /// Verify a detached signature against this member's public key (§10).
     pub fn verify(&self, message: &[u8], signature: &Signature) -> Result<(), CryptoError> {
-        let key =
-            VerifyingKey::from_bytes(&self.to_bytes()).map_err(|_| CryptoError::InvalidMemberId)?;
+        let key = VerifyingKey::from_bytes(&self.0)
+            .expect("MemberId contains a validated Ed25519 public key");
         key.verify_strict(message, &ed25519_dalek::Signature::from_bytes(&signature.0))
             .map_err(|_| CryptoError::Signature)
     }
@@ -61,7 +53,7 @@ impl FromStr for MemberId {
 
 impl fmt::Display for MemberId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&hex::encode(self.0))
     }
 }
 
@@ -119,7 +111,7 @@ impl MemberKeys {
 
     /// This member, identified by their public Ed25519 key (§20).
     pub fn member_id(&self) -> MemberId {
-        MemberId(hex::encode(self.signing.verifying_key().as_bytes()))
+        MemberId(self.signing.verifying_key().to_bytes())
     }
 
     /// The public X25519 key to which store and circle keys are sealed (§11).
@@ -154,6 +146,7 @@ impl MemberKeys {
     }
 
     /// Open the store key sealed to this member at the supplied storage path.
+    /// Panics if the storage path is empty.
     pub fn open_store_key(&self, path: &str, sealed: &[u8]) -> Result<StoreKey, CryptoError> {
         let plaintext = self.open_box(b"store", path, sealed)?;
         let mut bytes = plaintext.as_slice();
@@ -163,6 +156,7 @@ impl MemberKeys {
     }
 
     /// Open the circle key sealed to this member at the supplied storage path.
+    /// Panics if the storage path is empty.
     pub fn open_circle_key(&self, path: &str, sealed: &[u8]) -> Result<CircleKey, CryptoError> {
         let plaintext = self.open_box(b"circle", path, sealed)?;
         let mut bytes = plaintext.as_slice();
@@ -184,8 +178,8 @@ impl MemberKeys {
         if !shared.was_contributory() {
             return Err(CryptoError::WeakSealingKey);
         }
-        let context = box_context(kind, path, &sender, recipient.as_bytes())?;
-        let key = derivation::derive(shared.as_bytes(), &context)?;
+        let context = box_context(kind, path, &sender, recipient.as_bytes());
+        let key = derivation::derive(shared.as_bytes(), &context);
         Ok(Zeroizing::new(cipher::open_random(&key, &context, body)?))
     }
 }
@@ -197,6 +191,7 @@ impl fmt::Debug for MemberKeys {
 }
 
 /// Seal a store key to a member anonymously, authenticating its storage path (§11).
+/// Panics if the storage path is empty.
 pub fn seal_store_key(
     key: &StoreKey,
     recipient: &SealingPublicKey,
@@ -208,6 +203,7 @@ pub fn seal_store_key(
 }
 
 /// Seal a circle key to a member anonymously, authenticating its storage path (§14.3).
+/// Panics if the storage path is empty.
 pub fn seal_circle_key(
     key: &CircleKey,
     recipient: &SealingPublicKey,
@@ -218,19 +214,14 @@ pub fn seal_circle_key(
     seal_box(b"circle", recipient, path, &bytes)
 }
 
-fn box_context(
-    kind: &[u8],
-    path: &str,
-    sender: &[u8; 32],
-    recipient: &[u8; 32],
-) -> Result<Vec<u8>, CryptoError> {
-    Ok(cipher::context(&[
+fn box_context(kind: &[u8], path: &str, sender: &[u8; 32], recipient: &[u8; 32]) -> Vec<u8> {
+    cipher::context(&[
         derivation::SEALED_BOX,
         kind,
-        cipher::storage_path(path)?,
+        cipher::storage_path(path),
         sender,
         recipient,
-    ]))
+    ])
 }
 
 fn seal_box(
@@ -247,8 +238,8 @@ fn seal_box(
     if !shared.was_contributory() {
         return Err(CryptoError::WeakSealingKey);
     }
-    let context = box_context(kind, path, &sender, &recipient.0)?;
-    let key = derivation::derive(shared.as_bytes(), &context)?;
+    let context = box_context(kind, path, &sender, &recipient.0);
+    let key = derivation::derive(shared.as_bytes(), &context);
     let mut sealed = sender.to_vec();
     sealed.extend(cipher::seal_random(&key, &context, plaintext)?);
     Ok(sealed)

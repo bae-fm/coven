@@ -3,24 +3,15 @@
 /// A cryptographic operation could not produce or authenticate its result.
 #[derive(Debug, thiserror::Error)]
 pub enum CryptoError {
-    /// The operating system could not supply cryptographic randomness.
-    #[error("operating-system randomness failed: {0}")]
-    Random(#[from] getrandom::Error),
-    /// HKDF refused the requested output length.
-    #[error("key derivation failed")]
-    Derivation,
-    /// The cipher refused to encrypt the supplied message.
-    #[error("encryption failed")]
-    Encryption,
+    /// The device cannot provide a cryptographic service needed by this call.
+    #[error("cryptographic service unavailable: {0}")]
+    Unavailable(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// The ciphertext, key, path, index or associated data did not authenticate.
     #[error("ciphertext authentication failed")]
     Authentication,
     /// A sealed value was truncated or had invalid framing.
     #[error("invalid sealed value")]
     Malformed,
-    /// Every storage object must have a nonempty storage path.
-    #[error("storage path is empty")]
-    EmptyPath,
     /// X25519 produced a non-contributory shared secret.
     #[error("X25519 public key has low order")]
     WeakSealingKey,
@@ -38,15 +29,9 @@ pub enum CryptoError {
 /// A numbered key or serialized secret violates its representation.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum MaterialError {
-    /// Store and circle key numbers start at one.
-    #[error("key number must be nonzero")]
-    ZeroKeyNumber,
-    /// The byte representation was truncated, trailing, or of another kind.
+    /// The encoded secret or sealed value is malformed.
     #[error("invalid key material encoding")]
     Encoding,
-    /// The keyring must contain a store key.
-    #[error("keyring contains no store key")]
-    EmptyKeyring,
     /// A different key already has this store key number.
     #[error("conflicting store key number {0}")]
     StoreKeyConflict(u64),
@@ -74,7 +59,7 @@ pub enum MaterialError {
 /// App data could not be sealed or opened with the store key it names (§20.11).
 #[derive(Debug, thiserror::Error)]
 pub enum SealError {
-    /// The keyring does not hold the key the value names.
+    /// The keyring lacks the named key or the encoded material is invalid.
     #[error("store key unavailable: {0}")]
     Key(#[from] MaterialError),
     /// The cipher refused the value or its app-supplied context.

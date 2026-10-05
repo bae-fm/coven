@@ -1,6 +1,8 @@
 //! One registered service, with independent entries for each store (§20.1).
 
 use super::platform::NativeKeychain;
+#[cfg(any(test, feature = "test-utils"))]
+use super::KeychainError;
 use super::{KeyError, SecretNameError, MEMBER_KEYS_ENTRY, STORE_KEYS_ENTRY};
 use crate::SecretBytes;
 use coven_foundation::id_source::StoreId;
@@ -23,7 +25,9 @@ pub fn set_keyring_service(name: impl Into<String>) -> Result<(), KeyError> {
 
 fn register(service: &Mutex<Option<String>>, name: String) -> Result<(), KeyError> {
     validate_service(&name)?;
-    let mut registered = service.lock().map_err(|_| KeyError::Poisoned)?;
+    let mut registered = service
+        .lock()
+        .expect("keyring service name lock is poisoned");
     if let Some(existing) = registered.as_ref() {
         return if *existing == name {
             Ok(())
@@ -66,7 +70,15 @@ struct MemoryEntries {
 impl MemoryEntries {
     fn check(&mut self) -> Result<(), KeyError> {
         if std::mem::replace(&mut self.fail_next, false) {
-            return Err(KeyError::TestKeychainFailure);
+            return Err(
+                KeychainError::from(keyring_core::Error::NoStorageAccess(Box::new(
+                    std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "in-memory keychain refused the operation",
+                    ),
+                )))
+                .into(),
+            );
         }
         Ok(())
     }
@@ -85,7 +97,7 @@ impl Keychain {
     pub fn registered() -> Result<Arc<Self>, KeyError> {
         let name = SERVICE_NAME
             .lock()
-            .map_err(|_| KeyError::Poisoned)?
+            .expect("keyring service name lock is poisoned")
             .as_ref()
             .cloned()
             .ok_or(KeyError::ServiceNotRegistered)?;
@@ -106,7 +118,9 @@ impl Keychain {
             Backend::Native(native) => native.synced_restore_codes(&self.name)?,
             #[cfg(any(test, feature = "test-utils"))]
             Backend::Memory(memory) => {
-                let mut memory = memory.lock().map_err(|_| KeyError::Poisoned)?;
+                let mut memory = memory
+                    .lock()
+                    .expect("in-memory keychain entries lock is poisoned");
                 memory.check()?;
                 let mut codes = Vec::new();
                 for ((scope, account), bytes) in &memory.entries {
@@ -133,7 +147,9 @@ impl Keychain {
             Backend::Native(native) => native.read(scope, &self.name, account),
             #[cfg(any(test, feature = "test-utils"))]
             Backend::Memory(memory) => {
-                let mut memory = memory.lock().map_err(|_| KeyError::Poisoned)?;
+                let mut memory = memory
+                    .lock()
+                    .expect("in-memory keychain entries lock is poisoned");
                 memory.check()?;
                 Ok(memory
                     .entries
@@ -148,7 +164,9 @@ impl Keychain {
             Backend::Native(native) => native.write(scope, &self.name, account, bytes),
             #[cfg(any(test, feature = "test-utils"))]
             Backend::Memory(memory) => {
-                let mut memory = memory.lock().map_err(|_| KeyError::Poisoned)?;
+                let mut memory = memory
+                    .lock()
+                    .expect("in-memory keychain entries lock is poisoned");
                 memory.check()?;
                 memory.entries.insert(
                     (scope, account.to_owned()),
@@ -164,7 +182,9 @@ impl Keychain {
             Backend::Native(native) => native.delete(scope, &self.name, account),
             #[cfg(any(test, feature = "test-utils"))]
             Backend::Memory(memory) => {
-                let mut memory = memory.lock().map_err(|_| KeyError::Poisoned)?;
+                let mut memory = memory
+                    .lock()
+                    .expect("in-memory keychain entries lock is poisoned");
                 memory.check()?;
                 memory.entries.remove(&(scope, account.to_owned()));
                 Ok(())
@@ -188,14 +208,17 @@ impl Keychain {
     }
 
     /// Make the fake refuse the next read, write, delete or list before changing state.
+    /// Panics if this is a native keychain.
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn fail_next_operation(&self) -> Result<(), KeyError> {
+    pub fn fail_next_operation(&self) {
         match &self.backend {
             Backend::Memory(memory) => {
-                memory.lock().map_err(|_| KeyError::Poisoned)?.fail_next = true;
-                Ok(())
+                memory
+                    .lock()
+                    .expect("in-memory keychain entries lock is poisoned")
+                    .fail_next = true;
             }
-            Backend::Native(_) => Err(KeyError::TestKeychainFailure),
+            Backend::Native(_) => panic!("failure injection requires an in-memory keychain"),
         }
     }
 }
@@ -297,7 +320,7 @@ pub(crate) fn restore_code_store(account: &str) -> Result<Option<StoreId>, KeyEr
     match account.split_once(':') {
         Some((RESTORE_CODE_ENTRY, id)) => uuid::Uuid::parse_str(id)
             .map(|id| Some(StoreId(id)))
-            .map_err(KeyError::RestoreCodeStoreId),
+            .map_err(|_| KeyError::RestoreCodeStoreId),
         _ => {
             tracing::debug!(account, "skipping synced entry that is not a restore code");
             Ok(None)

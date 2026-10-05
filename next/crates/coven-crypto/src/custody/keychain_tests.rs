@@ -1,7 +1,35 @@
 use super::*;
 use crate::custody::{KeychainError, MemberKeyCustody, StoreKeyCustody};
 use crate::{MemberKeys, StoreKey, StoreKeyring};
+use std::num::NonZeroU64;
 use uuid::Uuid;
+
+#[test]
+#[should_panic(expected = "keyring service name lock is poisoned")]
+fn registration_propagates_a_poisoned_service_lock() {
+    let service = Mutex::new(None);
+    let poisoned = std::panic::catch_unwind(|| {
+        let _guard = service.lock().unwrap();
+        panic!("poison service name");
+    });
+    assert!(poisoned.is_err());
+    let _registration = register(&service, "service".into());
+}
+
+#[test]
+#[should_panic(expected = "in-memory keychain entries lock is poisoned")]
+fn discovery_propagates_a_poisoned_entries_lock() {
+    let fake = Keychain::in_memory("poisoned").unwrap();
+    let Backend::Memory(memory) = &fake.backend else {
+        panic!("expected in-memory keychain");
+    };
+    let poisoned = std::panic::catch_unwind(|| {
+        let _guard = memory.lock().unwrap();
+        panic!("poison keychain entries");
+    });
+    assert!(poisoned.is_err());
+    let _codes = fake.synced_restore_codes();
+}
 
 #[test]
 fn only_restore_codes_sync_and_stores_can_be_discovered_without_ids() {
@@ -10,7 +38,7 @@ fn only_restore_codes_sync_and_stores_can_be_discovered_without_ids() {
     let b_id = StoreId(Uuid::from_u128(2));
     let a = Arc::new(StoreKeychain::new(fake.clone(), a_id));
     let b = StoreKeychain::new(fake.clone(), b_id);
-    let keys = StoreKeyring::new(StoreKey::from_bytes(1, [17; 32]).unwrap());
+    let keys = StoreKeyring::new(StoreKey::from_bytes(NonZeroU64::MIN, [17; 32]));
     let member = MemberKeys::generate().unwrap();
     let store_custody = KeyringCustody::<StoreKeyring>::new(a.clone());
     let member_custody = KeyringCustody::<MemberKeys>::new(a.clone());
@@ -90,33 +118,33 @@ fn synced_restore_code_failures_preserve_the_previous_code() {
     let store = StoreKeychain::new(fake.clone(), StoreId(Uuid::from_u128(1)));
     let original = SecretBytes::new(b"original".to_vec());
     store.set_synced_restore_code(&original).unwrap();
-    fake.fail_next_operation().unwrap();
+    fake.fail_next_operation();
     assert!(matches!(
         store.set_synced_restore_code(&SecretBytes::new(b"replacement".to_vec())),
-        Err(KeyError::TestKeychainFailure)
+        Err(KeyError::Keychain(_))
     ));
     assert_eq!(
         store.synced_restore_code().unwrap().unwrap().as_bytes(),
         original.as_bytes()
     );
-    fake.fail_next_operation().unwrap();
+    fake.fail_next_operation();
     assert!(matches!(
         store.delete_synced_restore_code(),
-        Err(KeyError::TestKeychainFailure)
+        Err(KeyError::Keychain(_))
     ));
     assert_eq!(
         store.synced_restore_code().unwrap().unwrap().as_bytes(),
         original.as_bytes()
     );
-    fake.fail_next_operation().unwrap();
+    fake.fail_next_operation();
     assert!(matches!(
         store.synced_restore_code(),
-        Err(KeyError::TestKeychainFailure)
+        Err(KeyError::Keychain(_))
     ));
-    fake.fail_next_operation().unwrap();
+    fake.fail_next_operation();
     assert!(matches!(
         fake.synced_restore_codes(),
-        Err(KeyError::TestKeychainFailure)
+        Err(KeyError::Keychain(_))
     ));
     assert_eq!(
         fake.synced_restore_codes().unwrap()[0].1.as_bytes(),
@@ -140,7 +168,7 @@ fn discovery_filters_scope_and_kind_but_rejects_malformed_and_ambiguous_ids() {
         .unwrap();
     assert!(matches!(
         fake.synced_restore_codes(),
-        Err(KeyError::RestoreCodeStoreId(_))
+        Err(KeyError::RestoreCodeStoreId)
     ));
     fake.delete(EntryScope::Synced, "restore-code:invalid")
         .unwrap();

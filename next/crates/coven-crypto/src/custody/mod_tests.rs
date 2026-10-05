@@ -4,6 +4,7 @@ use coven_foundation::{
     files::{StoreDir, StoreFile, StoreLayout},
     id_source::{SequentialIds, StoreId},
 };
+use std::num::NonZeroU64;
 use uuid::Uuid;
 
 fn directory() -> (tempfile::TempDir, StoreDir) {
@@ -19,11 +20,13 @@ fn directory() -> (tempfile::TempDir, StoreDir) {
 }
 
 fn exercise_store_custody(custody: &dyn StoreKeyCustody) {
-    let mut keys = StoreKeyring::new(StoreKey::generate(1).unwrap());
-    keys.insert_store_key(StoreKey::generate(2).unwrap())
+    let mut keys = StoreKeyring::new(StoreKey::generate(NonZeroU64::MIN).unwrap());
+    keys.insert_store_key(StoreKey::generate(NonZeroU64::new(2).unwrap()).unwrap())
         .unwrap();
-    keys.insert_circle_key(CircleKey::generate(CircleId(Uuid::from_u128(4)), 1).unwrap())
-        .unwrap();
+    keys.insert_circle_key(
+        CircleKey::generate(CircleId(Uuid::from_u128(4)), NonZeroU64::MIN).unwrap(),
+    )
+    .unwrap();
     custody.persist(&keys).unwrap();
     let unlocked = custody.unlock().unwrap().unwrap();
     assert_eq!(
@@ -54,7 +57,9 @@ fn exercise_member_custody(custody: &dyn MemberKeyCustody) {
 
 #[test]
 fn in_memory_custody_keeps_both_material_kinds_for_one_session() {
-    let store = InMemoryCustody::new(StoreKeyring::new(StoreKey::generate(1).unwrap()));
+    let store = InMemoryCustody::new(StoreKeyring::new(
+        StoreKey::generate(NonZeroU64::MIN).unwrap(),
+    ));
     let member = InMemoryCustody::new(MemberKeys::generate().unwrap());
     assert!(store.unlock().unwrap().is_some());
     assert!(member.unlock().unwrap().is_some());
@@ -103,7 +108,7 @@ fn keyring_custody_uses_the_fake_and_isolates_stores_and_material_kinds() {
     let member = KeyringCustody::<MemberKeys>::new(first);
     assert!(store.unlock().unwrap().is_none());
     assert!(member.unlock().unwrap().is_none());
-    let keys = StoreKeyring::new(StoreKey::generate(1).unwrap());
+    let keys = StoreKeyring::new(StoreKey::generate(NonZeroU64::MIN).unwrap());
     store.persist(&keys).unwrap();
     assert!(member.unlock().unwrap().is_none());
     assert!(KeyringCustody::<StoreKeyring>::new(second.clone())
@@ -127,13 +132,10 @@ fn keychain_failure_preserves_material_and_reaches_the_caller() {
         StoreId(Uuid::from_u128(1)),
     ));
     let custody = KeyringCustody::<StoreKeyring>::new(store);
-    let original = StoreKeyring::new(StoreKey::generate(1).unwrap());
+    let original = StoreKeyring::new(StoreKey::generate(NonZeroU64::MIN).unwrap());
     custody.persist(&original).unwrap();
-    fake.fail_next_operation().unwrap();
-    assert!(matches!(
-        custody.forget(),
-        Err(KeyError::TestKeychainFailure)
-    ));
+    fake.fail_next_operation();
+    assert!(matches!(custody.forget(), Err(KeyError::Keychain(_))));
     assert_eq!(
         custody
             .unlock()
@@ -143,10 +145,12 @@ fn keychain_failure_preserves_material_and_reaches_the_caller() {
             .as_bytes(),
         original.to_secret_bytes().as_bytes()
     );
-    fake.fail_next_operation().unwrap();
+    fake.fail_next_operation();
     assert!(matches!(
-        custody.persist(&StoreKeyring::new(StoreKey::generate(2).unwrap())),
-        Err(KeyError::TestKeychainFailure)
+        custody.persist(&StoreKeyring::new(
+            StoreKey::generate(NonZeroU64::new(2).unwrap()).unwrap()
+        )),
+        Err(KeyError::Keychain(_))
     ));
     assert_eq!(
         custody
@@ -154,21 +158,17 @@ fn keychain_failure_preserves_material_and_reaches_the_caller() {
             .unwrap()
             .unwrap()
             .current_store_key()
-            .unwrap()
             .number(),
         1
     );
-    fake.fail_next_operation().unwrap();
-    assert!(matches!(
-        custody.unlock(),
-        Err(KeyError::TestKeychainFailure)
-    ));
+    fake.fail_next_operation();
+    assert!(matches!(custody.unlock(), Err(KeyError::Keychain(_))));
 }
 
 #[test]
 fn custody_debug_never_prints_secrets() {
     let phrase = || Passphrase::new("passphrase-must-not-print".into());
-    let keys = || StoreKeyring::new(StoreKey::from_bytes(1, [88; 32]).unwrap());
+    let keys = || StoreKeyring::new(StoreKey::from_bytes(NonZeroU64::MIN, [88; 32]));
     let member = || MemberKeys::generate().unwrap();
     let (_temp, directory) = directory();
     let fake = Keychain::in_memory("debug").unwrap();

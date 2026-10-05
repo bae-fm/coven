@@ -25,7 +25,7 @@ pub enum KeyError {
     /// A filesystem operation failed; the cause says whether bytes changed.
     #[error("custody file failed: {0}")]
     File(#[from] coven_foundation::files::FileError),
-    /// Cryptographic randomness, encryption or authentication failed.
+    /// A cryptographic service was unavailable or stored bytes failed validation.
     #[error("custody cryptography failed: {0}")]
     Crypto(#[from] crate::CryptoError),
     /// Decrypted or keychain-provided material was malformed.
@@ -40,12 +40,9 @@ pub enum KeyError {
     /// Recorded Argon2id parameters exceed the accepted resource bounds.
     #[error("Argon2id parameters are outside the accepted bounds")]
     PassphraseParameters,
-    /// Argon2id refused its parameters or derivation input.
-    #[error("Argon2id failed: {0}")]
-    Argon2(#[from] argon2::Error),
-    /// A lock was poisoned; custody never guesses at its state.
-    #[error("custody lock is poisoned")]
-    Poisoned,
+    /// The device lacks resources needed to unlock or keep keys.
+    #[error("key custody resources unavailable: {0}")]
+    Unavailable(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// The OS credential store refused an operation.
     #[error("keychain failed: {0}")]
     Keychain(#[from] KeychainError),
@@ -65,8 +62,8 @@ pub enum KeyError {
     #[error("synced restore codes are unsupported on this platform")]
     Unsupported,
     /// A synced restore-code account contains an invalid store id.
-    #[error("invalid store id in synced restore-code entry: {0}")]
-    RestoreCodeStoreId(#[source] uuid::Error),
+    #[error("invalid store id in synced restore-code entry")]
+    RestoreCodeStoreId,
     /// Multiple accessible keychain groups contain a restore code for one store.
     #[error("multiple synced restore codes for store {0}")]
     AmbiguousRestoreCode(coven_foundation::id_source::StoreId),
@@ -76,10 +73,6 @@ pub enum KeyError {
     /// An app secret was stored with bytes that are not UTF-8.
     #[error("host secret is not UTF-8")]
     HostSecretEncoding,
-    /// The test keychain was instructed to refuse the next operation.
-    #[cfg(any(test, feature = "test-utils"))]
-    #[error("in-memory keychain refused the operation")]
-    TestKeychainFailure,
 }
 
 /// A native keychain error whose diagnostic output never includes secret bytes.

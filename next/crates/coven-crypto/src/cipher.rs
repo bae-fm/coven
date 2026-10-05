@@ -2,15 +2,13 @@
 
 use crate::{randomness, CryptoError};
 use chacha20poly1305::{
-    aead::{Aead, Payload},
+    aead::{consts::U24, Aead, Payload},
     KeyInit, XChaCha20Poly1305,
 };
 
-pub(crate) fn storage_path(path: &str) -> Result<&[u8], CryptoError> {
-    if path.is_empty() {
-        return Err(CryptoError::EmptyPath);
-    }
-    Ok(path.as_bytes())
+pub(crate) fn storage_path(path: &str) -> &[u8] {
+    assert!(!path.is_empty(), "storage paths must be nonempty");
+    path.as_bytes()
 }
 pub(crate) fn context(parts: &[&[u8]]) -> Vec<u8> {
     let mut aad = Vec::new();
@@ -21,13 +19,17 @@ pub(crate) fn context(parts: &[&[u8]]) -> Vec<u8> {
     aad
 }
 
-pub(crate) fn seal(
-    key: &[u8; 32],
+pub(crate) fn seal(key: &[u8; 32], nonce: &[u8; 24], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
+    encrypt(&XChaCha20Poly1305::new(key.into()), nonce, aad, plaintext)
+}
+
+fn encrypt(
+    cipher: &impl Aead<NonceSize = U24>,
     nonce: &[u8; 24],
     aad: &[u8],
     plaintext: &[u8],
-) -> Result<Vec<u8>, CryptoError> {
-    XChaCha20Poly1305::new(key.into())
+) -> Vec<u8> {
+    cipher
         .encrypt(
             nonce.into(),
             Payload {
@@ -35,7 +37,7 @@ pub(crate) fn seal(
                 aad,
             },
         )
-        .map_err(|_| CryptoError::Encryption)
+        .expect("XChaCha20-Poly1305 plaintext must fit its block counter and lengths must fit u64")
 }
 
 pub(crate) fn open(
@@ -57,7 +59,7 @@ pub(crate) fn seal_random(
     let mut nonce = [0; 24];
     randomness::fill(&mut nonce)?;
     let mut sealed = nonce.to_vec();
-    sealed.extend(seal(key, &nonce, aad, plaintext)?);
+    sealed.extend(seal(key, &nonce, aad, plaintext));
     Ok(sealed)
 }
 
@@ -70,3 +72,7 @@ pub(crate) fn open_random(
     let nonce = nonce.try_into().map_err(|_| CryptoError::Malformed)?;
     open(key, nonce, aad, ciphertext)
 }
+
+#[cfg(test)]
+#[path = "cipher_tests.rs"]
+mod tests;

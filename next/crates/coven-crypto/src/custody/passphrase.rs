@@ -69,7 +69,7 @@ impl<T> PassphraseCustody<T> {
             return Err(KeyError::PassphraseHeader);
         }
         let header = bytes.get(..37).ok_or(KeyError::PassphraseHeader)?;
-        let key = derive(&self.passphrase, &salt, params)?;
+        let key = derive(&self.passphrase, &salt, read_parameters(params)?)?;
         let aad = cipher::context(&[header, self.store.0.as_bytes(), kind.as_bytes()]);
         match cipher::open_random(&key, &aad, body) {
             Ok(bytes) => Ok(Some(SecretBytes::new(bytes))),
@@ -83,7 +83,9 @@ impl<T> PassphraseCustody<T> {
         // exact authenticated parameters recorded in that particular file.
         let mut salt = [0; SALT_LEN];
         randomness::fill(&mut salt)?;
-        let key = derive(&self.passphrase, &salt, WRITE_PARAMETERS)?;
+        let params = read_parameters(WRITE_PARAMETERS)
+            .expect("custody writer parameters must satisfy the passphrase resource bounds");
+        let key = derive(&self.passphrase, &salt, params)?;
         let mut header = HEADER.to_vec();
         header.extend_from_slice(&0x13u32.to_le_bytes());
         for param in WRITE_PARAMETERS {
@@ -107,11 +109,7 @@ impl<T> std::fmt::Debug for PassphraseCustody<T> {
     }
 }
 
-fn derive(
-    passphrase: &Passphrase,
-    salt: &[u8; SALT_LEN],
-    params: [u32; 3],
-) -> Result<Zeroizing<[u8; 32]>, KeyError> {
+fn read_parameters(params: [u32; 3]) -> Result<argon2::Params, KeyError> {
     let [memory, iterations, lanes] = params;
     // These read bounds are independent of writer defaults: raising defaults
     // never strands a stored file. Upper bounds reject unauthenticated resource
@@ -122,14 +120,27 @@ fn derive(
     {
         return Err(KeyError::PassphraseParameters);
     }
-    let params = argon2::Params::new(memory, iterations, lanes, Some(32))?;
+    argon2::Params::new(memory, iterations, lanes, Some(32))
+        .map_err(|_| KeyError::PassphraseParameters)
+}
+
+fn allocate_blocks(count: usize) -> Result<Zeroizing<Vec<argon2::Block>>, KeyError> {
     // Argon2's allocating convenience method frees its work area without
     // zeroizing it. Own that area so every return path erases it.
     let mut blocks = Zeroizing::new(Vec::new());
     blocks
-        .try_reserve_exact(params.block_count())
-        .map_err(|_| KeyError::Argon2(argon2::Error::OutOfMemory))?;
-    blocks.resize(params.block_count(), argon2::Block::default());
+        .try_reserve_exact(count)
+        .map_err(|error| KeyError::Unavailable(Box::new(error)))?;
+    blocks.resize(count, argon2::Block::default());
+    Ok(blocks)
+}
+
+fn derive(
+    passphrase: &Passphrase,
+    salt: &[u8; SALT_LEN],
+    params: argon2::Params,
+) -> Result<Zeroizing<[u8; 32]>, KeyError> {
+    let mut blocks = allocate_blocks(params.block_count())?;
     let argon = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
     let mut key = Zeroizing::new([0; 32]);
     argon.hash_password_into_with_memory(
@@ -137,7 +148,8 @@ fn derive(
         salt,
         key.as_mut(),
         blocks.as_mut_slice(),
-    )?;
+    )
+    .expect("custody Argon2id requires a 32-byte output, a 16-byte salt, sufficient blocks and a passphrase no longer than u32::MAX bytes");
     Ok(key)
 }
 

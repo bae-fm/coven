@@ -25,9 +25,17 @@ fn member_identity_encoding_uses_cryptos_public_bytes() {
     let member = test_utils::member().signing;
     let raw = member.to_bytes();
     assert_eq!(bytes(&member), raw);
+    let text = member.to_string();
+    assert_eq!(bytes(&text.parse::<MemberId>().unwrap()), raw);
     assert_eq!(
         MemberId::get(&mut Decoder::new(&raw).unwrap()).unwrap(),
         member
+    );
+    assert_eq!(
+        MemberId::get(&mut Decoder::new(&raw).unwrap())
+            .unwrap()
+            .to_string(),
+        text
     );
 }
 

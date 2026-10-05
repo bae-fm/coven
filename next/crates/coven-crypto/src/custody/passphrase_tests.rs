@@ -5,7 +5,28 @@ use coven_foundation::{
     files::{StoreFile, StoreLayout},
     id_source::SequentialIds,
 };
+use std::num::NonZeroU64;
 use uuid::Uuid;
+
+#[test]
+fn unavailable_derivation_memory_preserves_the_allocation_cause() {
+    use std::error::Error;
+
+    // Capacity overflow fails deterministically without exhausting the machine.
+    let error = allocate_blocks(usize::MAX).unwrap_err();
+    assert!(matches!(&error, KeyError::Unavailable(_)));
+    assert!(error
+        .source()
+        .unwrap()
+        .is::<std::collections::TryReserveError>());
+}
+
+#[test]
+#[should_panic(expected = "custody Argon2id requires a 32-byte output")]
+fn an_invalid_internal_derivation_request_panics() {
+    let params = argon2::Params::new(8, 1, 1, Some(64)).unwrap();
+    let _key = derive(&Passphrase::new("phrase".into()), &[0; SALT_LEN], params);
+}
 
 fn file() -> (tempfile::TempDir, AtomicFile, StoreId) {
     let temp = tempfile::tempdir().unwrap();
@@ -22,7 +43,9 @@ fn wrong_passphrase_and_wrong_store_or_material_kind_fail_authentication() {
     let writer =
         PassphraseCustody::<StoreKeyring>::new(Passphrase::new("right".into()), file.clone(), id);
     writer
-        .persist(&StoreKeyring::new(StoreKey::generate(1).unwrap()))
+        .persist(&StoreKeyring::new(
+            StoreKey::generate(NonZeroU64::MIN).unwrap(),
+        ))
         .unwrap();
     let wrong =
         PassphraseCustody::<StoreKeyring>::new(Passphrase::new("wrong".into()), file.clone(), id);
@@ -52,7 +75,9 @@ fn a_live_custody_reads_the_parameters_of_the_current_file() {
     let original =
         PassphraseCustody::<StoreKeyring>::new(Passphrase::new("phrase".into()), file.clone(), id);
     original
-        .persist(&StoreKeyring::new(StoreKey::generate(1).unwrap()))
+        .persist(&StoreKeyring::new(
+            StoreKey::generate(NonZeroU64::MIN).unwrap(),
+        ))
         .unwrap();
     assert_eq!(
         original
@@ -60,14 +85,15 @@ fn a_live_custody_reads_the_parameters_of_the_current_file() {
             .unwrap()
             .unwrap()
             .current_store_key()
-            .unwrap()
             .number(),
         1
     );
     let reopened =
         PassphraseCustody::<StoreKeyring>::new(Passphrase::new("phrase".into()), file, id);
     reopened
-        .persist(&StoreKeyring::new(StoreKey::generate(2).unwrap()))
+        .persist(&StoreKeyring::new(
+            StoreKey::generate(NonZeroU64::new(2).unwrap()).unwrap(),
+        ))
         .unwrap();
     assert_eq!(
         original
@@ -75,7 +101,6 @@ fn a_live_custody_reads_the_parameters_of_the_current_file() {
             .unwrap()
             .unwrap()
             .current_store_key()
-            .unwrap()
             .number(),
         2
     );
@@ -86,7 +111,7 @@ fn parameters_are_recorded_authenticated_and_bounded_before_derivation() {
     let (_temp, file, id) = file();
     let custody =
         PassphraseCustody::<StoreKeyring>::new(Passphrase::new("phrase".into()), file.clone(), id);
-    let keys = StoreKeyring::new(StoreKey::generate(1).unwrap());
+    let keys = StoreKeyring::new(StoreKey::generate(NonZeroU64::MIN).unwrap());
     custody.persist(&keys).unwrap();
     let original = file.read_optional().unwrap().unwrap();
     assert_eq!(&original[..5], HEADER);
@@ -149,7 +174,9 @@ fn file_failures_are_not_absence_or_success() {
         store.id(),
     );
     assert!(matches!(
-        custody.persist(&StoreKeyring::new(StoreKey::generate(1).unwrap())),
+        custody.persist(&StoreKeyring::new(
+            StoreKey::generate(NonZeroU64::MIN).unwrap()
+        )),
         Err(KeyError::File(_))
     ));
 }

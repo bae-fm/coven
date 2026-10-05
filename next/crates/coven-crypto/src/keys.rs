@@ -23,18 +23,16 @@ pub struct StoreKey {
 
 impl StoreKey {
     /// Make the store's `number`th key using the operating system's randomness.
-    pub fn generate(number: u64) -> Result<Self, CryptoError> {
-        let number = NonZeroU64::new(number).ok_or(MaterialError::ZeroKeyNumber)?;
+    pub fn generate(number: NonZeroU64) -> Result<Self, CryptoError> {
         let mut bytes = Zeroizing::new([0; 32]);
         randomness::fill(bytes.as_mut())?;
         Ok(Self { number, bytes })
     }
 
     /// Import a store key opened from custody or a member's sealed copy (§11).
-    pub fn from_bytes(number: u64, bytes: [u8; 32]) -> Result<Self, MaterialError> {
+    pub fn from_bytes(number: NonZeroU64, bytes: [u8; 32]) -> Self {
         let bytes = Zeroizing::new(bytes);
-        let number = NonZeroU64::new(number).ok_or(MaterialError::ZeroKeyNumber)?;
-        Ok(Self { number, bytes })
+        Self { number, bytes }
     }
 
     /// Which store key this is, starting at one (§11).
@@ -43,7 +41,7 @@ impl StoreKey {
     }
 
     /// Derive separate encryption, naming, file-nonce and fingerprint keys.
-    pub fn derive(&self) -> Result<DerivedKeys, CryptoError> {
+    pub fn derive(&self) -> DerivedKeys {
         DerivedKeys::new(&self.bytes)
     }
 
@@ -53,7 +51,8 @@ impl StoreKey {
     }
 
     pub(crate) fn decode(bytes: &mut &[u8]) -> Result<Self, MaterialError> {
-        Self::from_bytes(wire::number(bytes)?, wire::array(bytes)?)
+        let number = NonZeroU64::new(wire::number(bytes)?).ok_or(MaterialError::Encoding)?;
+        Ok(Self::from_bytes(number, wire::array(bytes)?))
     }
 }
 
@@ -75,7 +74,7 @@ pub struct CircleKey {
 
 impl CircleKey {
     /// Make a circle key using the operating system's randomness.
-    pub fn generate(circle: CircleId, number: u64) -> Result<Self, CryptoError> {
+    pub fn generate(circle: CircleId, number: NonZeroU64) -> Result<Self, CryptoError> {
         Ok(Self {
             circle,
             key: StoreKey::generate(number)?,
@@ -83,15 +82,11 @@ impl CircleKey {
     }
 
     /// Import a circle key opened from custody or a member's sealed copy.
-    pub fn from_bytes(
-        circle: CircleId,
-        number: u64,
-        bytes: [u8; 32],
-    ) -> Result<Self, MaterialError> {
-        Ok(Self {
+    pub fn from_bytes(circle: CircleId, number: NonZeroU64, bytes: [u8; 32]) -> Self {
+        Self {
             circle,
-            key: StoreKey::from_bytes(number, bytes)?,
-        })
+            key: StoreKey::from_bytes(number, bytes),
+        }
     }
 
     /// The circle whose rows and files this key protects.
@@ -105,7 +100,7 @@ impl CircleKey {
     }
 
     /// Derive separate encryption, naming, file-nonce and fingerprint keys.
-    pub fn derive(&self) -> Result<DerivedKeys, CryptoError> {
+    pub fn derive(&self) -> DerivedKeys {
         self.key.derive()
     }
 
@@ -168,11 +163,11 @@ impl StoreKeyring {
     }
 
     /// The highest numbered store key, used for new writes and app data (§11).
-    pub fn current_store_key(&self) -> Result<&StoreKey, MaterialError> {
+    pub fn current_store_key(&self) -> &StoreKey {
         self.stores
             .last_key_value()
             .map(|(_, key)| key)
-            .ok_or(MaterialError::EmptyKeyring)
+            .expect("StoreKeyring always contains at least one store key")
     }
 
     /// An opened store key by its number, so older writes still open (§11).
@@ -219,10 +214,7 @@ impl StoreKeyring {
     pub fn from_secret_bytes(mut bytes: &[u8]) -> Result<Self, MaterialError> {
         wire::prefix(&mut bytes, b"CVKR\x01")?;
         let count = wire::number(&mut bytes)?;
-        if count == 0 {
-            return Err(MaterialError::EmptyKeyring);
-        }
-        if count > (bytes.len() / 40) as u64 {
+        if count == 0 || count > (bytes.len() / 40) as u64 {
             return Err(MaterialError::Encoding);
         }
         let mut stores = BTreeMap::new();
@@ -251,11 +243,11 @@ impl StoreKeyring {
     /// The app's associated data binds the value to its place.
     /// The authenticated header records the store key number for later opening.
     pub fn seal_app_data(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, SealError> {
-        let key = self.current_store_key()?;
+        let key = self.current_store_key();
         let mut header = b"CVAD\x01".to_vec();
         header.extend_from_slice(&key.number().to_le_bytes());
         let context = cipher::context(&[&header, aad]);
-        let encryption = derivation::derive(&key.bytes, derivation::APP_DATA)?;
+        let encryption = derivation::derive(&key.bytes, derivation::APP_DATA);
         let body = cipher::seal_random(&encryption, &context, plaintext)?;
         header.extend(body);
         Ok(header)
@@ -268,7 +260,7 @@ impl StoreKeyring {
         let number = wire::number(&mut bytes)?;
         let header = sealed.get(..13).ok_or(MaterialError::Encoding)?;
         let key = self.store_key(number)?;
-        let encryption = derivation::derive(&key.bytes, derivation::APP_DATA)?;
+        let encryption = derivation::derive(&key.bytes, derivation::APP_DATA);
         Ok(cipher::open_random(
             &encryption,
             &cipher::context(&[header, aad]),
@@ -299,11 +291,8 @@ impl InviteSecret {
     }
 
     /// Derive the join request's encryption key with its own HKDF label (§11.1).
-    pub fn join_request_key(&self) -> Result<EncryptionKey, CryptoError> {
-        Ok(EncryptionKey(derivation::derive(
-            &self.0,
-            derivation::JOIN_REQUEST,
-        )?))
+    pub fn join_request_key(&self) -> EncryptionKey {
+        EncryptionKey(derivation::derive(&self.0, derivation::JOIN_REQUEST))
     }
 }
 

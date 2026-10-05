@@ -1,5 +1,6 @@
 use super::*;
 use crate::{CircleId, CircleKey, ContentHasher, InviteSecret, StoreKey};
+use std::num::NonZeroU64;
 use uuid::Uuid;
 
 #[test]
@@ -44,34 +45,31 @@ fn purpose_labels_and_hkdf_answers_are_pinned() {
     ];
     for (label, expected, answer) in vectors {
         assert_eq!(label, expected);
-        assert_eq!(
-            hex::encode(derive(&[17; 32], label).unwrap().as_ref()),
-            *answer
-        );
+        assert_eq!(hex::encode(derive(&[17; 32], label).as_ref()), *answer);
     }
 }
 
 #[test]
 fn stored_file_name_nonce_chunk_and_fingerprint_answers_are_pinned() {
-    let keys = StoreKey::from_bytes(1, [17; 32]).unwrap().derive().unwrap();
+    let keys = StoreKey::from_bytes(NonZeroU64::MIN, [17; 32]).derive();
     let mut hash = ContentHasher::new();
     hash.update(b"hello file");
-    let name = keys.file_name(&hash.finish()).unwrap();
+    let name = keys.file_name(&hash.finish());
     assert_eq!(
         name.to_string(),
         "418312d742b95e056668ba4f91c034c0a49cb5159067a43f67b7cf73ce8c6956"
     );
     assert_eq!(
-        hex::encode(keys.chunk_nonce(&name, 7).unwrap()),
+        hex::encode(keys.chunk_nonce(&name, 7)),
         "12358369de655ceb9f1358b5720a43ce0700000000000000"
     );
     // Independently calculated with libsodium's XChaCha20-Poly1305, using
     // length-framed domain, raw name bytes and the little-endian chunk index.
     assert_eq!(
-        hex::encode(keys.seal_chunk(&name, 7, b"hello file").unwrap()),
+        hex::encode(keys.seal_chunk(&name, 7, b"hello file")),
         "6ec239349217077c8df98772b3ef4c2dc6c69d9a26f9cae3363e"
     );
-    let mut fingerprint = keys.fingerprint_hasher().unwrap();
+    let mut fingerprint = keys.fingerprint_hasher();
     fingerprint.update(b"agreed state");
     assert_eq!(
         hex::encode(fingerprint.finish().as_bytes()),
@@ -82,11 +80,10 @@ fn stored_file_name_nonce_chunk_and_fingerprint_answers_are_pinned() {
 #[test]
 fn store_and_circle_objects_bind_path_and_use_random_nonces() {
     let keys = [
-        StoreKey::generate(1).unwrap().derive().unwrap(),
-        CircleKey::generate(CircleId(Uuid::from_u128(5)), 1)
+        StoreKey::generate(NonZeroU64::MIN).unwrap().derive(),
+        CircleKey::generate(CircleId(Uuid::from_u128(5)), NonZeroU64::MIN)
             .unwrap()
-            .derive()
-            .unwrap(),
+            .derive(),
     ];
     for key in keys {
         for plaintext in [b"".as_slice(), b"object payload"] {
@@ -122,7 +119,7 @@ fn store_and_circle_objects_bind_path_and_use_random_nonces() {
 #[test]
 fn a_join_request_is_bound_to_its_invite_and_path() {
     let invite = InviteSecret::generate().unwrap();
-    let key = invite.join_request_key().unwrap();
+    let key = invite.join_request_key();
     let sealed = key.seal_object("join-requests/42", b"Carol").unwrap();
     assert_eq!(
         key.open_object("join-requests/42", &sealed).unwrap(),
@@ -132,13 +129,11 @@ fn a_join_request_is_bound_to_its_invite_and_path() {
     assert!(InviteSecret::generate()
         .unwrap()
         .join_request_key()
-        .unwrap()
         .open_object("join-requests/42", &sealed)
         .is_err());
     let same = InviteSecret::from_bytes(invite.to_secret_bytes().as_bytes().try_into().unwrap());
     assert_eq!(
         same.join_request_key()
-            .unwrap()
             .open_object("join-requests/42", &sealed)
             .unwrap(),
         b"Carol"
@@ -147,24 +142,18 @@ fn a_join_request_is_bound_to_its_invite_and_path() {
 
 #[test]
 fn file_chunks_repeat_only_for_the_same_key_name_index_and_bytes() {
-    let key = StoreKey::from_bytes(1, [17; 32]).unwrap().derive().unwrap();
-    let other_key = StoreKey::from_bytes(1, [18; 32]).unwrap().derive().unwrap();
-    let name = key.file_name(&ContentHash::from_bytes([4; 32])).unwrap();
-    let other_name = key.file_name(&ContentHash::from_bytes([5; 32])).unwrap();
+    let key = StoreKey::from_bytes(NonZeroU64::MIN, [17; 32]).derive();
+    let other_key = StoreKey::from_bytes(NonZeroU64::MIN, [18; 32]).derive();
+    let name = key.file_name(&ContentHash::from_bytes([4; 32]));
+    let other_name = key.file_name(&ContentHash::from_bytes([5; 32]));
     for index in [0, 1, 7, u64::MAX] {
         for plaintext in [b"".as_slice(), b"one chunk"] {
-            let sealed = key.seal_chunk(&name, index, plaintext).unwrap();
+            let sealed = key.seal_chunk(&name, index, plaintext);
             assert_eq!(key.open_chunk(&name, index, &sealed).unwrap(), plaintext);
-            assert_eq!(sealed, key.seal_chunk(&name, index, plaintext).unwrap());
-            assert_ne!(
-                sealed,
-                other_key.seal_chunk(&name, index, plaintext).unwrap()
-            );
-            assert_ne!(
-                sealed,
-                key.seal_chunk(&other_name, index, plaintext).unwrap()
-            );
-            assert_ne!(sealed, key.seal_chunk(&name, index ^ 1, plaintext).unwrap());
+            assert_eq!(sealed, key.seal_chunk(&name, index, plaintext));
+            assert_ne!(sealed, other_key.seal_chunk(&name, index, plaintext));
+            assert_ne!(sealed, key.seal_chunk(&other_name, index, plaintext));
+            assert_ne!(sealed, key.seal_chunk(&name, index ^ 1, plaintext));
             for result in [
                 key.open_chunk(&other_name, index, &sealed),
                 key.open_chunk(&name, index ^ 1, &sealed),
@@ -186,10 +175,10 @@ fn file_chunks_repeat_only_for_the_same_key_name_index_and_bytes() {
 
 #[test]
 fn chunks_authenticate_the_name_and_index_in_addition_to_the_nonce() {
-    let keys = StoreKey::from_bytes(1, [17; 32]).unwrap().derive().unwrap();
+    let keys = StoreKey::from_bytes(NonZeroU64::MIN, [17; 32]).derive();
     let name = StoredFileName::from_bytes([8; 32]);
-    let sealed = keys.seal_chunk(&name, 7, b"payload").unwrap();
-    let nonce = keys.chunk_nonce(&name, 7).unwrap();
+    let sealed = keys.seal_chunk(&name, 7, b"payload");
+    let nonce = keys.chunk_nonce(&name, 7);
     let aad = cipher::context(&[b"coven/chunk/v1", name.as_bytes(), &7u64.to_le_bytes()]);
     assert_eq!(
         cipher::open(&keys.encryption.0, &nonce, &aad, &sealed).unwrap(),
@@ -209,7 +198,16 @@ fn chunks_authenticate_the_name_and_index_in_addition_to_the_nonce() {
 }
 
 #[test]
+#[should_panic(expected = "storage paths must be nonempty")]
 fn objects_cannot_be_sealed_without_a_storage_path() {
-    let key = StoreKey::generate(1).unwrap().derive().unwrap();
-    assert!(key.seal_object("", b"payload").is_err());
+    let key = StoreKey::generate(NonZeroU64::MIN).unwrap().derive();
+    let _sealed = key.seal_object("", b"payload");
+}
+
+#[test]
+#[should_panic(expected = "storage paths must be nonempty")]
+fn objects_cannot_be_opened_without_a_storage_path() {
+    let key = StoreKey::generate(NonZeroU64::MIN).unwrap().derive();
+    let sealed = key.seal_object("objects/1", b"payload").unwrap();
+    let _opened = key.open_object("", &sealed);
 }

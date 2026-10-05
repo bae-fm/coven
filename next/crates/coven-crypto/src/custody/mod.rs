@@ -85,13 +85,15 @@ impl std::fmt::Debug for IdentityCustody {
 
 impl StoreKeyCustody for InMemoryCustody<StoreKeyring> {
     fn unlock(&self) -> Result<Option<StoreKeyring>, KeyError> {
-        self.read()
+        Ok(self.read())
     }
     fn persist(&self, keys: &StoreKeyring) -> Result<(), KeyError> {
-        self.write(keys)
+        self.write(keys);
+        Ok(())
     }
     fn forget(&self) -> Result<(), KeyError> {
-        self.remove()
+        self.remove();
+        Ok(())
     }
 }
 
@@ -125,13 +127,15 @@ impl StoreKeyCustody for KeyringCustody<StoreKeyring> {
 
 impl MemberKeyCustody for InMemoryCustody<MemberKeys> {
     fn unlock(&self) -> Result<Option<MemberKeys>, KeyError> {
-        self.read()
+        Ok(self.read())
     }
     fn persist(&self, keys: &MemberKeys) -> Result<(), KeyError> {
-        self.write(keys)
+        self.write(keys);
+        Ok(())
     }
     fn forget(&self) -> Result<(), KeyError> {
-        self.remove()
+        self.remove();
+        Ok(())
     }
 }
 

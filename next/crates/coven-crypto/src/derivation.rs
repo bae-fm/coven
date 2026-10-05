@@ -15,17 +15,17 @@ pub(crate) const FINGERPRINTS: &[u8] = b"coven/fingerprints/v1";
 pub(crate) const JOIN_REQUEST: &[u8] = b"coven/join-request/v1";
 pub(crate) const SEALED_BOX: &[u8] = b"coven/sealed-box/v1";
 
-pub(crate) fn derive(key: &[u8; 32], label: &[u8]) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
+pub(crate) fn derive(key: &[u8; 32], label: &[u8]) -> Zeroizing<[u8; 32]> {
     let mut output = Zeroizing::new([0; 32]);
     let (mut extracted, hkdf) = Hkdf::<Sha256>::extract(None, key);
     extracted.as_mut_slice().zeroize();
     hkdf.expand(label, output.as_mut())
-        .map_err(|_| CryptoError::Derivation)?;
-    Ok(output)
+        .expect("32-byte derived keys fit HKDF-SHA256's output limit");
+    output
 }
 
-pub(crate) fn mac(key: &[u8; 32]) -> Result<Hmac<Sha256>, CryptoError> {
-    Hmac::<Sha256>::new_from_slice(key).map_err(|_| CryptoError::Derivation)
+pub(crate) fn mac(key: &[u8; 32]) -> Hmac<Sha256> {
+    Hmac::<Sha256>::new_from_slice(key).expect("HMAC-SHA256 accepts a 32-byte key")
 }
 
 /// A purpose-derived key for objects, including an invite's join request (§11.1).
@@ -33,19 +33,21 @@ pub struct EncryptionKey(pub(crate) Zeroizing<[u8; 32]>);
 
 impl EncryptionKey {
     /// Seal an object with a random nonce, authenticating its storage path.
+    /// Panics if the storage path is empty.
     pub fn seal_object(&self, path: &str, plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
         cipher::seal_random(
             &self.0,
-            &cipher::context(&[b"coven/object/v1", cipher::storage_path(path)?]),
+            &cipher::context(&[b"coven/object/v1", cipher::storage_path(path)]),
             plaintext,
         )
     }
 
     /// Open an object only at the storage path it was sealed for.
+    /// Panics if the storage path is empty.
     pub fn open_object(&self, path: &str, sealed: &[u8]) -> Result<Vec<u8>, CryptoError> {
         cipher::open_random(
             &self.0,
-            &cipher::context(&[b"coven/object/v1", cipher::storage_path(path)?]),
+            &cipher::context(&[b"coven/object/v1", cipher::storage_path(path)]),
             sealed,
         )
     }
@@ -66,36 +68,36 @@ pub struct DerivedKeys {
 }
 
 impl DerivedKeys {
-    pub(crate) fn new(key: &[u8; 32]) -> Result<Self, CryptoError> {
-        Ok(Self {
-            encryption: EncryptionKey(derive(key, ENCRYPTION)?),
-            naming: derive(key, NAMING)?,
-            file_nonces: derive(key, FILE_NONCES)?,
-            fingerprints: derive(key, FINGERPRINTS)?,
-        })
+    pub(crate) fn new(key: &[u8; 32]) -> Self {
+        Self {
+            encryption: EncryptionKey(derive(key, ENCRYPTION)),
+            naming: derive(key, NAMING),
+            file_nonces: derive(key, FILE_NONCES),
+            fingerprints: derive(key, FINGERPRINTS),
+        }
     }
 
     /// Seal an object with a random nonce, authenticating its storage path (§11.1).
+    /// Panics if the storage path is empty.
     pub fn seal_object(&self, path: &str, plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
         self.encryption.seal_object(path, plaintext)
     }
 
     /// Open an object only at its authenticated storage path (§11.1).
+    /// Panics if the storage path is empty.
     pub fn open_object(&self, path: &str, sealed: &[u8]) -> Result<Vec<u8>, CryptoError> {
         self.encryption.open_object(path, sealed)
     }
 
     /// HMAC-SHA256 of a file's content hash with the naming key (§16.2).
-    pub fn file_name(&self, hash: &ContentHash) -> Result<StoredFileName, CryptoError> {
-        let mut mac = mac(&self.naming)?;
+    pub fn file_name(&self, hash: &ContentHash) -> StoredFileName {
+        let mut mac = mac(&self.naming);
         mac.update(hash.as_bytes());
-        Ok(StoredFileName::from_bytes(
-            mac.finalize().into_bytes().into(),
-        ))
+        StoredFileName::from_bytes(mac.finalize().into_bytes().into())
     }
 
     /// Start an incremental hash of the audience's agreed data (§19.1).
-    pub fn fingerprint_hasher(&self) -> Result<FingerprintHasher, CryptoError> {
+    pub fn fingerprint_hasher(&self) -> FingerprintHasher {
         FingerprintHasher::new(&self.fingerprints)
     }
 
@@ -103,15 +105,10 @@ impl DerivedKeys {
     /// Storage maps each name to one path, so binding the name binds that path.
     /// A name must identify immutable content with one fixed chunk partition:
     /// never reuse the same name and index for different plaintext bytes.
-    pub fn seal_chunk(
-        &self,
-        name: &StoredFileName,
-        index: u64,
-        plaintext: &[u8],
-    ) -> Result<Vec<u8>, CryptoError> {
+    pub fn seal_chunk(&self, name: &StoredFileName, index: u64, plaintext: &[u8]) -> Vec<u8> {
         cipher::seal(
             &self.encryption.0,
-            &self.chunk_nonce(name, index)?,
+            &self.chunk_nonce(name, index),
             &chunk_aad(name, index),
             plaintext,
         )
@@ -126,20 +123,20 @@ impl DerivedKeys {
     ) -> Result<Vec<u8>, CryptoError> {
         cipher::open(
             &self.encryption.0,
-            &self.chunk_nonce(name, index)?,
+            &self.chunk_nonce(name, index),
             &chunk_aad(name, index),
             sealed,
         )
     }
 
-    fn chunk_nonce(&self, name: &StoredFileName, index: u64) -> Result<[u8; 24], CryptoError> {
-        let mut mac = mac(&self.file_nonces)?;
+    fn chunk_nonce(&self, name: &StoredFileName, index: u64) -> [u8; 24] {
+        let mut mac = mac(&self.file_nonces);
         mac.update(name.as_bytes());
         let digest = mac.finalize().into_bytes();
         let mut nonce = [0; 24];
         nonce[..16].copy_from_slice(&digest[..16]);
         nonce[16..].copy_from_slice(&index.to_le_bytes());
-        Ok(nonce)
+        nonce
     }
 }
 

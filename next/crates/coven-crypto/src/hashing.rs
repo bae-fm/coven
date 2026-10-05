@@ -82,8 +82,8 @@ impl Fingerprint {
 pub struct FingerprintHasher(Hmac<Sha256>);
 
 impl FingerprintHasher {
-    pub(crate) fn new(key: &[u8; 32]) -> Result<Self, crate::CryptoError> {
-        Ok(Self(crate::derivation::mac(key)?))
+    pub(crate) fn new(key: &[u8; 32]) -> Self {
+        Self(crate::derivation::mac(key))
     }
     /// Feed the next canonical bytes of rows, generations, writers or lost values.
     pub fn update(&mut self, bytes: &[u8]) {
