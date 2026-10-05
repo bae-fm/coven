@@ -283,10 +283,16 @@ Two mechanisms order writes:
   again.
   - The write records that insert as an update of the removed row, setting
     every column.
-  - The row comes back if the new values clear its reasons, as a local
-    insert's always do.
-  - E.g. tag "urgent" is taken out after a merge; Ana adds "urgent" again,
-    and every device puts the removed row back with her values.
+  - The row comes back if the new values clear its reasons, and otherwise
+    stays out with them, like any write to a removed row.
+  - E.g. tag "urgent" is taken out because it fails a CHECK; Ana adds
+    "urgent" again with values that pass, and every device puts the row
+    back with her values.
+  - SQLite can't check against rows that are out, so a local insert can
+    still lose.
+  - E.g. tags have shared keys and unique labels, and tag b, a child of
+    tag a, claimed the label "Plan" first: a loses it, and b goes with a.
+  - Adding a again with "Plan" loses the same way, and both stay out.
 - Every rule but unique values and keys in two audiences keeps firing when
   more rows are removed, so applying them in any order ends with the same
   rows removed.
