@@ -1025,6 +1025,8 @@ Carol's tablet:
   - the store always has at least one admin.
 - Every device that has the same entries ends with the same member list,
   whatever order they arrived in.
+  - The proof is [Appendix C](coven-storelog-proof.md), in its own file,
+    checked by machine.
 - A device applies an entry once it has every entry that entry had read.
 - The member list is what you get by replaying the applied entries in
   timestamp order, from the first.
