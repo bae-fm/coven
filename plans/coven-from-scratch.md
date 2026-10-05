@@ -973,7 +973,9 @@ Carol's tablet:
   - one deletes a circle and the other changes it, its members, or resets
     it;
   - one adds someone to a circle and the other removes someone from it,
-    which replaces the circle key ([§14.6](#146-leaving-a-circle));
+    or removes from the store a member who is in it, which replaces the
+    circle key ([§13](#13-removing-members-and-devices),
+    [§14.6](#146-leaving-a-circle));
   - they raise the schema or format to the same version with different
     snapshots, or reset the same audience to different snapshots
     ([§17](#17-schema-changes), [§19.3](#193-resetting-a-store)).
@@ -1176,13 +1178,24 @@ Carol's tablet:
   ([§18.1](#181-operations)):
   - the store key is rotated: a new one, sealed to each remaining member's
     public key ([§11](#11-keys));
-  - the store log entry removing them is written;
+  - so is the key of each circle they were in: a new one, sealed to that
+    circle's remaining members ([§14.6](#146-leaving-a-circle));
+  - the store log entry removing them is written, naming every new key;
   - the storage access their invite granted is taken back: the store's
     folder is unshared from their account, or on S3 coven tells the admin
     to delete their key in the provider's console
     ([§12.2](#122-adding-a-person)).
-- So a removed member's copy of the old store key reads nothing written
-  after the removal, even if they regain read access.
+- So a removed member's copies of the old store and circle keys read
+  nothing written after the removal, even if they regain read access.
+- The removing device makes a new key for a circle its member isn't in,
+  seals it, and doesn't keep it.
+  - E.g. Ana removes Carol, who shares "Gifts" with Ben; Ana isn't in
+    Gifts. Ana's phone makes Gifts' next key, seals it to Ben alone, and
+    forgets it. Ana still can't read Gifts.
+  - The phone holds that key for a moment; members are trusted not to be
+    hostile ([§2](#2-threat-model)).
+- A circle the removed member was alone in is deleted by the same entry:
+  no one is left who could read it ([§14.7](#147-deleting-a-circle)).
 - Adding a member concurrently with a removal that rotates the key is a
   conflict, and the removal beats the add, which is dropped
   ([§9](#9-members-and-roles)).
