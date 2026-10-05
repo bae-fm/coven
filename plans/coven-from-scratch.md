@@ -939,31 +939,49 @@ Carol's tablet:
   whatever order they arrived in.
 - A device applies an entry once it has every entry that entry had read.
 - The member list is what you get by replaying the applied entries in
-  timestamp order, from the first. At its place in the replay, an entry
-  applies only if:
+  timestamp order, from the first.
+  - Each time an entry arrives, the device replays them all again, from
+    the first, so the result depends only on which entries it has.
+  - The member list an entry's author had read is the replay of just the
+    entries that entry had read.
+- At its place in the replay, an entry whose change is already in place
+  applies and changes nothing.
+  - E.g. Ana and Ben both add Dan: both apply, Dan is added once, and
+    neither is reported.
+- Otherwise an entry applies only if:
   - its author's role allowed it, in the member list the author had read;
-  - the member, device or circle it changes still exists, and the store
-    still has an admin after it;
+  - what it needs exists: the member it changes, the device it removes,
+    the member a new device belongs to, the circle it changes, the circle
+    member it removes;
+  - the store still has an admin after it;
   - it beats every concurrent entry already applied that it conflicts
     with.
-- When an entry beats one already applied, that one is dropped, and the
-  replay starts again without it.
-- A dropped entry stays dropped, and is shown to its author.
+- When an entry beats some already applied, they are all dropped, and the
+  replay starts again without them.
+  - A dropped entry stays dropped until that replay ends; the next arrival
+    starts a new replay with every entry.
+- A dropped entry is shown to its author.
+- Whose entry it is comes from its signature, not from the device it was
+  written from, so a new device adds itself, signed with its member's key
+  ([§12.1](#121-a-persons-new-device)).
 - Two concurrent entries conflict when:
-  - they're about the same member or device and say different things;
+  - they're about the same member or device and say different things,
+    where an entry about a device is also about the member it belongs to;
   - one adds a member and the other removes one, which replaces the store
     key ([§13](#13-removing-members-and-devices));
   - they give one circle different names;
-  - one deletes a circle and the other changes it or its members;
+  - one deletes a circle and the other changes it, its members, or resets
+    it;
   - one adds someone to a circle and the other removes someone from it,
-    which replaces the circle key ([§14.6](#146-leaving-a-circle)).
+    which replaces the circle key ([§14.6](#146-leaving-a-circle));
+  - they raise the schema or format to the same version with different
+    snapshots, or reset the same audience to different snapshots
+    ([§17](#17-schema-changes), [§19.3](#193-resetting-a-store)).
 - Of two conflicting entries, the one that beats the other is:
   - removing a member, a device or someone from a circle, or deleting a
     circle, over anything else;
   - anything else over making someone an admin;
   - otherwise, the one with the smaller timestamp.
-- Two concurrent entries saying the same thing both apply, and take effect
-  once.
 - Concurrent entries, and what applies:
 
   ```
@@ -988,7 +1006,7 @@ Carol's tablet:
     admin, so it is dropped, and Ana stays an admin.
 - E.g. Ana and Ben are admins. Concurrently, Ben removes Ana, Ana removes
   Ben a moment later, and Ben adds his new phone:
-  - Ben's removal is earlier, so it beats Ana's, which is dropped;
+  - after Ben's removal, Ana's would leave no admin, so it is dropped;
   - Ana's removal would have beaten Ben's new phone, but it was dropped,
     so the phone is added.
 
@@ -1273,7 +1291,9 @@ Carol's tablet:
 
 - Circles are made, and members added to and removed from them, by entries
   in the store log, under its rules ([§9](#9-members-and-roles)).
-- A circle's own members add and remove its members.
+- Any member of the store can make a circle, and is its first member.
+- A circle's own members rename it, add and remove its members, and delete
+  it ([§14.7](#147-deleting-a-circle)); an admin outside the circle can't.
 - Each circle has its own key, sealed to each of its members' public keys,
   like the store key ([§11](#11-keys)).
   - It is replaced whenever someone leaves the circle.
@@ -1631,7 +1651,8 @@ Carol's tablet:
 - This happens only when a device uploads just as another makes the
   breaking change.
 - If two devices make the same breaking change at once, the one with the
-  smaller timestamp counts, and the other's snapshot is ignored.
+  smaller timestamp counts; the other's entry is dropped, with its snapshot
+  ([§9](#9-members-and-roles)).
 
 ### 17.2 Coven's schema
 
@@ -1849,8 +1870,9 @@ Carol's tablet:
   - if it had read a write the snapshot doesn't include, its cause is gone,
     so it is recorded as lost on every device, and never applied;
   - otherwise it merges like any late write.
-- If two devices reset at once, the one with the smaller timestamp counts,
-  and the other's snapshot is ignored.
+- If two devices reset the same audience at once, the one with the smaller
+  timestamp counts; the other's entry is dropped, with its snapshot
+  ([§9](#9-members-and-roles)).
 
 ## 20. API
 
