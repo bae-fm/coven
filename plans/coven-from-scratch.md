@@ -3258,6 +3258,107 @@ fn migrations() -> Vec<Migration> {
 }
 ```
 
+## 21. Crates and conventions
+
+### 21.1 Crates
+
+- Coven is a Cargo workspace of eight crates, each owning one part of
+  this spec:
+
+  ```
+  coven-foundation   clock, id source, atomic file writes, the store's
+                     directory and its lock
+  coven-crypto       §11.1: ciphers, sealed boxes, derived keys, file
+                     naming, member keys and their custody
+  coven-format       the bytes in storage: write records, store log
+                     entries, snapshots, file headers and chunks,
+                     encoded, decoded and checked
+  coven-merge        §8 and §14: the merged state, the removal rules and
+                     lost values, as functions with no I/O
+  coven-database     §5: the SQLite connection, coven's internal tables,
+                     applying the merge's results, triggers, live
+                     queries, migrations
+  coven-storage      §4: each provider, and the operations coven needs
+                     from it, including upload sessions
+  coven-sync         §6, §9, §12 to §19: device logs, the store log,
+                     members, circles, snapshots, files and the cache,
+                     operations, recovery
+  coven              §20: the API, and nothing else
+  ```
+
+- Each crate depends only on crates above it in the list, except that
+  `coven-database` and `coven-storage` never depend on each other.
+  - So the database never reaches storage, and storage never reads the
+    database; `coven-sync` is where the two meet.
+- `coven-format` and `coven-merge` read no clock, file, database or
+  network.
+  - So the merge is tested, and checked against the Lean model of
+    [Appendix B](coven-merge-proof.md), without SQLite or storage.
+- Each external dependency's version is set once, in the workspace, and
+  crates name only the features they need.
+
+### 21.2 Capabilities and injection
+
+- Each outside capability is used in one place only:
+
+  ```
+  network          coven-storage
+  cryptography     coven-crypto
+  SQLite           coven-database
+  OS keychain      coven-crypto's custody
+  current time     coven-foundation's clock
+  new ids          coven-foundation's id source
+  files on disk    coven-foundation's file writes, and the file cache
+                   in coven-sync
+  ```
+
+- Everything else reaches a capability through the object that owns it,
+  passed in when that object is built.
+  - The clock, the id source, key custody, the CloudKit calls and the
+    OAuth clients are all set on the builder ([§20.1](#201-opening)), so
+    tests replace each one.
+- Objects that hold other objects are built in one place, the builder's
+  `open`, which passes each its collaborators; an object never builds
+  another long-lived object itself.
+- An object never hands out what it holds, such as its database
+  connection; callers ask it to do the work.
+
+### 21.3 Code conventions
+
+- Visibility:
+  - nothing is `pub` that can't be reached from outside its crate;
+  - `pub(in path)` and `super::super::` are not used: an item needed
+    elsewhere moves to where both callers can see it;
+  - `coven` re-exports the API at its root and keeps every module
+    private.
+- Errors are typed enums per crate; an error is never turned into text
+  to be passed on, and nothing returns `Result<_, String>`.
+- A source file holds at most 1,000 lines, and its tests live beside it
+  in `<name>_tests.rs`.
+- Each crate offers a `test-utils` feature with its fakes, such as an
+  in-memory provider and a fixed clock; tests build the same object graph
+  production does.
+
+### 21.4 Checks
+
+- One script runs every check, and CI runs that same script on every
+  platform:
+  - formatting, and clippy with warnings denied;
+  - the dependency rules of [§21.1](#211-crates);
+  - the capability and construction rules of
+    [§21.2](#212-capabilities-and-injection), read from the syntax tree,
+    including inside macro calls;
+  - the visibility and file-size rules of
+    [§21.3](#213-code-conventions);
+  - `cargo doc` with broken links denied;
+  - every crate built without test code, so an item only tests use shows
+    up as dead;
+  - the tests, with all features and with none;
+  - the Lean proof, built from scratch, with no `sorry` and no axiom
+    beyond Lean's own.
+- The pre-commit hook runs the fast ones: formatting, clippy, and the
+  rules of [§21.1](#211-crates) to [§21.3](#213-code-conventions).
+
 ## Appendix A. SQLite features
 
 Each SQLite feature whose meaning changes when devices write offline and
