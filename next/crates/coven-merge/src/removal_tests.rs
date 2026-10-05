@@ -623,6 +623,12 @@ fn deleted_circle_removes_concurrent_rows_without_deleting_them() {
 fn locality_uses_old_edges_and_never_enumerates_unrelated_rows() {
     struct Indexed(MemoryView);
     impl RemovalView for Indexed {
+        fn groups(&self, row: &RowId) -> Result<BTreeSet<Group>, MergeError> {
+            view_groups(self, row)
+        }
+        fn members(&self, group: &Group) -> Result<BTreeSet<RowId>, MergeError> {
+            self.0.members(group)
+        }
         fn rows(&self) -> Result<Vec<RowId>, MergeError> {
             panic!("local recomputation must not enumerate rows")
         }
@@ -665,6 +671,12 @@ fn locality_uses_old_edges_and_never_enumerates_unrelated_rows() {
 fn null_and_default_substitutions_feed_checks() {
     struct Resolved(MemoryView);
     impl RemovalView for Resolved {
+        fn groups(&self, row: &RowId) -> Result<BTreeSet<Group>, MergeError> {
+            view_groups(self, row)
+        }
+        fn members(&self, group: &Group) -> Result<BTreeSet<RowId>, MergeError> {
+            view_members(self, self.0.data.keys(), group)
+        }
         fn rows(&self) -> Result<Vec<RowId>, MergeError> {
             self.0.rows()
         }
@@ -754,6 +766,12 @@ fn cycles_terminate_and_invalid_inputs_are_errors() {
 fn default_reference_unique_claim_keeps_the_original_setters_stamp() {
     struct ResolvedClaims(MemoryView);
     impl RemovalView for ResolvedClaims {
+        fn groups(&self, row: &RowId) -> Result<BTreeSet<Group>, MergeError> {
+            view_groups(self, row)
+        }
+        fn members(&self, group: &Group) -> Result<BTreeSet<RowId>, MergeError> {
+            view_members(self, self.0.data.keys(), group)
+        }
         fn rows(&self) -> Result<Vec<RowId>, MergeError> {
             self.0.rows()
         }

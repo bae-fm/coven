@@ -259,21 +259,69 @@ impl RemovalView for MemoryView {
                     }
                 }
             }
-            if child.table == r.table && child.key == r.key {
-                edges.insert(child.clone());
-            }
-            if child.table == r.table && child.audience == r.audience {
-                if let (Some(a), Some(b)) = (self.checks.get(child), self.checks.get(r)) {
-                    if a.unique.iter().any(|(name, claim)| {
-                        b.unique.get(name).is_some_and(|c| c.value == claim.value)
-                    }) {
-                        edges.insert(child.clone());
-                    }
-                }
-            }
         }
         Ok(edges)
     }
+    fn groups(&self, row: &RowId) -> Result<BTreeSet<Group>, MergeError> {
+        view_groups(self, row)
+    }
+    fn members(&self, group: &Group) -> Result<BTreeSet<RowId>, MergeError> {
+        view_members(self, self.data.keys(), group)
+    }
+}
+
+// These adapters evaluate each test view's own constraint implementation so
+// default-reference substitutions participate in region discovery too.
+pub(crate) fn view_groups(
+    view: &impl RemovalView,
+    row: &RowId,
+) -> Result<BTreeSet<Group>, MergeError> {
+    let mut groups = BTreeSet::from([Group::Key {
+        table: row.table.clone(),
+        key: row.key.clone(),
+    }]);
+    let mut resolved = BTreeMap::new();
+    if let RemovalRow::Present { references, .. } = view.row(row)? {
+        for (name, reference) in references {
+            let generation = view.row(&reference.parent.row)?.generation();
+            let default_generation = match &reference.on_delete {
+                OnDelete::SetDefault {
+                    parent: Some(parent),
+                    permitted: true,
+                } if generation != reference.parent.generation => {
+                    Some(view.row(parent)?.generation())
+                }
+                _ => None,
+            };
+            resolved.insert(
+                name,
+                resolve_reference(row, &reference, generation, default_generation)?,
+            );
+        }
+    }
+    for (constraint, claim) in view.constraints(row, &resolved)?.unique {
+        groups.insert(Group::Claim {
+            table: row.table.clone(),
+            audience: row.audience.clone(),
+            constraint,
+            value: claim.value,
+        });
+    }
+    Ok(groups)
+}
+
+pub(crate) fn view_members<'a>(
+    view: &impl RemovalView,
+    rows: impl IntoIterator<Item = &'a RowId>,
+    group: &Group,
+) -> Result<BTreeSet<RowId>, MergeError> {
+    let mut members = BTreeSet::new();
+    for row in rows {
+        if view.groups(row)?.contains(group) {
+            members.insert(row.clone());
+        }
+    }
+    Ok(members)
 }
 
 /// Deterministic xorshift: reproducible histories without an ambient random

@@ -19,8 +19,8 @@ pub use input::{
     Audience, Change, ColumnValue, Operation, Parent, RowId, Write, WriteId, WriteOracle,
 };
 pub use removal::{
-    recompute, removals, resolve_reference, Constraints, OnDelete, Reference, ReferenceValue,
-    RemovalResult, RemovalRow, RemovalView, Rule, UniqueClaim,
+    recompute, removals, resolve_reference, Constraints, Group, OnDelete, Reference,
+    ReferenceValue, RemovalResult, RemovalRow, RemovalView, Rule, UniqueClaim,
 };
 pub use state::{apply, Cell, LostChange, LostKey, LostValue, RowState, RowUpdate};
 pub use timestamp::Timestamp;
