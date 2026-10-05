@@ -817,7 +817,8 @@ Carol's tablet:
 
 ### 8.7 Triggers
 
-- The app declares each trigger on a synced table as local or shared.
+- The app declares each trigger on a synced table as local or shared;
+  a trigger it doesn't declare shared is local ([§20.2](#202-declaring-synced-tables)).
 - A local trigger runs on every device, for its own writes and applied ones
   alike, and writes only local tables.
   - Every change coven makes is ordinary SQL, including a late write
@@ -892,8 +893,8 @@ Carol's tablet:
 - The *store log* records changes to the store itself, separate from the
   app's writes.
   - Each change is one *entry*: add or remove a member, change a role, add
-    or remove a device, make or delete a circle ([§14](#14-audiences)) or
-    change its members, raise the store's schema or format version, or
+    or remove a device, make, rename or delete a circle
+    ([§14](#14-audiences)) or change its members, raise the store's schema or format version, or
     reset the store or a circle to a snapshot ([§15](#15-snapshots)).
   - An entry names the store log entries its author had read, and is
     signed with its author's member key.
@@ -1027,6 +1028,8 @@ Carol's tablet:
 - Keys for each purpose are derived from the store key, or a circle's key,
   with HKDF-SHA256 and a label per purpose: encryption, naming, file
   nonces, fingerprints ([§19.1](#191-noticing)).
+- A join request's key is derived from its invite secret
+  ([§12.2](#122-adding-a-person)) the same way, with its own label.
 - A file's storage name is HMAC-SHA256 of its content hash, with the naming
   key.
 
@@ -1043,7 +1046,7 @@ Carol's tablet:
     the store open;
   - on Apple platforms, from iCloud Keychain, which holds the same
     contents, so a new device on the same Apple account opens the store
-    with no step at all;
+    with no step but a provider sign-in, where storage needs one;
   - by the person typing it in.
 - The QR code is blurred until the person taps to show it.
 - Where storage needs a sign-in, such as Google Drive, the new device
@@ -1056,8 +1059,10 @@ Carol's tablet:
 ### 12.2 Adding a person
 
 - An admin adds a person with an *invite*, a code shown as a QR code,
-  holding the store's id, name and location, and on S3 an access key made
-  for the new person.
+  holding:
+  - the store's id, name and location;
+  - the invite's id, and a one-time *invite secret*;
+  - on S3, an access key made for the new person.
 - E.g. Ana adds Carol, on Google Drive:
   1. Ana enters Carol's Google account email and picks her role; her phone
      shares the store's folder with that account and shows the invite.
@@ -1069,7 +1074,14 @@ Carol's tablet:
      ([§11](#11-keys)), then writes "add member Carol" to the store log.
   5. Carol's phone opens the store key, adds itself to the store log, and
      Carol writes down her own restore code.
+- The join request is stored at `join-requests/<invite id>`.
+  - It is encrypted with a key derived from the invite secret, and signed
+    with Carol's new member key.
+  - Ana's device holds the secret too, so it opens and checks the request.
+  - The provider sees only an encrypted object under the invite's id.
 - The invite only lets a device ask; Ana's approval is what lets Carol in.
+- Once the request is approved or declined, or the invite expires, Ana's
+  device deletes the request object.
 - Declining the request, or letting the invite expire after a day, takes
   back the storage access it granted.
 
@@ -1175,6 +1187,10 @@ Carol's tablet:
   - Which rows move is worked out against the database as it was before
     the write.
   - Moving them back later is a re-add ([§8.3](#83-deletes)).
+- A move is an ordinary write, such as `UPDATE notes SET audience = …`.
+  - It commits at once on the moving device.
+  - Its moved rows' uploaded files go up again under the new audience's
+    key, and the write uploads after them ([§16.5](#165-uploads-and-deletion)).
 - E.g. Ana moves note 42 and its attachments from the store into her
   circle: Ben's devices delete them, and Ana's insert them in the circle.
 - A row's generations ([§8.3](#83-deletes)) are counted per audience, so
@@ -1425,7 +1441,7 @@ Carol's tablet:
 - An uploaded file is encrypted with its row's audience's key
   ([§14](#14-audiences)).
   - Moving a row between the store and a circle uploads its file again
-    under the new audience's key, then writes the move.
+    under the new audience's key, before the move's write uploads.
   - A file on one device stays where it is.
 
 ### 16.2 Storage and naming
@@ -1636,7 +1652,8 @@ Carol's tablet:
 - Removing someone from a circle ([§14.6](#146-leaving-a-circle)):
   1. make the circle's new key, and record it in the operation's row;
   2. upload it sealed to each remaining circle member;
-  3. upload the store log entry removing them from the circle.
+  3. upload the store log entry removing them from the circle, naming the
+     new key's number.
 - A breaking schema or format change ([§17](#17-schema-changes)):
   1. migrate the database, in one transaction;
   2. upload a snapshot in the new version;
@@ -1649,10 +1666,6 @@ Carol's tablet:
      version is newer ([§17](#17-schema-changes)).
 - Writing a snapshot, then deleting the log objects and files it no
   longer needs ([§15](#15-snapshots), [§16.5](#165-uploads-and-deletion)).
-- Moving rows that carry uploaded files between the store and a circle
-  ([§14.2](#142-moving-rows), [§16.1](#161-kinds-and-where-files-are)):
-  1. upload each file under the new audience's key;
-  2. write the move.
 - Changing where a file is ([§16.1](#161-kinds-and-where-files-are)):
   1. upload it, or download it to the device keeping it;
   2. write its row's where-column.
@@ -1743,10 +1756,13 @@ Carol's tablet:
 
 ### 19.2 Recovering one device
 
-- When only one device is broken, such as a damaged database, it reloads
-  from the latest snapshot ([§15](#15-snapshots)).
-- Its own writes still waiting in `coven_uploads` are uploaded after, and
-  merge like any late write.
+- When only one device is broken, it reloads from the latest snapshot
+  ([§15](#15-snapshots)).
+  - A damaged database fails to open with an error of its own; reloading
+    then moves the damaged file aside and starts from the snapshot.
+  - A device that opens but disagrees with the others reloads in place.
+- Its own writes still waiting in `coven_uploads`, those it can still
+  read, are uploaded after, and merge like any late write.
 
 ### 19.3 Resetting a store
 
@@ -1812,9 +1828,9 @@ pub enum Audience {
   the database, coven's copies of files, and the cache.
 - Opening a store needs its declared tables ([§20.2](#202-declaring-synced-tables))
   and its migrations ([§20.13](#2013-migrations)).
-- *Key custody* is where this device keeps the store keys it has opened
-  ([§11](#11-keys)): every key it has used, so it reads writes made under
-  older ones.
+- *Key custody* is where this device keeps the store keys and circle keys
+  it has opened ([§11](#11-keys)): every key it has used, so it reads
+  writes made under older ones.
 - *Identity custody* is where this device keeps its member's two key pairs
   ([§11.1](#111-cryptography)).
 
@@ -1888,6 +1904,11 @@ impl CovenBuilder {
     /// on the device before any key is unlocked; the first call that needs a
     /// key reads it.
     pub async fn open(self) -> CovenResult<CovenHandle>;
+
+    /// Opens a store whose database is damaged (§19.2): moves the damaged
+    /// file aside, loads the latest snapshot, and queues the waiting writes it
+    /// can still read from the old file.
+    pub async fn open_reloading(self) -> CovenResult<CovenHandle>;
 
     /// Opens the store for reading only, alongside a handle that has it open,
     /// for example from another process. It takes no lock and runs no
@@ -1978,7 +1999,12 @@ impl SyncedTable {
     pub fn audience_from(self, foreign_key: impl Into<String>) -> Self;
 
     /// The table's rows carry a file, declared by `declaration`.
-    pub fn carries_blob(self, declaration: BlobDecl) -> Self;
+    pub fn carries_files(self, declaration: FileDecl) -> Self;
+
+    /// Declares the trigger `name` on this table as shared (§8.7); every
+    /// trigger not declared shared is local. Opening refuses a shared trigger
+    /// without `WHEN NOT coven_applying()`, naming it.
+    pub fn shared_trigger(self, name: impl Into<String>) -> Self;
 }
 
 pub enum Provenance {
@@ -1986,7 +2012,7 @@ pub enum Provenance {
     /// never copies, changes or deletes it (§16.1).
     UserProvided,
     /// Bytes the app hands to coven, which keeps and owns them.
-    HostProvided,
+    AppProvided,
 }
 
 pub enum CacheFill {
@@ -2005,7 +2031,7 @@ pub enum Uploads {
     WhenAsked,
 }
 
-impl BlobDecl {
+impl FileDecl {
     /// Declares the file a table's rows carry: its namespace, which groups
     /// files in the cache, each with its own budget (§20.8), its kind, when
     /// it is uploaded, and when devices download it.
@@ -2046,11 +2072,11 @@ fn tables() -> Vec<SyncedTable> {
         // Descendants of notes. Each attachment carries the user's own file.
         SyncedTable::new("attachments", RowIdentity::IndependentUuid)
             .audience_from("note_id")
-            .carries_blob(BlobDecl::new("attachments", Provenance::UserProvided, Uploads::WhenAsked, CacheFill::CacheLazy)),
+            .carries_files(FileDecl::new("attachments", Provenance::UserProvided, Uploads::WhenAsked, CacheFill::CacheLazy)),
         // A thumbnail the app makes, in the note's audience.
         SyncedTable::new("thumbnails", RowIdentity::IndependentUuid)
             .audience_from("note_id")
-            .carries_blob(BlobDecl::new("thumbnails", Provenance::HostProvided, Uploads::WhenAttached, CacheFill::CacheEager)),
+            .carries_files(FileDecl::new("thumbnails", Provenance::AppProvided, Uploads::WhenAttached, CacheFill::CacheEager)),
         // In the store, with keys from the tag's name.
         SyncedTable::new("tags", RowIdentity::SharedKey),
         // A shared key over two columns, which includes note_id (§14.1).
@@ -2077,7 +2103,7 @@ impl CovenHandle {
 
     /// Runs one write that also hands coven app-provided files. `build` adds
     /// the files, then `sql` runs the write that refers to them.
-    pub async fn write_with_blobs<F, S, R>(&self, build: F, sql: S) -> CovenResult<R>
+    pub async fn write_with_files<F, S, R>(&self, build: F, sql: S) -> CovenResult<R>
     where
         F: FnOnce(&mut WriteBatch) -> CovenResult<()> + Send + 'static,
         S: FnOnce(SqlContext<'_, '_>) -> CovenResult<R> + Send + 'static,
@@ -2088,19 +2114,19 @@ impl WriteBatch {
     /// Hands coven an app-provided file's bytes, kept under `namespace` and
     /// `id`. `bytes` is a byte buffer, or a stream read once, so a large file
     /// never has to fit in memory.
-    pub fn put_blob(
+    pub fn put_file(
         &mut self,
         namespace: impl Into<String>,
         id: impl Into<String>,
-        bytes: impl Into<BlobSource>,
+        bytes: impl Into<FileSource>,
     );
 
     /// Deletes coven's copy of an app-provided file. The write fails if a row
     /// still refers to the file after it.
-    pub fn delete_blob(&mut self, namespace: impl Into<String>, id: impl Into<String>);
+    pub fn delete_file(&mut self, namespace: impl Into<String>, id: impl Into<String>);
 }
 
-pub enum BlobSource {
+pub enum FileSource {
     Bytes(Vec<u8>),
     Stream(Pin<Box<dyn AsyncRead + Send>>),
 }
@@ -2114,11 +2140,11 @@ impl SqlContext<'_, '_> {
 
     /// Runs the app's INSERT of a row that carries a user-provided file, and
     /// records the prepared file on it.
-    pub fn insert_external_blob(
+    pub fn insert_user_file(
         &self,
         table: &str,
         key: impl Into<RowKey>,
-        prepared: PreparedExternalBlob,
+        prepared: PreparedUserFile,
         insert_sql: &str,
         params: &[(&str, &dyn ToSql)],
     ) -> Result<(), DbError>;
@@ -2126,30 +2152,30 @@ impl SqlContext<'_, '_> {
     /// Records a prepared user-provided file on a row the write already has.
     /// Fails if the row's size column disagrees with the file, or the file
     /// changed since it was prepared.
-    pub fn register_external_blob(
+    pub fn register_user_file(
         &self,
         table: &str,
         key: impl Into<RowKey>,
-        prepared: PreparedExternalBlob,
+        prepared: PreparedUserFile,
     ) -> Result<(), DbError>;
 
     /// Forgets the user-provided file recorded on a row. The file itself is
     /// untouched.
-    pub fn clear_external_blob(&self, table: &str, key: impl Into<RowKey>) -> Result<(), DbError>;
+    pub fn clear_user_file(&self, table: &str, key: impl Into<RowKey>) -> Result<(), DbError>;
 
     /// Checks that a file reference taken earlier still names the row's
     /// current file; the write fails if it doesn't. Called before changing
     /// or deleting the row.
-    pub fn validate_row_blob_ref(&self, reference: &RowBlobRef) -> Result<(), DbError>;
+    pub fn validate_file_ref(&self, reference: &FileRef) -> Result<(), DbError>;
 }
 
 /// Reads a user's file once, before the write, for its size and content.
 /// `progress` receives the bytes read so far. Fails if the file changes
 /// while it is read.
-pub async fn prepare_external_blob(
+pub async fn prepare_user_file(
     path: &Path,
     progress: impl Fn(u64) + Send + Sync,
-) -> Result<PreparedExternalBlob, DbError>;
+) -> Result<PreparedUserFile, DbError>;
 ```
 
 Example:
@@ -2158,7 +2184,7 @@ Example:
 let note_id = Uuid::now_v7().to_string();
 let attachment_id = Uuid::now_v7().to_string();
 let size = std::fs::metadata(&path)?.len() as i64;
-let prepared = prepare_external_blob(&path, |read| show_progress(read)).await?;
+let prepared = prepare_user_file(&path, |read| show_progress(read)).await?;
 
 handle
     .write(move |sql| {
@@ -2170,7 +2196,7 @@ handle
             "INSERT INTO attachments (id, note_id, title, size) VALUES (?1, ?2, ?3, ?4)",
             (&attachment_id, &note_id, "Swatches", size),
         )?;
-        sql.register_external_blob("attachments", attachment_id.as_str(), prepared)?;
+        sql.register_user_file("attachments", attachment_id.as_str(), prepared)?;
         Ok(())
     })
     .await?;
@@ -2301,10 +2327,10 @@ pub enum RemovalRule {
 /// A handle that only reads, opened with `open_read_only`.
 impl CovenReadHandle {
     pub fn read<F, R>(&self, read: F) -> Read<'_, F>;
-    pub async fn row_blob_ref(&self, table: &str, key: impl Into<RowKey>) -> Result<RowBlobRef, DbError>;
-    pub async fn read_blob(&self, file: &RowBlobRef) -> Result<Vec<u8>, BlobCacheError>;
-    pub async fn open_blob_stream(&self, file: &RowBlobRef) -> Result<BlobStream, BlobCacheError>;
-    pub async fn is_pinned(&self, files: &[RowBlobRef]) -> Result<bool, BlobCacheError>;
+    pub async fn file_ref(&self, table: &str, key: impl Into<RowKey>) -> Result<FileRef, DbError>;
+    pub async fn read_file(&self, file: &FileRef) -> Result<Vec<u8>, FileReadError>;
+    pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError>;
+    pub async fn is_pinned(&self, files: &[FileRef]) -> Result<bool, FileReadError>;
     pub fn open_app_data(&self, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>, SealError>;
 }
 ```
@@ -2352,42 +2378,42 @@ while let Ok(values) = lost.next().await {
 ```rust
 impl CovenHandle {
     /// Sets up storage on S3 with this member's access key (§4).
-    pub async fn setup_s3_cloud_home(
+    pub async fn setup_s3_storage(
         &self,
-        cloud_home: CloudHomeConfig,
+        storage: StorageConfig,
         access_key: String,
         secret_key: String,
-    ) -> Result<ConnectedCloudHome, CloudHomeSetupError>;
+    ) -> Result<ConnectedStorage, StorageSetupError>;
 
     /// Sets up storage on Google Drive, Dropbox or OneDrive, running the
     /// provider's sign-in with the builder's OAuth clients. `cancel` stops
     /// the sign-in.
-    pub async fn setup_oauth_cloud_home(
+    pub async fn setup_oauth_storage(
         &self,
-        cloud_home: CloudHomeConfig,
+        storage: StorageConfig,
         cancel: watch::Receiver<bool>,
-    ) -> Result<ConnectedCloudHome, CloudHomeSetupError>;
+    ) -> Result<ConnectedStorage, StorageSetupError>;
 
     /// Sets up storage on iCloud, through the builder's CloudKit calls.
-    pub async fn setup_cloudkit_cloud_home(
+    pub async fn setup_cloudkit_storage(
         &self,
-        cloud_home: CloudHomeConfig,
-    ) -> Result<ConnectedCloudHome, CloudHomeSetupError>;
+        storage: StorageConfig,
+    ) -> Result<ConnectedStorage, StorageSetupError>;
 
     /// Checks that the storage `config` describes can be reached and used,
     /// without connecting to it.
-    pub async fn probe_cloud_home(&self, config: &Config) -> Result<(), SyncError>;
+    pub async fn probe_storage(&self, config: &Config) -> Result<(), SyncError>;
 
     /// Opens the current store key from its copy sealed to this member in
     /// storage (§11), keeps it in key custody, and connects.
-    pub async fn unlock_cloud_home(&self) -> Result<ConnectedCloudHome, CloudHomeUnlockError>;
+    pub async fn unlock_store_key(&self) -> Result<ConnectedStorage, StoreKeyUnlockError>;
 
     /// Whether key custody holds the store key: `Available` or `Locked`.
-    pub fn cloud_home_key_state(&self) -> Result<CloudHomeKeyState, KeyError>;
+    pub fn store_key_state(&self) -> Result<StoreKeyState, KeyError>;
 
     /// Disconnects and removes this device's storage credentials. If removing
     /// them fails, the connection stays.
-    pub async fn disconnect_cloud_home(&self) -> Result<(), SyncError>;
+    pub async fn disconnect_storage(&self) -> Result<(), SyncError>;
 
     /// Connects to the configured storage with the credentials and keys this
     /// device holds, and starts syncing.
@@ -2462,23 +2488,23 @@ pub struct WaitingWrite {
 }
 
 /// Storage this device has set up, with whether it holds the store key.
-pub struct ConnectedCloudHome {
-    pub cloud_home: CloudHomeConfig,
-    pub key_state: CloudHomeKeyState,
+pub struct ConnectedStorage {
+    pub storage: StorageConfig,
+    pub key_state: StoreKeyState,
 }
 
-pub enum CloudHomeKeyState {
+pub enum StoreKeyState {
     Available,
     Locked,
 }
 
-impl CloudHomeSetupError {
+impl StorageSetupError {
     /// What went wrong, for the app to show: `Authentication`,
     /// `PermissionDenied`, `ContainerNotFound`, `RegionMismatch`,
     /// `QuotaExceeded`, `InvalidConfiguration`, `LocationOccupied` when the
     /// location holds another store, `Network`, `MemberKeysMissing`,
     /// `SecureStorage` or `Internal`.
-    pub fn failure(&self) -> CloudHomeSetupFailure;
+    pub fn failure(&self) -> StorageSetupFailure;
 }
 
 pub enum SyncFailure {
@@ -2494,8 +2520,8 @@ pub enum SyncFailure {
 Example:
 
 ```rust
-match handle.setup_s3_cloud_home(cloud_home, access_key, secret_key).await {
-    Ok(connected) => remember(connected.cloud_home),
+match handle.setup_s3_storage(storage, access_key, secret_key).await {
+    Ok(connected) => remember(connected.storage),
     Err(error) => return show_setup_failure(error.failure()),
 }
 
@@ -2530,6 +2556,10 @@ impl CovenHandle {
     /// half-done operation (§18).
     pub async fn discard_blocked_operation(&self, operation: OperationId) -> Result<(), OperationError>;
 
+    /// Reloads this device from the latest snapshot, keeping its waiting
+    /// writes, as an operation (§19.2).
+    pub async fn reload_from_snapshot(&self) -> Result<(), OperationError>;
+
     /// Resets the store from this device's copy, as an admin (§19.3): writes
     /// a snapshot, then records the reset in the store log. Every other
     /// device reloads from that snapshot.
@@ -2548,40 +2578,23 @@ pub struct BlockedOperation {
 }
 ```
 
-### 20.7 Audiences and uploads
+### 20.7 Moves and uploads
 
-- *Moving* a root row sends it and its descendants to another audience
-  ([§14.2](#142-moving-rows)).
-- A move uploads the rows' uploaded files again under the new audience's
-  key, then writes the move ([§16.1](#161-kinds-and-where-files-are)).
+- A row moves to another audience by an ordinary write that changes its
+  root's audience column, or points a descendant at a parent in another
+  audience ([§14.2](#142-moving-rows)).
+  - The write commits at once on this device; its moved rows' uploaded
+    files go up again under the new audience's key, and the write uploads
+    after them ([§16.5](#165-uploads-and-deletion)).
 - Uploading a file, and keeping an uploaded file on one device, change
-  where it is ([§16.1](#161-kinds-and-where-files-are)).
-- Each of these is an operation ([§18.1](#181-operations)): the call
-  records it and returns, and it finishes whenever storage can be reached.
+  where it is ([§16.1](#161-kinds-and-where-files-are)); each is an
+  operation ([§18.1](#181-operations)), so the call records it and
+  returns, and it finishes whenever storage can be reached.
 
 ```rust
 impl CovenHandle {
-    /// Moves a root row and its descendants to `audience`.
-    pub async fn set_audience(
-        &self,
-        table: &str,
-        key: impl Into<RowKey>,
-        audience: Audience,
-    ) -> Result<(), AudienceMoveError>;
-
-    /// Records several moves at once, in one transaction.
-    pub async fn set_audiences(&self, moves: Vec<AudienceChange>) -> Result<(), AudienceMoveError>;
-
-    /// Cancels a move whose files are still uploading. Files already
-    /// uploaded for it are deleted, and the rows keep their audience.
-    pub async fn cancel_set_audience(
-        &self,
-        table: &str,
-        key: impl Into<RowKey>,
-    ) -> Result<(), AudienceMoveError>;
-
     /// Uploads files that are on this device, then marks them uploaded.
-    pub async fn upload_files(&self, files: &[RowBlobRef]) -> Result<(), OperationError>;
+    pub async fn upload_files(&self, files: &[FileRef]) -> Result<(), OperationError>;
 
     /// Downloads uploaded files to this device and marks them as on this
     /// device; the uploaded copies are deleted once unused. `destinations`
@@ -2589,13 +2602,13 @@ impl CovenHandle {
     /// must not already exist.
     pub async fn keep_files_on_this_device(
         &self,
-        files: &[RowBlobRef],
+        files: &[FileRef],
         destinations: &HashMap<String, PathBuf>,
     ) -> Result<(), OperationError>;
 
     /// A live query over the upload queue: every file waiting to upload, with
-    /// its progress, and every move in progress. The first result is the
-    /// current state.
+    /// its progress, and every write waiting on files. The first result is
+    /// the current state.
     pub fn subscribe_uploads(&self) -> UploadsLiveQuery;
 
     /// Retries every waiting upload now, instead of after its retry delay.
@@ -2604,12 +2617,6 @@ impl CovenHandle {
     /// Pauses uploads, or resumes them. A paused upload keeps its place,
     /// including a provider upload session in progress.
     pub fn set_uploads_paused(&self, paused: bool);
-}
-
-pub struct AudienceChange {
-    pub table: String,
-    pub key: RowKey,
-    pub audience: Audience,
 }
 
 impl UploadsLiveQuery {
@@ -2621,19 +2628,25 @@ pub struct UploadQueue {
     pub paused: bool,
     /// Oldest first.
     pub files: Vec<QueuedUpload>,
-    pub moves: Vec<AudienceMove>,
+    /// Writes waiting for their files to be stored, oldest first.
+    pub writes: Vec<WaitingUpload>,
 }
 
 pub struct QueuedUpload {
-    pub file: RowBlobRef,
-    /// The move this upload belongs to, if any.
-    pub moving: Option<(String, RowKey)>,
+    pub file: FileRef,
     pub phase: UploadPhase,
     /// Failed attempts so far.
     pub attempts: u64,
     pub last_failure: Option<UploadFailure>,
     pub queued_at: SystemTime,
     pub last_attempt_at: Option<SystemTime>,
+}
+
+/// A write of this device's waiting in `coven_uploads` for files.
+pub struct WaitingUpload {
+    pub write: WriteId,
+    /// The files it waits for.
+    pub files: Vec<FileRef>,
 }
 
 pub enum UploadPhase {
@@ -2645,21 +2658,6 @@ pub enum UploadPhase {
     Uploading { bytes_sent: u64, bytes_total: u64 },
     /// Stored; the write that refers to it can upload (§16.5).
     Stored,
-}
-
-pub struct AudienceMove {
-    pub table: String,
-    pub key: RowKey,
-    pub audience: Audience,
-    pub phase: MovePhase,
-}
-
-pub enum MovePhase {
-    Uploading,
-    /// Every file is in place; the move's write is next.
-    Writing,
-    /// Cancelled; its uploaded files are being deleted.
-    Cancelling,
 }
 
 pub enum DrainOutcome {
@@ -2674,16 +2672,19 @@ Example:
 
 ```rust
 // Upload a note's attachment, which is on this device.
-let attachment = handle.row_blob_ref("attachments", attachment_id.as_str()).await?;
+let attachment = handle.file_ref("attachments", attachment_id.as_str()).await?;
 handle.upload_files(&[attachment]).await?;
 
-// Move the note into Ana's circle: its uploaded files go up again under the
-// circle's key, then the move is written.
+// Move the note into Ana's circle, with an ordinary write. Its uploaded
+// files go up again under the circle's key before the write uploads.
+let circle = anas_circle.to_string();
 handle
-    .set_audience("notes", note_id.as_str(), Audience::Circle(anas_circle))
+    .write(move |sql| {
+        sql.execute("UPDATE notes SET audience = ?1 WHERE id = ?2", (&circle, &note_id))?;
+        Ok(())
+    })
     .await?;
 
-let note_key = RowKey::from(note_id.as_str());
 let mut uploads = handle.subscribe_uploads();
 loop {
     let state = uploads.next().await?;
@@ -2692,16 +2693,15 @@ loop {
             show_progress(upload.file.key(), bytes_sent, bytes_total);
         }
     }
-    let moving = state.moves.iter().any(|m| m.table == "notes" && m.key == note_key);
-    if !moving {
-        break; // the note is now in the circle
+    if state.writes.is_empty() {
+        break; // the move has reached storage
     }
 }
 ```
 
 ### 20.8 Files and the cache
 
-- A *file reference*, `RowBlobRef`, names one row's file as of that row's
+- A *file reference*, `FileRef`, names one row's file as of that row's
   current version, so a later change to the row can't redirect a read.
 - Coven reads a file from wherever it is: the user's original, coven's own
   copy, the cache, or storage ([§16](#16-files)).
@@ -2709,42 +2709,42 @@ loop {
 ```rust
 impl CovenHandle {
     /// The file a row carries, as of the row's current version.
-    pub async fn row_blob_ref(&self, table: &str, key: impl Into<RowKey>) -> Result<RowBlobRef, DbError>;
+    pub async fn file_ref(&self, table: &str, key: impl Into<RowKey>) -> Result<FileRef, DbError>;
 
     /// Reads a whole file, checking it against its row.
-    pub async fn read_blob(&self, file: &RowBlobRef) -> Result<Vec<u8>, BlobCacheError>;
+    pub async fn read_file(&self, file: &FileRef) -> Result<Vec<u8>, FileReadError>;
 
     /// Opens a file for reading ranges (§16.3). Opening checks the file
     /// against its row once; keep the stream for as long as the file is read.
-    pub async fn open_blob_stream(&self, file: &RowBlobRef) -> Result<BlobStream, BlobCacheError>;
+    pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError>;
 
     /// Makes sure a file's bytes are on this device: an uploaded file is
     /// downloaded into the cache, and one kept on this device is checked.
-    pub async fn materialize_row_blob(&self, file: &RowBlobRef) -> Result<(), BlobCacheError>;
+    pub async fn ensure_file_on_device(&self, file: &FileRef) -> Result<(), FileReadError>;
 
     /// The path, size and modification time coven recorded for a row's
     /// user-provided file, or `None` when the row has none.
-    pub async fn external_blob(&self, table: &str, key: impl Into<RowKey>) -> Result<Option<ExternalBlob>, DbError>;
+    pub async fn user_file(&self, table: &str, key: impl Into<RowKey>) -> Result<Option<UserFile>, DbError>;
 
     /// Keeps uploaded files whole on this device regardless of the cache
     /// budget, downloading what is missing. `on_progress` is called before
     /// the first download, as bytes arrive, and as each file is kept.
     pub async fn pin(
         &self,
-        files: &[RowBlobRef],
+        files: &[FileRef],
         on_progress: &(dyn Fn(PinProgress) + Send + Sync),
-    ) -> Result<(), BlobCacheError>;
+    ) -> Result<(), FileReadError>;
 
     /// Stops keeping files; they stay in the cache until the budget evicts them.
-    pub async fn unpin(&self, files: &[RowBlobRef]) -> Result<(), BlobCacheError>;
+    pub async fn unpin(&self, files: &[FileRef]) -> Result<(), FileReadError>;
 
     /// Whether every file in `files` is pinned. An empty set is pinned.
-    pub async fn is_pinned(&self, files: &[RowBlobRef]) -> Result<bool, BlobCacheError>;
+    pub async fn is_pinned(&self, files: &[FileRef]) -> Result<bool, FileReadError>;
 
     /// Whether each row's file is pinned, one answer per key in order, or
     /// `None` for a key with no row carrying a file. A file not yet uploaded
     /// reads as not pinned.
-    pub async fn rows_pinned(&self, table: &str, keys: Vec<RowKey>) -> Result<Vec<Option<bool>>, BlobCacheError>;
+    pub async fn rows_pinned(&self, table: &str, keys: Vec<RowKey>) -> Result<Vec<Option<bool>>, FileReadError>;
 
     /// The same answers, live. `set_rows` changes which rows it watches.
     pub fn subscribe_rows_pinned(&self, table: &str, keys: Vec<RowKey>) -> RowsPinnedLiveQuery;
@@ -2752,7 +2752,7 @@ impl CovenHandle {
     /// Removes an uploaded file's copies from the cache, pinned or not. Never
     /// touches a file kept on this device, or storage; a later read
     /// downloads it again.
-    pub async fn evict_blob(&self, file: &RowBlobRef) -> Result<(), BlobCacheError>;
+    pub async fn evict_file(&self, file: &FileRef) -> Result<(), FileReadError>;
 
     /// The cache budget for one namespace, in bytes; each namespace evicts
     /// on its own.
@@ -2768,7 +2768,7 @@ impl CovenHandle {
     pub fn cancel_eager_cache_fill(&self);
 }
 
-impl RowBlobRef {
+impl FileRef {
     pub fn table(&self) -> &str;
     pub fn key(&self) -> &RowKey;
     /// The column naming the file.
@@ -2787,51 +2787,52 @@ pub enum FileLocation {
     OnDevice(DeviceId),
 }
 
-impl BlobStream {
+impl FileStream {
     /// The file's whole size in bytes.
     pub fn plaintext_size(&self) -> u64;
 
     /// Reads `len` bytes at `offset`. A range past the end is an error, never
     /// a short read.
-    pub async fn read_at(&self, offset: u64, len: u64) -> Result<Vec<u8>, BlobCacheError>;
+    pub async fn read_at(&self, offset: u64, len: u64) -> Result<Vec<u8>, FileReadError>;
 }
 
-pub enum BlobCacheError {
+pub enum FileReadError {
     /// The range needs chunks that aren't cached, and storage can't be reached.
     Offline { id: String },
     /// An uploaded file was read with no storage connected.
-    NoCloudHome,
+    NoStorage,
     /// The file is only on another device, which the app can name.
     OnOtherDevice { id: String, device: DeviceId },
     /// A user-provided file is gone from its recorded path.
-    ExternalMissing { id: String, path: PathBuf },
+    UserFileMissing { id: String, path: PathBuf },
     /// A user-provided file's size or modification time no longer matches
     /// what coven recorded.
-    ExternalChanged { id: String, path: PathBuf },
+    UserFileChanged { id: String, path: PathBuf },
     /// A chunk, or a copy on this device, failed its check.
     Integrity { id: String },
     /// The range lies outside the file.
     RangeOutOfBounds { id: String, offset: u64, end: u64, size: u64 },
     /// Storage refused or failed the request.
     Storage(StorageError),
-    /// A database or disk failure, with its cause.
-    Metadata(DbError),
-    File(FileError),
+    /// The database failed, with its cause.
+    Database(DbError),
+    /// The disk failed, with its cause.
+    Disk(DiskError),
 }
 ```
 
 Example:
 
 ```rust
-let recording = handle.row_blob_ref("attachments", attachment_id.as_str()).await?;
-let stream = handle.open_blob_stream(&recording).await?;
+let recording = handle.file_ref("attachments", attachment_id.as_str()).await?;
+let stream = handle.open_file_stream(&recording).await?;
 
 // A voice memo: read its header, then seek to where listening resumes.
 let header = stream.read_at(0, 64 * 1024).await?;
 let resume_at = position_for(&header, saved_seconds);
 match stream.read_at(resume_at, 256 * 1024).await {
     Ok(bytes) => play(bytes),
-    Err(BlobCacheError::Offline { .. }) => show_not_downloaded(),
+    Err(FileReadError::Offline { .. }) => show_not_downloaded(),
     Err(error) => return Err(error.into()),
 }
 ```
@@ -2987,8 +2988,9 @@ pub async fn restore_from_keychain(
     coven_migration_policy: CovenMigrationPolicy,
     key_custody: KeyCustody,
     identity_custody: IdentityCustody,
+    oauth_tokens: Option<OAuthTokens>,
     layout: &StoreLayout,
-    /* transfer limits, CloudKit calls, clock */
+    /* transfer limits, OAuth clients, CloudKit calls, clock */
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Option<Config>, BootstrapError>;
@@ -3149,7 +3151,7 @@ impl CovenHandle {
     /// Removes the store keys from key custody and drops any connection that
     /// holds them unlocked. If custody can't remove them, the connection
     /// stays.
-    pub async fn forget_master_key(&self) -> Result<(), SyncError>;
+    pub async fn forget_store_keys(&self) -> Result<(), SyncError>;
 
     /// Keeps an app secret, such as an API token, in the same keychain and
     /// under the same access policy as coven's keys. Names can't be empty,
@@ -3172,7 +3174,7 @@ impl CovenHandle {
     pub fn open_app_data(&self, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>, SealError>;
 }
 
-/// The app's own store for the store keys this device holds.
+/// The app's own store for the store keys and circle keys this device holds.
 pub trait StoreKeyCustody: Send + Sync {
     /// The keys, or `None` when this device has never held any.
     fn unlock(&self) -> Result<Option<StoreKeyring>, KeyError>;
@@ -3392,17 +3394,17 @@ fn migrations() -> Vec<Migration> {
 - A method never takes a raw capability as a parameter, such as a store
   directory or a database connection; it calls the owner of it instead.
 
-#### Owners and operations
+#### Owners and tasks
 
 - An *owner* is an object that holds a capability, or holds another
   owner, and lives while the store is open.
 - E.g. the database owner holds the SQLite connection, and the sync owner
   holds the database owner and the storage owner.
-- An *operation* is a value that lives for one piece of work and is then
-  dropped, such as one sync pass, one upload or one reload from a
-  snapshot.
-- An operation borrows the owners it needs for that work, and holds
-  nothing past it.
+- A *task* is a value that lives for one piece of work and is then
+  dropped, such as one sync pass, or one step of an operation
+  ([§18](#18-operations)).
+- A task borrows the owners it needs for that work, and holds nothing
+  past it.
 - An owner never builds another owner; it is given its collaborators.
 - E.g. the sync owner takes the database owner and the storage owner as
   arguments, and doesn't open either itself.
@@ -3434,6 +3436,10 @@ fn migrations() -> Vec<Migration> {
     private.
 - Errors are typed enums per crate; an error is never turned into text
   to be passed on, and nothing returns `Result<_, String>`.
+- Every failure reaches the app as an error it can tell apart and act on,
+  such as a damaged database, a file on another device, or storage that
+  can't be reached; none is dropped, and a retry shows in the upload queue
+  or the sync status.
 - A source file holds at most 1,000 lines, and its tests live beside it
   in `<name>_tests.rs`.
 - Each crate offers a `test-utils` feature with its fakes, such as an
