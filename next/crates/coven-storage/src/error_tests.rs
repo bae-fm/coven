@@ -2,6 +2,27 @@ use super::*;
 use std::error::Error;
 
 #[test]
+fn encoding_preserves_an_opaque_cause() {
+    let error = StorageError::Encoding(Box::new(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "invalid encoded data",
+    )));
+    assert_eq!(error.failure(), StorageFailure::Protocol);
+    assert!(!error.retryable());
+    assert_eq!(
+        error.to_string(),
+        "invalid storage data: invalid encoded data"
+    );
+    let source = error
+        .source()
+        .unwrap()
+        .downcast_ref::<std::io::Error>()
+        .unwrap();
+    assert_eq!(source.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(source.to_string(), "invalid encoded data");
+}
+
+#[test]
 fn setup_preserves_sign_in_and_custody_causes() {
     let network = StorageError::Provider {
         provider: CloudProvider::Dropbox,

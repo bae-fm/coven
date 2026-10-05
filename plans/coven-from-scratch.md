@@ -3207,7 +3207,7 @@ pub enum StorageError {
     /// A response violates the provider's protocol.
     Protocol(&'static str),
     /// Parsing recorded data failed.
-    Encoding(serde_json::Error),
+    Encoding(Box<dyn std::error::Error + Send + Sync>),
     /// Persisting provider settings failed.
     File(FileError),
     /// Cleanup failed too; both causes are retained.

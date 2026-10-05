@@ -3,6 +3,7 @@ use coven_foundation::{
     files::StoreLayout,
     id_source::{SequentialIds, StoreId},
 };
+use std::error::Error;
 #[test]
 fn settings_use_the_reserved_atomic_file_and_refuse_corrupt_values() {
     let temp = tempfile::tempdir().unwrap();
@@ -24,7 +25,9 @@ fn settings_use_the_reserved_atomic_file_and_refuse_corrupt_values() {
     assert_eq!(settings.read().unwrap(), Some(config));
     file.replace(br#"{"Dropbox":{"namespace_id":"","secret_access_key":"forbidden"}}"#)
         .unwrap();
-    assert!(matches!(settings.read(), Err(StorageError::Encoding(_))));
+    let error = settings.read().unwrap_err();
+    assert!(matches!(error, StorageError::Encoding(_)));
+    assert!(error.source().unwrap().is::<serde_json::Error>());
     settings.remove().unwrap();
     assert_eq!(settings.read().unwrap(), None);
 }

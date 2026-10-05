@@ -19,7 +19,8 @@ impl StorageSettings {
         else {
             return Ok(None);
         };
-        let config: StorageConfig = serde_json::from_slice(&bytes)?;
+        let config: StorageConfig = serde_json::from_slice(&bytes)
+            .map_err(|error| StorageError::Encoding(Box::new(error)))?;
         config.validate()?;
         Ok(Some(config))
     }
@@ -28,7 +29,10 @@ impl StorageSettings {
         config.validate()?;
         self.directory
             .owned_file(StoreFile::StorageSettings)
-            .replace(&serde_json::to_vec(config)?)?;
+            .replace(
+                &serde_json::to_vec(config)
+                    .map_err(|error| StorageError::Encoding(Box::new(error)))?,
+            )?;
         Ok(())
     }
     /// Remove settings after the facade successfully removes credentials.

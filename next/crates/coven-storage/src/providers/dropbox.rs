@@ -347,7 +347,8 @@ impl Storage for DropboxStorage {
         let error = http::response_error(PROVIDER, response).await;
         if let StorageError::Provider { source, .. } = &error {
             if let Some(response) = source.downcast_ref::<http::ProviderResponse>() {
-                let value: Value = serde_json::from_slice(response.body())?;
+                let value: Value = serde_json::from_slice(response.body())
+                    .map_err(|error| StorageError::Encoding(Box::new(error)))?;
                 if value["error"][".tag"].as_str() == Some("incorrect_offset") {
                     let offset = value["error"]["correct_offset"]
                         .as_u64()

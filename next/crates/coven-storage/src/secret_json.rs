@@ -7,10 +7,12 @@ use zeroize::Zeroizing;
 // A slice writer cannot grow or abandon an allocation containing secret data.
 pub(crate) fn encode(value: &impl Serialize) -> Result<SecretBytes, crate::StorageError> {
     let mut count = CountingWriter(0);
-    serde_json::to_writer(&mut count, value)?;
+    serde_json::to_writer(&mut count, value)
+        .map_err(|error| crate::StorageError::Encoding(Box::new(error)))?;
     let mut bytes = Zeroizing::new(vec![0; count.0]);
     let mut output = Cursor::new(bytes.as_mut_slice());
-    serde_json::to_writer(&mut output, value)?;
+    serde_json::to_writer(&mut output, value)
+        .map_err(|error| crate::StorageError::Encoding(Box::new(error)))?;
     if output.position() != count.0 as u64 {
         return Err(crate::StorageError::Protocol(
             "secret encoding changed length",

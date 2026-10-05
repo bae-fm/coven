@@ -42,7 +42,8 @@ impl StorageCredentials {
     }
     /// Decode credentials obtained from key custody or an opened restore code.
     pub fn decode(bytes: &[u8]) -> Result<Self, crate::StorageError> {
-        Ok(serde_json::from_slice(bytes)?)
+        serde_json::from_slice(bytes)
+            .map_err(|error| crate::StorageError::Encoding(Box::new(error)))
     }
 }
 

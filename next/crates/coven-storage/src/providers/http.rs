@@ -235,7 +235,7 @@ pub(crate) async fn json(
         .bytes()
         .await
         .map_err(|e| transport(provider, e))?;
-    Ok(serde_json::from_slice(&bytes)?)
+    serde_json::from_slice(&bytes).map_err(|error| StorageError::Encoding(Box::new(error)))
 }
 pub(crate) fn string<'a>(value: &'a Value, field: &str) -> Result<&'a str, StorageError> {
     value[field]

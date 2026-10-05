@@ -256,8 +256,8 @@ impl OAuthClients {
             expires_in: Option<u64>,
             token_type: String,
         }
-        let tokens: Tokens =
-            serde_json::from_slice(bytes.as_bytes()).map_err(StorageError::from)?;
+        let tokens: Tokens = serde_json::from_slice(bytes.as_bytes())
+            .map_err(|error| StorageError::Encoding(Box::new(error)))?;
         if tokens.access_token.as_str().is_empty()
             || !tokens.token_type.eq_ignore_ascii_case("bearer")
         {

@@ -87,7 +87,8 @@ impl UploadSession {
     }
     /// Read a recorded session; the provider checks its location before using it.
     pub fn decode(bytes: &[u8]) -> Result<Self, StorageError> {
-        let value: Self = serde_json::from_slice(bytes)?;
+        let value: Self = serde_json::from_slice(bytes)
+            .map_err(|error| StorageError::Encoding(Box::new(error)))?;
         value.location.validate()?;
         if value.part_size == 0
             || value.total == 0

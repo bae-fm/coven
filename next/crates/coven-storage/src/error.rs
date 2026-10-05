@@ -73,7 +73,7 @@ pub enum StorageError {
     Protocol(&'static str),
     /// Parsing recorded data failed.
     #[error("invalid storage data: {0}")]
-    Encoding(#[from] serde_json::Error),
+    Encoding(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// Persisting provider settings failed.
     #[error("storage settings: {0}")]
     File(#[from] coven_foundation::files::FileError),
