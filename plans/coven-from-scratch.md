@@ -1968,6 +1968,10 @@ Carol's tablet:
     changed.
   - A cell the migration left as it was keeps the write that set it, so a
     late write competes with that write, not with the migration.
+  - A cell whose references change, such as one a new foreign key now
+    covers, counts as changed: the migration write sets it, naming the
+    parent's generation after the migration
+    ([§8.4](#84-foreign-keys)).
   - Only the tables before and after count, not the statements between:
     a table or column after the migration is the one renamed to it with
     `ALTER TABLE … RENAME` from one that existed before, or else the one
