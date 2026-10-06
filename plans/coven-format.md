@@ -211,7 +211,7 @@
   | 2 | Synced column: `table:name \| column:name` | table, column |
   | 3 | Merge row (below) | `RowId` |
   | 4 | Lost write: `header` (D5's header fields up to `disposition`) `\| audience:Audience \| rows:u64 \| cause` | `WriteId` |
-  | 5 | Kept loss: `row:RowId \| values:map<LostKey, LostValue>` | `RowId` |
+  | 5 | Kept loss: `row:RowId \| values` (below) | row, incarnation, loss identity |
 
   - A lost write is followed at once by `rows` records of tag `6`, each a
     row change (D5) of its write, in increasing `RowId` order; the count
@@ -220,6 +220,12 @@
     `1 | entry:EntryId`, lost to a reset.
   - A kept loss is a removed row's loss whose merge records a breaking
     change forgot ([§17.1](coven-from-scratch.md#171-host-application)).
+    Its values are `0 | key:LostKey | value:LostValue` for a displaced cell,
+    or `1 | generation:u64 | cells:map<name, write:WriteId | value:ColumnValue>
+    | replaced_by:set<Rule>` for a removed row. Values are frozen as they
+    read at the migration, with empty parent maps. Within a row and
+    incarnation, cells precede rows; cell losses order by `LostKey`, removed
+    rows by their column-to-setter maps. Duplicate identities are refused.
 - A merge row is merge's state of one row ([§8](coven-from-scratch.md#8-merge)):
 
   ```

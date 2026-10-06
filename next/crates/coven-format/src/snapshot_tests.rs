@@ -13,7 +13,7 @@ fn raw(record: &SnapshotRecord) -> Vec<u8> {
 }
 fn single_header(section: usize, audience: Audience, count: u64) -> SnapshotHeader {
     let mut header = test_utils::snapshot_header();
-    header.counts = [0; 5];
+    header.counts = [0; 6];
     header.counts[section] = count;
     header.id.audience = audience;
     header
@@ -161,7 +161,7 @@ fn a_snapshot_larger_than_the_frame_bound_is_streamed_in_key_order() {
 #[test]
 fn empty_snapshot_requires_an_exact_end_frame() {
     let mut header = test_utils::snapshot_header();
-    header.counts = [0; 5];
+    header.counts = [0; 6];
     let (mut writer, first) = SnapshotEncoder::start(header).unwrap();
     let mut reader = SnapshotDecoder::start(&first).unwrap();
     let oracle = test_utils::oracle();
@@ -542,7 +542,7 @@ fn schema_loss_coverage_uses_the_snapshot_version_without_a_store_log_entry() {
 #[test]
 fn lost_row_records_require_their_header_audience_order_and_exact_count() {
     let mut header = test_utils::snapshot_header();
-    header.counts = [0, 0, 0, 0, 1];
+    header.counts = [0, 0, 0, 0, 1, 0];
     let (mut encoder, frame) = SnapshotEncoder::start(header).unwrap();
     let mut decoder = SnapshotDecoder::start(&frame).unwrap();
     let oracle = test_utils::oracle();

@@ -14,7 +14,7 @@ These codecs identify their plaintext frames with kinds 1–11.
 | --- | --- | --- |
 | 1 | Write header | `header:WriteHeader, parts:[PartHeader]` |
 | 4 | Store-log entry | `position:EntryId, timestamp:Timestamp, author:MemberId, had_read:EntryPositions, change:StoreChange` |
-| 5 | Snapshot header | `id:SnapshotId, schema_version:u32, writes:WritePositions, store_log:EntryPositions, counts:5*u64` |
+| 5 | Snapshot header | `id:SnapshotId, schema_version:u32, writes:WritePositions, store_log:EntryPositions, counts:6*u64` |
 | 6 | Snapshot record | `section:u8, record` |
 | 7 | Snapshot end | Empty |
 | 9 | Join request | `invite_uuid:16, keys:MemberPublicKeys, device_name:text` |
@@ -138,7 +138,7 @@ other entries and are checked by their owners.
 ### Snapshot streams
 
 A snapshot is one kind-5 header, its kind-6 records, then a kind-7 end marker.
-Counts declare records in five sections, in order. Empty sections emit nothing.
+Counts declare records in six sections, in order. Empty sections emit nothing.
 
 | Section | Record | Order within section |
 | --- | --- | --- |
@@ -147,6 +147,7 @@ Counts declare records in five sections, in order. Empty sections emit nothing.
 | 2 | `SyncedColumn { table:text, column:text }` | Table, column |
 | 3 | `MergeRow`, described below | RowId |
 | 4 | `LostWrite`, described below | Header's WriteId |
+| 5 | `RetainedLoss`, described below | RowId, incarnation, loss identity |
 
 `MergeRow` is `row:RowId | generations:map<u64, WriteId> |
 cells:map<text, Cell<Value>> | lost:map<LostKey, LostValue<Value>> |
@@ -175,7 +176,7 @@ Which removal rules actually hold is established by the removal computation.
 `LostWrite` is `header:WriteHeader | audience:Audience | row_count:u64 |
 cause:LostWriteCause`. Cause is `0 | schema_version:u32` or
 `1 | reset_entry:EntryId`. A lost-write header (record tag 4) is followed by
-exactly `row_count` kind-6 records with tag 5, each
+exactly `row_count` kind-6 records with tag 6, each
 `change:RowChange`. The count is positive and counts only the snapshot
 audience's rows. These rows belong to the preceding lost-write header by their
 position, without repeating its WriteId, and have its audience in strictly
@@ -191,6 +192,30 @@ than the snapshot schema version. The lost-write header's audience must match
 the snapshot, as must every following row.
 Merge's lost values and these lost writes remain separate; the database owns
 presenting both through its `coven_lost` API.
+
+`RetainedLoss` is `row:RowId | values:RetainedValues`. It keeps one loss after a
+breaking migration discards the row's merge records (§17.1). Its values are:
+
+- `0 | key:LostKey | value:LostValue<Value>` for a displaced cell;
+- `1 | generation:u64 | cells:map<text, Cell<Value>> | replaced_by:set<Rule>`
+  for a removed row.
+
+These reuse merge's cell and loss encodings without constructing a `RowState`
+or requiring a write oracle. Values are frozen as they read at the migration;
+their parent maps must be empty. The incarnation is positive and odd; removed
+rows have nonempty cells and removal rules. Names, values, write identities and
+circle-only removal rules have the same checks as merged rows. Setters and
+replacing writes must be covered by the header's write
+positions, and the row must belong to the snapshot's audience. The sixth header
+count counts these records; they cannot interrupt a lost write's row records.
+
+Ordering is by row identity, then incarnation, then cell before row. Cell losses
+use `LostKey` order; removed rows use the lexicographic order of their
+column-to-setter maps. Duplicate identities are refused. This keeps separate
+losses of the same row without carrying device-local ids. Original replacement
+reasons are retained; they are not recomputed under the new schema. Database
+loading keeps these values in `coven_lost` without restoring their old merge
+records, and includes them in the audience's fingerprint (§19.1).
 
 The streaming decoder retains its header, remaining counts and previous identity,
 not rows or write history. The consumer stages each AppliedWrite and supplies

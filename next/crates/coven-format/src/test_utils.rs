@@ -263,7 +263,7 @@ pub fn merge_row() -> MergeRow {
         removed: Default::default(),
     }
 }
-/// The header for the fixture's five snapshot sections.
+/// The header for the fixture's six snapshot sections.
 pub fn snapshot_header() -> SnapshotHeader {
     SnapshotHeader {
         id: SnapshotId {
@@ -280,7 +280,7 @@ pub fn snapshot_header() -> SnapshotHeader {
             },
         ]),
         store_log: EntryPositions(vec![loss_entry()]),
-        counts: [1, 3, 1, 1, 1],
+        counts: [1, 3, 1, 1, 1, 2],
     }
 }
 /// Records in their canonical section and identity order.
@@ -297,7 +297,41 @@ pub fn snapshot_records() -> Vec<SnapshotRecord> {
     records.push(SnapshotRecord::Merge(merge_row()));
     records.push(SnapshotRecord::LostWrite(lost_write()));
     records.push(SnapshotRecord::LostWriteRow(lost_write_row()));
+    records.extend(
+        retained_losses()
+            .into_iter()
+            .map(SnapshotRecord::RetainedLoss),
+    );
     records
+}
+/// Both kinds of loss after their row's merge history has been discarded.
+pub fn retained_losses() -> Vec<crate::retained_loss::RetainedLoss> {
+    use crate::retained_loss::{RetainedLoss, RetainedValues};
+    let merged = merge_row();
+    let (key, value) = merged.state.lost().first_key_value().unwrap();
+    let row = RowId {
+        table: "removed".into(),
+        ..row()
+    };
+    let mut cells = merged.state.cells().clone();
+    cells.get_mut("x").unwrap().value = column(Value::Null);
+    vec![
+        RetainedLoss {
+            row: row.clone(),
+            values: RetainedValues::Cell {
+                key: key.clone(),
+                value: value.clone(),
+            },
+        },
+        RetainedLoss {
+            row,
+            values: RetainedValues::Row {
+                generation: merged.state.generation(),
+                cells,
+                replaced_by: [coven_merge::Rule::Check("valid".into())].into(),
+            },
+        },
+    ]
 }
 /// Header of the fixture's excluded write.
 pub fn lost_write() -> LostWrite {

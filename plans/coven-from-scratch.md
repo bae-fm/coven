@@ -1930,6 +1930,10 @@ Carol's tablet:
   records; other audiences keep theirs, and the removal rules run again on
   rows that point at changed ones, as after any write
   ([§8.4](#84-foreign-keys)).
+- Losses kept after their row's merge records are discarded (§17.1) have
+  their own snapshot records, ordered by row, retaining each cell's frozen
+  value, setter and replacement. Loading preserves those losses in
+  `coven_lost`, and they count in its audience's fingerprint (§19.1).
 - Each device posts its positions only after uploading its own earlier
   writes.
 - A log object is deleted once snapshots cover every part of it, and either

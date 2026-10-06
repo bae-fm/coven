@@ -15,6 +15,7 @@ pub mod key;
 pub mod merge_fields;
 mod merge_wire;
 pub mod objects;
+pub mod retained_loss;
 mod sealed;
 pub mod sealed_single;
 pub mod sealed_snapshot;

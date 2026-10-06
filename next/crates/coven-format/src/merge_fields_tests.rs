@@ -50,7 +50,7 @@ fn metadata_fields_are_the_bytes_in_snapshot_merge_records() {
         Rule::Unique(["distinct"].into()),
     ]);
     let mut header = fixture::snapshot_header();
-    header.counts = [0, 0, 0, 1, 0];
+    header.counts = [0, 0, 0, 1, 0, 0];
     let (mut encoder, _) = SnapshotEncoder::start(header).unwrap();
     let frame = encoder
         .record(SnapshotRecord::Merge(merged.clone()))
@@ -162,7 +162,8 @@ fn applied_write_and_lost_write_fields_match_snapshot_records() {
             }
             SnapshotRecord::Column(_)
             | SnapshotRecord::Merge(_)
-            | SnapshotRecord::LostWriteRow(_) => {}
+            | SnapshotRecord::LostWriteRow(_)
+            | SnapshotRecord::RetainedLoss(_) => {}
         }
     }
     encoder.finish().unwrap();

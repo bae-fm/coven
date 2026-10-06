@@ -1,7 +1,8 @@
-//! Snapshots stream a header, five ordered sections and an end marker (§15).
+//! Snapshots stream a header, six ordered sections and an end marker (§15).
 //! The caller stages records and supplies the applied write metadata to merge.
 
 use crate::error::{require, Error, Rule};
+use crate::retained_loss::{LossIdentity, RetainedLoss};
 use crate::snapshot_rows::*;
 use crate::store_log::SnapshotId;
 use crate::value::{name, positive, EntryPositions, WritePositions};
@@ -20,8 +21,9 @@ pub struct SnapshotHeader {
     pub writes: WritePositions,
     /// Consumed store-log positions.
     pub store_log: EntryPositions,
-    /// Counts: synced rows, applied writes, columns, merged rows, lost writes.
-    pub counts: [u64; 5],
+    /// Counts: synced rows, applied writes, columns, merged rows, lost writes,
+    /// and losses retained without merge records.
+    pub counts: [u64; 6],
 }
 wire_struct!(
     SnapshotHeader,
@@ -31,7 +33,7 @@ wire_struct!(
     store_log,
     counts
 );
-impl Wire for [u64; 5] {
+impl Wire for [u64; 6] {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {
         for n in self {
             n.put(out)?;
@@ -40,6 +42,7 @@ impl Wire for [u64; 5] {
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
         Ok([
+            Wire::get(input)?,
             Wire::get(input)?,
             Wire::get(input)?,
             Wire::get(input)?,
@@ -71,13 +74,14 @@ pub enum SnapshotRecord {
     LostWrite(LostWrite),
     /// One row of the immediately preceding excluded write.
     LostWriteRow(LostWriteRow),
+    /// A loss retained after its row's merge records were discarded.
+    RetainedLoss(RetainedLoss),
 }
 impl SnapshotRecord {
     pub(crate) fn put(&self, out: &mut Encoder) -> Result<(), Error> {
-        let tag = if matches!(self, Self::LostWriteRow(_)) {
-            5
-        } else {
-            self.section()
+        let tag = match self {
+            Self::LostWriteRow(_) => 6,
+            _ => self.section(),
         };
         tag.put(out)?;
         match self {
@@ -87,6 +91,7 @@ impl SnapshotRecord {
             Self::Merge(v) => v.put(out),
             Self::LostWrite(v) => v.put(out),
             Self::LostWriteRow(v) => v.put(out),
+            Self::RetainedLoss(v) => v.put(out),
         }
     }
     pub(crate) fn get(input: &mut Decoder<'_>, oracle: &impl WriteOracle) -> Result<Self, Error> {
@@ -96,7 +101,8 @@ impl SnapshotRecord {
             2 => Ok(Self::Column(Wire::get(input)?)),
             3 => Ok(Self::Merge(MergeRow::get(input, oracle)?)),
             4 => Ok(Self::LostWrite(Wire::get(input)?)),
-            5 => Ok(Self::LostWriteRow(Wire::get(input)?)),
+            5 => Ok(Self::RetainedLoss(Wire::get(input)?)),
+            6 => Ok(Self::LostWriteRow(Wire::get(input)?)),
             tag => Err(Error::UnknownTag {
                 field: "snapshot section",
                 tag,
@@ -114,6 +120,7 @@ impl SnapshotRecord {
             Self::Merge(v) => v.validate(),
             Self::LostWrite(v) => v.validate(),
             Self::LostWriteRow(v) => v.change.validate(),
+            Self::RetainedLoss(v) => v.validate(),
         }
     }
     fn section(&self) -> u8 {
@@ -123,6 +130,7 @@ impl SnapshotRecord {
             Self::Column(_) => 2,
             Self::Merge(_) => 3,
             Self::LostWrite(_) | Self::LostWriteRow(_) => 4,
+            Self::RetainedLoss(_) => 5,
         }
     }
     fn key(&self) -> RecordKey {
@@ -133,6 +141,7 @@ impl SnapshotRecord {
             Self::Merge(v) => RecordKey::Row(v.state.row().clone()),
             Self::LostWrite(v) => RecordKey::Write(v.header.position),
             Self::LostWriteRow(v) => RecordKey::Row(v.change.row.clone()),
+            Self::RetainedLoss(v) => RecordKey::Loss(v.key()),
         }
     }
     fn check_header(&self, h: &SnapshotHeader) -> Result<(), Error> {
@@ -155,6 +164,10 @@ impl SnapshotRecord {
                 Ok(())
             }
             Self::Column(_) => Ok(()),
+            Self::RetainedLoss(v) => {
+                audience(&v.row)?;
+                require(v.covered(&h.writes), "retained loss writes", Rule::Coverage)
+            }
             Self::Merge(v) => {
                 audience(v.state.row())?;
                 for p in v.state.generations().values() {
@@ -198,10 +211,11 @@ enum RecordKey {
     Row(RowId),
     Write(WriteId),
     Column(SyncedColumn),
+    Loss((RowId, u64, LossIdentity)),
 }
 struct StreamState {
     header: SnapshotHeader,
-    remaining: [u64; 5],
+    remaining: [u64; 6],
     previous: Option<(u8, RecordKey)>,
     ended: bool,
     lost_rows: Option<LostRows>,
@@ -273,7 +287,7 @@ impl StreamState {
     }
     fn end(&mut self) -> Result<(), Error> {
         require(
-            !self.ended && self.remaining == [0; 5] && self.lost_rows.is_none(),
+            !self.ended && self.remaining == [0; 6] && self.lost_rows.is_none(),
             "snapshot end",
             Rule::SnapshotSequence,
         )?;

@@ -8,7 +8,7 @@ use crate::{
 fn lost_writes_stream_more_rows_than_a_frame_can_hold() {
     let count = 70_000;
     let mut header = test_utils::snapshot_header();
-    header.counts = [0, 0, 0, 0, 1];
+    header.counts = [0, 0, 0, 0, 1, 0];
     let (mut encoder, first) = SnapshotEncoder::start(header).unwrap();
     let mut lost = test_utils::lost_write();
     lost.row_count = count;
