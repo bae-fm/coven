@@ -352,8 +352,8 @@ Two mechanisms order writes:
     - its `coven_columns` row;
     - its `coven_rows` row;
     - the write that set it.
-  - `coven_references`, one row per reference a synced row holds, naming:
-    - the row's `coven_rows` row;
+  - `coven_references`, one row per reference a synced cell holds, naming:
+    - the cell's `coven_rows` and `coven_columns` rows;
     - its `coven_foreign_keys` row;
     - the parent's table, key, audience, and the generation it points at
       ([§8.4](#84-foreign-keys)).
