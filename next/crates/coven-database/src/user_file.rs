@@ -82,3 +82,70 @@ pub(crate) fn encode_path(path: &Path) -> Vec<u8> {
             .collect()
     }
 }
+
+pub(crate) fn read(
+    db: &crate::sqlite::DatabaseConnection,
+    schema: &crate::write_schema::WriteSchema,
+    table: &str,
+    key: &crate::RowKey,
+) -> Result<Option<UserFile>, DbError> {
+    let (_, file) = crate::file_row::declaration(schema, table)?;
+    if file.provenance != crate::Provenance::UserProvided {
+        return Ok(None);
+    }
+    let (key, values) = match crate::file_row::lookup(db, schema, table, key) {
+        Ok(row) => row,
+        Err(DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows)) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let records = db.query("SELECT path,size,modified_at FROM coven_user_files WHERE table_name=?1 AND key=?2 AND column_name=?3 AND identity=?4", (&key.0,&key.1,&file.id,crate::file_row::identity(file,&values)?), |row| Ok((row.get::<_,Vec<u8>>(0)?,row.get::<_,Vec<u8>>(1)?,row.get::<_,Vec<u8>>(2)?)))?;
+    records
+        .into_iter()
+        .next()
+        .map(|(path, size, modified_at)| {
+            Ok(UserFile {
+                path: decode_path(path)?,
+                size: u64::from_be_bytes(size.try_into().map_err(|_| DbError::DamagedDatabase)?),
+                modified_at: decode_time(&modified_at)?,
+            })
+        })
+        .transpose()
+}
+
+fn decode_time(bytes: &[u8]) -> Result<SystemTime, DbError> {
+    if bytes.len() != 13 {
+        return Err(DbError::DamagedDatabase);
+    }
+    let seconds = u64::from_be_bytes(bytes[1..9].try_into().expect("checked time width"));
+    let nanos = u32::from_be_bytes(bytes[9..].try_into().expect("checked time width"));
+    if nanos >= 1_000_000_000 {
+        return Err(DbError::DamagedDatabase);
+    }
+    let elapsed = std::time::Duration::new(seconds, nanos);
+    match bytes[0] {
+        0 => std::time::UNIX_EPOCH.checked_add(elapsed),
+        1 => std::time::UNIX_EPOCH.checked_sub(elapsed),
+        _ => None,
+    }
+    .ok_or(DbError::DamagedDatabase)
+}
+
+fn decode_path(bytes: Vec<u8>) -> Result<PathBuf, DbError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        Ok(std::ffi::OsString::from_vec(bytes).into())
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        if bytes.len() % 2 != 0 {
+            return Err(DbError::DamagedDatabase);
+        }
+        let units: Vec<_> = bytes
+            .chunks_exact(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        Ok(std::ffi::OsString::from_wide(&units).into())
+    }
+}

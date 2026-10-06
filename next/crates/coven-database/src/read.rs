@@ -40,6 +40,24 @@ impl<'connection> SqlReadContext<'connection> {
         self.database.app_query(sql, params, map)
     }
 
+    pub(crate) fn file_ref(
+        &self,
+        schema: &crate::write_schema::WriteSchema,
+        table: &str,
+        key: &crate::RowKey,
+    ) -> Result<crate::FileRef, crate::DbError> {
+        crate::file_ref::read(self.database, schema, table, key)
+    }
+
+    pub(crate) fn user_file(
+        &self,
+        schema: &crate::write_schema::WriteSchema,
+        table: &str,
+        key: &crate::RowKey,
+    ) -> Result<Option<crate::UserFile>, crate::DbError> {
+        crate::user_file::read(self.database, schema, table, key)
+    }
+
     pub(crate) fn lost_values(&self) -> CovenResult<Vec<LostValue>> {
         self.database.lost_values()
     }

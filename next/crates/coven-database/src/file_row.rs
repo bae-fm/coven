@@ -43,6 +43,9 @@ pub(crate) fn lookup(
         .iter()
         .map(|v| value(v.into()))
         .collect::<Result<Vec<_>, _>>()?;
+    if values.contains(&Value::Null) {
+        return Err(invalid("file row key cannot contain NULL"));
+    }
     let key = encoded(coven_format::key::encode_key(&values))?;
     let values = read_values(database, table, &key)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
     Ok(((table.name.clone(), row_key(table, &values)?), values))
@@ -59,7 +62,7 @@ pub(crate) fn set(
     let mut parameters = match hash {
         Some(hash) => vec![
             rusqlite::types::Value::Blob(hash.as_bytes().to_vec()),
-            format!("device:{}", device.0).into(),
+            device.0.to_string().into(),
         ],
         None => vec![rusqlite::types::Value::Null; 2],
     };
@@ -123,10 +126,17 @@ pub(crate) fn invalid(reason: impl Into<String>) -> DbError {
 }
 
 /// The facts binding local bytes to a file, independent of its audience/location.
-pub(crate) fn identity(file: &FileDecl, values: &AppValues) -> Result<Vec<u8>, DbError> {
+pub(crate) fn identity(file: &FileDecl, values: &AppValues) -> Result<Option<Vec<u8>>, DbError> {
+    if values[&file.hash] == Value::Null {
+        return Ok(None);
+    }
+    if values[&file.id] == Value::Null || values[&file.size] == Value::Null {
+        return Err(invalid("an attached file must have an id and size"));
+    }
     encoded(coven_format::key::encode_key(&[
         values[&file.id].clone(),
         values[&file.size].clone(),
         values[&file.hash].clone(),
     ]))
+    .map(Some)
 }

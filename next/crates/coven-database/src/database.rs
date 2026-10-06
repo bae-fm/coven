@@ -146,6 +146,7 @@ impl DatabaseBuilder {
             CovenMigrationPolicy::RefusePending,
             None,
         )?;
+        let schema = crate::write_schema::WriteSchema::read(&first, tables.clone())?;
         let mut readers = vec![Mutex::new(first)];
         for _ in 1..4 {
             readers.push(Mutex::new(DatabaseConnection::open(
@@ -155,7 +156,10 @@ impl DatabaseBuilder {
             )?));
         }
         Ok(CovenReadHandle {
-            inner: Arc::new(RwLock::new(Some(ReadPool::new(readers)))),
+            inner: Arc::new(RwLock::new(Some(ReadOnlyInner {
+                readers: ReadPool::new(readers),
+                schema,
+            }))),
         })
     }
 }
@@ -180,6 +184,50 @@ struct DatabaseInner {
 }
 
 impl Database {
+    /// The row's file, audience and version from one committed state.
+    pub async fn file_ref(
+        &self,
+        table: &str,
+        key: impl Into<crate::RowKey>,
+    ) -> Result<crate::FileRef, DbError> {
+        let owner = self.clone();
+        let table = table.to_owned();
+        let key = key.into();
+        finish_blocking(
+            tokio::task::spawn_blocking(move || {
+                let slot = owner.inner.read().expect("database lock poisoned");
+                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+                let reader = inner.readers.acquire_reader();
+                reader
+                    .read_snapshot(|sql| sql.file_ref(&inner.write_schema, &table, &key))
+                    .0
+            })
+            .await,
+        )
+    }
+
+    /// The recorded original's path, size and modification time; never reread its bytes.
+    pub async fn user_file(
+        &self,
+        table: &str,
+        key: impl Into<crate::RowKey>,
+    ) -> Result<Option<crate::UserFile>, DbError> {
+        let owner = self.clone();
+        let table = table.to_owned();
+        let key = key.into();
+        finish_blocking(
+            tokio::task::spawn_blocking(move || {
+                let slot = owner.inner.read().expect("database lock poisoned");
+                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+                let reader = inner.readers.acquire_reader();
+                reader
+                    .read_snapshot(|sql| sql.user_file(&inner.write_schema, &table, &key))
+                    .0
+            })
+            .await,
+        )
+    }
+
     /// Run ordinary SQL against one consistent snapshot when awaited.
     pub fn read<F, R>(&self, read: F) -> Read<'_, F>
     where
@@ -562,10 +610,59 @@ impl Database {
 /// ```
 #[derive(Clone)]
 pub struct CovenReadHandle {
-    inner: Arc<RwLock<Option<ReadPool>>>,
+    inner: Arc<RwLock<Option<ReadOnlyInner>>>,
+}
+
+struct ReadOnlyInner {
+    readers: ReadPool,
+    schema: crate::write_schema::WriteSchema,
 }
 
 impl CovenReadHandle {
+    /// The row's file, audience and version from one committed state.
+    pub async fn file_ref(
+        &self,
+        table: &str,
+        key: impl Into<crate::RowKey>,
+    ) -> Result<crate::FileRef, DbError> {
+        let owner = self.clone();
+        let table = table.to_owned();
+        let key = key.into();
+        finish_blocking(
+            tokio::task::spawn_blocking(move || {
+                let slot = owner.inner.read().expect("database lock poisoned");
+                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+                let reader = inner.readers.acquire_reader();
+                reader
+                    .read_snapshot(|sql| sql.file_ref(&inner.schema, &table, &key))
+                    .0
+            })
+            .await,
+        )
+    }
+
+    /// The recorded original's path, size and modification time; never reread its bytes.
+    pub async fn user_file(
+        &self,
+        table: &str,
+        key: impl Into<crate::RowKey>,
+    ) -> Result<Option<crate::UserFile>, DbError> {
+        let owner = self.clone();
+        let table = table.to_owned();
+        let key = key.into();
+        finish_blocking(
+            tokio::task::spawn_blocking(move || {
+                let slot = owner.inner.read().expect("database lock poisoned");
+                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+                let reader = inner.readers.acquire_reader();
+                reader
+                    .read_snapshot(|sql| sql.user_file(&inner.schema, &table, &key))
+                    .0
+            })
+            .await,
+        )
+    }
+
     /// Read one consistent snapshot when awaited.
     pub fn read<F, R>(&self, read: F) -> Read<'_, F>
     where
@@ -588,7 +685,11 @@ impl CovenReadHandle {
         let handle = self.clone();
         tokio::task::spawn_blocking(move || {
             let inner = handle.inner.read().expect("database lock poisoned");
-            let reader = inner.as_ref().ok_or(DbError::StoreClosed)?.acquire_reader();
+            let reader = inner
+                .as_ref()
+                .ok_or(DbError::StoreClosed)?
+                .readers
+                .acquire_reader();
             reader.read_snapshot(read).0
         })
     }
@@ -599,7 +700,11 @@ impl CovenReadHandle {
         finish_blocking(
             tokio::task::spawn_blocking(move || {
                 let inner = handle.inner.read().expect("database lock poisoned");
-                let reader = inner.as_ref().ok_or(DbError::StoreClosed)?.acquire_reader();
+                let reader = inner
+                    .as_ref()
+                    .ok_or(DbError::StoreClosed)?
+                    .readers
+                    .acquire_reader();
                 reader.schema_version()
             })
             .await,
@@ -613,7 +718,7 @@ impl CovenReadHandle {
             tokio::task::spawn_blocking(move || {
                 let mut slot = handle.inner.write().expect("database lock poisoned");
                 let readers = slot.take().ok_or(DbError::StoreClosed)?;
-                let failures = readers.close();
+                let failures = readers.readers.close();
                 if failures.is_empty() {
                     Ok(())
                 } else {
@@ -676,9 +781,10 @@ struct ReaderLease<'a> {
 }
 
 impl ReaderLease<'_> {
-    fn read_snapshot<F, R>(&self, read: F) -> (CovenResult<R>, ReadSet)
+    fn read_snapshot<F, R, E>(&self, read: F) -> (Result<R, E>, ReadSet)
     where
-        F: FnOnce(SqlReadContext<'_>) -> CovenResult<R>,
+        F: FnOnce(SqlReadContext<'_>) -> Result<R, E>,
+        E: From<DbError>,
     {
         let reader = self.database.readers[self.index]
             .lock()

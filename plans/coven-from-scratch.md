@@ -2796,7 +2796,7 @@ pub enum DbError {
     StoreClosed,
     /// SQLite refused or failed a statement, preserving its error.
     Sqlite(rusqlite::Error),
-    /// SQLite's opening integrity check found damage (§19.1).
+    /// SQLite's integrity check or decoding stored facts found damage (§19.1).
     DamagedDatabase,
     /// A synced table declaration or schema is invalid.
     Schema(SchemaError),
@@ -3703,6 +3703,7 @@ pub enum RemovalRule {
 impl CovenReadHandle {
     pub fn read<F, R>(&self, read: F) -> Read<'_, F>;
     pub async fn file_ref(&self, table: &str, key: impl Into<RowKey>) -> Result<FileRef, DbError>;
+    pub async fn user_file(&self, table: &str, key: impl Into<RowKey>) -> Result<Option<UserFile>, DbError>;
     pub async fn read_file(&self, file: &FileRef) -> Result<Vec<u8>, FileReadError>;
     pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError>;
     pub async fn is_pinned(&self, files: &[FileRef]) -> Result<bool, FileReadError>;
@@ -4500,7 +4501,10 @@ pub enum EagerCacheFillStatus {
 }
 
 impl CovenHandle {
-    /// The file a row carries, as of the row's current version.
+    /// The file a row carries, as of its current file version. Its four file
+    /// columns, audience and version are read in one committed state. A row
+    /// without a file returns `DbError::FileAttachment`; malformed stored
+    /// file facts return `DbError::DamagedDatabase`.
     pub async fn file_ref(&self, table: &str, key: impl Into<RowKey>) -> Result<FileRef, DbError>;
 
     /// Reads a whole file, checking it against its row.
@@ -4567,13 +4571,15 @@ impl FileRef {
     pub fn column(&self) -> &str;
     /// The file's size in bytes.
     pub fn plaintext_size(&self) -> u64;
-    /// The row's audience, whose key encrypts the file once uploaded (§16.1).
+    /// The row's audience, whose encrypted writes carry the file's key (§16.1).
     pub fn audience(&self) -> Audience;
     /// Where the file is (§16.1).
     pub fn location(&self) -> FileLocation;
 }
 
 pub enum FileLocation {
+    /// The where-column holds `uploaded <file id> <key in lowercase hex>`
+    /// (Appendix D12); the reference retains both privately.
     Uploaded,
     /// Only on the named device.
     OnDevice(DeviceId),

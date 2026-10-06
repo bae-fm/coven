@@ -47,6 +47,7 @@ pub(crate) struct FileWrite<'a> {
     originals: RefCell<Vec<PreparedUserFile>>,
     attached: RefCell<BTreeMap<AppKey, AttachedFile>>,
     obsolete: RefCell<BTreeSet<FileName>>,
+    changed_reference: RefCell<Option<(String, RowKey)>>,
 }
 
 impl<'a> FileWrite<'a> {
@@ -65,6 +66,7 @@ impl<'a> FileWrite<'a> {
             originals: RefCell::new(Vec::new()),
             attached: RefCell::new(BTreeMap::new()),
             obsolete: RefCell::new(BTreeSet::new()),
+            changed_reference: RefCell::new(None),
         }
     }
 
@@ -375,7 +377,7 @@ impl<'a> FileWrite<'a> {
                 if generation % 2 == 0 || matches!(&audience, coven_merge::Audience::Circle(id) if deleted.contains(id)) { continue; }
                 let row = store.row(&coven_merge::RowId { table:key.0.clone(), key:key.1.clone(), audience })?;
                 let values = row.state.cells().iter().map(|(column,cell)| (column.clone(),cell.value.value.clone())).collect();
-                retained.insert(file_row::identity(file, &values)?);
+                retained.extend(file_row::identity(file, &values)?);
             }
             if identities
                 .iter()
@@ -392,7 +394,21 @@ impl<'a> FileWrite<'a> {
         Ok(())
     }
 
+    pub(crate) fn validate_file_ref(&self, reference: &crate::FileRef) -> Result<(), DbError> {
+        let result = crate::file_ref::validate(self.database, self.schema, reference);
+        if let Err(DbError::FileRefChanged { table, key }) = &result {
+            *self.changed_reference.borrow_mut() = Some((table.clone(), key.clone()));
+        }
+        result
+    }
+
     pub(crate) fn before_commit(&self) -> Result<(), DbError> {
+        if let Some((table, key)) = self.changed_reference.borrow().as_ref() {
+            return Err(DbError::FileRefChanged {
+                table: table.clone(),
+                key: key.clone(),
+            });
+        }
         let db = self.database;
         for original in self.originals.borrow().iter() {
             original.observed.validate()?;

@@ -45,6 +45,12 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
         self.files.clear(table, key.into())
     }
 
+    /// Refuse this write if an earlier reference no longer names the row's file.
+    /// Call before changing or deleting that row.
+    pub fn validate_file_ref(&self, reference: &crate::FileRef) -> Result<(), crate::DbError> {
+        self.files.validate_file_ref(reference)
+    }
+
     /// Execute one app statement with parameters.
     pub fn execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
         self.files.execute(sql, params)

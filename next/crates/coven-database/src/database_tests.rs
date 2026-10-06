@@ -314,6 +314,7 @@ async fn opening_checks_integrity_once_for_all_its_connections() {
             slot.as_ref()
                 .unwrap()
                 .readers
+                .readers
                 .iter()
                 .map(|r| r.lock().unwrap().integrity_checks())
                 .sum::<usize>(),

@@ -13,6 +13,8 @@ mod declaration;
 mod download;
 mod error;
 mod file_authorization;
+mod file_location;
+mod file_ref;
 mod file_row;
 mod file_write;
 mod fingerprint;
@@ -62,6 +64,8 @@ pub use download::{ApplyOutcome, DownloadedPart, DownloadedWrite, SyncState, Wri
 pub use error::{
     CovenError, CovenMigrationError, CovenResult, DbError, MigrationError, SchemaError,
 };
+pub use file_location::FileLocation;
+pub use file_ref::FileRef;
 pub use live_query::{
     LiveQuery, LiveQueryCause, LiveQueryClosed, LiveQueryRequests, LiveQueryRevision,
     ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent,

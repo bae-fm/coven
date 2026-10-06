@@ -46,7 +46,7 @@ pub enum DbError {
     /// SQLite refused or failed a statement, preserving its error.
     #[error(transparent)]
     Sqlite(rusqlite::Error),
-    /// SQLite's opening integrity check found damage (§19.1).
+    /// SQLite's integrity check or decoding stored facts found damage (§19.1).
     #[error("damaged database")]
     DamagedDatabase,
     /// A synced table declaration or schema is invalid.
@@ -149,6 +149,14 @@ pub enum DbError {
         /// The row's key.
         key: crate::RowKey,
     },
+    /// A reference no longer names the row's current file (§16.3).
+    #[error("file reference changed for {table} at {key:?}")]
+    FileRefChanged {
+        /// The referenced table.
+        table: String,
+        /// The referenced primary key.
+        key: crate::RowKey,
+    },
     /// The supplied bytes disagree with the row's size (§16).
     #[error("file size is {actual}, expected {expected}")]
     FileSizeMismatch {
@@ -183,7 +191,7 @@ pub enum DbError {
         /// The failed attachment requirement.
         reason: String,
     },
-    /// An owned file operation failed.
+    /// Reading or keeping file bytes failed.
     #[error(transparent)]
     Disk(#[from] coven_foundation::files::FileError),
     /// File cleanup failed, retaining the write's outcome and every failure.

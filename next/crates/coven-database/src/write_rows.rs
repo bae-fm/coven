@@ -222,6 +222,25 @@ impl<'a> AppView<'a> {
         if let Some(snapshot) = self.migration {
             return snapshot.find(self.database, table, columns, values);
         }
+        let matching = |parameters: &[Value]| {
+            self.database.query(
+                &format!(
+                    "SELECT {} FROM main.{} WHERE {}",
+                    column_list(table),
+                    identifier(&table.name),
+                    columns
+                        .iter()
+                        .map(|c| format!("{}=?", identifier(c)))
+                        .collect::<Vec<_>>()
+                        .join(" AND ")
+                ),
+                params_from_iter(parameters.iter().map(sql_value)),
+                |r| read_row(table, r),
+            )
+        };
+        if self.overrides.is_empty() {
+            return matching(values);
+        }
         let values = crate::removal_sql::reference_values(self.database, table, columns, values)?;
         let index = table
             .indices
@@ -254,20 +273,7 @@ impl<'a> AppView<'a> {
             .collect();
         let wanted = equality_key(&ordered_values, &index.collations)?;
         let mut found = BTreeMap::new();
-        for values in self.database.query(
-            &format!(
-                "SELECT {} FROM main.{} WHERE {}",
-                column_list(table),
-                identifier(&table.name),
-                columns
-                    .iter()
-                    .map(|c| format!("{}=?", identifier(c)))
-                    .collect::<Vec<_>>()
-                    .join(" AND ")
-            ),
-            params_from_iter(values.iter().map(sql_value)),
-            |r| read_row(table, r),
-        )? {
+        for values in matching(&values)? {
             let key = (table.name.clone(), row_key(table, &values)?);
             let old = match self.overrides.get(&key) {
                 Some(old) => old.clone(),

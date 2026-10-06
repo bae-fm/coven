@@ -599,9 +599,10 @@ impl DatabaseConnection {
         Ok(())
     }
 
-    pub(crate) fn read_snapshot<F, R>(&self, read: F) -> (CovenResult<R>, ReadSet)
+    pub(crate) fn read_snapshot<F, R, E>(&self, read: F) -> (Result<R, E>, ReadSet)
     where
-        F: FnOnce(SqlReadContext<'_>) -> CovenResult<R>,
+        F: FnOnce(SqlReadContext<'_>) -> Result<R, E>,
+        E: From<DbError>,
     {
         let mut reads = ReadSet::new();
         let result = (|| {
