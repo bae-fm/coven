@@ -1430,8 +1430,8 @@ Carol's tablet:
 - A write's signature covers its path and a SHA-256 hash of every byte
   before it, so a device checks it as the object streams in.
 - Nonces:
-  - for a file's chunks, derived from the file's own key and the chunk's
-    index, so retrying an upload sends the same bytes;
+  - for a file's chunks, the chunk's index, which never repeats under the
+    file's own key, so retrying an upload sends the same bytes;
   - for everything else, random.
 - A key is sealed to a member with an anonymous sealed box: X25519 with
   XChaCha20-Poly1305.
