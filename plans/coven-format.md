@@ -268,7 +268,8 @@
 
 - A chunk is `length:u32 | nonce:24 bytes | ciphertext | tag:16 bytes`:
   XChaCha20-Poly1305 with a random nonce, under the encryption key derived
-  from the named key (D11).
+  from the named key (D11). `length` is the ciphertext's, which is the
+  plaintext's, so the chunk takes `length + 44` bytes.
 - Chunks are grouped in *sections*, each sealed with one key:
   - a write: section 0 is the header frame, one chunk with the prefix's
     `header_key`; section `i + 1` is part `i`'s stream, with
@@ -325,6 +326,8 @@
 
 - A *context* encodes a list of byte strings as each one's
   `length:u64 | bytes`; it is used as associated data, and as HKDF's info.
+  A number in a context, such as a section or a chunk's index, is one
+  string of its 8 bytes, as a `u64`.
 - From a store or circle key, HKDF-SHA256 with no salt derives 32-byte keys
   by label: `coven/encryption/v1` for sealing objects,
   `coven/fingerprints/v1` for fingerprints, and `coven/app-data/v1` for the
