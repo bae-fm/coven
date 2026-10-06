@@ -75,7 +75,7 @@
   has its own, so on S3 an admin makes and deletes members' keys in the
   provider's console, and coven says when.
 - Posted positions live at `positions/<device>` ([§6](#6-syncing-writes)).
-- Sealed circle keys live at `keys/circles/<circle>/<n>/<member>`
+- Sealed circle keys live at `keys/circles/<circle>/<key>/<member>`
   ([§14.3](#143-circles)).
 
 ## 5. Local database
@@ -1043,9 +1043,9 @@ Carol's tablet:
     checked, and whether the replay kept or dropped it;
   - the replay's result: `coven_members` (members, their roles and public
     keys), `coven_devices` (devices, their members and names),
-    `coven_circles` (circles, their names and key numbers),
-    `coven_circle_members`, and `coven_store_state` (the store key's
-    number, the schema and format versions, and each audience's reset).
+    `coven_circles` (circles, their names and current keys),
+    `coven_circle_members`, and `coven_store_state` (the current store
+    key, the schema and format versions, and each audience's reset).
   - An entry and the replay it causes commit in one transaction, so the
     tables always hold the replay of exactly the entries kept.
   - Entries waiting on ones they had read stay in storage until those
@@ -1190,11 +1190,24 @@ Carol's tablet:
     sign their writes and store log entries, and open the store key;
   - storage credentials: each device's own sign-in to the provider, or on
     S3 its member's access key ([§4](#4-storage-providers-and-access)).
+- Each key has a random id, picked when it is made, and the store log entry
+  that brings it in names it ([§9](#9-members-and-roles)):
+  - the store's first key, the entry creating the store; a circle's first
+    key, the entry making the circle;
+  - each later key, the removal that replaced the one before.
 - Each store key is sealed to every member's public key, and the sealed
-  copies are kept in storage, at `keys/store/<n>/<member>` for the store's
-  `n`th key.
-- Sealed circle keys live at `keys/circles/<circle>/<n>/<member>` for the
-  circle's `n`th key ([§14.3](#143-circles)).
+  copies are kept in storage, at `keys/store/<key>/<member>`.
+- Sealed circle keys live at `keys/circles/<circle>/<key>/<member>`
+  ([§14.3](#143-circles)).
+- So two concurrent removals each make their own key under its own id,
+  and both keys work.
+  - E.g. Ana removes Dan while Ben, offline, removes Erin: each removal
+    names its own new store key, and both apply.
+- The *current* store key is the one named by the latest entry, in the
+  replay's order, that brings one in, and likewise for each circle; new
+  writes, entries, snapshots and files use it.
+- Every encrypted object names, outside its encryption, the key that seals
+  each of its parts, so a reader knows which key opens it.
 - So a member's key alone gets the current store key: a device holding it
   reads its member's sealed copy from storage and opens it.
 - The store key is replaced whenever a member is removed.
@@ -1273,8 +1286,9 @@ Carol's tablet:
      Carol's member keys, and writes a join request to storage, holding
      her public key and her device's name.
   3. Ana's phone shows the request, and Ana approves it.
-  4. Ana's phone seals the store key to Carol's public key
+  4. Ana's phone seals every store key to Carol's public key
      ([§11](#11-keys)), then writes "add member Carol" to the store log.
+     - Every key, so Carol reads a late write made under an older one.
   5. Carol's phone opens the store key, adds itself to the store log, and
      Carol writes down her own restore code.
 - The join request is stored at `join-requests/<invite id>`.
@@ -1317,7 +1331,8 @@ Carol's tablet:
     public key ([§11](#11-keys));
   - so is the key of each circle they were in: a new one, sealed to that
     circle's remaining members ([§14.6](#146-leaving-a-circle));
-  - the store log entry removing them is written, naming every new key;
+  - the store log entry removing them is written; it names the new keys,
+    and the circles whose keys it replaced;
   - the storage access their invite granted is taken back: the store's
     folder is unshared from their account, or on S3 coven tells the admin
     to delete their key in the provider's console
@@ -1446,7 +1461,8 @@ Carol's tablet:
   it ([§14.7](#147-deleting-a-circle)); an admin outside the circle can't.
 - Each circle has its own key, sealed to each of its members' public keys,
   like the store key ([§11](#11-keys)).
-  - Its sealed copies live at `keys/circles/<circle>/<n>/<member>`.
+  - Its sealed copies live at `keys/circles/<circle>/<key>/<member>`
+    ([§11](#11-keys)).
   - It is replaced whenever someone leaves the circle.
   - Someone joining a circle gets its earlier keys too, so they can read its
     history.
@@ -1924,16 +1940,18 @@ Carol's tablet:
 ### 18.1 Operations
 
 - Removing a member ([§13](#13-removing-members-and-devices)):
-  1. make the new store key, and record it in the operation's row;
+  1. make the new store key and its id, and record them in the operation's
+     row;
   2. upload the new key sealed to each remaining member;
   3. upload the store log entry removing the member;
   4. revoke the member's storage access, or on S3 tell the admin to delete
      their key in the provider's console.
 - Removing someone from a circle ([§14.6](#146-leaving-a-circle)):
-  1. make the circle's new key, and record it in the operation's row;
+  1. make the circle's new key and its id, and record them in the
+     operation's row;
   2. upload it sealed to each remaining circle member;
   3. upload the store log entry removing them from the circle, naming the
-     new key's number.
+     new key.
 - A breaking schema or format change ([§17](#17-schema-changes)):
   1. migrate the database, with its migration write, in one transaction;
   2. upload a snapshot in the new version;
@@ -1974,8 +1992,8 @@ Carol's tablet:
     remove member   2           new store key     Ana's "remove Ben"
 
   storage
-    keys/store/4/ana     uploaded
-    keys/store/4/carol   uploaded
+    keys/store/7f3a…/ana     uploaded
+    keys/store/7f3a…/carol   uploaded
     store-log/ana-phone/9   not yet: the removal entry
   ```
 
