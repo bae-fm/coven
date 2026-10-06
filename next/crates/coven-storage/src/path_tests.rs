@@ -1,5 +1,42 @@
 use super::*;
 #[test]
+fn file_names_are_random_ids_and_snapshots_name_their_audience() {
+    for path in [
+        "files/00112233-4455-6677-8899-aabbccddeeff",
+        "snapshots/store/42/3",
+        "snapshots/00112233-4455-6677-8899-aabbccddeeff/42/3",
+    ] {
+        assert!(ObjectPath::parse(path).is_ok(), "{path}");
+    }
+    for path in [
+        format!("files/{}", "ab".repeat(32)),
+        "snapshots/42/3".to_owned(),
+    ] {
+        assert!(ObjectPath::parse(&path).is_err(), "{path}");
+    }
+}
+
+#[test]
+fn prefixes_find_every_device_and_snapshots_retain_the_device() {
+    let circle = CircleId(uuid::Uuid::from_u128(17));
+    for device in [DeviceId(1), DeviceId(42)] {
+        let write = ObjectPath::device_log(device, NonZeroU64::MIN);
+        let entry = ObjectPath::store_log(device, NonZeroU64::MIN);
+        assert!(ObjectPrefix::device_logs().contains(&write));
+        assert!(!ObjectPrefix::device_logs().contains(&entry));
+        assert!(ObjectPrefix::store_logs().contains(&entry));
+        assert!(!ObjectPrefix::store_logs().contains(&write));
+        for snapshot in [
+            ObjectPath::snapshot(Audience::Store, device, NonZeroU64::MIN),
+            ObjectPath::snapshot(Audience::Circle(circle), device, NonZeroU64::MIN),
+        ] {
+            assert_eq!(snapshot.device(), Some(device));
+            assert_eq!(ObjectPath::parse(snapshot.as_str()).unwrap(), snapshot);
+        }
+    }
+}
+
+#[test]
 fn every_layout_round_trips_without_aliases() {
     let device = DeviceId(42);
     let number = NonZeroU64::new(3).unwrap();
