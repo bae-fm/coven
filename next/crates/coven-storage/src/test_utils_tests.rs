@@ -362,3 +362,203 @@ async fn listing_records_publication_time_and_keeps_it_on_retry() {
     assert_eq!(listed[0].stored_at, published + Duration::from_secs(40));
     assert_eq!(listed[0].size, 12);
 }
+
+#[tokio::test]
+async fn recorded_sessions_cannot_redirect_or_regress_provider_state() {
+    use coven_foundation::id_source::DeviceId;
+    let storage = MemoryStorage::new(
+        config(),
+        Arc::new(coven_foundation::clock::FixedClock::new(
+            std::time::SystemTime::UNIX_EPOCH,
+        )),
+    )
+    .unwrap();
+    let path = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
+    let mut upload = storage.begin_upload(&path, 8).await.unwrap();
+    storage.upload_part(&mut upload, b"data").await.unwrap();
+    let mut wrong_path = upload.clone();
+    wrong_path.path = ObjectPath::device_log(DeviceId(32), std::num::NonZeroU64::MIN);
+    let mut wrong_size = upload.clone();
+    wrong_size.total = 12;
+    for mut invalid in [wrong_path, wrong_size] {
+        assert!(matches!(
+            storage.resume_upload(&mut invalid).await,
+            Err(StorageError::SessionMismatch)
+        ));
+        assert!(matches!(
+            storage.upload_part(&mut invalid, b"next").await,
+            Err(StorageError::SessionMismatch)
+        ));
+        assert!(matches!(
+            storage.finish_upload(&mut invalid).await,
+            Err(StorageError::SessionMismatch)
+        ));
+        assert!(matches!(
+            storage.abort_upload(&invalid).await,
+            Err(StorageError::SessionMismatch)
+        ));
+    }
+    let SessionState::Memory { id, .. } = upload.state else {
+        panic!()
+    };
+    storage
+        .state
+        .lock()
+        .await
+        .uploads
+        .get_mut(&id)
+        .unwrap()
+        .bytes
+        .clear();
+    assert_eq!(
+        storage
+            .resume_upload(&mut upload)
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageFailure::Protocol
+    );
+    assert_eq!(upload.confirmed_bytes(), 4);
+}
+
+#[tokio::test]
+async fn publication_removes_pending_parts_and_verifies_the_exact_session() {
+    use coven_foundation::id_source::DeviceId;
+    let storage = MemoryStorage::new(
+        config(),
+        Arc::new(coven_foundation::clock::FixedClock::new(
+            std::time::SystemTime::UNIX_EPOCH,
+        )),
+    )
+    .unwrap();
+    let path = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
+    let mut first = storage.begin_upload(&path, 4).await.unwrap();
+    let mut other = storage.begin_upload(&path, 4).await.unwrap();
+    storage.upload_part(&mut first, b"data").await.unwrap();
+    storage.upload_part(&mut other, b"data").await.unwrap();
+    let mut recorded = first.clone();
+    storage.finish_upload(&mut first).await.unwrap();
+    let SessionState::Memory { id, .. } = first.state else {
+        panic!()
+    };
+    assert!(!storage.state.lock().await.uploads.contains_key(&id));
+    storage.resume_upload(&mut recorded).await.unwrap();
+    assert!(recorded.is_complete());
+    storage.finish_upload(&mut recorded).await.unwrap();
+    assert!(matches!(
+        storage.finish_upload(&mut other).await,
+        Err(StorageError::AlreadyExists)
+    ));
+    storage.abort_upload(&other).await.unwrap();
+    storage.abort_upload(&other).await.unwrap();
+    assert!(matches!(
+        storage.resume_upload(&mut other).await,
+        Err(StorageError::AlreadyExists)
+    ));
+    assert_eq!(storage.read(&path).await.unwrap(), b"data");
+    assert!(storage.state.lock().await.uploads.is_empty());
+}
+
+#[tokio::test]
+async fn s3_fake_requires_the_members_console_key_for_revocation() {
+    let storage = MemoryStorage::new(
+        config(),
+        Arc::new(coven_foundation::clock::FixedClock::new(
+            std::time::SystemTime::UNIX_EPOCH,
+        )),
+    )
+    .unwrap();
+    assert!(matches!(
+        storage
+            .revoke_access(&MemberAccess::ProviderAccount("member".into()))
+            .await,
+        Err(StorageError::InvalidConfiguration(_))
+    ));
+}
+
+#[tokio::test]
+async fn the_same_fake_uses_committed_replacement_tokens() {
+    use coven_crypto::SecretText;
+    use coven_foundation::{clock::FixedClock, id_source::DeviceId};
+    use std::time::{Duration, SystemTime};
+    let storage = MemoryStorage::new(
+        StorageConfig::Dropbox {
+            namespace_id: "store".into(),
+        },
+        Arc::new(FixedClock::new(
+            SystemTime::UNIX_EPOCH + Duration::from_secs(10),
+        )),
+    )
+    .unwrap();
+    let path = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
+    storage.create(&path, b"data").await.unwrap();
+    storage
+        .set_oauth_tokens(OAuthTokens {
+            access_token: SecretText::new("expired".into()),
+            refresh_token: None,
+            expires_at: Some(SystemTime::UNIX_EPOCH),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.read(&path).await.unwrap_err().failure(),
+        StorageFailure::Authentication
+    );
+    storage
+        .set_oauth_tokens(OAuthTokens {
+            access_token: SecretText::new("refreshed".into()),
+            refresh_token: None,
+            expires_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(20)),
+        })
+        .await
+        .unwrap();
+    assert_eq!(storage.read(&path).await.unwrap(), b"data");
+}
+
+#[tokio::test]
+async fn lost_publication_replies_and_expired_parts_are_distinct() {
+    use coven_foundation::id_source::DeviceId;
+    let storage = MemoryStorage::new(
+        config(),
+        Arc::new(coven_foundation::clock::FixedClock::new(
+            std::time::SystemTime::UNIX_EPOCH,
+        )),
+    )
+    .unwrap();
+    let path = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
+    let mut upload = storage.begin_upload(&path, 4).await.unwrap();
+    storage.upload_part(&mut upload, b"data").await.unwrap();
+    storage
+        .set_faults(Faults {
+            lose_completion_reply: true,
+            ..Faults::none()
+        })
+        .await;
+    assert_eq!(
+        storage
+            .finish_upload(&mut upload)
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageFailure::Network
+    );
+    assert!(!upload.is_complete());
+    assert!(storage.state.lock().await.uploads.is_empty());
+    storage.resume_upload(&mut upload).await.unwrap();
+    assert!(upload.is_complete());
+    storage.delete(&path).await.unwrap();
+    let mut upload = storage.begin_upload(&path, 4).await.unwrap();
+    storage
+        .set_faults(Faults {
+            expire_uploads: true,
+            ..Faults::none()
+        })
+        .await;
+    assert!(matches!(
+        storage.resume_upload(&mut upload).await,
+        Err(StorageError::SessionExpired)
+    ));
+    let mut fresh = storage.restart_upload(&upload).await.unwrap();
+    storage.upload_part(&mut fresh, b"data").await.unwrap();
+    storage.finish_upload(&mut fresh).await.unwrap();
+}

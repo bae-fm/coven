@@ -21,6 +21,10 @@ pub struct Faults {
     pub drop_part: bool,
     /// Store the next part, but lose the reply before advancing the caller's session.
     pub lose_part_reply: bool,
+    /// Publish the next upload but lose the completion reply.
+    pub lose_completion_reply: bool,
+    /// Expire all pending sessions before the next call.
+    pub expire_uploads: bool,
 }
 impl Faults {
     /// No failures or delays.
@@ -31,11 +35,14 @@ impl Faults {
             delay: Duration::ZERO,
             drop_part: false,
             lose_part_reply: false,
+            lose_completion_reply: false,
+            expire_uploads: false,
         }
     }
 }
 
 struct Object {
+    upload_id: Option<u64>,
     bytes: Vec<u8>,
     stored_at: std::time::SystemTime,
 }
@@ -44,6 +51,36 @@ struct Pending {
     total: u64,
     bytes: Vec<u8>,
 }
+impl Pending {
+    fn check(&self, session: &UploadSession) -> Result<(), StorageError> {
+        if self.path != session.path || self.total != session.total {
+            return Err(StorageError::SessionMismatch);
+        }
+        if (self.bytes.len() as u64) < session.confirmed || self.bytes.len() as u64 > self.total {
+            return Err(StorageError::Protocol(
+                "memory provider lost confirmed progress",
+            ));
+        }
+        Ok(())
+    }
+}
+fn confirm_published(
+    state: &State,
+    session: &mut UploadSession,
+    id: u64,
+) -> Result<(), StorageError> {
+    let object = state
+        .objects
+        .get(&session.path)
+        .ok_or(StorageError::SessionExpired)?;
+    if object.upload_id != Some(id) || object.bytes.len() as u64 != session.total {
+        return Err(StorageError::AlreadyExists);
+    }
+    session.confirmed = session.total;
+    session.state = SessionState::Memory { id, complete: true };
+    Ok(())
+}
+
 struct State {
     objects: BTreeMap<ObjectPath, Object>,
     uploads: BTreeMap<u64, Pending>,
@@ -58,6 +95,7 @@ pub struct MemoryStorage {
     config: StorageConfig,
     owns_location: bool,
     clock: ClockRef,
+    tokens: Arc<Mutex<Option<OAuthTokens>>>,
     state: Arc<Mutex<State>>,
 }
 impl MemoryStorage {
@@ -68,6 +106,7 @@ impl MemoryStorage {
         Ok(Self {
             config,
             clock,
+            tokens: Arc::new(Mutex::new(None)),
             owns_location: true,
             state: Arc::new(Mutex::new(State {
                 objects: BTreeMap::new(),
@@ -90,6 +129,9 @@ impl MemoryStorage {
     async fn before(&self) -> Result<(), StorageError> {
         let (delay, failure) = {
             let mut state = self.state.lock().await;
+            if std::mem::replace(&mut state.faults.expire_uploads, false) {
+                state.uploads.clear();
+            }
             let failure = if state.faults.fail_next > 0 {
                 state.faults.fail_next -= 1;
                 Some(state.faults.failure)
@@ -98,10 +140,21 @@ impl MemoryStorage {
             };
             (state.faults.delay, failure)
         };
-        tokio::time::sleep(delay).await;
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
         match failure {
             Some(failure) => Err(StorageError::Injected(failure)),
-            None => Ok(()),
+            None => {
+                if self.tokens.lock().await.as_ref().is_some_and(|tokens| {
+                    tokens
+                        .expires_at
+                        .is_some_and(|expiry| self.clock.now() >= expiry)
+                }) {
+                    return Err(StorageError::Injected(StorageFailure::Authentication));
+                }
+                Ok(())
+            }
         }
     }
     fn session_id(&self, session: &UploadSession) -> Result<u64, StorageError> {
@@ -118,6 +171,18 @@ impl Storage for MemoryStorage {
     fn config(&self) -> StorageConfig {
         self.config.clone()
     }
+    async fn set_oauth_tokens(&self, tokens: OAuthTokens) -> Result<(), StorageError> {
+        if !matches!(
+            self.config.provider(),
+            CloudProvider::GoogleDrive | CloudProvider::Dropbox | CloudProvider::OneDrive
+        ) {
+            return Err(StorageError::InvalidConfiguration(
+                "provider does not use OAuth",
+            ));
+        }
+        *self.tokens.lock().await = Some(tokens);
+        Ok(())
+    }
     fn single_request_limit(&self) -> u64 {
         16
     }
@@ -131,6 +196,7 @@ impl Storage for MemoryStorage {
             state.objects.insert(
                 path.clone(),
                 Object {
+                    upload_id: None,
                     bytes: bytes.to_vec(),
                     stored_at: self.clock.now(),
                 },
@@ -149,6 +215,7 @@ impl Storage for MemoryStorage {
         self.state.lock().await.objects.insert(
             path.clone(),
             Object {
+                upload_id: None,
                 bytes: bytes.to_vec(),
                 stored_at: self.clock.now(),
             },
@@ -212,7 +279,13 @@ impl Storage for MemoryStorage {
                     access_key_id: access_key_id.clone(),
                 })
             }
-            (_, MemberAccess::ProviderAccount(account)) => {
+            (
+                CloudProvider::GoogleDrive
+                | CloudProvider::Dropbox
+                | CloudProvider::OneDrive
+                | CloudProvider::CloudKit,
+                MemberAccess::ProviderAccount(account),
+            ) => {
                 if !self.owns_location {
                     return Err(StorageError::NotStoreOwner);
                 }
@@ -266,17 +339,18 @@ impl Storage for MemoryStorage {
     }
     async fn resume_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
         self.before().await?;
-        session.check(&self.config)?;
+        let id = self.session_id(session)?;
         if session.is_complete() {
             return Ok(());
         }
-        let id = self.session_id(session)?;
         let state = self.state.lock().await;
-        let pending = state.uploads.get(&id).ok_or(StorageError::SessionExpired)?;
-        if pending.path != session.path || pending.total != session.total {
-            return Err(StorageError::SessionMismatch);
+        match state.uploads.get(&id) {
+            Some(pending) => {
+                pending.check(session)?;
+                session.confirmed = pending.bytes.len() as u64;
+            }
+            None => confirm_published(&state, session, id)?,
         }
-        session.confirmed = pending.bytes.len() as u64;
         Ok(())
     }
     async fn upload_part(
@@ -288,17 +362,20 @@ impl Storage for MemoryStorage {
         let id = self.session_id(session)?;
         let end = session.end_of_part(bytes.len())?;
         let mut state = self.state.lock().await;
-        if std::mem::replace(&mut state.faults.drop_part, false) {
-            return Err(StorageError::Injected(StorageFailure::Network));
-        }
-        let pending = state
-            .uploads
-            .get_mut(&id)
-            .ok_or(StorageError::SessionExpired)?;
+        let pending = state.uploads.get(&id).ok_or(StorageError::SessionExpired)?;
+        pending.check(session)?;
         if pending.bytes.len() as u64 != session.confirmed {
             return Err(StorageError::InvalidPart);
         }
-        pending.bytes.extend_from_slice(bytes);
+        if std::mem::replace(&mut state.faults.drop_part, false) {
+            return Err(StorageError::Injected(StorageFailure::Network));
+        }
+        state
+            .uploads
+            .get_mut(&id)
+            .ok_or(StorageError::SessionExpired)?
+            .bytes
+            .extend_from_slice(bytes);
         if std::mem::replace(&mut state.faults.lose_part_reply, false) {
             return Err(StorageError::Injected(StorageFailure::Network));
         }
@@ -307,44 +384,50 @@ impl Storage for MemoryStorage {
     }
     async fn finish_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
         self.before().await?;
-        session.check(&self.config)?;
+        let id = self.session_id(session)?;
         if session.is_complete() {
             return Ok(());
         }
-        let id = self.session_id(session)?;
         let mut state = self.state.lock().await;
-        let pending = state.uploads.get(&id).ok_or(StorageError::SessionExpired)?;
+        let Some(pending) = state.uploads.get(&id) else {
+            return confirm_published(&state, session, id);
+        };
+        pending.check(session)?;
         if pending.bytes.len() as u64 != session.total || session.confirmed != session.total {
             return Err(StorageError::InvalidPart);
         }
-        if let Some(existing) = state.objects.get(&session.path) {
-            if existing.bytes != pending.bytes {
-                return Err(StorageError::AlreadyExists);
-            }
-        } else {
-            let bytes = pending.bytes.clone();
-            state.objects.insert(
-                session.path.clone(),
-                Object {
-                    bytes,
-                    stored_at: self.clock.now(),
-                },
-            );
+        if state.objects.contains_key(&session.path) {
+            return Err(StorageError::AlreadyExists);
+        }
+        let pending = state
+            .uploads
+            .remove(&id)
+            .ok_or(StorageError::SessionExpired)?;
+        state.objects.insert(
+            pending.path,
+            Object {
+                bytes: pending.bytes,
+                stored_at: self.clock.now(),
+                upload_id: Some(id),
+            },
+        );
+        if std::mem::replace(&mut state.faults.lose_completion_reply, false) {
+            return Err(StorageError::Injected(StorageFailure::Network));
         }
         session.state = SessionState::Memory { id, complete: true };
         Ok(())
     }
     async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError> {
         self.before().await?;
-        session.check(&self.config)?;
+        let id = self.session_id(session)?;
         if session.is_complete() {
             return Ok(());
         }
-        self.state
-            .lock()
-            .await
-            .uploads
-            .remove(&self.session_id(session)?);
+        let mut state = self.state.lock().await;
+        if let Some(pending) = state.uploads.get(&id) {
+            pending.check(session)?;
+        }
+        state.uploads.remove(&id);
         Ok(())
     }
 }

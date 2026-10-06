@@ -3915,6 +3915,10 @@ while let Ok(values) = lost.next().await {
   Listings follow every page and reject absent or malformed metadata. Drive
   lists the earliest stored copy, with id breaking timestamp ties.
   `MemoryStorage::new` takes an injected `ClockRef` and timestamps publication.
+  Its `Faults` can lose part or completion replies and expire pending sessions;
+  completed uploads discard pending parts and retain their session identity on
+  the published object. OAuth replacement tokens govern subsequent calls on the
+  same fake adapter.
 - Storage exposes `delete`, not a deletion-rights query. Sync chooses the
   deleting device by §15; Drive deletes an object the account owns and
   otherwise removes it from the store's folder. Provider refusals keep
