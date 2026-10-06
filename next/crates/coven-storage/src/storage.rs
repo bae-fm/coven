@@ -102,6 +102,13 @@ pub enum MemberRemoval {
 pub trait Storage: Send + Sync {
     /// This provider's nonsecret location settings.
     fn config(&self) -> StorageConfig;
+    /// Install replacement OAuth tokens after the owner commits them to key custody.
+    /// S3 and CloudKit refuse OAuth tokens; they use different account credentials.
+    async fn set_oauth_tokens(&self, _tokens: crate::OAuthTokens) -> Result<(), StorageError> {
+        Err(StorageError::InvalidConfiguration(
+            "provider does not use OAuth",
+        ))
+    }
     /// Create a complete encrypted object, refusing an occupied path.
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError>;
     /// Replace a device's posted positions; immutable paths are refused.

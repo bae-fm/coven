@@ -416,3 +416,12 @@ async fn interrupted_part_continues_at_the_confirmed_byte() {
         [7, b'z']
     );
 }
+
+#[tokio::test]
+async fn refreshed_tokens_reach_the_same_adapter() {
+    crate::providers::tests::assert_token_refresh(
+        |url| Arc::new(provider(url)),
+        json!({"files":[]}),
+    )
+    .await;
+}

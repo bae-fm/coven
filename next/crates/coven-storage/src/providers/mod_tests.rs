@@ -88,3 +88,38 @@ pub(crate) fn query(uri: &axum::http::Uri) -> std::collections::BTreeMap<String,
         .into_owned()
         .collect()
 }
+
+pub(crate) async fn assert_token_refresh(
+    make: impl FnOnce(&str) -> Arc<dyn crate::Storage>,
+    reply: serde_json::Value,
+) {
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let received = requests.clone();
+    let server = TestServer::new(Router::new().fallback(move |headers: HeaderMap| {
+        let received = received.clone();
+        let reply = reply.clone();
+        async move {
+            received
+                .lock()
+                .unwrap()
+                .push(headers["authorization"].to_str().unwrap().to_owned());
+            json(reply)
+        }
+    }))
+    .await;
+    let storage = make(&server.url);
+    storage.list(&crate::ObjectPrefix::all()).await.unwrap();
+    storage
+        .set_oauth_tokens(OAuthTokens {
+            access_token: SecretText::new("refreshed".into()),
+            refresh_token: None,
+            expires_at: None,
+        })
+        .await
+        .unwrap();
+    storage.list(&crate::ObjectPrefix::all()).await.unwrap();
+    assert_eq!(
+        *requests.lock().unwrap(),
+        ["Bearer token", "Bearer refreshed"]
+    );
+}

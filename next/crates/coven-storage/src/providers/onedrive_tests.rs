@@ -371,3 +371,12 @@ async fn malformed_missing_ranges_keep_the_response_and_recorded_progress() {
         assert_eq!(upload.confirmed_bytes(), 5);
     }
 }
+
+#[tokio::test]
+async fn refreshed_tokens_reach_the_same_adapter() {
+    crate::providers::tests::assert_token_refresh(
+        |url| Arc::new(provider(url)),
+        json!({"value":[]}),
+    )
+    .await;
+}

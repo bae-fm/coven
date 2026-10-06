@@ -263,3 +263,12 @@ async fn resume_queries_the_stored_offset_after_lost_part_reply() {
         b"z"
     );
 }
+
+#[tokio::test]
+async fn refreshed_tokens_reach_the_same_adapter() {
+    crate::providers::tests::assert_token_refresh(
+        |url| Arc::new(provider(url)),
+        json!({"entries":[],"has_more":false}),
+    )
+    .await;
+}

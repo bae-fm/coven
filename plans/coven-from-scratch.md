@@ -5101,7 +5101,10 @@ impl OAuthClients {
 ```
 
 - Refreshed tokens are committed to key custody before the provider session
-  uses them.
+  uses them. The owner then awaits the storage capability's
+  `set_oauth_tokens(tokens: OAuthTokens) -> Result<(), StorageError>`;
+  the next request on that same adapter uses them. S3 and CloudKit refuse
+  this call with `StorageError::InvalidConfiguration`.
 
 Example, when the app handles the sign-in redirect:
 

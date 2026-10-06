@@ -242,6 +242,10 @@ impl Storage for OneDriveStorage {
     fn config(&self) -> StorageConfig {
         self.config.clone()
     }
+    async fn set_oauth_tokens(&self, tokens: OAuthTokens) -> Result<(), StorageError> {
+        self.session.set_tokens(tokens).await;
+        Ok(())
+    }
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         if bytes.is_empty() {
             self.parents(path).await?;
