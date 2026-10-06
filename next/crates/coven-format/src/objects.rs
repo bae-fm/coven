@@ -90,12 +90,12 @@ impl JoinRequest {
 pub struct Fingerprint {
     /// The rows this fingerprint describes.
     pub audience: Audience,
-    /// The audience key number used to derive the fingerprint key.
-    pub key_number: u64,
+    /// The audience key id used to derive the fingerprint key.
+    pub key: coven_foundation::id_source::KeyId,
     /// The 256-bit fingerprint; this crate neither computes nor authenticates it.
     pub bytes: coven_crypto::Fingerprint,
 }
-wire_struct!(Fingerprint, audience, key_number, bytes);
+wire_struct!(Fingerprint, audience, key, bytes);
 
 /// A device's posted positions and fingerprints, made after uploading its writes (§15).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -128,9 +128,6 @@ impl PostedPositions {
             "fingerprints",
             Rule::Order,
         )?;
-        for f in &self.fingerprints {
-            require(f.key_number > 0, "fingerprint key number", Rule::Required)?;
-        }
         Ok(())
     }
 }

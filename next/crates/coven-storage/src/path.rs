@@ -1,6 +1,6 @@
 use crate::StorageError;
 use coven_crypto::{MemberId, StoredFileName};
-use coven_foundation::id_source::{CircleId, DeviceId, InviteId};
+use coven_foundation::id_source::{CircleId, DeviceId, InviteId, KeyId};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 
@@ -27,12 +27,12 @@ impl ObjectPath {
         Self(format!("positions/{}", device.0))
     }
     /// A sealed store key for a member's lowercase hexadecimal public key (§11).
-    pub fn store_key(number: NonZeroU64, member: &MemberId) -> Self {
-        Self(format!("keys/store/{number}/{member}"))
+    pub fn store_key(key: KeyId, member: &MemberId) -> Self {
+        Self(format!("keys/store/{key}/{member}"))
     }
     /// A sealed circle key for a member (§14.3).
-    pub fn circle_key(circle: CircleId, number: NonZeroU64, member: &MemberId) -> Self {
-        Self(format!("keys/circles/{circle}/{number}/{member}"))
+    pub fn circle_key(circle: CircleId, key: KeyId, member: &MemberId) -> Self {
+        Self(format!("keys/circles/{circle}/{key}/{member}"))
     }
     /// Encrypted file bytes named by the lower-case hexadecimal keyed hash (§16.2).
     pub fn file(name: &StoredFileName) -> Self {
@@ -98,9 +98,11 @@ impl TryFrom<String> for ObjectPath {
                 decimal(device, false) && decimal(n, true)
             }
             ["positions", device] => decimal(device, false),
-            ["keys", "store", n, member] => decimal(n, true) && member.parse::<MemberId>().is_ok(),
-            ["keys", "circles", circle, n, member] => {
-                canonical_uuid(circle) && decimal(n, true) && member.parse::<MemberId>().is_ok()
+            ["keys", "store", key, member] => {
+                canonical_uuid(key) && member.parse::<MemberId>().is_ok()
+            }
+            ["keys", "circles", circle, key, member] => {
+                canonical_uuid(circle) && canonical_uuid(key) && member.parse::<MemberId>().is_ok()
             }
             ["files", name] => hex_name(name).is_ok(),
             ["join-requests", invite] => canonical_uuid(invite),

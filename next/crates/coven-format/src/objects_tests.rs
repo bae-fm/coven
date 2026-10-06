@@ -68,13 +68,13 @@ fn posted_fingerprints_include_store_and_have_unique_ordered_audiences() {
         store_log: EntryPositions(vec![]),
         fingerprints: vec![Fingerprint {
             audience: Audience::Store,
-            key_number: 1,
+            key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([1; 16])),
             bytes: coven_crypto::Fingerprint::from_bytes([0; 32]),
         }],
     };
     posted.fingerprints.push(Fingerprint {
         audience: Audience::Circle(CircleId(Uuid::from_bytes([1; 16]))),
-        key_number: 2,
+        key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([2; 16])),
         bytes: coven_crypto::Fingerprint::from_bytes([1; 32]),
     });
     let object = Object::PostedPositions(posted.clone());

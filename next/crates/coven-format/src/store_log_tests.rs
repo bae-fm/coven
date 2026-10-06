@@ -2,20 +2,64 @@ use super::*;
 use crate::{encode_frame, test_utils, Object};
 
 #[test]
+fn entries_preserve_every_key_id_byte_including_zero() {
+    for key in [
+        KeyId(uuid::Uuid::from_bytes([0; 16])),
+        KeyId(uuid::Uuid::from_bytes(std::array::from_fn(|i| i as u8))),
+    ] {
+        let changes = [
+            StoreChange::CreateStore {
+                store: StoreId(uuid::Uuid::from_u128(1)),
+                name: "S".into(),
+                admin: test_utils::member(),
+                key,
+            },
+            StoreChange::CreateCircle {
+                circle: circle(1),
+                name: "C".into(),
+                creator: test_utils::member().signing,
+                key,
+            },
+            StoreChange::RemoveMember {
+                member: test_utils::member().signing,
+                key,
+                circle_keys: vec![CircleKeyId {
+                    circle: circle(1),
+                    key,
+                }],
+                deleted_circles: vec![],
+            },
+            StoreChange::RemoveCircleMember {
+                circle: circle(1),
+                member: test_utils::member().signing,
+                key,
+            },
+        ];
+        for change in changes {
+            let object = Object::StoreLog(StoreLogEntry {
+                change,
+                ..test_utils::store_log()
+            });
+            assert_eq!(Object::decode(&object.encode().unwrap()).unwrap(), object);
+        }
+    }
+}
+
+#[test]
 fn member_removal_encodes_both_circle_lists_when_empty() {
     let mut entry = test_utils::store_log();
     entry.change = StoreChange::RemoveMember {
         member: test_utils::member().signing,
-        key_number: 2,
+        key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([2; 16])),
         circle_keys: vec![],
         deleted_circles: vec![],
     };
     let object = Object::StoreLog(entry);
     let bytes = object.encode().unwrap();
-    assert_eq!(bytes.len(), 124);
+    assert_eq!(bytes.len(), 132);
     assert_eq!(bytes[75], 2);
-    assert_eq!(&bytes[108..116], &2u64.to_be_bytes());
-    assert_eq!(&bytes[116..], &[0; 8]);
+    assert_eq!(&bytes[108..124], &[2; 16]);
+    assert_eq!(&bytes[124..], &[0; 8]);
     assert_eq!(Object::decode(&bytes).unwrap(), object);
 }
 
@@ -23,17 +67,17 @@ fn circle(number: u128) -> CircleId {
     CircleId(uuid::Uuid::from_u128(number))
 }
 
-fn circle_key(circle_number: u128, key_number: u64) -> CircleKeyNumber {
-    CircleKeyNumber {
+fn circle_key(circle_number: u128, key: u8) -> CircleKeyId {
+    CircleKeyId {
         circle: circle(circle_number),
-        key_number,
+        key: KeyId(uuid::Uuid::from_bytes([key; 16])),
     }
 }
 
 #[test]
 fn member_removal_round_trips_independent_circle_lists() {
     for (circle_keys, deleted_circles) in [
-        (vec![circle_key(1, u64::MAX), circle_key(3, 1)], vec![]),
+        (vec![circle_key(1, u8::MAX), circle_key(3, 1)], vec![]),
         (vec![], vec![circle(2), circle(4)]),
         (
             vec![circle_key(1, 5), circle_key(3, 2)],
@@ -43,7 +87,7 @@ fn member_removal_round_trips_independent_circle_lists() {
         let mut entry = test_utils::member_removal();
         entry.change = StoreChange::RemoveMember {
             member: test_utils::member().signing,
-            key_number: u64::MAX,
+            key: KeyId(uuid::Uuid::from_bytes([u8::MAX; 16])),
             circle_keys,
             deleted_circles,
         };
@@ -53,10 +97,8 @@ fn member_removal_round_trips_independent_circle_lists() {
 }
 
 #[test]
-fn member_removal_rejects_zero_keys_unordered_lists_and_overlap() {
-    for (key_number, circle_keys, deleted_circles, expected) in [
-        (0, vec![], vec![], Rule::Required),
-        (1, vec![circle_key(1, 0)], vec![], Rule::Required),
+fn member_removal_rejects_unordered_lists_and_overlap() {
+    for (key, circle_keys, deleted_circles, expected) in [
         (
             1,
             vec![circle_key(1, 2), circle_key(1, 3)],
@@ -87,7 +129,7 @@ fn member_removal_rejects_zero_keys_unordered_lists_and_overlap() {
         let mut entry = test_utils::member_removal();
         entry.change = StoreChange::RemoveMember {
             member: test_utils::member().signing,
-            key_number,
+            key: KeyId(uuid::Uuid::from_bytes([key; 16])),
             circle_keys,
             deleted_circles,
         };
@@ -131,6 +173,7 @@ fn every_store_log_change_round_trips_with_a_pinned_tag() {
             circle: c,
             name: "C".into(),
             creator: m.clone(),
+            key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([1; 16])),
         },
         StoreChange::RenameCircle {
             circle: c,
@@ -144,7 +187,7 @@ fn every_store_log_change_round_trips_with_a_pinned_tag() {
         StoreChange::RemoveCircleMember {
             circle: c,
             member: m.clone(),
-            key_number: 2,
+            key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([2; 16])),
         },
         StoreChange::RaiseSchema {
             version: 2,
@@ -197,7 +240,7 @@ fn had_read_can_name_earlier_entries_on_the_same_device() {
 }
 
 #[test]
-fn first_entry_versions_and_key_numbers_are_checked() {
+fn first_entry_and_versions_are_checked() {
     let mut entry = test_utils::store_log();
     entry.author = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
         .parse()
@@ -212,12 +255,6 @@ fn first_entry_versions_and_key_numbers_are_checked() {
         StoreChange::RaiseFormat {
             version: 0,
             snapshot: snapshot.clone(),
-        },
-        StoreChange::RemoveMember {
-            member: test_utils::member().signing,
-            key_number: 0,
-            circle_keys: vec![],
-            deleted_circles: vec![],
         },
     ] {
         let mut entry = test_utils::store_log();

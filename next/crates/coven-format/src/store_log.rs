@@ -4,7 +4,7 @@ use crate::error::{require, Error, Rule};
 use crate::value::{name, ordered, positive, EntryId, EntryPositions};
 use crate::wire::{wire_struct, Decoder, Encoder, Wire};
 use coven_crypto::{MemberId, SealingPublicKey};
-use coven_foundation::id_source::{CircleId, DeviceId, StoreId};
+use coven_foundation::id_source::{CircleId, DeviceId, KeyId, StoreId};
 use coven_merge::{Audience, Timestamp};
 
 /// The signing and sealed-box public keys of a member (§11.1).
@@ -56,13 +56,13 @@ wire_struct!(SnapshotId, device, number, audience);
 
 /// A circle and the replacement key made for it by a member removal (§13).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CircleKeyNumber {
+pub struct CircleKeyId {
     /// The circle whose key was replaced.
     pub circle: CircleId,
-    /// The replacement circle key's positive number.
-    pub key_number: u64,
+    /// The replacement circle key's random id.
+    pub key: KeyId,
 }
-wire_struct!(CircleKeyNumber, circle, key_number);
+wire_struct!(CircleKeyId, circle, key);
 
 /// Every kind of store-log change listed in §9, including the first entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,6 +75,8 @@ pub enum StoreChange {
         name: String,
         /// The first admin's public keys.
         admin: MemberPublicKeys,
+        /// The first store key, introduced by this entry.
+        key: KeyId,
     },
     /// Add a member with both public keys and their initial role.
     AddMember {
@@ -87,11 +89,11 @@ pub enum StoreChange {
     RemoveMember {
         /// The removed member.
         member: MemberId,
-        /// The replacement store key's positive number (§13).
-        key_number: u64,
+        /// The replacement store key's random id (§13).
+        key: KeyId,
         /// Each remaining circle the member was in and its replacement key,
         /// strictly increasing by circle.
-        circle_keys: Vec<CircleKeyNumber>,
+        circle_keys: Vec<CircleKeyId>,
         /// Circles the member was alone in, deleted by this entry, strictly increasing.
         deleted_circles: Vec<CircleId>,
     },
@@ -124,6 +126,8 @@ pub enum StoreChange {
         name: String,
         /// Its first member.
         creator: MemberId,
+        /// The first circle key, introduced by this entry.
+        key: KeyId,
     },
     /// Rename a circle without changing its members, keys or rows.
     RenameCircle {
@@ -150,8 +154,8 @@ pub enum StoreChange {
         circle: CircleId,
         /// The removed member.
         member: MemberId,
-        /// The replacement circle key's positive number.
-        key_number: u64,
+        /// The replacement circle key's random id.
+        key: KeyId,
     },
     /// Raise the store's app schema version with its replacement snapshot (§17.1).
     RaiseSchema {
@@ -182,20 +186,13 @@ impl StoreChange {
             | Self::CreateCircle { name: n, .. }
             | Self::RenameCircle { name: n, .. } => name(n),
             Self::RemoveMember {
-                key_number,
                 circle_keys,
                 deleted_circles,
                 ..
             } => {
-                require(*key_number > 0, "replacement key number", Rule::Required)?;
                 ordered(circle_keys, |key| key.circle, "replacement circle keys")?;
                 ordered(deleted_circles, |circle| *circle, "deleted circles")?;
                 for key in circle_keys {
-                    require(
-                        key.key_number > 0,
-                        "replacement circle key number",
-                        Rule::Required,
-                    )?;
                     require(
                         deleted_circles.binary_search(&key.circle).is_err(),
                         "removed member circles",
@@ -203,9 +200,6 @@ impl StoreChange {
                     )?;
                 }
                 Ok(())
-            }
-            Self::RemoveCircleMember { key_number, .. } => {
-                require(*key_number > 0, "replacement key number", Rule::Required)
             }
             Self::RaiseSchema { version, snapshot } => {
                 require(*version > 0, "schema version", Rule::Required)?;
@@ -230,7 +224,8 @@ impl StoreChange {
             | Self::ChangeRole { .. }
             | Self::RemoveDevice { .. }
             | Self::DeleteCircle { .. }
-            | Self::AddCircleMember { .. } => Ok(()),
+            | Self::AddCircleMember { .. }
+            | Self::RemoveCircleMember { .. } => Ok(()),
         }
     }
 }
@@ -254,17 +249,17 @@ macro_rules! store_changes {
     };
 }
 store_changes!(
-    0 => CreateStore { store, name, admin },
+    0 => CreateStore { store, name, admin, key },
     1 => AddMember { keys, role },
-    2 => RemoveMember { member, key_number, circle_keys, deleted_circles },
+    2 => RemoveMember { member, key, circle_keys, deleted_circles },
     3 => ChangeRole { member, role },
     4 => AddDevice { member, device, name },
     5 => RemoveDevice { device },
-    6 => CreateCircle { circle, name, creator },
+    6 => CreateCircle { circle, name, creator, key },
     7 => RenameCircle { circle, name },
     8 => DeleteCircle { circle },
     9 => AddCircleMember { circle, member },
-    10 => RemoveCircleMember { circle, member, key_number },
+    10 => RemoveCircleMember { circle, member, key },
     11 => RaiseSchema { version, snapshot },
     12 => RaiseFormat { version, snapshot },
     13 => Reset { snapshot },

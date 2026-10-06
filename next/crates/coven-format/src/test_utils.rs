@@ -112,6 +112,7 @@ pub fn store_log() -> StoreLogEntry {
             store: StoreId(Uuid::from_bytes([0x10; 16])),
             name: "S".into(),
             admin: member(),
+            key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([1; 16])),
         },
     }
 }
@@ -132,15 +133,15 @@ pub fn member_removal() -> StoreLogEntry {
             member: "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
                 .parse()
                 .unwrap(),
-            key_number: 2,
+            key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([2; 16])),
             circle_keys: vec![
-                CircleKeyNumber {
+                CircleKeyId {
                     circle: CircleId(Uuid::from_u128(1)),
-                    key_number: 5,
+                    key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([5; 16])),
                 },
-                CircleKeyNumber {
+                CircleKeyId {
                     circle: CircleId(Uuid::from_u128(3)),
-                    key_number: 2,
+                    key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([2; 16])),
                 },
             ],
             deleted_circles: vec![CircleId(Uuid::from_u128(2)), CircleId(Uuid::from_u128(4))],
@@ -349,7 +350,7 @@ pub fn objects() -> Vec<Object> {
             store_log: EntryPositions(vec![]),
             fingerprints: vec![Fingerprint {
                 audience: Audience::Store,
-                key_number: 1,
+                key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([1; 16])),
                 bytes: coven_crypto::Fingerprint::from_bytes([0x88; 32]),
             }],
         }),

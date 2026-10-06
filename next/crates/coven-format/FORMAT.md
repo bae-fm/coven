@@ -2,8 +2,8 @@
 
 This crate encodes the storage objects of `plans/coven-from-scratch.md`, §5,
 §7–§9, §11–§12, §14–§17 and §19. It depends on foundation, crypto and merge.
-Foundation owns store, device, circle and invite identities; crypto owns member
-identities, public keys, fingerprints and secrets; merge owns timestamps,
+Foundation owns store, device, circle, invite and key identities; crypto owns
+member identities, public keys, fingerprints and secrets; merge owns timestamps,
 audiences, write identities, row identities, changes, row state and removal rules.
 Format performs no I/O, clock reads, randomness, signing or sealing.
 
@@ -26,10 +26,13 @@ Notation:
   count followed by members. Keys/members must be strictly increasing in their
   type's order, including on decode; duplicates never silently overwrite.
 - Fixed byte arrays have no prefix. UUIDs are 16 bytes in UUID byte order.
-  Store, circle and invite ids wrap foundation's UUID types. Device ids are u64.
+  Store, circle, invite and key ids wrap foundation's UUID types. Device ids are u64.
   Member ids are 32 Ed25519 bytes from crypto's `MemberId::to_bytes`; decoding calls
   `MemberId::from_bytes`, which rejects invalid and weak points. A sealing public
   key is crypto's `SealingPublicKey`, encoded as its 32 public bytes.
+- `KeyId`: foundation's UUID wrapper, supplied by its id source and encoded as
+  16 UUID bytes. Storage paths use canonical lowercase hyphenated UUID text,
+  exactly as circle ids do. Every byte value, including zero, is representable.
 - `Timestamp`: `milliseconds:u48 | counter:u16 | device:u64`, exactly 16 bytes.
   Byte order is timestamp order. Decode calls merge's `Timestamp::new`.
 - `WriteId` and `EntryId` both encode `device:u64 | number:u64`, with positive
@@ -144,9 +147,9 @@ Total size may be zero, meaning no chunks. Chunk data is nonempty.
 `FileHeader::validate_chunk` checks index, overflow and exact length, including
 the final partial chunk. It does not authenticate.
 
-A fingerprint is `audience:Audience | key_number:u64 | fingerprint:32`.
+A fingerprint is `audience:Audience | key:KeyId | fingerprint:32`.
 Fingerprints are strictly ordered by audience and include the store first.
-Key numbers are positive. The fingerprint value is crypto's `Fingerprint`,
+The fingerprint value is crypto's `Fingerprint`,
 encoded through its `as_bytes` and decoded through `from_bytes`.
 
 ### Write records
@@ -190,31 +193,37 @@ entries, and is authored by the first admin. `MemberRole` is admin 0 or member 1
 
 | Tag | Change | Fields after tag |
 | --- | --- | --- |
-| 0 | Create store | `store_uuid:16, name:text, admin:MemberPublicKeys` |
+| 0 | Create store | `store_uuid:16, name:text, admin:MemberPublicKeys, key:KeyId` |
 | 1 | Add member | `keys:MemberPublicKeys, role:u8` |
-| 2 | Remove member | `member:32, replacement_key_number:u64, circle_keys:[CircleKeyNumber], deleted_circles:[CircleId]` |
+| 2 | Remove member | `member:32, key:KeyId, circle_keys:[CircleKeyId], deleted_circles:[CircleId]` |
 | 3 | Change role | `member:32, role:u8` |
 | 4 | Add device | `member:32, device:u64, name:text` |
 | 5 | Remove device | `device:u64` |
-| 6 | Create circle | `circle:16, name:text, creator:32` |
+| 6 | Create circle | `circle:16, name:text, creator:32, key:KeyId` |
 | 7 | Rename circle | `circle:16, name:text` |
 | 8 | Delete circle | `circle:16` |
 | 9 | Add circle member | `circle:16, member:32` |
-| 10 | Remove circle member | `circle:16, member:32, replacement_key_number:u64` |
+| 10 | Remove circle member | `circle:16, member:32, key:KeyId` |
 | 11 | Raise schema | `version:u32, snapshot:SnapshotId` |
 | 12 | Raise format | `version:u16, snapshot:SnapshotId` |
 | 13 | Reset | `snapshot:SnapshotId` |
 
-`CircleKeyNumber` is `circle:16 | key_number:u64`. A member removal records the
+`CircleKeyId` is `circle:16 | key:KeyId`. A member removal records the
 replacement store key, the replacement keys of circles the member shared with
 others, and circles deleted because the member was alone in them (§13).
 Both circle lists are strictly increasing by circle UUID, and no circle occurs
 in both. Either list may be empty; both count fields are always encoded.
 
-All replacement key numbers and raised versions are positive. Schema/format
-snapshots name the store audience; reset snapshots name the affected audience.
-Authority, conflicts, causal closure and monotonic version/key changes require
-other entries and are checked by their owners.
+Each create-store or create-circle entry names its first key; removals name
+the replacement keys. Key ids carry no numerical order. Raised versions are
+positive. Schema/format snapshots name the store audience; reset snapshots name
+the affected audience. Authority, conflicts, causal closure, monotonic version
+changes and the current key require other entries and are checked by their owners.
+
+Sealed-key paths are `keys/store/<key UUID>/<member>` and
+`keys/circles/<circle>/<key UUID>/<member>`. Storage accepts exactly the
+canonical lowercase hyphenated UUID text, without compact, uppercase, braced
+or URN aliases.
 
 ### Snapshot streams
 
