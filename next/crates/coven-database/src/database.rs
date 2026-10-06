@@ -9,7 +9,7 @@ mod file_staging;
 
 use coven_foundation::clock::{ClockRef, SystemClock};
 use coven_foundation::files::{StoreDir, StoreLock};
-use coven_foundation::id_source::{CircleId, DeviceId, IdSourceRef, UuidIds};
+use coven_foundation::id_source::{DeviceId, IdSourceRef, UuidIds};
 
 use crate::authorization::SqlAuthorization;
 use crate::observation::{CommitObserver, CommitSubscription, ReadSet};
@@ -454,8 +454,15 @@ impl Database {
         )
     }
 
-    /// Apply a store-log circle deletion atomically. Returns false on repetition.
-    pub async fn delete_circle(&self, circle: CircleId) -> Result<bool, DbError> {
+    /// Commit one checked entry and sync's complete replay result atomically (§9).
+    /// The database stores this result without replaying. Circle deletions and
+    /// reversals recompute row visibility in the same transaction.
+    /// A result for a stale or different applied-entry set is refused.
+    pub async fn apply_store_log(
+        &self,
+        entry: coven_format::store_log::StoreLogEntry,
+        replay: crate::StoreLogReplay,
+    ) -> Result<(), DbError> {
         let database = self.clone();
         finish_blocking(
             tokio::task::spawn_blocking(move || {
@@ -473,15 +480,21 @@ impl Database {
                     &inner.staging,
                     Vec::new(),
                 );
-                files.finish(crate::download::delete_circle(
+                files.finish(crate::store_log::apply(
                     &writer,
                     &inner.write_schema,
-                    circle,
+                    entry,
+                    replay,
                     &files,
                 ))
             })
             .await,
         )
+    }
+
+    /// Applied entries and their complete replay result from one committed snapshot.
+    pub async fn store_log(&self) -> CovenResult<crate::StoreLog> {
+        self.read(|sql| sql.store_log()).await
     }
 
     /// Read the schema version, positions and fingerprints from one committed state.

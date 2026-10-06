@@ -387,6 +387,21 @@ pub enum DbError {
         /// Each failed byte removal or pending-record update.
         failures: Vec<DbError>,
     },
+    /// The supplied checked entry does not have a valid format encoding.
+    #[error("invalid store-log entry {entry:?}: {error}")]
+    InvalidStoreLogEntry {
+        /// The refused entry's position.
+        entry: crate::EntryId,
+        /// The format check that failed.
+        #[source]
+        error: coven_format::Error,
+    },
+    /// Replaying a stale or different set cannot replace the committed result.
+    #[error("store-log replay must cover exactly the applied entries and the incoming entry")]
+    StoreLogEntriesChanged,
+    /// An applied entry's immutable bytes differ from those supplied again.
+    #[error("store-log entry {0:?} has different bytes")]
+    StoreLogEntryChanged(crate::EntryId),
     /// Closing failed for these connections, after every one was tried (§20.1).
     #[error("closing database connections failed: {failures:?}")]
     Closing {

@@ -2858,6 +2858,12 @@ pub enum DbError {
     MigrationWriteVersion { write: coven_merge::WriteId, schema_version: u32, migration_version: u32 },
     /// A waiting upload disappeared while its conversion was being recorded.
     MigrationUploadMissing { write: coven_merge::WriteId },
+    /// A supplied store-log entry cannot be encoded as a checked entry (§9).
+    InvalidStoreLogEntry { entry: EntryId, error: coven_format::Error },
+    /// A replay result does not cover exactly the stored entries and the incoming entry.
+    StoreLogEntriesChanged,
+    /// An already applied entry was supplied again with different bytes.
+    StoreLogEntryChanged(EntryId),
     /// A write changes a file declared write-once (§20.2).
     FileWriteOnce { table: String, key: RowKey },
     /// A file reference no longer names the row's file (§16.3).
@@ -4776,6 +4782,88 @@ pub enum ProviderSignOut {
     RemoveFromAppleAccount,
     /// Enter a new S3 key, update retained devices and the written restore code, then delete the old key.
     ReplaceAccessKey,
+}
+```
+
+The database boundary used by sync commits a checked entry and the supplied
+replay together (§9). These result types belong to `coven-database`; the
+database does not compute the replay. Versions are absent until a kept raise
+selects one, as in Appendix C; they are not the local app's migration version.
+
+```rust
+use std::collections::{BTreeMap, BTreeSet};
+use coven_crypto::SealingPublicKey;
+use coven_format::store_log::{SnapshotId, StoreLogEntry};
+
+impl Database {
+    /// Commit the entry, every kept/dropped mark, and the whole replay result.
+    /// Circle deletions and reversals recompute rows in this transaction too.
+    /// Refuses a result for a stale or different applied-entry set.
+    pub async fn apply_store_log(
+        &self, entry: StoreLogEntry, replay: StoreLogReplay,
+    ) -> Result<(), DbError>;
+
+    /// Applied entries and their result from one committed snapshot.
+    pub async fn store_log(&self) -> CovenResult<StoreLog>;
+}
+
+pub struct StoreLog {
+    /// All applied entries, including dropped entries, in timestamp order.
+    pub entries: Vec<StoreLogEntry>,
+    pub replay: StoreLogReplay,
+}
+
+pub struct StoreLogReplay {
+    pub state: StoreLogState,
+    /// Exactly one mark per applied entry; DropReason is declared in §20.5.
+    pub entries: BTreeMap<EntryId, EntryOutcome>,
+}
+
+pub enum EntryOutcome { Kept, Dropped(DropReason) }
+
+pub struct StoreLogState {
+    /// Absent until creation.
+    pub store: Option<StoreIdentity>,
+    pub members: BTreeMap<MemberId, StoreMember>,
+    pub devices: BTreeMap<DeviceId, StoreDevice>,
+    pub circles: BTreeMap<CircleId, StoreCircle>,
+    pub schema: Option<StoreVersion<u32>>,
+    pub format: Option<StoreVersion<u16>>,
+    pub resets: BTreeMap<Audience, SnapshotId>,
+}
+
+pub struct StoreIdentity {
+    pub id: StoreId,
+    pub name: String,
+    /// Current store key (§11).
+    pub key: KeyId,
+}
+
+pub struct StoreMember {
+    /// The map key is this member's signing public key.
+    pub sealing: SealingPublicKey,
+    pub role: MemberRole,
+    pub removed: bool,
+}
+
+pub struct StoreDevice {
+    pub member: MemberId,
+    pub name: String,
+    pub removed: bool,
+}
+
+pub struct StoreCircle {
+    pub name: String,
+    pub key: KeyId,
+    pub deleted: bool,
+    /// Current members, empty after deletion.
+    pub members: BTreeSet<MemberId>,
+}
+
+pub struct StoreVersion<N> {
+    pub number: N,
+    pub snapshot: SnapshotId,
+    pub entry: EntryId,
 }
 ```
 

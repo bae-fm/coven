@@ -61,6 +61,10 @@ impl<'connection> SqlReadContext<'connection> {
     pub(crate) fn lost_values(&self) -> CovenResult<Vec<LostValue>> {
         self.database.lost_values()
     }
+
+    pub(crate) fn store_log(&self) -> CovenResult<crate::StoreLog> {
+        Ok(crate::store_log_tables::read(self.database)?)
+    }
 }
 
 /// A read that starts when polled and retains its store borrow until it ends.

@@ -16,6 +16,73 @@ pub(crate) const VERSION: u32 = 1;
 // This is also the ownership checker's source of reserved table names.
 macro_rules! coven_tables {
     ($visit:ident) => {
+        $visit!(coven_store_log, "
+            CREATE TABLE coven_store_log (
+                device BLOB NOT NULL CHECK(length(device)=8),
+                number BLOB NOT NULL CHECK(length(number)=8 AND number>x'0000000000000000'),
+                record BLOB NOT NULL,
+                outcome TEXT NOT NULL CHECK(outcome IN ('kept','beaten','target','admin','authority','keys')),
+                beaten_device BLOB CHECK(length(beaten_device)=8),
+                beaten_number BLOB CHECK(length(beaten_number)=8),
+                PRIMARY KEY(device,number),
+                FOREIGN KEY(beaten_device,beaten_number) REFERENCES coven_store_log(device,number),
+                CHECK((outcome='beaten' AND beaten_device IS NOT NULL AND beaten_number IS NOT NULL)
+                   OR (outcome!='beaten' AND beaten_device IS NULL AND beaten_number IS NULL))
+            ) STRICT, WITHOUT ROWID;
+        ");
+        $visit!(coven_members, "
+            CREATE TABLE coven_members (
+                member BLOB PRIMARY KEY NOT NULL CHECK(length(member)=32),
+                sealing BLOB NOT NULL CHECK(length(sealing)=32),
+                role TEXT NOT NULL CHECK(role IN ('admin','member')),
+                removed INTEGER NOT NULL CHECK(removed IN (0,1))
+            ) STRICT, WITHOUT ROWID;
+        ");
+        $visit!(coven_devices, "
+            CREATE TABLE coven_devices (
+                device BLOB PRIMARY KEY NOT NULL CHECK(length(device)=8),
+                member BLOB NOT NULL REFERENCES coven_members(member),
+                name TEXT NOT NULL,
+                removed INTEGER NOT NULL CHECK(removed IN (0,1))
+            ) STRICT, WITHOUT ROWID;
+        ");
+        $visit!(coven_circles, "
+            CREATE TABLE coven_circles (
+                circle TEXT PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL,
+                key BLOB NOT NULL CHECK(length(key)=16),
+                deleted INTEGER NOT NULL CHECK(deleted IN (0,1))
+            ) STRICT, WITHOUT ROWID;
+        ");
+        $visit!(coven_circle_members, "
+            CREATE TABLE coven_circle_members (
+                circle TEXT NOT NULL REFERENCES coven_circles(circle),
+                member BLOB NOT NULL REFERENCES coven_members(member),
+                PRIMARY KEY(circle,member)
+            ) STRICT, WITHOUT ROWID;
+        ");
+        $visit!(coven_store_state, "
+            CREATE TABLE coven_store_state (
+                kind TEXT NOT NULL CHECK(kind IN ('store','schema','format','reset')),
+                audience TEXT NOT NULL,
+                store TEXT,
+                name TEXT,
+                key BLOB CHECK(length(key)=16),
+                version INTEGER CHECK(version>0),
+                snapshot_device BLOB CHECK(length(snapshot_device)=8),
+                snapshot_number BLOB CHECK(length(snapshot_number)=8 AND snapshot_number>x'0000000000000000'),
+                entry_device BLOB CHECK(length(entry_device)=8),
+                entry_number BLOB CHECK(length(entry_number)=8),
+                PRIMARY KEY(kind,audience),
+                FOREIGN KEY(entry_device,entry_number) REFERENCES coven_store_log(device,number),
+                CHECK((kind='store' AND audience='store' AND store IS NOT NULL AND name IS NOT NULL AND key IS NOT NULL
+                        AND version IS NULL AND snapshot_device IS NULL AND snapshot_number IS NULL AND entry_device IS NULL AND entry_number IS NULL)
+                   OR (kind IN ('schema','format') AND audience='store' AND store IS NULL AND name IS NULL AND key IS NULL
+                        AND version IS NOT NULL AND snapshot_device IS NOT NULL AND snapshot_number IS NOT NULL AND entry_device IS NOT NULL AND entry_number IS NOT NULL)
+                   OR (kind='reset' AND store IS NULL AND name IS NULL AND key IS NULL AND version IS NULL
+                        AND snapshot_device IS NOT NULL AND snapshot_number IS NOT NULL AND entry_device IS NULL AND entry_number IS NULL))
+            ) STRICT, WITHOUT ROWID;
+        ");
         $visit!(coven_applied_boundaries, "
             CREATE TABLE coven_applied_boundaries (
                 id INTEGER PRIMARY KEY,

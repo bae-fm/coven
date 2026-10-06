@@ -691,7 +691,9 @@ async fn observation_and_local_write_sessions_cover_app_and_materialized_changes
     .await
     .unwrap();
     assert_eq!(next(&mut notes).await, ["title"]);
-    db.delete_circle(circle).await.unwrap();
+    crate::store_log::tests::delete_circle(&db, circle)
+        .await
+        .unwrap();
     assert!(next(&mut notes).await.is_empty());
     assert_eq!(next(&mut audit).await, ["title"]);
     let losses = next(&mut lost).await;

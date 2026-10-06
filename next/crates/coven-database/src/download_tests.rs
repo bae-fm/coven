@@ -524,7 +524,9 @@ async fn fingerprints_ignore_other_audience_removal_and_its_descendants() {
         }
     }
     let b_before = fingerprint(&both, Audience::Circle(cb)).await;
-    both.delete_circle(ca).await.unwrap();
+    crate::store_log::tests::delete_circle(&both, ca)
+        .await
+        .unwrap();
     assert_eq!(fingerprint(&both, Audience::Circle(cb)).await, b_before);
     let visible: String = both
         .read(|sql| Ok(sql.query_row("SELECT audience FROM notes", [], |r| r.get(0))?))
@@ -553,7 +555,9 @@ async fn deleted_circle_takes_out_late_downloads_and_deletion_rolls_back_on_trig
     let source = circle_db(&source_store).await;
     let receiver = circle_db(&receiver_store).await;
     let circle = CircleId(uuid::Uuid::from_u128(10));
-    receiver.delete_circle(circle).await.unwrap();
+    crate::store_log::tests::delete_circle(&receiver, circle)
+        .await
+        .unwrap();
     circle_note(&source, circle, "00000000-0000-4000-8000-000000000002").await;
     assert_eq!(
         receiver
@@ -567,14 +571,16 @@ async fn deleted_circle_takes_out_late_downloads_and_deletion_rolls_back_on_trig
     assert_eq!(count(&receiver, "coven_lost"), 2);
     source.inspect_writer(|sql| sql.batch("CREATE TRIGGER refuse BEFORE DELETE ON notes BEGIN SELECT RAISE(ABORT,'keep circle'); END").unwrap());
     assert!(
-        matches!(source.delete_circle(circle).await,Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(_,Some(message)))) if message=="keep circle")
+        matches!(crate::store_log::tests::delete_circle(&source, circle).await,Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(_,Some(message)))) if message=="keep circle")
     );
     assert_eq!(count(&source, "notes"), 1);
     assert_eq!(count(&source, "children"), 1);
     assert_eq!(count(&source, "coven_deleted_circles"), 0);
     assert_eq!(count(&source, "coven_lost"), 0);
     source.inspect_writer(|sql| sql.batch("DROP TRIGGER refuse").unwrap());
-    source.delete_circle(circle).await.unwrap();
+    crate::store_log::tests::delete_circle(&source, circle)
+        .await
+        .unwrap();
     assert_eq!(
         fingerprint(&source, Audience::Circle(circle)).await,
         fingerprint(&receiver, Audience::Circle(circle)).await

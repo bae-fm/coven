@@ -239,41 +239,6 @@ fn exclude(
     Ok(())
 }
 
-pub(crate) fn delete_circle(
-    database: &DatabaseConnection,
-    schema: &WriteSchema,
-    circle: CircleId,
-    files: &crate::file_write::FileWrite<'_>,
-) -> Result<bool, DbError> {
-    database.transaction(|database| {
-        let mut deleted = deleted_circles(database)?;
-        if !deleted.insert(circle) {
-            return Ok(false);
-        }
-        database.internal_execute(
-            "INSERT INTO coven_deleted_circles(circle) VALUES(?1)",
-            [circle.to_string()],
-        )?;
-        let touched = database
-            .query(
-                "SELECT DISTINCT table_name,key,audience FROM coven_rows WHERE audience=?1",
-                [circle.to_string()],
-                crate::row_queries::read_identity,
-            )?
-            .into_iter()
-            .collect();
-        let visible = AppView::after(database, schema);
-        let store = MergeStore::new(database, &visible);
-        let affected = crate::write_apply::WriteApply::new(
-            database, schema, &store, &visible, &visible, &deleted,
-        )
-        .apply(None, touched)?;
-        files.retain_rows(affected, &deleted)?;
-        files.before_commit()?;
-        Ok(true)
-    })
-}
-
 /// Agreement state read atomically for sync to post.
 pub struct SyncState {
     /// Fingerprints may be compared only at the same app schema version.

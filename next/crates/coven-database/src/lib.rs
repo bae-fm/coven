@@ -45,6 +45,8 @@ mod schema_source;
 mod sql;
 mod sql_value;
 mod sqlite;
+mod store_log;
+mod store_log_tables;
 mod user_file;
 mod write;
 mod write_apply;
@@ -78,6 +80,10 @@ pub use migration::{
 pub use migration_change::{ChangeOp, ColumnChange, RowChange};
 pub use read::{Read, SqlReadContext};
 pub use row_key::RowKey;
+pub use store_log::{
+    DropReason, EntryOutcome, StoreCircle, StoreDevice, StoreIdentity, StoreLog, StoreLogReplay,
+    StoreLogState, StoreMember, StoreVersion,
+};
 pub use user_file::{prepare_user_file, PreparedUserFile, UserFile};
 pub use write::SqlContext;
 pub use write_batch::{FileSource, WriteBatch};
