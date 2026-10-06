@@ -104,7 +104,6 @@
     had read: ben-phone 8, carol-tablet 1
     notes  row 42  update  title: "Grocry list" → "Grocery list"
     tags   "errands"  delete
-  signed with Ana's key
   ```
 
 - Reads run on several read-only connections at once.
