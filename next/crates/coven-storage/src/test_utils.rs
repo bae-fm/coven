@@ -615,6 +615,50 @@ impl Conformance {
             return Err(StorageError::Protocol("posted positions replacement"));
         }
         self.storage.delete(&positions).await?;
+        self.storage.create(&path, &[]).await?;
+        self.storage.create_once(&path, &[]).await?;
+        if !self.storage.read(&path).await?.is_empty() {
+            return Err(StorageError::Protocol("empty object changed"));
+        }
+        if self
+            .storage
+            .create_once(&path, b"different")
+            .await
+            .err()
+            .map(|error| error.failure())
+            != Some(StorageFailure::AlreadyExists)
+        {
+            return Err(StorageError::Protocol("empty immutable object replaced"));
+        }
+        self.storage.delete(&path).await?;
+        let bytes: Vec<_> = (0..1024 * 1024 + 10)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        self.storage.create(&path, &bytes).await?;
+        if self
+            .storage
+            .read_range(&path, ByteRange::new(5, 1024 * 1024 + 5)?)
+            .await?
+            != bytes[5..1024 * 1024 + 5]
+        {
+            return Err(StorageError::Protocol("one MiB range changed"));
+        }
+        if self
+            .storage
+            .read_range(
+                &path,
+                ByteRange::new(bytes.len() as u64 - 1, bytes.len() as u64 + 1)?,
+            )
+            .await
+            .err()
+            .map(|error| error.failure())
+            != Some(StorageFailure::InvalidConfiguration)
+        {
+            return Err(StorageError::Protocol(
+                "clipped past-end range misclassified",
+            ));
+        }
+        self.storage.delete(&path).await?;
         self.storage.probe(&path, data).await?;
         let first = ObjectPath::store_log(DeviceId(31), std::num::NonZeroU64::MIN);
         self.storage

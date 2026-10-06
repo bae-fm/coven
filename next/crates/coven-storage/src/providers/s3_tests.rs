@@ -576,3 +576,29 @@ async fn resumed_multipart_parts_follow_every_page_before_advancing() {
     assert_eq!(recorded.confirmed_bytes(), recorded.total_bytes());
     storage.finish_upload(&mut recorded).await.unwrap();
 }
+
+#[tokio::test]
+async fn interrupted_ranged_body_retains_the_sdk_cause() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0; 4096];
+        assert!(socket.read(&mut request).await.unwrap() > 0);
+        socket.write_all(b"HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nContent-Range: bytes 3-6/8\r\nConnection: close\r\n\r\nx").await.unwrap();
+        socket.shutdown().await.unwrap();
+    });
+    let storage = provider(&format!("http://{address}"));
+    let path = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    let error = storage
+        .read_range(&path, ByteRange::new(3, 7).unwrap())
+        .await
+        .unwrap_err();
+    assert_eq!(error.failure(), StorageFailure::Network);
+    assert!(matches!(error, StorageError::Provider { .. }));
+    server.await.unwrap();
+}

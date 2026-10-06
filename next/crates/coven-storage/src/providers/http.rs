@@ -405,6 +405,12 @@ pub(crate) fn validate_content_range(header: &str, range: ByteRange) -> Result<(
     let total: u64 = total
         .parse()
         .map_err(|_| StorageError::Protocol("invalid Content-Range total"))?;
+    if range.start() < total
+        && range.end() > total
+        && bounds == format!("{}-{}", range.start(), total - 1)
+    {
+        return Err(StorageError::InvalidRange);
+    }
     if bounds != format!("{}-{}", range.start(), range.end() - 1) || range.end() > total {
         return Err(StorageError::Protocol(
             "Content-Range disagrees with request",

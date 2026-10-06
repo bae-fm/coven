@@ -262,3 +262,25 @@ async fn ranged_body_must_match_the_entire_requested_interval() {
         );
     }
 }
+
+#[test]
+fn a_valid_provider_clamp_identifies_a_range_past_eof() {
+    assert!(matches!(
+        validate_content_range("bytes 3-5/6", ByteRange::new(3, 7).unwrap()),
+        Err(StorageError::InvalidRange)
+    ));
+    for header in [
+        "bytes 3-4/6",
+        "bytes 2-5/6",
+        "bytes 3-6/6",
+        "bytes 5-3/6",
+        "bytes 3-x/6",
+    ] {
+        assert_eq!(
+            validate_content_range(header, ByteRange::new(3, 7).unwrap())
+                .unwrap_err()
+                .failure(),
+            StorageFailure::Protocol
+        );
+    }
+}
