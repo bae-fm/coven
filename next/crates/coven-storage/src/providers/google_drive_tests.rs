@@ -18,20 +18,13 @@ struct Remote {
     fail_reply: bool,
     partial: Option<usize>,
     permissions: BTreeMap<String, String>,
-    race: Option<CreateRace>,
-}
-struct CreateRace {
-    empty: Arc<tokio::sync::Barrier>,
-    published: Arc<tokio::sync::Barrier>,
-    listed: Arc<tokio::sync::Barrier>,
-    empty_replies: usize,
-    published_replies: usize,
-    listed_replies: usize,
+    lose_delete_reply: bool,
 }
 fn metadata(mut value: Value, size: usize) -> Value {
     value["size"] = json!(size.to_string());
     value["capabilities"] = json!({"canDelete":true,"canRemoveMyDriveParent":true});
     value["ownedByMe"] = json!(true);
+    value["createdTime"] = json!("2026-10-06T00:00:00Z");
     value
 }
 async fn endpoint(
@@ -41,42 +34,9 @@ async fn endpoint(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
-    let response = respond(&state, &method, &uri, &headers, &body);
-    let barrier = {
-        let mut state = state.lock().unwrap();
-        let files = state.files.len();
-        state.race.as_mut().and_then(|race| {
-            let q = query(&uri);
-            if uri.path() == "/drive/files"
-                && method == Method::GET
-                && files == 0
-                && race.empty_replies < 2
-            {
-                race.empty_replies += 1;
-                Some(race.empty.clone())
-            } else if uri.path().starts_with("/session/")
-                && method == Method::PUT
-                && response.status().is_success()
-                && race.published_replies < 2
-            {
-                race.published_replies += 1;
-                Some(race.published.clone())
-            } else if uri.path() == "/drive/files"
-                && q.contains_key("pageToken")
-                && race.listed_replies < 2
-            {
-                race.listed_replies += 1;
-                Some(race.listed.clone())
-            } else {
-                None
-            }
-        })
-    };
-    if let Some(barrier) = barrier {
-        barrier.wait().await;
-    }
-    response
+    respond(&state, &method, &uri, &headers, &body)
 }
+
 fn respond(
     state: &Mutex<Remote>,
     method: &Method,
@@ -202,7 +162,7 @@ fn respond(
             .split("name = '")
             .nth(1)
             .map(|s| s.split('\'').next().unwrap());
-        let mut files: Vec<_> = state
+        let files: Vec<_> = state
             .files
             .values()
             .filter(|(v, _)| {
@@ -211,9 +171,6 @@ fn respond(
             })
             .map(|(v, _)| v.clone())
             .collect();
-        if state.race.is_some() {
-            files.reverse();
-        }
         let start = q
             .get("pageToken")
             .map(|s| s.parse::<usize>().unwrap())
@@ -228,6 +185,9 @@ fn respond(
         let id = parts[2];
         if method == Method::DELETE {
             state.files.remove(id);
+            if std::mem::replace(&mut state.lose_delete_reply, false) {
+                return response(503, "{}");
+            }
             return response(204, Vec::new());
         }
         let Some((value, bytes)) = state.files.get_mut(id) else {
@@ -248,42 +208,6 @@ fn respond(
         return reply(value.clone());
     }
     panic!("unexpected Drive request {method} {uri}")
-}
-
-#[tokio::test]
-async fn concurrent_create_once_keeps_the_same_file_on_both_devices() {
-    let state = Arc::new(Mutex::new(Remote {
-        race: Some(CreateRace {
-            empty: Arc::new(tokio::sync::Barrier::new(2)),
-            published: Arc::new(tokio::sync::Barrier::new(2)),
-            listed: Arc::new(tokio::sync::Barrier::new(2)),
-            empty_replies: 0,
-            published_replies: 0,
-            listed_replies: 0,
-        }),
-        ..Remote::default()
-    }));
-    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-    let first = provider(&server.url);
-    let mut second = provider(&server.url);
-    second.device = DeviceId(32);
-    let path = ObjectPath::file(coven_foundation::id_source::FileId(uuid::Uuid::from_bytes(
-        [0xff; 16],
-    )));
-    let (a, b) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        tokio::join!(
-            first.create_once(&path, b"same bytes"),
-            second.create_once(&path, b"same bytes")
-        )
-    })
-    .await
-    .unwrap();
-    assert_eq!(state.lock().unwrap().files.len(), 1);
-    assert!(state.lock().unwrap().files.contains_key("id1"));
-    a.unwrap();
-    b.unwrap();
-    assert_eq!(first.read(&path).await.unwrap(), b"same bytes");
-    assert_eq!(first.list(&ObjectPrefix::files()).await.unwrap(), [path]);
 }
 
 #[tokio::test]
@@ -424,4 +348,112 @@ async fn refreshed_tokens_reach_the_same_adapter() {
         json!({"files":[]}),
     )
     .await;
+}
+
+fn duplicate(state: &mut Remote, path: &ObjectPath, id: &str, created: &str, device: u64) {
+    let mut value = metadata(
+        json!({"id":id,"name":path.as_str(),"parents":["folder"],"properties":{"covenDevice":device.to_string()}}),
+        4,
+    );
+    value["createdTime"] = json!(created);
+    state.files.insert(id.into(), (value, b"data".to_vec()));
+}
+
+#[tokio::test]
+async fn retry_keeps_earliest_own_copy_and_leaves_other_devices_copies() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let path = ObjectPath::store_log(DeviceId(31), std::num::NonZeroU64::MIN);
+    {
+        let mut state = state.lock().unwrap();
+        duplicate(&mut state, &path, "z-first", "2026-10-06T00:00:00Z", 31);
+        duplicate(&mut state, &path, "a-later", "2026-10-06T00:00:01Z", 31);
+        duplicate(
+            &mut state,
+            &path,
+            "other-device",
+            "2026-10-06T00:00:02Z",
+            32,
+        );
+    }
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    storage.create_once(&path, b"data").await.unwrap();
+    assert_eq!(
+        state
+            .lock()
+            .unwrap()
+            .files
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        ["other-device", "z-first"]
+    );
+    assert!(state.lock().unwrap().uploads.is_empty());
+    assert_eq!(storage.read(&path).await.unwrap(), b"data");
+}
+
+#[tokio::test]
+async fn duplicate_time_ties_use_ids_after_normalizing_timezones() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let path = ObjectPath::store_log(DeviceId(31), std::num::NonZeroU64::MIN);
+    {
+        let mut state = state.lock().unwrap();
+        duplicate(
+            &mut state,
+            &path,
+            "b-first",
+            "2026-10-06T01:00:00+01:00",
+            31,
+        );
+        duplicate(&mut state, &path, "a-first", "2026-10-06T00:00:00Z", 31);
+        duplicate(&mut state, &path, "0-later", "2026-10-06T00:00:00.001Z", 31);
+    }
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    storage.create_once(&path, b"data").await.unwrap();
+    assert_eq!(
+        state
+            .lock()
+            .unwrap()
+            .files
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        ["a-first"]
+    );
+}
+
+#[tokio::test]
+async fn duplicate_cleanup_failure_is_reported_and_the_retry_finishes() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let path = ObjectPath::store_log(DeviceId(31), std::num::NonZeroU64::MIN);
+    {
+        let mut state = state.lock().unwrap();
+        duplicate(&mut state, &path, "z-first", "2026-10-06T00:00:00Z", 31);
+        duplicate(&mut state, &path, "a-later", "2026-10-06T00:00:01Z", 31);
+        duplicate(&mut state, &path, "b-later", "2026-10-06T00:00:02Z", 31);
+        state.lose_delete_reply = true;
+    }
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    assert_eq!(
+        storage
+            .create_once(&path, b"data")
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageFailure::Network
+    );
+    assert!(state.lock().unwrap().files.contains_key("z-first"));
+    storage.create_once(&path, b"data").await.unwrap();
+    assert_eq!(
+        state
+            .lock()
+            .unwrap()
+            .files
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        ["z-first"]
+    );
 }

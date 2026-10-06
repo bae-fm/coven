@@ -258,6 +258,14 @@ pub(crate) fn string<'a>(value: &'a Value, field: &str) -> Result<&'a str, Stora
         .filter(|s| !s.is_empty())
         .ok_or(StorageError::Protocol("missing string field"))
 }
+pub(crate) fn timestamp(value: &Value, field: &str) -> Result<std::time::SystemTime, StorageError> {
+    use aws_sdk_s3::primitives::{DateTime, DateTimeFormat};
+    let timestamp = DateTime::from_str(string(value, field)?, DateTimeFormat::DateTimeWithOffset)
+        .map_err(|error| StorageError::Encoding(Box::new(error)))?;
+    timestamp
+        .try_into()
+        .map_err(|error| StorageError::Encoding(Box::new(error)))
+}
 pub(crate) fn array<'a>(value: &'a Value, field: &str) -> Result<&'a Vec<Value>, StorageError> {
     value[field]
         .as_array()

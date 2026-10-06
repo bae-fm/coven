@@ -58,32 +58,56 @@ impl GoogleDriveStorage {
         query.push(("supportsAllDrives", "true"));
         http::endpoint(&self.api, segments, &query)
     }
-    async fn find(&self, path: &ObjectPath) -> Result<Option<Value>, StorageError> {
+    async fn copies(&self, path: &ObjectPath) -> Result<Vec<Value>, StorageError> {
         let query = format!(
             "'{}' in parents and name = '{}' and trashed = false",
             escape(&self.folder),
             escape(path.as_str())
         );
-        // Concurrent creators must agree on a keeper before deleting their
-        // own duplicate. Listing order cannot decide which object survives.
-        let mut keeper: Option<(String, Value)> = None;
+        let mut copies = Vec::new();
         for item in self.pages(&query).await? {
-            let id = http::string(&item, "id")?;
-            if keeper
-                .as_ref()
-                .is_none_or(|(lowest, _)| id < lowest.as_str())
-            {
-                keeper = Some((id.to_owned(), item));
+            let stored = http::timestamp(&item, "createdTime")?;
+            let id = http::string(&item, "id")?.to_owned();
+            copies.push(((stored, id), item));
+        }
+        copies.sort_by(|(left, _), (right, _)| left.cmp(right));
+        Ok(copies.into_iter().map(|(_, item)| item).collect())
+    }
+    async fn find(&self, path: &ObjectPath) -> Result<Option<Value>, StorageError> {
+        Ok(self.copies(path).await?.into_iter().next())
+    }
+    async fn remove_own_duplicates(
+        &self,
+        path: &ObjectPath,
+    ) -> Result<Option<Value>, StorageError> {
+        let copies = self.copies(path).await?;
+        let device = self.device.0.to_string();
+        let mut own = copies
+            .iter()
+            .filter(|item| item["properties"]["covenDevice"].as_str() == Some(device.as_str()));
+        // Only this path's writer retries it. A lost reply may leave several
+        // copies; deleting later copies is itself safe to retry after a lost reply.
+        own.next();
+        for duplicate in own {
+            let response = self
+                .send(
+                    Method::DELETE,
+                    &self.url(&["files", http::string(duplicate, "id")?], &[])?,
+                    Body::Empty,
+                )
+                .await?;
+            if response.status().as_u16() != 404 {
+                http::checked(PROVIDER, response).await?;
             }
         }
-        Ok(keeper.map(|(_, item)| item))
+        Ok(copies.into_iter().next())
     }
     async fn pages(&self, query: &str) -> Result<Vec<Value>, StorageError> {
         let mut token = None::<String>;
         let mut seen = BTreeSet::new();
         let mut files = Vec::new();
         loop {
-            let mut parameters = vec![("q", query), ("fields", "nextPageToken,files(id,name,size,parents,properties,ownedByMe,capabilities(canDelete,canRemoveMyDriveParent))"), ("includeItemsFromAllDrives", "true"), ("pageSize", "1000")];
+            let mut parameters = vec![("q", query), ("fields", "nextPageToken,files(id,name,size,createdTime,parents,properties,ownedByMe,capabilities(canDelete,canRemoveMyDriveParent))"), ("includeItemsFromAllDrives", "true"), ("pageSize", "1000")];
             if let Some(token) = &token {
                 parameters.push(("pageToken", token));
             }
@@ -175,31 +199,9 @@ impl GoogleDriveStorage {
         Ok(())
     }
     async fn ensure_unique(&self, path: &ObjectPath, file_id: &str) -> Result<(), StorageError> {
-        match self.find(path).await {
+        match self.remove_own_duplicates(path).await {
             Ok(Some(found)) if http::string(&found, "id")? == file_id => {}
-            Ok(Some(_)) => {
-                let cleanup = async {
-                    http::checked(
-                        PROVIDER,
-                        self.send(
-                            Method::DELETE,
-                            &self.url(&["files", file_id], &[])?,
-                            Body::Empty,
-                        )
-                        .await?,
-                    )
-                    .await?;
-                    Ok(())
-                }
-                .await;
-                return match cleanup {
-                    Ok(_) => Err(StorageError::AlreadyExists),
-                    Err(cleanup) => Err(StorageError::Cleanup {
-                        operation: Box::new(StorageError::AlreadyExists),
-                        cleanup: Box::new(cleanup),
-                    }),
-                };
-            }
+            Ok(Some(_)) => return Err(StorageError::AlreadyExists),
             Err(error) => return Err(error),
             _ => {
                 return Err(StorageError::Protocol(
@@ -317,7 +319,7 @@ impl Storage for GoogleDriveStorage {
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         let _guard = self.create_lock.lock().await;
         if bytes.is_empty() {
-            if self.find(path).await?.is_some() {
+            if self.remove_own_duplicates(path).await?.is_some() {
                 return Err(StorageError::AlreadyExists);
             }
             let body = json!({"name": path.as_str(), "parents": [&self.folder], "mimeType": "application/octet-stream", "properties": {"covenDevice": self.device.0.to_string()}});
@@ -502,7 +504,7 @@ impl Storage for GoogleDriveStorage {
         if total == 0 {
             return Err(StorageError::InvalidPart);
         }
-        if self.find(path).await?.is_some() {
+        if self.remove_own_duplicates(path).await?.is_some() {
             return Err(StorageError::AlreadyExists);
         }
         let generated = http::json(
