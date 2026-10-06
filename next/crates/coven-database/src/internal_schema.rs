@@ -14,6 +14,33 @@ pub(crate) const VERSION: u32 = 1;
 // This is also the ownership checker's source of reserved table names.
 macro_rules! coven_tables {
     ($visit:ident) => {
+        $visit!(coven_applied_boundaries, "
+            CREATE TABLE coven_applied_boundaries (
+                id INTEGER PRIMARY KEY,
+                cause BLOB NOT NULL UNIQUE,
+                audience TEXT,
+                included BLOB NOT NULL
+            ) STRICT;
+        ");
+        $visit!(coven_deleted_circles, "
+            CREATE TABLE coven_deleted_circles (
+                circle TEXT PRIMARY KEY NOT NULL
+            ) STRICT, WITHOUT ROWID;
+        ");
+        $visit!(coven_fingerprint_leaves, "
+            CREATE TABLE coven_fingerprint_leaves (
+                audience TEXT NOT NULL,
+                key BLOB NOT NULL CHECK(length(key)=32),
+                hash BLOB NOT NULL CHECK(length(hash)=32),
+                PRIMARY KEY(audience,key)
+            ) STRICT, WITHOUT ROWID;
+        ");
+        $visit!(coven_fingerprint_sums, "
+            CREATE TABLE coven_fingerprint_sums (
+                audience TEXT PRIMARY KEY NOT NULL,
+                sum BLOB NOT NULL CHECK(length(sum)=32)
+            ) STRICT, WITHOUT ROWID;
+        ");
         $visit!(coven_writes, "
             CREATE TABLE coven_writes (
                 id INTEGER PRIMARY KEY,
@@ -47,6 +74,7 @@ macro_rules! coven_tables {
                 write_id INTEGER NOT NULL REFERENCES coven_writes(id),
                 UNIQUE(table_name, key, audience, generation)
             ) STRICT;
+            CREATE INDEX coven_rows_audience ON coven_rows(audience,table_name,key,generation);
         ");
         $visit!(coven_cells, "
             CREATE TABLE coven_cells (
@@ -113,6 +141,17 @@ macro_rules! coven_tables {
             ) STRICT;
             CREATE INDEX coven_lost_row ON coven_lost(table_name,key,audience,generation,column_id);
             CREATE INDEX coven_lost_column ON coven_lost(column_id);
+        ");
+        $visit!(coven_lost_references, "
+            CREATE TABLE coven_lost_references (
+                loss_id INTEGER NOT NULL REFERENCES coven_lost(id) ON DELETE CASCADE,
+                foreign_key_id INTEGER NOT NULL REFERENCES coven_foreign_keys(id),
+                parent_table TEXT NOT NULL,
+                parent_key BLOB NOT NULL,
+                parent_audience TEXT NOT NULL,
+                PRIMARY KEY(loss_id,foreign_key_id)
+            ) STRICT, WITHOUT ROWID;
+            CREATE INDEX coven_lost_references_parent ON coven_lost_references(parent_table,parent_key,parent_audience,loss_id);
         ");
         $visit!(coven_uploads, "
             CREATE TABLE coven_uploads (

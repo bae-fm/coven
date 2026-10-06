@@ -109,6 +109,15 @@ pub enum DbError {
     /// A write targets a circle whose deletion has been applied (§14.7).
     #[error("circle {0} has been deleted")]
     DeletedCircle(coven_foundation::id_source::CircleId),
+    /// A downloaded write fails the merge's checks and is never applied (§19.1).
+    #[error("invalid write {write:?}: {error}")]
+    InvalidWrite {
+        /// The refused write's device and log number.
+        write: coven_merge::WriteId,
+        /// The merge rule it broke.
+        #[source]
+        error: coven_merge::MergeError,
+    },
     /// Closing failed for these connections, after every one was tried (§20.1).
     #[error("closing database connections failed: {failures:?}")]
     Closing {
@@ -141,6 +150,14 @@ impl From<rusqlite::Error> for DbError {
 /// A schema rule checked on open and after migrating (§8, §14.1).
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SchemaError {
+    /// A local foreign key could prevent deletion of a synced row (§8.4).
+    #[error("local reference {table}.{column} must use CASCADE or nullable SET NULL")]
+    LocalChildAction {
+        /// The local child table.
+        table: String,
+        /// The referencing column.
+        column: String,
+    },
     /// A declared synced table isn't in the database (§20.2).
     #[error("declared synced table {table} is missing")]
     MissingTable {

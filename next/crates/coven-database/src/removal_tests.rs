@@ -585,7 +585,7 @@ async fn store_wins_one_key_and_circles_use_their_generation_start() {
     for other in ["store", BEN] {
         let store = TestStore::new();
         let db = store.schema(vec![SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience")], "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,title TEXT)").await.unwrap();
-        db.write(BTreeSet::new(), |context| {
+        db.write(|context| {
             context.execute("INSERT INTO notes VALUES('1',?1,'Circle')", [ANA])?;
             Ok(())
         })
@@ -598,7 +598,7 @@ async fn store_wins_one_key_and_circles_use_their_generation_start() {
             &[],
             BTreeSet::from([Rule::OtherAudience]),
         );
-        db.write(BTreeSet::new(), move |context| {
+        db.write(move |context| {
             context.execute("INSERT INTO notes VALUES('1',?1,'Other')", [other])?;
             Ok(())
         })
@@ -832,7 +832,7 @@ pub(crate) fn materialize_deleted(
             });
             let result = match coven_merge::recompute(&view, &view, rows) {
                 Ok(result) => result,
-                Err(crate::removal_view::RemovalFailure::Sql(error)) => return Err(error),
+                Err(crate::removal_view::RemovalFailure::Database(error)) => return Err(error),
                 Err(crate::removal_view::RemovalFailure::Merge(error)) => {
                     panic!("database removal view: {error}")
                 }

@@ -326,8 +326,8 @@ pub(crate) fn record(
     changes: BTreeMap<RowId, RowChange>,
 ) -> Result<WriteRecord, DbError> {
     let latest = database.query_row("SELECT max(timestamp) FROM coven_writes", [], |r| {
-        let bytes: Option<Vec<u8>> = r.get(0)?;
-        bytes
+        let applied: Option<Vec<u8>> = r.get(0)?;
+        applied
             .map(|b| decoded(merge_fields::decode_timestamp(&b)))
             .transpose()
     })?;
@@ -388,7 +388,7 @@ fn removed_values(
     generation: u64,
 ) -> Result<AppValues, DbError> {
     let rows = database.query(
-        "SELECT value FROM coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4 AND column_id IS NULL",
+        "SELECT value FROM coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4 AND column_id IS NULL AND replacement_kind='rules'",
         params![row.table, row.key, audience_text(&row.audience), generation.to_be_bytes().as_slice()],
         |r| { let bytes: Vec<u8> = r.get(0)?; decoded(merge_fields::decode_columns(&bytes)) },
     )?;

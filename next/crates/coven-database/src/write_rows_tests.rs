@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use coven_foundation::id_source::CircleId;
 use coven_merge::{Audience, Operation};
 
@@ -34,7 +32,7 @@ async fn moving_note_42_moves_its_prewrite_descendants_and_readds_when_moved_bac
     let store = TestStore::new();
     let database = store.schema(tables(), SCHEMA).await.unwrap();
     database
-        .write(BTreeSet::new(), |context| {
+        .write(|context| {
             context.execute("INSERT INTO notes VALUES(?1,'Groceries','store')", [NOTE])?;
             context.execute(
                 "INSERT INTO attachments VALUES(?1,'list.txt',x'0102')",
@@ -46,7 +44,7 @@ async fn moving_note_42_moves_its_prewrite_descendants_and_readds_when_moved_bac
         .await
         .unwrap();
     database
-        .write(BTreeSet::new(), |context| {
+        .write(|context| {
             context.execute("UPDATE notes SET audience=?1", [ANA])?;
             context.execute("INSERT INTO attachments VALUES(?1,'new.txt',x'03')", [NOTE])?;
             context.execute("DELETE FROM details", [])?;
@@ -104,7 +102,7 @@ async fn repointing_a_descendant_moves_its_entire_subtree() {
         SyncedTable::new("todo_labels", RowIdentity::SharedKey).key_columns(["todo_id", "label"]).audience_from("todo_id"),
     ], "CREATE TABLE lists(id TEXT NOT NULL PRIMARY KEY, audience TEXT NOT NULL); CREATE TABLE todos(id TEXT NOT NULL PRIMARY KEY, list_id TEXT NOT NULL REFERENCES lists(id)); CREATE TABLE todo_labels(todo_id TEXT NOT NULL REFERENCES todos(id),label TEXT NOT NULL,PRIMARY KEY(todo_id,label));").await.unwrap();
     database
-        .write(BTreeSet::new(), |context| {
+        .write(|context| {
             context.execute("INSERT INTO lists VALUES(?1, 'store')", [ANA])?;
             context.execute("INSERT INTO lists VALUES(?1, ?2)", [BEN, ANA])?;
             context.execute("INSERT INTO todos VALUES(?1,?2)", [NOTE, ANA])?;
@@ -114,7 +112,7 @@ async fn repointing_a_descendant_moves_its_entire_subtree() {
         .await
         .unwrap();
     database
-        .write(BTreeSet::new(), |context| {
+        .write(|context| {
             context.execute("UPDATE todos SET list_id=?1", [BEN])?;
             Ok(())
         })
@@ -143,7 +141,7 @@ async fn circle_pins_can_read_store_notes_but_store_and_other_circles_cannot_rea
         SyncedTable::new("links", RowIdentity::SharedKey),
     ], "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE pins(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,note TEXT REFERENCES notes(id),pin TEXT REFERENCES pins(id)); CREATE TABLE links(id TEXT NOT NULL PRIMARY KEY,pin TEXT REFERENCES pins(id));").await.unwrap();
     database
-        .write(BTreeSet::new(), |context| {
+        .write(|context| {
             context.execute("INSERT INTO notes VALUES('42')", [])?;
             context.execute("INSERT INTO pins VALUES(?1,?2,'42',NULL)", [NOTE, ANA])?;
             Ok(())
@@ -152,7 +150,7 @@ async fn circle_pins_can_read_store_notes_but_store_and_other_circles_cannot_rea
         .unwrap();
     for circle in ["store", BEN] {
         let error = database
-            .write(BTreeSet::new(), move |context| {
+            .write(move |context| {
                 context.execute(
                     "INSERT INTO pins VALUES(?1,?2,NULL,?3)",
                     [BEN, circle, NOTE],
@@ -166,7 +164,7 @@ async fn circle_pins_can_read_store_notes_but_store_and_other_circles_cannot_rea
         );
     }
     let error = database
-        .write(BTreeSet::new(), |context| {
+        .write(|context| {
             context.execute("INSERT INTO links VALUES('10',?1)", [NOTE])?;
             Ok(())
         })
@@ -185,8 +183,9 @@ async fn a_note_cannot_be_added_to_gifts_after_its_deletion_was_applied() {
     let store = TestStore::new();
     let database = store.schema(tables(), SCHEMA).await.unwrap();
     let gifts = CircleId(uuid::Uuid::parse_str(ANA).unwrap());
+    database.delete_circle(gifts).await.unwrap();
     let error = database
-        .write([gifts].into(), |context| {
+        .write(|context| {
             context.execute("INSERT INTO notes VALUES(?1,'Gift nine',?2)", [NOTE, ANA])?;
             Ok(())
         })

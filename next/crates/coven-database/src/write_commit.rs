@@ -14,7 +14,6 @@ pub(crate) fn commit(
     store: &MergeStore<'_>,
     updates: &BTreeMap<RowId, RowUpdate<Value>>,
 ) -> Result<(), DbError> {
-    let bytes = encoded(Object::Write(record.clone()).encode())?;
     let write_id: i64 = database.query_row(
         "INSERT INTO coven_writes(timestamp,number,had_read) VALUES(?1,?2,?3) RETURNING id",
         params![
@@ -27,14 +26,6 @@ pub(crate) fn commit(
         |r| r.get(0),
     )?;
     database.internal_execute("INSERT INTO coven_positions(device,number) VALUES(?1,?2) ON CONFLICT(device) DO UPDATE SET number=excluded.number",params![record.header.position.device.0.to_be_bytes().as_slice(),record.header.position.number.to_be_bytes().as_slice()])?;
-    database.internal_execute(
-        "INSERT INTO coven_uploads(device,number,record) VALUES(?1,?2,?3)",
-        params![
-            record.header.position.device.0.to_be_bytes().as_slice(),
-            record.header.position.number.to_be_bytes().as_slice(),
-            bytes
-        ],
-    )?;
     let ordinal = |id: WriteId| {
         if id == record.header.position {
             write_id
@@ -103,19 +94,41 @@ pub(crate) fn commit(
                     let bytes = encoded(merge_fields::encode_column_value(&value.value))?;
                     let setter = encoded(merge_fields::encode_write_id(&key.write))?;
                     let replaced_by = encoded(merge_fields::encode_write_id(&value.replaced_by))?;
-                    if let Some(id) = old.lost_ids.get(key) {
+                    let loss_id = if let Some(id) = old.lost_ids.get(key) {
                         database.internal_execute(
                             "UPDATE coven_lost SET value=?1,set_by=?2,replaced_by=?3 WHERE id=?4",
                             params![bytes, setter, replaced_by, id],
                         )?;
+                        *id
                     } else {
                         let column = column(database, &row.table, &key.column)?;
-                        database.internal_execute("INSERT INTO coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,?5,?6,?7,'write',?8)",params![row.table,row.key,audience,value.incarnation.to_be_bytes().as_slice(),column,bytes,setter,replaced_by])?;
+                        database.query_row("INSERT INTO coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,?5,?6,?7,'write',?8) RETURNING id",params![row.table,row.key,audience,value.incarnation.to_be_bytes().as_slice(),column,bytes,setter,replaced_by], |r| r.get::<_,i64>(0))?
+                    };
+                    database.internal_execute(
+                        "DELETE FROM coven_lost_references WHERE loss_id=?1",
+                        [loss_id],
+                    )?;
+                    for (key, parent) in &value.value.parents {
+                        let key = crate::row_queries::foreign_key(database, &row.table, key)?;
+                        database.internal_execute("INSERT INTO coven_lost_references(loss_id,foreign_key_id,parent_table,parent_key,parent_audience) VALUES(?1,?2,?3,?4,?5)", params![loss_id,key,parent.row.table,parent.row.key,audience_text(&parent.row.audience)])?;
                     }
                 }
             }
         }
     }
+    Ok(())
+}
+
+pub(crate) fn queue(database: &DatabaseConnection, record: &WriteRecord) -> Result<(), DbError> {
+    let bytes = encoded(Object::Write(record.clone()).encode())?;
+    database.internal_execute(
+        "INSERT INTO coven_uploads(device,number,record) VALUES(?1,?2,?3)",
+        params![
+            record.header.position.device.0.to_be_bytes().as_slice(),
+            record.header.position.number.to_be_bytes().as_slice(),
+            bytes
+        ],
+    )?;
     Ok(())
 }
 

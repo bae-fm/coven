@@ -205,7 +205,7 @@ async fn hidden_rowid_assignments_are_refused_in_writes_and_migrations() {
                 .unwrap();
             let statement = operation.clone();
             let error = db
-                .write(Default::default(), move |sql| {
+                .write(move |sql| {
                     sql.execute(&statement, [])?;
                     Ok(())
                 })
@@ -253,7 +253,7 @@ async fn integer_primary_key_aliases_and_real_rowid_named_columns_remain_writabl
                 .open()
                 .await
                 .unwrap();
-            db.write(Default::default(), move |sql| {
+            db.write(move |sql| {
                 sql.execute(&format!("UPDATE items SET {column}=4 WHERE id=3"), [])?;
                 sql.execute(
                     &format!("INSERT INTO items({column},id,value) VALUES(5,5,'five')"),
@@ -278,7 +278,7 @@ async fn rowid_policy_covers_tuple_assignments_ctes_upserts_and_returning() {
         "INSERT INTO items(id,value) VALUES('a','changed') ON CONFLICT(id) DO UPDATE SET rowid=2 RETURNING value",
     ] {
         for query_row in [true,false] {
-            let error=db.write(Default::default(),move |sql| {
+            let error=db.write(move |sql| {
                 if query_row { sql.query_row(statement,[],|_|Ok(()))?; }
                 else { sql.query(statement,[],|_|Ok(()))?; }
                 Ok(())
@@ -439,7 +439,7 @@ async fn rowid_policy_refreshes_for_migrations_and_reopening() {
     for _ in 0..2 {
         let db = store.builder(vec![], migrations()).open().await.unwrap();
         let error = db
-            .write(Default::default(), |sql| {
+            .write(|sql| {
                 sql.execute("UPDATE items SET _rowid_=8", [])?;
                 Ok(())
             })
@@ -471,7 +471,7 @@ async fn rowid_policy_excludes_each_declared_alias_name() {
             sql.execute_batch(&format!("CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY,{alias} INTEGER); INSERT INTO items VALUES('a',1)"))?;
             Ok(())
         })]).open().await.unwrap();
-        db.write(Default::default(), move |sql| {
+        db.write(move |sql| {
             sql.execute(&format!("UPDATE items SET {alias}=2"), [])?;
             Ok(())
         })

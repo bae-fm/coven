@@ -29,9 +29,21 @@ pub(crate) fn evaluate_values(
                 .map(|c| identifier(&c.name))
                 .collect::<Vec<_>>()
                 .join(","),
-            vec!["?"; columns.len()].join(",")
+            columns
+                .iter()
+                .map(|c| if values.contains_key(&c.name) {
+                    "?"
+                } else {
+                    c.default.as_deref().unwrap_or("NULL")
+                })
+                .collect::<Vec<_>>()
+                .join(",")
         ),
-        params_from_iter(columns.iter().map(|c| sql_value(&values[&c.name]))),
+        params_from_iter(
+            columns
+                .iter()
+                .filter_map(|c| values.get(&c.name).map(sql_value)),
+        ),
     )?;
     db.query_row(
         &format!(
@@ -110,7 +122,7 @@ pub(crate) fn constraints(
         let timestamp = claim
             .dependencies
             .iter()
-            .map(|c| state.cells()[c].write)
+            .filter_map(|c| state.cells().get(c).map(|cell| cell.write))
             .map(&stamp)
             .max()
             .unwrap_or_else(|| {

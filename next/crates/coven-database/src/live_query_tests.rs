@@ -598,7 +598,7 @@ async fn hidden_rowid_inserts_are_observed_and_updates_are_refused() {
     });
     assert_eq!(next(&mut query).await.unwrap(), [7]);
     for (alias, rowid, id) in [("rowid", 8, "b"), ("_rowid_", 9, "c"), ("oid", 10, "d")] {
-        db.write(Default::default(), move |sql| {
+        db.write(move |sql| {
             sql.execute(
                 &format!("INSERT INTO items({alias},id,value) VALUES(?1,?2,'other')"),
                 crate::params![rowid, id],
@@ -613,7 +613,7 @@ async fn hidden_rowid_inserts_are_observed_and_updates_are_refused() {
         );
     }
     let error = db
-        .write(Default::default(), |sql| {
+        .write(|sql| {
             sql.execute("UPDATE items SET rowid=2 WHERE id='a'", [])?;
             Ok(())
         })
@@ -654,7 +654,7 @@ async fn changing_an_integer_primary_key_through_rowid_is_observed() {
     let mut query = db
         .subscribe(|sql| Ok(sql.query_row("SELECT rowid FROM items", [], |r| r.get::<_, i64>(0))?));
     assert_eq!(next(&mut query).await.unwrap(), 1);
-    db.write(Default::default(), |sql| {
+    db.write(|sql| {
         sql.execute("UPDATE items SET rowid=2", [])?;
         Ok(())
     })

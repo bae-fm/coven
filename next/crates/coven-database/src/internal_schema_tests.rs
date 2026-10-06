@@ -508,12 +508,17 @@ async fn only_the_spec_tables_are_created() {
         assert_eq!(
             tables,
             [
+                "coven_applied_boundaries",
                 "coven_cells",
                 "coven_claims",
                 "coven_columns",
                 "coven_constraints",
+                "coven_deleted_circles",
+                "coven_fingerprint_leaves",
+                "coven_fingerprint_sums",
                 "coven_foreign_keys",
                 "coven_lost",
+                "coven_lost_references",
                 "coven_operations",
                 "coven_positions",
                 "coven_references",

@@ -163,7 +163,7 @@ async fn format_limits_are_typed_and_the_failed_write_is_absent() {
         (vec![b'x'; 8 * 1024 * 1024], vec![b'y'; 8 * 1024 * 1024]),
     ] {
         let result = database
-            .write(Default::default(), move |context| {
+            .write(move |context| {
                 context.execute(
                     "INSERT INTO notes VALUES('42',?1,?2)",
                     crate::params![

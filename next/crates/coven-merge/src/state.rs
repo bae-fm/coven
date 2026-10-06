@@ -214,17 +214,7 @@ pub fn apply<V: Clone + Eq, P: crate::WritePast>(
     write: &Write<V, P>,
     oracle: &impl WriteOracle,
 ) -> Result<RowUpdate<V>, MergeError> {
-    if oracle.timestamp(write.id).is_some() {
-        return Err(MergeError::DuplicateWrite(write.id));
-    }
-    if write.timestamp.device() != write.id.device {
-        return Err(MergeError::TimestampDevice(write.id));
-    }
-    for past in write.had_read.frontier() {
-        if timestamp(oracle, *past)? >= write.timestamp {
-            return Err(MergeError::CausalTimestamp(write.id));
-        }
-    }
+    write.validate_metadata(oracle)?;
     let change = write
         .changes
         .get(&state.row)

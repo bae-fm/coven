@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use coven_format::value::Value;
 use coven_format::write::WriteRecord;
 use coven_merge::Operation;
@@ -29,7 +27,7 @@ pub(crate) fn records(database: &Database) -> Vec<WriteRecord> {
 
 pub(crate) async fn sql(database: &Database, sql: &'static str) -> Result<(), DbError> {
     database
-        .write(BTreeSet::new(), move |context| {
+        .write(move |context| {
             context.execute_batch(sql)?;
             Ok(())
         })
@@ -66,7 +64,7 @@ async fn grocery_title_and_errands_tag_are_one_unsigned_write() {
         .await
         .unwrap();
     let returned = database
-        .write(BTreeSet::new(), |context| {
+        .write(|context| {
             context.execute("UPDATE notes SET title=?1 WHERE id='42'", ["Grocery list"])?;
             context.execute("DELETE FROM tags WHERE id='errands'", [])?;
             context.execute("INSERT INTO local_rows VALUES('kept')", [])?;
@@ -162,7 +160,7 @@ async fn hardware_store_note_delete_and_readd_advance_generations() {
 async fn app_errors_and_panics_roll_back_and_leave_the_writer_usable() {
     let store = TestStore::new();
     let database = store.schema(notes(), NOTES).await.unwrap();
-    let error = database.write(BTreeSet::new(), |context| {
+    let error = database.write(|context| {
         context.execute_batch("INSERT INTO notes VALUES('42','Groceries',''); INSERT INTO local_rows VALUES('one')")?;
         Err::<(), _>(DbError::ClockOutOfRange)
     }).await.unwrap_err();
@@ -170,7 +168,7 @@ async fn app_errors_and_panics_roll_back_and_leave_the_writer_usable() {
     let clone = database.clone();
     let panic = tokio::spawn(async move {
         clone
-            .write(BTreeSet::new(), |context| -> Result<(), DbError> {
+            .write(|context| -> Result<(), DbError> {
                 context.execute("INSERT INTO notes VALUES('43','Hardware store','')", [])?;
                 std::panic::panic_any(43u64)
             })
@@ -341,7 +339,7 @@ async fn internal_tables_transaction_control_and_pragmas_remain_protected() {
     // A caller's row mapper must not inherit the session extension's narrowly
     // scoped permission to read table metadata during a SQLite step.
     database
-        .write(Default::default(), |context| {
+        .write(|context| {
             context.query_row("SELECT 1", [], |_| {
                 let error = context
                     .execute_batch("PRAGMA table_xinfo(notes)")
@@ -388,7 +386,7 @@ async fn a_swallowed_sqlite_rollback_cannot_commit_a_write_record() {
         .await
         .unwrap();
     let result = database
-        .write(Default::default(), |context| {
+        .write(|context| {
             context.execute("INSERT INTO local_rows VALUES('x')", [])?;
             assert!(context
                 .execute(
@@ -482,7 +480,7 @@ async fn key_normalization_matches_sqlites_builtin_collations_with_embedded_nul(
             Ok(())
         })]).open().await.unwrap();
         database
-            .write(Default::default(), move |context| {
+            .write(move |context| {
                 let same: bool = context.query_row(
                     &format!("SELECT ?1 = ?2 COLLATE {collation}"),
                     [before, after],
@@ -495,7 +493,7 @@ async fn key_normalization_matches_sqlites_builtin_collations_with_embedded_nul(
             .await
             .unwrap();
         database
-            .write(Default::default(), move |context| {
+            .write(move |context| {
                 context.execute("UPDATE tags SET id=?1,label='two'", [after])?;
                 Ok(())
             })
@@ -530,7 +528,7 @@ async fn concurrent_calls_share_the_writer_and_allocate_a_gapless_sequence() {
     for _ in 0..12 {
         let database = database.clone();
         calls.push(tokio::spawn(async move {
-            database.write(BTreeSet::new(), |context| {
+            database.write(|context| {
                 context.query_row("UPDATE notes SET body=CAST(CAST(body AS INTEGER)+1 AS TEXT) RETURNING CAST(body AS INTEGER)", [], |row| row.get::<_, i64>(0)).map_err(Into::into)
             }).await.unwrap()
         }));
@@ -585,7 +583,7 @@ async fn writes_visit_only_indexed_rows_in_a_ten_thousand_row_store() {
         CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY,task TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,body TEXT);
         CREATE INDEX tasks_note ON tasks(note); CREATE INDEX items_task ON items(task);
         CREATE TABLE selection(note TEXT REFERENCES notes(id) ON DELETE CASCADE); CREATE INDEX selection_note ON selection(note);").await.unwrap();
-    db.write(Default::default(), |context| {
+    db.write(|context| {
         for n in 0..2000 {
             let note = format!("n{n}");
             context.execute("INSERT INTO notes VALUES(?1,'store',?1)", [&note])?;
@@ -670,7 +668,7 @@ async fn writes_visit_only_indexed_rows_in_a_ten_thousand_row_store() {
 async fn an_immediate_foreign_key_fails_at_the_app_statement() {
     let fixture = TestStore::new();
     let db = fixture.schema(vec![SyncedTable::new("parents",RowIdentity::SharedKey),SyncedTable::new("children",RowIdentity::SharedKey)],"CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id))").await.unwrap();
-    db.write(Default::default(),|context| {
+    db.write(|context| {
         let error = context.execute("INSERT INTO children VALUES('c','missing')",[]).expect_err("immediate foreign key must fail before the next statement");
         assert!(matches!(error,rusqlite::Error::SqliteFailure(e,_) if e.extended_code==rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY));
         context.execute("INSERT INTO parents VALUES('p')",[])?;
@@ -682,7 +680,7 @@ async fn an_immediate_foreign_key_fails_at_the_app_statement() {
 }
 
 #[tokio::test]
-async fn deleted_circles_only_affect_the_local_writes_region_after_reopening_too() {
+async fn deleted_circles_remove_rows_and_remain_refused_after_reopening() {
     const SCHEMA: &str = "CREATE TABLE roots(id TEXT NOT NULL PRIMARY KEY,body TEXT); CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,root TEXT REFERENCES roots(id)); CREATE INDEX notes_root ON notes(root)";
     let store = TestStore::new();
     let tables = || {
@@ -696,23 +694,23 @@ async fn deleted_circles_only_affect_the_local_writes_region_after_reopening_too
     );
     let db = store.schema(tables(), SCHEMA).await.unwrap();
     sql(&db,"INSERT INTO roots VALUES('r','before'),('other','unrelated'); INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-00000000000a','r')").await.unwrap();
-    db.write([circle].into(), |_| Ok(())).await.unwrap();
-    assert_eq!(count(&db, "notes"), 1);
+    assert!(db.delete_circle(circle).await.unwrap());
+    assert!(!db.delete_circle(circle).await.unwrap());
+    assert_eq!(count(&db, "notes"), 0);
     assert_eq!(records(&db).len(), 1);
     db.close().await.unwrap();
     let db = store.schema(tables(), SCHEMA).await.unwrap();
-    db.write([circle].into(), |c| {
+    db.write(|c| {
         c.execute("UPDATE roots SET body='after' WHERE id='other'", [])?;
         Ok(())
     })
     .await
     .unwrap();
-    assert_eq!(count(&db, "notes"), 1);
+    assert_eq!(count(&db, "notes"), 0);
     assert!(
-        matches!(db.write([circle].into(), |c| { c.execute("DELETE FROM notes",[])?; Ok(()) }).await,Err(DbError::DeletedCircle(id)) if id==circle)
+        matches!(db.write(|c| { c.execute("INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-00000000000a','r')",[])?; Ok(()) }).await,Err(DbError::DeletedCircle(id)) if id==circle)
     );
-    // Changing the referenced store row puts its child in removal's region.
-    db.write([circle].into(), |c| {
+    db.write(|c| {
         c.execute("UPDATE roots SET body='after' WHERE id='r'", [])?;
         Ok(())
     })

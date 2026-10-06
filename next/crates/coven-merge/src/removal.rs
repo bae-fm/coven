@@ -257,7 +257,7 @@ pub fn removals<V: RemovalView>(view: &V) -> Result<RemovalResult, V::Error> {
     let region = region(&[view], seen.clone())?;
     let mut order = rows;
     order.extend(region.iter().filter(|r| !seen.contains(*r)).cloned());
-    evaluate(view, region, &order)
+    evaluate(view, region, &order, true)
 }
 
 /// Recompute only the touched rows' dependency region in the union of the
@@ -276,7 +276,19 @@ pub fn recompute<E: From<MergeError>>(
 ) -> Result<RemovalResult, E> {
     let region = region(&[before, after], touched.into_iter().collect())?;
     let order: Vec<_> = region.iter().cloned().collect();
-    evaluate(after, region, &order)
+    evaluate(after, region, &order, true)
+}
+
+/// Recompute the same closed region without cross-audience key competition.
+/// Fingerprints use this result, including its consequent foreign-key removals (§19.1).
+pub fn recompute_fingerprint<E: From<MergeError>>(
+    before: &impl RemovalView<Error = E>,
+    after: &impl RemovalView<Error = E>,
+    touched: impl IntoIterator<Item = RowId>,
+) -> Result<RemovalResult, E> {
+    let region = region(&[before, after], touched.into_iter().collect())?;
+    let order: Vec<_> = region.iter().cloned().collect();
+    evaluate(after, region, &order, false)
 }
 
 fn region<E: From<MergeError>>(
@@ -315,6 +327,7 @@ fn evaluate<V: RemovalView>(
     view: &V,
     region: BTreeSet<RowId>,
     order: &[RowId],
+    other_audiences: bool,
 ) -> Result<RemovalResult, V::Error> {
     let mut raw = BTreeMap::new();
     for row in &region {
@@ -381,7 +394,7 @@ fn evaluate<V: RemovalView>(
         }
     }
     close(&facts, &children, order, &mut out);
-    let judged = judge_groups(&facts, &out);
+    let judged = judge_groups(&facts, &out, other_audiences);
     out.extend(judged.keys().cloned());
     close(&facts, &children, order, &mut out);
     let mut result = RemovalResult {
@@ -460,6 +473,7 @@ fn monotone_rules(fact: &Facts, out: &BTreeSet<RowId>) -> BTreeSet<Rule> {
 fn judge_groups(
     facts: &BTreeMap<RowId, Facts>,
     out: &BTreeSet<RowId>,
+    other_audiences: bool,
 ) -> BTreeMap<RowId, BTreeSet<Rule>> {
     // Judge every group against the same pass-one survivors. A row losing
     // another competition still participates in all of its groups.
@@ -477,14 +491,16 @@ fn judge_groups(
                     .or_default()
                     .push((row, claim.timestamp));
             }
-            if let RemovalRow::Present { started, .. } = fact.row {
-                groups
-                    .entry(Group::Key {
-                        table: row.table.clone(),
-                        key: row.key.clone(),
-                    })
-                    .or_default()
-                    .push((row, started));
+            if other_audiences {
+                if let RemovalRow::Present { started, .. } = fact.row {
+                    groups
+                        .entry(Group::Key {
+                            table: row.table.clone(),
+                            key: row.key.clone(),
+                        })
+                        .or_default()
+                        .push((row, started));
+                }
             }
         }
     }

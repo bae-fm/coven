@@ -11,11 +11,14 @@ pub(crate) struct TestStore {
 
 impl TestStore {
     pub(crate) fn new() -> Self {
+        Self::with_ids(&SequentialIds::new())
+    }
+
+    pub(crate) fn with_ids(ids: &dyn IdSource) -> Self {
         let temporary = tempfile::tempdir().unwrap();
-        let ids = SequentialIds::new();
         let layout = StoreLayout::new(temporary.path().to_owned());
         let directory = layout
-            .create_store_dir(StoreId(ids.new_id()), "database tests", &ids)
+            .create_store_dir(StoreId(ids.new_id()), "database tests", ids)
             .unwrap();
         Self {
             directory,

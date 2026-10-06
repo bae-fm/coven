@@ -6,7 +6,6 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 use coven_foundation::clock::{ClockRef, SystemClock};
 use coven_foundation::files::{StoreDir, StoreLock};
 use coven_foundation::id_source::{CircleId, DeviceId};
-use std::collections::BTreeSet;
 
 use crate::authorization::SqlAuthorization;
 use crate::observation::{CommitObserver, CommitSubscription, ReadSet};
@@ -258,13 +257,8 @@ impl Database {
     }
 
     /// Run app SQL and commit its unsigned write record and merge metadata in
-    /// one IMMEDIATE transaction (§5). The caller supplies the circles deleted
-    /// by the applied store log. The closure's result is returned after commit.
-    pub async fn write<F, R>(
-        &self,
-        deleted_circles: BTreeSet<CircleId>,
-        sql: F,
-    ) -> Result<R, DbError>
+    /// one IMMEDIATE transaction (§5). The closure's result is returned after commit.
+    pub async fn write<F, R>(&self, sql: F) -> Result<R, DbError>
     where
         F: FnOnce(crate::SqlContext<'_>) -> Result<R, DbError> + Send + 'static,
         R: Send + 'static,
@@ -279,13 +273,7 @@ impl Database {
                     .lock()
                     .expect("writer connection lock poisoned");
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    writer.local_write(
-                        &inner.write_schema,
-                        inner.device,
-                        inner.clock.now(),
-                        &deleted_circles,
-                        sql,
-                    )
+                    writer.local_write(&inner.write_schema, inner.device, inner.clock.now(), sql)
                 }));
                 // The transaction rolls back during unwinding. Release the mutex
                 // before propagating the app panic so later calls can still use it.
@@ -294,6 +282,128 @@ impl Database {
                     Ok(result) => result,
                     Err(panic) => std::panic::resume_unwind(panic),
                 }
+            })
+            .await,
+        )
+    }
+
+    /// Apply one authenticated download, or report the prerequisite it awaits.
+    /// Row changes, merge state, fingerprints and positions commit together.
+    pub async fn apply_downloaded(
+        &self,
+        write: crate::DownloadedWrite,
+    ) -> Result<crate::ApplyOutcome, DbError> {
+        let database = self.clone();
+        finish_blocking(
+            tokio::task::spawn_blocking(move || {
+                let slot = database.inner.read().expect("database lock poisoned");
+                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+                let writer = inner
+                    .writer
+                    .lock()
+                    .expect("writer connection lock poisoned");
+                crate::download::apply(&writer, &inner.write_schema, inner.clock.now(), write)
+            })
+            .await,
+        )
+    }
+
+    /// Record an applied breaking change's snapshot coverage. Returns false on repetition.
+    /// Loading the snapshot's rows is a separate operation.
+    pub async fn apply_breaking_change(
+        &self,
+        version: u32,
+        included: coven_format::value::WritePositions,
+    ) -> Result<bool, DbError> {
+        self.apply_boundary(crate::write_boundary::WriteBoundary::SchemaChange {
+            version,
+            included,
+        })
+        .await
+    }
+
+    /// Record an applied reset's snapshot coverage. Returns false on repetition.
+    /// Loading the snapshot's rows is a separate operation.
+    pub async fn apply_reset(
+        &self,
+        entry: crate::EntryId,
+        audience: coven_merge::Audience,
+        included: coven_format::value::WritePositions,
+    ) -> Result<bool, DbError> {
+        self.apply_boundary(crate::write_boundary::WriteBoundary::Reset {
+            entry,
+            audience,
+            included,
+        })
+        .await
+    }
+
+    async fn apply_boundary(
+        &self,
+        boundary: crate::write_boundary::WriteBoundary,
+    ) -> Result<bool, DbError> {
+        let database = self.clone();
+        finish_blocking(
+            tokio::task::spawn_blocking(move || {
+                let slot = database.inner.read().expect("database lock poisoned");
+                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+                let writer = inner
+                    .writer
+                    .lock()
+                    .expect("writer connection lock poisoned");
+                boundary.record(&writer)
+            })
+            .await,
+        )
+    }
+
+    /// Apply a store-log circle deletion atomically. Returns false on repetition.
+    pub async fn delete_circle(&self, circle: CircleId) -> Result<bool, DbError> {
+        let database = self.clone();
+        finish_blocking(
+            tokio::task::spawn_blocking(move || {
+                let slot = database.inner.read().expect("database lock poisoned");
+                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+                let writer = inner
+                    .writer
+                    .lock()
+                    .expect("writer connection lock poisoned");
+                crate::download::delete_circle(&writer, &inner.write_schema, circle)
+            })
+            .await,
+        )
+    }
+
+    /// Read the schema version, positions and fingerprints from one committed state.
+    /// Supply fresh hashers derived from the store or circle keys. Audiences whose
+    /// keys are unavailable can be omitted without interrupting sum maintenance.
+    pub async fn sync_state(
+        &self,
+        keys: Vec<(coven_merge::Audience, coven_crypto::FingerprintHasher)>,
+    ) -> Result<crate::SyncState, DbError> {
+        let database = self.clone();
+        finish_blocking(
+            tokio::task::spawn_blocking(move || {
+                let slot = database.inner.read().expect("database lock poisoned");
+                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+                let writer = inner
+                    .writer
+                    .lock()
+                    .expect("writer connection lock poisoned");
+                let schema_version = writer.schema_version()?;
+                let positions = crate::download::positions(&writer)?;
+                let fingerprints = keys
+                    .into_iter()
+                    .map(|(audience, key)| {
+                        crate::fingerprint::read(&writer, &audience, key)
+                            .map(|value| (audience, value))
+                    })
+                    .collect::<Result<_, _>>()?;
+                Ok(crate::SyncState {
+                    schema_version,
+                    positions,
+                    fingerprints,
+                })
             })
             .await,
         )
@@ -364,7 +474,7 @@ impl Database {
 ///
 /// ```compile_fail
 /// async fn cannot_write(handle: &coven_database::CovenReadHandle) {
-///     handle.write(Default::default(), |_| Ok(())).await;
+///     handle.write(|_| Ok(())).await;
 /// }
 /// ```
 /// ```compile_fail

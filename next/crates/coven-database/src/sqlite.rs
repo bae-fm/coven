@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use coven_foundation::id_source::{CircleId, DeviceId};
+use coven_foundation::id_source::DeviceId;
 
 use rusqlite::{
     fallible_iterator::FallibleIterator, functions::FunctionFlags, Batch, Connection, OpenFlags,
@@ -58,6 +58,18 @@ impl DatabaseConnection {
             0,
             FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
             authorization.applying_function(),
+        )?;
+        connection.create_scalar_function(
+            "coven_fingerprint_replace",
+            3,
+            FunctionFlags::SQLITE_UTF8
+                | FunctionFlags::SQLITE_DETERMINISTIC
+                | FunctionFlags::SQLITE_DIRECTONLY,
+            |ctx| {
+                // The first leaf at this identity adds to the set without a subtraction.
+                let old = ctx.get::<Option<[u8; 32]>>(1)?.unwrap_or_default();
+                Ok(crate::fingerprint::replace_sum(ctx.get(0)?, old, ctx.get(2)?).to_vec())
+            },
         )?;
         connection.authorizer(Some(authorization.callback()))?;
         let db = Self {
@@ -179,7 +191,6 @@ impl DatabaseConnection {
         schema: &crate::write_schema::WriteSchema,
         device: DeviceId,
         now: SystemTime,
-        deleted_circles: &BTreeSet<CircleId>,
         sql: F,
     ) -> Result<R, DbError>
     where
@@ -188,6 +199,7 @@ impl DatabaseConnection {
         #[cfg(test)]
         let _profile = self.profile_write();
         self.transaction(|database| {
+            let deleted_circles = crate::download::deleted_circles(database)?;
             let mut session = rusqlite::session::Session::new(&database.connection)?;
             for table in &schema.declarations {
                 session.attach(Some(table.name.as_str()))?;
@@ -213,53 +225,33 @@ impl DatabaseConnection {
                 &after,
                 &store,
                 &captured,
-                deleted_circles,
+                &deleted_circles,
             )?;
             let record = if changes.is_empty() {
                 None
             } else {
                 Some(crate::write_record::record(database, device, now, changes)?)
             };
-            let updates = match &record {
-                Some(record) => store.apply(record)?,
-                None => std::collections::BTreeMap::new(),
-            };
-            let empty = std::collections::BTreeMap::new();
-            let old = crate::removal_view::DatabaseRemovalView::new(
+            crate::write_apply::WriteApply::new(
                 database,
-                &store,
                 schema,
+                &store,
                 &before,
-                &empty,
-                deleted_circles,
-                None,
-            )?;
-            let new = crate::removal_view::DatabaseRemovalView::new(
-                database,
-                &store,
-                schema,
                 &after,
-                &updates,
-                deleted_circles,
-                record
-                    .as_ref()
-                    .map(|r| (r.header.position, r.header.timestamp)),
-            )?;
-            let touched: BTreeSet<_> = updates.keys().cloned().collect();
-            old.prime(touched.iter().cloned())?;
-            new.prime(touched.iter().cloned())?;
-            let removal = match coven_merge::recompute(&old, &new, touched) {
-                Ok(result) => result,
-                Err(crate::removal_view::RemovalFailure::Sql(error)) => return Err(error),
-                Err(crate::removal_view::RemovalFailure::Merge(error)) => {
-                    panic!("database removal view violates merge invariant: {error}")
+                &deleted_circles,
+            )
+            .apply(record.as_ref(), BTreeSet::new())
+            .map_err(|error| match error {
+                // This device authored the record; rejecting it means our own
+                // authoring or removal machinery broke its invariants.
+                DbError::InvalidWrite { write, error } => {
+                    panic!("locally authored write {write:?} violates merge invariant: {error}")
                 }
-            };
+                error => error,
+            })?;
             if let Some(record) = &record {
-                crate::write_commit::commit(database, record, &store, &updates)?;
+                crate::write_commit::queue(database, record)?;
             }
-            database.batch("PRAGMA defer_foreign_keys=ON")?;
-            crate::removal::materialize(database, schema, &after, &new, &removal)?;
             Ok(result)
         })
     }

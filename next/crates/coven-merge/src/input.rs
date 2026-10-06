@@ -208,6 +208,25 @@ pub struct Write<V, P = BTreeSet<WriteId>> {
     pub changes: BTreeMap<RowId, Change<V>>,
 }
 
+impl<V, P: WritePast> Write<V, P> {
+    /// Check the write's identity and causal timestamp against the applied set.
+    /// This also validates writes with no row changes available to the receiver.
+    pub fn validate_metadata(&self, oracle: &impl WriteOracle) -> Result<(), MergeError> {
+        if oracle.timestamp(self.id).is_some() {
+            return Err(MergeError::DuplicateWrite(self.id));
+        }
+        if self.timestamp.device() != self.id.device {
+            return Err(MergeError::TimestampDevice(self.id));
+        }
+        for past in self.had_read.frontier() {
+            if crate::state::timestamp(oracle, *past)? >= self.timestamp {
+                return Err(MergeError::CausalTimestamp(self.id));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// A causally closed past, represented explicitly or by device log positions.
 /// A frontier contains maximal writes covering the set: all covered writes
 /// have timestamps at most a frontier timestamp. Device logs are contiguous.

@@ -136,6 +136,7 @@ pub(crate) const POLICY: Policy = Policy {
         "MergeStore",
         "WriteMetadata",
         "DatabaseRemovalView",
+        "WriteApply",
     ],
     root_owner_types: &["Database", "CovenReadHandle"],
     task_types: &[
@@ -151,6 +152,7 @@ pub(crate) const POLICY: Policy = Policy {
         "MergeStore",
         "WriteMetadata",
         "DatabaseRemovalView",
+        "WriteApply",
     ],
     internal_dependency_types: &["DatabaseConnection"],
     always_forbidden_returns: &[],
@@ -162,6 +164,7 @@ pub(crate) const POLICY: Policy = Policy {
         "MergeStore",
         "WriteMetadata",
         "DatabaseRemovalView",
+        "WriteApply",
     ],
     field_capability_types: &[],
     raw_provider_operations: &[],

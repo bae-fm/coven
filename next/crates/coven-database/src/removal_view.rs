@@ -20,12 +20,23 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) enum RemovalFailure {
-    Sql(DbError),
+    Database(DbError),
     Merge(MergeError),
+}
+impl RemovalFailure {
+    pub(crate) fn into_db_error(self, write: Option<WriteId>) -> DbError {
+        match self {
+            Self::Database(error) => error,
+            Self::Merge(error) => match write {
+                Some(write) => DbError::InvalidWrite { write, error },
+                None => panic!("stored removal view violates merge invariant: {error}"),
+            },
+        }
+    }
 }
 impl From<DbError> for RemovalFailure {
     fn from(error: DbError) -> Self {
-        Self::Sql(error)
+        Self::Database(error)
     }
 }
 impl From<MergeError> for RemovalFailure {
@@ -69,8 +80,14 @@ impl<'a> DatabaseRemovalView<'a> {
         let mut edges = BTreeMap::<RowId, BTreeSet<RowId>>::new();
         let mut lookups = BTreeMap::<_, BTreeSet<RowId>>::new();
         for (id, update) in updates {
-            for cell in update.state.cells().values() {
-                for parent in cell.value.parents.values() {
+            for value in update
+                .state
+                .cells()
+                .values()
+                .map(|c| &c.value)
+                .chain(update.state.lost().values().map(|l| &l.value))
+            {
+                for parent in value.parents.values() {
                     edges
                         .entry(parent.row.clone())
                         .or_default()
@@ -79,13 +96,17 @@ impl<'a> DatabaseRemovalView<'a> {
             }
             let table = schema.table(&id.table);
             if update.state.generation() % 2 == 1 {
+                let values: AppValues = update
+                    .state
+                    .cells()
+                    .iter()
+                    .map(|(n, c)| (n.clone(), c.value.value.clone()))
+                    .collect();
+                let values = crate::removal_sql::evaluate_values(database, table, &values)?;
                 for index in &table.indices {
                     if let Some(columns) = index.columns.iter().cloned().collect::<Option<Vec<_>>>()
                     {
-                        let values: Vec<_> = columns
-                            .iter()
-                            .map(|c| update.state.cells()[c].value.value.clone())
-                            .collect();
+                        let values: Vec<_> = columns.iter().map(|c| values[c].clone()).collect();
                         if values.iter().any(|v| matches!(v, Value::Null)) {
                             continue;
                         }
@@ -241,7 +262,9 @@ impl<'a> DatabaseRemovalView<'a> {
                 parent_generation,
                 default_generation,
             )
-            .expect("database reference satisfies merge invariants");
+            .map_err(|error| {
+                RemovalFailure::Merge(error).into_db_error(self.arriving.map(|(write, _)| write))
+            })?;
             let defaults = match reading {
                 ReferenceValue::Null => Some(false),
                 ReferenceValue::Default(_) => Some(true),
@@ -289,6 +312,60 @@ impl<'a> DatabaseRemovalView<'a> {
         };
         self.rows.borrow_mut().insert(id.clone(), row.clone());
         Ok(row)
+    }
+
+    pub(crate) fn constraints_for_values(
+        &self,
+        id: &RowId,
+        values: &AppValues,
+    ) -> Result<Constraints, DbError> {
+        let table = self.schema.table(&id.table);
+        crate::removal_sql::constraints(
+            self.database,
+            table,
+            &self.schema.rules[&table.name],
+            &self.state(id)?,
+            values,
+            |write| self.stamp(write),
+        )
+    }
+
+    pub(crate) fn lost_value(
+        &self,
+        id: &RowId,
+        key: &coven_merge::LostKey,
+        lost: &coven_merge::LostValue<Value>,
+    ) -> Result<coven_merge::ColumnValue<Value>, DbError> {
+        let mut value = lost.value.clone();
+        let table = self.schema.table(&id.table);
+        for (name, parent) in &lost.value.parents {
+            if self.state(&parent.row)?.generation() == parent.generation {
+                continue;
+            }
+            let fk = table
+                .foreign_keys
+                .iter()
+                .find(|fk| self.schema.foreign_key(table, fk) == *name)
+                .expect("lost reference constraint");
+            if fk.on_delete == "SET NULL" || fk.on_delete == "SET DEFAULT" {
+                let replacement = crate::removal_sql::replacement(
+                    self.database,
+                    table,
+                    fk,
+                    fk.on_delete == "SET DEFAULT",
+                )?;
+                // A lost cell is not an app row. It retains its original parent
+                // metadata while reading the stale reference's replacement.
+                let values = crate::removal_sql::reference_values(
+                    self.database,
+                    table,
+                    std::slice::from_ref(&key.column),
+                    std::slice::from_ref(&replacement[&key.column]),
+                )?;
+                value.value = values.into_iter().next().expect("one column");
+            }
+        }
+        Ok(value)
     }
 
     pub(crate) fn default_parent(
@@ -450,6 +527,10 @@ impl<'a> DatabaseRemovalView<'a> {
                 }
             }
         }
+        for lost in self.state(id)?.lost().values() {
+            related.extend(lost.value.parents.values().map(|parent| parent.row.clone()));
+        }
+        related.extend(self.database.query("SELECT DISTINCT l.table_name,l.key,l.audience FROM coven_lost_references v JOIN coven_lost l ON l.id=v.loss_id WHERE v.parent_table=?1 AND v.parent_key=?2 AND v.parent_audience=?3", params![id.table,id.key,crate::write_encoding::audience_text(&id.audience)], crate::row_queries::read_identity)?);
         if let Some(children) = self.edges.get(id) {
             related.extend(children.iter().cloned());
         }

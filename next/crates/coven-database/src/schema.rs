@@ -312,6 +312,7 @@ impl Schema {
                 }
             }
         }
+        self.validate_local_children(&declared)?;
         for table in self.tables.values() {
             for key in &table.foreign_keys {
                 for action in [&key.on_delete, &key.on_update] {
@@ -361,6 +362,41 @@ impl Schema {
                     .into());
                 }
                 table = parent.clone();
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_local_children(&self, synced: &BTreeSet<String>) -> Result<(), DbError> {
+        let mut reached = synced.clone();
+        let mut pending: Vec<_> = synced.iter().cloned().collect();
+        while let Some(parent) = pending.pop() {
+            for (name, table) in &self.tables {
+                if synced.contains(name) {
+                    continue;
+                }
+                for key in &table.foreign_keys {
+                    if !key.target.eq_ignore_ascii_case(&parent) {
+                        continue;
+                    }
+                    let invalid = key.columns.iter().find(|name| {
+                        key.on_delete != "CASCADE"
+                            && (key.on_delete != "SET NULL"
+                                || table.columns.iter().any(|column| {
+                                    column.name.eq_ignore_ascii_case(name) && column.not_null
+                                }))
+                    });
+                    if let Some(column) = invalid {
+                        return Err(SchemaError::LocalChildAction {
+                            table: table.name.clone(),
+                            column: column.clone(),
+                        }
+                        .into());
+                    }
+                    if reached.insert(name.clone()) {
+                        pending.push(name.clone());
+                    }
+                }
             }
         }
         Ok(())

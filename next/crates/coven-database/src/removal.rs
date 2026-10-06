@@ -20,7 +20,10 @@ pub(crate) fn materialize(
     result: &RemovalResult,
 ) -> Result<(), DbError> {
     let mut removed_visible = BTreeMap::new();
-    for id in result.removed.keys() {
+    for id in &result.region {
+        if !result.removed.contains_key(id) && view.state(id)?.present() {
+            continue;
+        }
         if let Some(app) = visible
             .row(&(id.table.clone(), id.key.clone()))?
             .filter(|app| app.audience == id.audience)
@@ -28,46 +31,108 @@ pub(crate) fn materialize(
             removed_visible.insert(id.clone(), app);
         }
     }
+    let returning: BTreeSet<_> = result
+        .references
+        .keys()
+        .filter(|id| !result.removed.contains_key(*id))
+        .cloned()
+        .collect();
+    let actions: BTreeSet<_> = removed_visible
+        .keys()
+        .chain(returning.iter())
+        .cloned()
+        .collect();
     let mut dependencies = BTreeMap::<RowId, BTreeSet<RowId>>::new();
-    for (id, app) in &removed_visible {
-        for parent in app.parents.values() {
-            if let Some(row) = visible.row(parent)? {
-                let parent = crate::write_rows::row_id(parent, &row);
-                if removed_visible.contains_key(&parent) {
-                    dependencies.entry(parent).or_default().insert(id.clone());
+    let mut old_claims = BTreeMap::new();
+    for id in &actions {
+        if let Some(app) = visible
+            .row(&(id.table.clone(), id.key.clone()))?
+            .filter(|app| app.audience == id.audience)
+        {
+            // A surviving child must be repointed before SQLite can cascade its
+            // old parent's delete. New parents are dependencies of that update.
+            for parent in app.parents.values() {
+                if let Some(row) = visible.row(parent)? {
+                    let parent = crate::write_rows::row_id(parent, &row);
+                    if removed_visible.contains_key(&parent) {
+                        dependencies.entry(parent).or_default().insert(id.clone());
+                    }
+                }
+            }
+            for (constraint, claim) in view.constraints_for_values(id, &app.values)?.unique {
+                old_claims.insert(
+                    (
+                        id.table.clone(),
+                        id.audience.clone(),
+                        constraint,
+                        claim.value,
+                    ),
+                    id.clone(),
+                );
+            }
+        }
+    }
+    for id in &returning {
+        for reference in result.references[id].values() {
+            let parent = match reference {
+                coven_merge::ReferenceValue::Original { parent, .. }
+                | coven_merge::ReferenceValue::Default(Some(parent)) => Some(&parent.row),
+                _ => None,
+            };
+            if let Some(parent) = parent {
+                dependencies
+                    .entry(id.clone())
+                    .or_default()
+                    .insert(parent.clone());
+            }
+        }
+        for old in removed_visible
+            .keys()
+            .filter(|old| old.table == id.table && old.key == id.key)
+        {
+            dependencies
+                .entry(id.clone())
+                .or_default()
+                .insert(old.clone());
+        }
+        for (constraint, claim) in view.evaluated(id)?.constraints.unique {
+            if let Some(old) = old_claims.get(&(
+                id.table.clone(),
+                id.audience.clone(),
+                constraint,
+                claim.value,
+            )) {
+                if old != id {
+                    dependencies
+                        .entry(id.clone())
+                        .or_default()
+                        .insert(old.clone());
                 }
             }
         }
     }
-    let deletes = dependency_order(removed_visible.keys().cloned().collect(), &dependencies);
+    let ordered = dependency_order(actions, &dependencies);
     database.materialize(|database| {
-        for id in &deletes {
+        for id in ordered {
             let table = schema.table(&id.table);
-            // A native CASCADE may have already deleted another member of a
-            // cycle. Only rows merge decided to remove are in this delete set.
-            if let Some(values) = crate::write_rows::read_values(database, table, &id.key)? {
-                changed_once(database.app_execute(&format!("DELETE FROM main.{} WHERE {}",identifier(&table.name),predicate(table)),params_from_iter(key_columns(table).iter().map(|c| sql_value(&values[&c.name]))))?)?;
+            if removed_visible.contains_key(&id) {
+                // A native CASCADE may have already deleted another member of
+                // a removal cycle. No surviving synced child remains attached.
+                if let Some(values) = crate::write_rows::read_values(database, table, &id.key)? {
+                    changed_once(database.app_execute(&format!("DELETE FROM main.{} WHERE {}",identifier(&table.name),predicate(table)),params_from_iter(key_columns(table).iter().map(|c| sql_value(&values[&c.name]))))?)?;
+                }
+            } else {
+                put(database,table,&id,&view.evaluated(&id)?.values,visible)?;
             }
-        }
-        let mut returning = BTreeSet::new();
-        let mut parents = BTreeMap::<RowId,BTreeSet<RowId>>::new();
-        for (id, references) in &result.references {
-            if result.removed.contains_key(id) { continue; }
-            returning.insert(id.clone());
-            for reference in references.values() {
-                let parent = match reference {
-                    coven_merge::ReferenceValue::Original { parent, .. } | coven_merge::ReferenceValue::Default(Some(parent)) => Some(&parent.row),
-                    _ => None,
-                };
-                if let Some(parent) = parent { parents.entry(id.clone()).or_default().insert(parent.clone()); }
-            }
-        }
-        for id in dependency_order(returning, &parents) {
-            let row = view.evaluated(&id)?;
-            put(database,schema.table(&id.table),&id,&row.values,visible)?;
         }
         for id in &result.region {
             let row = view.evaluated(id)?;
+            for (key, lost) in view.state(id)?.lost() {
+                let value = view.lost_value(id, key, lost)?;
+                if value != lost.value {
+                    database.internal_execute("UPDATE coven_lost SET value=?1 WHERE table_name=?2 AND key=?3 AND audience=?4 AND column_id=(SELECT id FROM coven_columns WHERE table_name=?2 AND column_name=?5) AND set_by=?6 AND replacement_kind='write'", params![encoded(merge_fields::encode_column_value(&value))?,id.table,id.key,audience_text(&id.audience),key.column,encoded(merge_fields::encode_write_id(&key.write))?])?;
+                }
+            }
             if !row.facts.present() { continue; }
             let state = view.state(id)?;
             let old = view.prior(id)?;

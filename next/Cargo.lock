@@ -966,6 +966,7 @@ dependencies = [
 name = "coven-database"
 version = "0.1.0"
 dependencies = [
+ "coven-crypto",
  "coven-format",
  "coven-foundation",
  "coven-merge",

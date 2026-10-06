@@ -3,6 +3,7 @@ use crate::{
     test_utils::{notes_migrations, notes_tables},
     tests::TestStore,
 };
+use coven_foundation::id_source::CircleId;
 
 thread_local! {
     static SCANS: std::cell::RefCell<Vec<(String, i32)>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -241,7 +242,7 @@ async fn reference_cycle(store: &TestStore, reference: &str) -> crate::Database 
         .open()
         .await
         .unwrap();
-    db.write(BTreeSet::new(), |context| {
+    db.write(|context| {
         context.execute(
             "INSERT INTO nodes VALUES(?1,?4,'first',?2),(?2,?4,'second',?1),(?3,'store','default',?3)",
             [CYCLE_FIRST, CYCLE_SECOND, CYCLE_DEFAULT, CYCLE_CIRCLE],
@@ -422,7 +423,7 @@ async fn restoration_triggers_cannot_leave_invalid_local_references() {
                 continue;
             }
             let store = TestStore::new();
-            let schema=format!("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT UNIQUE); CREATE TABLE local({shape},note TEXT REFERENCES notes(id)){suffix}; CREATE TRIGGER restore AFTER INSERT ON notes WHEN coven_applying() BEGIN INSERT INTO local(id,note) VALUES(1,'missing'); END");
+            let schema=format!("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT UNIQUE); CREATE TABLE local({shape},note TEXT REFERENCES notes(id) ON DELETE CASCADE){suffix}; CREATE TRIGGER restore AFTER INSERT ON notes WHEN coven_applying() BEGIN INSERT INTO local(id,note) VALUES(1,'missing'); END");
             let db = store
                 .builder(
                     vec![SyncedTable::new("notes", RowIdentity::SharedKey)],
@@ -635,7 +636,7 @@ async fn observation_and_local_write_sessions_cover_app_and_materialized_changes
     assert!(next(&mut audit).await.is_empty());
     assert!(next(&mut lost).await.is_empty());
     let circle = CircleId(uuid::Uuid::from_u128(7));
-    db.write(BTreeSet::new(), move |sql| {
+    db.write(move |sql| {
         sql.execute("INSERT INTO roots VALUES('root','before')", [])?;
         sql.execute(
             "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001',?1,'title','root')",
@@ -646,13 +647,7 @@ async fn observation_and_local_write_sessions_cover_app_and_materialized_changes
     .await
     .unwrap();
     assert_eq!(next(&mut notes).await, ["title"]);
-    // Removal recomputation runs after part 2 drops its app-write session.
-    db.write(BTreeSet::from([circle]), |sql| {
-        sql.execute("UPDATE roots SET value='after'", [])?;
-        Ok(())
-    })
-    .await
-    .unwrap();
+    db.delete_circle(circle).await.unwrap();
     assert!(next(&mut notes).await.is_empty());
     assert_eq!(next(&mut audit).await, ["title"]);
     let losses = next(&mut lost).await;
@@ -871,4 +866,21 @@ async fn rowid_authorization_does_not_query_metadata_for_each_write_or_trigger()
             .unwrap();
     });
     db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn local_restrict_children_are_refused_before_circle_removal() {
+    let store = TestStore::new();
+    let result = store.schema(
+        vec![SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience")],
+        "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL); CREATE TABLE pins(note TEXT REFERENCES notes(id) ON DELETE RESTRICT)",
+    ).await;
+    let error = crate::tests::database_error(
+        result
+            .err()
+            .expect("local pins must not block a synced deletion"),
+    );
+    assert!(
+        matches!(error, DbError::Schema(crate::SchemaError::LocalChildAction { table, column }) if table == "pins" && column == "note")
+    );
 }

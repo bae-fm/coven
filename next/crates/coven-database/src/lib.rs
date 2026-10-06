@@ -10,7 +10,9 @@ mod authorization;
 mod change_capture;
 mod database;
 mod declaration;
+mod download;
 mod error;
+mod fingerprint;
 mod internal_schema;
 mod key_scope;
 mod live_query;
@@ -31,6 +33,8 @@ mod sql;
 mod sql_value;
 mod sqlite;
 mod write;
+mod write_apply;
+mod write_boundary;
 mod write_capture;
 mod write_commit;
 mod write_encoding;
@@ -42,6 +46,7 @@ pub use coven_format::value::EntryId;
 pub use coven_merge::WriteId;
 pub use database::{CovenReadHandle, Database, DatabaseBuilder};
 pub use declaration::{CacheFill, FileDecl, Provenance, RowIdentity, SyncedTable, Uploads};
+pub use download::{ApplyOutcome, DownloadedPart, DownloadedWrite, SyncState, WriteWait};
 pub use error::{
     CovenError, CovenMigrationError, CovenResult, DbError, MigrationError, SchemaError,
 };

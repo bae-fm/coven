@@ -114,7 +114,7 @@ fn a_region_omitting_the_default_parent_is_not_closed() {
         },
     );
     assert_eq!(
-        super::evaluate(&view, [row(1), row(3)].into(), &[row(1), row(3)]),
+        super::evaluate(&view, [row(1), row(3)].into(), &[row(1), row(3)], true),
         Err(MergeError::RegionNotClosed(row(2)))
     );
 }
