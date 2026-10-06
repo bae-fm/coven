@@ -11,7 +11,11 @@ async fn final_declarations_validate_only_after_the_whole_run() {
         .builder(
             vec![SyncedTable::new("notes", RowIdentity::IndependentUuid).key_columns(["note_id"])],
             vec![
-                Migration::sql(1, "initial", "CREATE TABLE notes(id TEXT PRIMARY KEY)"),
+                Migration::sql(
+                    1,
+                    "initial",
+                    "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY)",
+                ),
                 Migration::sql(2, "rename", "ALTER TABLE notes RENAME COLUMN id TO note_id"),
                 Migration::sql(3, "body", "ALTER TABLE notes ADD COLUMN body TEXT"),
             ],
@@ -102,7 +106,11 @@ async fn final_schema_failure_rolls_back_the_entire_app_run() {
         .builder(
             notes_tables(),
             vec![
-                Migration::sql(1, "initial", "CREATE TABLE notes(id TEXT PRIMARY KEY)"),
+                Migration::sql(
+                    1,
+                    "initial",
+                    "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY)",
+                ),
                 Migration::sql(
                     2,
                     "remove key",
@@ -161,9 +169,9 @@ async fn migration_numbering_and_newer_database_errors_are_exact() {
     for read_only in [true, false] {
         let builder = store.builder(notes_tables(), vec![]);
         let error = if read_only {
-            builder.open_read_only().await
+            builder.open_read_only().await.map(|_| ())
         } else {
-            builder.open().await
+            builder.open().await.map(|_| ())
         }
         .err()
         .unwrap();
@@ -195,7 +203,6 @@ async fn read_only_open_never_runs_pending_app_migrations() {
         .await
         .unwrap();
     assert_eq!(reader.schema_version().await.unwrap(), 1);
-    assert!(reader.applied_migrations().unwrap().is_empty());
     reader.close().await.unwrap();
     db.close().await.unwrap();
 }

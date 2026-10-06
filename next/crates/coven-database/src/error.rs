@@ -60,11 +60,11 @@ pub enum DbError {
         /// The target table.
         table: String,
     },
-    /// SQLite rolled a migration's transaction back itself, so it can't go on (§20.13).
+    /// SQLite rolled the owned transaction back itself, so it can't go on (§20.3, §20.13).
     #[error("SQLite ended the owned transaction")]
     TransactionEnded,
-    /// App SQL tried transaction control, a PRAGMA, ATTACH or loading an
-    /// extension (§5, §20.13).
+    /// App SQL tried transaction control, a PRAGMA, ATTACH, loading an
+    /// extension, or changing the schema outside a migration (§5, §20.13).
     #[error("app SQL cannot perform {operation}")]
     StatementForbidden {
         /// The refused operation.
@@ -76,6 +76,32 @@ pub enum DbError {
         /// The journal mode SQLite selected.
         mode: String,
     },
+    /// The wall clock or next timestamp exceeds its representation (§7.2).
+    #[error("clock is outside the timestamp range")]
+    ClockOutOfRange,
+    /// A value or write exceeds the format's bounds (§5).
+    #[error("{field} length {actual} exceeds {maximum}")]
+    TooLarge {
+        /// The bounded field or collection.
+        field: &'static str,
+        /// Its actual length.
+        actual: usize,
+        /// Its maximum length.
+        maximum: usize,
+    },
+    /// A reference reaches an audience the source row's readers cannot read (§14.5).
+    #[error("reference {table}.{column} at {key:?} reaches another audience")]
+    ReferenceAudience {
+        /// The referencing table.
+        table: String,
+        /// Its row's primary key.
+        key: crate::RowKey,
+        /// The referencing column.
+        column: String,
+    },
+    /// A write targets a circle whose deletion has been applied (§14.7).
+    #[error("circle {0} has been deleted")]
+    DeletedCircle(coven_foundation::id_source::CircleId),
     /// Closing failed for these connections, after every one was tried (§20.1).
     #[error("closing database connections failed: {failures:?}")]
     Closing {
@@ -148,6 +174,14 @@ pub enum SchemaError {
         /// The declared table.
         table: String,
     },
+    /// A primary-key column permits NULL (§8.5).
+    #[error("primary-key column {table}.{column} allows NULL")]
+    NullableKey {
+        /// The synced table.
+        table: String,
+        /// The nullable key column.
+        column: String,
+    },
     /// SQLite chooses the primary key itself (§8.5).
     #[error("SQLite generates the primary key of {table}")]
     GeneratedPrimaryKey {
@@ -165,6 +199,14 @@ pub enum SchemaError {
     KeyColumns {
         /// The declared table.
         table: String,
+    },
+    /// SET NULL or SET DEFAULT would put NULL in a NOT NULL column (§8.4).
+    #[error("foreign key action would put NULL in non-null column {table}.{column}")]
+    ImpossibleAction {
+        /// The synced or local table.
+        table: String,
+        /// The non-null referencing column.
+        column: String,
     },
     /// SET NULL or SET DEFAULT acts on a primary-key column (§8.4).
     #[error("foreign key action changes key column {table}.{column}")]

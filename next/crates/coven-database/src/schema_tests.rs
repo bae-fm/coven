@@ -37,7 +37,7 @@ async fn primary_key_rules_have_distinct_errors() {
     for schema in [
         "CREATE TABLE notes (id INTEGER PRIMARY KEY)",
         "CREATE TABLE notes (id INTEGER PRIMARY KEY AUTOINCREMENT)",
-        "CREATE TABLE notes (id TEXT PRIMARY KEY DEFAULT 'generated')",
+        "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY DEFAULT 'generated')",
     ] {
         rejects(
             schema,
@@ -57,7 +57,7 @@ async fn primary_key_rules_have_distinct_errors() {
     )
     .await;
     rejects(
-        "CREATE TABLE notes (id TEXT, other TEXT, PRIMARY KEY(other,id))",
+        "CREATE TABLE notes (id TEXT NOT NULL, other TEXT NOT NULL, PRIMARY KEY(other,id))",
         vec![independent("notes").key_columns(["id", "other"])],
         SchemaError::KeyColumns {
             table: "notes".into(),
@@ -69,31 +69,30 @@ async fn primary_key_rules_have_distinct_errors() {
 #[tokio::test]
 async fn uuid_values_must_be_canonical_lowercase_v4_or_v7() {
     for schema in [
-        "CREATE TABLE notes (id TEXT PRIMARY KEY); INSERT INTO notes VALUES ('not a uuid')",
-        "CREATE TABLE notes (id TEXT PRIMARY KEY); INSERT INTO notes VALUES ('F47AC10B-58CC-4372-A567-0E02B2C3D479')",
-        "CREATE TABLE notes (id TEXT PRIMARY KEY); INSERT INTO notes VALUES ('f47ac10b-58cc-1372-a567-0e02b2c3d479')",
-        "CREATE TABLE notes (id TEXT PRIMARY KEY); INSERT INTO notes VALUES (NULL)",
-        "CREATE TABLE notes (id TEXT PRIMARY KEY); INSERT INTO notes VALUES ('f47ac10b-58cc-4372-7567-0e02b2c3d479')",
+        "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY); INSERT INTO notes VALUES ('not a uuid')",
+        "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY); INSERT INTO notes VALUES ('F47AC10B-58CC-4372-A567-0E02B2C3D479')",
+        "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY); INSERT INTO notes VALUES ('f47ac10b-58cc-1372-a567-0e02b2c3d479')",
+        "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY); INSERT INTO notes VALUES ('f47ac10b-58cc-4372-7567-0e02b2c3d479')",
     ] { rejects(schema, notes_tables(), SchemaError::IndependentKeyNotUuid { table: "notes".into() }).await; }
     let store = TestStore::new();
-    let database = store.schema(vec![independent("notes").key_columns(["number", "id"])], "CREATE TABLE notes (number INTEGER, id TEXT, PRIMARY KEY(number,id)); INSERT INTO notes VALUES (2,'f47ac10b-58cc-4372-a567-0e02b2c3d479'), (3,'018f22bb-aaaa-7777-8ccc-000000000001')").await.unwrap();
+    let database = store.schema(vec![independent("notes").key_columns(["number", "id"])], "CREATE TABLE notes (number INTEGER NOT NULL, id TEXT NOT NULL, PRIMARY KEY(number,id)); INSERT INTO notes VALUES (2,'f47ac10b-58cc-4372-a567-0e02b2c3d479'), (3,'018f22bb-aaaa-7777-8ccc-000000000001')").await.unwrap();
     database.close().await.unwrap();
 }
 
 #[tokio::test]
 async fn key_foreign_keys_cannot_replace_values_on_delete_or_update() {
     for schema in [
-        "CREATE TABLE p (id TEXT PRIMARY KEY); CREATE TABLE c (id TEXT PRIMARY KEY REFERENCES p(id) ON DELETE SET NULL)",
-        "CREATE TABLE p (id TEXT PRIMARY KEY); CREATE TABLE c (id TEXT PRIMARY KEY REFERENCES p(id) ON UPDATE SET DEFAULT)",
+        "CREATE TABLE p (id TEXT NOT NULL PRIMARY KEY); CREATE TABLE c (id TEXT NOT NULL PRIMARY KEY REFERENCES p(id) ON DELETE SET NULL)",
+        "CREATE TABLE p (id TEXT NOT NULL PRIMARY KEY); CREATE TABLE c (id TEXT NOT NULL PRIMARY KEY REFERENCES p(id) ON UPDATE SET DEFAULT)",
     ] { rejects(schema, vec![shared("p"), shared("c")], SchemaError::PrimaryKeyAction { table: "c".into(), column: "id".into() }).await; }
 }
 
 #[tokio::test]
 async fn root_audience_requires_a_nonnull_text_column() {
     for schema in [
-        "CREATE TABLE notes (id TEXT PRIMARY KEY)",
-        "CREATE TABLE notes (id TEXT PRIMARY KEY, audience TEXT)",
-        "CREATE TABLE notes (id TEXT PRIMARY KEY, audience INTEGER NOT NULL)",
+        "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY)",
+        "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY, audience TEXT)",
+        "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY, audience INTEGER NOT NULL)",
     ] {
         rejects(
             schema,
@@ -109,10 +108,10 @@ async fn root_audience_requires_a_nonnull_text_column() {
 
 #[tokio::test]
 async fn descendant_audience_requires_one_foreign_key_column_into_synced_data() {
-    rejects("CREATE TABLE p (id TEXT, x TEXT, PRIMARY KEY(id,x)); CREATE TABLE c (id TEXT PRIMARY KEY, p_id TEXT, p_x TEXT, FOREIGN KEY(p_id,p_x) REFERENCES p(id,x))", vec![shared("p").key_columns(["id","x"]), independent("c").audience_from("p_id")], SchemaError::AudienceForeignKeyColumns { table: "c".into() }).await;
-    rejects("CREATE TABLE p (id TEXT PRIMARY KEY); CREATE TABLE c (id TEXT PRIMARY KEY, p_id TEXT REFERENCES p(id))", vec![independent("c").audience_from("p_id")], SchemaError::AudienceForeignKeyTarget { table: "c".into(), column: "p_id".into() }).await;
+    rejects("CREATE TABLE p (id TEXT NOT NULL, x TEXT NOT NULL, PRIMARY KEY(id,x)); CREATE TABLE c (id TEXT NOT NULL PRIMARY KEY, p_id TEXT, p_x TEXT, FOREIGN KEY(p_id,p_x) REFERENCES p(id,x))", vec![shared("p").key_columns(["id","x"]), independent("c").audience_from("p_id")], SchemaError::AudienceForeignKeyColumns { table: "c".into() }).await;
+    rejects("CREATE TABLE p (id TEXT NOT NULL PRIMARY KEY); CREATE TABLE c (id TEXT NOT NULL PRIMARY KEY, p_id TEXT REFERENCES p(id))", vec![independent("c").audience_from("p_id")], SchemaError::AudienceForeignKeyTarget { table: "c".into(), column: "p_id".into() }).await;
     rejects(
-        "CREATE TABLE c (id TEXT PRIMARY KEY, p_id TEXT)",
+        "CREATE TABLE c (id TEXT NOT NULL PRIMARY KEY, p_id TEXT)",
         vec![independent("c").audience_from("p_id")],
         SchemaError::AudienceForeignKeyTarget {
             table: "c".into(),
@@ -121,29 +120,29 @@ async fn descendant_audience_requires_one_foreign_key_column_into_synced_data() 
     )
     .await;
     for schema in [
-        "CREATE TABLE p (id TEXT PRIMARY KEY); CREATE TABLE c (id TEXT PRIMARY KEY, p_id TEXT REFERENCES p(id) ON DELETE SET NULL)",
-        "CREATE TABLE p (id TEXT PRIMARY KEY); CREATE TABLE c (id TEXT PRIMARY KEY, p_id TEXT REFERENCES p(id) ON UPDATE SET DEFAULT)",
+        "CREATE TABLE p (id TEXT NOT NULL PRIMARY KEY); CREATE TABLE c (id TEXT NOT NULL PRIMARY KEY, p_id TEXT REFERENCES p(id) ON DELETE SET NULL)",
+        "CREATE TABLE p (id TEXT NOT NULL PRIMARY KEY); CREATE TABLE c (id TEXT NOT NULL PRIMARY KEY, p_id TEXT REFERENCES p(id) ON UPDATE SET DEFAULT)",
     ] { rejects(schema, vec![shared("p"), independent("c").audience_from("p_id")], SchemaError::AudienceForeignKeyAction { table: "c".into(), column: "p_id".into() }).await; }
 }
 
 #[tokio::test]
 async fn audience_cycles_include_self_references_and_longer_cycles() {
     rejects(
-        "CREATE TABLE notes (id TEXT PRIMARY KEY, parent TEXT REFERENCES notes(id))",
+        "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY, parent TEXT REFERENCES notes(id))",
         vec![independent("notes").audience_from("parent")],
         SchemaError::AudienceCycle {
             table: "notes".into(),
         },
     )
     .await;
-    rejects("CREATE TABLE a (id TEXT PRIMARY KEY, parent TEXT REFERENCES b(id)); CREATE TABLE b (id TEXT PRIMARY KEY, parent TEXT REFERENCES c(id)); CREATE TABLE c (id TEXT PRIMARY KEY, parent TEXT REFERENCES a(id))", vec![independent("a").audience_from("parent"), independent("b").audience_from("parent"), independent("c").audience_from("parent")], SchemaError::AudienceCycle { table: "a".into() }).await;
+    rejects("CREATE TABLE a (id TEXT NOT NULL PRIMARY KEY, parent TEXT REFERENCES b(id)); CREATE TABLE b (id TEXT NOT NULL PRIMARY KEY, parent TEXT REFERENCES c(id)); CREATE TABLE c (id TEXT NOT NULL PRIMARY KEY, parent TEXT REFERENCES a(id))", vec![independent("a").audience_from("parent"), independent("b").audience_from("parent"), independent("c").audience_from("parent")], SchemaError::AudienceCycle { table: "a".into() }).await;
 }
 
 #[tokio::test]
 async fn uniqueness_and_shared_keys_are_scoped_to_the_audience() {
-    rejects("CREATE TABLE notes (id TEXT PRIMARY KEY, audience TEXT NOT NULL, title TEXT); CREATE UNIQUE INDEX title_unique ON notes(title)", vec![independent("notes").audience_column("audience")], SchemaError::AudienceConstraint { table: "notes".into(), constraint: "title_unique".into() }).await;
+    rejects("CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY, audience TEXT NOT NULL, title TEXT); CREATE UNIQUE INDEX title_unique ON notes(title)", vec![independent("notes").audience_column("audience")], SchemaError::AudienceConstraint { table: "notes".into(), constraint: "title_unique".into() }).await;
     rejects(
-        "CREATE TABLE notes (id TEXT PRIMARY KEY, audience TEXT NOT NULL)",
+        "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY, audience TEXT NOT NULL)",
         vec![shared("notes").audience_column("audience")],
         SchemaError::AudienceConstraint {
             table: "notes".into(),
@@ -151,18 +150,18 @@ async fn uniqueness_and_shared_keys_are_scoped_to_the_audience() {
         },
     )
     .await;
-    rejects("CREATE TABLE p (id TEXT PRIMARY KEY); CREATE TABLE c (id TEXT PRIMARY KEY, p_id TEXT REFERENCES p(id), label TEXT); CREATE UNIQUE INDEX label_unique ON c(label)", vec![shared("p"), independent("c").audience_from("p_id")], SchemaError::AudienceConstraint { table: "c".into(), constraint: "label_unique".into() }).await;
-    rejects("CREATE TABLE p (id TEXT PRIMARY KEY); CREATE TABLE c (id TEXT PRIMARY KEY, p_id TEXT REFERENCES p(id))", vec![shared("p"), shared("c").audience_from("p_id")], SchemaError::AudienceConstraint { table: "c".into(), constraint: "PRIMARY KEY".into() }).await;
+    rejects("CREATE TABLE p (id TEXT NOT NULL PRIMARY KEY); CREATE TABLE c (id TEXT NOT NULL PRIMARY KEY, p_id TEXT REFERENCES p(id), label TEXT); CREATE UNIQUE INDEX label_unique ON c(label)", vec![shared("p"), independent("c").audience_from("p_id")], SchemaError::AudienceConstraint { table: "c".into(), constraint: "label_unique".into() }).await;
+    rejects("CREATE TABLE p (id TEXT NOT NULL PRIMARY KEY); CREATE TABLE c (id TEXT NOT NULL PRIMARY KEY, p_id TEXT REFERENCES p(id))", vec![shared("p"), shared("c").audience_from("p_id")], SchemaError::AudienceConstraint { table: "c".into(), constraint: "PRIMARY KEY".into() }).await;
     let store = TestStore::new();
-    let db = store.schema(vec![shared("p").key_columns(["audience","id"]).audience_column("audience"), shared("s"), shared("c").key_columns(["s_id","id"]).audience_from("s_id")], "CREATE TABLE p (audience TEXT NOT NULL, id TEXT NOT NULL, title TEXT, PRIMARY KEY(audience,id), UNIQUE(audience,title)); CREATE TABLE s (id TEXT PRIMARY KEY); CREATE TABLE c (s_id TEXT REFERENCES s(id), id TEXT, label TEXT, PRIMARY KEY(s_id,id)); CREATE UNIQUE INDEX scoped_label ON c(s_id,lower(label))").await.unwrap();
+    let db = store.schema(vec![shared("p").key_columns(["audience","id"]).audience_column("audience"), shared("s"), shared("c").key_columns(["s_id","id"]).audience_from("s_id")], "CREATE TABLE p (audience TEXT NOT NULL, id TEXT NOT NULL, title TEXT, PRIMARY KEY(audience,id), UNIQUE(audience,title)); CREATE TABLE s (id TEXT NOT NULL PRIMARY KEY); CREATE TABLE c (s_id TEXT NOT NULL REFERENCES s(id), id TEXT NOT NULL, label TEXT, PRIMARY KEY(s_id,id)); CREATE UNIQUE INDEX scoped_label ON c(s_id,lower(label))").await.unwrap();
     db.close().await.unwrap();
 }
 
 #[tokio::test]
 async fn unguarded_shared_triggers_are_schema_errors() {
     for schema in [
-        "CREATE TABLE notes (id TEXT PRIMARY KEY, title TEXT); CREATE TRIGGER edited AFTER UPDATE ON notes BEGIN SELECT 1; END",
-        "CREATE TABLE notes (id TEXT PRIMARY KEY, title TEXT); CREATE TRIGGER edited AFTER UPDATE ON notes WHEN NOT coven_applying() OR 1 BEGIN SELECT 1; END",
+        "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY, title TEXT); CREATE TRIGGER edited AFTER UPDATE ON notes BEGIN SELECT 1; END",
+        "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY, title TEXT); CREATE TRIGGER edited AFTER UPDATE ON notes WHEN NOT coven_applying() OR 1 BEGIN SELECT 1; END",
     ] { rejects(schema, vec![independent("notes").shared_trigger("edited")], SchemaError::SharedTriggerGuard { table: "notes".into(), trigger: "edited".into() }).await; }
 }
 
@@ -180,7 +179,7 @@ async fn file_declarations_check_every_named_column_and_accept_custom_names() {
     let error = store
         .schema(
             vec![shared("files").carries_files(file())],
-            "CREATE TABLE files (id TEXT PRIMARY KEY, size INTEGER, hash BLOB)",
+            "CREATE TABLE files (id TEXT NOT NULL PRIMARY KEY, size INTEGER, hash BLOB)",
         )
         .await
         .err()
@@ -188,7 +187,7 @@ async fn file_declarations_check_every_named_column_and_accept_custom_names() {
     assert!(
         matches!(database_error(error), DbError::Schema(SchemaError::FileColumn { table, column }) if table == "files" && column == "location")
     );
-    let db = store.schema(vec![shared("files").carries_files(file().with_id_column("file_id").with_size_column("bytes").with_hash_column("sha").with_location_column("place").write_once())], "CREATE TABLE files (id TEXT PRIMARY KEY, file_id TEXT, bytes INTEGER, sha BLOB, place TEXT)").await.unwrap();
+    let db = store.schema(vec![shared("files").carries_files(file().with_id_column("file_id").with_size_column("bytes").with_hash_column("sha").with_location_column("place").write_once())], "CREATE TABLE files (id TEXT NOT NULL PRIMARY KEY, file_id TEXT, bytes INTEGER, sha BLOB, place TEXT)").await.unwrap();
     db.close().await.unwrap();
 }
 
@@ -226,7 +225,7 @@ async fn declarations_have_distinct_errors() {
     )
     .await;
     rejects(
-        "CREATE TABLE notes(id TEXT PRIMARY KEY)",
+        "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY)",
         vec![shared("notes"), shared("NOTES")],
         SchemaError::DuplicateTable {
             table: "NOTES".into(),
@@ -249,12 +248,122 @@ async fn declarations_have_distinct_errors() {
             .audience_column("audience")
             .audience_from("parent"),
     ] {
-        rejects("CREATE TABLE notes(id TEXT PRIMARY KEY, audience TEXT NOT NULL, parent TEXT REFERENCES notes(id))", vec![declaration], SchemaError::TwoAudiences { table: "notes".into() }).await;
+        rejects("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, audience TEXT NOT NULL, parent TEXT REFERENCES notes(id))", vec![declaration], SchemaError::TwoAudiences { table: "notes".into() }).await;
     }
     for schema in [
-        "CREATE TABLE notes(id TEXT PRIMARY KEY)",
-        "CREATE TABLE notes(id TEXT PRIMARY KEY); CREATE TABLE local(id TEXT); CREATE TRIGGER edited AFTER UPDATE ON local WHEN NOT coven_applying() BEGIN SELECT 1; END",
+        "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY)",
+        "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE local(id TEXT); CREATE TRIGGER edited AFTER UPDATE ON local WHEN NOT coven_applying() BEGIN SELECT 1; END",
     ] {
         rejects(schema, vec![shared("notes").shared_trigger("edited")], SchemaError::MissingTrigger { table: "notes".into(), trigger: "edited".into() }).await;
+    }
+}
+
+#[tokio::test]
+async fn impossible_actions_are_refused_in_synced_and_local_tables() {
+    for synced in [false, true] {
+        for event in ["DELETE", "UPDATE"] {
+            for (action, default) in [
+                ("SET NULL", ""),
+                ("SET NULL", "DEFAULT 'valid'"),
+                ("SET DEFAULT", ""),
+                ("SET DEFAULT", "DEFAULT NULL"),
+                ("SET DEFAULT", "DEFAULT (NULL)"),
+                ("SET DEFAULT", "DEFAULT (NULLIF(1,1))"),
+            ] {
+                let store = TestStore::new();
+                let tables = if synced {
+                    vec![shared("child")]
+                } else {
+                    vec![]
+                };
+                let schema = format!("CREATE TABLE parent(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE child(id TEXT NOT NULL PRIMARY KEY,parent TEXT NOT NULL {default} REFERENCES parent(id) ON {event} {action})");
+                let error = store
+                    .builder(
+                        tables,
+                        vec![Migration::run(1, "invalid action", move |c| {
+                            c.execute_batch(&schema)?;
+                            Ok(())
+                        })],
+                    )
+                    .open()
+                    .await
+                    .err()
+                    .expect("impossible action must fail migration");
+                assert!(
+                    matches!(database_error(error), DbError::Schema(SchemaError::ImpossibleAction { table, column }) if table == "child" && column == "parent"),
+                    "{synced}, {event}, {action}, {default}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn opening_an_existing_schema_refuses_an_impossible_local_action() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    db.inspect_writer(|db| db.batch("CREATE TABLE parent(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE child(parent TEXT NOT NULL REFERENCES parent(id) ON UPDATE SET DEFAULT)").unwrap());
+    db.close().await.unwrap();
+    for read_only in [false, true] {
+        let builder = store.builder(vec![], vec![]);
+        let error = if read_only {
+            builder.open_read_only().await.map(|_| ())
+        } else {
+            builder.open().await.map(|_| ())
+        }
+        .expect_err("invalid existing schema");
+        assert!(
+            matches!(database_error(error), DbError::Schema(SchemaError::ImpossibleAction { table, column }) if table == "child" && column == "parent")
+        );
+    }
+}
+
+#[tokio::test]
+async fn nullable_actions_and_nonnull_defaults_are_accepted() {
+    for definition in [
+        "parent TEXT REFERENCES parent(id) ON DELETE SET NULL",
+        "parent TEXT REFERENCES parent(id) ON UPDATE SET DEFAULT",
+        "parent TEXT NOT NULL DEFAULT 'NULL' REFERENCES parent(id) ON DELETE SET DEFAULT",
+        "parent TEXT NOT NULL DEFAULT (lower('DEFAULT')) REFERENCES parent(id) ON UPDATE SET DEFAULT",
+    ] {
+        let store = TestStore::new();
+        let schema = format!("CREATE TABLE parent(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE child({definition})");
+        let db = store.builder(vec![], vec![Migration::run(1, "actions", move |c| { c.execute_batch(&schema)?; Ok(()) })]).open().await.unwrap();
+        db.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn nullable_primary_keys_are_refused_on_open_and_after_migrating() {
+    for (schema, key, column) in [
+        ("CREATE TABLE notes(id TEXT PRIMARY KEY)", vec!["id"], "id"),
+        (
+            "CREATE TABLE notes(id TEXT NOT NULL,seq INT,PRIMARY KEY(id,seq))",
+            vec!["id", "seq"],
+            "seq",
+        ),
+    ] {
+        let store = TestStore::new();
+        let tables = || vec![shared("notes").key_columns(key.clone())];
+        let error = store
+            .schema(tables(), schema)
+            .await
+            .err()
+            .expect("nullable key must fail migration");
+        assert!(
+            matches!(database_error(error), DbError::Schema(SchemaError::NullableKey { table, column: found }) if table == "notes" && found == column)
+        );
+        let db = store.builder(vec![], vec![]).open().await.unwrap();
+        db.inspect_writer(|db| db.batch(schema).unwrap());
+        db.close().await.unwrap();
+        let error = store
+            .builder(tables(), vec![])
+            .open()
+            .await
+            .err()
+            .expect("nullable key must fail open");
+        assert!(
+            matches!(database_error(error), DbError::Schema(SchemaError::NullableKey { table, column: found }) if table == "notes" && found == column)
+        );
     }
 }

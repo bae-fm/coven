@@ -16,7 +16,8 @@ mod timestamp;
 pub use error::MergeError;
 pub use history::{from_writes, History};
 pub use input::{
-    Audience, Change, ColumnValue, Operation, Parent, RowId, Write, WriteId, WriteOracle,
+    Audience, Change, ColumnValue, ConstraintColumns, ForeignKey, Operation, Parent, RowId,
+    UniqueConstraint, Write, WriteId, WriteOracle, WritePast,
 };
 pub use removal::{
     recompute, removals, resolve_reference, Constraints, Group, OnDelete, Reference,

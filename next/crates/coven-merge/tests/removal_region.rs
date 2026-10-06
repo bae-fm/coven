@@ -37,7 +37,7 @@ fn present(ms: u64, parent: Option<RowId>) -> RemovalRow {
             .into_iter()
             .map(|row| {
                 (
-                    "parent".into(),
+                    coven_merge::ForeignKey::new(["parent"], "rows", ["id"]),
                     Reference {
                         parent: Parent { row, generation: 1 },
                         on_delete: OnDelete::Cascade,
@@ -52,7 +52,7 @@ fn present(ms: u64, parent: Option<RowId>) -> RemovalRow {
 fn claim(value: &str, ms: u64) -> Constraints {
     Constraints {
         unique: BTreeMap::from([(
-            "title".into(),
+            ["title"].into(),
             UniqueClaim {
                 value: value.as_bytes().to_vec(),
                 timestamp: stamp(ms),
@@ -108,7 +108,7 @@ impl IndexedView {
                 table: row.table.clone(),
                 key: row.key.clone(),
             }]);
-            for (constraint, claim) in &constraints.unique {
+            for (constraint, claim) in constraints.unique.iter() {
                 groups.insert(Group::Claim {
                     table: row.table.clone(),
                     audience: row.audience.clone(),
@@ -133,6 +133,7 @@ impl IndexedView {
 }
 
 impl RemovalView for IndexedView {
+    type Error = MergeError;
     fn rows(&self) -> Result<Vec<RowId>, MergeError> {
         Ok(self.rows.keys().cloned().collect())
     }
@@ -147,7 +148,7 @@ impl RemovalView for IndexedView {
     fn constraints(
         &self,
         row: &RowId,
-        _: &BTreeMap<String, ReferenceValue>,
+        _: &BTreeMap<coven_merge::ForeignKey, ReferenceValue>,
     ) -> Result<Constraints, MergeError> {
         Ok(self.rows[row].1.clone())
     }
@@ -191,7 +192,7 @@ fn region_expands_each_competition_group_once_per_view() {
     assert_eq!(
         partial.removed,
         BTreeMap::from([
-            (row(0), BTreeSet::from([Rule::Unique("title".into())])),
+            (row(0), BTreeSet::from([Rule::Unique(["title"].into())])),
             (circle(0, 1), BTreeSet::from([Rule::OtherAudience])),
         ])
     );
@@ -210,14 +211,14 @@ fn competing_claims_keep_every_reason_and_respect_each_scope() {
     let mut first = claim("shared", 1);
     first
         .unique
-        .insert("slug".into(), first.unique["title"].clone());
+        .insert(["slug"].into(), first.unique[&["title"].into()].clone());
     let mut second = claim("shared", 2);
     second
         .unique
-        .insert("slug".into(), second.unique["title"].clone());
+        .insert(["slug"].into(), second.unique[&["title"].into()].clone());
     let mut third = claim("different", 0);
     third.unique.insert(
-        "slug".into(),
+        ["slug"].into(),
         UniqueClaim {
             value: b"shared".to_vec(),
             timestamp: stamp(0),
@@ -240,10 +241,13 @@ fn competing_claims_keep_every_reason_and_respect_each_scope() {
     assert_eq!(
         result.removed,
         BTreeMap::from([
-            (row(1), BTreeSet::from([Rule::Unique("slug".into())])),
+            (row(1), BTreeSet::from([Rule::Unique(["slug"].into())])),
             (
                 row(2),
-                BTreeSet::from([Rule::Unique("slug".into()), Rule::Unique("title".into())])
+                BTreeSet::from([
+                    Rule::Unique(["slug"].into()),
+                    Rule::Unique(["title"].into())
+                ])
             ),
         ])
     );
@@ -256,7 +260,7 @@ fn closure_records_every_reference_even_when_the_child_went_out_first() {
         unreachable!()
     };
     references.insert(
-        "second".into(),
+        coven_merge::ForeignKey::new(["second"], "rows", ["id"]),
         Reference {
             parent: Parent {
                 row: row(2),
@@ -276,11 +280,15 @@ fn closure_records_every_reference_even_when_the_child_went_out_first() {
     assert_eq!(
         result.removed[&row(0)],
         BTreeSet::from([
-            Rule::ForeignKey("parent".into()),
-            Rule::ForeignKey("second".into()),
+            Rule::ForeignKey(coven_merge::ForeignKey::new(["parent"], "rows", ["id"])),
+            Rule::ForeignKey(coven_merge::ForeignKey::new(["second"], "rows", ["id"])),
         ])
     );
-    assert_rule(&result, &row(1), Rule::ForeignKey("parent".into()));
+    assert_rule(
+        &result,
+        &row(1),
+        Rule::ForeignKey(coven_merge::ForeignKey::new(["parent"], "rows", ["id"])),
+    );
     assert_rule(&result, &row(2), Rule::Check("valid".into()));
 }
 
@@ -322,13 +330,17 @@ fn twenty_thousand_rows_cover_claims_audiences_and_deep_chains() {
     assert_eq!(full.removed.len(), 19_999);
     assert!(!full.removed.contains_key(&row(0)));
     for n in 1..8_000 {
-        assert_rule(&full, &row(n), Rule::Unique("title".into()));
+        assert_rule(&full, &row(n), Rule::Unique(["title"].into()));
     }
     for n in 1..=8_000 {
         assert_rule(&full, &circle(0, n), Rule::OtherAudience);
     }
     for n in 8_000..11_999 {
-        assert_rule(&full, &row(n), Rule::ForeignKey("parent".into()));
+        assert_rule(
+            &full,
+            &row(n),
+            Rule::ForeignKey(coven_merge::ForeignKey::new(["parent"], "rows", ["id"])),
+        );
     }
     assert_rule(&full, &row(11_999), Rule::Check("valid".into()));
     assert_eq!(before.visited.borrow().len(), before.members.len());
@@ -349,13 +361,17 @@ fn twenty_thousand_rows_cover_claims_audiences_and_deep_chains() {
     assert_eq!(after.visited.borrow().len(), after.members.len());
     assert!(!partial.removed.contains_key(&row(0)));
     for n in 2..8_000 {
-        assert_rule(&partial, &row(n), Rule::Unique("title".into()));
+        assert_rule(&partial, &row(n), Rule::Unique(["title"].into()));
     }
     for n in 3..=8_000 {
         assert_rule(&partial, &circle(0, n), Rule::OtherAudience);
     }
     for n in 10_000..11_999 {
-        assert_rule(&partial, &row(n), Rule::ForeignKey("parent".into()));
+        assert_rule(
+            &partial,
+            &row(n),
+            Rule::ForeignKey(coven_merge::ForeignKey::new(["parent"], "rows", ["id"])),
+        );
     }
     assert_rule(&partial, &row(11_999), Rule::Check("valid".into()));
     // Visit counts above prove linear group expansion; these bounds only

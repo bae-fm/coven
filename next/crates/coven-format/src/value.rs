@@ -154,6 +154,15 @@ positions!(
     WriteId,
     "How far each device's write log has been read (§7.1)."
 );
+impl coven_merge::WritePast for WritePositions {
+    fn contains(&self, write: &WriteId) -> bool {
+        self.covers(*write)
+    }
+    fn frontier(&self) -> impl Iterator<Item = &WriteId> {
+        self.0.iter()
+    }
+}
+
 positions!(
     EntryPositions,
     EntryId,

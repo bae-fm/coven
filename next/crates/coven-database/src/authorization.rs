@@ -13,6 +13,10 @@ pub(crate) struct SqlAuthorization {
 
 struct AuthorizationState {
     internal: bool,
+    writing: bool,
+    stepping: bool,
+    applying: bool,
+    reads: Option<Vec<String>>,
     #[cfg(test)]
     integrity_checks: usize,
     altering: bool,
@@ -26,6 +30,10 @@ impl SqlAuthorization {
         Self {
             state: Arc::new(Mutex::new(AuthorizationState {
                 internal: false,
+                writing: false,
+                stepping: false,
+                applying: false,
+                reads: None,
                 #[cfg(test)]
                 integrity_checks: 0,
                 altering: false,
@@ -43,6 +51,13 @@ impl SqlAuthorization {
         let state = Arc::clone(&self.state);
         move |context| {
             let mut state = state.lock().expect("SQL authorization lock poisoned");
+            if let AuthAction::Read { column_name, .. } = context.action {
+                if let Some(reads) = &mut state.reads {
+                    if !column_name.is_empty() && !reads.iter().any(|c| c == column_name) {
+                        reads.push(column_name.into());
+                    }
+                }
+            }
             #[cfg(test)]
             if matches!(
                 context.action,
@@ -71,6 +86,46 @@ impl SqlAuthorization {
         assert!(!state.internal, "internal SQL scope cannot nest");
         state.internal = true;
         InternalSql(self)
+    }
+
+    pub(crate) fn applying_function(
+        &self,
+    ) -> impl Fn(&rusqlite::functions::Context<'_>) -> rusqlite::Result<bool> + Send + 'static {
+        let state = Arc::clone(&self.state);
+        move |_| {
+            Ok(state
+                .lock()
+                .expect("SQL authorization lock poisoned")
+                .applying)
+        }
+    }
+
+    pub(crate) fn applying(&self) -> ApplyingSql<'_> {
+        let mut state = self.state.lock().expect("SQL authorization lock poisoned");
+        assert!(!state.applying, "applying SQL scope cannot nest");
+        state.applying = true;
+        ApplyingSql(self)
+    }
+
+    pub(crate) fn observe_reads(&self) -> ReadColumns<'_> {
+        let mut state = self.state.lock().expect("SQL authorization lock poisoned");
+        assert!(state.reads.is_none(), "column observation cannot nest");
+        state.reads = Some(Vec::new());
+        ReadColumns(self)
+    }
+
+    pub(crate) fn write(&self) -> WriteSql<'_> {
+        let mut state = self.state.lock().expect("SQL authorization lock poisoned");
+        assert!(!state.writing, "write SQL scope cannot nest");
+        state.writing = true;
+        WriteSql(self)
+    }
+
+    pub(crate) fn step(&self) -> StepSql<'_> {
+        let mut state = self.state.lock().expect("SQL authorization lock poisoned");
+        assert!(!state.stepping, "SQL step scope cannot nest");
+        state.stepping = true;
+        StepSql(self)
     }
 
     pub(crate) fn begin_app_call(&self) {
@@ -117,6 +172,67 @@ impl SqlAuthorization {
 }
 
 pub(crate) struct InternalSql<'a>(&'a SqlAuthorization);
+
+pub(crate) struct ApplyingSql<'a>(&'a SqlAuthorization);
+
+impl Drop for ApplyingSql<'_> {
+    fn drop(&mut self) {
+        self.0
+            .state
+            .lock()
+            .expect("SQL authorization lock poisoned")
+            .applying = false;
+    }
+}
+
+pub(crate) struct ReadColumns<'a>(&'a SqlAuthorization);
+
+impl ReadColumns<'_> {
+    pub(crate) fn columns(&self) -> Vec<String> {
+        self.0
+            .state
+            .lock()
+            .expect("SQL authorization lock poisoned")
+            .reads
+            .as_ref()
+            .expect("observing reads")
+            .clone()
+    }
+}
+
+impl Drop for ReadColumns<'_> {
+    fn drop(&mut self) {
+        self.0
+            .state
+            .lock()
+            .expect("SQL authorization lock poisoned")
+            .reads = None;
+    }
+}
+
+pub(crate) struct WriteSql<'a>(&'a SqlAuthorization);
+
+impl Drop for WriteSql<'_> {
+    fn drop(&mut self) {
+        self.0
+            .state
+            .lock()
+            .expect("SQL authorization lock poisoned")
+            .writing = false;
+    }
+}
+
+pub(crate) struct StepSql<'a>(&'a SqlAuthorization);
+
+impl Drop for StepSql<'_> {
+    fn drop(&mut self) {
+        self.0
+            .state
+            .lock()
+            .expect("SQL authorization lock poisoned")
+            .stepping = false;
+    }
+}
 
 impl Drop for InternalSql<'_> {
     fn drop(&mut self) {
@@ -213,6 +329,34 @@ impl AuthorizationState {
         if let Some(error) = object.and_then(reserved) {
             return Some(error);
         }
+        if self.writing
+            && matches!(
+                context.action,
+                CreateTable { .. }
+                    | CreateTempTable { .. }
+                    | DropTable { .. }
+                    | DropTempTable { .. }
+                    | CreateVtable { .. }
+                    | DropVtable { .. }
+                    | AlterTable { .. }
+                    | CreateIndex { .. }
+                    | CreateTempIndex { .. }
+                    | DropIndex { .. }
+                    | DropTempIndex { .. }
+                    | CreateTrigger { .. }
+                    | CreateTempTrigger { .. }
+                    | DropTrigger { .. }
+                    | DropTempTrigger { .. }
+                    | CreateView { .. }
+                    | CreateTempView { .. }
+                    | DropView { .. }
+                    | DropTempView { .. }
+            )
+        {
+            return Some(DbError::StatementForbidden {
+                operation: "schema changes in a write",
+            });
+        }
         if matches!(context.action, AlterTable { .. }) {
             self.altering = true;
         }
@@ -220,6 +364,19 @@ impl AuthorizationState {
         // The permission lasts for this statement, never the following one.
         let internal_check = self.altering;
         let forbidden = match context.action {
+            // The session extension initializes its table metadata lazily from
+            // its pre-update hook. App SQL was already authorized at prepare;
+            // no app row-mapping callback runs with this permission enabled.
+            Pragma {
+                pragma_name: "table_xinfo",
+                pragma_value: Some(table),
+            } if self.stepping
+                && context.database_name == Some("main")
+                && self.writing
+                && self.synced.contains(&table.to_ascii_lowercase()) =>
+            {
+                None
+            }
             Pragma {
                 pragma_name: "quick_check",
                 ..

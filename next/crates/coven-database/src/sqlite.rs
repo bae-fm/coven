@@ -1,6 +1,10 @@
 //! The leaf SQLite capability. Its connection is never returned or borrowed out.
 
+use std::collections::BTreeSet;
 use std::path::Path;
+use std::time::SystemTime;
+
+use coven_foundation::id_source::{CircleId, DeviceId};
 
 use rusqlite::{
     fallible_iterator::FallibleIterator, functions::FunctionFlags, Batch, Connection, OpenFlags,
@@ -19,6 +23,8 @@ use crate::{
 pub(crate) struct DatabaseConnection {
     connection: Connection,
     authorization: SqlAuthorization,
+    #[cfg(test)]
+    scans: std::sync::Mutex<Vec<(String, i32)>>,
 }
 
 impl DatabaseConnection {
@@ -42,12 +48,14 @@ impl DatabaseConnection {
             "coven_applying",
             0,
             FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
-            |_| Ok(false),
+            authorization.applying_function(),
         )?;
         connection.authorizer(Some(authorization.callback()))?;
         let db = Self {
             connection,
             authorization,
+            #[cfg(test)]
+            scans: std::sync::Mutex::new(Vec::new()),
         };
         db.batch("PRAGMA foreign_keys = ON; PRAGMA recursive_triggers = ON; PRAGMA trusted_schema = OFF;")?;
         Ok(db)
@@ -151,9 +159,125 @@ impl DatabaseConnection {
         })
     }
 
+    pub(crate) fn local_write<F, R>(
+        &self,
+        schema: &crate::write_schema::WriteSchema,
+        device: DeviceId,
+        now: SystemTime,
+        deleted_circles: &BTreeSet<CircleId>,
+        sql: F,
+    ) -> Result<R, DbError>
+    where
+        F: FnOnce(crate::SqlContext<'_>) -> Result<R, DbError>,
+    {
+        #[cfg(test)]
+        let _profile = self.profile_write();
+        self.transaction(|database| {
+            let mut session = rusqlite::session::Session::new(&database.connection)?;
+            for table in &schema.declarations {
+                session.attach(Some(table.name.as_str()))?;
+            }
+            let result = {
+                let _scope = database.authorization.write();
+                sql(crate::SqlContext::new(database))?
+            };
+            database.require_transaction()?;
+            let changeset = {
+                let _scope = database.authorization.internal();
+                session.changeset()?
+            };
+            drop(session);
+            let captured = crate::write_capture::capture(&changeset, &schema.schema)?;
+            let before = crate::write_rows::AppView::before(database, schema, &captured)?;
+            let after = crate::write_rows::AppView::after(database, schema);
+            let store = crate::merge_store::MergeStore::new(database, &before);
+            let changes = crate::write_record::changes(
+                database,
+                schema,
+                &before,
+                &after,
+                &store,
+                &captured,
+                deleted_circles,
+            )?;
+            let record = if changes.is_empty() {
+                None
+            } else {
+                Some(crate::write_record::record(database, device, now, changes)?)
+            };
+            let updates = match &record {
+                Some(record) => store.apply(record)?,
+                None => std::collections::BTreeMap::new(),
+            };
+            let empty = std::collections::BTreeMap::new();
+            let old = crate::removal_view::DatabaseRemovalView::new(
+                database,
+                &store,
+                schema,
+                &before,
+                &empty,
+                deleted_circles,
+                None,
+            )?;
+            let new = crate::removal_view::DatabaseRemovalView::new(
+                database,
+                &store,
+                schema,
+                &after,
+                &updates,
+                deleted_circles,
+                record
+                    .as_ref()
+                    .map(|r| (r.header.position, r.header.timestamp)),
+            )?;
+            let touched: BTreeSet<_> = updates.keys().cloned().collect();
+            old.prime(touched.iter().cloned())?;
+            new.prime(touched.iter().cloned())?;
+            let removal = match coven_merge::recompute(&old, &new, touched) {
+                Ok(result) => result,
+                Err(crate::removal_view::RemovalFailure::Sql(error)) => return Err(error),
+                Err(crate::removal_view::RemovalFailure::Merge(error)) => {
+                    panic!("database removal view violates merge invariant: {error}")
+                }
+            };
+            if let Some(record) = &record {
+                crate::write_commit::commit(database, record, &store, &updates)?;
+            }
+            database.batch("PRAGMA defer_foreign_keys=ON")?;
+            crate::removal::materialize(database, schema, &after, &new, &removal)?;
+            Ok(result)
+        })
+    }
+
     pub(crate) fn batch(&self, sql: &str) -> Result<(), DbError> {
         let _scope = self.authorization.internal();
         self.connection.execute_batch(sql).map_err(Into::into)
+    }
+
+    pub(crate) fn columns_read(&self, sql: &str) -> Result<Vec<String>, DbError> {
+        let _scope = self.authorization.internal();
+        let reads = self.authorization.observe_reads();
+        self.connection.prepare(sql)?;
+        Ok(reads.columns())
+    }
+
+    /// Mark ordinary materialization SQL so shared triggers stay suppressed.
+    /// SQLite retains ownership of foreign keys, actions and deferred checks.
+    pub(crate) fn materialize<T>(
+        &self,
+        run: impl FnOnce(&Self) -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
+        let _scope = self.authorization.applying();
+        run(self)
+    }
+
+    pub(crate) fn internal_execute<P: Params>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> Result<usize, DbError> {
+        let _scope = self.authorization.internal();
+        self.connection.execute(sql, params).map_err(Into::into)
     }
 
     pub(crate) fn query_row<T, P: Params>(
@@ -200,8 +324,11 @@ impl DatabaseConnection {
     pub(crate) fn app_execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
         self.authorization.check_sql(sql)?;
         self.begin_app_statement()?;
-        self.authorization
-            .app_result(self.connection.execute(sql, params))
+        let mut statement = self
+            .authorization
+            .app_result(self.connection.prepare(sql))?;
+        let _scope = self.authorization.step();
+        self.authorization.app_result(statement.execute(params))
     }
 
     pub(crate) fn app_batch(&self, sql: &str) -> rusqlite::Result<()> {
@@ -215,6 +342,7 @@ impl DatabaseConnection {
             // Step every row so later execution errors cannot be discarded.
             let result = (|| {
                 let mut rows = statement.raw_query();
+                let _scope = self.authorization.step();
                 while rows.next()?.is_some() {}
                 Ok(())
             })();
@@ -230,8 +358,15 @@ impl DatabaseConnection {
     ) -> rusqlite::Result<T> {
         self.authorization.check_sql(sql)?;
         self.begin_app_statement()?;
-        self.authorization
-            .app_result(self.connection.query_row(sql, params, map))
+        let mut statement = self
+            .authorization
+            .app_result(self.connection.prepare(sql))?;
+        let mut rows = statement.query(params)?;
+        let row = {
+            let _scope = self.authorization.step();
+            self.authorization.app_result(rows.next())?
+        };
+        map(row.ok_or(rusqlite::Error::QueryReturnedNoRows)?)
     }
 
     pub(crate) fn app_query<T, P: Params>(
@@ -244,8 +379,18 @@ impl DatabaseConnection {
         self.begin_app_statement()?;
         let result = (|| {
             let mut statement = self.connection.prepare(sql)?;
-            let rows = statement.query_map(params, map)?.collect();
-            rows
+            let mut rows = statement.query(params)?;
+            let mut values = Vec::new();
+            let mut map = map;
+            loop {
+                let row = {
+                    let _scope = self.authorization.step();
+                    self.authorization.app_result(rows.next())?
+                };
+                let Some(row) = row else { break };
+                values.push(map(row)?);
+            }
+            Ok(values)
         })();
         self.authorization.app_result(result)
     }
@@ -311,7 +456,7 @@ impl Drop for SqlTransaction<'_> {
         if self.active && !self.database.connection.is_autocommit() {
             self.database
                 .batch("ROLLBACK")
-                .expect("rollback panicking migration");
+                .expect("rollback panicking database transaction");
         }
     }
 }

@@ -6,6 +6,33 @@ use crate::wire::{wire_struct, Decoder, Encoder, Wire};
 use coven_merge::{Cell, ColumnValue, LostKey, LostValue, Parent, Rule};
 use std::collections::{BTreeMap, BTreeSet};
 
+wire_struct!(coven_merge::ForeignKey, columns, parent, parent_columns);
+impl Wire for coven_merge::UniqueConstraint {
+    fn put(&self, out: &mut Encoder) -> Result<(), Error> {
+        self.terms.put(out)?;
+        match &self.partial {
+            None => 0u8.put(out),
+            Some(partial) => {
+                1u8.put(out)?;
+                partial.put(out)
+            }
+        }
+    }
+    fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
+        let terms = Wire::get(input)?;
+        let partial = match u8::get(input)? {
+            0 => None,
+            1 => Some(Wire::get(input)?),
+            tag => {
+                return Err(Error::UnknownTag {
+                    field: "partial unique constraint",
+                    tag,
+                })
+            }
+        };
+        Ok(Self { terms, partial })
+    }
+}
 wire_struct!(Parent, row, generation);
 wire_struct!(ColumnValue<Value>, value, parents);
 wire_struct!(Cell<Value>, write, value);
@@ -51,9 +78,9 @@ pub(crate) fn column(value: &ColumnValue<Value>) -> Result<(), Error> {
     parents(&value.parents)
 }
 
-pub(crate) fn parents(values: &BTreeMap<String, Parent>) -> Result<(), Error> {
+pub(crate) fn parents(values: &BTreeMap<coven_merge::ForeignKey, Parent>) -> Result<(), Error> {
     for (constraint, parent) in values {
-        name(constraint)?;
+        foreign_key(constraint)?;
         row(&parent.row)?;
     }
     Ok(())
@@ -97,9 +124,62 @@ pub(crate) fn setters(values: &BTreeMap<String, coven_merge::WriteId>) -> Result
 pub(crate) fn rules(values: &BTreeSet<Rule>) -> Result<(), Error> {
     for rule in values {
         match rule {
-            Rule::ForeignKey(n) | Rule::Check(n) | Rule::Unique(n) => name(n)?,
+            Rule::ForeignKey(n) => foreign_key(n)?,
+            Rule::Unique(n) => unique_constraint(n)?,
+            Rule::Check(n) => name(n)?,
             Rule::DeletedCircle | Rule::OtherAudience => {}
         }
+    }
+    Ok(())
+}
+
+impl Wire for coven_merge::ConstraintColumns {
+    fn put(&self, out: &mut Encoder) -> Result<(), Error> {
+        self.0.put(out)
+    }
+    fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
+        Ok(Self(Wire::get(input)?))
+    }
+}
+
+pub(crate) fn foreign_key(key: &coven_merge::ForeignKey) -> Result<(), Error> {
+    foreign_key_columns(&key.columns)?;
+    name(&key.parent)?;
+    foreign_key_columns(&key.parent_columns)?;
+    crate::error::require(
+        key.columns.0.len() == key.parent_columns.0.len(),
+        "foreign key columns",
+        crate::error::Rule::ForeignKeyColumns,
+    )
+}
+
+fn foreign_key_columns(columns: &coven_merge::ConstraintColumns) -> Result<(), Error> {
+    crate::error::require(
+        !columns.0.is_empty(),
+        "constraint columns",
+        crate::error::Rule::Required,
+    )?;
+    constraint_columns(columns)
+}
+
+fn constraint_columns(columns: &coven_merge::ConstraintColumns) -> Result<(), Error> {
+    for column in &columns.0 {
+        name(column)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn unique_constraint(constraint: &coven_merge::UniqueConstraint) -> Result<(), Error> {
+    crate::error::require(
+        !constraint.terms.is_empty(),
+        "unique terms",
+        crate::error::Rule::Required,
+    )?;
+    for term in &constraint.terms {
+        name(term)?;
+    }
+    if let Some(partial) = &constraint.partial {
+        name(partial)?;
     }
     Ok(())
 }

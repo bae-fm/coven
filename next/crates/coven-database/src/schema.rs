@@ -11,7 +11,7 @@ use crate::{DbError, MigrationChange, RowIdentity, SchemaError, SyncedTable};
 
 pub(crate) struct Schema {
     objects: BTreeMap<(String, String), SchemaObject>,
-    tables: BTreeMap<String, TableSchema>,
+    pub(crate) tables: BTreeMap<String, TableSchema>,
 }
 
 #[derive(Eq, PartialEq)]
@@ -20,33 +20,38 @@ struct SchemaObject {
     sql: Option<String>,
 }
 
-struct TableSchema {
-    name: String,
-    columns: Vec<SchemaColumn>,
-    indices: Vec<SchemaIndex>,
-    foreign_keys: Vec<SchemaForeignKey>,
-    without_rowid: bool,
+pub(crate) struct TableSchema {
+    pub(crate) name: String,
+    pub(crate) sql: String,
+    pub(crate) columns: Vec<SchemaColumn>,
+    pub(crate) indices: Vec<SchemaIndex>,
+    pub(crate) foreign_keys: Vec<SchemaForeignKey>,
+    pub(crate) without_rowid: bool,
 }
 
-struct SchemaColumn {
-    name: String,
-    kind: String,
-    not_null: bool,
-    default: Option<String>,
-    primary_key: u32,
+pub(crate) struct SchemaColumn {
+    pub(crate) name: String,
+    pub(crate) kind: String,
+    pub(crate) not_null: bool,
+    pub(crate) default: Option<String>,
+    pub(crate) primary_key: u32,
+    pub(crate) generated: bool,
 }
 
-struct SchemaIndex {
-    name: String,
-    primary: bool,
-    columns: Vec<Option<String>>,
+pub(crate) struct SchemaIndex {
+    pub(crate) name: String,
+    pub(crate) sql: Option<String>,
+    pub(crate) primary: bool,
+    pub(crate) columns: Vec<Option<String>>,
+    pub(crate) collations: Vec<String>,
 }
 
-struct SchemaForeignKey {
-    target: String,
-    columns: Vec<String>,
+pub(crate) struct SchemaForeignKey {
+    pub(crate) target: String,
+    pub(crate) columns: Vec<String>,
+    pub(crate) target_columns: Vec<Option<String>>,
     on_update: String,
-    on_delete: String,
+    pub(crate) on_delete: String,
 }
 
 impl Schema {
@@ -58,18 +63,20 @@ impl Schema {
         let mut tables = BTreeMap::new();
         for ((kind, name), object) in &objects {
             if kind == "table" {
-                let columns = db.query("SELECT name, type, \"notnull\", dflt_value, pk FROM pragma_table_xinfo(?1, 'main') ORDER BY cid", [name], |r| {
-                    Ok(SchemaColumn { name: r.get(0)?, kind: r.get(1)?, not_null: r.get(2)?, default: r.get(3)?, primary_key: r.get(4)? })
+                let columns = db.query("SELECT name, type, \"notnull\", dflt_value, pk, hidden != 0 FROM pragma_table_xinfo(?1, 'main') ORDER BY cid", [name], |r| {
+                    Ok(SchemaColumn { name: r.get(0)?, kind: r.get(1)?, not_null: r.get(2)?, default: r.get(3)?, primary_key: r.get(4)?, generated: r.get(5)? })
                 })?;
                 let mut indices = Vec::new();
                 for (name, primary) in db.query("SELECT name, origin = 'pk' FROM pragma_index_list(?1, 'main') WHERE \"unique\" ORDER BY seq", [name], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)))? {
-                    let columns = db.query("SELECT name FROM pragma_index_xinfo(?1, 'main') WHERE key ORDER BY seqno", [&name], |r| r.get(0))?;
-                    indices.push(SchemaIndex { name, primary, columns });
+                    let (columns, collations) = db.query("SELECT name, coll FROM pragma_index_xinfo(?1, 'main') WHERE key ORDER BY seqno", [&name], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?)))?.into_iter().unzip();
+                    let sql = objects.get(&("index".into(), name.clone())).and_then(|object| object.sql.clone());
+                    indices.push(SchemaIndex { name, sql, primary, columns, collations });
                 }
                 let mut foreign_keys = BTreeMap::new();
-                for (id, target, column, on_update, on_delete) in db.query("SELECT id, \"table\", \"from\", on_update, on_delete FROM pragma_foreign_key_list(?1, 'main') ORDER BY id, seq", [name], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?)))? {
-                    let key = foreign_keys.entry(id).or_insert_with(|| SchemaForeignKey { target, columns: Vec::new(), on_update, on_delete });
+                for (id, target, column, target_column, on_update, on_delete) in db.query("SELECT id, \"table\", \"from\", \"to\", on_update, on_delete FROM pragma_foreign_key_list(?1, 'main') ORDER BY id, seq", [name], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?)))? {
+                    let key = foreign_keys.entry(id).or_insert_with(|| SchemaForeignKey { target, columns: Vec::new(), target_columns: Vec::new(), on_update, on_delete });
                     key.columns.push(column);
+                    key.target_columns.push(target_column);
                 }
                 let without_rowid = object.sql.as_ref().is_some_and(|sql| {
                     tokens(sql)
@@ -80,6 +87,7 @@ impl Schema {
                     name.to_ascii_lowercase(),
                     TableSchema {
                         name: name.clone(),
+                        sql: object.sql.clone().expect("table has CREATE SQL"),
                         columns,
                         indices,
                         foreign_keys: foreign_keys.into_values().collect(),
@@ -147,6 +155,13 @@ impl Schema {
             {
                 return Err(SchemaError::KeyColumns {
                     table: error_table(),
+                }
+                .into());
+            }
+            if let Some(column) = key.iter().find(|c| !c.not_null) {
+                return Err(SchemaError::NullableKey {
+                    table: error_table(),
+                    column: column.name.clone(),
                 }
                 .into());
             }
@@ -293,6 +308,44 @@ impl Schema {
                             column: column.into(),
                         }
                         .into());
+                    }
+                }
+            }
+        }
+        for table in self.tables.values() {
+            for key in &table.foreign_keys {
+                for action in [&key.on_delete, &key.on_update] {
+                    if action != "SET NULL" && action != "SET DEFAULT" {
+                        continue;
+                    }
+                    for source in &key.columns {
+                        let column = table
+                            .columns
+                            .iter()
+                            .find(|c| c.name.eq_ignore_ascii_case(source))
+                            .expect("foreign key column");
+                        if !column.not_null {
+                            continue;
+                        }
+                        let null = if action == "SET NULL" {
+                            true
+                        } else {
+                            match &column.default {
+                                None => true,
+                                Some(default) => {
+                                    db.query_row(&format!("SELECT ({default}) IS NULL"), [], |r| {
+                                        r.get::<_, bool>(0)
+                                    })?
+                                }
+                            }
+                        };
+                        if null {
+                            return Err(SchemaError::ImpossibleAction {
+                                table: table.name.clone(),
+                                column: column.name.clone(),
+                            }
+                            .into());
+                        }
                     }
                 }
             }

@@ -65,15 +65,41 @@ pub fn decode_write_positions(bytes: &[u8]) -> Result<WritePositions, Error> {
     Ok(value)
 }
 
+/// Encode a foreign key's stable identity using its snapshot field bytes.
+pub fn encode_foreign_key(value: &coven_merge::ForeignKey) -> Result<Vec<u8>, Error> {
+    merge_wire::foreign_key(value)?;
+    encode(value)
+}
+
+/// Decode exactly one foreign key identity.
+pub fn decode_foreign_key(bytes: &[u8]) -> Result<coven_merge::ForeignKey, Error> {
+    let value = decode(bytes)?;
+    merge_wire::foreign_key(&value)?;
+    Ok(value)
+}
+
+/// Encode a unique constraint's terms and partial predicate.
+pub fn encode_unique_constraint(value: &coven_merge::UniqueConstraint) -> Result<Vec<u8>, Error> {
+    merge_wire::unique_constraint(value)?;
+    encode(value)
+}
+
+/// Decode exactly one unique constraint identity.
+pub fn decode_unique_constraint(bytes: &[u8]) -> Result<coven_merge::UniqueConstraint, Error> {
+    let value = decode(bytes)?;
+    merge_wire::unique_constraint(&value)?;
+    Ok(value)
+}
+
 /// Encode reference parent generations using its snapshot field bytes.
-pub fn encode_parents(value: &BTreeMap<String, Parent>) -> Result<Vec<u8>, Error> {
+pub fn encode_parents(value: &BTreeMap<coven_merge::ForeignKey, Parent>) -> Result<Vec<u8>, Error> {
     merge_wire::parents(value)?;
     encode(value)
 }
 
 /// Decode exactly one snapshot field containing reference parent generations.
-pub fn decode_parents(bytes: &[u8]) -> Result<BTreeMap<String, Parent>, Error> {
-    let value: BTreeMap<String, Parent> = decode(bytes)?;
+pub fn decode_parents(bytes: &[u8]) -> Result<BTreeMap<coven_merge::ForeignKey, Parent>, Error> {
+    let value: BTreeMap<coven_merge::ForeignKey, Parent> = decode(bytes)?;
     merge_wire::parents(&value)?;
     Ok(value)
 }

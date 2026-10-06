@@ -72,7 +72,7 @@ async fn trigger_targets_are_rejected_while_preparing_before_any_row_changes() {
             table = table.shared_trigger("effect");
         }
         let db = store.builder(vec![table], vec![Migration::run(1, "triggers", move |sql| {
-            sql.execute_batch("CREATE TABLE notes(id TEXT PRIMARY KEY, n INTEGER); CREATE TABLE local(n INTEGER); INSERT INTO local VALUES (0)")?;
+            sql.execute_batch("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, n INTEGER); CREATE TABLE local(n INTEGER); INSERT INTO local VALUES (0)")?;
             sql.execute_batch(if shared {
                 "CREATE TRIGGER effect AFTER INSERT ON notes WHEN NOT coven_applying() BEGIN UPDATE local SET n = n+1; END"
             } else {
@@ -92,7 +92,7 @@ async fn trigger_targets_are_rejected_while_preparing_before_any_row_changes() {
 async fn permitted_local_and_shared_triggers_run_with_applying_false() {
     let store = TestStore::new();
     let db = store.builder(vec![SyncedTable::new("notes", RowIdentity::SharedKey).shared_trigger("shared")], vec![Migration::run(1, "triggers", |sql| {
-        sql.execute_batch("CREATE TABLE notes(id TEXT PRIMARY KEY, n INTEGER); CREATE TABLE local(n INTEGER); INSERT INTO local VALUES (0); CREATE TRIGGER local_effect AFTER INSERT ON notes BEGIN UPDATE local SET n = n+1; END; CREATE TRIGGER shared AFTER INSERT ON notes WHEN NOT coven_applying() BEGIN UPDATE notes SET n = 7 WHERE id = new.id; END; INSERT INTO notes VALUES ('a',0)")?;
+        sql.execute_batch("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, n INTEGER); CREATE TABLE local(n INTEGER); INSERT INTO local VALUES (0); CREATE TRIGGER local_effect AFTER INSERT ON notes BEGIN UPDATE local SET n = n+1; END; CREATE TRIGGER shared AFTER INSERT ON notes WHEN NOT coven_applying() BEGIN UPDATE notes SET n = 7 WHERE id = new.id; END; INSERT INTO notes VALUES ('a',0)")?;
         assert_eq!(sql.query_row("SELECT n FROM notes", [], |r| r.get::<_, i64>(0))?, 7);
         assert_eq!(sql.query_row("SELECT n FROM local", [], |r| r.get::<_, i64>(0))?, 1);
         assert!(!sql.query_row("SELECT coven_applying()", [], |r| r.get::<_, bool>(0))?);
@@ -125,7 +125,7 @@ async fn app_reindex_cannot_write_an_internal_index() {
 async fn a_temporary_table_with_a_synced_name_is_still_local() {
     let store = TestStore::new();
     let db = store.builder(vec![SyncedTable::new("notes", RowIdentity::SharedKey).shared_trigger("shared")], vec![Migration::run(1,"shadow", |sql| {
-        sql.execute_batch("CREATE TABLE notes(id TEXT PRIMARY KEY); CREATE TRIGGER shared AFTER INSERT ON notes WHEN NOT coven_applying() BEGIN SELECT 1; END; CREATE TEMP TABLE notes(id TEXT); CREATE TEMP TABLE source(id TEXT); CREATE TEMP TRIGGER local AFTER INSERT ON source BEGIN INSERT INTO notes VALUES(new.id); END; INSERT INTO source VALUES('local')")?;
+        sql.execute_batch("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); CREATE TRIGGER shared AFTER INSERT ON notes WHEN NOT coven_applying() BEGIN SELECT 1; END; CREATE TEMP TABLE notes(id TEXT); CREATE TEMP TABLE source(id TEXT); CREATE TEMP TRIGGER local AFTER INSERT ON source BEGIN INSERT INTO notes VALUES(new.id); END; INSERT INTO source VALUES('local')")?;
         assert_eq!(sql.query_row("SELECT count(*) FROM temp.notes", [], |r| r.get::<_, i64>(0))?,1);
         Ok(())
     })]).open().await.unwrap();
@@ -135,7 +135,7 @@ async fn a_temporary_table_with_a_synced_name_is_still_local() {
 #[tokio::test]
 async fn a_temporary_trigger_cannot_impersonate_a_declared_shared_trigger() {
     let store = TestStore::new();
-    let error = store.builder(vec![SyncedTable::new("notes", RowIdentity::SharedKey).shared_trigger("shared")], vec![Migration::sql(1,"shadow", "CREATE TABLE notes(id TEXT PRIMARY KEY); CREATE TRIGGER shared AFTER INSERT ON notes WHEN NOT coven_applying() BEGIN SELECT 1; END; CREATE TEMP TRIGGER shared AFTER INSERT ON main.notes BEGIN UPDATE notes SET id = 'unguarded'; END; INSERT INTO notes VALUES('x')")]).open().await.err().unwrap();
+    let error = store.builder(vec![SyncedTable::new("notes", RowIdentity::SharedKey).shared_trigger("shared")], vec![Migration::sql(1,"shadow", "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); CREATE TRIGGER shared AFTER INSERT ON notes WHEN NOT coven_applying() BEGIN SELECT 1; END; CREATE TEMP TRIGGER shared AFTER INSERT ON main.notes BEGIN UPDATE notes SET id = 'unguarded'; END; INSERT INTO notes VALUES('x')")]).open().await.err().unwrap();
     assert!(matches!(
         database_error(error),
         DbError::StatementForbidden { .. }

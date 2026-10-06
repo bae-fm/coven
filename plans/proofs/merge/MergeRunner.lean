@@ -58,7 +58,10 @@ private def readRef (j : Json) : Except String (CovenMerge.Ref Nat) := do
   pure ⟨← natField j "parent", ← j.getObjValAs? Bool "stale"⟩
 
 private def readClaim (j : Json) : Except String (Claim Nat) := do
-  pure ⟨← natField j "con", ← natField j "value", ← stampField j,
+  let con ← j.getObjVal? "con"
+  let terms ← con.getObjValAs? (Array String) "terms"
+  let predicate ← con.getObjValAs? (Option String) "partial"
+  pure ⟨⟨terms.toList, predicate⟩, ← natField j "value", ← stampField j,
     ← j.getObjValAs? Bool "other"⟩
 
 private def readRow (j : Json) : Except String InputRow := do

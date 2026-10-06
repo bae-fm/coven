@@ -169,7 +169,7 @@ impl MemoryView {
         match self.data.get_mut(child).unwrap() {
             RemovalRow::Present { references, .. } => {
                 references.insert(
-                    "parent".into(),
+                    crate::ForeignKey::new(["parent"], parent.table.clone(), ["id"]),
                     Reference {
                         parent: Parent {
                             row: parent,
@@ -182,9 +182,15 @@ impl MemoryView {
             _ => panic!("reference fixture needs a present child"),
         }
     }
-    pub(crate) fn claim(&mut self, row: &RowId, name: &str, value: &str, timestamp: Timestamp) {
+    pub(crate) fn claim<const N: usize>(
+        &mut self,
+        row: &RowId,
+        columns: [&str; N],
+        value: &str,
+        timestamp: Timestamp,
+    ) {
         self.checks.entry(row.clone()).or_default().unique.insert(
-            name.into(),
+            columns.into(),
             UniqueClaim {
                 value: value.as_bytes().to_vec(),
                 timestamp,
@@ -216,6 +222,7 @@ impl MemoryView {
     }
 }
 impl RemovalView for MemoryView {
+    type Error = MergeError;
     fn rows(&self) -> Result<Vec<RowId>, MergeError> {
         if self.order.is_empty() {
             Ok(self.data.keys().cloned().collect())
@@ -233,7 +240,7 @@ impl RemovalView for MemoryView {
     fn constraints(
         &self,
         row: &RowId,
-        _: &BTreeMap<String, ReferenceValue>,
+        _: &BTreeMap<crate::ForeignKey, ReferenceValue>,
     ) -> Result<Constraints, MergeError> {
         Ok(self.checks.get(row).cloned().unwrap_or_default())
     }
@@ -273,7 +280,7 @@ impl RemovalView for MemoryView {
 // These adapters evaluate each test view's own constraint implementation so
 // default-reference substitutions participate in region discovery too.
 pub(crate) fn view_groups(
-    view: &impl RemovalView,
+    view: &impl RemovalView<Error = MergeError>,
     row: &RowId,
 ) -> Result<BTreeSet<Group>, MergeError> {
     let mut groups = BTreeSet::from([Group::Key {
@@ -299,7 +306,7 @@ pub(crate) fn view_groups(
             );
         }
     }
-    for (constraint, claim) in view.constraints(row, &resolved)?.unique {
+    for (constraint, claim) in view.constraints(row, &resolved)?.unique.into_iter() {
         groups.insert(Group::Claim {
             table: row.table.clone(),
             audience: row.audience.clone(),
@@ -311,7 +318,7 @@ pub(crate) fn view_groups(
 }
 
 pub(crate) fn view_members<'a>(
-    view: &impl RemovalView,
+    view: &impl RemovalView<Error = MergeError>,
     rows: impl IntoIterator<Item = &'a RowId>,
     group: &Group,
 ) -> Result<BTreeSet<RowId>, MergeError> {
@@ -492,7 +499,7 @@ pub(crate) fn generated_view(
                 if a % 3 != 0 {
                     view.claim(
                         r,
-                        "title",
+                        ["title"],
                         &(a % 3).to_string(),
                         state.claim_timestamp(&["0".into()], history).unwrap(),
                     );
@@ -502,11 +509,23 @@ pub(crate) fn generated_view(
                 if b % 4 == 2 {
                     view.claim(
                         r,
-                        "folder/title",
+                        ["folder", "title"],
                         &format!("{}/{}", a % 2, b % 3),
                         state
                             .claim_timestamp(&["0".into(), "1".into()], history)
                             .unwrap(),
+                    );
+                }
+                if b.is_multiple_of(2) {
+                    view.checks.entry(r.clone()).or_default().unique.insert(
+                        UniqueConstraint {
+                            terms: vec!["lower(title)".into()],
+                            partial: seed.is_multiple_of(2).then(|| "active=1".into()),
+                        },
+                        UniqueClaim {
+                            value: (a % 2).to_string().into_bytes(),
+                            timestamp: state.claim_timestamp(&["0".into()], history).unwrap(),
+                        },
                     );
                 }
                 if a > b && seed.is_multiple_of(3) {
@@ -617,7 +636,7 @@ mod differential {
                 })
                 .collect();
             let mut row_claims = Vec::new();
-            for (name, claim) in &constraints.unique {
+            for (name, claim) in constraints.unique.iter() {
                 let key = (
                     r.table.clone(),
                     r.audience.clone(),
@@ -626,7 +645,7 @@ mod differential {
                 );
                 let next = claims.len();
                 let key = *claims.entry(key).or_insert(next);
-                row_claims.push(json!({"con": 0, "value": key, "ts": scalar(claim.timestamp).to_string(), "other": false}));
+                row_claims.push(json!({"con": {"terms":name.terms,"partial":name.partial}, "value": key, "ts": scalar(claim.timestamp).to_string(), "other": false}));
             }
             let (deleted, started) = match data {
                 RemovalRow::Present {
@@ -646,7 +665,7 @@ mod differential {
                 };
                 let key = u64::from_be_bytes(r.key.clone().try_into().unwrap());
                 row_claims
-                    .push(json!({"con": 0, "value": key, "ts": ts.to_string(), "other": true}));
+                    .push(json!({"con": {"terms":[],"partial":null}, "value": key, "ts": ts.to_string(), "other": true}));
             }
             input_rows.push(json!({"id": row_ids[r], "present": data.present(), "refs": refs,
                 "check": !constraints.failed_checks.is_empty(), "deleted": deleted,

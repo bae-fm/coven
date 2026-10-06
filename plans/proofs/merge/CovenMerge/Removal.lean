@@ -41,10 +41,16 @@ structure Ref (Row : Type) where
   parent : Row
   stale : Bool
 
+/-- A unique constraint's ordered column/expression terms and partial predicate. -/
+structure UniqueConstraint where
+  terms : List String
+  predicate : Option String
+  deriving DecidableEq, Repr
+
 /-- One claim: the constraint, the value claimed, the claim's stamp, and
 whether it is a key present in two audiences (§8.5, §14.2). -/
 structure Claim (K : Type) where
-  con : Nat
+  con : UniqueConstraint
   key : K
   ts : Nat
   other : Bool
@@ -273,7 +279,7 @@ def I : Inputs Nat Nat where
   refs x := if x = 1 then [⟨0, false⟩] else []
   checkFails _ := false
   inDeletedCircle _ := false
-  claims x := if x = 1 then [⟨0, 7, 10, false⟩] else if x = 2 then [⟨0, 7, 11, false⟩] else []
+  claims x := if x = 1 then [⟨⟨["title"], none⟩, 7, 10, false⟩] else if x = 2 then [⟨⟨["title"], none⟩, 7, 11, false⟩] else []
   rank x := x
 
 /-- The unique rule as one more rule: a row is removed while a present row

@@ -19,34 +19,44 @@ impl Token {
 }
 
 pub(crate) fn tokens(sql: &str) -> Vec<Token> {
-    let mut chars = sql.chars().peekable();
+    spanned_tokens(sql)
+        .into_iter()
+        .map(|(token, _)| token)
+        .collect()
+}
+
+/// Byte ranges preserve expressions exactly, including operators and literals.
+pub(crate) fn spanned_tokens(sql: &str) -> Vec<(Token, std::ops::Range<usize>)> {
+    let mut chars = sql.char_indices().peekable();
     let mut result = Vec::new();
-    while let Some(ch) = chars.next() {
-        match ch {
-            ch if ch.is_whitespace() => {}
-            '-' if chars.peek() == Some(&'-') => {
+    while let Some((start, ch)) = chars.next() {
+        let token = match ch {
+            ch if ch.is_whitespace() => continue,
+            '-' if chars.peek().is_some_and(|(_, c)| *c == '-') => {
                 chars.next();
-                for ch in chars.by_ref() {
+                for (_, ch) in chars.by_ref() {
                     if ch == '\n' {
                         break;
                     }
                 }
+                continue;
             }
-            '/' if chars.peek() == Some(&'*') => {
+            '/' if chars.peek().is_some_and(|(_, c)| *c == '*') => {
                 chars.next();
-                while let Some(ch) = chars.next() {
-                    if ch == '*' && chars.peek() == Some(&'/') {
+                while let Some((_, ch)) = chars.next() {
+                    if ch == '*' && chars.peek().is_some_and(|(_, c)| *c == '/') {
                         chars.next();
                         break;
                     }
                 }
+                continue;
             }
             '\'' | '"' | '`' | '[' => {
                 let end = if ch == '[' { ']' } else { ch };
                 let mut value = String::new();
-                while let Some(next) = chars.next() {
+                while let Some((_, next)) = chars.next() {
                     if next == end {
-                        if ch != '[' && chars.peek() == Some(&end) {
+                        if ch != '[' && chars.peek().is_some_and(|(_, c)| *c == end) {
                             chars.next();
                         } else {
                             break;
@@ -54,24 +64,26 @@ pub(crate) fn tokens(sql: &str) -> Vec<Token> {
                     }
                     value.push(next);
                 }
-                result.push(if ch == '\'' {
+                if ch == '\'' {
                     Token::String(value)
                 } else {
                     Token::Quoted(value)
-                });
+                }
             }
             ch if ch.is_alphanumeric() || ch == '_' || ch == '$' => {
                 let mut word = String::from(ch);
                 while chars
                     .peek()
-                    .is_some_and(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+                    .is_some_and(|(_, c)| c.is_alphanumeric() || *c == '_' || *c == '$')
                 {
-                    word.push(chars.next().expect("peeked character"));
+                    word.push(chars.next().expect("peeked character").1);
                 }
-                result.push(Token::Word(word.to_ascii_lowercase()));
+                Token::Word(word.to_ascii_lowercase())
             }
-            ch => result.push(Token::Symbol(ch)),
-        }
+            ch => Token::Symbol(ch),
+        };
+        let end = chars.peek().map_or(sql.len(), |(index, _)| *index);
+        result.push((token, start..end));
     }
     result
 }

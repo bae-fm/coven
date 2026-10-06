@@ -285,7 +285,7 @@ def carolInputs : Inputs Nat Nat where
   refs _ := []
   checkFails _ := false
   inDeletedCircle _ := false
-  claims r := if r = 1 then [⟨0, 1, 0, true⟩] else [⟨0, 1, 20, true⟩]
+  claims r := if r = 1 then [⟨⟨[], none⟩, 1, 0, true⟩] else [⟨⟨[], none⟩, 1, 20, true⟩]
   rank r := r
 
 theorem store_wins : (view carolInputs).shown 1 = true ∧ (view carolInputs).removed 2 = true ∧

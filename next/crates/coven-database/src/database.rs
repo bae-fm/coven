@@ -3,7 +3,10 @@
 
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 
+use coven_foundation::clock::{ClockRef, SystemClock};
 use coven_foundation::files::{StoreDir, StoreLock};
+use coven_foundation::id_source::{CircleId, DeviceId};
+use std::collections::BTreeSet;
 
 use crate::authorization::SqlAuthorization;
 use crate::sqlite::DatabaseConnection;
@@ -18,6 +21,7 @@ pub struct DatabaseBuilder {
     tables: Option<Vec<SyncedTable>>,
     migrations: Option<Vec<Migration>>,
     policy: Option<CovenMigrationPolicy>,
+    clock: Option<ClockRef>,
 }
 
 impl DatabaseBuilder {
@@ -28,6 +32,7 @@ impl DatabaseBuilder {
             tables: None,
             migrations: None,
             policy: None,
+            clock: None,
         }
     }
 
@@ -49,53 +54,48 @@ impl DatabaseBuilder {
         self
     }
 
+    /// The clock used when stamping a local write (§7.2).
+    pub fn clock(mut self, clock: ClockRef) -> Self {
+        self.clock = Some(clock);
+        self
+    }
+
     /// Open one writer under the store lock and four read-only connections.
     pub async fn open(self) -> CovenResult<Database> {
-        finish_blocking(tokio::task::spawn_blocking(move || self.open_graph(false)).await)
+        finish_blocking(tokio::task::spawn_blocking(move || self.open_graph()).await)
     }
 
     /// Open read-only connections without locking or migrating, including from
     /// a second process while the store's writer is open.
-    pub async fn open_read_only(self) -> CovenResult<Database> {
-        finish_blocking(tokio::task::spawn_blocking(move || self.open_graph(true)).await)
+    pub async fn open_read_only(self) -> CovenResult<CovenReadHandle> {
+        finish_blocking(tokio::task::spawn_blocking(move || self.open_read_graph()).await)
     }
 
-    fn open_graph(self, read_only: bool) -> CovenResult<Database> {
+    fn open_graph(self) -> CovenResult<Database> {
         let tables = self.tables.ok_or(CovenError::MissingConfiguration {
             field: "synced_tables",
         })?;
         let migrations = self.migrations.ok_or(CovenError::MissingConfiguration {
             field: "migrations",
         })?;
-        let policy = if read_only {
-            CovenMigrationPolicy::RefusePending
-        } else {
-            self.policy.ok_or(CovenError::MissingConfiguration {
-                field: "coven_migration_policy",
-            })?
-        };
+        let policy = self.policy.ok_or(CovenError::MissingConfiguration {
+            field: "coven_migration_policy",
+        })?;
         // Refuse a directory that is not a store before creating its database.
-        self.directory.settings()?;
-        let lock = if read_only {
-            None
-        } else {
-            Some(self.directory.lock_exclusive()?)
+        let settings = self.directory.settings()?;
+        let clock = match self.clock {
+            Some(clock) => clock,
+            None => Arc::new(SystemClock),
         };
+        let lock = self.directory.lock_exclusive()?;
         let path = self.directory.database_path();
-        let first = DatabaseConnection::open(&path, read_only, SqlAuthorization::new(&tables))?;
-        first.check_integrity()?;
-        if !read_only {
-            first.enable_wal()?;
-        }
-        let migrations = first.prepare_schema(&tables, &migrations, policy, read_only)?;
+        let writer = DatabaseConnection::open(&path, false, SqlAuthorization::new(&tables))?;
+        writer.check_integrity()?;
+        writer.enable_wal()?;
+        let migrations = writer.prepare_schema(&tables, &migrations, policy, false)?;
+        let write_schema = crate::write_schema::WriteSchema::read(&writer, tables.clone())?;
         let mut readers = Vec::new();
-        let writer = if read_only {
-            readers.push(Mutex::new(first));
-            None
-        } else {
-            Some(Mutex::new(first))
-        };
-        while readers.len() < 4 {
+        for _ in 0..4 {
             readers.push(Mutex::new(DatabaseConnection::open(
                 &path,
                 true,
@@ -104,13 +104,43 @@ impl DatabaseBuilder {
         }
         Ok(Database {
             inner: Arc::new(RwLock::new(Some(DatabaseInner {
-                writer,
-                idle_readers: Mutex::new((0..readers.len()).collect()),
-                reader_ready: Condvar::new(),
-                readers,
+                writer: Mutex::new(writer),
+                readers: ReadPool::new(readers),
                 migrations,
                 lock,
+                write_schema,
+                device: settings.device_id,
+                clock,
             }))),
+        })
+    }
+    fn open_read_graph(self) -> CovenResult<CovenReadHandle> {
+        let tables = self.tables.ok_or(CovenError::MissingConfiguration {
+            field: "synced_tables",
+        })?;
+        let migrations = self.migrations.ok_or(CovenError::MissingConfiguration {
+            field: "migrations",
+        })?;
+        self.directory.settings()?;
+        let path = self.directory.database_path();
+        let first = DatabaseConnection::open(&path, true, SqlAuthorization::new(&tables))?;
+        first.check_integrity()?;
+        first.prepare_schema(
+            &tables,
+            &migrations,
+            CovenMigrationPolicy::RefusePending,
+            true,
+        )?;
+        let mut readers = vec![Mutex::new(first)];
+        for _ in 1..4 {
+            readers.push(Mutex::new(DatabaseConnection::open(
+                &path,
+                true,
+                SqlAuthorization::new(&tables),
+            )?));
+        }
+        Ok(CovenReadHandle {
+            inner: Arc::new(RwLock::new(Some(ReadPool::new(readers)))),
         })
     }
 }
@@ -123,15 +153,58 @@ pub struct Database {
 
 struct DatabaseInner {
     // Drop every SQLite connection before releasing the writer lock.
-    writer: Option<Mutex<DatabaseConnection>>,
-    readers: Vec<Mutex<DatabaseConnection>>,
-    idle_readers: Mutex<Vec<usize>>,
-    reader_ready: Condvar,
+    writer: Mutex<DatabaseConnection>,
+    readers: ReadPool,
     migrations: Vec<MigrationOutcome>,
-    lock: Option<StoreLock>,
+    lock: StoreLock,
+    write_schema: crate::write_schema::WriteSchema,
+    device: DeviceId,
+    clock: ClockRef,
 }
 
 impl Database {
+    /// Run app SQL and commit its unsigned write record and merge metadata in
+    /// one IMMEDIATE transaction (§5). The caller supplies the circles deleted
+    /// by the applied store log. The closure's result is returned after commit.
+    pub async fn write<F, R>(
+        &self,
+        deleted_circles: BTreeSet<CircleId>,
+        sql: F,
+    ) -> Result<R, DbError>
+    where
+        F: FnOnce(crate::SqlContext<'_>) -> Result<R, DbError> + Send + 'static,
+        R: Send + 'static,
+    {
+        let database = self.clone();
+        finish_blocking(
+            tokio::task::spawn_blocking(move || {
+                let slot = database.inner.read().expect("database lock poisoned");
+                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+                let writer = inner
+                    .writer
+                    .lock()
+                    .expect("writer connection lock poisoned");
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    writer.local_write(
+                        &inner.write_schema,
+                        inner.device,
+                        inner.clock.now(),
+                        &deleted_circles,
+                        sql,
+                    )
+                }));
+                // The transaction rolls back during unwinding. Release the mutex
+                // before propagating the app panic so later calls can still use it.
+                drop(writer);
+                match result {
+                    Ok(result) => result,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                }
+            })
+            .await,
+        )
+    }
+
     /// The committed app schema version, read on a read-only connection.
     pub async fn schema_version(&self) -> Result<u32, DbError> {
         let database = self.clone();
@@ -139,7 +212,7 @@ impl Database {
             tokio::task::spawn_blocking(move || {
                 let inner = database.inner.read().expect("database lock poisoned");
                 let inner = inner.as_ref().ok_or(DbError::StoreClosed)?;
-                let reader = inner.acquire_reader();
+                let reader = inner.readers.acquire_reader();
                 reader.schema_version()
             })
             .await,
@@ -172,24 +245,13 @@ impl Database {
                     lock,
                     ..
                 } = inner;
-                let mut failures = Vec::new();
-                for reader in readers {
-                    if let Err(error) = reader
-                        .into_inner()
-                        .expect("read connection lock poisoned")
-                        .close()
-                    {
-                        failures.push(error);
-                    }
-                }
-                if let Some(writer) = writer {
-                    if let Err(error) = writer
-                        .into_inner()
-                        .expect("writer connection lock poisoned")
-                        .close()
-                    {
-                        failures.push(error);
-                    }
+                let mut failures = readers.close();
+                if let Err(error) = writer
+                    .into_inner()
+                    .expect("writer connection lock poisoned")
+                    .close()
+                {
+                    failures.push(error);
                 }
                 drop(lock);
                 if failures.is_empty() {
@@ -203,7 +265,80 @@ impl Database {
     }
 }
 
-impl DatabaseInner {
+/// A database open that cannot write or migrate. It owns no writer or store lock.
+///
+/// ```compile_fail
+/// async fn cannot_write(handle: &coven_database::CovenReadHandle) {
+///     handle.write(Default::default(), |_| Ok(())).await;
+/// }
+/// ```
+#[derive(Clone)]
+pub struct CovenReadHandle {
+    inner: Arc<RwLock<Option<ReadPool>>>,
+}
+
+impl CovenReadHandle {
+    /// The committed app schema version.
+    pub async fn schema_version(&self) -> Result<u32, DbError> {
+        let handle = self.clone();
+        finish_blocking(
+            tokio::task::spawn_blocking(move || {
+                let inner = handle.inner.read().expect("database lock poisoned");
+                let reader = inner.as_ref().ok_or(DbError::StoreClosed)?.acquire_reader();
+                reader.schema_version()
+            })
+            .await,
+        )
+    }
+
+    /// Wait for active calls and close every clone of this handle.
+    pub async fn close(&self) -> Result<(), DbError> {
+        let handle = self.clone();
+        finish_blocking(
+            tokio::task::spawn_blocking(move || {
+                let mut slot = handle.inner.write().expect("database lock poisoned");
+                let readers = slot.take().ok_or(DbError::StoreClosed)?;
+                let failures = readers.close();
+                if failures.is_empty() {
+                    Ok(())
+                } else {
+                    Err(DbError::Closing { failures })
+                }
+            })
+            .await,
+        )
+    }
+}
+
+struct ReadPool {
+    readers: Vec<Mutex<DatabaseConnection>>,
+    idle_readers: Mutex<Vec<usize>>,
+    reader_ready: Condvar,
+}
+
+impl ReadPool {
+    fn new(readers: Vec<Mutex<DatabaseConnection>>) -> Self {
+        Self {
+            idle_readers: Mutex::new((0..readers.len()).collect()),
+            readers,
+            reader_ready: Condvar::new(),
+        }
+    }
+
+    fn close(self) -> Vec<DbError> {
+        let mut failures = Vec::new();
+        for reader in self.readers {
+            if let Err(error) = reader
+                .into_inner()
+                .expect("reader connection lock poisoned")
+                .close()
+            {
+                failures.push(error);
+            }
+        }
+        failures
+    }
+
     fn acquire_reader(&self) -> ReaderLease<'_> {
         let mut idle = self.idle_readers.lock().expect("reader pool poisoned");
         loop {
@@ -221,7 +356,7 @@ impl DatabaseInner {
 // A call reserves one available reader while borrowing the database owner.
 // Dropping the reservation wakes a caller even when the call panics.
 struct ReaderLease<'a> {
-    database: &'a DatabaseInner,
+    database: &'a ReadPool,
     index: usize,
 }
 

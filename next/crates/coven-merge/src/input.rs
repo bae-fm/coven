@@ -2,6 +2,64 @@ use crate::{MergeError, Timestamp};
 use coven_foundation::id_source::{CircleId, DeviceId};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// A foreign key's columns in declaration order (§8).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ConstraintColumns(
+    /// Ordered column names, retaining composite-constraint boundaries.
+    pub Vec<String>,
+);
+
+impl<const N: usize> From<[&str; N]> for ConstraintColumns {
+    fn from(columns: [&str; N]) -> Self {
+        Self(columns.into_iter().map(str::to_owned).collect())
+    }
+}
+
+/// A unique constraint's ordered terms and optional partial predicate (§8).
+/// Column terms use their names; expression terms retain their SQL text.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct UniqueConstraint {
+    /// Column names or expression text, in declaration order.
+    pub terms: Vec<String>,
+    /// The WHERE expression as written for a partial unique index.
+    pub partial: Option<String>,
+}
+
+impl<const N: usize> From<[&str; N]> for UniqueConstraint {
+    fn from(terms: [&str; N]) -> Self {
+        Self {
+            terms: terms.into_iter().map(str::to_owned).collect(),
+            partial: None,
+        }
+    }
+}
+
+/// A foreign key's stable identity, independent of SQLite's positional id (§8).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ForeignKey {
+    /// Referencing columns in declaration order.
+    pub columns: ConstraintColumns,
+    /// Referenced table.
+    pub parent: String,
+    /// Referenced columns, paired in order with `columns`.
+    pub parent_columns: ConstraintColumns,
+}
+
+impl ForeignKey {
+    /// Name both sides of a declared reference, including implicit primary keys.
+    pub fn new(
+        columns: impl Into<ConstraintColumns>,
+        parent: impl Into<String>,
+        parent_columns: impl Into<ConstraintColumns>,
+    ) -> Self {
+        Self {
+            columns: columns.into(),
+            parent: parent.into(),
+            parent_columns: parent_columns.into(),
+        }
+    }
+}
+
 /// One device's numbered write (§5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WriteId {
@@ -63,7 +121,7 @@ pub struct ColumnValue<V> {
     pub value: V,
     /// Foreign-key names and their parents for this column's written value.
     /// For a composite reference the database combines the winning columns.
-    pub parents: BTreeMap<String, Parent>,
+    pub parents: BTreeMap<ForeignKey, Parent>,
 }
 
 /// One row's insert, update or delete. A delete cannot set columns.
@@ -138,16 +196,35 @@ impl<V> Change<V> {
 
 /// A decoded write's merge inputs, independent of its storage encoding.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Write<V> {
+pub struct Write<V, P = BTreeSet<WriteId>> {
     /// Device and log number.
     pub id: WriteId,
     /// Unique total-order timestamp (§7.2).
     pub timestamp: Timestamp,
     /// Every write the author had applied, including its own earlier writes.
-    /// A format/database adapter expands log positions to this relation.
-    pub had_read: BTreeSet<WriteId>,
+    /// A position frontier can represent the same relation without expansion.
+    pub had_read: P,
     /// At most one change for each table, key and audience.
     pub changes: BTreeMap<RowId, Change<V>>,
+}
+
+/// A causally closed past, represented explicitly or by device log positions.
+/// A frontier contains maximal writes covering the set: all covered writes
+/// have timestamps at most a frontier timestamp. Device logs are contiguous.
+pub trait WritePast {
+    /// Whether the writer had applied this write.
+    fn contains(&self, write: &WriteId) -> bool;
+    /// Writes whose causal pasts cover this entire past, including themselves.
+    fn frontier(&self) -> impl Iterator<Item = &WriteId>;
+}
+
+impl WritePast for BTreeSet<WriteId> {
+    fn contains(&self, write: &WriteId) -> bool {
+        self.contains(write)
+    }
+    fn frontier(&self) -> impl Iterator<Item = &WriteId> {
+        self.iter()
+    }
 }
 
 /// Pure access to applied write metadata. The arriving write is not yet in

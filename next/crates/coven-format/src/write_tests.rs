@@ -67,11 +67,10 @@ fn set_parent(write: &mut WriteRecord, part: usize, audience: Audience, generati
     let mut values = values();
     let mut row = test_utils::row();
     row.audience = audience;
-    values
-        .get_mut("x")
-        .unwrap()
-        .parents
-        .insert("fk".into(), Parent { row, generation });
+    values.get_mut("x").unwrap().parents.insert(
+        coven_merge::ForeignKey::new(["fk"], row.table.clone(), ["id"]),
+        Parent { row, generation },
+    );
     write.parts[part].rows[0].change.operation = Operation::Update(values);
 }
 #[test]

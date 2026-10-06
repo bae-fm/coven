@@ -22,6 +22,12 @@ macro_rules! coven_tables {
             ) STRICT;
             CREATE UNIQUE INDEX coven_write_position ON coven_writes(substr(timestamp, 9, 8), number);
         ");
+        $visit!(coven_positions, "
+            CREATE TABLE coven_positions (
+                device BLOB PRIMARY KEY NOT NULL CHECK(length(device)=8),
+                number BLOB NOT NULL CHECK(length(number)=8 AND number>x'0000000000000000')
+            ) STRICT, WITHOUT ROWID;
+        ");
         $visit!(coven_columns, "
             CREATE TABLE coven_columns (
                 id INTEGER PRIMARY KEY,
@@ -46,9 +52,49 @@ macro_rules! coven_tables {
                 column_id INTEGER NOT NULL REFERENCES coven_columns(id),
                 row_id INTEGER NOT NULL REFERENCES coven_rows(id),
                 write_id INTEGER NOT NULL REFERENCES coven_writes(id),
-                parents BLOB NOT NULL,
                 PRIMARY KEY(column_id, row_id)
             ) STRICT;
+            CREATE INDEX coven_cells_row ON coven_cells(row_id,column_id);
+        ");
+        $visit!(coven_foreign_keys, "
+            CREATE TABLE coven_foreign_keys (
+                id INTEGER PRIMARY KEY,
+                table_name TEXT NOT NULL,
+                identity BLOB NOT NULL,
+                UNIQUE(table_name, identity)
+            ) STRICT;
+        ");
+        $visit!(coven_references, "
+            CREATE TABLE coven_references (
+                row_id INTEGER NOT NULL REFERENCES coven_rows(id),
+                column_id INTEGER NOT NULL REFERENCES coven_columns(id),
+                foreign_key_id INTEGER NOT NULL REFERENCES coven_foreign_keys(id),
+                parent_table TEXT NOT NULL,
+                parent_key BLOB NOT NULL,
+                parent_audience TEXT NOT NULL,
+                parent_generation BLOB NOT NULL CHECK(length(parent_generation)=8),
+                PRIMARY KEY(row_id, column_id, foreign_key_id)
+            ) STRICT, WITHOUT ROWID;
+            CREATE INDEX coven_references_parent ON coven_references(parent_table,parent_key,parent_audience,foreign_key_id,row_id);
+            CREATE INDEX coven_references_key ON coven_references(foreign_key_id,row_id);
+        ");
+        $visit!(coven_constraints, "
+            CREATE TABLE coven_constraints (
+                id INTEGER PRIMARY KEY,
+                table_name TEXT NOT NULL,
+                identity BLOB NOT NULL,
+                UNIQUE(table_name, identity)
+            ) STRICT;
+        ");
+        $visit!(coven_claims, "
+            CREATE TABLE coven_claims (
+                row_id INTEGER NOT NULL REFERENCES coven_rows(id),
+                constraint_id INTEGER NOT NULL REFERENCES coven_constraints(id),
+                audience TEXT NOT NULL,
+                value BLOB NOT NULL,
+                PRIMARY KEY(row_id, constraint_id)
+            ) STRICT, WITHOUT ROWID;
+            CREATE INDEX coven_claims_value ON coven_claims(constraint_id,audience,value,row_id);
         ");
         $visit!(coven_lost, "
             CREATE TABLE coven_lost (
@@ -62,6 +108,8 @@ macro_rules! coven_tables {
                 set_by BLOB NOT NULL,
                 replaced_by BLOB NOT NULL
             ) STRICT;
+            CREATE INDEX coven_lost_row ON coven_lost(table_name,key,audience,generation,column_id);
+            CREATE INDEX coven_lost_column ON coven_lost(column_id);
         ");
         $visit!(coven_uploads, "
             CREATE TABLE coven_uploads (

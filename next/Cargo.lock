@@ -970,6 +970,7 @@ dependencies = [
  "coven-foundation",
  "coven-merge",
  "rusqlite",
+ "sqlite3-parser",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -3058,6 +3059,21 @@ dependencies = [
  "js-sys",
  "rsqlite-vfs",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "sqlite3-parser"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fbb44bfd84bfd1bde5ee215dd0b27d10c3c601a1b7cf03a91c7d6f607f2a10f7"
+dependencies = [
+ "bitflags",
+ "bumpalo",
+ "cc",
+ "fallible-iterator",
+ "indexmap",
+ "log",
+ "memchr",
 ]
 
 [[package]]

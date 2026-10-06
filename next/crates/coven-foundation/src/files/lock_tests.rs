@@ -36,3 +36,24 @@ fn a_missing_store_is_an_io_error_and_is_not_created_by_locking() {
     );
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
 }
+
+#[test]
+fn dropping_the_guard_unlocks_even_while_an_inherited_handle_survives() {
+    let directory = tempfile::tempdir().unwrap();
+    let layout = StoreLayout::new(directory.path().to_owned());
+    let id = StoreId(Uuid::from_u128(1));
+    let store = layout.create_store_dir(id, "store", &UuidIds).unwrap();
+    let guard = store.lock_exclusive().unwrap();
+    // A fork before exec retains a reference to this same open file. Duplicating
+    // it makes that descriptor lifetime deterministic without racing a process.
+    let inherited = guard.file.try_clone().unwrap();
+    drop(guard);
+    let next = store.lock_exclusive().unwrap();
+    drop(inherited);
+    assert!(matches!(
+        store.lock_exclusive(),
+        Err(StoreLockError::AlreadyOpen(_))
+    ));
+    drop(next);
+    store.lock_exclusive().unwrap();
+}

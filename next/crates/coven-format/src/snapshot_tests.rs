@@ -180,11 +180,11 @@ fn every_merge_rule_round_trips_including_another_circle_winning() {
     )
     .unwrap();
     let removed = BTreeSet::from([
-        coven_merge::Rule::ForeignKey("p".into()),
+        coven_merge::Rule::ForeignKey(coven_merge::ForeignKey::new(["p"], "t", ["id"])),
         coven_merge::Rule::Check("positive".into()),
         coven_merge::Rule::DeletedCircle,
         coven_merge::Rule::OtherAudience,
-        coven_merge::Rule::Unique("x".into()),
+        coven_merge::Rule::Unique(["x"].into()),
     ]);
     // OtherAudience carries no invented winning-audience restriction: merge decides it.
     round_trip(
@@ -208,7 +208,7 @@ fn synced_rows_use_merges_written_reference_validation() {
                 ColumnValue {
                     value: Value::Integer(1),
                     parents: BTreeMap::from([(
-                        "fk".into(),
+                        coven_merge::ForeignKey::new(["fk"], "t", ["id"]),
                         Parent {
                             row: parent,
                             generation,
@@ -291,7 +291,7 @@ fn merge_owns_snapshot_row_invariants_and_a_rejected_row_can_be_retried() {
     ));
     let mut cells = state.cells().clone();
     cells.get_mut("x").unwrap().value.parents.insert(
-        "fk".into(),
+        coven_merge::ForeignKey::new(["fk"], "t", ["id"]),
         Parent {
             row: test_utils::row(),
             generation: 2,
@@ -431,7 +431,7 @@ fn decoded_snapshot_state_is_directly_usable_by_the_merge() {
     else {
         panic!("merge row");
     };
-    let write = coven_merge::Write {
+    let write = coven_merge::Write::<Value> {
         id: WriteId {
             device: DeviceId(3),
             number: 1,

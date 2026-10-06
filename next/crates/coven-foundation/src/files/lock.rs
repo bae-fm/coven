@@ -6,11 +6,19 @@ use std::path::Path;
 use crate::files::FileError;
 use crate::id_source::StoreId;
 
-/// An exclusive store lock. Dropping it closes the OS handle and releases the
-/// lock. Read-only opens take no lock, so they can coexist with a writer (§20.1).
+/// An exclusive store lock. Dropping it unlocks and closes the OS handle.
+/// Read-only opens take no lock, so they can coexist with a writer (§20.1).
 #[derive(Debug)]
 pub struct StoreLock {
-    _file: File,
+    file: File,
+}
+
+impl Drop for StoreLock {
+    fn drop(&mut self) {
+        // Closing alone leaves the lock held while a concurrently forked child
+        // retains the open file before exec closes its inherited descriptors.
+        self.file.unlock().expect("release owned store lock");
+    }
 }
 
 /// A store already open for writing is distinct from a filesystem failure.
@@ -33,7 +41,7 @@ pub(crate) fn acquire(path: &Path, id: StoreId) -> Result<StoreLock, StoreLockEr
         .open(path)
         .map_err(|source| FileError::at("open store lock", path, source))?;
     match file.try_lock() {
-        Ok(()) => Ok(StoreLock { _file: file }),
+        Ok(()) => Ok(StoreLock { file }),
         Err(TryLockError::WouldBlock) => Err(StoreLockError::AlreadyOpen(id)),
         Err(TryLockError::Error(source)) => Err(FileError::at("lock store", path, source).into()),
     }

@@ -82,7 +82,7 @@ fn sample() -> (RowState<Value>, History<Value>, BTreeSet<Rule>) {
     let value = |value| ColumnValue {
         value,
         parents: BTreeMap::from([(
-            "parent_fk".into(),
+            coven_merge::ForeignKey::new(["title", "body"], "parents", ["id", "locale"]),
             Parent {
                 row: RowId {
                     table: "parents".into(),
@@ -143,9 +143,13 @@ fn sample() -> (RowState<Value>, History<Value>, BTreeSet<Rule>) {
         state,
         oracle,
         BTreeSet::from([
-            Rule::ForeignKey("parent_fk".into()),
+            Rule::ForeignKey(coven_merge::ForeignKey::new(
+                ["parent_fk"],
+                "parents",
+                ["id"],
+            )),
             Rule::Check("range".into()),
-            Rule::Unique("title_unique".into()),
+            Rule::Unique(["title_unique"].into()),
             Rule::DeletedCircle,
             Rule::OtherAudience,
         ]),
@@ -207,15 +211,18 @@ fn put_state(
     }
     for (name, cell) in state.cells() {
         db.internal_execute(
-            "INSERT INTO coven_cells(column_id,row_id,write_id,parents) VALUES (?1,?2,?3,?4)",
+            "INSERT INTO coven_cells(column_id,row_id,write_id) VALUES (?1,?2,?3)",
             (
                 columns[name],
                 rows[&state.generation()],
                 writes[&cell.write],
-                encode_parents(&cell.value.parents).unwrap(),
             ),
         )
         .unwrap();
+        for (key, parent) in &cell.value.parents {
+            let key = crate::row_queries::foreign_key(db, &state.row().table, key).unwrap();
+            db.internal_execute("INSERT INTO coven_references(row_id,column_id,foreign_key_id,parent_table,parent_key,parent_audience,parent_generation) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT DO NOTHING", (rows[&state.generation()],columns[name],key,&parent.row.table,&parent.row.key,audience(&parent.row.audience),parent.generation.to_be_bytes().as_slice())).unwrap();
+        }
     }
     for (key, lost) in state.lost() {
         db.internal_execute("INSERT INTO coven_lost(table_name,key,audience,generation,column_id,value,set_by,replaced_by) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
@@ -350,11 +357,12 @@ fn get_state(db: &DatabaseConnection) -> (RowState<Value>, BTreeSet<Rule>) {
                     },
                 )
                 .unwrap();
-            let cells = db.query("SELECT c.column_name,v.write_id,v.parents FROM coven_cells v JOIN coven_columns c ON c.id=v.column_id", [], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Vec<u8>>(2)?))
-            }).unwrap().into_iter().map(|(name, write, parents)| {
-                let value = ColumnValue { value: values[&name].clone(), parents: decode_parents(&parents).unwrap() };
-                (name, Cell { write: write_ids[&write], value })
+            let mut references = BTreeMap::<String, BTreeMap<_, _>>::new();
+            for (column,key,parent) in db.query("SELECT c.column_name,f.identity,v.parent_table,v.parent_key,v.parent_audience,v.parent_generation FROM coven_references v JOIN coven_foreign_keys f ON f.id=v.foreign_key_id JOIN coven_columns c ON c.id=v.column_id", [], |r| Ok((r.get::<_,String>(0)?,decode_foreign_key(&r.get::<_,Vec<u8>>(1)?).unwrap(),Parent { row: RowId { table:r.get(2)?,key:r.get(3)?,audience:read_audience(r.get(4)?) },generation:crate::write_encoding::counter(r.get(5)?) }))).unwrap() { references.entry(column).or_default().insert(key,parent); }
+            let cells = db.query("SELECT c.column_name,v.write_id FROM coven_cells v JOIN coven_columns c ON c.id=v.column_id", [], |r| Ok((r.get::<_,String>(0)?, r.get::<_,i64>(1)?))).unwrap().into_iter().map(|(name,write)| {
+                let parents = references.remove(&name).unwrap_or_default();
+                let value = ColumnValue { value:values[&name].clone(), parents };
+                (name,Cell { write:write_ids[&write],value })
             }).collect();
             (cells, BTreeSet::new())
         }
@@ -441,7 +449,7 @@ async fn migrations_change_present_values_without_a_second_copy() {
     db.close().await.unwrap();
 }
 #[tokio::test]
-async fn only_the_seven_spec_tables_are_created() {
+async fn only_the_spec_tables_are_created() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     db.inspect_writer(|sql| {
@@ -456,9 +464,14 @@ async fn only_the_seven_spec_tables_are_created() {
             tables,
             [
                 "coven_cells",
+                "coven_claims",
                 "coven_columns",
+                "coven_constraints",
+                "coven_foreign_keys",
                 "coven_lost",
                 "coven_operations",
+                "coven_positions",
+                "coven_references",
                 "coven_rows",
                 "coven_uploads",
                 "coven_writes"
@@ -471,7 +484,7 @@ async fn only_the_seven_spec_tables_are_created() {
                 |r| r.get::<_, String>(0),
             )
             .unwrap();
-        assert_eq!(cells, ["column_id", "row_id", "write_id", "parents"]);
+        assert_eq!(cells, ["column_id", "row_id", "write_id"]);
         let fields = sql
             .query(
                 "SELECT name FROM pragma_table_info('coven_operations') ORDER BY cid",

@@ -30,7 +30,7 @@ fn metadata_fields_are_the_bytes_in_snapshot_merge_records() {
     let mut merged = fixture::merge_row();
     let mut cells = merged.state.cells().clone();
     cells.get_mut("x").unwrap().value.parents.insert(
-        "parent_fk".into(),
+        coven_merge::ForeignKey::new(["parent_fk"], "t", ["id"]),
         Parent {
             row: fixture::row(),
             generation: 1,
@@ -45,9 +45,9 @@ fn metadata_fields_are_the_bytes_in_snapshot_merge_records() {
     )
     .unwrap();
     merged.removed = BTreeSet::from([
-        Rule::ForeignKey("parent_fk".into()),
+        Rule::ForeignKey(coven_merge::ForeignKey::new(["parent_fk"], "t", ["id"])),
         Rule::Check("valid".into()),
-        Rule::Unique("distinct".into()),
+        Rule::Unique(["distinct"].into()),
     ]);
     let mut header = fixture::snapshot_header();
     header.counts = [0, 0, 0, 1, 0];
@@ -219,7 +219,7 @@ fn field_codecs_refuse_invalid_values_and_noncanonical_bytes() {
     assert!(encode_write_positions(&WritePositions(vec![fixture::position(); 2])).is_err());
     assert!(encode_setters(&BTreeMap::from([("x".into(), invalid)])).is_err());
     assert!(encode_parents(&BTreeMap::from([(
-        "fk".into(),
+        coven_merge::ForeignKey::new(["fk"], "t", ["id"]),
         Parent {
             row: RowId {
                 key: vec![255],
@@ -243,4 +243,89 @@ fn field_codecs_refuse_invalid_values_and_noncanonical_bytes() {
         number: 0
     }))
     .is_err());
+}
+
+#[test]
+fn foreign_key_identity_keeps_both_sides_and_column_order() {
+    use coven_merge::ForeignKey;
+    let keys = [
+        ForeignKey::new(["parent"], "lefts", ["id"]),
+        ForeignKey::new(["parent"], "rights", ["id"]),
+        ForeignKey::new(["parent"], "rights", ["alternate"]),
+        ForeignKey::new(["a", "bc"], "pairs", ["id", "locale"]),
+        ForeignKey::new(["ab", "c"], "pairs", ["id", "locale"]),
+        ForeignKey::new(["a", "bc"], "pairs", ["locale", "id"]),
+    ];
+    let parents = keys
+        .iter()
+        .map(|key| {
+            (
+                key.clone(),
+                Parent {
+                    row: RowId {
+                        table: key.parent.clone(),
+                        ..fixture::row()
+                    },
+                    generation: 1,
+                },
+            )
+        })
+        .collect();
+    let bytes = encode_parents(&parents).unwrap();
+    assert_eq!(decode_parents(&bytes).unwrap(), parents);
+    assert_eq!(parents.len(), keys.len());
+    let rules = keys.into_iter().map(Rule::ForeignKey).collect();
+    assert_eq!(decode_rules(&encode_rules(&rules).unwrap()).unwrap(), rules);
+    for key in [
+        ForeignKey::new([], "parents", []),
+        ForeignKey::new(["parent"], "", ["id"]),
+        ForeignKey::new(["parent"], "parents", [""]),
+        ForeignKey::new(["parent"], "parents", ["id", "extra"]),
+    ] {
+        let rules = [Rule::ForeignKey(key)].into();
+        assert!(encode_rules(&rules).is_err());
+        // Bypass validation to exercise rejection by the field decoder too.
+        assert!(decode_rules(&encode(&rules).unwrap()).is_err());
+    }
+}
+
+#[test]
+fn unique_identity_retains_terms_order_and_partial_predicate() {
+    use coven_merge::UniqueConstraint;
+    let identities = [
+        UniqueConstraint::from(["title"]),
+        UniqueConstraint::from(["lower(title)"]),
+        UniqueConstraint {
+            terms: vec!["title".into()],
+            partial: Some("active=1".into()),
+        },
+        UniqueConstraint::from(["folder", "title"]),
+        UniqueConstraint::from(["title", "folder"]),
+        UniqueConstraint::from(["(1)"]),
+    ];
+    let mut encodings = BTreeSet::new();
+    for identity in &identities {
+        let bytes = encode_unique_constraint(identity).unwrap();
+        take_field(
+            &mut Decoder::new(&bytes).unwrap(),
+            identity,
+            encode_unique_constraint,
+            decode_unique_constraint,
+        );
+        encodings.insert(bytes);
+    }
+    assert_eq!(encodings.len(), identities.len());
+    let rules = identities.into_iter().map(Rule::Unique).collect();
+    assert_eq!(decode_rules(&encode_rules(&rules).unwrap()).unwrap(), rules);
+    for identity in [
+        UniqueConstraint::from([]),
+        UniqueConstraint::from([""]),
+        UniqueConstraint {
+            terms: vec!["title".into()],
+            partial: Some(String::new()),
+        },
+    ] {
+        assert!(encode_unique_constraint(&identity).is_err());
+        assert!(decode_unique_constraint(&encode(&identity).unwrap()).is_err());
+    }
 }

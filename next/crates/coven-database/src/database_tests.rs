@@ -4,16 +4,19 @@ use crate::tests::TestStore;
 use coven_foundation::files::{SettingsError, StoreLockError};
 
 impl Database {
+    pub(crate) fn inspect_writer_schema<T>(
+        &self,
+        inspect: impl FnOnce(&DatabaseConnection, &crate::write_schema::WriteSchema) -> T,
+    ) -> T {
+        let slot = self.inner.read().unwrap();
+        let inner = slot.as_ref().unwrap();
+        let writer = inner.writer.lock().unwrap();
+        inspect(&writer, &inner.write_schema)
+    }
+
     pub(crate) fn inspect_writer<T>(&self, inspect: impl FnOnce(&DatabaseConnection) -> T) -> T {
         let inner = self.inner.read().unwrap();
-        let writer = inner
-            .as_ref()
-            .unwrap()
-            .writer
-            .as_ref()
-            .unwrap()
-            .lock()
-            .unwrap();
+        let writer = inner.as_ref().unwrap().writer.lock().unwrap();
         inspect(&writer)
     }
 }
@@ -78,7 +81,7 @@ async fn read_connections_are_read_only_and_run_concurrently() {
         .unwrap();
     {
         let slot = database.inner.read().unwrap();
-        for reader in &slot.as_ref().unwrap().readers {
+        for reader in &slot.as_ref().unwrap().readers.readers {
             let error = reader
                 .lock()
                 .unwrap()
@@ -94,7 +97,7 @@ async fn read_connections_are_read_only_and_run_concurrently() {
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let held = std::thread::spawn(move || {
             let slot = database.inner.read().unwrap();
-            let _reader = slot.as_ref().unwrap().acquire_reader();
+            let _reader = slot.as_ref().unwrap().readers.acquire_reader();
             entered_tx.send(()).unwrap();
             release_rx
                 .recv_timeout(std::time::Duration::from_secs(10))
@@ -162,7 +165,7 @@ async fn closing_waits_for_a_borrowed_connection_before_releasing_the_lock() {
     let clone = database.clone();
     let worker = std::thread::spawn(move || {
         let slot = clone.inner.read().unwrap();
-        let reader = slot.as_ref().unwrap().acquire_reader();
+        let reader = slot.as_ref().unwrap().readers.acquire_reader();
         entered_tx.send(()).unwrap();
         release_rx
             .recv_timeout(std::time::Duration::from_secs(10))
@@ -281,28 +284,38 @@ async fn a_panicking_migration_preserves_its_panic_payload() {
 #[tokio::test]
 async fn opening_checks_integrity_once_for_all_its_connections() {
     let store = TestStore::new();
-    for read_only in [false, true] {
-        let builder = store.builder(notes_tables(), notes_migrations());
-        let db = if read_only {
-            builder.open_read_only().await
-        } else {
-            builder.open().await
-        }
+    let database = store
+        .builder(notes_tables(), notes_migrations())
+        .open()
+        .await
         .unwrap();
-        {
-            let slot = db.inner.read().unwrap();
-            let inner = slot.as_ref().unwrap();
-            let readers: usize = inner
+    let reader = store
+        .builder(notes_tables(), notes_migrations())
+        .open_read_only()
+        .await
+        .unwrap();
+    {
+        let slot = database.inner.read().unwrap();
+        let inner = slot.as_ref().unwrap();
+        let checks = inner
+            .readers
+            .readers
+            .iter()
+            .map(|r| r.lock().unwrap().integrity_checks())
+            .sum::<usize>()
+            + inner.writer.lock().unwrap().integrity_checks();
+        assert_eq!(checks, 1);
+        let slot = reader.inner.read().unwrap();
+        assert_eq!(
+            slot.as_ref()
+                .unwrap()
                 .readers
                 .iter()
                 .map(|r| r.lock().unwrap().integrity_checks())
-                .sum();
-            let writer = match &inner.writer {
-                Some(w) => w.lock().unwrap().integrity_checks(),
-                None => 0,
-            };
-            assert_eq!(readers + writer, 1);
-        }
-        db.close().await.unwrap();
+                .sum::<usize>(),
+            1
+        );
     }
+    reader.close().await.unwrap();
+    database.close().await.unwrap();
 }

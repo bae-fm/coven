@@ -8,15 +8,17 @@ test-utils = []
 
 [dependencies]
 coven-foundation.workspace = true
+coven-merge.workspace = true
+coven-format.workspace = true
 rusqlite = { workspace = true, features = ["bundled", "session", "hooks", "functions"] }
+sqlite3-parser.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }
 uuid.workspace = true
 
 [dev-dependencies]
+rusqlite = { workspace = true, features = ["trace"] }
 coven-foundation = { workspace = true, features = ["test-utils"] }
-coven-merge.workspace = true
-coven-format.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 

@@ -121,7 +121,7 @@ pub enum RemovalRow {
         /// The timestamp recorded for this generation in `coven_rows`.
         started: Timestamp,
         /// Foreign-key names and their merged references.
-        references: BTreeMap<String, Reference>,
+        references: BTreeMap<crate::ForeignKey, Reference>,
         /// Whether the store log has deleted this row's circle.
         deleted_circle: bool,
     },
@@ -155,8 +155,8 @@ pub struct UniqueClaim {
 pub struct Constraints {
     /// Names of all CHECK constraints the merged values fail.
     pub failed_checks: BTreeSet<String>,
-    /// Unique constraint names and the row's claims.
-    pub unique: BTreeMap<String, UniqueClaim>,
+    /// One non-null claim per constraint, identified by terms and predicate.
+    pub unique: BTreeMap<crate::UniqueConstraint, UniqueClaim>,
 }
 
 /// Rows competing for one unique value or one key across audiences.
@@ -169,7 +169,7 @@ pub enum Group {
         /// The audience within which the value must be unique.
         audience: Audience,
         /// The unique constraint's name.
-        constraint: String,
+        constraint: crate::UniqueConstraint,
         /// The canonical equality encoding used by [`UniqueClaim`].
         value: Vec<u8>,
     },
@@ -186,30 +186,32 @@ pub enum Group {
 /// the merged state and store log, independent of which rows are removed.
 /// An adapter can prepare this view in memory; the merge itself performs no I/O.
 pub trait RemovalView {
+    /// Query failure, including the merge invariant errors checked here.
+    type Error: From<MergeError>;
     /// Every known row, including rows absent by their own generation.
-    fn rows(&self) -> Result<Vec<RowId>, MergeError>;
+    fn rows(&self) -> Result<Vec<RowId>, Self::Error>;
     /// Facts for a row. Unknown keys are `Absent { generation: 0 }`.
-    fn row(&self, row: &RowId) -> Result<RemovalRow, MergeError>;
+    fn row(&self, row: &RowId) -> Result<RemovalRow, Self::Error>;
     /// Evaluate constraints on merged values with these resolved references.
     /// Substitution permission is supplied with the reference; CHECK results
     /// here describe the merged values that remain after that decision.
     fn constraints(
         &self,
         row: &RowId,
-        references: &BTreeMap<String, ReferenceValue>,
-    ) -> Result<Constraints, MergeError>;
+        references: &BTreeMap<crate::ForeignKey, ReferenceValue>,
+    ) -> Result<Constraints, Self::Error>;
     /// Indexed reference edges in both directions: parents, children, default
     /// parents, and children whose default parent is this row. Include absent
     /// and removed rows, and edges before and after reference substitution.
     /// Competition belongs in [`Self::groups`], not in these edges.
-    fn related(&self, row: &RowId) -> Result<BTreeSet<RowId>, MergeError>;
+    fn related(&self, row: &RowId) -> Result<BTreeSet<RowId>, Self::Error>;
     /// The row's key group and its current unique claim groups, using values
     /// after reference substitution. Include removed rows' claims. The union
     /// of the before/after views in [`recompute`] covers groups a row left.
-    fn groups(&self, row: &RowId) -> Result<BTreeSet<Group>, MergeError>;
+    fn groups(&self, row: &RowId) -> Result<BTreeSet<Group>, Self::Error>;
     /// Every row in a competition group, including absent and removed rows,
     /// regardless of rank. Region discovery visits each group once per view.
-    fn members(&self, group: &Group) -> Result<BTreeSet<RowId>, MergeError>;
+    fn members(&self, group: &Group) -> Result<BTreeSet<RowId>, Self::Error>;
 }
 
 /// A rule recorded for a removed row. Every rule that holds at the end is
@@ -217,7 +219,7 @@ pub trait RemovalView {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Rule {
     /// The named foreign key is stale or its parent is absent/removed.
-    ForeignKey(String),
+    ForeignKey(crate::ForeignKey),
     /// The named CHECK fails on merged values.
     Check(String),
     /// The store log has deleted the row's circle.
@@ -225,7 +227,7 @@ pub enum Rule {
     /// The same key won in another audience.
     OtherAudience,
     /// The named unique constraint lost its value to an earlier claim.
-    Unique(String),
+    Unique(crate::UniqueConstraint),
 }
 
 /// Removals and reference readings for a closed region. Replace prior removal
@@ -239,17 +241,17 @@ pub struct RemovalResult {
     pub removed: BTreeMap<RowId, BTreeSet<Rule>>,
     /// References as they read in both the app's table and `coven_lost`.
     /// The original cell setters and timestamps are retained in `RowState`.
-    pub references: BTreeMap<RowId, BTreeMap<String, ReferenceValue>>,
+    pub references: BTreeMap<RowId, BTreeMap<crate::ForeignKey, ReferenceValue>>,
 }
 
 /// Recompute every row using §8's three steps. The view controls iteration
 /// order; no choice of monotone rule order changes the result (Appendix B, B8).
-pub fn removals(view: &impl RemovalView) -> Result<RemovalResult, MergeError> {
+pub fn removals<V: RemovalView>(view: &V) -> Result<RemovalResult, V::Error> {
     let rows = view.rows()?;
     let mut seen = BTreeSet::new();
     for row in &rows {
         if !seen.insert(row.clone()) {
-            return Err(MergeError::DuplicateRow(row.clone()));
+            return Err(MergeError::DuplicateRow(row.clone()).into());
         }
     }
     let region = region(&[view], seen.clone())?;
@@ -267,20 +269,20 @@ pub fn removals(view: &impl RemovalView) -> Result<RemovalResult, MergeError> {
 /// No global row enumeration is performed by this function. Each competition
 /// group is expanded at most once in each view, so rivals are visited by group
 /// membership rather than by every pair of competing rows.
-pub fn recompute(
-    before: &impl RemovalView,
-    after: &impl RemovalView,
+pub fn recompute<E: From<MergeError>>(
+    before: &impl RemovalView<Error = E>,
+    after: &impl RemovalView<Error = E>,
     touched: impl IntoIterator<Item = RowId>,
-) -> Result<RemovalResult, MergeError> {
+) -> Result<RemovalResult, E> {
     let region = region(&[before, after], touched.into_iter().collect())?;
     let order: Vec<_> = region.iter().cloned().collect();
     evaluate(after, region, &order)
 }
 
-fn region(
-    views: &[&dyn RemovalView],
+fn region<E: From<MergeError>>(
+    views: &[&dyn RemovalView<Error = E>],
     mut rows: BTreeSet<RowId>,
-) -> Result<BTreeSet<RowId>, MergeError> {
+) -> Result<BTreeSet<RowId>, E> {
     let mut visited = vec![BTreeSet::new(); views.len()];
     let mut pending: Vec<_> = rows.iter().cloned().collect();
     while let Some(row) = pending.pop() {
@@ -306,19 +308,19 @@ fn region(
 struct Facts {
     row: RemovalRow,
     constraints: Constraints,
-    references: BTreeMap<String, ReferenceValue>,
+    references: BTreeMap<crate::ForeignKey, ReferenceValue>,
 }
 
-fn evaluate(
-    view: &impl RemovalView,
+fn evaluate<V: RemovalView>(
+    view: &V,
     region: BTreeSet<RowId>,
     order: &[RowId],
-) -> Result<RemovalResult, MergeError> {
+) -> Result<RemovalResult, V::Error> {
     let mut raw = BTreeMap::new();
     for row in &region {
         let facts = view.row(row)?;
         if facts.present() == facts.generation().is_multiple_of(2) {
-            return Err(MergeError::GenerationParity(facts.generation()));
+            return Err(MergeError::GenerationParity(facts.generation()).into());
         }
         raw.insert(row.clone(), facts);
     }
@@ -464,7 +466,7 @@ fn judge_groups(
     let mut groups = BTreeMap::<Group, Vec<(&RowId, Timestamp)>>::new();
     for (row, fact) in facts {
         if !out.contains(row) {
-            for (name, claim) in &fact.constraints.unique {
+            for (name, claim) in fact.constraints.unique.iter() {
                 groups
                     .entry(Group::Claim {
                         table: row.table.clone(),

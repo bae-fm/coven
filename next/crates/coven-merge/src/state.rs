@@ -209,9 +209,9 @@ pub(crate) fn timestamp(oracle: &impl WriteOracle, id: WriteId) -> Result<Timest
 /// the generation. Full witness validation is provided by [`crate::History`];
 /// the authoring database establishes it when producing a change. The input
 /// state is unchanged on every error path.
-pub fn apply<V: Clone + Eq>(
+pub fn apply<V: Clone + Eq, P: crate::WritePast>(
     state: &RowState<V>,
-    write: &Write<V>,
+    write: &Write<V, P>,
     oracle: &impl WriteOracle,
 ) -> Result<RowUpdate<V>, MergeError> {
     if oracle.timestamp(write.id).is_some() {
@@ -220,7 +220,7 @@ pub fn apply<V: Clone + Eq>(
     if write.timestamp.device() != write.id.device {
         return Err(MergeError::TimestampDevice(write.id));
     }
-    for past in &write.had_read {
+    for past in write.had_read.frontier() {
         if timestamp(oracle, *past)? >= write.timestamp {
             return Err(MergeError::CausalTimestamp(write.id));
         }
@@ -244,7 +244,7 @@ pub fn apply<V: Clone + Eq>(
         })?;
         let earliest = timestamp(oracle, *first)?;
         let mut possible_witness = false;
-        for past in &write.had_read {
+        for past in write.had_read.frontier() {
             possible_witness |= timestamp(oracle, *past)? >= earliest;
         }
         if !possible_witness {

@@ -46,9 +46,25 @@ Notation:
   ordered encoding below. Every row and parent key is decoded for validation.
 - `Parent`: `row:RowId | generation:u64`. Written references name odd
   incarnations. A child can refer to its own audience or the store.
-- `ColumnValue<Value>`: `value:Value | parents:map<text, Parent>`. Map keys are
-  foreign-key names, sorted by name. This is merge's type, also used inside
-  winning cells and lost values, without copying its fields into another type.
+- `ConstraintColumns`: `[text]`, the column names in declaration order. List
+  boundaries are encoded; `(a, bc)` and `(ab, c)` are different identities.
+  Column lists order lexicographically, without sorting their columns. A foreign
+  key has at least one column.
+- `ForeignKey`: `columns:ConstraintColumns | parent:text |
+  parent_columns:ConstraintColumns`. Both column lists are nonempty and have
+  equal lengths. Implicit targets name the parent's primary-key columns. Order
+  compares the source columns, then the parent table, then the target columns.
+  Two keys on one column into different tables or target columns stay distinct.
+- `UniqueConstraint`: `terms:[text] | partial`. Terms are nonempty and ordered,
+  each a column name or an expression's text as written. `partial` is `0` for a
+  full constraint or `1 | text` for the WHERE expression of a partial index.
+  Terms and predicates use the name bounds. Order compares terms, then the
+  optional predicate (absent first). `title`, `lower(title)` and `title` with
+  `WHERE active=1` identify three different constraints. An explicit COLLATE
+  stays in an expression term; ASC/DESC ordering is not part of the term.
+- `ColumnValue<Value>`: `value:Value | parents:map<ForeignKey, Parent>`.
+  This is merge's type, also used inside winning cells and lost values, without
+  copying its fields into another type.
 - `MemberPublicKeys`: `signing:32 | sealing:32`.
 - `SnapshotId`: `device:u64 | number:u64 | audience:Audience`. Its positive
   number is in the device's snapshot sequence, not either log.
@@ -159,7 +175,10 @@ generation advancement without overflow, and parent generations/audiences.
 Insert/update columns are nonempty. Inserts have no old values; updates have
 exactly the same column names in old and new maps; deletes may retain old values
 or omit them.
-Parent metadata belongs to each new `ColumnValue`, named by foreign key.
+Parent metadata belongs to each new `ColumnValue`, keyed by the full `ForeignKey` identity.
+
+The local upload queue holds the canonical kind-1 frame, unencrypted and
+unsigned. Its uploader encrypts and signs it on its first upload (§6).
 
 ### Store-log entries
 
@@ -216,9 +235,11 @@ removed:set<Rule>`. Each nested shape belongs to merge:
 - `LostKey`: `column:text | write:WriteId`, ordered by column then write.
 - `LostValue<Value>`: `incarnation:u64 | value:ColumnValue<Value> |
   replaced_by:WriteId`.
-- `Rule`: `0 | foreign_key_name:text`, `1 | check_name:text`, `2` DeletedCircle,
-  `3` OtherAudience, or `4 | unique_name:text`. Ordering is merge's variant
-  order, then the name where present. OtherAudience names no winner and imposes
+- `Rule`: `0 | foreign_key:ForeignKey`, `1 | check_name:text`,
+  `2` DeletedCircle, `3` OtherAudience, or `4 | unique:UniqueConstraint`.
+  A CHECK uses its declared name, or its SQL expression when unnamed.
+  Ordering is merge's variant order, then the foreign-key identity, unique terms and predicate,
+  or CHECK name. OtherAudience names no winner and imposes
   no invented restriction on which circle can win.
 
 Synced-row references are checked by merge's `Parent::validate_written`.
@@ -258,7 +279,8 @@ No local row ids, uploads, operations or storage paths occur in a snapshot.
 ### Fields stored in SQLite
 
 `merge_fields` exposes the snapshot field encodings without a frame prefix:
-`Timestamp`, `WriteId`, `WritePositions`, parent maps, `ColumnValue<Value>`,
+`Timestamp`, `WriteId`, `WritePositions`, `ForeignKey`, `UniqueConstraint`,
+parent maps, `ColumnValue<Value>`,
 column maps, setter maps (`map<text, WriteId>`), removal-rule sets, and
 `LostWriteCause`. The database's schema version identifies their format.
 These functions use the same binary primitives and validation as snapshots;
@@ -266,10 +288,14 @@ they do not define another encoding. Each call has the same collection and
 byte bounds and rejects trailing bytes. Cross-field relationships still need
 merge's validation.
 
-Present values live only in the app's tables. `coven_cells` retains setters and
-reference parents; `coven_lost` retains lost values and removed rows. The database
-round-trip tests use these codecs with the actual tables, without a production
-merge adapter.
+Present values live only in the app's tables. `coven_cells` retains setters.
+`coven_foreign_keys` interns reference identities, and `coven_references` holds
+one parent table, key, audience and generation per row, column and foreign key.
+`coven_constraints` interns unique identities, and `coven_claims` indexes each
+removed row's audience and equality-encoded claim. `coven_lost` retains lost
+values and removed rows; lost cells keep their written parents in their value.
+The database round-trip tests use these codecs with the actual tables. Local
+writes load only touched rows’ merge state and persist `coven-merge::apply` updates.
 
 ### Restore and invite codes
 

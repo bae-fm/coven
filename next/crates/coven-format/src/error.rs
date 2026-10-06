@@ -23,6 +23,8 @@ pub enum Rule {
     CircleRemoval,
     /// Old and new column values did not match the operation.
     ColumnOperation,
+    /// A foreign key names different numbers of source and target columns.
+    ForeignKeyColumns,
     /// A real number was NaN or encoded negative zero.
     Real,
     /// A row key contained null.

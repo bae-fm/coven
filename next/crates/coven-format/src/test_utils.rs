@@ -64,7 +64,7 @@ pub fn member() -> MemberPublicKeys {
 pub fn write() -> WriteRecord {
     let mut new = column(Value::Integer(2));
     new.parents.insert(
-        "parent_fk".into(),
+        coven_merge::ForeignKey::new(["parent_fk"], "p", ["id"]),
         Parent {
             row: RowId {
                 table: "p".into(),

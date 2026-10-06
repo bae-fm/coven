@@ -237,7 +237,7 @@ def val (w r c : Nat) : Nat :=
 
 def claimOf (st : St Nat Nat Nat) (r : Nat) : List (Claim Nat) :=
   match st.cell r 0, st.cell r 1 with
-  | some a, some b => [⟨0, val a r 0 * 100 + val b r 1, max (M.ts a) (M.ts b), false⟩]
+  | some a, some b => [⟨⟨["folder", "title"], none⟩, val a r 0 * 100 + val b r 1, max (M.ts a) (M.ts b), false⟩]
   | _, _ => []
 
 def inputs (st : St Nat Nat Nat) : Inputs Nat Nat where
@@ -273,7 +273,7 @@ def subNote : Inputs Nat Nat where
   refs x := if x = 2 then [⟨1, false⟩] else []
   checkFails _ := false
   inDeletedCircle _ := false
-  claims x := if x = 1 then [⟨0, 7, 1100, false⟩] else [⟨0, 7, 1000, false⟩]
+  claims x := if x = 1 then [⟨⟨["title"], none⟩, 7, 1100, false⟩] else [⟨⟨["title"], none⟩, 7, 1000, false⟩]
   rank x := x
 
 /-- Note 1 loses "Plan" and is removed; note 2 goes with it by cascade; note
@@ -293,8 +293,8 @@ def otherLoser : Inputs Nat Nat where
   checkFails _ := false
   inDeletedCircle _ := false
   claims x :=
-    if x = 1 then [⟨0, 7, 1100, false⟩] else if x = 2 then [⟨0, 7, 1000, false⟩]
-    else if x = 3 then [⟨0, 8, 1200, false⟩] else [⟨0, 8, 900, false⟩]
+    if x = 1 then [⟨⟨["title"], none⟩, 7, 1100, false⟩] else if x = 2 then [⟨⟨["title"], none⟩, 7, 1000, false⟩]
+    else if x = 3 then [⟨⟨["title"], none⟩, 8, 1200, false⟩] else [⟨⟨["title"], none⟩, 8, 900, false⟩]
   rank x := x
 
 theorem example_8_5_step3 :

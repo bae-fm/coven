@@ -71,7 +71,7 @@ fn written_references_share_the_change_audience_check() {
             "x".into(),
             ColumnValue {
                 value: (),
-                parents: BTreeMap::from([("fk".into(), parent)]),
+                parents: BTreeMap::from([(crate::ForeignKey::new(["fk"], "t", ["id"]), parent)]),
             },
         )]);
         for (generation, operation) in [
@@ -124,13 +124,13 @@ fn change_validation_checks_each_written_parent_generation() {
                         value: (),
                         parents: BTreeMap::from([
                             (
-                                "first".into(),
+                                crate::ForeignKey::new(["first"], "t", ["id"]),
                                 Parent {
                                     row: child.clone(),
                                     generation: 1,
                                 },
                             ),
-                            ("second".into(), parent),
+                            (crate::ForeignKey::new(["second"], "t", ["id"]), parent),
                         ]),
                     },
                 ),
