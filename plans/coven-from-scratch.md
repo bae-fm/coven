@@ -44,6 +44,7 @@
   - [16.3 Reading ranges](#163-reading-ranges)
   - [16.4 Cache](#164-cache)
   - [16.5 Uploads and deletion](#165-uploads-and-deletion)
+  - [16.6 What a device keeps about files](#166-what-a-device-keeps-about-files)
 - [17. Schema changes](#17-schema-changes)
   - [17.1 Host application](#171-host-application)
   - [17.2 Coven's schema](#172-covens-schema)
@@ -1890,6 +1891,27 @@ Carol's tablet:
   ([§15](#15-snapshots)).
 - Deleting a row deletes only coven's copies of its file, never a
   user-provided original.
+
+### 16.6 What a device keeps about files
+
+- Coven keeps, in its local tables, what only this device knows about
+  files; none of it syncs:
+  - `coven_user_files`: each user-provided file's path, size and
+    modification time, by its row and column;
+  - `coven_device_files`: each app-provided file this device keeps, and
+    where in coven's own folder;
+  - `coven_file_uploads`: the upload queue, each file's attempts, last
+    failure, and its provider upload session while one is in progress;
+  - `coven_upload_waits`: which waiting writes wait for which files
+    ([§16.5](#165-uploads-and-deletion));
+  - `coven_cache`: each cached file or chunk, its namespace, size, when it
+    was last read, and whether it is pinned;
+  - `coven_cache_budgets`: each namespace's budget.
+- The bytes themselves are files in the store's directory: coven's own
+  copies, and the cache.
+- A file's bytes are written and synced to disk before the row that names
+  them commits, and a row's removal commits before its bytes are deleted,
+  so a crash never leaves a table naming bytes that aren't there.
 
 ## 17. Schema changes
 
