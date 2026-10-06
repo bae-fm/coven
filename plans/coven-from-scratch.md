@@ -2222,8 +2222,22 @@ Carol's tablet:
   - The migration can never be done while the row says it isn't, which
     would run it twice.
 - A step that changes storage is safe to run twice.
-  - Writing an object writes the same path with the same bytes.
+  - Writing an object writes the same path with the same bytes: its bytes
+    are fixed and kept before the first attempt ([§6](#6-syncing-writes)).
   - Deleting an object that is already gone succeeds.
+- A store log entry takes its number when its bytes are fixed; from then on
+  it is always uploaded, even if the operation is abandoned, and the replay
+  judges it like any entry, since a device's later entries had read it.
+- An operation that writes a store log entry finishes only once the replay
+  keeps it; if the replay drops it, the operation starts over from its
+  first step, against the member list it then has.
+  - Unless the drop leaves nothing to do, such as removing a member a
+    concurrent entry already removed.
+- A device runs one operation that writes store log entries at a time, and
+  none while it reloads from a snapshot.
+- The app call that starts an operation returns once it finishes or fails
+  for good; without storage it waits. Dropping the call doesn't stop the
+  operation.
 - Steps are ordered so other devices never see a half-done operation.
 - Anything another device reads, such as a store log entry, is uploaded
   last, after everything it refers to.
@@ -2239,9 +2253,10 @@ Carol's tablet:
 ### 18.1 Operations
 
 - Removing a member ([§13](#13-removing-members-and-devices)):
-  1. make the new store key and its id, and record them in the operation's
-     row;
-  2. upload the new key sealed to each remaining member;
+  1. make the new store key, and a new key for each circle the member
+     shared with others, with their ids, and record them in the
+     operation's row with the member list they were made from;
+  2. upload each new key sealed to each remaining member of its audience;
   3. upload the store log entry removing the member;
   4. revoke the member's storage access, or on S3 tell the admin to delete
      their key in the provider's console.
@@ -2261,16 +2276,29 @@ Carol's tablet:
      ([§8](#8-merge)) with it, in one transaction;
   3. migrate the writes waiting in `coven_uploads`, if the snapshot's
      version is newer ([§17](#17-schema-changes)).
-- Writing a snapshot, then deleting the log objects and files it no
-  longer needs ([§15](#15-snapshots), [§16.5](#165-uploads-and-deletion)).
+- Writing a snapshot ([§15](#15-snapshots)):
+  1. write it, sealed, to a temporary file, and record the file;
+  2. upload it;
+  3. delete the log objects, older snapshots and files it lets go
+     ([§16.5](#165-uploads-and-deletion)).
+- Making a circle ([§14.3](#143-circles)):
+  1. make its first key and its id, and record them;
+  2. upload the key sealed to this member;
+  3. upload the entry making the circle.
+- Adding someone to a circle: seal each of its keys to them, then upload
+  the entry adding them.
+- Deleting a circle ([§14.7](#147-deleting-a-circle)):
+  1. commit the write deleting its rows, recording the operation in the
+     same transaction;
+  2. upload the entry deleting the circle, after the write.
 - Changing where a file is ([§16.1](#161-kinds-and-where-files-are)):
   1. upload it, or download it to the device keeping it;
   2. write its row's file columns, checking the row still has that file;
      if it doesn't, the operation stops for good, and what step 1 made is
      deleted like any unused copy.
 - Inviting a person ([§12.2](#122-adding-a-person)):
-  1. share the storage with their account, or make their access key, and
-     record the invite;
+  1. share the storage with their account, or record the S3 key the admin
+     made in the provider's console, and record the invite;
   2. once an admin approves the request, seal the store key to them, then
      write the store log entry adding them;
   3. on decline or expiry, take back the access instead.
