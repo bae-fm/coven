@@ -190,6 +190,15 @@ macro_rules! coven_tables {
                 UNIQUE(table_name, identity)
             ) STRICT;
         ");
+        $visit!(coven_reference_values, "
+            CREATE TABLE coven_reference_values (
+                column_id INTEGER NOT NULL,
+                row_id INTEGER NOT NULL,
+                value ANY,
+                PRIMARY KEY(column_id,row_id),
+                FOREIGN KEY(column_id,row_id) REFERENCES coven_cells(column_id,row_id) ON DELETE CASCADE ON UPDATE CASCADE
+            ) STRICT, WITHOUT ROWID;
+        ");
         $visit!(coven_references, "
             CREATE TABLE coven_references (
                 row_id INTEGER NOT NULL REFERENCES coven_rows(id),
@@ -234,6 +243,7 @@ macro_rules! coven_tables {
                 value BLOB NOT NULL,
                 set_by BLOB NOT NULL,
                 retired INTEGER NOT NULL DEFAULT 0 CHECK(retired IN (0,1)),
+                read_value BLOB,
                 replacement_kind TEXT NOT NULL CHECK(replacement_kind IN ('write', 'rules', 'excluded')),
                 replaced_by BLOB NOT NULL,
                 CHECK((replacement_kind != 'write' OR column_id IS NOT NULL) AND (replacement_kind != 'rules' OR column_id IS NULL))

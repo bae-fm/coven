@@ -135,7 +135,7 @@ impl<'a> MergeStore<'a> {
                 retained.len() <= 1,
                 "present row has more than one removal record: {id:?}"
             );
-            let values = if let Some((ordinal, columns)) = retained.into_iter().next() {
+            let mut values = if let Some((ordinal, columns)) = retained.into_iter().next() {
                 loss = Some(ordinal);
                 columns.into_iter().map(|(n, v)| (n, v.value)).collect()
             } else {
@@ -149,6 +149,7 @@ impl<'a> MergeStore<'a> {
                 );
                 app.values
             };
+            values.extend(crate::reference_values::load(self.database, ordinal)?);
             let mut references = BTreeMap::<String, BTreeMap<_, _>>::new();
             for (column,key,parent) in self.database.query("SELECT c.column_name,f.identity,v.parent_table,v.parent_key,v.parent_audience,v.parent_generation FROM coven_references v JOIN coven_foreign_keys f ON f.id=v.foreign_key_id JOIN coven_columns c ON c.id=v.column_id WHERE v.row_id=?1", [ordinal], |r| Ok((r.get::<_,String>(0)?,decoded(merge_fields::decode_foreign_key(&r.get::<_,Vec<u8>>(1)?))?, coven_merge::Parent { row: RowId { table:r.get(2)?,key:r.get(3)?,audience:crate::write_encoding::audience(&r.get::<_,String>(4)?)? }, generation:counter(r.get(5)?) })))? {
                 references.entry(column).or_default().insert(key,parent);

@@ -49,6 +49,13 @@ pub(crate) fn update(
             .map(|(name, cell)| (name.clone(), cell.write))
             .collect();
         fields.push(encoded(merge_fields::encode_setters(&setters))?);
+        let written_references = state
+            .cells()
+            .iter()
+            .filter(|(_, cell)| !cell.value.parents.is_empty())
+            .map(|(name, cell)| (name.clone(), cell.value.clone()))
+            .collect();
+        fields.push(encoded(merge_fields::encode_columns(&written_references))?);
         let row = view.evaluated(id)?;
         let values = if state.present() && !result.removed.contains_key(id) {
             row.values
@@ -88,6 +95,7 @@ pub(crate) fn update(
             fields.push(key.column.as_bytes().to_vec());
             fields.push(encoded(merge_fields::encode_write_id(&key.write))?);
             fields.push(lost.incarnation.to_be_bytes().to_vec());
+            fields.push(encoded(merge_fields::encode_column_value(&lost.value))?);
             fields.push(encoded(merge_fields::encode_column_value(
                 &view.lost_value(id, key, lost)?,
             ))?);

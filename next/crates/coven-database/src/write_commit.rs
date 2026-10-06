@@ -105,7 +105,7 @@ pub(crate) fn persist(
                     let replaced_by = encoded(merge_fields::encode_write_id(&value.replaced_by))?;
                     let loss_id = if let Some(id) = old.lost_ids.get(key) {
                         database.internal_execute(
-                            "UPDATE coven_lost SET value=?1,set_by=?2,replaced_by=?3 WHERE id=?4",
+                            "UPDATE coven_lost SET value=?1,set_by=?2,replaced_by=?3,read_value=NULL WHERE id=?4",
                             params![bytes, setter, replaced_by, id],
                         )?;
                         *id

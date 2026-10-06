@@ -20,6 +20,7 @@ pub(crate) fn carry(
     db.batch("CREATE TEMP TABLE coven_migration_retired AS SELECT DISTINCT table_name,key,audience FROM coven_lost WHERE retired=0 AND replacement_kind='rules'")?;
     db.visit("SELECT table_name,key,audience FROM temp.coven_migration_retired", [], |r| {
         let id = crate::row_queries::read_identity(r)?;
+        freeze_losses(db, &id)?;
         crate::fingerprint::retire_losses(db, &id)?;
         crate::fingerprint::forget_rows(db, std::iter::once(&id))?;
         let audience = audience_text(&id.audience);
@@ -77,6 +78,26 @@ pub(crate) fn carry(
         rename_table(db, &format!("coven_migration_table_{index}"), new)?;
     }
     Ok(refresh)
+}
+
+/// Retired rows no longer participate in reference recomputation. Keep exactly
+/// their displayed values, without parent generations that could restore them.
+fn freeze_losses(db: &DatabaseConnection, row: &coven_merge::RowId) -> Result<(), DbError> {
+    db.visit("SELECT id,replacement_kind,COALESCE(read_value,value) FROM coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND retired=0 AND replacement_kind IN ('rules','write')", params![row.table,row.key,audience_text(&row.audience)], |r| {
+        let id: i64 = r.get(0)?;
+        let bytes: Vec<u8> = r.get(2)?;
+        let value = if r.get::<_,String>(1)? == "rules" {
+            let mut columns = decoded(merge_fields::decode_columns(&bytes))?;
+            for value in columns.values_mut() { value.parents.clear(); }
+            encoded(merge_fields::encode_columns(&columns))?
+        } else {
+            let mut value = decoded(merge_fields::decode_column_value(&bytes))?;
+            value.parents.clear();
+            encoded(merge_fields::encode_column_value(&value))?
+        };
+        db.internal_execute("UPDATE coven_lost SET value=?2,read_value=NULL WHERE id=?1",params![id,value])?;
+        Ok(())
+    })
 }
 
 fn rename_table(db: &DatabaseConnection, old: &str, new: &str) -> Result<(), DbError> {
@@ -231,7 +252,7 @@ fn references(
     }
     for table in losses {
         // Values of concurrent cell losses embed reference identities as well.
-        db.visit("SELECT id,value FROM coven_lost WHERE table_name=?1 AND retired=0 AND replacement_kind='write'",[&table],|r| {
+        db.visit("SELECT id,value,read_value FROM coven_lost WHERE table_name=?1 AND retired=0 AND replacement_kind='write'",[&table],|r| {
             let id: i64 = r.get(0)?;
             let mut value = decoded(merge_fields::decode_column_value(&r.get::<_,Vec<u8>>(1)?))?;
             let old = value.clone();
@@ -243,7 +264,12 @@ fn references(
                 Some((fk,parent))
             }).collect();
             if value != old {
-                db.internal_execute("UPDATE coven_lost SET value=?2 WHERE id=?1",params![id,encoded(merge_fields::encode_column_value(&value))?])?;
+                if value.parents.is_empty() {
+                    if let Some(displayed) = r.get::<_,Option<Vec<u8>>>(2)? {
+                        value.value = decoded(merge_fields::decode_column_value(&displayed))?.value;
+                    }
+                }
+                db.internal_execute("UPDATE coven_lost SET value=?2,read_value=NULL WHERE id=?1",params![id,encoded(merge_fields::encode_column_value(&value))?])?;
             }
             Ok(())
         })?;

@@ -550,7 +550,10 @@ Two mechanisms order writes:
       below;
     - the row's audience and the value it claims
       ([§8.5](#85-keys-and-uniqueness)).
-  - A present row's values are in the app's table, and only there.
+  - A present row's displayed values are in the app's table. When a
+    reference reads differently from what was written (§8.4),
+    `coven_reference_values` keeps the written value by cell until the
+    two agree again.
   - `coven_lost`, one row per lost value or removed row, naming:
     - the cell, or the row;
     - the value that lost, or every value of the removed row;
@@ -563,6 +566,9 @@ Two mechanisms order writes:
     naming its `coven_lost` row, its `coven_foreign_keys` row and the
     parent, so a lost reference reads as null or the default when its
     parent goes ([§8.4](#84-foreign-keys)).
+  - A lost reference keeps its written value too; `coven_lost.read_value`
+    holds its derived reading while that differs, so displaying a loss
+    does not change its merge record.
 - Store-log publication uses `coven_store_log_uploads`: the next local entry's
   number, canonical plaintext record and complete fixed encrypted, signed bytes.
   `coven_store_log_key_uploads` holds its prerequisite sealed-key paths and fixed

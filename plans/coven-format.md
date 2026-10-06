@@ -382,10 +382,12 @@
   - The row's hash is SHA-256 over the context of: `coven/agreement/row/v1`;
     the table; the key; the number of generations and each generation with
     the write that started it; its cells' setters as `map<name, WriteId>`;
+    its written reference cells as `map<name, ColumnValue>`;
     the values the app sees as `map<name, ColumnValue>`, empty if the row
     isn't shown; if a rule removed it, its values and its rules, otherwise
     two empty strings; then the number of lost values and, for each, its
-    column, write, incarnation, value and replacing write.
+    column, write, incarnation, written value, displayed value and replacing
+    write.
   - A lost write's row has a leaf of its own, in place of a row's: its
     identity hash is over `excluded`, the table, the key and the write;
     its hash is over the row change's generation, its values as

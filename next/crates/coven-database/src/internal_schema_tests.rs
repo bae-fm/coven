@@ -535,6 +535,7 @@ async fn only_the_spec_tables_are_created() {
                 "coven_members",
                 "coven_operations",
                 "coven_positions",
+                "coven_reference_values",
                 "coven_references",
                 "coven_resets",
                 "coven_rows",

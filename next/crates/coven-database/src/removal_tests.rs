@@ -43,7 +43,7 @@ pub(crate) fn remove(
 type RemovedRow = (String, BTreeMap<String, ColumnValue<Value>>, BTreeSet<Rule>);
 
 fn losses(database: &Database) -> Vec<RemovedRow> {
-    database.inspect_writer(|db| db.query("SELECT table_name,value,replaced_by FROM coven_lost WHERE column_id IS NULL ORDER BY table_name,key", [], |r| Ok((r.get(0)?, merge_fields::decode_columns(&r.get::<_, Vec<u8>>(1)?).unwrap(), merge_fields::decode_rules(&r.get::<_, Vec<u8>>(2)?).unwrap()))).unwrap())
+    database.inspect_writer(|db| db.query("SELECT table_name,COALESCE(read_value,value),replaced_by FROM coven_lost WHERE column_id IS NULL ORDER BY table_name,key", [], |r| Ok((r.get(0)?, merge_fields::decode_columns(&r.get::<_, Vec<u8>>(1)?).unwrap(), merge_fields::decode_rules(&r.get::<_, Vec<u8>>(2)?).unwrap()))).unwrap())
 }
 
 #[tokio::test]

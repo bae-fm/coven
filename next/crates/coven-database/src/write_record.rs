@@ -397,7 +397,7 @@ fn removed_values(
     generation: u64,
 ) -> Result<AppValues, DbError> {
     let rows = database.query(
-        "SELECT value FROM coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4 AND column_id IS NULL AND replacement_kind='rules' AND retired=0",
+        "SELECT COALESCE(read_value,value) FROM coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4 AND column_id IS NULL AND replacement_kind='rules' AND retired=0",
         params![row.table, row.key, audience_text(&row.audience), generation.to_be_bytes().as_slice()],
         |r| { let bytes: Vec<u8> = r.get(0)?; decoded(merge_fields::decode_columns(&bytes)) },
     )?;
