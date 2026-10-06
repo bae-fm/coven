@@ -295,7 +295,7 @@
   ```
   20 0001                       kind 32, version 1
   <store key id>                header_key
-  00000001 <Gifts key id>       part_keys
+  00000002 <store key id> <Gifts key id>    part_keys
   <length><nonce><header frame sealed><tag>                 section 0
   <length><nonce><notes row 47 sealed><tag>                 section 1, chunk 0
   <length><nonce><pins row 4 sealed><tag>                   section 2, chunk 0
