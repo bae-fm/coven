@@ -1072,6 +1072,14 @@ Carol's tablet:
   - they raise the schema or format to the same version with different
     snapshots, or reset the same audience to different snapshots
     ([§17](#17-schema-changes), [§19.3](#193-resetting-a-store)).
+- Whether an entry deletes a circle is judged in the member list its
+  author had read: removing the circle's only member there deletes it.
+  - E.g. Ana and Ben are admins and share Gifts. Concurrently, Ana's phone
+    removes Ben from Gifts, and her tablet removes Ana from the store.
+  - Each had read Gifts with two members, so neither deletes it, and they
+    are about different members: both apply.
+  - Ana leaves the store, Ben stays as its admin, and Gifts, left with no
+    members, is deleted.
 - Of two conflicting entries, the one that beats the other is:
   - removing a member, a device or someone from a circle, or deleting a
     circle, over anything else;
@@ -1471,6 +1479,8 @@ Carol's tablet:
   - The circle key is replaced, sealed to Ana alone.
   - Ben keeps the circle's rows he already had, but can't read anything
     written to it afterwards.
+- Removing a circle's last member deletes the circle
+  ([§14.7](#147-deleting-a-circle)).
 - A write Ben made to the circle before he had read his removal still
   counts, as with any concurrent entry ([§9](#9-members-and-roles)).
   - Ben is still in the store, so storage access doesn't stop him writing
