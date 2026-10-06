@@ -13,6 +13,7 @@ use std::{
 #[derive(Default)]
 struct Remote {
     next: u64,
+    single_uploads: usize,
     files: BTreeMap<String, (Value, Vec<u8>)>,
     uploads: BTreeMap<String, (Value, Vec<u8>, usize)>,
     fail_reply: bool,
@@ -64,6 +65,33 @@ fn respond(
     }
     if parts == ["upload", "files"] {
         assert_eq!(method, Method::POST);
+        if q["uploadType"] == "multipart" {
+            let content_type = headers["content-type"].to_str().unwrap();
+            let boundary = content_type
+                .strip_prefix("multipart/related; boundary=")
+                .unwrap();
+            let marker = format!("--{boundary}");
+            let metadata_start = body.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+            let separator =
+                format!("\r\n{marker}\r\nContent-Type: application/octet-stream\r\n\r\n");
+            let metadata_end = body
+                .windows(separator.len())
+                .position(|w| w == separator.as_bytes())
+                .unwrap();
+            let mut value: Value =
+                serde_json::from_slice(&body[metadata_start..metadata_end]).unwrap();
+            let end = format!("\r\n{marker}--\r\n");
+            assert!(body.ends_with(end.as_bytes()));
+            let bytes = body[metadata_end + separator.len()..body.len() - end.len()].to_vec();
+            state.next += 1;
+            state.single_uploads += 1;
+            let id = format!("id{}", state.next);
+            value["id"] = json!(id);
+            let value = metadata(value, bytes.len());
+            state.files.insert(id, (value.clone(), bytes));
+            return reply(value);
+        }
+        assert_eq!(q["uploadType"], "resumable");
         let id = value["id"].as_str().unwrap().to_owned();
         let total = headers["x-upload-content-length"]
             .to_str()
@@ -456,4 +484,20 @@ async fn duplicate_cleanup_failure_is_reported_and_the_retry_finishes() {
             .collect::<Vec<_>>(),
         ["z-first"]
     );
+}
+
+#[tokio::test]
+async fn first_positions_write_uses_one_content_request() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let path = ObjectPath::positions(DeviceId(31));
+    let data = b"encrypted\0\xff\r\n--coven-upload-0\r\n--coven-upload-1\r\n";
+    storage.replace(&path, data).await.unwrap();
+    assert_eq!(state.lock().unwrap().single_uploads, 1);
+    assert!(state.lock().unwrap().uploads.is_empty());
+    assert_eq!(storage.read(&path).await.unwrap(), data);
+    storage.replace(&path, b"next").await.unwrap();
+    assert_eq!(state.lock().unwrap().single_uploads, 1);
+    assert_eq!(storage.read(&path).await.unwrap(), b"next");
 }

@@ -3870,6 +3870,10 @@ while let Ok(values) = lost.next().await {
     `LocationOccupied`.
   - Creating uploads the store's first entry and its key sealed to this
     member; waiting writes then go up through sync like any others.
+- Recorded `UploadSession`s only target create-once paths. Every provider's
+  `begin_upload` and recorded-session decoding refuse posted positions; their
+  replacement sends the complete bytes in one request. Completion recovery can
+  therefore compare immutable object ranges without mixing replacements.
 - Storage exposes `delete`, not a deletion-rights query. Sync chooses the
   deleting device by §15; Drive deletes an object the account owns and
   otherwise removes it from the store's folder. Provider refusals keep

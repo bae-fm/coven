@@ -188,6 +188,9 @@ impl Storage for MemoryStorage {
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
+        if path.is_replaceable() {
+            return Err(StorageError::InvalidPath);
+        }
         self.before().await?;
         if total == 0 {
             return Err(StorageError::InvalidPart);
@@ -359,6 +362,22 @@ impl Conformance {
             return Err(StorageError::Protocol("deleted object read"));
         }
         let positions = ObjectPath::positions(DeviceId(31));
+        if !matches!(
+            self.storage.begin_upload(&positions, 1).await,
+            Err(StorageError::InvalidPath)
+        ) {
+            return Err(StorageError::Protocol(
+                "positions accepted a recorded upload",
+            ));
+        }
+        if !matches!(
+            self.storage.replace(&path, data).await,
+            Err(StorageError::InvalidPath)
+        ) {
+            return Err(StorageError::Protocol(
+                "immutable object accepted replacement",
+            ));
+        }
         self.storage.replace(&positions, b"first positions").await?;
         self.storage.replace(&positions, b"next positions").await?;
         if self.storage.read(&positions).await? != b"next positions" {

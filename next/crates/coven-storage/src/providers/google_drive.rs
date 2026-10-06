@@ -294,6 +294,34 @@ impl GoogleDriveStorage {
         Ok(found)
     }
 }
+fn multipart_content(metadata: &Value, bytes: &[u8]) -> Result<(String, Vec<u8>), StorageError> {
+    let metadata =
+        serde_json::to_vec(metadata).map_err(|error| StorageError::Encoding(Box::new(error)))?;
+    let mut candidate = 0u64;
+    let mut boundary = format!("coven-upload-{candidate:x}");
+    while bytes
+        .windows(boundary.len())
+        .any(|part| part == boundary.as_bytes())
+        || metadata
+            .windows(boundary.len())
+            .any(|part| part == boundary.as_bytes())
+    {
+        candidate = candidate
+            .checked_add(1)
+            .ok_or(StorageError::Protocol("multipart boundary exhausted"))?;
+        boundary = format!("coven-upload-{candidate:x}");
+    }
+    let mut body = format!("--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n")
+        .into_bytes();
+    body.extend_from_slice(&metadata);
+    body.extend_from_slice(
+        format!("\r\n--{boundary}\r\nContent-Type: application/octet-stream\r\n\r\n").as_bytes(),
+    );
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    Ok((format!("multipart/related; boundary={boundary}"), body))
+}
+
 fn can_delete(item: &Value) -> Result<bool, StorageError> {
     let allowed = item["capabilities"]["canDelete"]
         .as_bool()
@@ -341,8 +369,28 @@ impl Storage for GoogleDriveStorage {
         if !path.is_replaceable() {
             return Err(StorageError::InvalidPath);
         }
-        let Some(item) = self.find(path).await? else {
-            return self.create(path, bytes).await;
+        let Some(item) = self.remove_own_duplicates(path).await? else {
+            let metadata = json!({"name": path.as_str(), "parents": [&self.folder], "properties": {"covenDevice": self.device.0.to_string()}});
+            let (content_type, body) = multipart_content(&metadata, bytes)?;
+            let url = http::endpoint(
+                &self.upload_api,
+                &["files"],
+                &[("uploadType", "multipart"), ("supportsAllDrives", "true")],
+            )?;
+            let item = http::json(
+                PROVIDER,
+                self.session
+                    .send(
+                        Method::POST,
+                        &url,
+                        &[("Content-Type", content_type)],
+                        Body::Bytes(body),
+                        true,
+                    )
+                    .await?,
+            )
+            .await?;
+            return self.ensure_unique(path, http::string(&item, "id")?).await;
         };
         let url = http::endpoint(
             &self.upload_api,
@@ -501,6 +549,9 @@ impl Storage for GoogleDriveStorage {
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
+        if path.is_replaceable() {
+            return Err(StorageError::InvalidPath);
+        }
         if total == 0 {
             return Err(StorageError::InvalidPart);
         }

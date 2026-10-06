@@ -3,7 +3,8 @@ use coven_crypto::SecretBytes;
 use coven_crypto::SecretText;
 use serde::{Deserialize, Serialize};
 
-/// A provider upload recorded by the caller's operation (§16.5, §18).
+/// A create-once provider upload recorded by the caller's operation (§16.5, §18).
+/// Posted positions cannot have recorded upload sessions.
 ///
 /// Record it before sending parts and after each confirmed part. After a crash,
 /// call `resume_upload` to discover bytes accepted before a reply was lost. The
@@ -90,6 +91,9 @@ impl UploadSession {
         let value: Self = serde_json::from_slice(bytes)
             .map_err(|error| StorageError::Encoding(Box::new(error)))?;
         value.location.validate()?;
+        if value.path.is_replaceable() {
+            return Err(StorageError::InvalidPath);
+        }
         if value.part_size == 0
             || value.total == 0
             || value.confirmed > value.total
@@ -100,6 +104,9 @@ impl UploadSession {
         Ok(value)
     }
     pub(crate) fn check(&self, location: &StorageConfig) -> Result<(), StorageError> {
+        if self.path.is_replaceable() {
+            return Err(StorageError::InvalidPath);
+        }
         if &self.location != location {
             return Err(StorageError::SessionMismatch);
         }

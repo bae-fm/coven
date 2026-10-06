@@ -289,6 +289,9 @@ impl Storage for S3Storage {
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
+        if path.is_replaceable() {
+            return Err(StorageError::InvalidPath);
+        }
         let unit = 8 * 1024 * 1024;
         if total == 0 || total > 10_000 * 5 * 1024u64.pow(3) {
             return Err(StorageError::InvalidPart);

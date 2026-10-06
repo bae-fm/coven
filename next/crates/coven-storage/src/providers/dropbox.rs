@@ -307,6 +307,9 @@ impl Storage for DropboxStorage {
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
+        if path.is_replaceable() {
+            return Err(StorageError::InvalidPath);
+        }
         if total == 0 {
             return Err(StorageError::InvalidPart);
         }

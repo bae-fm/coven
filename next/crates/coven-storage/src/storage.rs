@@ -131,6 +131,7 @@ pub trait Storage: Send + Sync {
     /// Unshare the store, or tell an S3 admin which key to delete.
     async fn revoke_access(&self, member: &MemberAccess) -> Result<MemberRemoval, StorageError>;
     /// Begin a create-once upload, returning the value to record before parts are sent.
+    /// Posted positions are refused: replacement always sends complete bytes in one request.
     async fn begin_upload(
         &self,
         path: &ObjectPath,
