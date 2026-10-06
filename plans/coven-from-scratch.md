@@ -1344,7 +1344,9 @@ Carol's tablet:
   - so is the key of each circle they were in: a new one, sealed to that
     circle's remaining members ([§14.6](#146-leaving-a-circle));
   - the store log entry removing them is written; it names the new keys,
-    and the circles whose keys it replaced;
+    and the circles whose keys it replaced, which must be exactly the
+    circles they shared with others in the author's view, or the replay
+    drops the entry ([§9](#9-members-and-roles));
   - the storage access their invite granted is taken back: the store's
     folder is unshared from their account, or on S3 coven tells the admin
     to delete their key in the provider's console
