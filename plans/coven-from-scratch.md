@@ -2267,9 +2267,9 @@ impl ObjectPath {
     /// A device's posted positions (§6).
     pub fn positions(device: DeviceId) -> Self;
     /// A sealed store key for a member (§11).
-    pub fn store_key(number: NonZeroU64, member: &MemberId) -> Self;
+    pub fn store_key(key: KeyId, member: &MemberId) -> Self;
     /// A sealed circle key for a member (§14.3).
-    pub fn circle_key(circle: CircleId, number: NonZeroU64, member: &MemberId) -> Self;
+    pub fn circle_key(circle: CircleId, key: KeyId, member: &MemberId) -> Self;
     /// Encrypted file bytes named by their keyed hash (§16.2).
     pub fn file(name: &StoredFileName) -> Self;
     /// An encrypted join request under its invite id (§12.2).
@@ -2650,15 +2650,19 @@ pub enum CryptoError {
     Material(MaterialError),
 }
 
-/// A numbered key or encoded secret has an invalid representation (§11).
+/// A key or encoded secret has an invalid representation, or isn't held (§11).
 pub enum MaterialError {
     /// The encoded secret or sealed value is malformed.
     Encoding,
     /// The keyring does not hold this store key.
-    UnknownStoreKey(u64),
+    UnknownStoreKey(KeyId),
     /// The keyring does not hold this circle key.
-    UnknownCircleKey { circle: CircleId, number: u64 },
+    UnknownCircleKey { circle: CircleId, key: KeyId },
 }
+
+/// A store or circle key's random id, named by the store log entry that
+/// brings the key in (§11).
+pub struct KeyId([u8; 16]);
 
 /// Registers the OS keychain service every key and secret is stored under.
 /// Called once at startup, before any store opens.
