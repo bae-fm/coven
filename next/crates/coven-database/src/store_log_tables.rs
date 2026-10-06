@@ -170,7 +170,8 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
     state.format = read_versions(database, "format")?;
     state.resets = database
         .query(
-            "SELECT audience,snapshot_device,snapshot_number FROM coven_resets",
+            "SELECT audience,snapshot_device,snapshot_number
+             FROM coven_resets",
             [],
             |row| {
                 let audience = audience(&row.get::<_, String>(0)?)?;
@@ -193,10 +194,29 @@ fn read_versions<N: FromSql>(
     database: &DatabaseConnection,
     kind: &str,
 ) -> Result<BTreeMap<Audience, StoreVersion<N>>, DbError> {
-    Ok(database.query("SELECT version,snapshot_device,snapshot_number,entry_device,entry_number,audience FROM coven_versions WHERE kind=?1", [kind], |row| {
-        let audience = audience(&row.get::<_, String>(5)?)?;
-        Ok((audience.clone(), StoreVersion { number: row.get(0)?, snapshot: SnapshotId { audience, device: DeviceId(counter(row.get(1)?)), number: counter(row.get(2)?) }, entry: entry_id(row, 3)? }))
-    })?.into_iter().collect())
+    Ok(database
+        .query(
+            "SELECT version,snapshot_device,snapshot_number,entry_device,entry_number,audience
+             FROM coven_versions WHERE kind=?1",
+            [kind],
+            |row| {
+                let audience = audience(&row.get::<_, String>(5)?)?;
+                Ok((
+                    audience.clone(),
+                    StoreVersion {
+                        number: row.get(0)?,
+                        snapshot: SnapshotId {
+                            audience,
+                            device: DeviceId(counter(row.get(1)?)),
+                            number: counter(row.get(2)?),
+                        },
+                        entry: entry_id(row, 3)?,
+                    },
+                ))
+            },
+        )?
+        .into_iter()
+        .collect())
 }
 
 pub(crate) fn replace(
@@ -214,7 +234,17 @@ pub(crate) fn replace(
                 DropReason::WrongCircleKeys => ("keys", None),
             },
         };
-        database.internal_execute("UPDATE coven_store_log SET outcome=?1,beaten_device=?2,beaten_number=?3 WHERE device=?4 AND number=?5", params![tag, beaten.map(|e| e.device.0.to_be_bytes().to_vec()), beaten.map(|e| e.number.to_be_bytes().to_vec()), entry.device.0.to_be_bytes().as_slice(), entry.number.to_be_bytes().as_slice()])?;
+        database.internal_execute(
+            "UPDATE coven_store_log SET outcome=?1,beaten_device=?2,beaten_number=?3
+             WHERE device=?4 AND number=?5",
+            params![
+                tag,
+                beaten.map(|e| e.device.0.to_be_bytes().to_vec()),
+                beaten.map(|e| e.number.to_be_bytes().to_vec()),
+                entry.device.0.to_be_bytes().as_slice(),
+                entry.number.to_be_bytes().as_slice()
+            ],
+        )?;
     }
     for table in [
         "coven_circle_members",
@@ -289,7 +319,8 @@ pub(crate) fn replace(
     }
     for (audience, snapshot) in &state.resets {
         database.internal_execute(
-            "INSERT INTO coven_resets(audience,snapshot_device,snapshot_number) VALUES(?1,?2,?3)",
+            "INSERT INTO coven_resets(audience,snapshot_device,snapshot_number)
+             VALUES(?1,?2,?3)",
             (
                 audience_text(audience),
                 snapshot.device.0.to_be_bytes().as_slice(),
@@ -306,6 +337,19 @@ fn put_version<N: ToSql>(
     audience: &Audience,
     version: &StoreVersion<N>,
 ) -> Result<(), DbError> {
-    database.internal_execute("INSERT INTO coven_versions(kind,audience,version,snapshot_device,snapshot_number,entry_device,entry_number) VALUES(?1,?2,?3,?4,?5,?6,?7)", params![kind, audience_text(audience), version.number, version.snapshot.device.0.to_be_bytes().as_slice(), version.snapshot.number.to_be_bytes().as_slice(), version.entry.device.0.to_be_bytes().as_slice(), version.entry.number.to_be_bytes().as_slice()])?;
+    database.internal_execute(
+        "INSERT INTO coven_versions(kind,audience,version,snapshot_device,snapshot_number,
+                                    entry_device,entry_number)
+         VALUES(?1,?2,?3,?4,?5,?6,?7)",
+        params![
+            kind,
+            audience_text(audience),
+            version.number,
+            version.snapshot.device.0.to_be_bytes().as_slice(),
+            version.snapshot.number.to_be_bytes().as_slice(),
+            version.entry.device.0.to_be_bytes().as_slice(),
+            version.entry.number.to_be_bytes().as_slice()
+        ],
+    )?;
     Ok(())
 }
