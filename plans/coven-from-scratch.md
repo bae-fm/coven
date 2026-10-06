@@ -458,10 +458,11 @@ Two mechanisms order writes:
     row keeps its values, which later edits to it update.
   - Coven puts it back from there when the reason goes away, e.g. when the
     reference that made it a parent's child is pointed elsewhere.
-  - The app dismissing it ([§20.4](#204-reading)) only stops coven listing
-    it: the row stays out with its values, and still comes back when its
-    reasons go away. A dismissed lost value, which nothing else needs, is
-    dropped from `coven_lost`.
+  - The app dismissing it ([§20.4](#204-reading)) deletes it for good: the
+    dismissal write records a delete of the row, so it never comes back,
+    and its children follow its foreign keys' delete actions
+    ([§8.4](#84-foreign-keys)). A dismissed lost value is dropped from
+    `coven_lost`.
 - A removed row's `coven_lost` row names every rule that holds for it once
   the rules have run, and it comes back only when none holds.
   - E.g. todos need `start <= end`, and todo 7 is in list 3.
@@ -3662,9 +3663,8 @@ impl CovenHandle {
     pub async fn lost_values(&self) -> CovenResult<Vec<LostValue>>;
 
     /// Dismisses lost values the app has dealt with, in a write, so every
-    /// device stops listing them: a lost value is dropped from `coven_lost`;
-    /// a removed row stays out, unlisted, and still comes back when its
-    /// reasons go away (§8).
+    /// device drops them from `coven_lost`; a removed row is deleted for
+    /// good, and never comes back (§8).
     pub async fn dismiss_lost_values(&self, values: &[LostValue]) -> CovenResult<()>;
 
     /// The same, as a live query.

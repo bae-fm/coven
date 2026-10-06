@@ -136,14 +136,16 @@
     old         map<name, Value>       insert none; update the same columns; delete any
     ```
 
-  - A dismissal (kind 3) names a lost value the app dismissed
+  - A dismissal (kind 3) names a lost cell the app dismissed
     ([§20.4](coven-from-scratch.md#204-reading)):
 
     ```
-    row   RowId
-    lost  u8      0, then column:name | write:WriteId   a lost cell
-                  1, then incarnation:u64                a removed row
+    row     RowId
+    column  name
+    write   WriteId
     ```
+
+  - Dismissing a removed row is a delete of it, an ordinary row change.
 
   - A row has at most one change in a write, and changes come before
     dismissals of the same row.
