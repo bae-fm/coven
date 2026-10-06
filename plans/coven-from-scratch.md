@@ -1038,6 +1038,18 @@ Carol's tablet:
   - The proof is [Appendix C](coven-storelog-proof.md), in its own file,
     checked by machine.
 - A device applies an entry once it has every entry that entry had read.
+- Each device keeps, in coven's local tables:
+  - `coven_store_log`: every entry it has applied, as downloaded and
+    checked, and whether the replay kept or dropped it;
+  - the replay's result: `coven_members` (members, their roles and public
+    keys), `coven_devices` (devices, their members and names),
+    `coven_circles` (circles, their names and key numbers),
+    `coven_circle_members`, and `coven_store_state` (the store key's
+    number, the schema and format versions, and each audience's reset).
+  - An entry and the replay it causes commit in one transaction, so the
+    tables always hold the replay of exactly the entries kept.
+  - Entries waiting on ones they had read stay in storage until those
+    arrive.
 - The member list is what you get by replaying the applied entries in
   timestamp order, from the first.
   - Each time an entry arrives, the device replays them all again, from
