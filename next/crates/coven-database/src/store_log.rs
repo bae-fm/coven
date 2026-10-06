@@ -54,7 +54,7 @@ pub struct StoreIdentity {
     pub id: StoreId,
     /// Its name.
     pub name: String,
-    /// The latest kept entry's store key.
+    /// The current key; an entry already in place brings no key in (§11).
     pub key: KeyId,
 }
 

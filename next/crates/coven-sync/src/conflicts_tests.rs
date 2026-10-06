@@ -73,7 +73,7 @@ fn store_removal_beats_a_later_concurrent_circle_rotation() {
 }
 
 #[test]
-fn repeated_removals_keep_both_entries_without_changing_the_key_again() {
+fn already_in_place_removals_bring_no_key_in() {
     for store in [false, true] {
         let mut h = two_circles();
         let change = if store {
@@ -85,9 +85,16 @@ fn repeated_removals_keep_both_entries_without_changing_the_key_again() {
         let mut repeated = change;
         match &mut repeated {
             StoreChange::RemoveMember {
-                key: replacement, ..
+                key: replacement,
+                circle_keys,
+                ..
+            } => {
+                *replacement = key(99);
+                for (index, replacement) in circle_keys.iter_mut().enumerate() {
+                    replacement.key = key(300 + index as u64);
+                }
             }
-            | StoreChange::RemoveCircleMember {
+            StoreChange::RemoveCircleMember {
                 key: replacement, ..
             } => *replacement = key(99),
             _ => unreachable!(),
@@ -95,6 +102,12 @@ fn repeated_removals_keep_both_entries_without_changing_the_key_again() {
         h.push(2, 2, &(0..11).collect::<Vec<_>>(), repeated);
         h.every_order(|r| {
             assert!(h.drops(r).is_empty());
+            for entry in &h.entries[11..] {
+                assert_eq!(r.entries[&entry.position], EntryOutcome::Kept);
+            }
+            if store {
+                assert_eq!(r.state.circles[&circle(1)].key, key(201));
+            }
             assert_eq!(
                 r.state.store.as_ref().unwrap().key,
                 key(if store { 101 } else { 1 })
