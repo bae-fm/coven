@@ -776,7 +776,7 @@ Carol's tablet:
   - shared: the app derives the key from what makes the row unique, so
     equal values are one row on every device.
 - Coven refuses, checked when the database opens and after migrating:
-  - an independent key that isn't a UUID;
+  - an independent key with no text column to hold its UUID;
   - a key SQLite picks itself, such as an integer rowid;
   - a synced table with no primary key;
   - a primary key column that allows NULL, since SQLite lets a non-integer
@@ -786,6 +786,9 @@ Carol's tablet:
   - E.g. `note_tags(note_id, tag_id)` is a shared key.
   - Ana and Ben, both offline, each tag note 42 "urgent", and make one row.
   - An independent key over several columns needs a UUID in one of them.
+  - A write that inserts a row whose independent key holds no UUID,
+    version 4 or 7 in canonical lowercase form, is refused; opening never
+    reads the rows to check.
 - E.g. notes have independent keys, and tags have shared keys derived from
   the tag's name.
   - Ana and Ben, both offline, each add the tag "urgent".
@@ -1740,6 +1743,10 @@ Carol's tablet:
   - Only new tables or new columns: an addition.
   - Anything else, such as a new index, constraint or foreign key: a
     breaking change.
+  - Changes only to local tables that keep their names, their columns,
+    indexes and triggers, and to views, are neither: they don't sync.
+  - Dropping or renaming a table is a breaking change, since it may have
+    synced.
 - For each breaking change, the app supplies a *migration* in two parts:
   - one changes the database, e.g. `ALTER TABLE notes RENAME COLUMN title
     TO name`;
@@ -2338,6 +2345,8 @@ pub enum DbError {
     ReferenceAudience { table: String, key: RowKey, column: String },
     /// A write targets a circle whose deletion has been applied (§14.7).
     DeletedCircle(CircleId),
+    /// An inserted row's independent key holds no UUID (§8.5).
+    KeyNotUuid { table: String, key: RowKey },
     /// A downloaded write fails the merge's checks, such as a timestamp no
     /// later than a write it had read; it is never applied (§19.1).
     InvalidWrite { write: WriteId, error: MergeError },
