@@ -1794,6 +1794,12 @@ Carol's tablet:
   - A user-provided file is written to a path the user picks, which must
     not already exist; an app-provided one goes into coven's own folder.
   - The uploaded copy is then deleted like any unused file.
+- A write that changes any of a row's file columns, its file, size, hash
+  or where-column, writes all four, unchanged ones included, so a row's
+  file always comes whole from one write.
+  - E.g. Ana's phone and Ben's laptop each attach a different file to row
+    7: the later write wins all four columns, never one file's size with
+    the other's hash.
 - Concurrent changes to where a file is follow [§8.2](#82-concurrent-writes-to-one-row):
   the later write wins.
   - E.g. an album is uploaded; at 10:00 Ana's laptop keeps it on the
