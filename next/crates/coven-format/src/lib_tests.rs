@@ -49,16 +49,23 @@ fn pinned_chunks_decode_with_their_declared_boundaries() {
     assert_eq!(header.parts.len(), prefix.part_keys.len());
     let mut parts = Vec::new();
     for part in header.parts {
-        let mut rows = Vec::new();
+        let mut frames = Vec::new();
         let mut decoder = crate::write_stream::PartDecoder::new(part.clone()).unwrap();
         for _ in 0..part.chunk_count() {
-            rows.extend(decoder.chunk(&pieces[index]).unwrap());
+            frames.extend(decoder.chunk(&pieces[index]).unwrap());
             index += 1;
         }
         decoder.finish().unwrap();
         parts.push(crate::write::WritePart {
             audience: part.audience,
-            rows,
+            rows: frames
+                .into_iter()
+                .map(|frame| match frame {
+                    crate::dismissal::WriteFrame::Change(row) => row,
+                    _ => panic!("fixture contains row changes"),
+                })
+                .collect(),
+            dismissals: Vec::new(),
         });
     }
     assert_eq!(
@@ -107,25 +114,25 @@ fn reencode(bytes: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
         1 => Ok(Zeroizing::new(
             crate::write_stream::WriteHeaderFrame::decode(bytes)?.encode()?,
         )),
-        13 => Ok(Zeroizing::new(
+        2 => Ok(Zeroizing::new(
             crate::write::RowChange::decode(bytes)?.encode()?,
         )),
-        3 => {
+        5 => {
             let reader = crate::snapshot::SnapshotDecoder::start(bytes)?;
             Ok(Zeroizing::new(
                 crate::snapshot::SnapshotEncoder::start(reader.header().clone())?.1,
             ))
         }
-        4 => {
+        6 => {
             let (_, mut input) = crate::wire::decode_frame(bytes)?;
             let record = crate::snapshot::SnapshotRecord::get(&mut input, &test_utils::oracle())?;
             input.finish()?;
             record.validate()?;
-            Ok(Zeroizing::new(encode_frame_with(4, |out| record.put(out))?))
+            Ok(Zeroizing::new(encode_frame_with(6, |out| record.put(out))?))
         }
-        5 => {
+        7 => {
             crate::wire::decode_frame(bytes)?.1.finish()?;
-            Ok(Zeroizing::new(encode_frame_with(5, |_| Ok(()))?))
+            Ok(Zeroizing::new(encode_frame_with(7, |_| Ok(()))?))
         }
         _ => Ok(Zeroizing::new(Object::decode(bytes)?.encode()?)),
     }
@@ -188,7 +195,7 @@ fn prefix_limits_versions_and_trailing_bytes_are_typed_errors() {
             ..
         })
     ));
-    let mut end = encode_frame_with(5, |_| Ok(())).unwrap();
+    let mut end = encode_frame_with(7, |_| Ok(())).unwrap();
     end.push(0);
     assert_eq!(reencode(&end), Err(Error::TrailingBytes));
     end[6] = 1;

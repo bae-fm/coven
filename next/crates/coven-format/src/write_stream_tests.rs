@@ -21,7 +21,7 @@ fn rows(count: usize, payload: usize) -> WriteRecord {
 }
 
 #[test]
-fn write_size_and_row_count_are_not_frame_limits() {
+fn write_size_and_record_count_are_not_frame_limits() {
     for record in [rows(70_000, 0), rows(3, 6 * 1024 * 1024)] {
         let encoder = WriteEncoder::new(&record).unwrap();
         let mut decoder = PartDecoder::new(encoder.header().parts[0].clone()).unwrap();
@@ -33,7 +33,15 @@ fn write_size_and_row_count_are_not_frame_limits() {
             decoded.extend(decoder.chunk(&chunk).unwrap());
         }
         decoder.finish().unwrap();
-        assert_eq!(decoded, record.parts[0].rows);
+        assert_eq!(
+            decoded,
+            record.parts[0]
+                .rows
+                .iter()
+                .cloned()
+                .map(WriteFrame::Change)
+                .collect::<Vec<_>>()
+        );
         assert_eq!(length, encoder.plaintext_length());
     }
 }
@@ -109,9 +117,9 @@ fn counts_lengths_order_and_audience_are_checked_at_stream_boundaries() {
         .iter()
         .map(|r| r.encode().unwrap())
         .collect();
-    for row_count in [1, 3] {
+    for record_count in [1, 3] {
         let mut decoder = PartDecoder::new(PartHeader {
-            row_count,
+            record_count,
             ..header.clone()
         })
         .unwrap();
@@ -130,7 +138,7 @@ fn counts_lengths_order_and_audience_are_checked_at_stream_boundaries() {
     }
     let mut decoder = PartDecoder::new(PartHeader {
         plaintext_length: 7,
-        row_count: 1,
+        record_count: 1,
         ..header.clone()
     })
     .unwrap();
@@ -190,7 +198,7 @@ fn generated_plaintext_streams_are_rejected_or_reencode_identically() {
         if bytes.len() >= FRAME_PREFIX_LEN {
             let header = PartHeader {
                 audience: Audience::Store,
-                row_count: 1,
+                record_count: 1,
                 plaintext_length: bytes.len() as u64,
             };
             let mut decoder = PartDecoder::new(header).unwrap();

@@ -100,7 +100,7 @@ fn member_removal_rejects_repeated_or_unordered_replacement_circles() {
         };
         for result in [
             Object::StoreLog(entry.clone()).encode().map(|_| ()),
-            Object::decode(&encode_frame(2, &entry).unwrap()).map(|_| ()),
+            Object::decode(&encode_frame(4, &entry).unwrap()).map(|_| ()),
         ] {
             assert!(
                 matches!(
@@ -128,7 +128,7 @@ fn creation_names_its_writing_device() {
         };
         *name = device_name.into();
         let encoded = Object::StoreLog(entry.clone()).encode();
-        let decoded = Object::decode(&encode_frame(2, &entry).unwrap());
+        let decoded = Object::decode(&encode_frame(4, &entry).unwrap());
         if device_name == "Ana’s phone" {
             let object = Object::StoreLog(entry);
             assert_eq!(Object::decode(&encoded.unwrap()).unwrap(), object);
@@ -252,7 +252,7 @@ fn had_read_can_name_earlier_entries_on_the_same_device() {
     for number in [3, 4] {
         entry.had_read.0[0].number = number;
         assert!(matches!(
-            Object::decode(&encode_frame(2, &entry).unwrap()),
+            Object::decode(&encode_frame(4, &entry).unwrap()),
             Err(Error::Invalid {
                 rule: Rule::OwnPosition,
                 ..
@@ -268,7 +268,7 @@ fn first_entry_and_versions_are_checked() {
         .parse()
         .unwrap();
     assert!(matches!(
-        Object::decode(&encode_frame(2, &entry).unwrap()),
+        Object::decode(&encode_frame(4, &entry).unwrap()),
         Err(Error::Invalid {
             field: "first admin",
             rule: Rule::Required
@@ -288,7 +288,7 @@ fn first_entry_and_versions_are_checked() {
     ] {
         let mut entry = test_utils::store_log();
         entry.change = change;
-        assert!(Object::decode(&encode_frame(2, &entry).unwrap()).is_err());
+        assert!(Object::decode(&encode_frame(4, &entry).unwrap()).is_err());
     }
 }
 

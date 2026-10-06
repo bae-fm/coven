@@ -8,6 +8,7 @@
 
 pub mod chunks;
 pub mod codes;
+pub mod dismissal;
 pub mod error;
 pub mod file;
 pub mod key;
@@ -60,9 +61,9 @@ impl Object {
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         self.validate()?;
         match self {
-            Self::StoreLog(v) => encode_frame(2, v),
-            Self::JoinRequest(v) => encode_frame(10, v),
-            Self::PostedPositions(v) => encode_frame(11, v),
+            Self::StoreLog(v) => encode_frame(4, v),
+            Self::JoinRequest(v) => encode_frame(9, v),
+            Self::PostedPositions(v) => encode_frame(8, v),
         }
     }
     /// Decodes exactly one bounded frame, refusing unknown tags/versions, trailing
@@ -71,9 +72,9 @@ impl Object {
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let (kind, mut input) = decode_frame(bytes)?;
         let object = match kind {
-            2 => Self::StoreLog(Wire::get(&mut input)?),
-            10 => Self::JoinRequest(Wire::get(&mut input)?),
-            11 => Self::PostedPositions(Wire::get(&mut input)?),
+            4 => Self::StoreLog(Wire::get(&mut input)?),
+            9 => Self::JoinRequest(Wire::get(&mut input)?),
+            8 => Self::PostedPositions(Wire::get(&mut input)?),
             tag => {
                 return Err(Error::UnknownTag {
                     field: "object kind",
@@ -99,7 +100,7 @@ impl Object {
 /// are ignored here; [`Object::decode`] requires exactly one complete frame.
 pub fn frame_length(prefix: &[u8]) -> Result<usize, Error> {
     let bytes = prefix.get(..FRAME_PREFIX_LEN).ok_or(Error::Truncated)?;
-    if !matches!(bytes[0], 1..=5 | 10 | 11 | 13) {
+    if !matches!(bytes[0], 1..=11) {
         return Err(Error::UnknownTag {
             field: "object kind",
             tag: bytes[0],

@@ -1,6 +1,6 @@
 //! Decoding the durable lost-value fields into the read API.
 
-use crate::{CovenResult, DbError, EntryId, RowKey, WriteId};
+use crate::{DbError, EntryId, RowKey, WriteId};
 use coven_format::{merge_fields::*, snapshot_rows::LostWriteCause};
 use coven_merge::Rule;
 use rusqlite::{types::Value, Row};
@@ -16,6 +16,16 @@ pub struct LostValue {
     pub lost: Lost,
     /// What replaced these values.
     pub replaced_by: Replacement,
+    pub(crate) target: LossTarget,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LossTarget {
+    Removed {
+        row: coven_merge::RowId,
+        generation: u64,
+    },
+    Cells(Vec<coven_format::dismissal::Dismissal>),
 }
 
 /// Values retained when a cell loses or a row is removed.
@@ -94,6 +104,9 @@ pub(crate) struct LostRecord {
     setters: Vec<u8>,
     kind: String,
     replacement: Vec<u8>,
+    audience: String,
+    generation: Vec<u8>,
+    retired: bool,
 }
 
 impl LostRecord {
@@ -108,10 +121,13 @@ impl LostRecord {
             setters: row.get(6)?,
             kind: row.get(7)?,
             replacement: row.get(8)?,
+            audience: row.get(9)?,
+            generation: row.get(10)?,
+            retired: row.get(11)?,
         })
     }
 
-    pub(crate) fn decode(self) -> CovenResult<LostValue> {
+    pub(crate) fn decode(self) -> Result<LostValue, DbError> {
         let key = RowKey(
             decoded(coven_format::key::decode_key(&self.key))?
                 .iter()
@@ -136,7 +152,7 @@ impl LostRecord {
                 let values = decoded(decode_columns(&self.value))?;
                 let setters = decoded(decode_setters(&self.setters))?;
                 if !values.keys().eq(setters.keys()) {
-                    return Err(DbError::DamagedDatabase.into());
+                    return Err(DbError::DamagedDatabase);
                 }
                 Lost::Row(
                     values
@@ -177,13 +193,40 @@ impl LostRecord {
                 LostWriteCause::SchemaChange(version) => Replacement::SchemaChange { version },
                 LostWriteCause::Reset(entry) => Replacement::Reset(entry),
             },
-            _ => return Err(DbError::DamagedDatabase.into()),
+            _ => return Err(DbError::DamagedDatabase),
+        };
+        let row = coven_merge::RowId {
+            table: self.table.clone(),
+            key: self.key,
+            audience: crate::write_encoding::audience(&self.audience)?,
+        };
+        let target = if self.kind == "rules" && !self.retired {
+            LossTarget::Removed {
+                row,
+                generation: crate::write_encoding::counter(self.generation),
+            }
+        } else {
+            let cells = match &lost {
+                Lost::Cell(cell) => std::slice::from_ref(cell),
+                Lost::Row(cells) => cells,
+            };
+            LossTarget::Cells(
+                cells
+                    .iter()
+                    .map(|cell| coven_format::dismissal::Dismissal {
+                        row: row.clone(),
+                        column: cell.column.clone(),
+                        write: cell.set_by,
+                    })
+                    .collect(),
+            )
         };
         Ok(LostValue {
             table: self.table,
             key,
             lost,
             replaced_by,
+            target,
         })
     }
 }

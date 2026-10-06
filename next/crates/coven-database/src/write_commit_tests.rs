@@ -221,7 +221,7 @@ async fn seventy_thousand_rows_commit_as_one_queued_write_and_decode_after_reope
     }
     let encoder = WriteEncoder::new(&record).unwrap();
     assert_eq!(encoder.plaintext_length(), bytes.len() as u64);
-    assert_eq!(encoder.header().parts[0].row_count, 70_000);
+    assert_eq!(encoder.header().parts[0].record_count, 70_000);
     let mut reencoded = vec![0; bytes.len()];
     encoder.encode_plaintext(&mut reencoded).unwrap();
     assert_eq!(reencoded, bytes);

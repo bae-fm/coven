@@ -86,6 +86,7 @@ pub fn write() -> WriteRecord {
             disposition: WriteDisposition::Apply,
         },
         parts: vec![WritePart {
+            dismissals: Vec::new(),
             audience: Audience::Store,
             rows: vec![RowChange {
                 row: row(),

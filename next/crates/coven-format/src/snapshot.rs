@@ -288,19 +288,19 @@ impl SnapshotEncoder {
     /// Start a snapshot and return its header frame.
     pub fn start(header: SnapshotHeader) -> Result<(Self, Vec<u8>), Error> {
         header.validate()?;
-        let bytes = encode_frame(3, &header)?;
+        let bytes = encode_frame(5, &header)?;
         Ok((Self(StreamState::new(header)), bytes))
     }
     /// Validate and encode a record. Failure leaves the cursor unchanged.
     pub fn record(&mut self, record: SnapshotRecord) -> Result<Vec<u8>, Error> {
         record.validate()?;
-        let bytes = encode_frame_with(4, |out| record.put(out))?;
+        let bytes = encode_frame_with(6, |out| record.put(out))?;
         self.0.accept(&record)?;
         Ok(bytes)
     }
     /// Emit the required end marker after all declared records.
     pub fn finish(&mut self) -> Result<Vec<u8>, Error> {
-        let bytes = encode_frame_with(5, |_| Ok(()))?;
+        let bytes = encode_frame_with(7, |_| Ok(()))?;
         self.0.end()?;
         Ok(bytes)
     }
@@ -314,7 +314,7 @@ impl SnapshotDecoder {
     /// Read the initial header frame.
     pub fn start(frame: &[u8]) -> Result<Self, Error> {
         let (kind, mut input) = decode_frame(frame)?;
-        require(kind == 3, "snapshot header kind", Rule::Kind)?;
+        require(kind == 5, "snapshot header kind", Rule::Kind)?;
         let header = SnapshotHeader::get(&mut input)?;
         input.finish()?;
         header.validate()?;
@@ -332,12 +332,12 @@ impl SnapshotDecoder {
         oracle: &impl WriteOracle,
     ) -> Result<Option<SnapshotRecord>, Error> {
         let (kind, mut input) = decode_frame(bytes)?;
-        if kind == 5 {
+        if kind == 7 {
             input.finish()?;
             self.0.end()?;
             return Ok(None);
         }
-        require(kind == 4, "snapshot record kind", Rule::Kind)?;
+        require(kind == 6, "snapshot record kind", Rule::Kind)?;
         let record = SnapshotRecord::get(&mut input, oracle)?;
         input.finish()?;
         record.validate()?;

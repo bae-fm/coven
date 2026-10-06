@@ -23,7 +23,7 @@ fn posted_fingerprints_include_store_and_have_unique_ordered_audiences() {
     let object = Object::PostedPositions(posted.clone());
     assert_eq!(Object::decode(&object.encode().unwrap()).unwrap(), object);
     posted.fingerprints.reverse();
-    assert!(Object::decode(&encode_frame(11, &posted).unwrap()).is_err());
+    assert!(Object::decode(&encode_frame(8, &posted).unwrap()).is_err());
     posted.fingerprints.clear();
     assert!(Object::PostedPositions(posted).encode().is_err());
 }

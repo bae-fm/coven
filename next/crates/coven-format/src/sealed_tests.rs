@@ -146,7 +146,14 @@ fn sealed_write_fixture_opens_both_parts_and_reencodes_all_random_bytes() {
     }
     let expected = test_utils::chunked_write();
     for (rows, part) in rows.into_iter().zip(expected.parts) {
-        assert_eq!(rows, part.rows);
+        assert_eq!(
+            rows,
+            part.rows
+                .iter()
+                .cloned()
+                .map(crate::dismissal::WriteFrame::Change)
+                .collect::<Vec<_>>()
+        );
     }
     encoded.extend(writer.signature(&signature).unwrap());
     writer.finish(&[]).unwrap();

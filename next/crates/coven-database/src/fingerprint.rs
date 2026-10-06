@@ -114,18 +114,83 @@ pub(crate) fn excluded(
     )
 }
 
+pub(crate) fn forget_excluded(
+    database: &DatabaseConnection,
+    row: &coven_merge::RowId,
+    setter: &[u8],
+) -> Result<(), DbError> {
+    forget(
+        database,
+        &row.audience,
+        hash(&[b"excluded", row.table.as_bytes(), &row.key, setter]),
+    )
+}
+
+pub(crate) fn forget_retired(
+    database: &DatabaseConnection,
+    row: &coven_merge::RowId,
+    generation: &[u8],
+    column: &str,
+    setter: &[u8],
+) -> Result<(), DbError> {
+    forget(
+        database,
+        &row.audience,
+        hash(&[
+            b"retired",
+            row.table.as_bytes(),
+            &row.key,
+            generation,
+            column.as_bytes(),
+            setter,
+        ]),
+    )
+}
+
+pub(crate) fn retired(
+    database: &DatabaseConnection,
+    row: &coven_merge::RowId,
+    generation: &[u8],
+    column: &str,
+    setter: &[u8],
+    fields: &[&[u8]],
+) -> Result<(), DbError> {
+    put(
+        database,
+        &row.audience,
+        hash(&[
+            b"retired",
+            row.table.as_bytes(),
+            &row.key,
+            generation,
+            column.as_bytes(),
+            setter,
+        ]),
+        hash(fields),
+    )
+}
+
+fn forget(
+    database: &DatabaseConnection,
+    audience: &Audience,
+    key: [u8; 32],
+) -> Result<(), DbError> {
+    let audience = audience_text(audience);
+    database.internal_execute("UPDATE coven_fingerprint_sums SET sum=coven_fingerprint_replace(sum,(SELECT hash FROM coven_fingerprint_leaves WHERE audience=?1 AND key=?2),zeroblob(32)) WHERE audience=?1", params![audience,key.as_slice()])?;
+    database.internal_execute(
+        "DELETE FROM coven_fingerprint_leaves WHERE audience=?1 AND key=?2",
+        params![audience, key.as_slice()],
+    )?;
+    Ok(())
+}
+
 pub(crate) fn forget_rows<'a>(
     database: &DatabaseConnection,
     rows: impl Iterator<Item = &'a coven_merge::RowId>,
 ) -> Result<(), DbError> {
     for row in rows {
-        let audience = audience_text(&row.audience);
         let key = hash(&[b"row", row.table.as_bytes(), &row.key]);
-        database.internal_execute("UPDATE coven_fingerprint_sums SET sum=coven_fingerprint_replace(sum,(SELECT hash FROM coven_fingerprint_leaves WHERE audience=?1 AND key=?2),zeroblob(32)) WHERE audience=?1", params![audience,key.as_slice()])?;
-        database.internal_execute(
-            "DELETE FROM coven_fingerprint_leaves WHERE audience=?1 AND key=?2",
-            params![audience, key.as_slice()],
-        )?;
+        forget(database, &row.audience, key)?;
     }
     Ok(())
 }
@@ -137,19 +202,13 @@ pub(crate) fn retire_losses(
     let fields = database.query("SELECT l.generation,c.column_name,l.value,l.set_by,l.replacement_kind,l.replaced_by FROM coven_lost l LEFT JOIN coven_columns c ON c.id=l.column_id WHERE l.table_name=?1 AND l.key=?2 AND l.audience=?3 AND l.retired=0 AND l.replacement_kind IN ('rules','write')", params![row.table,row.key,audience_text(&row.audience)], |r| Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,Vec<u8>>(2)?,r.get::<_,Vec<u8>>(3)?,r.get::<_,String>(4)?,r.get::<_,Vec<u8>>(5)?)))?;
     for (generation, column, value, setter, kind, cause) in fields {
         let column = column.unwrap_or_default();
-        let key = hash(&[
-            b"retired",
-            row.table.as_bytes(),
-            &row.key,
-            &generation,
-            column.as_bytes(),
-            &setter,
-        ]);
-        put(
+        retired(
             database,
-            &row.audience,
-            key,
-            hash(&[&value, &setter, kind.as_bytes(), &cause]),
+            row,
+            &generation,
+            &column,
+            &setter,
+            &[&value, &setter, kind.as_bytes(), &cause],
         )?;
     }
     Ok(())

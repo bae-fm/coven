@@ -13,7 +13,7 @@ fn raw(write: &WriteRecord) -> Vec<u8> {
         .map(|part| {
             part.rows
                 .iter()
-                .flat_map(|row| encode_frame(13, row).unwrap())
+                .flat_map(|row| encode_frame(2, row).unwrap())
                 .collect()
         })
         .collect();
@@ -25,7 +25,7 @@ fn raw(write: &WriteRecord) -> Vec<u8> {
             .zip(&streams)
             .map(|(part, bytes)| PartHeader {
                 audience: part.audience.clone(),
-                row_count: part.rows.len() as u64,
+                record_count: part.rows.len() as u64,
                 plaintext_length: bytes.len() as u64,
             })
             .collect(),

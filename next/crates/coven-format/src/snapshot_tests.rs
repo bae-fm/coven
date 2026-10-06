@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 fn raw(record: &SnapshotRecord) -> Vec<u8> {
-    encode_frame_with(4, |out| record.put(out)).unwrap()
+    encode_frame_with(6, |out| record.put(out)).unwrap()
 }
 fn single_header(section: usize, audience: Audience, count: u64) -> SnapshotHeader {
     let mut header = test_utils::snapshot_header();
@@ -74,7 +74,7 @@ fn every_section_streams_with_write_metadata_supplied_by_its_consumer() {
     reader.finish().unwrap();
     assert!(writer.finish().is_err());
     assert!(reader
-        .frame(&encode_frame_with(5, |_| Ok(())).unwrap(), &oracle)
+        .frame(&encode_frame_with(7, |_| Ok(())).unwrap(), &oracle)
         .is_err());
 }
 #[test]
@@ -84,7 +84,7 @@ fn rejected_frames_do_not_advance_counts_or_order() {
     let oracle = test_utils::oracle();
     assert!(writer.finish().is_err());
     assert!(reader
-        .frame(&encode_frame_with(5, |_| Ok(())).unwrap(), &oracle)
+        .frame(&encode_frame_with(7, |_| Ok(())).unwrap(), &oracle)
         .is_err());
     let records = test_utils::snapshot_records();
     assert!(writer.record(records[1].clone()).is_err());
@@ -259,7 +259,7 @@ fn merge_owns_snapshot_row_invariants_and_a_rejected_row_can_be_retried() {
     let encode_parts = |generations: &BTreeMap<u64, WriteId>,
                         cells: &BTreeMap<String, Cell<Value>>,
                         lost: &BTreeMap<LostKey, LostValue<Value>>| {
-        encode_frame_with(4, |out| {
+        encode_frame_with(6, |out| {
             3u8.put(out)?;
             state.row().put(out)?;
             generations.put(out)?;
@@ -569,7 +569,7 @@ fn lost_row_records_require_their_header_audience_order_and_exact_count() {
     assert!(decoder.frame(&raw(&row), &oracle).is_err());
     assert!(encoder.finish().is_err());
     assert!(decoder
-        .frame(&encode_frame_with(5, |_| Ok(())).unwrap(), &oracle)
+        .frame(&encode_frame_with(7, |_| Ok(())).unwrap(), &oracle)
         .is_err());
     let mut next = test_utils::lost_write_row();
     next.change.row.key = crate::key::encode_key(&[Value::Text("later".into())]).unwrap();

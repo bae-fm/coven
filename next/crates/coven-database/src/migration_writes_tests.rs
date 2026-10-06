@@ -663,6 +663,7 @@ async fn a_late_converted_title_competes_with_the_title_setter_and_leaves_the_sl
             disposition: WriteDisposition::Apply,
         },
         parts: vec![WritePart {
+            dismissals: Vec::new(),
             audience: Audience::Store,
             rows: vec![coven_format::write::RowChange {
                 row: row.clone(),

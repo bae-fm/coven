@@ -122,7 +122,15 @@ fn read(pieces: &[Vec<u8>]) -> Result<(), Box<dyn std::error::Error>> {
         // This device lacks the other key; it still consumes and hashes the part.
     }
     store.finish()?;
-    assert_eq!(rows, test_utils::chunked_write().parts[0].rows);
+    assert_eq!(
+        rows,
+        test_utils::chunked_write().parts[0]
+            .rows
+            .iter()
+            .cloned()
+            .map(crate::dismissal::WriteFrame::Change)
+            .collect::<Vec<_>>()
+    );
     let signature = layout.read_signature(pieces.last().unwrap())?;
     layout.finish(&[])?;
     test_utils::member()

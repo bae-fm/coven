@@ -3750,6 +3750,7 @@ pub struct LostValue {
     /// What replaced it: a write that hadn't read it, the removal rules, or
     /// a breaking change or reset the write hadn't read.
     pub replaced_by: Replacement,
+    /* private identity for dismissing this loss, including its audience */
 }
 
 pub enum Lost {

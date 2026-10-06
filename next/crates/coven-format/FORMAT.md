@@ -8,22 +8,23 @@ and codes.
 ## Object kinds
 
 Fields appear in exactly the order shown. All enum tags are u8.
-These codecs identify their plaintext frames with kinds 1–5, 10, 11 and 13.
+These codecs identify their plaintext frames with kinds 1–11.
 
 | Kind | Object | Payload |
 | --- | --- | --- |
 | 1 | Write header | `header:WriteHeader, parts:[PartHeader]` |
-| 2 | Store-log entry | `position:EntryId, timestamp:Timestamp, author:MemberId, had_read:EntryPositions, change:StoreChange` |
-| 3 | Snapshot header | `id:SnapshotId, schema_version:u32, writes:WritePositions, store_log:EntryPositions, counts:5*u64` |
-| 4 | Snapshot record | `section:u8, record` |
-| 5 | Snapshot end | Empty |
-| 10 | Join request | `invite_uuid:16, keys:MemberPublicKeys, device_name:text` |
-| 11 | Posted positions | `device:u64, writes:WritePositions, store_log:EntryPositions, fingerprints:[Fingerprint]` |
-| 13 | Write row | `row:RowChange` |
+| 4 | Store-log entry | `position:EntryId, timestamp:Timestamp, author:MemberId, had_read:EntryPositions, change:StoreChange` |
+| 5 | Snapshot header | `id:SnapshotId, schema_version:u32, writes:WritePositions, store_log:EntryPositions, counts:5*u64` |
+| 6 | Snapshot record | `section:u8, record` |
+| 7 | Snapshot end | Empty |
+| 9 | Join request | `invite_uuid:16, keys:MemberPublicKeys, device_name:text` |
+| 8 | Posted positions | `device:u64, writes:WritePositions, store_log:EntryPositions, fingerprints:[Fingerprint]` |
+| 2 | Write row | `row:RowChange` |
 
-Kinds 6–9 and 12 are not defined by these plaintext codecs.
+Kind 3 is a lost-cell dismissal: `row:RowId | column:name | write:WriteId`.
+Kinds 10 and 11 are the restore and invite codes (Appendix D13).
 
-`Object` encodes and decodes kinds 2, 10 and 11. Writes and snapshots use their
+`Object` encodes and decodes kinds 4, 9 and 8. Writes and snapshots use their
 streaming encoder/decoder, with merge's oracle supplied on decode.
 
 `SnapshotId` in these plaintext frames is
@@ -49,12 +50,13 @@ the position without changing rows.
 The breaking version is positive and names the version the change raised the
 store to.
 
-`PartHeader` is `audience:Audience | row_count:u64 | plaintext_length:u64`.
+`PartHeader` is `audience:Audience | record_count:u64 | plaintext_length:u64`.
 The header's descriptors are strictly ordered by audience, empty for a migration
 write and nonempty for every other disposition.
-Each part is a stream of kind-13 frames, one `RowChange` per frame, strictly
-increasing by `RowId`. Every row has its part's audience. Each part has at least
-one row. `plaintext_length` includes every row frame's seven-byte
+Each part contains kind-2 row changes and kind-3 cell dismissals, ordered by
+`RowId`. A row has at most one change, followed by its dismissals in column
+and setter order, without duplicates. Every record has its part's audience.
+Each part contains at least one record. `plaintext_length` includes every row frame's seven-byte
 prefix. There is no collection count around the stream, and no bound on the
 write's aggregate size or row count beyond the lengths' u64 representation.
 Every individual frame retains Appendix D's frame and collection bounds.
@@ -63,7 +65,7 @@ Every individual frame retains Appendix D's frame and collection bounds.
 `WriteEncoder` measures each row frame to produce the header, then emits each
 part's frame stream. `PartDecoder` retains at most one unfinished frame and
 the previous row identity, yields complete rows from each chunk, and checks
-row count and plaintext length at `finish`. A frame announced past the stream's
+record count and plaintext length at `finish`. A frame announced past the stream's
 end is refused before allocating its payload. Row identity order is merge's order: table,
 encoded key bytes, then audience. Table and column names sort by UTF-8 bytes.
 
@@ -133,7 +135,7 @@ other entries and are checked by their owners.
 
 ### Snapshot streams
 
-A snapshot is one kind-3 header, its kind-4 records, then a kind-5 end marker.
+A snapshot is one kind-5 header, its kind-6 records, then a kind-7 end marker.
 Counts declare records in five sections, in order. Empty sections emit nothing.
 
 | Section | Record | Order within section |
@@ -171,7 +173,7 @@ Which removal rules actually hold is established by the removal computation.
 `LostWrite` is `header:WriteHeader | audience:Audience | row_count:u64 |
 cause:LostWriteCause`. Cause is `0 | schema_version:u32` or
 `1 | reset_entry:EntryId`. A lost-write header (record tag 4) is followed by
-exactly `row_count` kind-4 records with tag 5, each
+exactly `row_count` kind-6 records with tag 5, each
 `change:RowChange`. The count is positive and counts only the snapshot
 audience's rows. These rows belong to the preceding lost-write header by their
 position, without repeating its WriteId, and have its audience in strictly

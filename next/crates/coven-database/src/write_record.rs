@@ -375,7 +375,11 @@ pub(crate) fn record(
         header,
         parts: parts
             .into_iter()
-            .map(|(audience, rows)| WritePart { audience, rows })
+            .map(|(audience, rows)| WritePart {
+                audience,
+                rows,
+                dismissals: Vec::new(),
+            })
             .collect(),
     })
 }

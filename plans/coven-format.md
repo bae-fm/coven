@@ -148,7 +148,8 @@
   - Dismissing a removed row is a delete of it, an ordinary row change.
 
   - A row has at most one change in a write, and changes come before
-    dismissals of the same row.
+    dismissals of the same row. Those dismissals are ordered by column,
+    then write, with no duplicates; each names a write the author had read.
 - A write waiting in `coven_uploads` is the header frame followed by its
   parts' streams, with nothing between them.
 

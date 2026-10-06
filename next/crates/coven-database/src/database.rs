@@ -294,6 +294,42 @@ impl Database {
         self.read(|sql| sql.lost_values()).await
     }
 
+    /// Dismisses lost values in a write so every device drops them from
+    /// `coven_lost`; a removed row is deleted for good (§8, §20.4).
+    pub async fn dismiss_lost_values(&self, values: &[LostValue]) -> CovenResult<()> {
+        let database = self.clone();
+        let values = values.to_vec();
+        finish_blocking(
+            tokio::task::spawn_blocking(move || {
+                let slot = database.inner.read().expect("database lock poisoned");
+                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+                let writer = inner
+                    .writer
+                    .lock()
+                    .expect("writer connection lock poisoned");
+                let files = crate::file_write::FileWrite::new(
+                    &writer,
+                    &inner.directory,
+                    &inner.write_schema,
+                    inner.device,
+                    &inner.staging,
+                    Vec::new(),
+                );
+                files
+                    .finish(crate::dismissal::dismiss(
+                        &writer,
+                        &inner.write_schema,
+                        inner.device,
+                        inner.clock.now(),
+                        &values,
+                        &files,
+                    ))
+                    .map_err(Into::into)
+            })
+            .await,
+        )
+    }
+
     /// Observe the decoded lost cells and removed rows.
     pub fn subscribe_lost_values(&self) -> LiveQuery<Vec<LostValue>> {
         self.subscribe(|sql| sql.lost_values())

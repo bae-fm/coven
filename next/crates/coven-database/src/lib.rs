@@ -10,6 +10,7 @@ mod authorization;
 mod change_capture;
 mod database;
 mod declaration;
+mod dismissal;
 mod download;
 mod error;
 mod file_authorization;

@@ -80,6 +80,27 @@ impl<'a> WriteApply<'a> {
         self.database.batch("PRAGMA defer_foreign_keys=ON")?;
         crate::removal::materialize(self.database, self.schema, self.visible, &new, &removal)?;
         crate::fingerprint::update(self.database, &new, &fingerprint)?;
+        if let Some(record) = record {
+            let dismissed = crate::dismissal::apply(self.database, record)?;
+            if !dismissed.is_empty() {
+                // Read the committed merge effects and the acknowledged losses
+                // inside this same transaction, without cached pre-dismissal rows.
+                let visible = AppView::after(self.database, self.schema);
+                let store = MergeStore::new(self.database, &visible);
+                let view = DatabaseRemovalView::new(
+                    self.database,
+                    &store,
+                    self.schema,
+                    &visible,
+                    &empty,
+                    self.deleted,
+                    None,
+                )?;
+                let result = coven_merge::recompute_fingerprint(&view, &view, dismissed)
+                    .map_err(|error| error.into_db_error(Some(record.header.position)))?;
+                crate::fingerprint::update(self.database, &view, &result)?;
+            }
+        }
         Ok(removal
             .region
             .into_iter()

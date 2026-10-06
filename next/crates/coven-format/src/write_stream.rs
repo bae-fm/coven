@@ -1,28 +1,29 @@
 //! Write headers describe independently framed, chunked audience streams (§14.4).
 
 use crate::chunks::{FrameDecoder, PlaintextChunks, CHUNK_SIZE};
+use crate::dismissal::WriteFrame;
 use crate::error::{require, Error, Rule};
 use crate::wire::{decode_frame, wire_struct, Wire};
-use crate::write::{RowChange, WriteHeader, WritePart, WriteRecord};
+use crate::write::{WriteHeader, WritePart, WriteRecord};
 use crate::{encode_frame, frame_length, FRAME_PREFIX_LEN};
-use coven_merge::{Audience, RowId};
+use coven_merge::{Audience, RowId, WriteId};
 
 /// The plaintext stream boundaries of one audience part.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PartHeader {
     /// Every row in the stream belongs to this audience.
     pub audience: Audience,
-    /// Number of row-change frames, without a per-write collection bound.
-    pub row_count: u64,
+    /// Number of change and dismissal frames, without a per-write collection bound.
+    pub record_count: u64,
     /// Sum of the complete row frames' lengths, including frame prefixes.
     pub plaintext_length: u64,
 }
-wire_struct!(PartHeader, audience, row_count, plaintext_length);
+wire_struct!(PartHeader, audience, record_count, plaintext_length);
 impl PartHeader {
     pub(crate) fn validate(&self) -> Result<(), Error> {
-        require(self.row_count > 0, "write part rows", Rule::Required)?;
+        require(self.record_count > 0, "write part rows", Rule::Required)?;
         require(
-            self.row_count <= self.plaintext_length / FRAME_PREFIX_LEN as u64,
+            self.record_count <= self.plaintext_length / FRAME_PREFIX_LEN as u64,
             "write part length",
             Rule::StreamLength,
         )
@@ -34,7 +35,7 @@ impl PartHeader {
     }
 }
 
-/// The kind-1 header frame; rows are separate kind-13 frames.
+/// The kind-1 header frame; changes and dismissals are separate kind-2 and kind-3 frames.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WriteHeaderFrame {
     /// Identity, causal positions, timestamp and schema.
@@ -90,12 +91,12 @@ impl<'a> WriteEncoder<'a> {
         let mut parts = Vec::new();
         for part in &record.parts {
             let mut length = 0u64;
-            for row in &part.rows {
-                length = add_length(length, row.encode()?.len() as u64)?;
+            for frame in part.frames() {
+                length = add_length(length, frame?.len() as u64)?;
             }
             parts.push(PartHeader {
                 audience: part.audience.clone(),
-                row_count: part.rows.len() as u64,
+                record_count: (part.rows.len() + part.dismissals.len()) as u64,
                 plaintext_length: length,
             });
         }
@@ -163,9 +164,7 @@ impl<'a> WriteEncoder<'a> {
             field: "write part index",
             rule: Rule::Chunk,
         })?;
-        Ok(PlaintextChunks::new(
-            part.rows.iter().map(RowChange::encode),
-        ))
+        Ok(PlaintextChunks::new(part.frames()))
     }
 }
 
@@ -184,7 +183,7 @@ pub struct PartDecoder {
     frames: FrameDecoder,
     received: u64,
     rows: u64,
-    previous: Option<RowId>,
+    previous: Option<(RowId, Option<(String, WriteId)>)>,
 }
 impl PartDecoder {
     /// Begin the stream described by the authenticated write header.
@@ -201,7 +200,7 @@ impl PartDecoder {
 
     /// Feed exactly the next chunk. Full chunks are 64 KiB, and the last chunk
     /// has the header's remaining length. Discard the decoder after any error.
-    pub fn chunk(&mut self, mut bytes: &[u8]) -> Result<Vec<RowChange>, Error> {
+    pub fn chunk(&mut self, mut bytes: &[u8]) -> Result<Vec<WriteFrame>, Error> {
         let left = self.header.plaintext_length - self.received;
         require(
             left > 0 && bytes.len() as u64 == left.min(CHUNK_SIZE as u64),
@@ -212,24 +211,25 @@ impl PartDecoder {
         let mut rows = Vec::new();
         while let Some(frame) = self.frames.next(&mut bytes)? {
             require(
-                self.rows < self.header.row_count,
+                self.rows < self.header.record_count,
                 "write part row count",
                 Rule::StreamLength,
             )?;
-            let row = RowChange::decode(&frame)?;
+            let row = WriteFrame::decode(&frame)?;
+            let key = row.key();
             require(
-                row.row.audience == self.header.audience,
+                key.0.audience == self.header.audience,
                 "write part audience",
                 Rule::Audience,
             )?;
             require(
                 self.previous
                     .as_ref()
-                    .is_none_or(|previous| *previous < row.row),
+                    .is_none_or(|previous| *previous < key),
                 "write part rows",
                 Rule::Order,
             )?;
-            self.previous = Some(row.row.clone());
+            self.previous = Some(key);
             self.rows += 1;
             rows.push(row);
             if bytes.is_empty() {
@@ -243,7 +243,7 @@ impl PartDecoder {
     pub fn finish(&self) -> Result<(), Error> {
         self.frames.finish()?;
         require(
-            self.received == self.header.plaintext_length && self.rows == self.header.row_count,
+            self.received == self.header.plaintext_length && self.rows == self.header.record_count,
             "write part row count/length",
             Rule::StreamLength,
         )
@@ -264,19 +264,31 @@ pub fn decode_plaintext(bytes: &[u8]) -> Result<WriteRecord, Error> {
         let audience = part.audience.clone();
         let mut decoder = PartDecoder::new(part)?;
         let mut rows = Vec::new();
+        let mut dismissals = Vec::new();
         for chunk in stream.chunks(CHUNK_SIZE) {
-            rows.extend(decoder.chunk(chunk)?);
+            for frame in decoder.chunk(chunk)? {
+                match frame {
+                    WriteFrame::Change(row) => rows.push(row),
+                    WriteFrame::Dismissal(dismissal) => dismissals.push(dismissal),
+                }
+            }
         }
         decoder.finish()?;
-        parts.push(WritePart { audience, rows });
+        parts.push(WritePart {
+            audience,
+            rows,
+            dismissals,
+        });
     }
     if !bytes.is_empty() {
         return Err(Error::TrailingBytes);
     }
-    Ok(WriteRecord {
+    let record = WriteRecord {
         header: header.header,
         parts,
-    })
+    };
+    record.validate()?;
+    Ok(record)
 }
 
 #[cfg(test)]

@@ -91,6 +91,13 @@ pub(crate) fn apply(
     files: &crate::file_write::FileWrite<'_>,
 ) -> Result<ApplyOutcome, DbError> {
     database.transaction(|database| {
+        for part in &download.parts {
+            if let DownloadedPart::Opened(part) = part {
+                for dismissal in &part.dismissals {
+                    dismissal.validate_past(&download.header)?;
+                }
+            }
+        }
         let positions = positions(database)?;
         let header = &download.header;
         if positions.covers(header.position) {
@@ -165,6 +172,12 @@ fn apply_opened(
         };
         if let Some(cause) = cause {
             exclude(database, &record.header, &part, cause)?;
+            if !part.dismissals.is_empty() {
+                kept.push(WritePart {
+                    rows: Vec::new(),
+                    ..part
+                });
+            }
         } else {
             kept.push(part);
         }

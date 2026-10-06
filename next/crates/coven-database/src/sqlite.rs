@@ -632,10 +632,13 @@ impl DatabaseConnection {
 
     pub(crate) fn lost_values(&self) -> CovenResult<Vec<crate::LostValue>> {
         let records = self.query(
-            "SELECT l.table_name,l.key,l.column_id,c.table_name,c.column_name,l.value,l.set_by,l.replacement_kind,l.replaced_by FROM coven_lost l LEFT JOIN coven_columns c ON c.id=l.column_id ORDER BY l.id",
+            "SELECT l.table_name,l.key,l.column_id,c.table_name,c.column_name,l.value,l.set_by,l.replacement_kind,l.replaced_by,l.audience,l.generation,l.retired FROM coven_lost l LEFT JOIN coven_columns c ON c.id=l.column_id ORDER BY l.id",
             [], crate::lost::LostRecord::read,
         )?;
-        records.into_iter().map(|record| record.decode()).collect()
+        records
+            .into_iter()
+            .map(|record| record.decode().map_err(Into::into))
+            .collect()
     }
 
     fn require_transaction(&self) -> Result<(), DbError> {

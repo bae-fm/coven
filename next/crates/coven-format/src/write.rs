@@ -127,16 +127,16 @@ pub struct RowChange {
 }
 wire_struct!(RowChange, row, change, old);
 impl RowChange {
-    /// Validate and encode one bounded row-change frame (kind 13).
+    /// Validate and encode one bounded row-change frame (kind 2).
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         self.validate()?;
-        crate::encode_frame(13, self)
+        crate::encode_frame(2, self)
     }
 
     /// Decode exactly one row-change frame.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let (kind, mut input) = crate::wire::decode_frame(bytes)?;
-        require(kind == 13, "row change kind", Rule::Kind)?;
+        require(kind == 2, "row change kind", Rule::Kind)?;
         let row = Self::get(&mut input)?;
         input.finish()?;
         row.validate()?;
@@ -174,10 +174,29 @@ pub struct WritePart {
     pub audience: Audience,
     /// One change per row, in increasing merge row-identity order.
     pub rows: Vec<RowChange>,
+    /// Lost cells acknowledged by this write, ordered by row, column and setter.
+    pub dismissals: Vec<crate::dismissal::Dismissal>,
 }
 impl WritePart {
     pub(crate) fn validate(&self) -> Result<(), Error> {
-        require(!self.rows.is_empty(), "write part rows", Rule::Required)?;
+        require(
+            !self.rows.is_empty() || !self.dismissals.is_empty(),
+            "write part rows",
+            Rule::Required,
+        )?;
+        require(
+            self.dismissals.windows(2).all(|pair| pair[0] < pair[1]),
+            "write part dismissals",
+            Rule::Order,
+        )?;
+        for dismissal in &self.dismissals {
+            dismissal.validate()?;
+            require(
+                dismissal.row.audience == self.audience,
+                "write part audience",
+                Rule::Audience,
+            )?;
+        }
         require(
             self.rows.windows(2).all(|r| r[0].row < r[1].row),
             "write part rows",
@@ -192,6 +211,19 @@ impl WritePart {
             )?;
         }
         Ok(())
+    }
+
+    pub(crate) fn frames(&self) -> impl Iterator<Item = Result<Vec<u8>, Error>> + '_ {
+        let mut rows = self.rows.iter().peekable();
+        let mut dismissals = self.dismissals.iter().peekable();
+        std::iter::from_fn(move || match (rows.peek(), dismissals.peek()) {
+            (Some(row), Some(dismissal)) if row.row <= dismissal.row => {
+                rows.next().map(RowChange::encode)
+            }
+            (_, Some(_)) => dismissals.next().map(crate::dismissal::Dismissal::encode),
+            (Some(_), None) => rows.next().map(RowChange::encode),
+            (None, None) => None,
+        })
     }
 }
 
@@ -214,6 +246,9 @@ impl WriteRecord {
         )?;
         for part in &self.parts {
             part.validate()?;
+            for dismissal in &part.dismissals {
+                dismissal.validate_past(&self.header)?;
+            }
         }
         Ok(())
     }
