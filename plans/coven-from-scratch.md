@@ -1444,9 +1444,10 @@ Carol's tablet:
 
 ### 12.2 Adding a person
 
-- An admin adds a person with an *invite*, a code shown as a QR code; on
-  a provider that shares with an account, that admin is the member whose
-  account holds the store ([§4](#4-storage-providers-and-access)),
+- On a provider that shares with an account, the admin who invites is
+  the member whose account holds the store
+  ([§4](#4-storage-providers-and-access)).
+- An admin adds a person with an *invite*, a code shown as a QR code,
   holding:
   - the store's id, name and location;
   - the invite's id, and a one-time *invite secret*;
