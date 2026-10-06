@@ -24,6 +24,7 @@ struct Remote {
     refuse_share: bool,
     lose_update_reply: bool,
     range_reads: usize,
+    folders: BTreeSet<String>,
 }
 async fn endpoint(
     State(state): State<Arc<Mutex<Remote>>>,
@@ -82,13 +83,18 @@ async fn endpoint(
                 .as_str()
                 .map(|s| s.parse::<usize>().unwrap())
                 .unwrap_or(0);
-            let all: Vec<_> = state.objects.iter().collect();
-            let entries: Vec<_> = all
+            let all: Vec<_> = state
+                .objects
                 .iter()
-                .skip(start)
-                .take(1)
                 .map(|(path, bytes)| json!({".tag":"file","path_lower":path,"size":bytes.len()}))
+                .chain(
+                    state
+                        .folders
+                        .iter()
+                        .map(|path| json!({".tag":"folder","path_lower":path})),
+                )
                 .collect();
+            let entries: Vec<_> = all.iter().skip(start).take(1).collect();
             reply(
                 json!({"entries":entries,"has_more":all.len()>start+1,"cursor":(start+1).to_string()}),
             )
@@ -547,4 +553,30 @@ async fn granting_an_owner_does_not_downgrade_their_access() {
     storage.grant_access("owner@example.test").await.unwrap();
     assert_eq!(state.lock().unwrap().members["owner@example.test"], "owner");
     assert!(state.lock().unwrap().sharing_mutations.is_empty());
+}
+
+#[tokio::test]
+async fn setup_refuses_unrelated_empty_folders_and_accepts_its_own_parents() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let first = ObjectPath::store_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    for folder in [
+        "/vacation",
+        "/devices/031",
+        "/files/00000000-0000-0000-0000-000000000000",
+    ] {
+        state.lock().unwrap().folders = [folder.into()].into();
+        assert_eq!(
+            storage.setup(&first, b"first").await.unwrap_err().failure(),
+            StorageSetupFailure::LocationOccupied
+        );
+        assert!(state.lock().unwrap().objects.is_empty());
+    }
+    state.lock().unwrap().folders = ["/store-log".into(), "/store-log/31".into()].into();
+    storage.setup(&first, b"first").await.unwrap();
+    storage.setup(&first, b"first").await.unwrap();
 }

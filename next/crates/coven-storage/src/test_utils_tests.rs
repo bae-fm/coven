@@ -238,3 +238,33 @@ async fn sharing_authority_belongs_to_the_adapters_account() {
         MemberRemoval::DeleteAccessKey { .. }
     ));
 }
+
+#[tokio::test]
+async fn reconnect_accepts_its_first_entry_after_the_store_has_uploaded_more() {
+    use coven_foundation::id_source::DeviceId;
+    let storage = MemoryStorage::new(config()).unwrap();
+    let first = ObjectPath::store_log(DeviceId(31), std::num::NonZeroU64::MIN);
+    storage.setup(&first, b"first").await.unwrap();
+    let later = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
+    storage.create(&later, b"later").await.unwrap();
+    storage
+        .replace(&ObjectPath::positions(DeviceId(32)), b"positions")
+        .await
+        .unwrap();
+    assert_eq!(storage.setup(&first, b"first").await.unwrap(), config());
+    assert_eq!(
+        storage
+            .setup(&first, b"different")
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageSetupFailure::LocationOccupied
+    );
+    let other = ObjectPath::store_log(DeviceId(32), std::num::NonZeroU64::MIN);
+    assert_eq!(
+        storage.setup(&other, b"other").await.unwrap_err().failure(),
+        StorageSetupFailure::LocationOccupied
+    );
+    assert_eq!(storage.read(&first).await.unwrap(), b"first");
+    assert_eq!(storage.read(&later).await.unwrap(), b"later");
+}

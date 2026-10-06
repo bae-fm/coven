@@ -496,3 +496,24 @@ async fn sharing_requires_the_store_owners_account() {
         ["kept@example.test"]
     );
 }
+
+#[tokio::test]
+async fn setup_refuses_an_unrelated_empty_folder() {
+    let state = remote();
+    state
+        .lock()
+        .unwrap()
+        .dirs
+        .insert("unrelated".into(), "vacation".into());
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let first = ObjectPath::store_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    assert_eq!(
+        storage.setup(&first, b"first").await.unwrap_err().failure(),
+        StorageSetupFailure::LocationOccupied
+    );
+    assert!(state.lock().unwrap().files.is_empty());
+}

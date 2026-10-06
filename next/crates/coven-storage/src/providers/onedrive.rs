@@ -340,6 +340,7 @@ impl Storage for OneDriveStorage {
                     if item["folder"].is_object() {
                         let mut parts = names.clone();
                         parts.push(name.to_owned());
+                        crate::path::validate_directory(&parts.join("/"))?;
                         folders.push((http::string(item, "id")?.into(), parts));
                     } else if item["file"].is_object() {
                         let path = ObjectPath::from_components(&names, name)?;

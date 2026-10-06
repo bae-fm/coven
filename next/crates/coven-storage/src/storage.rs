@@ -229,8 +229,9 @@ pub trait Storage: Send + Sync {
     }
 
     /// Create the store's first encrypted store-log entry at an empty location.
-    /// Retries accept exactly that same entry. The facade commits the returned
-    /// settings and credentials only after this call succeeds (§20.5).
+    /// Reconnect when the location contains that same entry, including when later
+    /// objects have been uploaded. The facade commits settings and credentials
+    /// only after this call succeeds (§20.5).
     async fn setup(
         &self,
         first_entry: &ObjectPath,
@@ -246,10 +247,7 @@ pub trait Storage: Send + Sync {
             Err(error) => return Err(error.into()),
         };
         if !objects.is_empty() {
-            if objects.len() != 1
-                || &objects[0] != first_entry
-                || self.read(first_entry).await? != encrypted_entry
-            {
+            if !objects.contains(first_entry) || self.read(first_entry).await? != encrypted_entry {
                 return Err(StorageSetupError::LocationOccupied);
             }
         } else {

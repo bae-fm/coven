@@ -20,10 +20,34 @@ struct Remote {
     metadata: BTreeMap<String, String>,
     fail_part_reply: bool,
     fail_completion_reply: bool,
+    setup_barrier: Option<Arc<tokio::sync::Barrier>>,
     forced_error: Option<(&'static str, u16)>,
 }
 async fn endpoint(
     State(state): State<Arc<Mutex<Remote>>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    let barrier = if query(&uri).contains_key("list-type") {
+        let remote = state.lock().unwrap();
+        if remote.objects.is_empty() {
+            remote.setup_barrier.clone()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let reply = respond(&state, method, uri, headers, body);
+    if let Some(barrier) = barrier {
+        barrier.wait().await;
+    }
+    reply
+}
+fn respond(
+    state: &Mutex<Remote>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -343,4 +367,26 @@ async fn abort_retries_and_preserves_an_object_after_a_lost_completion_reply() {
     storage.abort_upload(&upload).await.unwrap();
     storage.abort_upload(&upload).await.unwrap();
     assert_eq!(storage.read(&path).await.unwrap(), b"data");
+}
+
+#[tokio::test]
+async fn simultaneous_setups_expose_both_first_entries_for_sync() {
+    use coven_foundation::id_source::DeviceId;
+    let state = Arc::new(Mutex::new(Remote::default()));
+    state.lock().unwrap().setup_barrier = Some(Arc::new(tokio::sync::Barrier::new(2)));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let first = ObjectPath::store_log(DeviceId(31), std::num::NonZeroU64::MIN);
+    let other = ObjectPath::store_log(DeviceId(32), std::num::NonZeroU64::MIN);
+    let (left, right) = tokio::join!(
+        storage.setup(&first, b"first store"),
+        storage.setup(&other, b"second store")
+    );
+    assert_eq!(left.unwrap(), storage.config());
+    assert_eq!(right.unwrap(), storage.config());
+    assert_eq!(
+        storage.list(&ObjectPrefix::store_logs()).await.unwrap(),
+        [first, other]
+    );
+    assert_eq!(state.lock().unwrap().objects.len(), 2);
 }

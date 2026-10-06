@@ -3872,6 +3872,12 @@ while let Ok(values) = lost.next().await {
     `disconnect_storage`, setup reconnects to it; one that holds another
     store, or anything that isn't a coven store, fails with
     `LocationOccupied`.
+    Storage identifies a reconnect by the caller's known first-entry path and
+    encrypted bytes, even when later objects are present. Provider folders must
+    be ancestors in coven's layout; unrelated folders count as occupied. Empty
+    layout folders left by an interrupted upload contain no stored objects.
+    Concurrent empty-location setups both may succeed; storage lists their
+    first entries for sync to detect the collision (§4).
   - Creating uploads the store's first entry and its key sealed to this
     member; waiting writes then go up through sync like any others.
 - `Storage::single_request_limit() -> u64` exposes the maximum encrypted body

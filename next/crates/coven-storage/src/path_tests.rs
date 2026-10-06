@@ -58,6 +58,11 @@ fn every_layout_round_trips_without_aliases() {
         assert_eq!(ObjectPath::parse(path.as_str()).unwrap(), path);
         let json = serde_json::to_vec(&path).unwrap();
         assert_eq!(serde_json::from_slice::<ObjectPath>(&json).unwrap(), path);
+        assert!(validate_directory(path.as_str()).is_err());
+        let parts = path.components();
+        for end in 1..parts.len() {
+            validate_directory(&parts[..end].join("/")).unwrap();
+        }
     }
     assert_eq!(
         ObjectPath::device_log(device, number).as_str(),
@@ -128,5 +133,29 @@ fn appendix_d_paths_include_snapshot_audience_and_random_file_id() {
         "files/abababab-abab-abab-abab-abababababab",
     ] {
         assert!(ObjectPath::parse(path).is_ok(), "{path}");
+    }
+}
+
+#[test]
+fn provider_folders_cannot_introduce_another_layout_or_alias() {
+    for folder in [
+        "",
+        "/devices",
+        "devices/",
+        "devices/00",
+        "devices/../1",
+        "positions/42",
+        "snapshots/42",
+        "snapshots/store/042",
+        "keys/other",
+        "keys/store/not-a-key",
+        "keys/circles/not-a-circle",
+        "vacation",
+        "files/a",
+    ] {
+        assert!(
+            matches!(validate_directory(folder), Err(StorageError::InvalidPath)),
+            "{folder}"
+        );
     }
 }

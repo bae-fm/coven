@@ -295,7 +295,14 @@ impl Storage for DropboxStorage {
             let value = self.rpc(method, request).await?;
             for entry in http::array(&value, "entries")? {
                 match http::string(entry, ".tag")? {
-                    "folder" => continue,
+                    "folder" => {
+                        crate::path::validate_directory(
+                            http::string(entry, "path_lower")?
+                                .strip_prefix('/')
+                                .ok_or(StorageError::InvalidPath)?,
+                        )?;
+                        continue;
+                    }
                     "file" => {}
                     _ => return Err(StorageError::Protocol("unexpected Dropbox listing entry")),
                 }

@@ -188,6 +188,30 @@ impl ObjectPrefix {
     }
 }
 
+/// Validate a provider folder as a strict ancestor of an object in the
+/// layout. Empty folders left by interrupted uploads remain recognizable.
+pub(crate) fn validate_directory(value: &str) -> Result<(), StorageError> {
+    let parts: Vec<_> = value.split('/').collect();
+    let valid = match parts.as_slice() {
+        ["devices" | "store-log" | "positions" | "snapshots" | "keys" | "files"
+        | "join-requests"] => true,
+        ["devices" | "store-log", device] => decimal(device, false),
+        ["snapshots", audience] => *audience == "store" || canonical_uuid(audience),
+        ["snapshots", audience, device] => {
+            (*audience == "store" || canonical_uuid(audience)) && decimal(device, false)
+        }
+        ["keys", "store" | "circles"] => true,
+        ["keys", "store", key] => canonical_uuid(key),
+        ["keys", "circles", circle] => canonical_uuid(circle),
+        ["keys", "circles", circle, key] => canonical_uuid(circle) && canonical_uuid(key),
+        _ => false,
+    };
+    if !valid {
+        return Err(StorageError::InvalidPath);
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_root(root: &str) -> Result<(), StorageError> {
     if !root.is_empty() {
         for part in root.split('/') {

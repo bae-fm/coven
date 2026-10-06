@@ -598,3 +598,24 @@ async fn sharing_requires_the_store_owners_account() {
         ["kept@example.test"]
     );
 }
+
+#[tokio::test]
+async fn setup_refuses_a_folder_even_when_its_name_is_an_object_path() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    state.lock().unwrap().files.insert("directory".into(), (metadata(json!({"id":"directory","name":"devices/31/1","mimeType":"application/vnd.google-apps.folder","parents":["folder"]}), 0), Vec::new()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let first = ObjectPath::store_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    assert_eq!(
+        storage.setup(&first, b"first").await.unwrap_err().failure(),
+        StorageSetupFailure::LocationOccupied
+    );
+    assert_eq!(state.lock().unwrap().files.len(), 1);
+    assert!(matches!(
+        storage.list(&ObjectPrefix::all()).await,
+        Err(StorageError::InvalidPath)
+    ));
+}

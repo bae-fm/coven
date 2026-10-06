@@ -130,7 +130,7 @@ impl GoogleDriveStorage {
         let mut seen = BTreeSet::new();
         let mut files = Vec::new();
         loop {
-            let mut parameters = vec![("q", query), ("fields", "nextPageToken,files(id,name,size,createdTime,parents,properties,ownedByMe,capabilities(canDelete,canRemoveMyDriveParent))"), ("includeItemsFromAllDrives", "true"), ("pageSize", "1000")];
+            let mut parameters = vec![("q", query), ("fields", "nextPageToken,files(id,name,mimeType,size,createdTime,parents,properties,ownedByMe,capabilities(canDelete,canRemoveMyDriveParent))"), ("includeItemsFromAllDrives", "true"), ("pageSize", "1000")];
             if let Some(token) = &token {
                 parameters.push(("pageToken", token));
             }
@@ -440,6 +440,9 @@ impl Storage for GoogleDriveStorage {
         let query = format!("'{}' in parents and trashed = false", escape(&self.folder));
         let mut paths = BTreeSet::new();
         for item in self.pages(&query).await? {
+            if item["mimeType"].as_str() == Some("application/vnd.google-apps.folder") {
+                return Err(StorageError::InvalidPath);
+            }
             let path = ObjectPath::parse(http::string(&item, "name")?)?;
             if prefix.contains(&path) {
                 paths.insert(path);
