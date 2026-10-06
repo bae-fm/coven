@@ -668,10 +668,13 @@ Carol's tablet:
     as null, with the cell still naming Ben's write.
   - Dan's write then wins over Ben's, so every device ends with link 6 on
     note 44, whatever order the writes arrived in.
-- Where SQLite would refuse the null or the default, such as on a `NOT NULL`
-  column, the child is taken out as under restrict.
-- E.g. if link 6's `note_id` were `NOT NULL`, link 6 would be taken out
-  instead.
+- Coven refuses set null on a `NOT NULL` column, and set default where
+  the column is `NOT NULL` and its default is NULL, in any table, checked
+  when the database opens and after migrating.
+  - SQLite can never apply such an action: no device could delete the
+    parent, and coven couldn't take it out.
+- Where SQLite would still refuse the default, such as one failing a
+  CHECK, the child is taken out as under restrict.
 - A reference set to its default points at whichever generation of the
   default parent is current, and is never stale.
   - If that parent is deleted or taken out, the child is taken out as
@@ -2321,6 +2324,8 @@ pub enum SchemaError {
     NoPrimaryKey { table: String },
     /// A primary key column allows NULL (§8.5).
     NullableKey { table: String, column: String },
+    /// SET NULL or SET DEFAULT would put NULL in a NOT NULL column (§8.4).
+    ImpossibleAction { table: String, column: String },
     /// SQLite chooses the primary key itself (§8.5).
     GeneratedPrimaryKey { table: String },
     /// An independent key does not contain a UUID (§8.5).
