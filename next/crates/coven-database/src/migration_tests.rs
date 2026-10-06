@@ -228,19 +228,19 @@ async fn classify_each_sqlite_definition_change() {
         ),
         (
             "CREATE TABLE extra(id TEXT PRIMARY KEY); CREATE INDEX extra_ids ON extra(id)",
-            MigrationChange::Addition,
+            MigrationChange::NoChange,
         ),
         (
             "CREATE TABLE extra(id TEXT PRIMARY KEY); CREATE TRIGGER extra_insert AFTER INSERT ON extra BEGIN SELECT 1; END",
-            MigrationChange::Addition,
+            MigrationChange::NoChange,
         ),
         (
             "CREATE TABLE extra(id TEXT PRIMARY KEY)",
-            MigrationChange::Addition,
+            MigrationChange::NoChange,
         ),
         (
             "CREATE VIEW titles AS SELECT title FROM notes",
-            MigrationChange::Breaking,
+            MigrationChange::NoChange,
         ),
         (
             "ALTER TABLE notes RENAME COLUMN title TO name",
@@ -308,13 +308,13 @@ async fn reordering_existing_columns_is_a_breaking_schema_change() {
     let store = TestStore::new();
     let db = store
         .builder(
-            vec![],
+            vec![SyncedTable::new("synced", RowIdentity::SharedKey)],
             vec![
-                Migration::sql(1, "initial", "CREATE TABLE local(a TEXT,b TEXT)"),
+                Migration::sql(1, "initial", "CREATE TABLE synced(id TEXT NOT NULL PRIMARY KEY,a TEXT,b TEXT)"),
                 Migration::sql(
                     2,
                     "reorder",
-                    "DROP TABLE local; CREATE TABLE local(b TEXT,a TEXT)",
+                    "DROP TABLE synced; CREATE TABLE synced(id TEXT NOT NULL PRIMARY KEY,b TEXT,a TEXT)",
                 ),
             ],
         )
@@ -391,5 +391,167 @@ async fn an_implicit_sqlite_rollback_cannot_escape_the_owned_transaction() {
             .unwrap(),
             0
         );
+    }
+}
+
+#[tokio::test]
+async fn local_schema_and_views_have_no_migration_change() {
+    for change in [
+        "SELECT 1",
+        "INSERT INTO local VALUES('key','title',NULL)",
+        "ALTER TABLE local ADD COLUMN color TEXT CHECK(color <> '')",
+        "ALTER TABLE local RENAME COLUMN title TO name",
+        "ALTER TABLE local DROP COLUMN extra",
+        "DROP TABLE local; CREATE TABLE local(title BLOB,id INTEGER PRIMARY KEY)",
+        "CREATE INDEX local_extra ON local(extra)",
+        "CREATE UNIQUE INDEX unique_extra ON local(extra)",
+        "DROP INDEX local_titles",
+        "DROP INDEX local_titles; CREATE INDEX local_titles ON local(extra)",
+        "CREATE TRIGGER inserted AFTER INSERT ON local BEGIN SELECT 1; END",
+        "DROP TRIGGER edited",
+        "DROP TRIGGER edited; CREATE TRIGGER edited AFTER DELETE ON local BEGIN SELECT 2; END",
+        "CREATE VIEW titles AS SELECT title FROM local",
+        "CREATE VIEW titles AS SELECT title FROM notes",
+        "DROP VIEW existing",
+        "DROP VIEW existing; CREATE VIEW existing AS SELECT extra FROM local",
+        "CREATE TRIGGER view_insert INSTEAD OF INSERT ON existing BEGIN SELECT 1; END",
+        "CREATE TABLE another(id TEXT); CREATE INDEX another_ids ON another(id)",
+    ] {
+        let store = TestStore::new();
+        let db = store.builder(notes_tables(), vec![
+            Migration::sql(1, "tables", "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT); CREATE TABLE local(id TEXT PRIMARY KEY,title TEXT,extra TEXT); CREATE INDEX local_titles ON local(title); CREATE TRIGGER edited AFTER UPDATE ON local BEGIN SELECT 1; END; CREATE VIEW existing AS SELECT title FROM notes"),
+            Migration::sql(2, "change", change),
+        ]).open().await.unwrap();
+        assert_eq!(
+            db.applied_migrations().unwrap()[1].change,
+            MigrationChange::NoChange,
+            "{change}"
+        );
+        db.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn new_synced_tables_with_indexes_and_triggers_are_additions() {
+    for schema in [
+        "CREATE TABLE extra(id TEXT NOT NULL PRIMARY KEY)",
+        "CREATE TABLE extra(id TEXT NOT NULL PRIMARY KEY); CREATE INDEX extra_ids ON extra(id)",
+        "CREATE TABLE extra(id TEXT NOT NULL PRIMARY KEY); CREATE TRIGGER inserted AFTER INSERT ON extra BEGIN SELECT 1; END",
+    ] {
+        let store = TestStore::new();
+        let db = store.schema(vec![SyncedTable::new("EXTRA", RowIdentity::SharedKey)], schema).await.unwrap();
+        assert_eq!(db.applied_migrations().unwrap()[0].change, MigrationChange::Addition);
+        db.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn dropping_or_renaming_any_table_is_breaking() {
+    for initially_synced in [false, true] {
+        for (sql, declarations) in [
+            ("DROP TABLE old", vec![]),
+            ("ALTER TABLE old RENAME TO renamed", vec![]),
+            (
+                "ALTER TABLE old RENAME TO renamed",
+                vec![SyncedTable::new("renamed", RowIdentity::SharedKey)],
+            ),
+        ] {
+            let store = TestStore::new();
+            let initial = || {
+                Migration::sql(
+                    1,
+                    "initial",
+                    "CREATE TABLE old(id TEXT NOT NULL PRIMARY KEY)",
+                )
+            };
+            let tables = if initially_synced {
+                vec![SyncedTable::new("old", RowIdentity::SharedKey)]
+            } else {
+                vec![]
+            };
+            store
+                .builder(tables, vec![initial()])
+                .open()
+                .await
+                .unwrap()
+                .close()
+                .await
+                .unwrap();
+            let db = store
+                .builder(
+                    declarations,
+                    vec![initial(), Migration::sql(2, "change", sql)],
+                )
+                .open()
+                .await
+                .unwrap();
+            assert_eq!(
+                db.applied_migrations().unwrap()[0].change,
+                MigrationChange::Breaking,
+                "{sql}, initially synced: {initially_synced}"
+            );
+            db.close().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn local_changes_do_not_hide_synced_additions_or_breaks() {
+    for (sql, expected) in [
+        ("ALTER TABLE notes ADD COLUMN extra TEXT; CREATE INDEX local_titles ON local(title)", MigrationChange::Addition),
+        ("CREATE INDEX note_titles ON notes(title); ALTER TABLE local ADD COLUMN extra TEXT", MigrationChange::Breaking),
+        ("DROP INDEX existing_index", MigrationChange::Breaking),
+        ("DROP TRIGGER existing_trigger", MigrationChange::Breaking),
+        ("DROP TRIGGER existing_trigger; CREATE TRIGGER existing_trigger AFTER DELETE ON notes BEGIN SELECT 2; END", MigrationChange::Breaking),
+    ] {
+        let store = TestStore::new();
+        let db = store.builder(vec![SyncedTable::new("NOTES", RowIdentity::SharedKey)], vec![
+            Migration::sql(1, "initial", "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT); CREATE INDEX existing_index ON notes(title); CREATE TRIGGER existing_trigger AFTER INSERT ON notes BEGIN SELECT 1; END; CREATE TABLE local(title TEXT)"),
+            Migration::sql(2, "change", sql),
+        ]).open().await.unwrap();
+        assert_eq!(db.applied_migrations().unwrap()[1].change, expected, "{sql}");
+        db.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn moving_an_index_or_trigger_between_local_and_synced_tables_is_breaking() {
+    for (before, after) in [("local", "notes"), ("notes", "local")] {
+        for (definition, kind) in [
+            ("INDEX effect ON", "INDEX"),
+            ("TRIGGER effect AFTER INSERT ON", "TRIGGER"),
+        ] {
+            let suffix = if kind == "INDEX" {
+                "(title)"
+            } else {
+                " BEGIN SELECT 1; END"
+            };
+            let initial = format!("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT); CREATE TABLE local(title TEXT); CREATE {definition} {before}{suffix}");
+            let changed = format!("DROP {kind} effect; CREATE {definition} {after}{suffix}");
+            let store = TestStore::new();
+            let db = store
+                .builder(
+                    notes_tables(),
+                    vec![
+                        Migration::run(1, "initial", move |sql| {
+                            sql.execute_batch(&initial)?;
+                            Ok(())
+                        }),
+                        Migration::run(2, "change", move |sql| {
+                            sql.execute_batch(&changed)?;
+                            Ok(())
+                        }),
+                    ],
+                )
+                .open()
+                .await
+                .unwrap();
+            assert_eq!(
+                db.applied_migrations().unwrap()[1].change,
+                MigrationChange::Breaking,
+                "{kind} from {before} to {after}"
+            );
+            db.close().await.unwrap();
+        }
     }
 }

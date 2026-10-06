@@ -16,9 +16,12 @@ pub enum CovenMigrationPolicy {
 /// How one migration changed SQLite's schema (§17.1).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MigrationChange {
-    /// Only tables or columns were added, or the schema was unchanged.
+    /// No synced definition changed and no table disappeared. Local-only and
+    /// view changes must not be mistaken for a synced schema addition (§17.1).
+    NoChange,
+    /// Only synced tables or their columns were added.
     Addition,
-    /// An existing definition changed, or an index, trigger or constraint was added.
+    /// A table disappeared or an existing synced definition changed beyond an addition.
     Breaking,
 }
 

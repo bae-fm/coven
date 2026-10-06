@@ -161,7 +161,7 @@ impl DatabaseConnection {
                 outcomes.push(MigrationOutcome {
                     version: migration.version,
                     name: migration.name,
-                    change: before.change_to(&after),
+                    change: before.change_to(&after, tables),
                 });
                 before = after;
             }
@@ -197,7 +197,7 @@ impl DatabaseConnection {
         F: FnOnce(crate::SqlContext<'_>) -> Result<R, DbError>,
     {
         #[cfg(test)]
-        let _profile = self.profile_write();
+        let _profile = self.profile_statements();
         self.transaction(|database| {
             let deleted_circles = crate::download::deleted_circles(database)?;
             let mut session = rusqlite::session::Session::new(&database.connection)?;
@@ -214,7 +214,7 @@ impl DatabaseConnection {
                 session.changeset()?
             };
             drop(session);
-            let captured = crate::write_capture::capture(&changeset, &schema.schema)?;
+            let captured = crate::write_capture::capture(&changeset, schema)?;
             let before = crate::write_rows::AppView::before(database, schema, &captured)?;
             let after = crate::write_rows::AppView::after(database, schema);
             let store = crate::merge_store::MergeStore::new(database, &before);
@@ -315,27 +315,6 @@ impl DatabaseConnection {
                 .query_map(params, map)?
                 .collect::<rusqlite::Result<Vec<T>>>();
             rows
-        })();
-        self.authorization
-            .record_statement(&self.connection, None)?;
-        result.map_err(Into::into)
-    }
-
-    pub(crate) fn scan<P: Params>(
-        &self,
-        sql: &str,
-        params: P,
-        mut visit: impl FnMut(&Row<'_>) -> rusqlite::Result<()>,
-    ) -> Result<(), DbError> {
-        let _scope = self.authorization.internal();
-        self.authorization.begin_read_statement();
-        let result: rusqlite::Result<()> = (|| {
-            let mut statement = self.connection.prepare(sql)?;
-            let mut rows = statement.query(params)?;
-            while let Some(row) = rows.next()? {
-                visit(row)?;
-            }
-            Ok(())
         })();
         self.authorization
             .record_statement(&self.connection, None)?;

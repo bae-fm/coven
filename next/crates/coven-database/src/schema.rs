@@ -2,10 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use rusqlite::types::ValueRef;
-
 use crate::declaration::AudienceSource;
-use crate::sql::{guarded_trigger, identifier, table_parts, tokens};
+use crate::sql::{guarded_trigger, table_parts, tokens};
 use crate::sqlite::DatabaseConnection;
 use crate::{DbError, MigrationChange, RowIdentity, SchemaError, SyncedTable};
 
@@ -165,16 +163,13 @@ impl Schema {
                 }
                 .into());
             }
-            if declaration.identity == RowIdentity::IndependentUuid {
-                check_uuid(db, table, &key).map_err(|error| match error {
-                    DbError::Schema(SchemaError::IndependentKeyNotUuid { .. }) => {
-                        SchemaError::IndependentKeyNotUuid {
-                            table: error_table(),
-                        }
-                        .into()
-                    }
-                    error => error,
-                })?;
+            if declaration.identity == RowIdentity::IndependentUuid
+                && !key.iter().any(|column| text_affinity(&column.kind))
+            {
+                return Err(SchemaError::IndependentKeyNotUuid {
+                    table: error_table(),
+                }
+                .into());
             }
             for foreign_key in &table.foreign_keys {
                 if foreign_key.replaces_reference() {
@@ -402,9 +397,30 @@ impl Schema {
         Ok(())
     }
 
-    pub(crate) fn change_to(&self, next: &Self) -> MigrationChange {
+    pub(crate) fn change_to(&self, next: &Self, declarations: &[SyncedTable]) -> MigrationChange {
+        // Final declarations cannot tell us whether a vanished table used to sync.
+        if self
+            .objects
+            .keys()
+            .any(|identity| identity.0 == "table" && !next.objects.contains_key(identity))
+        {
+            return MigrationChange::Breaking;
+        }
+        let synced: BTreeSet<_> = declarations
+            .iter()
+            .map(|table| table.name.to_ascii_lowercase())
+            .collect();
+        let mut change = MigrationChange::NoChange;
         for (identity, before) in &self.objects {
-            let Some(after) = next.objects.get(identity) else {
+            let after = next.objects.get(identity);
+            if identity.0 == "view"
+                || (!synced.contains(&before.table.to_ascii_lowercase())
+                    && !after
+                        .is_some_and(|object| synced.contains(&object.table.to_ascii_lowercase())))
+            {
+                continue;
+            }
+            let Some(after) = after else {
                 return MigrationChange::Breaking;
             };
             if before == after {
@@ -478,9 +494,17 @@ impl Schema {
                     return MigrationChange::Breaking;
                 }
             }
+            change = MigrationChange::Addition;
         }
         for ((kind, name), object) in &next.objects {
-            if !self.objects.contains_key(&(kind.clone(), name.clone())) && kind != "table" {
+            if kind == "view" || !synced.contains(&object.table.to_ascii_lowercase()) {
+                continue;
+            }
+            if !self.objects.contains_key(&(kind.clone(), name.clone())) {
+                if kind == "table" {
+                    change = MigrationChange::Addition;
+                    continue;
+                }
                 let table = object.table.to_ascii_lowercase();
                 let on_new_table = matches!(kind.as_str(), "index" | "trigger")
                     && !self.tables.contains_key(&table)
@@ -490,7 +514,7 @@ impl Schema {
                 }
             }
         }
-        MigrationChange::Addition
+        change
     }
 }
 
@@ -505,49 +529,6 @@ impl SchemaForeignKey {
 fn text_affinity(kind: &str) -> bool {
     let kind = kind.to_ascii_uppercase();
     !kind.contains("INT") && ["CHAR", "CLOB", "TEXT"].iter().any(|s| kind.contains(s))
-}
-
-fn check_uuid(
-    db: &DatabaseConnection,
-    table: &TableSchema,
-    key: &[&SchemaColumn],
-) -> Result<(), DbError> {
-    let mut candidates: Vec<_> = key
-        .iter()
-        .map(|c| text_affinity(&c.kind) || c.kind.eq_ignore_ascii_case("uuid"))
-        .collect();
-    let sql = format!(
-        "SELECT {} FROM main.{}",
-        key.iter()
-            .map(|c| identifier(&c.name))
-            .collect::<Vec<_>>()
-            .join(","),
-        identifier(&table.name)
-    );
-    db.scan(&sql, [], |row| {
-        for (i, candidate) in candidates.iter_mut().enumerate() {
-            if *candidate {
-                *candidate = match row.get_ref(i)? {
-                    ValueRef::Text(bytes) => std::str::from_utf8(bytes).is_ok_and(|text| {
-                        uuid::Uuid::parse_str(text).is_ok_and(|id| {
-                            matches!(id.get_version_num(), 4 | 7)
-                                && id.get_variant() == uuid::Variant::RFC4122
-                                && id.to_string() == text
-                        })
-                    }),
-                    _ => false,
-                };
-            }
-        }
-        Ok(())
-    })?;
-    if !candidates.iter().any(|v| *v) {
-        return Err(SchemaError::IndependentKeyNotUuid {
-            table: table.name.clone(),
-        }
-        .into());
-    }
-    Ok(())
 }
 
 #[cfg(test)]

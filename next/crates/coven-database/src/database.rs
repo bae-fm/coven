@@ -91,11 +91,15 @@ impl DatabaseBuilder {
         let lock = self.directory.lock_exclusive()?;
         let path = self.directory.database_path();
         let mut writer = DatabaseConnection::open(&path, false, SqlAuthorization::new(&tables))?;
+        #[cfg(test)]
+        let profile = writer.profile_statements();
         writer.check_integrity()?;
         writer.enable_wal()?;
         let migrations = writer.prepare_schema(&tables, &migrations, policy, false)?;
         let write_schema = crate::write_schema::WriteSchema::read(&writer, tables.clone())?;
         let observer = CommitObserver::new();
+        #[cfg(test)]
+        drop(profile);
         writer.observe_commits(observer.clone())?;
         let mut readers = Vec::new();
         for _ in 0..4 {

@@ -109,6 +109,14 @@ pub enum DbError {
     /// A write targets a circle whose deletion has been applied (§14.7).
     #[error("circle {0} has been deleted")]
     DeletedCircle(coven_foundation::id_source::CircleId),
+    /// An inserted row's independent key holds no UUID (§8.5).
+    #[error("independent key {key:?} of {table} does not contain a canonical lowercase UUIDv4 or UUIDv7")]
+    KeyNotUuid {
+        /// The inserted row's table.
+        table: String,
+        /// Its primary key, in declared key order.
+        key: crate::RowKey,
+    },
     /// A downloaded write fails the merge's checks and is never applied (§19.1).
     #[error("invalid write {write:?}: {error}")]
     InvalidWrite {
@@ -212,8 +220,8 @@ pub enum SchemaError {
         /// The declared table.
         table: String,
     },
-    /// An independent key does not contain a UUID (§8.5).
-    #[error("independent key of {table} does not contain a canonical UUIDv4 or UUIDv7")]
+    /// An independent key has no text-affinity column to hold its UUID (§8.5).
+    #[error("independent key of {table} has no text-affinity column to hold its UUID")]
     IndependentKeyNotUuid {
         /// The declared table.
         table: String,

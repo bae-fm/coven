@@ -537,14 +537,14 @@ async fn moving_note_42_also_moves_its_removed_attachments() {
     let db = store.schema(vec![SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience"), SyncedTable::new("attachments", RowIdentity::IndependentUuid).audience_from("note_id")], "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL); CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,note_id TEXT REFERENCES notes(id),start INT,end INT,CONSTRAINT ordered CHECK(start<=end))").await.unwrap();
     sql(
         &db,
-        "INSERT INTO notes VALUES('42','store'); INSERT INTO attachments VALUES('8','42',5,12)",
+        "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000042','store'); INSERT INTO attachments VALUES('00000000-0000-4000-8000-000000000008','00000000-0000-4000-8000-000000000042',5,12)",
     )
     .await
     .unwrap();
     remove(
         &db,
         "attachments",
-        "8",
+        "00000000-0000-4000-8000-000000000008",
         &[("start", Value::Integer(10)), ("end", Value::Integer(8))],
         BTreeSet::from([Rule::Check("ordered".into())]),
     );
@@ -569,7 +569,7 @@ async fn moving_note_42_also_moves_its_removed_attachments() {
     assert_eq!(count(&db, "attachments"), 0);
     sql(
         &db,
-        "UPDATE notes SET audience='store'; INSERT INTO attachments VALUES('8','42',10,20)",
+        "UPDATE notes SET audience='store'; INSERT INTO attachments VALUES('00000000-0000-4000-8000-000000000008','00000000-0000-4000-8000-000000000042',10,20)",
     )
     .await
     .unwrap();
@@ -586,7 +586,10 @@ async fn store_wins_one_key_and_circles_use_their_generation_start() {
         let store = TestStore::new();
         let db = store.schema(vec![SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience")], "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,title TEXT)").await.unwrap();
         db.write(|context| {
-            context.execute("INSERT INTO notes VALUES('1',?1,'Circle')", [ANA])?;
+            context.execute(
+                "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001',?1,'Circle')",
+                [ANA],
+            )?;
             Ok(())
         })
         .await
@@ -594,12 +597,15 @@ async fn store_wins_one_key_and_circles_use_their_generation_start() {
         remove(
             &db,
             "notes",
-            "1",
+            "00000000-0000-4000-8000-000000000001",
             &[],
             BTreeSet::from([Rule::OtherAudience]),
         );
         db.write(move |context| {
-            context.execute("INSERT INTO notes VALUES('1',?1,'Other')", [other])?;
+            context.execute(
+                "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001',?1,'Other')",
+                [other],
+            )?;
             Ok(())
         })
         .await
@@ -623,7 +629,13 @@ async fn store_wins_one_key_and_circles_use_their_generation_start() {
         } else {
             let deleted =
                 coven_foundation::id_source::CircleId(uuid::Uuid::parse_str(ANA).unwrap());
-            materialize_deleted(&db, "notes", &["1"], deleted).unwrap();
+            materialize_deleted(
+                &db,
+                "notes",
+                &["00000000-0000-4000-8000-000000000001"],
+                deleted,
+            )
+            .unwrap();
             assert_eq!(records(&db).len(), 2);
             assert_eq!(losses(&db)[0].2, BTreeSet::from([Rule::DeletedCircle]));
             let audience: String = db.inspect_writer(|db| {

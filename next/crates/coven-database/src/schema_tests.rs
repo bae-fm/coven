@@ -67,16 +67,58 @@ async fn primary_key_rules_have_distinct_errors() {
 }
 
 #[tokio::test]
-async fn uuid_values_must_be_canonical_lowercase_v4_or_v7() {
-    for schema in [
-        "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY); INSERT INTO notes VALUES ('not a uuid')",
-        "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY); INSERT INTO notes VALUES ('F47AC10B-58CC-4372-A567-0E02B2C3D479')",
-        "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY); INSERT INTO notes VALUES ('f47ac10b-58cc-1372-a567-0e02b2c3d479')",
-        "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY); INSERT INTO notes VALUES ('f47ac10b-58cc-4372-7567-0e02b2c3d479')",
-    ] { rejects(schema, notes_tables(), SchemaError::IndependentKeyNotUuid { table: "notes".into() }).await; }
+async fn opening_does_not_validate_existing_uuid_values() {
     let store = TestStore::new();
-    let database = store.schema(vec![independent("notes").key_columns(["number", "id"])], "CREATE TABLE notes (number INTEGER NOT NULL, id TEXT NOT NULL, PRIMARY KEY(number,id)); INSERT INTO notes VALUES (2,'f47ac10b-58cc-4372-a567-0e02b2c3d479'), (3,'018f22bb-aaaa-7777-8ccc-000000000001')").await.unwrap();
-    database.close().await.unwrap();
+    let schema =
+        "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); INSERT INTO notes VALUES('not a uuid')";
+    let db = store.schema(notes_tables(), schema).await.unwrap();
+    db.close().await.unwrap();
+    store
+        .schema(notes_tables(), schema)
+        .await
+        .unwrap()
+        .close()
+        .await
+        .unwrap();
+    store
+        .builder(notes_tables(), vec![Migration::sql(1, "notes", schema)])
+        .open_read_only()
+        .await
+        .unwrap()
+        .close()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn opening_ten_thousand_independent_rows_does_not_scan_app_tables() {
+    let store = TestStore::new();
+    let db = store
+        .builder(notes_tables(), notes_migrations())
+        .open()
+        .await
+        .unwrap();
+    db.inspect_writer(|writer| {
+        writer.batch("WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<10000) INSERT INTO notes(id,title) SELECT printf('00000000-0000-4000-8000-%012x',i),'title' FROM n").unwrap();
+    });
+    db.close().await.unwrap();
+    let db = store
+        .builder(notes_tables(), notes_migrations())
+        .open()
+        .await
+        .unwrap();
+    let statements = db.inspect_writer(|writer| writer.fullscan_statements());
+    assert!(!statements.is_empty(), "the open must be traced");
+    for (statement, steps) in statements {
+        // Metadata enumeration may scan sqlite_schema and pragma virtual tables.
+        if steps > 0 {
+            assert!(
+                statement.contains("sqlite_schema") || statement.contains("pragma_"),
+                "app table scan ({steps} steps): {statement}"
+            );
+        }
+    }
+    db.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -365,5 +407,76 @@ async fn nullable_primary_keys_are_refused_on_open_and_after_migrating() {
         assert!(
             matches!(database_error(error), DbError::Schema(SchemaError::NullableKey { table, column: found }) if table == "notes" && found == column)
         );
+    }
+}
+
+#[tokio::test]
+async fn independent_keys_require_text_affinity_on_open_and_after_migrating() {
+    for kind in ["BLOB", "UUID", "INT", "CHARINT", "REAL", "NUMERIC", ""] {
+        let store = TestStore::new();
+        let schema = format!("CREATE TABLE notes(id {kind} NOT NULL PRIMARY KEY,title TEXT)");
+        let migration_schema = schema.clone();
+        let error = store
+            .builder(
+                notes_tables(),
+                vec![Migration::run(1, "key type", move |sql| {
+                    sql.execute_batch(&migration_schema)?;
+                    Ok(())
+                })],
+            )
+            .open()
+            .await
+            .err()
+            .expect("non-text key must fail migration");
+        assert!(
+            matches!(database_error(error), DbError::Schema(SchemaError::IndependentKeyNotUuid { table }) if table == "notes"),
+            "{kind}"
+        );
+        let db = store.builder(vec![], vec![]).open().await.unwrap();
+        db.inspect_writer(|writer| {
+            assert_eq!(writer.schema_version().unwrap(), 0);
+            assert_eq!(
+                writer
+                    .query_row(
+                        "SELECT count(*) FROM sqlite_schema WHERE name='notes'",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                0
+            );
+            writer.batch(&schema).unwrap();
+        });
+        db.close().await.unwrap();
+        for read_only in [false, true] {
+            let builder = store.builder(notes_tables(), vec![]);
+            let error = if read_only {
+                builder.open_read_only().await.map(|_| ())
+            } else {
+                builder.open().await.map(|_| ())
+            }
+            .expect_err("non-text key must fail open");
+            assert!(
+                matches!(database_error(error), DbError::Schema(SchemaError::IndependentKeyNotUuid { table }) if table == "notes"),
+                "{kind}"
+            );
+        }
+    }
+    for kind in ["TEXT", "VARCHAR(36)", "CLOB", "UUID TEXT"] {
+        let store = TestStore::new();
+        let schema =
+            format!("CREATE TABLE notes(n INT NOT NULL,id {kind} NOT NULL,PRIMARY KEY(n,id))");
+        let db = store
+            .builder(
+                vec![independent("notes").key_columns(["n", "id"])],
+                vec![Migration::run(1, "key type", move |sql| {
+                    sql.execute_batch(&schema)?;
+                    Ok(())
+                })],
+            )
+            .open()
+            .await
+            .unwrap();
+        db.close().await.unwrap();
     }
 }

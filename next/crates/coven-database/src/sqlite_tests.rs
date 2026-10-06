@@ -9,9 +9,9 @@ thread_local! {
     static SCANS: std::cell::RefCell<Vec<(String, i32)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-pub(super) struct WriteProfile<'a>(&'a DatabaseConnection);
+pub(crate) struct StatementProfile<'a>(&'a DatabaseConnection);
 
-impl Drop for WriteProfile<'_> {
+impl Drop for StatementProfile<'_> {
     fn drop(&mut self) {
         self.0
             .connection
@@ -22,7 +22,7 @@ impl Drop for WriteProfile<'_> {
 }
 
 impl DatabaseConnection {
-    pub(super) fn profile_write(&self) -> WriteProfile<'_> {
+    pub(crate) fn profile_statements(&self) -> StatementProfile<'_> {
         SCANS.with(|scans| scans.borrow_mut().clear());
         self.connection.trace_v2(
             rusqlite::trace::TraceEventCodes::SQLITE_TRACE_PROFILE,
@@ -37,7 +37,7 @@ impl DatabaseConnection {
                 }
             }),
         );
-        WriteProfile(self)
+        StatementProfile(self)
     }
 
     pub(crate) fn fullscan_statements(&self) -> Vec<(String, i32)> {
@@ -493,7 +493,7 @@ async fn audience_validation_looks_up_children_only_when_the_parent_moves() {
     let db=fixture.schema(vec![SyncedTable::new("albums",RowIdentity::IndependentUuid).audience_column("audience"),SyncedTable::new("tracks",RowIdentity::SharedKey)],"CREATE TABLE albums(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,title TEXT); CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY,album TEXT REFERENCES albums(id)); CREATE INDEX tracks_album ON tracks(album)").await.unwrap();
     sql(
         &db,
-        "INSERT INTO albums VALUES('a','store','Before'); INSERT INTO tracks VALUES('t','a')",
+        "INSERT INTO albums VALUES('00000000-0000-4000-8000-000000000001','store','Before'); INSERT INTO tracks VALUES('t','00000000-0000-4000-8000-000000000001')",
     )
     .await
     .unwrap();
@@ -502,14 +502,14 @@ async fn audience_validation_looks_up_children_only_when_the_parent_moves() {
             writer.batch("BEGIN IMMEDIATE").unwrap();
             let mut session=rusqlite::session::Session::new(&writer.connection).unwrap();
             session.attach(Some("albums")).unwrap();
-            writer.internal_execute(if moving { "UPDATE albums SET audience='00000000-0000-4000-8000-00000000000a' WHERE id='a'" } else { "UPDATE albums SET title='After' WHERE id='a'" },[]).unwrap();
+            writer.internal_execute(if moving { "UPDATE albums SET audience='00000000-0000-4000-8000-00000000000a' WHERE id='00000000-0000-4000-8000-000000000001'" } else { "UPDATE albums SET title='After' WHERE id='00000000-0000-4000-8000-000000000001'" },[]).unwrap();
             let changeset = { let _scope=writer.authorization.internal(); session.changeset().unwrap() };
             drop(session);
-            let captured=crate::write_capture::capture(&changeset,&schema.schema).unwrap();
+            let captured=crate::write_capture::capture(&changeset,schema).unwrap();
             let before=crate::write_rows::AppView::before(writer,schema,&captured).unwrap();
             let after=crate::write_rows::AppView::after(writer,schema);
             let stored=crate::merge_store::MergeStore::new(writer,&before);
-            let profile=writer.profile_write();
+            let profile=writer.profile_statements();
             let changes=crate::write_record::changes(writer,schema,&before,&after,&stored,&captured,&BTreeSet::new());
             drop(profile);
             let lookups=writer.fullscan_statements().into_iter().filter(|(sql,_)| sql.starts_with("SELECT DISTINCT r.table_name,r.key,r.audience FROM coven_references v")).count();
@@ -697,14 +697,6 @@ async fn every_internal_statement_path_is_observed_by_the_transaction() {
             .unwrap()
     });
     assert_eq!(next(&mut query).await, "query");
-    db.commit_writer(|writer| {
-        writer
-            .scan("UPDATE items SET value='scan' RETURNING value", [], |_| {
-                Ok(())
-            })
-            .unwrap()
-    });
-    assert_eq!(next(&mut query).await, "scan");
     db.commit_writer(|writer| writer.batch("UPDATE items SET value='batch'").unwrap());
     assert_eq!(next(&mut query).await, "batch");
     db.close().await.unwrap();
@@ -850,7 +842,7 @@ async fn rowid_authorization_does_not_query_metadata_for_each_write_or_trigger()
     db.inspect_writer(|writer| {
         writer
             .transaction(|writer| {
-                let profile = writer.profile_write();
+                let profile = writer.profile_statements();
                 for value in [vec![1u8; 4096], vec![2u8; 4096]] {
                     writer.app_execute("UPDATE items SET value=?1 WHERE id='a'", [value])?;
                 }

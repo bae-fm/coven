@@ -585,11 +585,11 @@ async fn writes_visit_only_indexed_rows_in_a_ten_thousand_row_store() {
         CREATE TABLE selection(note TEXT REFERENCES notes(id) ON DELETE CASCADE); CREATE INDEX selection_note ON selection(note);").await.unwrap();
     db.write(|context| {
         for n in 0..2000 {
-            let note = format!("n{n}");
+            let note = format!("00000000-0000-4000-8000-{n:012x}");
             context.execute("INSERT INTO notes VALUES(?1,'store',?1)", [&note])?;
             context.execute("INSERT INTO selection VALUES(?1)", [&note])?;
             for c in 0..2 {
-                let task = format!("t{n}-{c}");
+                let task = format!("00000000-0000-4000-8001-{:012x}", n * 2 + c);
                 context.execute("INSERT INTO tasks VALUES(?1,?2,'body')", [&task, &note])?;
                 context.execute("INSERT INTO items VALUES(?1,?1,'body')", [&task])?;
             }
@@ -598,19 +598,22 @@ async fn writes_visit_only_indexed_rows_in_a_ten_thousand_row_store() {
     })
     .await
     .unwrap();
-    sql(&db, "UPDATE items SET body='changed' WHERE id='t0-0'")
-        .await
-        .unwrap();
+    sql(
+        &db,
+        "UPDATE items SET body='changed' WHERE id='00000000-0000-4000-8001-000000000000'",
+    )
+    .await
+    .unwrap();
     assert_indexed(&db);
     sql(
         &db,
-        "UPDATE notes SET audience='00000000-0000-4000-8000-000000000001' WHERE id='n1'",
+        "UPDATE notes SET audience='00000000-0000-4000-8000-000000000001' WHERE id='00000000-0000-4000-8000-000000000001'",
     )
     .await
     .unwrap();
     assert_indexed(&db);
     for c in 0..2 {
-        let child = format!("t3-{c}");
+        let child = format!("00000000-0000-4000-8001-{:012x}", 6 + c);
         crate::removal::tests::remove(
             &db,
             "items",
@@ -639,25 +642,31 @@ async fn writes_visit_only_indexed_rows_in_a_ten_thousand_row_store() {
     crate::removal::tests::remove(
         &db,
         "notes",
-        "n3",
+        "00000000-0000-4000-8000-000000000003",
         &[],
         [coven_merge::Rule::Unique(["audience", "body"].into())].into(),
     );
-    sql(&db, "UPDATE notes SET body='n3' WHERE id='n2'")
+    sql(&db, "UPDATE notes SET body='00000000-0000-4000-8000-000000000003' WHERE id='00000000-0000-4000-8000-000000000002'")
         .await
         .unwrap();
     assert_indexed(&db);
     assert_eq!(
         db.inspect_writer(|db| db
-            .query_row("SELECT count(*) FROM notes WHERE id='n2'", [], |r| r
-                .get::<_, i64>(0))
+            .query_row(
+                "SELECT count(*) FROM notes WHERE id='00000000-0000-4000-8000-000000000002'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
             .unwrap()),
         0
     );
     assert_eq!(
         db.inspect_writer(|db| db
-            .query_row("SELECT count(*) FROM notes WHERE id='n3'", [], |r| r
-                .get::<_, i64>(0))
+            .query_row(
+                "SELECT count(*) FROM notes WHERE id='00000000-0000-4000-8000-000000000003'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
             .unwrap()),
         1
     );
