@@ -2076,12 +2076,22 @@ Carol's tablet:
     failure, and its provider upload session while one is in progress;
   - `coven_cache`: each cached file or chunk, its namespace, size, when it
     was last read, and whether it is pinned;
-  - `coven_cache_budgets`: each namespace's budget.
+  - `coven_cache_budgets`: each namespace's budget;
+  - `coven_file_removals`: bytes in coven's own folder that nothing names,
+    waiting to be deleted.
 - The bytes themselves are files in the store's directory: coven's own
   copies, and the cache.
 - A file's bytes are written and synced to disk before the row that names
   them commits, and a row's removal commits before its bytes are deleted,
   so a crash never leaves a table naming bytes that aren't there.
+- Nor bytes that no table names:
+  - before writing new bytes, coven records their name in
+    `coven_file_removals`, and the write that attaches them takes it out;
+  - the write that lets bytes go records them there in its transaction;
+  - after a write commits or fails, and when the database opens, coven
+    deletes the bytes `coven_file_removals` names, then their records.
+  - A deletion that fails stays recorded and is tried again then; the
+    write that let the bytes go stays committed, and reports the failure.
 
 ## 17. Schema changes
 
