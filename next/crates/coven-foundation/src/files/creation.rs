@@ -128,7 +128,20 @@ fn rename_new_directory(from: &Path, to: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 fn rename_new_directory(from: &Path, to: &Path) -> io::Result<()> {
-    crate::files::atomic_file::windows_rename(from, to, false)
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+
+    // Both paths are inside the canonicalized stores directory. Publication
+    // must refuse an existing name, even when it is an empty directory.
+    let from: Vec<_> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+    let to: Vec<_> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: both paths are live, NUL-terminated UTF-16 buffers. They have
+    // the same parent; no replacement or cross-volume copy is requested.
+    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_WRITE_THROUGH) } == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

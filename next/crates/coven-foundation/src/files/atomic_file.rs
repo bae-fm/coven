@@ -1,7 +1,7 @@
 //! Install complete bytes using a synced temporary sibling and an atomic rename.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 /// A file operation's cause, including whether replacement already happened.
@@ -84,8 +84,11 @@ impl AtomicFile {
     /// directory. The parent must already exist. Concurrent writers each
     /// install one complete version; a failed pre-rename write leaves it alone.
     ///
-    /// Windows uses a write-through rename for the directory-entry durability
-    /// barrier; Win32 does not offer POSIX directory fsync.
+    /// Windows uses POSIX replacement on a write-through file handle, which
+    /// flushes the rename's metadata on NTFS. This requires `FileRenameInfoEx`
+    /// and a filesystem supporting POSIX replacement. Windows 10 before 1607
+    /// lacks that API; unsupported systems return the OS error without falling
+    /// back to a rename that can fail while readers hold old versions open.
     pub fn replace(&self, bytes: &[u8]) -> Result<(), FileError> {
         replace(&self.path, bytes)
     }
@@ -119,7 +122,12 @@ impl AtomicFile {
 }
 
 pub(crate) fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, FileError> {
-    match fs::read(path) {
+    let result = open_reader(path).and_then(|mut file| {
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    });
+    match result {
         Ok(bytes) => Ok(Some(bytes)),
         Err(source) if source.kind() == io::ErrorKind::NotFound => {
             tracing::debug!(path = %path.display(), "file is absent");
@@ -127,6 +135,20 @@ pub(crate) fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, FileError> {
         }
         Err(source) => Err(FileError::at("read file", path, source)),
     }
+}
+
+fn open_reader(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    }
+    options.open(path)
 }
 
 pub(crate) fn replace(path: &Path, bytes: &[u8]) -> Result<(), FileError> {
@@ -149,28 +171,17 @@ pub(crate) fn replace(path: &Path, bytes: &[u8]) -> Result<(), FileError> {
     }
     #[cfg(windows)]
     {
-        // Close the temporary handle before renaming. The path still owns its
-        // removal on failure; an explicit close reports a cleanup error too.
-        let mut temp = temp.into_temp_path();
-        let result = windows_rename(&temp, path, true);
-        match result {
-            Ok(()) => {
-                // The source no longer exists. Disarm removal without issuing
-                // another filesystem operation against a possibly reused name.
-                temp.disable_cleanup(true);
-                Ok(())
-            }
-            Err(source) => {
-                let operation = FileError::at("rename temporary file", path, source);
-                match temp.close() {
-                    Ok(()) => Err(operation),
-                    Err(cleanup) => Err(FileError::Cleanup {
-                        operation: Box::new(operation),
-                        cleanup,
-                    }),
-                }
-            }
+        let mut temp = temp;
+        if let Err(source) = windows_rename(temp.as_file(), path) {
+            return Err(cleanup(
+                temp,
+                FileError::at("POSIX rename temporary file", path, source),
+            ));
         }
+        // The source no longer exists. Disarm removal without issuing another
+        // filesystem operation against a possibly reused name.
+        temp.disable_cleanup(true);
+        Ok(())
     }
 }
 
@@ -179,10 +190,34 @@ fn prepare(path: &Path, bytes: &[u8]) -> Result<tempfile::NamedTempFile, FileErr
     // directory already exists, so there is no guess about a relative parent.
     let directory = fs::canonicalize(parent(path))
         .map_err(|source| FileError::at("resolve parent directory", path, source))?;
-    let mut temp = tempfile::Builder::new()
-        .prefix(".coven-write-")
-        .tempfile_in(directory)
-        .map_err(|source| FileError::at("create temporary file", path, source))?;
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".coven-write-");
+    #[cfg(unix)]
+    let temp = builder.tempfile_in(directory);
+    #[cfg(windows)]
+    let temp = builder.make_in(directory, |path| {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            DELETE, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_WRITE_THROUGH, FILE_GENERIC_READ,
+            FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+
+        // Create the actual rename handle with DELETE access and write-through
+        // semantics. Unlike tempfile_in, make_in does not mark it TEMPORARY:
+        // these bytes are destined for durable storage. Share delete so another
+        // writer can replace this version before this handle is closed.
+        // CreateFileW documents that WRITE_THROUGH flushes NTFS rename metadata:
+        // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew#caching-behavior
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .access_mode(DELETE | FILE_GENERIC_READ | FILE_GENERIC_WRITE)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .attributes(FILE_ATTRIBUTE_NORMAL)
+            .custom_flags(FILE_FLAG_WRITE_THROUGH)
+            .open(path)
+    });
+    let mut temp = temp.map_err(|source| FileError::at("create temporary file", path, source))?;
     if let Err(source) = temp
         .write_all(bytes)
         .and_then(|()| temp.as_file().sync_all())
@@ -218,38 +253,70 @@ pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-pub(crate) fn windows_rename(from: &Path, to: &Path, replace: bool) -> io::Result<()> {
+fn windows_rename(file: &fs::File, to: &Path) -> io::Result<()> {
+    use std::mem::{offset_of, size_of, size_of_val, MaybeUninit};
     use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, SetFileAttributesW, FILE_ATTRIBUTE_NORMAL, MOVEFILE_REPLACE_EXISTING,
-        MOVEFILE_WRITE_THROUGH,
+        FileRenameInfoEx, SetFileInformationByHandle, FILE_RENAME_INFO,
+    };
+    use windows_sys::Win32::System::WindowsProgramming::{
+        FILE_RENAME_FLAG_POSIX_SEMANTICS, FILE_RENAME_FLAG_REPLACE_IF_EXISTS,
     };
 
     let name = to
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "file name required"))?;
     let destination = fs::canonicalize(parent(to))?.join(name);
-    let from: Vec<_> = from.as_os_str().encode_wide().chain(Some(0)).collect();
-    let to: Vec<_> = destination
+    let name: Vec<_> = destination
         .as_os_str()
         .encode_wide()
         .chain(Some(0))
         .collect();
-    // SAFETY: the source is a live, NUL-terminated UTF-16 buffer. A persisted
-    // file must no longer have tempfile's FILE_ATTRIBUTE_TEMPORARY hint.
-    if replace && unsafe { SetFileAttributesW(from.as_ptr(), FILE_ATTRIBUTE_NORMAL) } == 0 {
-        return Err(io::Error::last_os_error());
+    if name[..name.len() - 1].contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "NUL in file name",
+        ));
     }
-    // SAFETY: both paths are live, NUL-terminated UTF-16 buffers. The temp and
-    // destination have the same parent, so this cannot become a copy/delete.
-    let flags = MOVEFILE_WRITE_THROUGH
-        | if replace {
-            MOVEFILE_REPLACE_EXISTING
-        } else {
-            0
-        };
-    let result = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), flags) };
+    let too_long = || io::Error::new(io::ErrorKind::InvalidInput, "rename path is too long");
+    let buffer_size = size_of::<FILE_RENAME_INFO>()
+        .checked_add(size_of_val(name.as_slice()))
+        .ok_or_else(too_long)?;
+    let buffer_size = u32::try_from(buffer_size).map_err(|_| too_long())?;
+    // Allocate in units of the ABI type for its alignment, leaving enough room
+    // for its variable-length UTF-16 name, NUL and trailing struct padding.
+    let mut buffer = vec![
+        MaybeUninit::<FILE_RENAME_INFO>::zeroed();
+        (buffer_size as usize).div_ceil(size_of::<FILE_RENAME_INFO>())
+    ];
+    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    // SAFETY: the allocation is aligned for FILE_RENAME_INFO and contains its
+    // header and the whole name. RootDirectory is null (the name is absolute),
+    // and FileNameLength excludes the NUL.
+    // Both the buffer and the DELETE-access, write-through handle stay alive
+    // for the synchronous call. No Rust reference covers the variable tail.
+    let result = unsafe {
+        (*info).Anonymous.Flags =
+            FILE_RENAME_FLAG_POSIX_SEMANTICS | FILE_RENAME_FLAG_REPLACE_IF_EXISTS;
+        (*info).FileNameLength = (size_of_val(name.as_slice()) - size_of::<u16>()) as u32;
+        std::ptr::copy_nonoverlapping(
+            name.as_ptr(),
+            info.cast::<u8>()
+                .add(offset_of!(FILE_RENAME_INFO, FileName))
+                .cast::<u16>(),
+            name.len(),
+        );
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileRenameInfoEx,
+            info.cast(),
+            buffer_size,
+        )
+    };
     if result == 0 {
+        // No classic-rename fallback: it cannot preserve replacement while
+        // old versions are open. Keep the OS cause on unsupported systems too.
         Err(io::Error::last_os_error())
     } else {
         Ok(())

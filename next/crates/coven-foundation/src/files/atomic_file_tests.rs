@@ -25,7 +25,7 @@ fn a_crash_after_writing_the_temporary_sibling_leaves_the_old_target() {
     let file = AtomicFile::new(path.clone());
     file.replace(b"old").unwrap();
     let stage = prepare(&path, b"new").unwrap();
-    assert_eq!(fs::read(stage.path()).unwrap(), b"new");
+    assert_eq!(read_optional(stage.path()).unwrap().unwrap(), b"new");
     // Reopen without renaming or deleting the synced temporary sibling.
     assert_eq!(
         AtomicFile::new(path).read_optional().unwrap().unwrap(),
@@ -108,6 +108,66 @@ fn concurrent_writers_and_readers_observe_whole_versions() {
 }
 
 #[test]
+fn replacement_keeps_open_versions_readable_and_the_name_available() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("shared");
+    let file = AtomicFile::new(path.clone());
+    let mut readers = Vec::new();
+    for value in 0..4 {
+        let bytes = vec![value; 32768];
+        file.replace(&bytes).unwrap();
+        assert_eq!(file.read_optional().unwrap().unwrap(), bytes);
+        readers.push(open_reader(&path).unwrap());
+        // Earlier versions still have open handles, but only the current
+        // version has a name in this directory.
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+    for (value, mut reader) in readers.into_iter().enumerate() {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, vec![value as u8; 32768]);
+    }
+}
+
+#[test]
+fn a_nul_in_the_destination_cannot_replace_a_different_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let original = AtomicFile::new(directory.path().join("settings"));
+    original.replace(b"old").unwrap();
+    let invalid = AtomicFile::new(directory.path().join("settings\0suffix"));
+    let error = invalid.replace(b"new").unwrap_err();
+    assert!(matches!(error, FileError::Io { .. }));
+    assert!(!error.installed_new_bytes());
+    assert_eq!(original.read_optional().unwrap().unwrap(), b"old");
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+}
+
+#[cfg(windows)]
+#[test]
+fn a_reader_refusing_delete_sharing_preserves_the_target_on_failure() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("shared");
+    let file = AtomicFile::new(path.clone());
+    file.replace(b"old").unwrap();
+    let reader = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .open(&path)
+        .unwrap();
+    let error = file.replace(b"new").unwrap_err();
+    assert!(matches!(error, FileError::Io { .. }));
+    assert!(!error.installed_new_bytes());
+    assert_eq!(file.read_optional().unwrap().unwrap(), b"old");
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    drop(reader);
+    file.replace(b"new").unwrap();
+    assert_eq!(file.read_optional().unwrap().unwrap(), b"new");
+}
+
+#[test]
 fn replacement_supports_paths_past_the_windows_path_limit() {
     let directory = tempfile::tempdir().unwrap();
     let mut parent = directory.path().to_owned();
@@ -115,8 +175,23 @@ fn replacement_supports_paths_past_the_windows_path_limit() {
         parent.push("long-directory-component");
     }
     fs::create_dir_all(&parent).unwrap();
-    let file = AtomicFile::new(parent.join("settings"));
+    let file = AtomicFile::new(parent.join("settings-音楽-🎵"));
     file.replace(b"first").unwrap();
     file.replace(b"second").unwrap();
     assert_eq!(file.read_optional().unwrap().unwrap(), b"second");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_published_file_is_not_marked_temporary() {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_TEMPORARY;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("settings");
+    AtomicFile::new(path.clone()).replace(b"durable").unwrap();
+    assert_eq!(
+        fs::metadata(path).unwrap().file_attributes() & FILE_ATTRIBUTE_TEMPORARY,
+        0
+    );
 }
