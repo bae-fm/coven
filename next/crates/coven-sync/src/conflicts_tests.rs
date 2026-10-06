@@ -124,79 +124,124 @@ fn a_store_removal_does_not_replace_an_unlisted_circles_key() {
 }
 
 #[test]
-fn concurrent_store_reset_and_version_raise_use_the_earlier_entry() {
-    for format in [false, true] {
-        for reset_first in [false, true] {
-            for number in [30, 50] {
-                let mut h = household(Admin, Admin).prefix(3);
-                let reset = StoreChange::Reset {
-                    snapshot: snapshot(number, Audience::Store),
-                };
-                let raise = raise(format, 2, 30);
-                let changes = if reset_first {
-                    [reset, raise]
-                } else {
-                    [raise, reset]
-                };
-                for (i, change) in changes.into_iter().enumerate() {
-                    h.push(i as u8, i as u64, &[0, 1, 2], change);
-                }
-                h.every_order(|r| {
-                    let version = if format {
-                        r.state
-                            .format
-                            .as_ref()
-                            .map(|v| (u32::from(v.number), v.snapshot.number))
-                    } else {
-                        r.state
-                            .schema
-                            .as_ref()
-                            .map(|v| (v.number, v.snapshot.number))
+fn concurrent_audience_reset_and_version_raise_use_the_earlier_entry() {
+    for audience in [Audience::Store, Audience::Circle(circle(0))] {
+        for format in [false, true] {
+            for reset_first in [false, true] {
+                for number in [30, 50] {
+                    let mut h = two_circles();
+                    let base = h.entries.len();
+                    let past: Vec<_> = (0..base).collect();
+                    let reset = StoreChange::Reset {
+                        snapshot: snapshot(number, audience.clone()),
                     };
-                    assert_eq!(version, if reset_first { None } else { Some((2, 30)) });
-                    assert_eq!(
-                        r.state.resets.get(&Audience::Store).map(|s| s.number),
-                        reset_first.then_some(number)
-                    );
-                    assert_eq!(h.reports(r, 1), [4]);
-                    assert_eq!(
-                        r.entries[&h.entries[4].position],
-                        EntryOutcome::Dropped(DropReason::BeatenBy(h.entries[3].position))
-                    );
-                });
+                    let raise = raise(format, 2, 30, audience.clone());
+                    let changes = if reset_first {
+                        [reset, raise]
+                    } else {
+                        [raise, reset]
+                    };
+                    for (i, change) in changes.into_iter().enumerate() {
+                        h.push(i as u8, i as u64, &past, change);
+                    }
+                    h.every_order(|r| {
+                        let version = if format {
+                            r.state
+                                .format
+                                .get(&audience)
+                                .map(|v| (u32::from(v.number), v.snapshot.number))
+                        } else {
+                            r.state
+                                .schema
+                                .get(&audience)
+                                .map(|v| (v.number, v.snapshot.number))
+                        };
+                        assert_eq!(version, if reset_first { None } else { Some((2, 30)) });
+                        assert_eq!(
+                            r.state.resets.get(&audience).map(|s| s.number),
+                            reset_first.then_some(number)
+                        );
+                        assert_eq!(h.reports(r, 1), [base + 1]);
+                        assert_eq!(
+                            r.entries[&h.entries[base + 1].position],
+                            EntryOutcome::Dropped(DropReason::BeatenBy(h.entries[base].position))
+                        );
+                    });
+                }
             }
         }
     }
 }
 
 #[test]
-fn a_store_raise_and_a_causal_store_reset_or_concurrent_circle_reset_both_apply() {
+fn a_raise_and_a_causal_reset_or_reset_of_another_audience_both_apply() {
+    for raised in [Audience::Store, Audience::Circle(circle(0))] {
+        for format in [false, true] {
+            for reset_first in [false, true] {
+                for audience in [
+                    Audience::Store,
+                    Audience::Circle(circle(0)),
+                    Audience::Circle(circle(1)),
+                ] {
+                    let mut h = two_circles();
+                    let reset = StoreChange::Reset {
+                        snapshot: snapshot(50, audience.clone()),
+                    };
+                    let raise = raise(format, 2, 30, raised.clone());
+                    let changes = if reset_first {
+                        [reset, raise]
+                    } else {
+                        [raise, reset]
+                    };
+                    for (i, change) in changes.into_iter().enumerate() {
+                        let past = 11 + usize::from(i == 1 && audience == raised);
+                        h.push(i as u8, i as u64, &(0..past).collect::<Vec<_>>(), change);
+                    }
+                    h.every_order(|r| {
+                        let number = if format {
+                            u32::from(r.state.format.get(&raised).unwrap().number)
+                        } else {
+                            r.state.schema.get(&raised).unwrap().number
+                        };
+                        assert_eq!(number, 2);
+                        assert_eq!(r.state.resets[&audience].number, 50);
+                        assert!(h.drops(r).is_empty());
+                    });
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn deleting_a_circle_defeats_its_concurrent_raise() {
+    use coven_format::store_log::MemberRole::Member;
     for format in [false, true] {
-        for reset_first in [false, true] {
-            for audience in [Audience::Store, Audience::Circle(circle(0))] {
-                let mut h = two_circles();
-                let reset = StoreChange::Reset {
-                    snapshot: snapshot(50, audience.clone()),
+        for deletion in 0..3 {
+            for deletion_first in [false, true] {
+                let mut h = household(Member, Member).prefix(3);
+                h.all(1, 1, make(0, "Ben’s notes"));
+                let audience = Audience::Circle(circle(0));
+                let remove = match deletion {
+                    0 => (1, 4, delete(0)),
+                    1 => (1, 4, leave(0, 1)),
+                    2 => (0, 0, remove(1, &[])),
+                    _ => unreachable!(),
                 };
-                let raise = raise(format, 2, 30);
-                let changes = if reset_first {
-                    [reset, raise]
+                let raising = (1, 1, raise(format, 2, 30, audience.clone()));
+                let entries = if deletion_first {
+                    [remove, raising]
                 } else {
-                    [raise, reset]
+                    [raising, remove]
                 };
-                for (i, change) in changes.into_iter().enumerate() {
-                    let past = 11 + usize::from(i == 1 && audience == Audience::Store);
-                    h.push(i as u8, i as u64, &(0..past).collect::<Vec<_>>(), change);
+                for (author, device, change) in entries {
+                    h.push(author, device, &[0, 1, 2, 3], change);
                 }
                 h.every_order(|r| {
-                    let number = if format {
-                        u32::from(r.state.format.as_ref().unwrap().number)
-                    } else {
-                        r.state.schema.as_ref().unwrap().number
-                    };
-                    assert_eq!(number, 2);
-                    assert_eq!(r.state.resets[&audience].number, 50);
-                    assert!(h.drops(r).is_empty());
+                    assert!(r.state.circles[&circle(0)].deleted);
+                    assert!(!r.state.schema.contains_key(&audience));
+                    assert!(!r.state.format.contains_key(&audience));
+                    assert_eq!(h.drops(r), [if deletion_first { 5 } else { 4 }]);
                 });
             }
         }

@@ -356,6 +356,28 @@ pub fn objects() -> Vec<Object> {
     vec![
         Object::StoreLog(store_log()),
         Object::StoreLog(member_removal()),
+        Object::StoreLog(StoreLogEntry {
+            change: StoreChange::RaiseSchema {
+                version: 3,
+                snapshot: SnapshotId {
+                    audience: Audience::Circle(CircleId(Uuid::from_u128(7))),
+                    device: DeviceId(9),
+                    number: 11,
+                },
+            },
+            ..store_log()
+        }),
+        Object::StoreLog(StoreLogEntry {
+            change: StoreChange::RaiseFormat {
+                version: 2,
+                snapshot: SnapshotId {
+                    audience: Audience::Circle(CircleId(Uuid::from_u128(8))),
+                    device: DeviceId(10),
+                    number: 12,
+                },
+            },
+            ..store_log()
+        }),
         Object::JoinRequest(JoinRequest {
             invite: InviteId(Uuid::from_bytes([0x55; 16])),
             keys: member(),

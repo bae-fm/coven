@@ -291,3 +291,48 @@ fn first_entry_and_versions_are_checked() {
         assert!(Object::decode(&encode_frame(2, &entry).unwrap()).is_err());
     }
 }
+
+#[test]
+fn raises_name_their_audience_through_the_snapshot_id() {
+    for audience in [Audience::Store, Audience::Circle(circle(7))] {
+        let snapshot = SnapshotId {
+            audience: audience.clone(),
+            device: DeviceId(9),
+            number: 11,
+        };
+        for (change, prefix) in [
+            (
+                StoreChange::RaiseSchema {
+                    version: 3,
+                    snapshot: snapshot.clone(),
+                },
+                vec![11, 0, 0, 0, 3],
+            ),
+            (
+                StoreChange::RaiseFormat {
+                    version: 3,
+                    snapshot: snapshot.clone(),
+                },
+                vec![12, 0, 3],
+            ),
+        ] {
+            let mut expected = prefix;
+            match audience {
+                Audience::Store => expected.push(0),
+                Audience::Circle(id) => {
+                    expected.push(1);
+                    expected.extend(id.0.as_bytes());
+                }
+            }
+            expected.extend(9u64.to_be_bytes());
+            expected.extend(11u64.to_be_bytes());
+            let entry = StoreLogEntry {
+                change,
+                ..test_utils::store_log()
+            };
+            let bytes = Object::StoreLog(entry.clone()).encode().unwrap();
+            assert_eq!(&bytes[75..], expected);
+            assert_eq!(Object::decode(&bytes).unwrap(), Object::StoreLog(entry));
+        }
+    }
+}

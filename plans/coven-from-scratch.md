@@ -1172,8 +1172,9 @@ Carol's tablet:
   app's writes.
   - Each change is one *entry*: add or remove a member, change a role, add
     or remove a device, make, rename or delete a circle
-    ([§14](#14-audiences)) or change its members, raise the store's schema or format version, or
-    reset the store or a circle to a snapshot ([§15](#15-snapshots)).
+    ([§14](#14-audiences)) or change its members, raise the store's or a
+    circle's schema or format version, or reset the store or a circle to a
+    snapshot ([§15](#15-snapshots)).
   - An entry names the store log entries its author had read, and is
     signed with its author's member key.
   - Entries live at `store-log/<device>/<n>`, numbered like a device's
@@ -1218,7 +1219,7 @@ Carol's tablet:
     and whether it was removed), `coven_circles` (every circle a kept
     entry made, its name and current key's id, and whether it was deleted),
     `coven_circle_members`, and `coven_store_state` (the current store
-    key's id, the schema and format versions, and each audience's reset).
+    key's id, and each audience's schema and format versions and reset).
   - Keys themselves are only ever in key custody
     ([§11](#11-keys)); these tables hold their ids.
   - Removed members and devices stay, since their writes that reached
@@ -1282,9 +1283,9 @@ Carol's tablet:
     removals of someone from the same circle, since otherwise a key one of
     them made would be sealed to the member the other removed
     ([§13](#13-removing-members-and-devices));
-  - they raise the schema or format to the same version with different
-    snapshots, reset the same audience to different snapshots, or one
-    resets an audience the other raises to a new version
+  - they raise one audience's schema or format to the same version with
+    different snapshots, reset the same audience to different snapshots, or
+    one resets an audience the other raises to a new version
     ([§17](#17-schema-changes), [§19.3](#193-resetting-a-store)).
 - Whether an entry deletes a circle is judged in the member list its
   author had read: removing the circle's only member there deletes it.
@@ -4106,6 +4107,8 @@ pub enum DropReason {
     WrongCircleKeys,
 }
 
+pub use coven_format::store_log::SnapshotId;
+
 /// What a dropped store log entry would have changed, for its author to see (§9).
 pub enum StoreLogChange {
     /// Creates the store, names its first admin and registers the writing device.
@@ -4130,12 +4133,12 @@ pub enum StoreLogChange {
     AddCircleMember { circle: CircleId, member: MemberId },
     /// Removes a circle member and replaces its key (§14.6).
     RemoveCircleMember { circle: CircleId, member: MemberId },
-    /// Raises the schema version and names its snapshot path (§17.1).
-    SchemaChange { version: u32, snapshot: String },
-    /// Raises the format version and names its snapshot path (§17.2).
-    FormatChange { version: u32, snapshot: String },
-    /// Resets the audience to the named snapshot path (§19.3).
-    Reset { audience: Audience, snapshot: String },
+    /// Raises the schema version of the snapshot's audience (§17.1).
+    SchemaChange { version: u32, snapshot: SnapshotId },
+    /// Raises the format version of the snapshot's audience (§17.2).
+    FormatChange { version: u16, snapshot: SnapshotId },
+    /// Resets the snapshot's audience to that snapshot (§19.3).
+    Reset { snapshot: SnapshotId },
 }
 
 impl CovenHandle {
@@ -4787,8 +4790,10 @@ pub enum ProviderSignOut {
 
 The database boundary used by sync commits a checked entry and the supplied
 replay together (§9). These result types belong to `coven-database`; the
-database does not compute the replay. Versions are absent until a kept raise
-selects one, as in Appendix C; they are not the local app's migration version.
+database does not compute the replay. Each audience's versions are absent until
+a kept raise selects them, as in Appendix C; they are not the local app's
+migration version. The store's version is the store audience's; each circle
+has its own.
 
 ```rust
 use std::collections::{BTreeMap, BTreeSet};
@@ -4831,8 +4836,8 @@ pub struct StoreLogState {
     pub members: BTreeMap<MemberId, StoreMember>,
     pub devices: BTreeMap<DeviceId, StoreDevice>,
     pub circles: BTreeMap<CircleId, StoreCircle>,
-    pub schema: Option<StoreVersion<u32>>,
-    pub format: Option<StoreVersion<u16>>,
+    pub schema: BTreeMap<Audience, StoreVersion<u32>>,
+    pub format: BTreeMap<Audience, StoreVersion<u16>>,
     pub resets: BTreeMap<Audience, SnapshotId>,
 }
 

@@ -15,5 +15,6 @@ import CovenStorelog.ExamplesMembers
 import CovenStorelog.ExamplesCircles
 import CovenStorelog.ExamplesRotations
 import CovenStorelog.ExamplesVersions
+import CovenStorelog.ExamplesAudienceVersions
 import CovenStorelog.ExamplesGifts
 import CovenStorelog.ExamplesCircleDeletion

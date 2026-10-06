@@ -39,10 +39,10 @@ pub struct StoreLogState {
     pub devices: BTreeMap<DeviceId, StoreDevice>,
     /// Every circle made by a kept entry, including deleted circles.
     pub circles: BTreeMap<CircleId, StoreCircle>,
-    /// The selected schema raise, if any; creation itself carries no raise.
-    pub schema: Option<StoreVersion<u32>>,
-    /// The selected format raise, if any; creation itself carries no raise.
-    pub format: Option<StoreVersion<u16>>,
+    /// The selected schema raise per audience; creation itself carries no raise.
+    pub schema: BTreeMap<Audience, StoreVersion<u32>>,
+    /// The selected format raise per audience; creation itself carries no raise.
+    pub format: BTreeMap<Audience, StoreVersion<u16>>,
     /// The last kept reset of each audience (§19.3).
     pub resets: BTreeMap<Audience, SnapshotId>,
 }

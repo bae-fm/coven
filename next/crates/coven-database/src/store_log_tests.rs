@@ -461,11 +461,14 @@ async fn removed_identities_keys_versions_resets_and_every_drop_reason_round_tri
             snapshot: snapshot.clone(),
         },
     );
-    replay.state.schema = Some(StoreVersion {
-        number: u32::MAX,
-        snapshot: snapshot.clone(),
-        entry: schema.position,
-    });
+    replay.state.schema.insert(
+        Audience::Store,
+        StoreVersion {
+            number: u32::MAX,
+            snapshot: snapshot.clone(),
+            entry: schema.position,
+        },
+    );
     replay.entries.insert(schema.position, EntryOutcome::Kept);
     db.apply_store_log(schema.clone(), replay.clone())
         .await
@@ -478,11 +481,14 @@ async fn removed_identities_keys_versions_resets_and_every_drop_reason_round_tri
             snapshot: snapshot.clone(),
         },
     );
-    replay.state.format = Some(StoreVersion {
-        number: u16::MAX,
-        snapshot,
-        entry: format.position,
-    });
+    replay.state.format.insert(
+        Audience::Store,
+        StoreVersion {
+            number: u16::MAX,
+            snapshot,
+            entry: format.position,
+        },
+    );
     replay.entries.insert(format.position, EntryOutcome::Kept);
     db.apply_store_log(format.clone(), replay.clone())
         .await
@@ -547,5 +553,122 @@ async fn entries_and_result_are_read_from_one_snapshot_during_an_apply() {
     resume.send(()).unwrap();
     assert_eq!(read.await.unwrap().entries.len(), 1);
     assert_eq!(db.store_log().await.unwrap().replay, next);
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn audience_versions_round_trip_and_a_failed_raise_keeps_every_audience() {
+    let store = TestStore::new();
+    let db = open(&store).await;
+    let gifts = CircleId(uuid::Uuid::from_u128(2));
+    let notes = CircleId(uuid::Uuid::from_u128(3));
+    for (entry, replay) in &circle_history(gifts)[..4] {
+        db.apply_store_log(entry.clone(), replay.clone())
+            .await
+            .unwrap();
+    }
+    let mut replay = db.store_log().await.unwrap().replay;
+    let create = entry(
+        5,
+        StoreChange::CreateCircle {
+            circle: notes,
+            name: "Notes".into(),
+            key: key(3),
+        },
+    );
+    replay.state.circles.insert(
+        notes,
+        StoreCircle {
+            name: "Notes".into(),
+            key: key(3),
+            deleted: false,
+            members: [keys(1).signing].into(),
+        },
+    );
+    replay.entries.insert(create.position, EntryOutcome::Kept);
+    db.apply_store_log(create, replay.clone()).await.unwrap();
+    let mut number = 6;
+    for (audience, version) in [
+        (Audience::Store, 8),
+        (Audience::Circle(gifts), 3),
+        (Audience::Circle(notes), 5),
+    ] {
+        let snapshot = SnapshotId {
+            audience: audience.clone(),
+            device: DeviceId(u64::MAX),
+            number: u64::MAX - number,
+        };
+        let schema = entry(
+            number,
+            StoreChange::RaiseSchema {
+                version,
+                snapshot: snapshot.clone(),
+            },
+        );
+        number += 1;
+        replay.state.schema.insert(
+            audience.clone(),
+            StoreVersion {
+                number: version,
+                snapshot: snapshot.clone(),
+                entry: schema.position,
+            },
+        );
+        replay.entries.insert(schema.position, EntryOutcome::Kept);
+        db.apply_store_log(schema, replay.clone()).await.unwrap();
+        let format = entry(
+            number,
+            StoreChange::RaiseFormat {
+                version: version as u16,
+                snapshot: snapshot.clone(),
+            },
+        );
+        number += 1;
+        replay.state.format.insert(
+            audience,
+            StoreVersion {
+                number: version as u16,
+                snapshot,
+                entry: format.position,
+            },
+        );
+        replay.entries.insert(format.position, EntryOutcome::Kept);
+        db.apply_store_log(format, replay.clone()).await.unwrap();
+        assert_eq!(db.store_log().await.unwrap().replay, replay);
+    }
+    let before = db.store_log().await.unwrap();
+    let snapshot = SnapshotId {
+        audience: Audience::Circle(gifts),
+        device: DeviceId(7),
+        number: 100,
+    };
+    let raised = entry(
+        number,
+        StoreChange::RaiseSchema {
+            version: 13,
+            snapshot: snapshot.clone(),
+        },
+    );
+    replay.state.schema.insert(
+        snapshot.audience.clone(),
+        StoreVersion {
+            number: 13,
+            snapshot,
+            entry: raised.position,
+        },
+    );
+    replay.entries.insert(raised.position, EntryOutcome::Kept);
+    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER coven_refuse BEFORE INSERT ON coven_store_state WHEN NEW.version=13 BEGIN SELECT RAISE(ABORT,'refuse circle raise'); END").unwrap());
+    assert!(db
+        .apply_store_log(raised.clone(), replay.clone())
+        .await
+        .is_err());
+    assert_eq!(db.store_log().await.unwrap(), before);
+    db.inspect_writer(|sql| sql.batch("DROP TRIGGER coven_refuse").unwrap());
+    db.apply_store_log(raised, replay.clone()).await.unwrap();
+    assert_eq!(db.store_log().await.unwrap().replay, replay);
+    db.close().await.unwrap();
+    let db = open(&store).await;
+    assert_eq!(db.store_log().await.unwrap().replay, replay);
     db.close().await.unwrap();
 }

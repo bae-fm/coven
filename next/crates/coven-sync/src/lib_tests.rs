@@ -31,9 +31,11 @@ impl Generator {
 
     fn history(&mut self) -> History {
         let mut h = household(MemberRole::Admin, MemberRole::Admin);
-        h.all(0, 0, make(0, "Gifts"));
-        h.all(0, 0, join(0, 1));
-        h.all(0, 0, join(0, 2));
+        for (id, name) in [(0, "Gifts"), (1, "Notes")] {
+            h.all(0, 0, make(id, name));
+            h.all(0, 0, join(id, 1));
+            h.all(0, 0, join(id, 2));
+        }
         if self.pick(2) == 0 {
             let mut changes = self.concurrent_changes();
             if self.pick(2) == 0 {
@@ -44,7 +46,7 @@ impl Generator {
                 h.push(author, u64::from(author), &past, change);
             }
         }
-        let size = 12 + self.pick(7);
+        let size = 14 + self.pick(7);
         while h.entries.len() < size {
             let author = self.pick(5) as u8;
             let device = self.pick(8) as u64;
@@ -81,28 +83,42 @@ impl Generator {
         h
     }
 
+    fn audience(&mut self) -> Audience {
+        match self.pick(3) {
+            0 => Audience::Store,
+            c => Audience::Circle(circle(c as u64 - 1)),
+        }
+    }
+
     fn concurrent_changes(&mut self) -> [StoreChange; 2] {
         let reset = |audience| StoreChange::Reset {
             snapshot: snapshot(30, audience),
         };
-        match self.pick(8) {
-            0 => [remove(1, &[0]), remove(2, &[0])],
+        let audience = self.audience();
+        let format = self.pick(2) == 0;
+        match self.pick(10) {
+            0 => [remove(1, &[0, 1]), remove(2, &[0, 1])],
             1 => [leave(0, 1), leave(0, 2)],
-            2 => [remove(1, &[0]), leave(0, 2)],
-            3 => [leave(0, 1), remove(2, &[0])],
+            2 => [remove(1, &[0, 1]), leave(0, 2)],
+            3 => [leave(0, 1), remove(2, &[0, 1])],
             4 => [
-                reset(Audience::Store),
-                raise(false, 2, 30 + self.pick(2) as u64),
+                reset(audience.clone()),
+                raise(format, 2, 30 + self.pick(2) as u64, audience),
             ],
             5 => [
-                reset(Audience::Store),
-                raise(true, 2, 30 + self.pick(2) as u64),
+                raise(format, 2, 30, audience.clone()),
+                raise(format, 2, 31, audience),
             ],
             6 => [
-                reset(Audience::Circle(circle(0))),
-                raise(self.pick(2) == 0, 2, 30),
+                raise(format, 2, 30, audience.clone()),
+                raise(format, 3, 31, audience),
             ],
-            7 => [reset(Audience::Store), reset(Audience::Circle(circle(0)))],
+            7 => [reset(self.audience()), raise(format, 2, 30, audience)],
+            8 => [
+                raise(format, 2, 30, self.audience()),
+                raise(format, 2, 31, audience),
+            ],
+            9 => [delete(0), raise(format, 2, 30, Audience::Circle(circle(0)))],
             _ => unreachable!(),
         }
     }
@@ -155,11 +171,11 @@ impl Generator {
             9 => leave(c, m),
             10 => StoreChange::RaiseSchema {
                 version: self.pick(3) as u32 + 1,
-                snapshot: snapshot(self.pick(5) as u64 + 1, Audience::Store),
+                snapshot: snapshot(self.pick(5) as u64 + 1, self.audience()),
             },
             11 => StoreChange::RaiseFormat {
                 version: self.pick(3) as u16 + 1,
-                snapshot: snapshot(self.pick(5) as u64 + 1, Audience::Store),
+                snapshot: snapshot(self.pick(5) as u64 + 1, self.audience()),
             },
             12 => StoreChange::Reset {
                 snapshot: snapshot(
@@ -217,9 +233,9 @@ fn input(h: &History) -> Value {
             StoreChange::DeleteCircle { circle } => json!({"kind":8,"circle":circle_number(*circle)}),
             StoreChange::AddCircleMember { circle, member } => json!({"kind":9,"circle":circle_number(*circle),"member":member_number(member)}),
             StoreChange::RemoveCircleMember { circle, member, .. } => json!({"kind":10,"circle":circle_number(*circle),"member":member_number(member)}),
-            StoreChange::RaiseSchema { version, snapshot } => json!({"kind":11,"version":version,"snapshot":snapshot.number}),
-            StoreChange::RaiseFormat { version, snapshot } => json!({"kind":12,"version":version,"snapshot":snapshot.number}),
-            StoreChange::Reset { snapshot } => json!({"kind":13,"audience":audience_number(&snapshot.audience),"snapshot":snapshot.number}),
+            StoreChange::RaiseSchema { version, snapshot } => json!({"kind":11,"version":version,"snapshot":{"audience":audience_number(&snapshot.audience),"number":snapshot.number}}),
+            StoreChange::RaiseFormat { version, snapshot } => json!({"kind":12,"version":version,"snapshot":{"audience":audience_number(&snapshot.audience),"number":snapshot.number}}),
+            StoreChange::Reset { snapshot } => json!({"kind":13,"snapshot":{"audience":audience_number(&snapshot.audience),"number":snapshot.number}}),
         };
         json!({"author":member_number(&entry.author),"device":entry.position.device.0,"past":past,"action":action})
     }).collect();
@@ -251,11 +267,23 @@ fn projected(h: &History, replay: &StoreLogReplay) -> Value {
         .collect();
     let index = |entry| h.entries.iter().position(|e| e.position == entry).unwrap();
     let mut versions = vec![];
-    if let Some(v) = &state.schema {
-        versions.push(json!([0, v.number, v.snapshot.number, index(v.entry)]));
+    for (a, v) in &state.schema {
+        versions.push(json!([
+            0,
+            audience_number(a),
+            v.number,
+            v.snapshot.number,
+            index(v.entry)
+        ]));
     }
-    if let Some(v) = &state.format {
-        versions.push(json!([1, v.number, v.snapshot.number, index(v.entry)]));
+    for (a, v) in &state.format {
+        versions.push(json!([
+            1,
+            audience_number(a),
+            v.number,
+            v.snapshot.number,
+            index(v.entry)
+        ]));
     }
     let resets: Vec<_> = state
         .resets

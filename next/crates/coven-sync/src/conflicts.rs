@@ -62,10 +62,12 @@ fn circle_target(change: &StoreChange) -> Option<CircleId> {
         | DeleteCircle { circle }
         | AddCircleMember { circle, .. }
         | RemoveCircleMember { circle, .. } => Some(*circle),
-        Reset { snapshot } => match snapshot.audience {
-            Audience::Circle(circle) => Some(circle),
-            Audience::Store => None,
-        },
+        RaiseSchema { snapshot, .. } | RaiseFormat { snapshot, .. } | Reset { snapshot } => {
+            match snapshot.audience {
+                Audience::Circle(circle) => Some(circle),
+                Audience::Store => None,
+            }
+        }
         _ => None,
     }
 }
@@ -223,7 +225,7 @@ fn special(va: &StoreLogState, a: &StoreChange, vb: &StoreLogState, b: &StoreCha
                 version: w,
                 snapshot: t,
             },
-        ) => v == w && s != t,
+        ) => s.audience == t.audience && v == w && s != t,
         (
             RaiseFormat {
                 version: v,
@@ -233,7 +235,7 @@ fn special(va: &StoreLogState, a: &StoreChange, vb: &StoreLogState, b: &StoreCha
                 version: w,
                 snapshot: t,
             },
-        ) => v == w && s != t,
+        ) => s.audience == t.audience && v == w && s != t,
         (Reset { snapshot: s }, Reset { snapshot: t }) => s.audience == t.audience && s != t,
         (
             Reset { snapshot: s },

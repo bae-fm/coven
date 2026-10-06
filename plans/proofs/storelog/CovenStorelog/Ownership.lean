@@ -238,12 +238,14 @@ theorem effect_references {s t : State} {w : Nat} {e : Entry}
                 exact hs.circles c circle (lookup_some_mem he) q (List.mem_filter.mp hq).1
           · cases h
   | raiseVersion kind version snapshot =>
-      simp only [effect, ha, Option.some.injEq] at h
-      subst t
-      exact ⟨hs.devices, hs.nonempty, hs.circles⟩
-  | reset audience snapshot =>
-      cases audience <;> simp only [effect, ha] at h
-      all_goals split at h
-      all_goals first | cases h; exact ⟨hs.devices, hs.nonempty, hs.circles⟩ | cases h
+      simp only [effect, ha] at h
+      split at h
+      · cases h; exact ⟨hs.devices, hs.nonempty, hs.circles⟩
+      · cases h
+  | reset snapshot =>
+      simp only [effect, ha] at h
+      split at h
+      · cases h; exact ⟨hs.devices, hs.nonempty, hs.circles⟩
+      · cases h
 
 end CovenStorelog

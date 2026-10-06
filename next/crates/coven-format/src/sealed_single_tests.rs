@@ -5,24 +5,25 @@ use coven_crypto::{ObjectHasher, StoreKey};
 #[test]
 fn each_single_frame_envelope_authenticates_its_routing_and_signature() {
     let key = StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [17; 32]);
-    let objects = test_utils::objects();
-    for (prefix, object, path) in [
-        (
-            SingleChunkPrefix::StoreLog(key.id()),
-            &objects[0],
-            "store-log/1/1",
-        ),
-        (
-            SingleChunkPrefix::PostedPositions(key.id()),
-            &objects[3],
-            "positions/1",
-        ),
-        (
-            SingleChunkPrefix::JoinRequest,
-            &objects[2],
-            "join-requests/55555555-5555-5555-5555-555555555555",
-        ),
-    ] {
+    for object in test_utils::objects() {
+        let (prefix, path) = match &object {
+            Object::StoreLog(entry) => (
+                SingleChunkPrefix::StoreLog(key.id()),
+                format!(
+                    "store-log/{}/{}",
+                    entry.position.device.0, entry.position.number
+                ),
+            ),
+            Object::PostedPositions(positions) => (
+                SingleChunkPrefix::PostedPositions(key.id()),
+                format!("positions/{}", positions.device.0),
+            ),
+            Object::JoinRequest(request) => (
+                SingleChunkPrefix::JoinRequest,
+                format!("join-requests/{}", request.invite),
+            ),
+        };
+        let path = path.as_str();
         let plain = object.encode().unwrap();
         let aad = prefix.encode().unwrap();
         let seal = |plain: &[u8]| match prefix {
@@ -65,7 +66,15 @@ fn each_single_frame_envelope_authenticates_its_routing_and_signature() {
         assert_eq!(decoded.prefix(), prefix);
         assert_eq!(decoded.signed_bytes().unwrap(), before_signature);
         assert_eq!(open(&aad, decoded.chunk()).unwrap(), plain);
-        Object::decode(&plain).unwrap();
+        assert!(matches!(
+            (prefix, Object::decode(&plain).unwrap()),
+            (SingleChunkPrefix::StoreLog(_), Object::StoreLog(_))
+                | (
+                    SingleChunkPrefix::PostedPositions(_),
+                    Object::PostedPositions(_)
+                )
+                | (SingleChunkPrefix::JoinRequest, Object::JoinRequest(_))
+        ));
         if let Some(signature) = decoded.signature() {
             test_utils::member()
                 .signing

@@ -77,7 +77,7 @@ macro_rules! coven_tables {
                 FOREIGN KEY(entry_device,entry_number) REFERENCES coven_store_log(device,number),
                 CHECK((kind='store' AND audience='store' AND store IS NOT NULL AND name IS NOT NULL AND key IS NOT NULL
                         AND version IS NULL AND snapshot_device IS NULL AND snapshot_number IS NULL AND entry_device IS NULL AND entry_number IS NULL)
-                   OR (kind IN ('schema','format') AND audience='store' AND store IS NULL AND name IS NULL AND key IS NULL
+                   OR (kind IN ('schema','format') AND store IS NULL AND name IS NULL AND key IS NULL
                         AND version IS NOT NULL AND snapshot_device IS NOT NULL AND snapshot_number IS NOT NULL AND entry_device IS NOT NULL AND entry_number IS NOT NULL)
                    OR (kind='reset' AND store IS NULL AND name IS NULL AND key IS NULL AND version IS NULL
                         AND snapshot_device IS NOT NULL AND snapshot_number IS NOT NULL AND entry_device IS NULL AND entry_number IS NULL))

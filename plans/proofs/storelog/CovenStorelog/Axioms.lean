@@ -166,3 +166,19 @@ import CovenStorelog
 #print axioms CovenStorelog.authorViews_at
 #print axioms CovenStorelog.reported_to_author
 #print axioms CovenStorelog.report_only_author
+
+#print axioms CovenStorelog.Examples.audience_updates_valid
+#print axioms CovenStorelog.Examples.each_audience_has_its_version
+#print axioms CovenStorelog.Examples.circle_updates_valid
+#print axioms CovenStorelog.Examples.circle_higher_version_wins
+#print axioms CovenStorelog.Examples.circle_equal_version_snapshots
+#print axioms CovenStorelog.Examples.circle_reset_raise_valid
+#print axioms CovenStorelog.Examples.circle_concurrent_reset_and_raise
+#print axioms CovenStorelog.Examples.circle_causal_reset_and_raise
+#print axioms CovenStorelog.Examples.circle_raise_and_other_reset
+#print axioms CovenStorelog.Examples.circle_raise_authority_examples_valid
+#print axioms CovenStorelog.Examples.outside_admin_cannot_repeat_raise
+#print axioms CovenStorelog.Examples.removed_circle_member_can_raise_concurrently
+#print axioms CovenStorelog.Examples.derived_circle_deletion_beats_raise
+#print axioms CovenStorelog.Examples.explicit_circle_deletion_beats_raise
+#print axioms CovenStorelog.circle_raise_authority

@@ -52,7 +52,7 @@ pub struct SnapshotId {
     /// The rows the snapshot covers.
     pub audience: Audience,
 }
-wire_struct!(SnapshotId, device, number, audience);
+wire_struct!(SnapshotId, audience, device, number);
 
 /// A circle and the replacement key made for it by a member removal (§13).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,18 +153,18 @@ pub enum StoreChange {
         /// The replacement circle key's random id.
         key: KeyId,
     },
-    /// Raise the store's app schema version with its replacement snapshot (§17.1).
+    /// Raise an audience's app schema version with its replacement snapshot (§17.1).
     RaiseSchema {
         /// The new schema version.
         version: u32,
-        /// The snapshot in that schema.
+        /// The snapshot whose audience is raised to that schema.
         snapshot: SnapshotId,
     },
-    /// Raise the store's format version with its replacement snapshot (§17.2).
+    /// Raise an audience's format version with its replacement snapshot (§17.2).
     RaiseFormat {
         /// The new format version.
         version: u16,
-        /// The snapshot in that format.
+        /// The snapshot whose audience is raised to that format.
         snapshot: SnapshotId,
     },
     /// Reset the store's or a circle's rows to a snapshot (§19.3).
@@ -193,20 +193,10 @@ impl StoreChange {
             }
             Self::RaiseSchema { version, snapshot } => {
                 require(*version > 0, "schema version", Rule::Required)?;
-                require(
-                    snapshot.audience == Audience::Store,
-                    "schema snapshot",
-                    Rule::Audience,
-                )?;
                 positive(snapshot.number)
             }
             Self::RaiseFormat { version, snapshot } => {
                 require(*version > 0, "format version", Rule::Required)?;
-                require(
-                    snapshot.audience == Audience::Store,
-                    "format snapshot",
-                    Rule::Audience,
-                )?;
                 positive(snapshot.number)
             }
             Self::Reset { snapshot } => positive(snapshot.number),

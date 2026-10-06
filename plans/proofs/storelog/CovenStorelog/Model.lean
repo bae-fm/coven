@@ -20,6 +20,12 @@ inductive Audience where
   | store | circle (id : Nat)
   deriving DecidableEq, Repr
 
+/-- The audience and an abstract identity for the snapshot's device/number pair. -/
+structure SnapshotId where
+  audience : Audience
+  number : Nat
+  deriving DecidableEq, Repr
+
 inductive Action where
   | create
   | addMember (member : Nat) (role : Role)
@@ -32,8 +38,8 @@ inductive Action where
   | deleteCircle (circle : Nat)
   | addToCircle (circle member : Nat)
   | removeFromCircle (circle member : Nat)
-  | raiseVersion (kind : VersionKind) (version snapshot : Nat)
-  | reset (audience : Audience) (snapshot : Nat)
+  | raiseVersion (kind : VersionKind) (version : Nat) (snapshot : SnapshotId)
+  | reset (snapshot : SnapshotId)
   deriving DecidableEq, Repr
 
 structure Entry where
@@ -86,7 +92,7 @@ structure State where
   members : List (Nat × Role)
   devices : List (Nat × Nat)
   circles : List (Nat × Circle)
-  versions : List (VersionKind × Version)
+  versions : List ((VersionKind × Audience) × Version)
   resets : List (Audience × Nat)
   deriving DecidableEq, Repr
 
@@ -123,11 +129,12 @@ def authorized (s : State) (e : Entry) : Bool :=
   | .addDevice m _ => member s e.author && e.author == m
   | .removeDevice m d => lookup s.devices d == some m &&
       member s e.author && (e.author == m || admin s e.author)
-  | .makeCircle _ _ | .raiseVersion _ _ _ => member s e.author
+  | .makeCircle _ _ | .raiseVersion _ _ ⟨.store, _⟩ => member s e.author
+  | .raiseVersion _ _ ⟨.circle c, _⟩ => inCircle s c e.author
   | .renameCircle c _ | .deleteCircle c | .addToCircle c _ | .removeFromCircle c _ =>
       inCircle s c e.author
-  | .reset .store _ => admin s e.author
-  | .reset (.circle c) _ => inCircle s c e.author
+  | .reset ⟨.store, _⟩ => admin s e.author
+  | .reset ⟨.circle c, _⟩ => inCircle s c e.author
 
 def alreadyInPlace (s : State) (e : Entry) : Bool :=
   match e.action with
@@ -141,9 +148,9 @@ def alreadyInPlace (s : State) (e : Entry) : Bool :=
   | .deleteCircle c => (lookup s.circles c).isNone
   | .addToCircle c m => inCircle s c m
   | .removeFromCircle c m => !inCircle s c m
-  | .raiseVersion kind v snapshot => (lookup s.versions kind).any
-      (fun x => v < x.number || (v == x.number && snapshot == x.snapshot))
-  | .reset audience snapshot => lookup s.resets audience == some snapshot
+  | .raiseVersion kind v snapshot => (lookup s.versions (kind, snapshot.audience)).any
+      (fun x => v < x.number || (v == x.number && snapshot.number == x.snapshot))
+  | .reset snapshot => lookup s.resets snapshot.audience == some snapshot.number
 
 /-- Removing a circle's last member deletes the circle. -/
 def withoutMember (circle : Circle) (m : Nat) : Option Circle :=
@@ -152,6 +159,10 @@ def withoutMember (circle : Circle) (m : Nat) : Option Circle :=
 
 def removeFromCircles (circles : List (Nat × Circle)) (m : Nat) : List (Nat × Circle) :=
   circles.filterMap fun (c, circle) => (withoutMember circle m).map (c, ·)
+
+def audienceExists (s : State) : Audience → Bool
+  | .store => s.created
+  | .circle c => (lookup s.circles c).isSome
 
 /-- Realize a change after the authority and already-in-place checks. -/
 def effect (s : State) (w : Nat) (e : Entry) : Option State := do
@@ -196,13 +207,12 @@ def effect (s : State) (w : Nat) (e : Entry) : Option State := do
         | some next => some { s with circles := put s.circles c next }
       else none
   | .raiseVersion kind v snapshot =>
-      some { s with versions := put s.versions kind ⟨v, snapshot, w⟩ }
-  | .reset audience snapshot =>
-      match audience with
-      | .store => if s.created then
-          some { s with resets := put s.resets audience snapshot } else none
-      | .circle c => if (lookup s.circles c).isSome then
-          some { s with resets := put s.resets audience snapshot } else none
+      if audienceExists s snapshot.audience then
+        some { s with versions := put s.versions (kind, snapshot.audience) ⟨v, snapshot.number, w⟩ }
+      else none
+  | .reset snapshot =>
+      if audienceExists s snapshot.audience then
+        some { s with resets := put s.resets snapshot.audience snapshot.number } else none
 
 def checkedEffect (s : State) (w : Nat) (e : Entry) : Option State := do
   let next ← effect s w e

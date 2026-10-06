@@ -162,4 +162,10 @@ theorem circle_delete_authority (M : Log) (n : Nat) (S : EntrySet) {w c : Nat}
     inCircle (authorView M w) c (M w).author = true := by
   simpa [authorized, he] using authority_uses_author_view M n S hw
 
+theorem circle_raise_authority (M : Log) (n : Nat) (S : EntrySet) {w c v snap : Nat}
+    {kind : VersionKind} (hw : w ∈ (resolve M n S).kept)
+    (he : (M w).action = .raiseVersion kind v ⟨.circle c, snap⟩) :
+    inCircle (authorView M w) c (M w).author = true := by
+  simpa [authorized, he] using authority_uses_author_view M n S hw
+
 end CovenStorelog

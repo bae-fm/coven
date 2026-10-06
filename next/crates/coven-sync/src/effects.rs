@@ -35,9 +35,11 @@ pub(crate) fn authorize(view: &StoreLogState, entry: &StoreLogEntry) -> Result<(
     let allowed = match &entry.change {
         CreateStore { .. } => view.store.is_none(),
         AddMember { .. } | RemoveMember { .. } | ChangeRole { .. } => admin(view, author),
-        AddDevice { .. } | CreateCircle { .. } | RaiseSchema { .. } | RaiseFormat { .. } => {
-            member(view, author).is_some()
-        }
+        AddDevice { .. } | CreateCircle { .. } => member(view, author).is_some(),
+        RaiseSchema { snapshot, .. } | RaiseFormat { snapshot, .. } => match snapshot.audience {
+            Audience::Store => member(view, author).is_some(),
+            Audience::Circle(circle) => in_circle(view, circle, author),
+        },
         RemoveDevice { device: id } => device(view, *id).is_some_and(|device| {
             member(view, author).is_some() && (device.member == *author || admin(view, author))
         }),
@@ -92,12 +94,16 @@ pub(crate) fn already_in_place(state: &StoreLogState, entry: &StoreLogEntry) -> 
         DeleteCircle { circle: id } => circle(state, *id).is_none(),
         AddCircleMember { circle, member } => in_circle(state, *circle, member),
         RemoveCircleMember { circle, member, .. } => !in_circle(state, *circle, member),
-        RaiseSchema { version, snapshot } => state.schema.as_ref().is_some_and(|v| {
-            *version < v.number || (*version == v.number && *snapshot == v.snapshot)
-        }),
-        RaiseFormat { version, snapshot } => state.format.as_ref().is_some_and(|v| {
-            *version < v.number || (*version == v.number && *snapshot == v.snapshot)
-        }),
+        RaiseSchema { version, snapshot } => {
+            state.schema.get(&snapshot.audience).is_some_and(|v| {
+                *version < v.number || (*version == v.number && *snapshot == v.snapshot)
+            })
+        }
+        RaiseFormat { version, snapshot } => {
+            state.format.get(&snapshot.audience).is_some_and(|v| {
+                *version < v.number || (*version == v.number && *snapshot == v.snapshot)
+            })
+        }
         Reset { snapshot } => state.resets.get(&snapshot.audience) == Some(snapshot),
     }
 }
@@ -109,6 +115,17 @@ pub(crate) fn effect(
 ) -> Result<StoreLogState, DropReason> {
     use StoreChange::*;
     let mut next = state.clone();
+    if let RaiseSchema { snapshot, .. } | RaiseFormat { snapshot, .. } | Reset { snapshot } =
+        &entry.change
+    {
+        let exists = match snapshot.audience {
+            Audience::Store => state.store.is_some(),
+            Audience::Circle(id) => circle(state, id).is_some(),
+        };
+        if !exists {
+            return Err(DropReason::TargetGone);
+        }
+    }
     match &entry.change {
         CreateStore {
             store,
@@ -266,27 +283,26 @@ pub(crate) fn effect(
             circle.deleted = circle.members.is_empty();
         }
         RaiseSchema { version, snapshot } => {
-            next.schema = Some(StoreVersion {
-                number: *version,
-                snapshot: snapshot.clone(),
-                entry: entry.position,
-            })
+            next.schema.insert(
+                snapshot.audience.clone(),
+                StoreVersion {
+                    number: *version,
+                    snapshot: snapshot.clone(),
+                    entry: entry.position,
+                },
+            );
         }
         RaiseFormat { version, snapshot } => {
-            next.format = Some(StoreVersion {
-                number: *version,
-                snapshot: snapshot.clone(),
-                entry: entry.position,
-            })
+            next.format.insert(
+                snapshot.audience.clone(),
+                StoreVersion {
+                    number: *version,
+                    snapshot: snapshot.clone(),
+                    entry: entry.position,
+                },
+            );
         }
         Reset { snapshot } => {
-            let exists = match snapshot.audience {
-                Audience::Store => state.store.is_some(),
-                Audience::Circle(id) => circle(state, id).is_some(),
-            };
-            if !exists {
-                return Err(DropReason::TargetGone);
-            }
             next.resets
                 .insert(snapshot.audience.clone(), snapshot.clone());
         }

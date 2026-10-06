@@ -22,6 +22,10 @@ private def readAudience (j : Json) : Except String Audience := do
   | 0 => pure .store
   | c + 1 => pure (.circle c)
 
+private def readSnapshot (j : Json) : Except String SnapshotId := do
+  let snapshot ← j.getObjVal? "snapshot"
+  pure ⟨← readAudience snapshot, ← nat snapshot "number"⟩
+
 private def readAction (j : Json) : Except String Action := do
   match ← nat j "kind" with
   | 0 => pure .create
@@ -35,9 +39,9 @@ private def readAction (j : Json) : Except String Action := do
   | 8 => pure (.deleteCircle (← nat j "circle"))
   | 9 => pure (.addToCircle (← nat j "circle") (← nat j "member"))
   | 10 => pure (.removeFromCircle (← nat j "circle") (← nat j "member"))
-  | 11 => pure (.raiseVersion .schema (← nat j "version") (← nat j "snapshot"))
-  | 12 => pure (.raiseVersion .format (← nat j "version") (← nat j "snapshot"))
-  | 13 => pure (.reset (← readAudience j) (← nat j "snapshot"))
+  | 11 => pure (.raiseVersion .schema (← nat j "version") (← readSnapshot j))
+  | 12 => pure (.raiseVersion .format (← nat j "version") (← readSnapshot j))
+  | 13 => pure (.reset (← readSnapshot j))
   | _ => throw "unknown action"
 
 private def readEntry (j : Json) : Except String Entry := do
@@ -79,8 +83,10 @@ private def run (j : Json) : Except String Json := do
   let devices := (byKey r.state.devices).map fun (d, m) => toJson [d, m]
   let circles := (byKey r.state.circles).map fun (c, circle) =>
     Json.arr #[toJson c, toJson circle.name, toJson (sorted circle.members)]
-  let versions := byKey (r.state.versions.map fun (k, v) => (kindNumber k, v))
-  let versions := versions.map fun (k, v) => toJson [k, v.number, v.snapshot, v.entry]
+  let versions := (r.state.versions.map fun ((k, a), v) =>
+    (kindNumber k, audienceNumber a, v)).mergeSort
+      (fun x y => decide (x.1 < y.1 ∨ (x.1 = y.1 ∧ x.2.1 ≤ y.2.1)))
+  let versions := versions.map fun (k, a, v) => toJson [k, a, v.number, v.snapshot, v.entry]
   let resets := byKey (r.state.resets.map fun (a, s) => (audienceNumber a, s))
   let resets := resets.map fun (a, s) => toJson [a, s]
   pure (Json.mkObj [

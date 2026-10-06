@@ -36,15 +36,18 @@
 
 - Two devices receive the same entries, each in a causal order. They end
   with the same members, roles, devices, circles and circle memberships,
-  schema and format versions, reset snapshots, kept identities, and
-  dropped identities. Lean: `storelog_converges`, `reports_converge`.
+  each audience's schema and format versions, reset snapshots, kept identities,
+  and dropped identities. Lean: `storelog_converges`, `reports_converge`.
 - An entry records its signature's author, writing device, had-read set,
   and action. Its identifier is its unique timestamp. Finite histories
   are numbered from zero without changing timestamp order.
 - The actions are creation, adding or removing a member, changing a role,
   adding or removing a device, making, renaming or deleting a circle,
   changing its members, raising either version, and resetting an audience.
-  Lean: `Entry`, `Action`, `State`.
+  A raise or reset names a `SnapshotId`: its audience determines which store
+  or circle it affects, with no separate audience field. The model abstracts
+  the snapshot's device and number to one identity number; versions are keyed
+  by version kind and audience. Lean: `Entry`, `Action`, `SnapshotId`, `State`.
 - A store removal also carries the names of the circles whose keys it
   replaced, as recorded when it was made
   ([§13](coven-from-scratch.md#13-removing-members-and-devices)). Replaying
@@ -88,10 +91,10 @@
     is also about its owner;
   - a store addition against a store removal;
   - different names for one circle;
-  - deleting a circle against changing or resetting it;
+  - deleting a circle against changing it, raising its version, or resetting it;
   - a circle addition against replacement of that circle's key;
   - two replacements of the same store or circle key;
-  - different snapshots for the same version raise or audience reset;
+  - different snapshots for the same version raise of one audience, or its reset;
   - a reset against a version raise for that audience.
   - Lean: `memberTarget`, `deviceTarget`, `specialConflict`, `pairConflict`.
 - Whether an entry deletes a circle is judged in its author's view
@@ -229,8 +232,11 @@
   Lean: `device_add_authority`, `device_removal_authority`,
   `Examples.device_removal_checks_owner`, `Examples.new_device_registers_itself`.
 - **Circle members manage their circle.** An outside store admin cannot
-  rename it, change its members, delete it, or reset it. Lean:
-  `circle_delete_authority`, `Examples.outsider_cannot_manage`.
+  rename it, change its members, delete it, raise its version, or reset it.
+  A store version raise requires store membership; a circle raise requires
+  membership of that circle in the author's view. Lean: `circle_delete_authority`,
+  `circle_raise_authority`, `Examples.outsider_cannot_manage`,
+  `outside_admin_cannot_repeat_raise`, `removed_circle_member_can_raise_concurrently`.
 - The device and circle invariants follow from the effects; the replay
   does not add rejection checks to enforce them.
 
@@ -287,16 +293,34 @@
   raises keep both identities; a later raise advances the version.
   Lean: `Examples.same_version_snapshot`, `identical_version_raises`,
   `version_raised`.
+- Each snapshot of a breaking change has its own raise entry. Store and
+  circle versions remain independent; even equal version numbers with
+  different snapshots of different audiences do not conflict. Concurrent
+  raises of one audience to different versions both keep their identities,
+  and the higher version selects its snapshot. Circle raises at the same
+  version combine when the snapshots agree; otherwise the earlier entry
+  wins. Lean: `Examples.each_audience_has_its_version`, `circle_higher_version_wins`,
+  `circle_equal_version_snapshots`.
+- A circle raise needs membership in its author's view, including a raise
+  whose version and snapshot are already in place. Removing that member
+  concurrently does not revoke that authority. Deleting the circle, either
+  explicitly or through a store removal judged in its author's view, beats
+  a concurrent raise. Lean: `Examples.outside_admin_cannot_repeat_raise`,
+  `removed_circle_member_can_raise_concurrently`, `explicit_circle_deletion_beats_raise`,
+  `derived_circle_deletion_beats_raise`.
 - [§19.3](coven-from-scratch.md#193-resetting-a-store): concurrent store
   or circle resets use the earlier snapshot and report the other entry;
   identical resets keep both identities; a later causal reset supersedes
   them. Lean: `Examples.store_reset_tie`, `circle_reset_tie`,
   `equal_resets_combine`, `later_reset`.
-- A concurrent store reset and schema or format raise use the earlier
-  entry, even if they name the same snapshot. Both can apply if one has
+- A concurrent reset and schema or format raise of the same audience use
+  the earlier entry, even if they name the same snapshot. Both can apply if one has
   read the other. A circle reset and store raise affect different audiences
   and can both apply concurrently. Lean: `Examples.concurrent_reset_and_raise`,
-  `causal_reset_and_raise`, `circle_reset_and_store_raise`.
+  `causal_reset_and_raise`, `circle_reset_and_store_raise`. The same rules hold
+  for circle raises: a reset of that circle conflicts, while a store reset
+  or another circle's reset does not. Lean: `Examples.circle_concurrent_reset_and_raise`,
+  `circle_causal_reset_and_raise`, `circle_raise_and_other_reset`.
 
 ### C9 What Lean checks, and what is prose
 
@@ -326,4 +350,7 @@
   `next/scripts/check.sh` builds `storelogRunner` and runs Rust's generated
   differential test against its `resolve`, comparing state, kept entries,
   and dropped entries. The histories include concurrent key replacements
-  and resets against version raises, in both timestamp orders.
+  and resets against version raises, in both timestamp orders, for the store
+  and circles. The comparison includes each audience's selected versions and
+  snapshots; generated histories also cover different versions of one audience,
+  equal versions of different audiences, and circle deletions against raises.

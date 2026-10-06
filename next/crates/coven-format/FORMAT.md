@@ -27,7 +27,7 @@ Kinds 6–9 and 12 are not defined by these plaintext codecs.
 streaming encoder/decoder, with merge's oracle supplied on decode.
 
 `SnapshotId` in these plaintext frames is
-`device:u64 | number:u64 | audience:Audience`; its positive number belongs to
+`audience:Audience | device:u64 | number:u64`; its positive number belongs to
 the device's snapshot sequence. `UniqueConstraint` terms and predicates use
 the name bounds in these codecs.
 
@@ -126,9 +126,10 @@ removal deletes from the author's view; the entry carries no deletion list.
 
 Each create-store or create-circle entry names its first key; removals name
 the replacement keys. Key ids carry no numerical order. Raised versions are
-positive. Schema/format snapshots name the store audience; reset snapshots name
-the affected audience. Authority, conflicts, causal closure, monotonic version
-changes and the current key require other entries and are checked by their owners.
+positive. A schema/format raise names a snapshot whose audience is the store
+or circle it raises; a reset snapshot names the audience it resets. Authority,
+conflicts, causal closure, monotonic version changes and the current key require
+other entries and are checked by their owners.
 
 ### Snapshot streams
 

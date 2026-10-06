@@ -60,7 +60,7 @@ def removeCarolAndAddDan : Log
 theorem circle_examples_valid :
     validCheck gifts 5 = true ∧ validCheck renames 7 = true ∧
     validCheck (deletion (.renameCircle 0 "Birthdays")) 7 = true ∧
-    validCheck (deletion (.reset (.circle 0) 50)) 7 = true ∧
+    validCheck (deletion (.reset ⟨.circle 0, 50⟩)) 7 = true ∧
     validCheck circleRotation 8 = true ∧ validCheck leaveAndRename 7 = true ∧
     validCheck (outsider (.deleteCircle 0)) 5 = true ∧ validCheck lastLeaves 5 = true ∧
     validCheck carolsCircles 9 = true ∧ validCheck removeCarolAndAddDan 10 = true := by decide
@@ -81,7 +81,7 @@ theorem circle_deleted :
   apply every_order; decide
 
 theorem circle_delete_beats_reset :
-    EveryOrder (deletion (.reset (.circle 0) 50)) 7 (List.range 7) (fun r =>
+    EveryOrder (deletion (.reset ⟨.circle 0, 50⟩)) 7 (List.range 7) (fun r =>
       lookup r.state.circles 0 = none ∧ lookup r.state.resets (.circle 0) = none ∧
       r.dropped = [5]) := by
   apply every_order; decide
@@ -100,7 +100,7 @@ theorem circle_leaving : EveryOrder leaveAndRename 7 (List.range 7) (fun r =>
 /-- Store administration does not confer circle management rights. -/
 theorem outsider_cannot_manage :
     ∀ action ∈ ([.renameCircle 0 "Gifts", .renameCircle 0 "Birthdays", .addToCircle 0 0,
-      .removeFromCircle 0 1, .deleteCircle 0, .reset (.circle 0) 50] : List Action),
+      .removeFromCircle 0 1, .deleteCircle 0, .reset ⟨.circle 0, 50⟩] : List Action),
     EveryOrder (outsider action) 5 (List.range 5) (fun r =>
       lookup r.state.circles 0 = some ⟨"Gifts", [1]⟩ ∧ admin r.state 0 = true ∧
       r.dropped = [4]) := by
