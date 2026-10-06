@@ -137,24 +137,38 @@ impl OneDriveStorage {
         if response.status().as_u16() == 404 {
             return Err(StorageError::SessionExpired);
         }
-        let value = http::json(PROVIDER, response).await?;
+        let response = http::checked(PROVIDER, response).await?;
+        let status = response.status().as_u16();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|e| http::transport(PROVIDER, e))?;
+        let invalid = || http::invalid_response(PROVIDER, status, body.to_vec());
+        let value: Value = serde_json::from_slice(&body).map_err(|_| invalid())?;
         if let Some(ranges) = value.get("nextExpectedRanges") {
-            let ranges = ranges
-                .as_array()
-                .ok_or(StorageError::Protocol("invalid OneDrive upload ranges"))?;
-            if ranges.len() != 1 {
-                return Err(StorageError::Protocol("OneDrive upload is not contiguous"));
+            let ranges = ranges.as_array().ok_or_else(invalid)?;
+            let mut first: Option<u64> = None;
+            for range in ranges {
+                let (start, end) = range
+                    .as_str()
+                    .and_then(|s| s.split_once('-'))
+                    .ok_or_else(invalid)?;
+                let start = start.parse::<u64>().map_err(|_| invalid())?;
+                if start < session.confirmed || start >= session.total {
+                    return Err(invalid());
+                }
+                if !end.is_empty() {
+                    let end = end.parse::<u64>().map_err(|_| invalid())?;
+                    if end < start || end >= session.total {
+                        return Err(invalid());
+                    }
+                }
+                first = Some(match first {
+                    Some(previous) => previous.min(start),
+                    None => start,
+                });
             }
-            let start = ranges[0]
-                .as_str()
-                .and_then(|s| s.strip_suffix('-'))
-                .ok_or(StorageError::Protocol("invalid OneDrive upload range"))?
-                .parse::<u64>()
-                .map_err(|_| StorageError::Protocol("invalid OneDrive upload offset"))?;
-            if start < session.confirmed || start > session.total {
-                return Err(StorageError::Protocol("OneDrive lost confirmed bytes"));
-            }
-            session.confirmed = start;
+            session.confirmed = first.ok_or_else(invalid)?;
         } else {
             if value["size"].as_u64() != Some(session.total)
                 || http::string(&value, "name")? != session.path.file_name()
@@ -464,7 +478,7 @@ impl Storage for OneDriveStorage {
             )
             .await?;
         self.progress(session, response).await?;
-        if session.confirmed != end {
+        if session.confirmed < end {
             return Err(StorageError::Protocol(
                 "OneDrive did not store the entire part",
             ));

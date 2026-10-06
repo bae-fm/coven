@@ -132,6 +132,21 @@ impl fmt::Display for ProviderResponse {
 }
 impl std::error::Error for ProviderResponse {}
 
+pub(crate) fn invalid_response(
+    provider: CloudProvider,
+    status: u16,
+    body: Vec<u8>,
+) -> StorageError {
+    StorageError::Provider {
+        provider,
+        failure: StorageFailure::Protocol,
+        source: Box::new(ProviderResponse {
+            status,
+            body: SecretBytes::new(body),
+        }),
+    }
+}
+
 pub(crate) async fn checked(
     provider: CloudProvider,
     response: Response,

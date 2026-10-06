@@ -17,6 +17,7 @@ struct Remote {
     uploads: BTreeMap<String, (String, Vec<u8>)>,
     next: u64,
     fail_reply: bool,
+    expected_ranges: Option<Value>,
     members: BTreeSet<String>,
 }
 fn file(path: &str, bytes: &[u8], host: &str) -> Value {
@@ -44,6 +45,11 @@ async fn endpoint(
         if method == Method::DELETE {
             state.uploads.remove(id);
             return response(204, Vec::new());
+        }
+        if method == Method::GET && state.uploads.contains_key(id) {
+            if let Some(ranges) = &state.expected_ranges {
+                return reply(json!({"nextExpectedRanges": ranges}));
+            }
         }
         let Some((path, bytes)) = state.uploads.get_mut(id) else {
             return response(404, "{}");
@@ -308,4 +314,60 @@ async fn resume_uses_provider_progress_and_keeps_bearer_off_transfer_urls() {
             .unwrap(),
         b"z"
     );
+}
+
+#[tokio::test]
+async fn resume_accepts_bounded_and_multiple_missing_ranges() {
+    let state = remote();
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let path = ObjectPath::store_log(
+        coven_foundation::id_source::DeviceId(1),
+        std::num::NonZeroU64::MIN,
+    );
+    for ranges in [json!(["5-9"]), json!(["9-", "5-7"]), json!(["5-"])] {
+        let mut upload = storage.begin_upload(&path, 12).await.unwrap();
+        state.lock().unwrap().expected_ranges = Some(ranges);
+        storage.resume_upload(&mut upload).await.unwrap();
+        assert_eq!(upload.confirmed_bytes(), 5);
+        assert!(!upload.is_complete());
+    }
+}
+
+#[tokio::test]
+async fn malformed_missing_ranges_keep_the_response_and_recorded_progress() {
+    let state = remote();
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let path = ObjectPath::store_log(
+        coven_foundation::id_source::DeviceId(1),
+        std::num::NonZeroU64::MIN,
+    );
+    for ranges in [
+        json!([]),
+        json!("5-"),
+        json!([3]),
+        json!(["no-range"]),
+        json!(["4-"]),
+        json!(["12-"]),
+        json!(["5-12"]),
+        json!(["8-7"]),
+        json!(["18446744073709551616-"]),
+    ] {
+        let mut upload = storage.begin_upload(&path, 12).await.unwrap();
+        upload.confirmed = 5;
+        state.lock().unwrap().expected_ranges = Some(ranges.clone());
+        let error = storage.resume_upload(&mut upload).await.unwrap_err();
+        assert_eq!(error.failure(), StorageFailure::Protocol);
+        let StorageError::Provider { source, .. } = error else {
+            panic!("response discarded")
+        };
+        let response = source.downcast_ref::<http::ProviderResponse>().unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            serde_json::from_slice::<Value>(response.body()).unwrap()["nextExpectedRanges"],
+            ranges
+        );
+        assert_eq!(upload.confirmed_bytes(), 5);
+    }
 }
