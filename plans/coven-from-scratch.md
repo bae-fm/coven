@@ -150,12 +150,29 @@
 - Every member reaches the storage using their own provider account.
 - On S3, each member has their own access key.
 - What coven needs from a provider:
-  - create an object;
+  - create an object, in one request or, past the provider's single
+    request limit, through its resumable upload;
   - read it, whole and by range;
-  - list a prefix;
+  - list a prefix, with when storage stored each object;
   - delete;
   - grant and revoke a member's access, where the provider can: Google
     Drive, Dropbox, OneDrive and iCloud share with an account.
+- Every path has one writer: the device it names, or the device that made
+  the key, file or request it holds.
+  - So creating an object only has to survive its own device retrying,
+    never two devices racing for one path.
+  - On Google Drive, which allows two files with one name, a retry first
+    looks for its own earlier copy.
+- On the providers that share with an account, only the member whose
+  account holds the store can share it and take it back, so:
+  - that member's devices make invites ([§12.2](#122-adding-a-person));
+  - any admin removes a member, and that member's access is taken back by
+    the owner's device when it applies the removal
+    ([§13](#13-removing-members-and-devices)).
+- Two devices setting up a store in the same empty location at once both
+  write a first entry; the one with the smaller timestamp keeps the
+  location, and the other's setup fails with `LocationOccupied` and
+  deletes what it wrote.
 - S3 has no standard way to make or delete access keys; each S3 provider
   has its own, so on S3 an admin makes and deletes members' keys in the
   provider's console, and coven says when.
@@ -1427,7 +1444,9 @@ Carol's tablet:
 
 ### 12.2 Adding a person
 
-- An admin adds a person with an *invite*, a code shown as a QR code,
+- An admin adds a person with an *invite*, a code shown as a QR code; on
+  a provider that shares with an account, that admin is the member whose
+  account holds the store ([§4](#4-storage-providers-and-access)),
   holding:
   - the store's id, name and location;
   - the invite's id, and a one-time *invite secret*;
@@ -1503,9 +1522,9 @@ Carol's tablet:
     circles they shared with others in the author's view, or the replay
     drops the entry ([§9](#9-members-and-roles));
   - the storage access their invite granted is taken back: the store's
-    folder is unshared from their account, or on S3 coven tells the admin
-    to delete their key in the provider's console
-    ([§12.2](#122-adding-a-person)).
+    folder is unshared from their account, by the store owner's device
+    when it applies the removal, or on S3 coven tells the admin to delete
+    their key in the provider's console ([§12.2](#122-adding-a-person)).
 - What the entry names is fixed when the removal starts, from the member
   list the device has then; if the replay drops the entry, the removal
   starts over against the new list ([§18](#18-operations)).
@@ -1978,6 +1997,10 @@ Carol's tablet:
     request.
   - The upload session is recorded, so after a crash the upload continues
     from the last part stored, instead of starting over.
+  - A session the provider has since expired starts over, from the kept
+    bytes.
+  - Any object past the provider's single request limit goes up this way,
+    a large write or snapshot included.
 - The write that marks a file uploaded is made only once the file is
   stored, so no device ever sees a row whose uploaded file isn't there
   yet, and no write ever waits for a file.
