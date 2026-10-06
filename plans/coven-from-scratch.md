@@ -4992,16 +4992,16 @@ fn migrations() -> Vec<Migration> {
 - Coven is a Cargo workspace of eight crates, each owning one part of
   this spec:
 
-| Crate | Spec | Owns |
+| Crate | Owns | Spec |
 | --- | --- | --- |
-| `coven-foundation` | | The clock, the id source, atomic file writes, the store's directory and its lock |
-| `coven-crypto` | [§11.1](#111-cryptography) | Ciphers, sealed boxes, derived keys, file naming, member keys and their custody |
-| `coven-merge` | [§7](#7-order), [§8](#8-merge), [§14](#14-audiences) | Timestamps, the merged state, the removal rules and lost values, as functions with no I/O |
-| `coven-format` | | The bytes in storage: write records, store log entries, snapshots, file headers and chunks, encoded, decoded and checked, using merge's and crypto's types |
-| `coven-database` | [§5](#5-local-database) | The SQLite connection, coven's internal tables, applying the merge's results, triggers, live queries, migrations |
-| `coven-storage` | [§4](#4-storage-providers-and-access) | Each provider, and the operations coven needs from it, including upload sessions |
-| `coven-sync` | [§6](#6-syncing-writes), [§9](#9-members-and-roles), [§12](#12-joining-and-restore) to [§19](#19-recovery) | Device logs, the store log, members, circles, snapshots, files and the cache, operations, recovery |
-| `coven` | [§20](#20-api) | The API, and nothing else |
+| `coven-foundation` | The clock, the id source, atomic file writes, the store's directory and its lock | |
+| `coven-crypto` | Ciphers, sealed boxes, derived keys, file naming, member keys and their custody | [§11.1](#111-cryptography) |
+| `coven-merge` | Timestamps, the merged state, the removal rules and lost values, as functions with no I/O | [§7](#7-order), [§8](#8-merge), [§14](#14-audiences) |
+| `coven-format` | The bytes in storage: write records, store log entries, snapshots, file headers and chunks, encoded, decoded and checked, using merge's and crypto's types | |
+| `coven-database` | The SQLite connection, coven's internal tables, applying the merge's results, triggers, live queries, migrations | [§5](#5-local-database) |
+| `coven-storage` | Each provider, and the operations coven needs from it, including upload sessions | [§4](#4-storage-providers-and-access) |
+| `coven-sync` | Device logs, the store log, members, circles, snapshots, files and the cache, operations, recovery | [§6](#6-syncing-writes), [§9](#9-members-and-roles), [§12](#12-joining-and-restore) to [§19](#19-recovery) |
+| `coven` | The API, and nothing else | [§20](#20-api) |
 
 - Each crate depends only on crates above it in the table, except that
   `coven-database` and `coven-storage` never depend on each other.
