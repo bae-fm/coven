@@ -3128,6 +3128,10 @@ pub enum CryptoError {
     Authentication,
     /// A sealed value was truncated or had invalid framing.
     Malformed,
+    /// The stored object has an unrecognized kind.
+    UnknownKind(u8),
+    /// The stored object uses a format version this reader does not support.
+    UnsupportedVersion(u16),
     /// The X25519 public key has low order.
     WeakSealingKey,
     /// The Ed25519 public key is invalid or weak.
@@ -5162,6 +5166,17 @@ match join_with_invite(
 ### 20.11 Keys and secrets
 
 ```rust
+/// A store or circle key's kind-37 envelope, preserving its random bytes (§11.1).
+/// MemberKeys authenticates and opens the ciphertext after the envelope is decoded.
+pub struct SealedKey<'a> { /* private fields */ }
+
+impl<'a> SealedKey<'a> {
+    /// Checks the kind, version and fixed envelope lengths without allocation.
+    pub fn decode(bytes: &'a [u8]) -> Result<Self, CryptoError>;
+    /// Encodes the original ephemeral key, nonce, ciphertext and tag.
+    pub fn encode(&self) -> Vec<u8>;
+}
+
 /// Initializing this device's member identity failed (§20.11).
 pub enum IdentityError {
     /// Custody already holds member keys.

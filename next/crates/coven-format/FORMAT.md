@@ -138,9 +138,7 @@ own prefixes, not frame envelopes. No sealed layout shares a frame kind.
 | 14 | Sealed write layout | Key prefix, sealed header, sealed part chunks, signature (below) |
 | 15 | Sealed snapshot layout | Audience/key prefix, sealed chunks (below) |
 
-Kind 6 is not defined. Sealed keys, their plaintext, recipient binding and path
-binding belong entirely to crypto's `seal_store_key` and `seal_circle_key`.
-There is no format-owned sealed-key envelope or reader for one.
+Kind 6 is not defined.
 
 `Object` encodes and decodes kinds 2, 7, 10, 11 and 12. Writes and snapshots use their
 streaming encoder/decoder, with merge's oracle supplied on decode. Restore and
@@ -273,11 +271,6 @@ the replacement keys. Key ids carry no numerical order. Raised versions are
 positive. Schema/format snapshots name the store audience; reset snapshots name
 the affected audience. Authority, conflicts, causal closure, monotonic version
 changes and the current key require other entries and are checked by their owners.
-
-Sealed-key paths are `keys/store/<key UUID>/<member>` and
-`keys/circles/<circle>/<key UUID>/<member>`. Storage accepts exactly the
-canonical lowercase hyphenated UUID text, without compact, uppercase, braced
-or URN aliases.
 
 ### Snapshot streams
 

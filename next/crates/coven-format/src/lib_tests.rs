@@ -1,3 +1,7 @@
+use coven_crypto::{CircleKey, CryptoError, SealedKey, StoreKey, StoreKeyring};
+use coven_foundation::id_source::{CircleId, KeyId};
+use uuid::Uuid;
+
 use super::*;
 use crate::codes::{InviteCode, RestoreCode};
 use crate::error::Rule;
@@ -231,4 +235,80 @@ fn malformed_strings_and_keys_remain_distinguishable() {
             ..
         })
     ));
+}
+
+// Public test material, independently sealed using Python hashlib/hmac and libsodium.
+// Recipient seeds are 0x33, ephemeral seeds are 0x55/0x56, nonces 0x44/0x45.
+#[test]
+fn sealed_key_fixtures_open_and_reencode_without_losing_their_random_bytes() {
+    let member = crate::test_utils::member_keys();
+    for (circle, text) in [
+        (false, include_str!("../fixtures/sealed-store-key.hex")),
+        (true, include_str!("../fixtures/sealed-circle-key.hex")),
+    ] {
+        let bytes = hex(text);
+        let key_id = KeyId(Uuid::from_bytes([if circle { 3 } else { 1 }; 16]));
+        let circle_id = CircleId(Uuid::from_bytes([2; 16]));
+        let path = if circle {
+            format!("keys/circles/{circle_id}/{key_id}/{}", member.member_id())
+        } else {
+            format!("keys/store/{key_id}/{}", member.member_id())
+        };
+        assert_eq!(SealedKey::decode(&bytes).unwrap().encode(), bytes);
+        let initial = StoreKey::from_bytes(KeyId(Uuid::from_bytes([1; 16])), [17; 32]);
+        let mut expected = StoreKeyring::new(initial.clone());
+        let actual = if circle {
+            let key = member.open_circle_key(&path, &bytes).unwrap();
+            assert_eq!((key.circle(), key.id()), (circle_id, key_id));
+            expected
+                .insert_circle_key(CircleKey::from_bytes(circle_id, key_id, [18; 32]))
+                .unwrap();
+            let mut actual = StoreKeyring::new(initial);
+            actual.insert_circle_key(key).unwrap();
+            actual
+        } else {
+            let key = member.open_store_key(&path, &bytes).unwrap();
+            assert_eq!(key.id(), key_id);
+            StoreKeyring::new(key)
+        };
+        assert_eq!(
+            actual.to_secret_bytes().as_bytes(),
+            expected.to_secret_bytes().as_bytes()
+        );
+        let open = |bytes: &[u8]| {
+            if circle {
+                member.open_circle_key(&path, bytes).map(|_| ())
+            } else {
+                member.open_store_key(&path, bytes).map(|_| ())
+            }
+        };
+        for end in 0..bytes.len() {
+            assert!(open(&bytes[..end]).is_err());
+            check_encoding(&bytes[..end]);
+        }
+        let mut changed = bytes.clone();
+        for index in 0..bytes.len() {
+            for bit in 0..8 {
+                changed[index] ^= 1 << bit;
+                assert!(open(&changed).is_err());
+                check_encoding(&changed);
+                changed[index] ^= 1 << bit;
+            }
+        }
+        changed.push(0);
+        assert!(open(&changed).is_err());
+        assert!(SealedKey::decode(&changed).is_err());
+        changed = bytes.clone();
+        changed[2] = 2;
+        assert!(matches!(
+            open(&changed),
+            Err(CryptoError::UnsupportedVersion(2))
+        ));
+    }
+}
+
+fn check_encoding(bytes: &[u8]) {
+    if let Ok(key) = SealedKey::decode(bytes) {
+        assert_eq!(key.encode(), bytes);
+    }
 }

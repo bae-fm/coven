@@ -9,7 +9,7 @@ fn member_identity_retains_only_the_public_key_bytes() {
 }
 
 #[test]
-fn truncated_keys_in_authenticated_boxes_are_malformed_material() {
+fn wrong_key_lengths_are_refused_before_opening_the_box() {
     let member = MemberKeys::generate().unwrap();
     let recipient = member.sealing_public_key();
     let store = StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [17; 32]);
@@ -24,7 +24,7 @@ fn truncated_keys_in_authenticated_boxes_are_malformed_material() {
     let sealed = seal_box(b"store", &recipient, "keys/store/1/member", &store_bytes).unwrap();
     assert!(matches!(
         member.open_store_key("keys/store/1/member", &sealed),
-        Err(CryptoError::Material(MaterialError::Encoding))
+        Err(CryptoError::Malformed)
     ));
     let mut circle_bytes = Zeroizing::new(Vec::with_capacity(64));
     circle.encode_into(&mut circle_bytes);
@@ -38,7 +38,7 @@ fn truncated_keys_in_authenticated_boxes_are_malformed_material() {
     .unwrap();
     assert!(matches!(
         member.open_circle_key("keys/circle/11/1/member", &sealed),
-        Err(CryptoError::Material(MaterialError::Encoding))
+        Err(CryptoError::Malformed)
     ));
 }
 
@@ -141,6 +141,8 @@ fn anonymous_store_boxes_bind_recipient_path_and_all_ciphertext_bytes() {
     let store = StoreKey::generate(KeyId(key_ids.new_id())).unwrap();
     let path = format!("keys/store/{}/{}", store.id(), member.member_id());
     let sealed = seal_store_key(&store, &member.sealing_public_key(), &path).unwrap();
+    assert_eq!(&sealed[..3], &[37, 0, 1]);
+    assert_eq!(sealed.len(), 123);
     assert_ne!(
         sealed,
         seal_store_key(&store, &member.sealing_public_key(), &path).unwrap()
@@ -225,7 +227,7 @@ fn low_order_x25519_keys_are_rejected_in_both_directions() {
         ));
         let mut sealed =
             seal_store_key(&store, &member.sealing_public_key(), "keys/store/1/member").unwrap();
-        sealed[..32].copy_from_slice(&low);
+        sealed[3..35].copy_from_slice(&low);
         assert!(matches!(
             member.open_store_key("keys/store/1/member", &sealed),
             Err(CryptoError::WeakSealingKey)

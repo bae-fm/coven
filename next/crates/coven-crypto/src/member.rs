@@ -99,6 +99,44 @@ impl Signature {
     }
 }
 
+/// The kind-37 envelope of a store or circle key, retaining its random bytes.
+/// Decoding checks framing only; [`MemberKeys`] authenticates and opens it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SealedKey<'a> {
+    ephemeral: [u8; 32],
+    body: &'a [u8],
+}
+
+impl<'a> SealedKey<'a> {
+    /// Decode exactly one envelope, checking its fixed lengths before allocation.
+    pub fn decode(bytes: &'a [u8]) -> Result<Self, CryptoError> {
+        let prefix = bytes.get(..3).ok_or(CryptoError::Malformed)?;
+        if prefix[0] != 37 {
+            return Err(CryptoError::UnknownKind(prefix[0]));
+        }
+        let version = u16::from_be_bytes([prefix[1], prefix[2]]);
+        if version != 1 {
+            return Err(CryptoError::UnsupportedVersion(version));
+        }
+        if !matches!(bytes.len(), 123 | 139) {
+            return Err(CryptoError::Malformed);
+        }
+        Ok(Self {
+            ephemeral: bytes[3..35].try_into().expect("checked envelope length"),
+            body: &bytes[35..],
+        })
+    }
+
+    /// Encode the same ephemeral key, nonce, ciphertext and tag without resealing.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(35 + self.body.len());
+        bytes.extend_from_slice(&[37, 0, 1]);
+        bytes.extend_from_slice(&self.ephemeral);
+        bytes.extend_from_slice(self.body);
+        bytes
+    }
+}
+
 /// A member's Ed25519 signing pair and independent X25519 sealing pair (§11.1).
 /// Both secrets erase on drop. Clone is needed by in-memory custody to keep
 /// its keys while returning an independently owned unlocked pair.
@@ -175,7 +213,7 @@ impl MemberKeys {
     /// Open the store key sealed to this member at the supplied storage path.
     /// Panics if the storage path is empty.
     pub fn open_store_key(&self, path: &str, sealed: &[u8]) -> Result<StoreKey, CryptoError> {
-        let plaintext = self.open_box(b"store", path, sealed)?;
+        let plaintext = self.open_box(b"store", 48, path, sealed)?;
         let mut bytes = plaintext.as_slice();
         let key = StoreKey::decode(&mut bytes)?;
         wire::end(bytes)?;
@@ -185,7 +223,7 @@ impl MemberKeys {
     /// Open the circle key sealed to this member at the supplied storage path.
     /// Panics if the storage path is empty.
     pub fn open_circle_key(&self, path: &str, sealed: &[u8]) -> Result<CircleKey, CryptoError> {
-        let plaintext = self.open_box(b"circle", path, sealed)?;
+        let plaintext = self.open_box(b"circle", 64, path, sealed)?;
         let mut bytes = plaintext.as_slice();
         let key = CircleKey::decode(&mut bytes)?;
         wire::end(bytes)?;
@@ -195,11 +233,15 @@ impl MemberKeys {
     fn open_box(
         &self,
         kind: &[u8],
+        plaintext_length: usize,
         path: &str,
         sealed: &[u8],
     ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
-        let (sender, body) = sealed.split_at_checked(32).ok_or(CryptoError::Malformed)?;
-        let sender: [u8; 32] = sender.try_into().map_err(|_| CryptoError::Malformed)?;
+        let envelope = SealedKey::decode(sealed)?;
+        if envelope.body.len() != plaintext_length + cipher::SEALED_OBJECT_CHUNK_OVERHEAD {
+            return Err(CryptoError::Malformed);
+        }
+        let sender = envelope.ephemeral;
         let recipient = self.sealing_public_key();
         let shared = self.sealing.diffie_hellman(&PublicKey::from(sender));
         if !shared.was_contributory() {
@@ -207,7 +249,11 @@ impl MemberKeys {
         }
         let context = box_context(kind, path, &sender, recipient.as_bytes());
         let key = derivation::derive(shared.as_bytes(), &context);
-        Ok(Zeroizing::new(cipher::open_random(&key, &context, body)?))
+        Ok(Zeroizing::new(cipher::open_random(
+            &key,
+            &context,
+            envelope.body,
+        )?))
     }
 }
 
@@ -275,9 +321,12 @@ fn seal_box(
     }
     let context = box_context(kind, path, &sender, &recipient.0);
     let key = derivation::derive(shared.as_bytes(), &context);
-    let mut sealed = sender.to_vec();
-    sealed.extend(cipher::seal_random(&key, &context, plaintext)?);
-    Ok(sealed)
+    let body = cipher::seal_random(&key, &context, plaintext)?;
+    Ok(SealedKey {
+        ephemeral: sender,
+        body: &body,
+    }
+    .encode())
 }
 
 #[cfg(test)]
