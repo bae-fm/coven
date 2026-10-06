@@ -171,10 +171,13 @@
   - any admin removes a member, and that member's access is taken back by
     the owner's device when it applies the removal
     ([§13](#13-removing-members-and-devices)).
-- Two devices setting up a store in the same empty location at once both
-  write a first entry; the one with the smaller timestamp keeps the
-  location, and the other's setup fails with `LocationOccupied` and
-  deletes what it wrote.
+- Setting up a store refuses a location that already holds one.
+  - Two devices setting up different stores in one empty location at the
+    same moment can both succeed; whichever store's first entry has the
+    larger timestamp finds the other's when it next syncs, stops syncing,
+    and reports the location taken.
+  - Its data is all on its devices, so the app sets it up somewhere else,
+    and it uploads everything again.
 - S3 has no standard way to make or delete access keys; each S3 provider
   has its own, so on S3 an admin makes and deletes members' keys in the
   provider's console, and coven says when.
