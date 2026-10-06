@@ -1538,6 +1538,8 @@ Carol's tablet:
   - A device's own `coven_uploads` and `coven_operations` aren't in it, so
     a device that loads one keeps its own.
   - Snapshots live at `snapshots/<device>/<n>`.
+  - A snapshot is one object, encrypted in chunks like a write
+    ([§6](#6-syncing-writes)), and written and loaded a chunk at a time.
   - A snapshot *covers* a write when the write is within its positions:
     `snapshots/ana-phone/3` covers ana-phone's writes 1 to 40.
 - A device writes one once the writes after the latest snapshot it knows of
