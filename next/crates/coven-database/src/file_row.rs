@@ -92,7 +92,9 @@ pub(crate) fn set(
     );
     let count = database.file_execute(
         &format!(
-            "UPDATE main.{} SET {} WHERE {}",
+            "UPDATE main.{}
+             SET {}
+             WHERE {}",
             crate::sql::identifier(&table.name),
             columns
                 .iter()

@@ -145,7 +145,18 @@ impl<'a> FileWrite<'a> {
                             key: file_row::key(&key)?,
                         });
                     };
-                    db.internal_execute("INSERT INTO coven_device_files(table_name,key,column_name,identity,path) VALUES(?1,?2,?3,?4,?5)", (&key.0, &key.1, &file.id, file_row::identity(file, &attached_values)?, staged.name.as_str()))?;
+                    db.internal_execute(
+                        "INSERT INTO coven_device_files
+                             (table_name,key,column_name,identity,path)
+                         VALUES(?1,?2,?3,?4,?5)",
+                        (
+                            &key.0,
+                            &key.1,
+                            &file.id,
+                            file_row::identity(file, &attached_values)?,
+                            staged.name.as_str(),
+                        ),
+                    )?;
                     self.attached.borrow_mut().insert(
                         key,
                         AttachedFile {
@@ -195,7 +206,23 @@ impl<'a> FileWrite<'a> {
             file.hash.clone(),
             Value::Blob(prepared.hash.as_bytes().to_vec()),
         );
-        db.internal_execute("INSERT INTO coven_user_files(table_name,key,column_name,identity,path,size,modified_at) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(table_name,key,column_name) DO UPDATE SET identity=excluded.identity,path=excluded.path,size=excluded.size,modified_at=excluded.modified_at", rusqlite::params![key.0, key.1, file.id, file_row::identity(file, &attached_values)?, crate::user_file::encode_path(prepared.observed.path()), prepared.observed.size().to_be_bytes().as_slice(), crate::user_file::encode_time(prepared.observed.modified_at())])?;
+        db.internal_execute(
+            "INSERT INTO coven_user_files
+                 (table_name,key,column_name,identity,path,size,modified_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7)
+             ON CONFLICT(table_name,key,column_name) DO UPDATE SET
+                 identity=excluded.identity,path=excluded.path,
+                 size=excluded.size,modified_at=excluded.modified_at",
+            rusqlite::params![
+                key.0,
+                key.1,
+                file.id,
+                file_row::identity(file, &attached_values)?,
+                crate::user_file::encode_path(prepared.observed.path()),
+                prepared.observed.size().to_be_bytes().as_slice(),
+                crate::user_file::encode_time(prepared.observed.modified_at())
+            ],
+        )?;
         self.attached.borrow_mut().insert(
             key,
             AttachedFile {
@@ -219,7 +246,8 @@ impl<'a> FileWrite<'a> {
         let (key, _) = file_row::lookup(db, self.schema, table, &key)?;
         file_row::set(db, self.schema, &key, None, self.device)?;
         db.internal_execute(
-            "DELETE FROM coven_user_files WHERE table_name=?1 AND key=?2 AND column_name=?3",
+            "DELETE FROM coven_user_files
+             WHERE table_name=?1 AND key=?2 AND column_name=?3",
             (&key.0, &key.1, &file.id),
         )?;
         Ok(())
@@ -309,7 +337,11 @@ impl<'a> FileWrite<'a> {
             }
             if new.as_ref().is_none_or(|r| !has_file(r)) {
                 self.forget_owned(key, &file.id)?;
-                db.internal_execute("DELETE FROM coven_user_files WHERE table_name=?1 AND key=?2 AND column_name=?3", (&key.0, &key.1, &file.id))?;
+                db.internal_execute(
+                    "DELETE FROM coven_user_files
+                     WHERE table_name=?1 AND key=?2 AND column_name=?3",
+                    (&key.0, &key.1, &file.id),
+                )?;
             }
         }
         Ok(())
@@ -334,18 +366,49 @@ impl<'a> FileWrite<'a> {
                 Provenance::AppProvided => "coven_device_files",
                 Provenance::UserProvided => "coven_user_files",
             };
-            let identities = db.query(&format!("SELECT identity FROM {local_table} WHERE table_name=?1 AND key=?2 AND column_name=?3"), (&key.0, &key.1, &file.id), |r| r.get::<_, Vec<u8>>(0))?;
+            let identities = db.query(
+                &format!(
+                    "SELECT identity FROM {local_table}
+                     WHERE table_name=?1 AND key=?2 AND column_name=?3"
+                ),
+                (&key.0, &key.1, &file.id),
+                |r| r.get::<_, Vec<u8>>(0),
+            )?;
             if identities.is_empty() {
                 continue;
             }
             let mut retained = BTreeSet::new();
-            for (audience, generation) in db.query("SELECT audience,max(generation) FROM coven_rows WHERE table_name=?1 AND key=?2 GROUP BY audience", (&key.0, &key.1), |r| Ok((crate::write_encoding::audience(&r.get::<_,String>(0)?)?, crate::write_encoding::counter(r.get(1)?))))? {
-                if generation % 2 == 0 || matches!(&audience, coven_merge::Audience::Circle(id) if deleted.contains(id)) { continue; }
-                let row = store.row(&coven_merge::RowId { table:key.0.clone(), key:key.1.clone(), audience })?;
-                let values = row.state.cells().iter().map(|(column,cell)| (column.clone(),cell.value.value.clone())).collect();
+            for (audience, generation) in db.query(
+                "SELECT audience,max(generation) FROM coven_rows
+                 WHERE table_name=?1 AND key=?2 GROUP BY audience",
+                (&key.0, &key.1),
+                |r| {
+                    Ok((
+                        crate::write_encoding::audience(&r.get::<_, String>(0)?)?,
+                        crate::write_encoding::counter(r.get(1)?),
+                    ))
+                },
+            )? {
+                if generation % 2 == 0
+                    || matches!(&audience, coven_merge::Audience::Circle(id) if deleted.contains(id))
+                {
+                    continue;
+                }
+                let row = store.row(&coven_merge::RowId {
+                    table: key.0.clone(),
+                    key: key.1.clone(),
+                    audience,
+                })?;
+                let values = row
+                    .state
+                    .cells()
+                    .iter()
+                    .map(|(column, cell)| (column.clone(), cell.value.value.clone()))
+                    .collect();
                 if let Some(identity) = file_row::identity(file, &values)? {
                     if file.provenance == Provenance::AppProvided
-                        && crate::file_location::StoredLocation::decode(&values[&file.location])?.public()
+                        && crate::file_location::StoredLocation::decode(&values[&file.location])?
+                            .public()
                             != crate::FileLocation::OnDevice(self.device)
                     {
                         continue;
@@ -360,7 +423,11 @@ impl<'a> FileWrite<'a> {
                 match file.provenance {
                     Provenance::AppProvided => self.forget_owned(&key, &file.id)?,
                     Provenance::UserProvided => {
-                        db.internal_execute("DELETE FROM coven_user_files WHERE table_name=?1 AND key=?2 AND column_name=?3", (&key.0, &key.1, &file.id))?;
+                        db.internal_execute(
+                            "DELETE FROM coven_user_files
+                             WHERE table_name=?1 AND key=?2 AND column_name=?3",
+                            (&key.0, &key.1, &file.id),
+                        )?;
                     }
                 }
             }
@@ -412,7 +479,12 @@ impl<'a> FileWrite<'a> {
 
     fn forget_owned(&self, key: &AppKey, column: &str) -> Result<(), DbError> {
         let db = self.database;
-        let paths = db.query("DELETE FROM coven_device_files WHERE table_name=?1 AND key=?2 AND column_name=?3 RETURNING path", (&key.0, &key.1, column), |r| r.get::<_, String>(0))?;
+        let paths = db.query(
+            "DELETE FROM coven_device_files
+             WHERE table_name=?1 AND key=?2 AND column_name=?3 RETURNING path",
+            (&key.0, &key.1, column),
+            |r| r.get::<_, String>(0),
+        )?;
         for path in paths {
             self.obsolete
                 .borrow_mut()
