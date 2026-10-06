@@ -1770,8 +1770,8 @@ Carol's tablet:
   - *uploaded*: stored encrypted, and read the same way on every device;
   - *on one device*: only on the device that has it, as the user's
     original or coven's own copy, and never uploaded.
-- The row's where-column says which: `uploaded`, or the id of the device
-  that has the file.
+- The row's where-column says which: `uploaded`, with the id of the key
+  that names and encrypts the file, or the id of the device that has it.
   - So every device knows where each file is, and can say so.
   - Reading a file that is on another device fails with an error of its
     own, naming that device.
@@ -1823,6 +1823,9 @@ Carol's tablet:
   named with a naming key derived from it.
   - Only the circle's members can read it.
   - The same file in the store and in a circle gets two different names.
+- A file is named and encrypted with its audience's current key when it
+  is uploaded, and its where-column names that key, so every device finds
+  and opens it after the key is replaced.
 - After a key is replaced, a file added again gets a new name, and is
   stored again.
 - A file is encrypted in chunks, 64 KiB by default, recorded in its
@@ -3029,8 +3032,9 @@ impl FileDecl {
     pub fn with_hash_column(self, column: impl Into<String>) -> Self;
 
     /// The column holding where the file is, which coven fills in:
-    /// `uploaded`, or the id of the device that has it (§16.1). Defaults to
-    /// `location`.
+    /// `uploaded` with the id of the key naming the file, or the id of the
+    /// device that has it (§16.1, §16.2). Read it through `FileRef::location`.
+    /// Defaults to `location`.
     pub fn with_location_column(self, column: impl Into<String>) -> Self;
 
     /// Refuses a write that points an existing row at a different file.
