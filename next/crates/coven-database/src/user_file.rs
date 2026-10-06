@@ -139,7 +139,7 @@ fn decode_path(bytes: Vec<u8>) -> Result<PathBuf, DbError> {
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStringExt;
-        if bytes.len() % 2 != 0 {
+        if !bytes.len().is_multiple_of(2) {
             return Err(DbError::DamagedDatabase);
         }
         let units: Vec<_> = bytes
