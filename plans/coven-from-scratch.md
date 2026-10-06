@@ -3284,8 +3284,8 @@ pub enum CacheFill {
 }
 
 pub enum Uploads {
-    /// A file is uploaded when a write attaches it, and the write uploads
-    /// after it (§16.5).
+    /// A file starts uploading once the write attaching it commits; a later
+    /// write marks it uploaded once it is stored (§16.5).
     WhenAttached,
     /// A file stays on the device that attached it until the app uploads it
     /// (§16.1).
