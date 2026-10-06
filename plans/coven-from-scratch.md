@@ -1166,9 +1166,11 @@ Carol's tablet:
     added, their public keys and role, and whether they were removed),
     `coven_devices` (every device a kept entry added, its member and name,
     and whether it was removed), `coven_circles` (every circle a kept
-    entry made, its name and current key, and whether it was deleted),
+    entry made, its name and current key's id, and whether it was deleted),
     `coven_circle_members`, and `coven_store_state` (the current store
-    key, the schema and format versions, and each audience's reset).
+    key's id, the schema and format versions, and each audience's reset).
+  - Keys themselves are only ever in key custody
+    ([§11](#11-keys)); these tables hold their ids.
   - Removed members and devices stay, since their writes that reached
     storage still count, checked with their keys
     ([§10](#10-device-identity)).
@@ -1226,8 +1228,13 @@ Carol's tablet:
       which hadn't seen either, removes Ben from the store: the removal
       doesn't name Gifts, so Carol's add applies; Ben's own add is about
       Ben, so the removal beats it;
+  - they each replace the same key: two removals from the store, or two
+    removals of someone from the same circle, since otherwise a key one of
+    them made would be sealed to the member the other removed
+    ([§13](#13-removing-members-and-devices));
   - they raise the schema or format to the same version with different
-    snapshots, or reset the same audience to different snapshots
+    snapshots, reset the same audience to different snapshots, or one
+    resets an audience the other raises to a new version
     ([§17](#17-schema-changes), [§19.3](#193-resetting-a-store)).
 - Whether an entry deletes a circle is judged in the member list its
   author had read: removing the circle's only member there deletes it.
@@ -1261,9 +1268,12 @@ Carol's tablet:
   third stamp    Carol removes Ana
   ```
 
-  - No two conflict: each pair leaves an admin.
-  - The replay applies Ana's and Ben's removals; Carol's would leave no
-    admin, so it is dropped, and Ana stays an admin.
+  - Each pair conflicts, since each removal replaces the store key: Ana's,
+    the earliest, applies, and Ben's and Carol's are dropped.
+  - Carol's device then redoes her removal against the new member list,
+    as an operation does until its entry is kept
+    ([§18](#18-operations)): Ana is removed, and Carol stays the admin.
+    Ben's device, removed, can't redo his.
 - E.g. Ana and Ben are admins. Concurrently, Ben removes Ana, Ana removes
   Ben a moment later, and Ben adds his new phone:
   - after Ben's removal, Ana's would leave no admin, so it is dropped;
@@ -1284,6 +1294,9 @@ Carol's tablet:
 - A device is one install of the app, with its own device id, belonging to
   one member, who adds it to the store log ([§9](#9-members-and-roles)).
 - A device restored from a backup is a new device, with a new id.
+  - It knows it was restored because its id is also kept where backups
+    don't reach, such as a keychain item kept to this device only; a
+    store whose kept id is missing or different takes a new id at open.
   - So it never reuses write numbers its backup's device already used.
   - E.g. Ana's phone is backed up after its write 5, writes 6 and 7, and is
     lost. Her new phone is restored from the backup:
@@ -1304,11 +1317,13 @@ Carol's tablet:
 - Every write record is signed with the key of the member whose device
   wrote it, so who wrote what is authentic.
 - This is about authenticity, not trust.
-- A device applies a write only if it is signed with the key of a member
-  the store log has added, and comes from one of that member's
-  devices ([§9](#9-members-and-roles)), so a write by Ana's phone counts
-  as Ana's.
-- A removed device's writes still count if they reached storage.
+- A write counts only if its author was a member, and its device one of
+  theirs, in the store log the write had read ([§7.1](#71-causality)), so
+  a write by Ana's phone counts as Ana's.
+- A removed device's writes still count if they reached storage and were
+  made before it read its removal.
+- A device that reads its own removal, or its member's, stops syncing and
+  tells the app ([§20.5](#205-storage-and-sync)).
 - Removing a device takes away its storage access, so nothing it writes
   afterwards can reach other devices.
 
@@ -1336,8 +1351,8 @@ Carol's tablet:
   and both keys work.
   - E.g. Ana removes Dan while Ben, offline, removes Erin: each removal
     names its own new store key, and both apply.
-- The *current* store key is the one named by the latest entry, in the
-  replay's order, that brings one in, and likewise for each circle; new
+- The *current* store key is the one named by the latest entry the replay
+  keeps, in its order, that brings one in, and likewise for each circle; new
   writes, entries, snapshots and files use it.
 - Every encrypted object names, outside its encryption, the key that seals
   each of its parts, so a reader knows which key opens it.
@@ -1493,9 +1508,11 @@ Carol's tablet:
     read anything written after the rotation.
   - E.g. Ana adds Carol while Ben, offline, removes Dan: on every device
     Carol's add is dropped, Ana is shown it, and she invites Carol again.
-  - Carol's phone reports the join as declined, and the storage access
-    her invite granted is taken back, as for a declined request
+  - Carol's phone shows the join as dropped; Ana invites her again, or
+    cancels the invite, which takes back the storage access it granted
     ([§12.2](#122-adding-a-person)).
+  - Nothing is taken back on its own: if a later entry brings the add
+    back, Carol is in, and her phone shows it.
 
 ## 14. Audiences
 
