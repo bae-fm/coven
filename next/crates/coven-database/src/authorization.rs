@@ -39,6 +39,7 @@ struct AuthorizationState {
     stepping: bool,
     applying: bool,
     columns: Option<Vec<String>>,
+    mutations: Option<BTreeSet<String>>,
     reads: Option<ReadCapture>,
     #[cfg(test)]
     integrity_checks: usize,
@@ -59,6 +60,7 @@ impl SqlAuthorization {
                 stepping: false,
                 applying: false,
                 columns: None,
+                mutations: None,
                 reads: None,
                 #[cfg(test)]
                 integrity_checks: 0,
@@ -79,6 +81,20 @@ impl SqlAuthorization {
         let state = Arc::clone(&self.state);
         move |context| {
             let mut state = state.lock().expect("SQL authorization lock poisoned");
+            if context.database_name == Some("main") {
+                if let AuthAction::Insert { table_name }
+                | AuthAction::Update { table_name, .. }
+                | AuthAction::Delete { table_name }
+                | AuthAction::CreateIndex { table_name, .. }
+                | AuthAction::DropIndex { table_name, .. }
+                | AuthAction::CreateTrigger { table_name, .. }
+                | AuthAction::DropTrigger { table_name, .. } = context.action
+                {
+                    if let Some(tables) = &mut state.mutations {
+                        tables.insert(table_name.to_ascii_lowercase());
+                    }
+                }
+            }
             if let AuthAction::Read {
                 table_name,
                 column_name,
@@ -308,6 +324,26 @@ impl SqlAuthorization {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn mutations<T>(
+        &self,
+        prepare: impl FnOnce() -> rusqlite::Result<T>,
+    ) -> rusqlite::Result<BTreeSet<String>> {
+        self.state
+            .lock()
+            .expect("SQL authorization lock poisoned")
+            .mutations = Some(BTreeSet::new());
+        let result = prepare();
+        let mutations = self
+            .state
+            .lock()
+            .expect("SQL authorization lock poisoned")
+            .mutations
+            .take()
+            .expect("mutation capture");
+        result?;
+        Ok(mutations)
     }
 
     pub(crate) fn app_result<T>(&self, result: rusqlite::Result<T>) -> rusqlite::Result<T> {

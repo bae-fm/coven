@@ -107,6 +107,7 @@ macro_rules! coven_tables {
                 PRIMARY KEY(row_id, column_id, foreign_key_id)
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX coven_references_parent ON coven_references(parent_table,parent_key,parent_audience,foreign_key_id,row_id);
+            CREATE INDEX coven_references_column ON coven_references(column_id,row_id);
             CREATE INDEX coven_references_key ON coven_references(foreign_key_id,row_id);
         ");
         $visit!(coven_constraints, "
@@ -137,11 +138,13 @@ macro_rules! coven_tables {
                 column_id INTEGER REFERENCES coven_columns(id),
                 value BLOB NOT NULL,
                 set_by BLOB NOT NULL,
+                retired INTEGER NOT NULL DEFAULT 0 CHECK(retired IN (0,1)),
                 replacement_kind TEXT NOT NULL CHECK(replacement_kind IN ('write', 'rules', 'excluded')),
                 replaced_by BLOB NOT NULL,
                 CHECK((replacement_kind != 'write' OR column_id IS NOT NULL) AND (replacement_kind != 'rules' OR column_id IS NULL))
             ) STRICT;
             CREATE INDEX coven_lost_row ON coven_lost(table_name,key,audience,generation,column_id);
+            CREATE INDEX coven_lost_removed ON coven_lost(table_name,key,audience) WHERE retired=0 AND replacement_kind='rules';
             CREATE INDEX coven_lost_column ON coven_lost(column_id);
         ");
         $visit!(coven_lost_references, "
@@ -153,6 +156,7 @@ macro_rules! coven_tables {
                 parent_audience TEXT NOT NULL,
                 PRIMARY KEY(loss_id,foreign_key_id)
             ) STRICT, WITHOUT ROWID;
+            CREATE INDEX coven_lost_references_key ON coven_lost_references(foreign_key_id,loss_id);
             CREATE INDEX coven_lost_references_parent ON coven_lost_references(parent_table,parent_key,parent_audience,loss_id);
         ");
         $visit!(coven_uploads, "

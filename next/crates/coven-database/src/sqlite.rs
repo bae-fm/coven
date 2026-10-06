@@ -14,7 +14,7 @@ use rusqlite::{
 
 use crate::authorization::SqlAuthorization;
 use crate::internal_schema;
-use crate::migration::{validate_versions, MigrationContext};
+use crate::migration::validate_versions;
 use crate::observation::{CommitObserver, ReadSet, RowChange};
 use crate::schema::Schema;
 use crate::SqlReadContext;
@@ -29,6 +29,8 @@ pub(crate) struct DatabaseConnection {
     observation: Option<WriterObservation>,
     #[cfg(test)]
     scans: std::sync::Mutex<Vec<(String, i32)>>,
+    #[cfg(test)]
+    merge_loads: std::sync::Mutex<BTreeMap<String, usize>>,
 }
 
 struct WriterObservation {
@@ -71,6 +73,29 @@ impl DatabaseConnection {
                 Ok(crate::fingerprint::replace_sum(ctx.get(0)?, old, ctx.get(2)?).to_vec())
             },
         )?;
+        connection.create_scalar_function(
+            "coven_migration_key",
+            -1,
+            FunctionFlags::SQLITE_UTF8
+                | FunctionFlags::SQLITE_DETERMINISTIC
+                | FunctionFlags::SQLITE_DIRECTONLY,
+            |ctx| {
+                if !ctx.len().is_multiple_of(2) {
+                    return Err(rusqlite::Error::InvalidParameterCount(
+                        ctx.len(),
+                        ctx.len() + 1,
+                    ));
+                }
+                let mut values = Vec::new();
+                let mut collations = Vec::new();
+                for i in (0..ctx.len()).step_by(2) {
+                    collations.push(ctx.get::<String>(i)?);
+                    values.push(crate::write_encoding::value(ctx.get_raw(i + 1))?);
+                }
+                crate::write_rows::equality_key(&values, &collations)
+                    .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))
+            },
+        )?;
         connection.authorizer(Some(authorization.callback()))?;
         let db = Self {
             connection,
@@ -78,6 +103,8 @@ impl DatabaseConnection {
             observation: None,
             #[cfg(test)]
             scans: std::sync::Mutex::new(Vec::new()),
+            #[cfg(test)]
+            merge_loads: std::sync::Mutex::new(BTreeMap::new()),
         };
         db.batch("PRAGMA foreign_keys = ON; PRAGMA recursive_triggers = ON; PRAGMA trusted_schema = OFF;")?;
         db.refresh_hidden_rowids().map_err(opening_error)?;
@@ -110,8 +137,9 @@ impl DatabaseConnection {
         tables: &[SyncedTable],
         migrations: &[Migration],
         policy: CovenMigrationPolicy,
-        read_only: bool,
+        author: Option<(DeviceId, SystemTime)>,
     ) -> CovenResult<Vec<MigrationOutcome>> {
+        let read_only = author.is_none();
         let supported = validate_versions(migrations)?;
         let internal: i32 = self.query_row("PRAGMA application_id", [], |r| r.get(0))?;
         let internal = internal as u32;
@@ -150,24 +178,19 @@ impl DatabaseConnection {
             .iter()
             .find(|m| m.version > current)
             .expect("pending migration");
+        #[cfg(test)]
+        let _profile = self.profile_statements();
         let result = self.transaction(|db| {
-            let mut outcomes = Vec::new();
-            let mut before = Schema::read(db)?;
-            for migration in migrations.iter().filter(|m| m.version > current) {
-                at = migration;
-                migration.apply(&MigrationContext::new(db))?;
-                db.require_transaction()?;
-                let after = Schema::read(db)?;
-                outcomes.push(MigrationOutcome {
-                    version: migration.version,
-                    name: migration.name,
-                    change: before.change_to(&after, tables),
-                });
-                before = after;
-            }
-            before.validate(db, tables)?;
+            let outcomes = crate::migration_run::run(
+                db,
+                tables,
+                migrations,
+                current,
+                supported,
+                author.expect("writable migration"),
+                &mut at,
+            )?;
             db.refresh_hidden_rowids()?;
-            db.batch(&format!("PRAGMA user_version = {}", supported as i32))?;
             Ok(outcomes)
         });
         result.map_err(|source| {
@@ -243,7 +266,7 @@ impl DatabaseConnection {
                 &before,
                 &after,
                 &store,
-                &captured,
+                &before.changes(&after, captured.keys().cloned())?,
                 &deleted_circles,
             )?;
             let record = if changes.is_empty() {
@@ -340,6 +363,35 @@ impl DatabaseConnection {
         result.map_err(Into::into)
     }
 
+    /// Visit rows while SQLite owns the cursor; no result-sized allocation.
+    pub(crate) fn visit<P: Params>(
+        &self,
+        sql: &str,
+        params: P,
+        mut visit: impl FnMut(&Row<'_>) -> Result<(), DbError>,
+    ) -> Result<(), DbError> {
+        let _scope = self.authorization.internal();
+        self.authorization.begin_read_statement();
+        let result = (|| {
+            let mut statement = self.connection.prepare(sql)?;
+            let mut rows = statement.query(params)?;
+            while let Some(row) = rows.next()? {
+                visit(row)?;
+            }
+            Ok(())
+        })();
+        self.authorization
+            .record_statement(&self.connection, None)?;
+        result
+    }
+
+    pub(crate) fn migration_targets(&self, sql: &str) -> rusqlite::Result<BTreeSet<String>> {
+        self.authorization.check_sql(sql)?;
+        self.begin_app_statement()?;
+        self.authorization
+            .mutations(|| self.authorization.app_result(self.connection.prepare(sql)))
+    }
+
     pub(crate) fn app_execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
         self.authorization.check_sql(sql)?;
         self.begin_app_statement()?;
@@ -351,6 +403,14 @@ impl DatabaseConnection {
     }
 
     pub(crate) fn app_batch(&self, sql: &str) -> rusqlite::Result<()> {
+        self.app_batch_tracked(sql, None)
+    }
+
+    pub(crate) fn app_batch_tracked(
+        &self,
+        sql: &str,
+        migration: Option<&crate::MigrationContext<'_>>,
+    ) -> rusqlite::Result<()> {
         self.authorization.check_sql(sql)?;
         let mut batch = Batch::new(&self.connection, sql);
         loop {
@@ -358,6 +418,11 @@ impl DatabaseConnection {
             let Some(mut statement) = self.authorization.app_result(batch.next())? else {
                 return Ok(());
             };
+            let text = migration.map(|_| statement.expanded_sql().expect("prepared SQL"));
+            if let (Some(migration), Some(text)) = (migration, text.as_ref()) {
+                migration.before_statement(text)?;
+            }
+            let cookie = migration.map(|_| self.schema_cookie()).transpose()?;
             // Step every row so later execution errors cannot be discarded.
             let result = (|| {
                 let mut rows = statement.raw_query();
@@ -366,7 +431,53 @@ impl DatabaseConnection {
                 Ok(())
             })();
             self.authorization.app_result(result)?;
+            if let (Some(cookie), Some(migration), Some(text)) = (cookie, migration, text) {
+                if self.schema_cookie()? != cookie {
+                    migration.record(&text)?;
+                }
+            }
         }
+    }
+
+    pub(crate) fn schema_cookie(&self) -> rusqlite::Result<i64> {
+        let _scope = self.authorization.internal();
+        self.connection
+            .query_row("PRAGMA main.schema_version", [], |r| r.get(0))
+    }
+
+    pub(crate) fn migration_changes<T>(
+        &self,
+        run: impl FnOnce() -> Result<T, DbError>,
+    ) -> Result<(T, BTreeSet<String>), DbError> {
+        assert!(
+            self.observation.is_none(),
+            "migrations precede commit observation"
+        );
+        let changes = Arc::new(Mutex::new(BTreeSet::new()));
+        let captured = Arc::clone(&changes);
+        self.connection.preupdate_hook(Some(
+            move |_, schema: &str, table: &str, _: &rusqlite::hooks::PreUpdateCase| {
+                if schema == "main" {
+                    captured
+                        .lock()
+                        .expect("migration capture")
+                        .insert(table.to_ascii_lowercase());
+                }
+            },
+        ))?;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
+        self.connection
+            .preupdate_hook(
+                None::<fn(rusqlite::hooks::Action, &str, &str, &rusqlite::hooks::PreUpdateCase)>,
+            )
+            .expect("remove migration capture");
+        let result = match result {
+            Ok(result) => result?,
+            Err(panic) => std::panic::resume_unwind(panic),
+        };
+        self.require_transaction()?;
+        let changed = std::mem::take(&mut *changes.lock().expect("migration capture"));
+        Ok((result, changed))
     }
 
     pub(crate) fn app_query_row<T, P: Params>(

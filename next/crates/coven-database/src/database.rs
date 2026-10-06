@@ -95,7 +95,12 @@ impl DatabaseBuilder {
         let profile = writer.profile_statements();
         writer.check_integrity()?;
         writer.enable_wal()?;
-        let migrations = writer.prepare_schema(&tables, &migrations, policy, false)?;
+        let migrations = writer.prepare_schema(
+            &tables,
+            &migrations,
+            policy,
+            Some((settings.device_id, clock.now())),
+        )?;
         let write_schema = crate::write_schema::WriteSchema::read(&writer, tables.clone())?;
         let observer = CommitObserver::new();
         #[cfg(test)]
@@ -137,7 +142,7 @@ impl DatabaseBuilder {
             &tables,
             &migrations,
             CovenMigrationPolicy::RefusePending,
-            true,
+            None,
         )?;
         let mut readers = vec![Mutex::new(first)];
         for _ in 1..4 {

@@ -94,7 +94,7 @@ pub(crate) struct StoredRow {
 
 pub(crate) struct MergeStore<'a> {
     database: &'a DatabaseConnection,
-    app: &'a AppView<'a>,
+    values: &'a AppView<'a>,
     metadata: WriteMetadata<'a>,
     rows: RefCell<BTreeMap<RowId, StoredRow>>,
 }
@@ -103,7 +103,7 @@ impl<'a> MergeStore<'a> {
     pub(crate) fn new(database: &'a DatabaseConnection, app: &'a AppView<'a>) -> Self {
         Self {
             database,
-            app,
+            values: app,
             metadata: WriteMetadata::new(database),
             rows: RefCell::new(BTreeMap::new()),
         }
@@ -120,6 +120,8 @@ impl<'a> MergeStore<'a> {
         if let Some(row) = self.rows.borrow().get(id) {
             return Ok(row.clone());
         }
+        #[cfg(test)]
+        self.database.record_merge_load(&id.table);
         let audience = audience_text(&id.audience);
         let generations = self.database.query("SELECT r.id,r.generation,w.id,w.timestamp,w.number,w.had_read FROM coven_rows r JOIN coven_writes w ON w.id=r.write_id WHERE r.table_name=?1 AND r.key=?2 AND r.audience=?3 ORDER BY r.generation", params![id.table, id.key, audience], |r| Ok((r.get::<_,i64>(0)?, counter(r.get(1)?), self.metadata.retain(r,2)?)))?;
         let current = generations
@@ -128,7 +130,7 @@ impl<'a> MergeStore<'a> {
         let mut cells = BTreeMap::new();
         let mut loss = None;
         if let Some((ordinal, generation)) = current.filter(|(_, g)| g % 2 == 1) {
-            let retained = self.database.query("SELECT id,value FROM coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4 AND column_id IS NULL AND replacement_kind='rules'", params![id.table,id.key,audience,generation.to_be_bytes().as_slice()], |r| Ok((r.get::<_,i64>(0)?, decoded(merge_fields::decode_columns(&r.get::<_,Vec<u8>>(1)?))?)))?;
+            let retained = self.database.query("SELECT id,value FROM coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4 AND column_id IS NULL AND replacement_kind='rules' AND retired=0", params![id.table,id.key,audience,generation.to_be_bytes().as_slice()], |r| Ok((r.get::<_,i64>(0)?, decoded(merge_fields::decode_columns(&r.get::<_,Vec<u8>>(1)?))?)))?;
             assert!(
                 retained.len() <= 1,
                 "present row has more than one removal record: {id:?}"
@@ -138,7 +140,7 @@ impl<'a> MergeStore<'a> {
                 columns.into_iter().map(|(n, v)| (n, v.value)).collect()
             } else {
                 let app = self
-                    .app
+                    .values
                     .row(&(id.table.clone(), id.key.clone()))?
                     .expect("present row must be in app or coven_lost");
                 assert_eq!(
@@ -159,7 +161,7 @@ impl<'a> MergeStore<'a> {
         }
         let mut lost = BTreeMap::new();
         let mut lost_ids = BTreeMap::new();
-        for (ordinal, generation, column, value, set_by, replaced_by) in self.database.query("SELECT l.id,l.generation,c.column_name,l.value,l.set_by,l.replaced_by FROM coven_lost l JOIN coven_columns c ON c.id=l.column_id WHERE l.table_name=?1 AND l.key=?2 AND l.audience=?3 AND l.column_id IS NOT NULL AND l.replacement_kind='write'", params![id.table,id.key,audience], |r| Ok((r.get::<_,i64>(0)?, counter(r.get(1)?),r.get::<_,String>(2)?,decoded(merge_fields::decode_column_value(&r.get::<_,Vec<u8>>(3)?))?,decoded(merge_fields::decode_write_id(&r.get::<_,Vec<u8>>(4)?))?,decoded(merge_fields::decode_write_id(&r.get::<_,Vec<u8>>(5)?))?)))? {
+        for (ordinal, generation, column, value, set_by, replaced_by) in self.database.query("SELECT l.id,l.generation,c.column_name,l.value,l.set_by,l.replaced_by FROM coven_lost l JOIN coven_columns c ON c.id=l.column_id WHERE l.table_name=?1 AND l.key=?2 AND l.audience=?3 AND l.column_id IS NOT NULL AND l.replacement_kind='write' AND l.retired=0", params![id.table,id.key,audience], |r| Ok((r.get::<_,i64>(0)?, counter(r.get(1)?),r.get::<_,String>(2)?,decoded(merge_fields::decode_column_value(&r.get::<_,Vec<u8>>(3)?))?,decoded(merge_fields::decode_write_id(&r.get::<_,Vec<u8>>(4)?))?,decoded(merge_fields::decode_write_id(&r.get::<_,Vec<u8>>(5)?))?)))? {
             self.metadata.load(set_by)?;
             self.metadata.load(replaced_by)?;
             let key = LostKey { column, write:set_by };

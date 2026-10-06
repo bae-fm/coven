@@ -298,7 +298,7 @@ fn check_name(named: &Option<Name<'_>>, expression: &str) -> String {
     }
 }
 
-fn name(raw: &str) -> String {
+pub(crate) fn name(raw: &str) -> String {
     match raw.as_bytes()[0] {
         b'[' => raw[1..raw.len() - 1].to_owned(),
         quote @ (b'\'' | b'"' | b'`') => raw[1..raw.len() - 1].replace(

@@ -12,7 +12,7 @@ use coven_format::value::Value;
 use coven_merge::{Audience, ForeignKey, RowId};
 use rusqlite::params_from_iter;
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) type AppKey = (String, Vec<u8>);
 pub(crate) type AppValues = BTreeMap<String, Value>;
@@ -30,6 +30,7 @@ pub(crate) struct AppView<'a> {
     overrides: BTreeMap<AppKey, Option<AppValues>>,
     lookup: BTreeMap<(String, Vec<String>, Vec<u8>), Vec<AppKey>>,
     rows: RefCell<BTreeMap<AppKey, Option<AppRow>>>,
+    migration: Option<&'a crate::migration_snapshot::MigrationSnapshot>,
 }
 
 impl<'a> AppView<'a> {
@@ -40,6 +41,7 @@ impl<'a> AppView<'a> {
             overrides: BTreeMap::new(),
             lookup: BTreeMap::new(),
             rows: RefCell::new(BTreeMap::new()),
+            migration: None,
         }
     }
 
@@ -64,21 +66,7 @@ impl<'a> AppView<'a> {
                 Some(crate::removal_sql::evaluate_values(database, table, &old)?)
             };
             if let Some(old) = &old {
-                for index in &table.indices {
-                    if let Some(columns) = index.columns.iter().cloned().collect::<Option<Vec<_>>>()
-                    {
-                        let values: Vec<_> = columns.iter().map(|c| old[c].clone()).collect();
-                        if values.iter().any(|v| matches!(v, Value::Null)) {
-                            continue;
-                        }
-                        let encoded = equality_key(&values, &index.collations)?;
-                        result
-                            .lookup
-                            .entry((table.name.clone(), columns, encoded))
-                            .or_default()
-                            .push(key.clone());
-                    }
-                }
+                result.index_old(key, table, old)?;
             }
             result.overrides.insert(key.clone(), old);
         }
@@ -88,6 +76,11 @@ impl<'a> AppView<'a> {
     pub(crate) fn row(&self, key: &AppKey) -> Result<Option<AppRow>, DbError> {
         if let Some(row) = self.rows.borrow().get(key) {
             return Ok(row.clone());
+        }
+        if let Some(snapshot) = self.migration {
+            let row = snapshot.row(self.database, key)?;
+            self.rows.borrow_mut().insert(key.clone(), row.clone());
+            return Ok(row);
         }
         let table = self.schema.table(&key.0);
         let values = match self.overrides.get(key) {
@@ -165,12 +158,70 @@ impl<'a> AppView<'a> {
         Ok(Some(row))
     }
 
+    pub(crate) fn migration_before(
+        database: &'a DatabaseConnection,
+        schema: &'a WriteSchema,
+        snapshot: &'a crate::migration_snapshot::MigrationSnapshot,
+    ) -> Self {
+        let mut view = Self::after(database, schema);
+        view.migration = Some(snapshot);
+        view
+    }
+
+    fn index_old(
+        &mut self,
+        key: &AppKey,
+        table: &TableSchema,
+        values: &AppValues,
+    ) -> Result<(), DbError> {
+        for index in &table.indices {
+            if let Some(columns) = index.columns.iter().cloned().collect::<Option<Vec<_>>>() {
+                let parts: Vec<_> = columns.iter().map(|c| values[c].clone()).collect();
+                if parts.iter().all(|v| !matches!(v, Value::Null)) {
+                    self.lookup
+                        .entry((
+                            table.name.clone(),
+                            columns,
+                            equality_key(&parts, &index.collations)?,
+                        ))
+                        .or_default()
+                        .push(key.clone());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Candidate rows and the cells whose SQL values differ between the views.
+    pub(crate) fn changes(
+        &self,
+        after: &Self,
+        keys: impl IntoIterator<Item = AppKey>,
+    ) -> Result<BTreeMap<AppKey, BTreeSet<String>>, DbError> {
+        let mut changes = BTreeMap::new();
+        for key in keys {
+            let old = self.row(&key)?;
+            let new = after.row(&key)?;
+            let columns = new
+                .into_iter()
+                .flat_map(|r| r.values)
+                .filter(|(c, v)| old.as_ref().and_then(|r| r.values.get(c)) != Some(v))
+                .map(|(c, _)| c)
+                .collect();
+            changes.insert(key, columns);
+        }
+        Ok(changes)
+    }
+
     pub(crate) fn find(
         &self,
         table: &TableSchema,
         columns: &[String],
         values: &[Value],
     ) -> Result<Vec<AppValues>, DbError> {
+        if let Some(snapshot) = self.migration {
+            return snapshot.find(self.database, table, columns, values);
+        }
         let values = crate::removal_sql::reference_values(self.database, table, columns, values)?;
         let index = table
             .indices
@@ -252,6 +303,11 @@ pub(crate) fn read_values(
     key: &[u8],
 ) -> Result<Option<AppValues>, DbError> {
     let components = crate::write_encoding::decoded(coven_format::key::decode_key(key))?;
+    // A migration can replace the primary key. A key of the old arity cannot
+    // identify a row in the new table, even while its deletion is being merged.
+    if components.len() != key_columns(table).len() {
+        return Ok(None);
+    }
     let rows = database.query(
         &format!(
             "SELECT {} FROM main.{} WHERE {}",

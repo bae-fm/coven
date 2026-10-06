@@ -55,29 +55,8 @@ pub(crate) fn capture(
         };
         // Check the captured insert before key collation can normalize its text,
         // including a key change or a re-add that the merge represents as an update.
-        if operation.code() == Action::SQLITE_INSERT
-            && schema.declaration(&table.name).identity == RowIdentity::IndependentUuid
-        {
-            let columns = key_columns(table);
-            let has_uuid = columns.iter().any(|column| match &values[&column.name] {
-                Value::Text(text) => uuid::Uuid::parse_str(text).is_ok_and(|id| {
-                    matches!(id.get_version_num(), 4 | 7)
-                        && id.get_variant() == uuid::Variant::RFC4122
-                        && id.to_string() == *text
-                }),
-                _ => false,
-            });
-            if !has_uuid {
-                return Err(DbError::KeyNotUuid {
-                    table: table.name.clone(),
-                    key: RowKey(
-                        columns
-                            .iter()
-                            .map(|column| sql_value(&values[&column.name]))
-                            .collect(),
-                    ),
-                });
-            }
+        if operation.code() == Action::SQLITE_INSERT {
+            validate_key(schema, table, values)?;
         }
         let key = (table.name.clone(), row_key(table, values)?);
         match changes.entry(key) {
@@ -102,6 +81,36 @@ pub(crate) fn capture(
         }
     }
     Ok(changes)
+}
+
+pub(crate) fn validate_key(
+    schema: &WriteSchema,
+    table: &crate::schema::TableSchema,
+    values: &AppValues,
+) -> Result<(), DbError> {
+    if schema.declaration(&table.name).identity == RowIdentity::IndependentUuid {
+        let columns = key_columns(table);
+        let has_uuid = columns.iter().any(|column| match &values[&column.name] {
+            Value::Text(text) => uuid::Uuid::parse_str(text).is_ok_and(|id| {
+                matches!(id.get_version_num(), 4 | 7)
+                    && id.get_variant() == uuid::Variant::RFC4122
+                    && id.to_string() == *text
+            }),
+            _ => false,
+        });
+        if !has_uuid {
+            return Err(DbError::KeyNotUuid {
+                table: table.name.clone(),
+                key: RowKey(
+                    columns
+                        .iter()
+                        .map(|column| sql_value(&values[&column.name]))
+                        .collect(),
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

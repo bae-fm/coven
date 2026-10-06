@@ -33,8 +33,17 @@ pub(crate) fn commit(
             store.write_ordinal(id)
         }
     };
+    persist(database, updates, |row| store.row(row), ordinal)
+}
+
+pub(crate) fn persist(
+    database: &DatabaseConnection,
+    updates: &BTreeMap<RowId, RowUpdate<Value>>,
+    prior: impl Fn(&RowId) -> Result<crate::merge_store::StoredRow, DbError>,
+    ordinal: impl Fn(WriteId) -> i64,
+) -> Result<(), DbError> {
     for (row, update) in updates {
-        let old = store.row(row)?;
+        let old = prior(row)?;
         let audience = audience_text(&row.audience);
         for (generation, writer) in update.state.generations() {
             if old.state.generations().get(generation) != Some(writer) {

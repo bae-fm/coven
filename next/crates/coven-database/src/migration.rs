@@ -1,8 +1,10 @@
 //! Numbered app migrations and their transaction-scoped SQL access.
 
+use crate::migration_names::MigrationNames;
 use crate::sqlite::DatabaseConnection;
 use crate::{DbError, MigrationError};
 use rusqlite::{Params, Row};
+use std::cell::RefCell;
 
 /// Whether a writable open may migrate coven's internal schema.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -13,15 +15,16 @@ pub enum CovenMigrationPolicy {
     RefusePending,
 }
 
-/// How one migration changed SQLite's schema (§17.1).
+/// How one migration changed the schema and synced rows (§17.1).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MigrationChange {
-    /// No synced definition changed and no table disappeared. Local-only and
+    /// No synced definition or row changed and no table disappeared. Local-only and
     /// view changes must not be mistaken for a synced schema addition (§17.1).
     NoChange,
     /// Only synced tables or their columns were added.
     Addition,
-    /// A table disappeared or an existing synced definition changed beyond an addition.
+    /// A table disappeared, a synced definition changed beyond an addition,
+    /// or statements changed rows of synced tables.
     Breaking,
 }
 
@@ -32,7 +35,7 @@ pub struct MigrationOutcome {
     pub version: u32,
     /// The app's name for this migration.
     pub name: &'static str,
-    /// Its own before-and-after schema comparison, before subsequent migrations.
+    /// Its schema comparison and row changes, before subsequent migrations.
     pub change: MigrationChange,
 }
 
@@ -93,21 +96,65 @@ pub(crate) fn validate_versions(migrations: &[Migration]) -> Result<u32, Migrati
 /// The context borrows its owner and cannot change the transaction or connection.
 pub struct MigrationContext<'connection> {
     database: &'connection DatabaseConnection,
+    names: RefCell<MigrationNames>,
+    before: &'connection crate::schema::Schema,
+    capture: &'connection RefCell<crate::migration_snapshot::MigrationCapture>,
 }
 
 impl<'connection> MigrationContext<'connection> {
-    pub(crate) fn new(database: &'connection DatabaseConnection) -> Self {
-        Self { database }
+    pub(crate) fn new(
+        database: &'connection DatabaseConnection,
+        before: &'connection crate::schema::Schema,
+        capture: &'connection RefCell<crate::migration_snapshot::MigrationCapture>,
+    ) -> Self {
+        Self {
+            database,
+            names: RefCell::new(MigrationNames::new(before)),
+            before,
+            capture,
+        }
+    }
+
+    pub(crate) fn finish(
+        self,
+        before: &crate::schema::Schema,
+        after: &crate::schema::Schema,
+    ) -> crate::migration_names::MigrationEffects {
+        self.names.into_inner().finish(before, after)
+    }
+
+    fn statement<T>(
+        &self,
+        sql: &str,
+        run: impl FnOnce() -> rusqlite::Result<T>,
+    ) -> rusqlite::Result<T> {
+        self.before_statement(sql)?;
+        let before = self.database.schema_cookie()?;
+        let result = run();
+        if self.database.schema_cookie()? != before {
+            self.record(sql)?;
+        }
+        result
+    }
+
+    pub(crate) fn before_statement(&self, sql: &str) -> rusqlite::Result<()> {
+        self.capture
+            .borrow_mut()
+            .before(self.database, self.before, sql)
+    }
+
+    pub(crate) fn record(&self, sql: &str) -> rusqlite::Result<()> {
+        self.names.borrow_mut().record(sql)
     }
 
     /// Execute one app statement with parameters.
     pub fn execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
-        self.database.app_execute(sql, params)
+        self.statement(sql, || self.database.app_execute(sql, params))
     }
 
     /// Execute app statements without escaping the migration transaction.
     pub fn execute_batch(&self, sql: &str) -> rusqlite::Result<()> {
-        self.database.app_batch(sql)
+        self.database.app_batch_tracked(sql, Some(self))
     }
 
     /// Map one row from an app query.
@@ -116,7 +163,7 @@ impl<'connection> MigrationContext<'connection> {
         P: Params,
         F: FnOnce(&Row<'_>) -> rusqlite::Result<T>,
     {
-        self.database.app_query_row(sql, params, map)
+        self.statement(sql, || self.database.app_query_row(sql, params, map))
     }
 
     /// Map every result of an app query.
@@ -125,7 +172,7 @@ impl<'connection> MigrationContext<'connection> {
         P: Params,
         F: FnMut(&Row<'_>) -> rusqlite::Result<T>,
     {
-        self.database.app_query(sql, params, map)
+        self.statement(sql, || self.database.app_query(sql, params, map))
     }
 }
 

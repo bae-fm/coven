@@ -542,7 +542,9 @@ Two mechanisms order writes:
     - the value that lost, or every value of the removed row;
     - the write that set each value;
     - what replaced it: a write that hadn't read it, the rules that removed
-      the row, or a breaking change or reset its write hadn't read.
+      the row, or a breaking change or reset its write hadn't read;
+    - whether a breaking migration has retired its row from the merge
+      ([§17.1](#171-host-application)), keeping the loss as history.
   - `coven_lost_references`, one row per reference a lost value holds,
     naming its `coven_lost` row, its `coven_foreign_keys` row and the
     parent, so a lost reference reads as null or the default when its
@@ -5211,7 +5213,8 @@ pub struct CircleMemberInfo {
   changes the database, and the optional second changes writes made in the
   older version that still wait in `coven_uploads`.
 - Coven decides whether a migration is an addition or a breaking change by
-  comparing the schema before and after it.
+  comparing the schema before and after it. Statements that change rows of
+  synced tables also make it breaking (§17.1).
 - A converted change keeps the references its columns carried, renamed
   with them. Changing a reference's value, or adding a column that is a
   reference, fails the migration: the device can't know which generation

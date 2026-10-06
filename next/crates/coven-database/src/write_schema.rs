@@ -5,7 +5,7 @@ use crate::schema::{Schema, SchemaForeignKey, TableSchema};
 use crate::sql::identifier;
 use crate::sqlite::DatabaseConnection;
 use crate::{DbError, SyncedTable};
-use coven_merge::{ConstraintColumns, ForeignKey};
+use coven_merge::ForeignKey;
 use std::collections::BTreeMap;
 
 pub(crate) struct WriteSchema {
@@ -45,17 +45,7 @@ impl WriteSchema {
     }
 
     pub(crate) fn foreign_key(&self, table: &TableSchema, key: &SchemaForeignKey) -> ForeignKey {
-        let parent = self.table(&key.target);
-        ForeignKey::new(
-            ConstraintColumns(
-                key.columns
-                    .iter()
-                    .map(|c| crate::write_rows::column_name(table, c).to_owned())
-                    .collect(),
-            ),
-            parent.name.clone(),
-            ConstraintColumns(crate::write_rows::target_columns(parent, key)),
-        )
+        self.schema.foreign_key(table, key)
     }
 
     fn prepare(&self, db: &DatabaseConnection) -> Result<(), DbError> {

@@ -460,14 +460,8 @@ async fn migrations_change_present_values_without_a_second_copy() {
         .open()
         .await
         .unwrap();
-    let (state, oracle, _) = sample();
-    db.inspect_writer(|sql| {
-        sql.transaction(|sql| {
-            put_state(sql, &state, &oracle, &BTreeSet::new());
-            Ok(())
-        })
-        .unwrap()
-    });
+    crate::write::tests::sql(&db, "INSERT INTO notes VALUES('f47ac10b-58cc-4372-a567-0e02b2c3d479',1,'store','before',x'00ff2a')").await.unwrap();
+    let original = crate::write::tests::records(&db).remove(0);
     db.close().await.unwrap();
     let mut migrations = migrations();
     migrations.push(Migration::sql(
@@ -480,17 +474,31 @@ async fn migrations_change_present_values_without_a_second_copy() {
         .open()
         .await
         .unwrap();
-    let mut cells = state.cells().clone();
-    cells.get_mut("title").unwrap().value.value = Value::Text("migrated".into());
-    let expected = RowState::from_parts(
-        state.row().clone(),
-        state.generations().clone(),
-        cells,
-        state.lost().clone(),
-        &oracle,
-    )
-    .unwrap();
-    db.inspect_writer(|sql| assert_eq!(get_state(sql), (expected, BTreeSet::new())));
+    let migration = crate::write::tests::records(&db).pop().unwrap();
+    db.inspect_writer_schema(|sql, schema| {
+        let visible = crate::write_rows::AppView::after(sql, schema);
+        let merge = crate::merge_store::MergeStore::new(sql, &visible);
+        let state = merge.row(&original.parts[0].rows[0].row).unwrap().state;
+        assert_eq!(
+            state.cells()["title"].value.value,
+            Value::Text("migrated".into())
+        );
+        assert_eq!(state.cells()["title"].write, migration.header.position);
+        assert_eq!(state.cells()["body"].write, original.header.position);
+        assert_eq!(
+            state.cells()["body"].value.value,
+            Value::Blob(vec![0, 255, 42])
+        );
+        assert!(state.lost().is_empty());
+        let cells = sql
+            .query(
+                "SELECT name FROM pragma_table_info('coven_cells') ORDER BY cid",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(cells, ["column_id", "row_id", "write_id"]);
+    });
     db.close().await.unwrap();
 }
 #[tokio::test]

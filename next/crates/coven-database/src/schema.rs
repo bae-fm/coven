@@ -97,6 +97,24 @@ impl Schema {
         Ok(Self { objects, tables })
     }
 
+    pub(crate) fn foreign_key(
+        &self,
+        table: &TableSchema,
+        key: &SchemaForeignKey,
+    ) -> coven_merge::ForeignKey {
+        let parent = &self.tables[&key.target.to_ascii_lowercase()];
+        coven_merge::ForeignKey::new(
+            coven_merge::ConstraintColumns(
+                key.columns
+                    .iter()
+                    .map(|c| crate::write_rows::column_name(table, c).to_owned())
+                    .collect(),
+            ),
+            parent.name.clone(),
+            coven_merge::ConstraintColumns(crate::write_rows::target_columns(parent, key)),
+        )
+    }
+
     pub(crate) fn validate(
         &self,
         db: &DatabaseConnection,
@@ -397,7 +415,21 @@ impl Schema {
         Ok(())
     }
 
-    pub(crate) fn change_to(&self, next: &Self, declarations: &[SyncedTable]) -> MigrationChange {
+    pub(crate) fn changed_tables(&self, next: &Self) -> BTreeSet<String> {
+        self.objects
+            .iter()
+            .filter(|(key, object)| next.objects.get(*key) != Some(*object))
+            .chain(
+                next.objects
+                    .iter()
+                    .filter(|(key, object)| self.objects.get(*key) != Some(*object)),
+            )
+            .filter(|((kind, _), _)| kind != "view")
+            .map(|(_, object)| object.table.to_ascii_lowercase())
+            .collect()
+    }
+
+    pub(crate) fn change_to(&self, next: &Self, synced: &BTreeSet<String>) -> MigrationChange {
         // Final declarations cannot tell us whether a vanished table used to sync.
         if self
             .objects
@@ -406,10 +438,6 @@ impl Schema {
         {
             return MigrationChange::Breaking;
         }
-        let synced: BTreeSet<_> = declarations
-            .iter()
-            .map(|table| table.name.to_ascii_lowercase())
-            .collect();
         let mut change = MigrationChange::NoChange;
         for (identity, before) in &self.objects {
             let after = next.objects.get(identity);

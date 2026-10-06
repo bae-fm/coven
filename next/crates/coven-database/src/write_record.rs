@@ -1,7 +1,6 @@
 //! Session changes, audience moves, and one causal write record.
 use crate::merge_store::MergeStore;
 use crate::sqlite::DatabaseConnection;
-use crate::write_capture::CapturedRow;
 use crate::write_encoding::{audience_text, counter, decoded, timestamp};
 use crate::write_rows::{column_name, reference_error, row_id, AppKey, AppValues, AppView};
 use crate::write_schema::WriteSchema;
@@ -23,12 +22,12 @@ pub(crate) fn changes(
     before: &AppView<'_>,
     after: &AppView<'_>,
     stored: &MergeStore<'_>,
-    captured: &BTreeMap<AppKey, CapturedRow>,
+    changed: &BTreeMap<AppKey, BTreeSet<String>>,
     deleted: &BTreeSet<CircleId>,
 ) -> Result<BTreeMap<RowId, RowChange>, DbError> {
     let mut moved = BTreeMap::new();
-    let mut keys: BTreeSet<_> = captured.keys().cloned().collect();
-    for key in captured.keys() {
+    let mut keys: BTreeSet<_> = changed.keys().cloned().collect();
+    for key in changed.keys() {
         if let (Some(old), Some(new)) = (before.row(key)?, after.row(key)?) {
             if old.audience != new.audience {
                 moved.insert(row_id(key, &old), row_id(key, &new));
@@ -143,7 +142,7 @@ pub(crate) fn changes(
             }
         }
         if let Some(new) = new {
-            if !moving && !captured.contains_key(key) {
+            if !moving && !changed.contains_key(key) {
                 continue;
             }
             let row = row_id(key, &new);
@@ -152,7 +151,7 @@ pub(crate) fn changes(
                 let new_values: AppValues = new
                     .values
                     .iter()
-                    .filter(|(c, v)| old.values[*c] != **v)
+                    .filter(|(c, _)| changed[key].contains(*c))
                     .map(|(c, v)| (c.clone(), v.clone()))
                     .collect();
                 if new_values.is_empty() {
@@ -160,7 +159,7 @@ pub(crate) fn changes(
                 }
                 let old_values = new_values
                     .keys()
-                    .map(|c| (c.clone(), old.values[c].clone()))
+                    .map(|c| (c.clone(), old.values.get(c).cloned().unwrap_or(Value::Null)))
                     .collect();
                 (Operation::Update(columns(&new_values)), old_values)
             } else if generation % 2 == 1 {
@@ -388,7 +387,7 @@ fn removed_values(
     generation: u64,
 ) -> Result<AppValues, DbError> {
     let rows = database.query(
-        "SELECT value FROM coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4 AND column_id IS NULL AND replacement_kind='rules'",
+        "SELECT value FROM coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4 AND column_id IS NULL AND replacement_kind='rules' AND retired=0",
         params![row.table, row.key, audience_text(&row.audience), generation.to_be_bytes().as_slice()],
         |r| { let bytes: Vec<u8> = r.get(0)?; decoded(merge_fields::decode_columns(&bytes)) },
     )?;

@@ -69,9 +69,13 @@ async fn primary_key_rules_have_distinct_errors() {
 #[tokio::test]
 async fn opening_does_not_validate_existing_uuid_values() {
     let store = TestStore::new();
-    let schema =
-        "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); INSERT INTO notes VALUES('not a uuid')";
+    let schema = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY)";
     let db = store.schema(notes_tables(), schema).await.unwrap();
+    db.inspect_writer(|writer| {
+        writer
+            .batch("INSERT INTO notes VALUES('not a uuid')")
+            .unwrap();
+    });
     db.close().await.unwrap();
     store
         .schema(notes_tables(), schema)

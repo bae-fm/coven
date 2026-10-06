@@ -22,6 +22,19 @@ impl Drop for StatementProfile<'_> {
 }
 
 impl DatabaseConnection {
+    pub(crate) fn record_merge_load(&self, table: &str) {
+        *self
+            .merge_loads
+            .lock()
+            .unwrap()
+            .entry(table.into())
+            .or_default() += 1;
+    }
+
+    pub(crate) fn merge_loads(&self) -> BTreeMap<String, usize> {
+        self.merge_loads.lock().unwrap().clone()
+    }
+
     pub(crate) fn set_value_limit(&self, bytes: i32) -> i32 {
         self.connection
             .set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, bytes)
@@ -516,7 +529,7 @@ async fn audience_validation_looks_up_children_only_when_the_parent_moves() {
             let after=crate::write_rows::AppView::after(writer,schema);
             let stored=crate::merge_store::MergeStore::new(writer,&before);
             let profile=writer.profile_statements();
-            let changes=crate::write_record::changes(writer,schema,&before,&after,&stored,&captured,&BTreeSet::new());
+            let changes=crate::write_record::changes(writer,schema,&before,&after,&stored,&before.changes(&after, captured.keys().cloned()).unwrap(),&BTreeSet::new());
             drop(profile);
             let lookups=writer.fullscan_statements().into_iter().filter(|(sql,_)| sql.starts_with("SELECT DISTINCT r.table_name,r.key,r.audience FROM coven_references v")).count();
             if moving {
