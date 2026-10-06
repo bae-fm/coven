@@ -299,7 +299,9 @@ Two mechanisms order writes:
   coven names them by what they are:
   - a foreign key by its columns, in order, and the table and columns it
     points at, so two keys on one column into different tables stay two;
-  - a unique constraint by its columns, in order;
+  - a unique constraint by its terms, in order, each a column's name or an
+    expression's text as written, and by its WHERE clause when it is
+    partial, so `UNIQUE(title)` and `UNIQUE(lower(title))` stay two;
   - a CHECK by its name, or by its expression when it has none, as SQLite
     reports a failed one.
 - The app can't see a removed row, so it can insert the same shared key
@@ -724,7 +726,10 @@ Carol's tablet:
 - Coven refuses, checked when the database opens and after migrating:
   - an independent key that isn't a UUID;
   - a key SQLite picks itself, such as an integer rowid;
-  - a synced table with no primary key.
+  - a synced table with no primary key;
+  - a primary key column that allows NULL, since SQLite lets a non-integer
+    key column hold NULL unless it is declared NOT NULL, and a key with a
+    NULL in it names no row.
 - Either kind can span several columns.
   - E.g. `note_tags(note_id, tag_id)` is a shared key.
   - Ana and Ben, both offline, each tag note 42 "urgent", and make one row.
@@ -2303,6 +2308,8 @@ pub enum SchemaError {
     MissingTrigger { table: String, trigger: String },
     /// A synced table has no primary key (§8.5).
     NoPrimaryKey { table: String },
+    /// A primary key column allows NULL (§8.5).
+    NullableKey { table: String, column: String },
     /// SQLite chooses the primary key itself (§8.5).
     GeneratedPrimaryKey { table: String },
     /// An independent key does not contain a UUID (§8.5).
@@ -3094,7 +3101,7 @@ pub enum RemovalRule {
     /// The same key is present in another audience, whose row is shown
     /// (§14.2).
     OtherAudience,
-    Unique { columns: Vec<String> },
+    Unique { terms: Vec<String>, partial: Option<String> },
 }
 
 /// A handle that only reads, opened with `open_read_only`.
