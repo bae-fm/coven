@@ -3607,6 +3607,9 @@ pub enum DropReason {
     NoAdminLeft,
     /// Its author's role didn't allow it, in the member list they had read.
     NotAllowed,
+    /// A removal's replaced circle keys didn't name exactly the circles the
+    /// removed member shared with others, in its author's view (§13).
+    WrongCircleKeys,
 }
 
 /// What a dropped store log entry would have changed, for its author to see (§9).
