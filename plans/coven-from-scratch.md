@@ -2,7 +2,7 @@
 
 ## Contents
 
-- [1. What coven is](#1-what-coven-is)
+- [1. Overview](#1-overview)
 - [2. Threat model](#2-threat-model)
 - [3. Guarantees](#3-guarantees)
 - [4. Storage providers and access](#4-storage-providers-and-access)
@@ -86,7 +86,7 @@
 - [Appendix C. Proof of the store log](coven-storelog-proof.md), in its own file
 - [Appendix D. Storage format](coven-format.md), in its own file
 
-## 1. What coven is
+## 1. Overview
 
 - Sync for a small intimate group: a person's own devices, or a household.
 - The app's data is SQLite. The app keeps its schema and writes ordinary SQL.
