@@ -186,7 +186,9 @@ Two mechanisms order writes:
 - Every install, and every restored copy of a store, gets a new device id.
 - The stamping rule:
   - each device keeps the latest timestamp it has seen, from its own writes
-    and every write it downloads, saved on disk;
+    and every write it applies, saved on disk;
+  - a write that waits, such as one stamped too far ahead, isn't seen yet,
+    so a device with a wrong clock can't drag the others' stamps forward;
   - to stamp a new write:
     - if its wall clock is past that, it uses the wall clock, counter 0;
     - otherwise it uses that latest time, counter raised by one;
@@ -375,6 +377,13 @@ Two mechanisms order writes:
     - the write that set each value;
     - what replaced it: a write that hadn't read it, the rules that removed
       the row, or a breaking change or reset its write hadn't read.
+  - `coven_lost_references`, one row per reference a lost value holds,
+    naming its `coven_lost` row, its `coven_foreign_keys` row and the
+    parent, so a lost reference reads as null or the default when its
+    parent goes ([§8.4](#84-foreign-keys)).
+- The store log's effects that the database applies are kept with it:
+  `coven_deleted_circles` names each circle whose deletion it has applied
+  ([§14.7](#147-deleting-a-circle)).
 - Note 42 on Ben's phone, after Ana's write 4 and its own write 9:
 
   ```
@@ -1945,9 +1954,11 @@ Carol's tablet:
   - each device posts its fingerprints with its positions ([§6](#6-syncing-writes));
   - two devices that have applied exactly the same writes must have the
     same fingerprints;
-  - so whenever two devices are at the same positions, as they usually are
-    once a store is quiet, each compares, and a mismatch means a bug made
-    one of them wrong.
+  - so whenever two devices are at the same positions and on the same
+    schema version, as they usually are once a store is quiet, each
+    compares, and a mismatch means a bug made one of them wrong;
+  - on different versions they can't compare: an added column exists on
+    one device only.
 - The app sees each of these, and which devices are involved.
 
 ### 19.2 Recovering one device
@@ -1973,7 +1984,9 @@ Carol's tablet:
   2. record in the store log that the store, or the circle, is reset to
      that snapshot ([§9](#9-members-and-roles)).
 - Every other device reloads from that snapshot when it sees the entry.
-- A write the reset snapshot doesn't cover is then judged by what it had
+- A write that had read everything the snapshot includes came after the
+  reset, and applies like any write.
+- Any other write the reset snapshot doesn't cover is judged by what it had
   read:
   - if it had read a write the snapshot doesn't include, its cause is gone,
     so it is recorded as lost on every device, and never applied;
