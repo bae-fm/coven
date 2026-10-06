@@ -255,7 +255,7 @@ fn the_clock_and_the_id_source_own_their_reads() {
 }
 
 #[test]
-fn files_are_rejected_outside_the_file_writes_and_the_file_cache() {
+fn files_are_rejected_outside_foundations_file_boundary() {
     assert_eq!(
         kinds(
             "crates/coven-sync/src/leak.rs",
@@ -267,17 +267,11 @@ fn files_are_rejected_outside_the_file_writes_and_the_file_cache() {
         ),
         BTreeSet::from(["filesystem"]),
     );
-    let homes = [
-        RustFile::fixture(
-            "crates/coven-foundation/src/files/atomic.rs",
-            "use std::fs::File;",
-        ),
-        RustFile::fixture(
-            "crates/coven-sync/src/file_cache/evict.rs",
-            "use tokio::fs;",
-        ),
-    ];
-    assert!(find_capability_boundary_violations(&homes, &POLICY).is_empty());
+    assert!(kinds(
+        "crates/coven-foundation/src/files/atomic_file.rs",
+        "use std::fs::File;"
+    )
+    .is_empty());
 }
 
 #[test]

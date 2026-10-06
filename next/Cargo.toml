@@ -3,7 +3,7 @@
 # ships, unchanged.
 [workspace]
 resolver = "2"
-members = ["crates/coven-foundation", "crates/coven-crypto", "crates/coven-merge", "crates/coven-format", "crates/coven-database", "crates/coven-storage", "tools/owner-construction-check"]
+members = ["crates/coven-foundation", "crates/coven-crypto", "crates/coven-merge", "crates/coven-format", "crates/coven-database", "crates/coven-storage", "crates/coven-sync", "tools/owner-construction-check"]
 
 [workspace.package]
 edition = "2021"
@@ -17,6 +17,7 @@ coven-foundation = { path = "crates/coven-foundation" }
 coven-crypto = { path = "crates/coven-crypto" }
 coven-merge = { path = "crates/coven-merge" }
 coven-format = { path = "crates/coven-format" }
+coven-database = { path = "crates/coven-database" }
 rusqlite = "0.40.2"
 sqlite3-parser = "0.17.0"
 async-trait = "0.1.92"

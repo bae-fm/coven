@@ -1040,6 +1040,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "coven-sync"
+version = "0.1.0"
+dependencies = [
+ "coven-crypto",
+ "coven-database",
+ "coven-format",
+ "coven-foundation",
+ "coven-merge",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "cpubits"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

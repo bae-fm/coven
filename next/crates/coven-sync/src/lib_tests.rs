@@ -1,0 +1,273 @@
+//! Adapter and generated inputs for the independent Lean `resolve` executable.
+
+use std::{
+    collections::BTreeSet,
+    io::Write,
+    process::{Command, Stdio},
+};
+
+use coven_crypto::MemberId;
+use coven_database::{EntryOutcome, StoreLogReplay, StoreLogState};
+use coven_format::store_log::{CircleKeyId, MemberRole, StoreChange};
+use coven_foundation::id_source::{CircleId, DeviceId};
+use coven_merge::Audience;
+use serde_json::{json, Value};
+
+use crate::{effects::tests::snapshot, replay, replay::tests::*};
+
+struct Generator(u64);
+
+impl Generator {
+    fn pick(&mut self, n: usize) -> usize {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        (self.0 % n as u64) as usize
+    }
+
+    fn history(&mut self) -> History {
+        let mut h = household(MemberRole::Admin, MemberRole::Admin);
+        h.all(0, 0, make(0, "Gifts"));
+        h.all(0, 0, join(0, 1));
+        let size = 8 + self.pick(9);
+        while h.entries.len() < size {
+            let author = self.pick(5) as u8;
+            let device = self.pick(8) as u64;
+            let mut past = BTreeSet::from([0]);
+            for (i, entry) in h.entries.iter().enumerate() {
+                if entry.position.device == DeviceId(device) || self.pick(4) == 0 {
+                    past.insert(i);
+                }
+            }
+            for i in (0..h.entries.len()).rev() {
+                if past.contains(&i) {
+                    for (j, entry) in h.entries[..i].iter().enumerate() {
+                        if crate::replay::had_read(&h.entries[i], entry) {
+                            past.insert(j);
+                        }
+                    }
+                }
+            }
+            let view = replay(
+                &past
+                    .iter()
+                    .map(|&i| h.entries[i].clone())
+                    .collect::<Vec<_>>(),
+            )
+            .state;
+            let change = self.action(&view);
+            h.push(
+                author,
+                device,
+                &past.into_iter().collect::<Vec<_>>(),
+                change,
+            );
+        }
+        h
+    }
+
+    fn action(&mut self, view: &StoreLogState) -> StoreChange {
+        let m = self.pick(5) as u8;
+        let c = self.pick(3) as u64;
+        let role = if self.pick(2) == 0 {
+            MemberRole::Admin
+        } else {
+            MemberRole::Member
+        };
+        match self.pick(13) {
+            0 => add(m, role),
+            1 => StoreChange::RemoveMember {
+                member: member(m),
+                key: key(self.0),
+                circle_keys: view
+                    .circles
+                    .iter()
+                    .filter_map(|(id, c)| {
+                        (!c.deleted && c.members.len() > 1 && c.members.contains(&member(m)))
+                            .then_some(CircleKeyId {
+                                circle: *id,
+                                key: key(self.0),
+                            })
+                    })
+                    .collect(),
+            },
+            2 => crate::replay::tests::role(m, role),
+            3 => device(self.pick(9) as u64),
+            4 => {
+                let devices: Vec<_> = view
+                    .devices
+                    .iter()
+                    .filter_map(|(id, d)| (!d.removed).then_some(*id))
+                    .collect();
+                if devices.is_empty() {
+                    device(self.pick(9) as u64)
+                } else {
+                    StoreChange::RemoveDevice {
+                        device: devices[self.pick(devices.len())],
+                    }
+                }
+            }
+            5 => make(c, &format!("Circle {}", self.pick(3))),
+            6 => rename(c, &format!("Circle {}", self.pick(3))),
+            7 => delete(c),
+            8 => join(c, m),
+            9 => leave(c, m),
+            10 => StoreChange::RaiseSchema {
+                version: self.pick(3) as u32 + 1,
+                snapshot: snapshot(self.pick(5) as u64 + 1, Audience::Store),
+            },
+            11 => StoreChange::RaiseFormat {
+                version: self.pick(3) as u16 + 1,
+                snapshot: snapshot(self.pick(5) as u64 + 1, Audience::Store),
+            },
+            12 => StoreChange::Reset {
+                snapshot: snapshot(
+                    self.pick(5) as u64 + 1,
+                    if self.pick(4) == 0 {
+                        Audience::Store
+                    } else {
+                        Audience::Circle(circle(c))
+                    },
+                ),
+            },
+            _ => unreachable!(),
+        }
+    }
+}
+
+fn member_number(id: &MemberId) -> u64 {
+    (0..5)
+        .find(|&i| member(i) == *id)
+        .expect("generated member") as u64
+}
+fn circle_number(id: CircleId) -> u64 {
+    u64::try_from(id.0.as_u128()).unwrap()
+}
+fn audience_number(a: &Audience) -> u64 {
+    match a {
+        Audience::Store => 0,
+        Audience::Circle(id) => circle_number(*id) + 1,
+    }
+}
+fn role_number(role: MemberRole) -> u64 {
+    match role {
+        MemberRole::Admin => 0,
+        MemberRole::Member => 1,
+    }
+}
+
+fn input(h: &History) -> Value {
+    let entries: Vec<_> = h.entries.iter().enumerate().map(|(i,entry)| {
+        let past: Vec<_> = h.entries[..i].iter().enumerate().filter_map(|(j,e)| crate::replay::had_read(entry,e).then_some(j)).collect();
+        let action = match &entry.change {
+            StoreChange::CreateStore { .. } => json!({"kind":0}),
+            StoreChange::AddMember { keys, role } => json!({"kind":1,"member":member_number(&keys.signing),"role":role_number(*role)}),
+            StoreChange::RemoveMember { member, circle_keys, .. } => json!({"kind":2,"member":member_number(member),"circles":circle_keys.iter().map(|k| circle_number(k.circle)).collect::<Vec<_>>()}),
+            StoreChange::ChangeRole { member, role } => json!({"kind":3,"member":member_number(member),"role":role_number(*role)}),
+            StoreChange::AddDevice { device, .. } => json!({"kind":4,"member":member_number(&entry.author),"device":device.0}),
+            StoreChange::RemoveDevice { device } => {
+                let view = replay(&past.iter().map(|&i| h.entries[i].clone()).collect::<Vec<_>>()).state;
+                let owner = &view.devices[device];
+                assert!(!owner.removed, "generator may remove only an observed device");
+                json!({"kind":5,"member":member_number(&owner.member),"device":device.0})
+            }
+            StoreChange::CreateCircle { circle, name, .. } => json!({"kind":6,"circle":circle_number(*circle),"name":name}),
+            StoreChange::RenameCircle { circle, name } => json!({"kind":7,"circle":circle_number(*circle),"name":name}),
+            StoreChange::DeleteCircle { circle } => json!({"kind":8,"circle":circle_number(*circle)}),
+            StoreChange::AddCircleMember { circle, member } => json!({"kind":9,"circle":circle_number(*circle),"member":member_number(member)}),
+            StoreChange::RemoveCircleMember { circle, member, .. } => json!({"kind":10,"circle":circle_number(*circle),"member":member_number(member)}),
+            StoreChange::RaiseSchema { version, snapshot } => json!({"kind":11,"version":version,"snapshot":snapshot.number}),
+            StoreChange::RaiseFormat { version, snapshot } => json!({"kind":12,"version":version,"snapshot":snapshot.number}),
+            StoreChange::Reset { snapshot } => json!({"kind":13,"audience":audience_number(&snapshot.audience),"snapshot":snapshot.number}),
+        };
+        json!({"author":member_number(&entry.author),"device":entry.position.device.0,"past":past,"action":action})
+    }).collect();
+    json!({"entries":entries})
+}
+
+fn projected(h: &History, replay: &StoreLogReplay) -> Value {
+    let state = &replay.state;
+    let mut members: Vec<_> = state
+        .members
+        .iter()
+        .filter_map(|(id, m)| (!m.removed).then_some([member_number(id), role_number(m.role)]))
+        .collect();
+    members.sort();
+    let devices: Vec<_> = state
+        .devices
+        .iter()
+        .filter_map(|(id, d)| (!d.removed).then_some([id.0, member_number(&d.member)]))
+        .collect();
+    let circles: Vec<_> = state
+        .circles
+        .iter()
+        .filter(|(_, c)| !c.deleted)
+        .map(|(id, c)| {
+            let mut members: Vec<_> = c.members.iter().map(member_number).collect();
+            members.sort();
+            json!([circle_number(*id), c.name, members])
+        })
+        .collect();
+    let index = |entry| h.entries.iter().position(|e| e.position == entry).unwrap();
+    let mut versions = vec![];
+    if let Some(v) = &state.schema {
+        versions.push(json!([0, v.number, v.snapshot.number, index(v.entry)]));
+    }
+    if let Some(v) = &state.format {
+        versions.push(json!([1, v.number, v.snapshot.number, index(v.entry)]));
+    }
+    let resets: Vec<_> = state
+        .resets
+        .iter()
+        .map(|(a, s)| [audience_number(a), s.number])
+        .collect();
+    let kept: Vec<_> = h
+        .entries
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| (replay.entries[&e.position] == EntryOutcome::Kept).then_some(i))
+        .collect();
+    json!({"created":state.store.is_some(),"members":members,"devices":devices,"circles":circles,"versions":versions,"resets":resets,"kept":kept,"dropped":h.drops(replay)})
+}
+
+#[test]
+#[ignore = "requires COVEN_STORELOG_LEAN, supplied by next/scripts/check.sh"]
+fn lean_differential() {
+    let runner = std::env::var_os("COVEN_STORELOG_LEAN")
+        .expect("COVEN_STORELOG_LEAN must name storelogRunner");
+    let histories: Vec<_> = (1..=2048).map(|seed| Generator(seed).history()).collect();
+    let inputs: Vec<_> = histories.iter().map(input).collect();
+    let input = json!({"histories":inputs});
+    let mut child = Command::new(runner)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start storelogRunner");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "Lean runner failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual: Vec<Value> = serde_json::from_slice(&output.stdout).expect("Lean result array");
+    assert_eq!(actual.len(), histories.len());
+    for (index, (history, actual)) in histories.iter().zip(actual).enumerate() {
+        let result = replay(&history.entries);
+        assert_eq!(
+            actual,
+            projected(history, &result),
+            "seed {}, input {}",
+            index + 1,
+            inputs[index]
+        );
+        let reversed: Vec<_> = history.entries.iter().rev().cloned().collect();
+        assert_eq!(replay(&reversed), result, "seed {}", index + 1);
+    }
+}

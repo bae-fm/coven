@@ -4795,6 +4795,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use coven_crypto::SealingPublicKey;
 use coven_format::store_log::{SnapshotId, StoreLogEntry};
 
+/// Pure coven-sync replay of the checked, causally closed applied-entry set (§9).
+/// Input order has no effect. Authority and circle-key failures are dropped marks.
+pub fn replay(entries: &[StoreLogEntry]) -> StoreLogReplay;
+
 impl Database {
     /// Commit the entry, every kept/dropped mark, and the whole replay result.
     /// Circle deletions and reversals recompute rows in this transaction too.

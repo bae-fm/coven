@@ -16,6 +16,7 @@ pub(crate) const POLICY: Policy = Policy {
         "coven-format",
         "coven-database",
         "coven-storage",
+        "coven-sync",
     ],
     separated_crates: &[("coven-database", "coven-storage")],
     capabilities: CAPABILITIES,
@@ -346,10 +347,7 @@ const CAPABILITIES: Capabilities = Capabilities {
     },
     files: Capability {
         name: "files on disk",
-        homes: &[
-            "crates/coven-foundation/src/files/",
-            "crates/coven-sync/src/file_cache/",
-        ],
+        homes: &["crates/coven-foundation/src/files/"],
         gates: &[Gate {
             kind: "filesystem",
             crates: &["tempfile"],

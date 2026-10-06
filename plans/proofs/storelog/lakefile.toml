@@ -1,5 +1,9 @@
 name = "covenStorelog"
-defaultTargets = ["CovenStorelog"]
+defaultTargets = ["CovenStorelog", "storelogRunner"]
 
 [[lean_lib]]
 name = "CovenStorelog"
+
+[[lean_exe]]
+name = "storelogRunner"
+root = "StorelogRunner"

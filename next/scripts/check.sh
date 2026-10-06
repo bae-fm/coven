@@ -97,5 +97,12 @@ if [ -f "$runner.exe" ]; then
 fi
 COVEN_MERGE_LEAN="$runner" cargo test -p coven-merge --all-features lean_differential -- --ignored
 
+step "Rust / Lean differential store-log test"
+runner="$(cd ../plans/proofs/storelog && pwd)/.lake/build/bin/storelogRunner"
+if [ -f "$runner.exe" ]; then
+    runner="$runner.exe"
+fi
+COVEN_STORELOG_LEAN="$runner" cargo test -p coven-sync --all-features lean_differential -- --ignored
+
 echo ""
 echo "✅ all checks passed"
