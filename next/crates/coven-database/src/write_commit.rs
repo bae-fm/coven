@@ -130,9 +130,7 @@ pub(crate) fn persist(
 
 pub(crate) fn queue(database: &DatabaseConnection, record: &WriteRecord) -> Result<(), DbError> {
     let encoder = encoded(WriteEncoder::new(record))?;
-    let length = database.check_value_length("write plaintext", encoder.plaintext_length())?;
-    let mut bytes = vec![0; length];
-    encoded(encoder.encode_plaintext(&mut bytes))?;
+    let bytes = plaintext(database, encoder)?;
     database.internal_execute(
         "INSERT INTO coven_uploads(device,number,record) VALUES(?1,?2,?3)",
         params![
@@ -142,6 +140,16 @@ pub(crate) fn queue(database: &DatabaseConnection, record: &WriteRecord) -> Resu
         ],
     )?;
     Ok(())
+}
+
+pub(crate) fn plaintext(
+    database: &DatabaseConnection,
+    encoder: WriteEncoder<'_>,
+) -> Result<Vec<u8>, DbError> {
+    let length = database.check_value_length("write plaintext", encoder.plaintext_length())?;
+    let mut bytes = vec![0; length];
+    encoded(encoder.encode_plaintext(&mut bytes))?;
+    Ok(bytes)
 }
 
 fn column(database: &DatabaseConnection, table: &str, column: &str) -> Result<i64, DbError> {

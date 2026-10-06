@@ -39,6 +39,9 @@ pub struct MigrationOutcome {
     pub change: MigrationChange,
 }
 
+pub(crate) type WriteConversion =
+    dyn Fn(&mut crate::RowChange) -> Result<(), DbError> + Send + Sync;
+
 type MigrationBody = dyn Fn(&MigrationContext<'_>) -> Result<(), DbError> + Send + Sync;
 
 /// One numbered change to the app's database.
@@ -46,6 +49,7 @@ pub struct Migration {
     pub(crate) version: u32,
     pub(crate) name: &'static str,
     body: Box<MigrationBody>,
+    conversion: Option<Box<WriteConversion>>,
 }
 
 impl Migration {
@@ -66,7 +70,35 @@ impl Migration {
             version,
             name,
             body: Box::new(f),
+            conversion: None,
         }
+    }
+
+    /// Convert each row change of an unattempted waiting write to this version.
+    /// Without a converter, a breaking migration marks those writes lost (§17.1).
+    pub fn writes<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&mut crate::RowChange) -> Result<(), DbError> + Send + Sync + 'static,
+    {
+        self.conversion = Some(Box::new(f));
+        self
+    }
+
+    pub(crate) fn convert_waiting(
+        &self,
+        database: &DatabaseConnection,
+        before: &crate::schema::Schema,
+        after: &crate::schema::Schema,
+        names: &crate::migration_names::MigrationMatch,
+    ) -> Result<(), DbError> {
+        crate::migration_writes::convert(
+            database,
+            before,
+            after,
+            names,
+            self.version,
+            self.conversion.as_deref(),
+        )
     }
 
     pub(crate) fn apply(&self, context: &MigrationContext<'_>) -> Result<(), DbError> {

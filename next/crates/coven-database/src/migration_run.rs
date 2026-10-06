@@ -84,6 +84,18 @@ pub(crate) fn run<'a>(
         after = &step.before;
     }
     outcomes.reverse();
+    for (index, step) in steps.iter().enumerate() {
+        if outcomes[index].change == MigrationChange::Breaking {
+            *at = step.migration;
+            let after = match steps.get(index + 1) {
+                Some(next) => &next.before,
+                None => &final_schema,
+            };
+            step.migration
+                .convert_waiting(database, &step.before, after, &step.effects.names)?;
+        }
+    }
+    *at = steps.last().expect("pending migrations").migration;
     database.batch(&format!("PRAGMA user_version = {}", supported as i32))?;
     if let Some(first) = outcomes
         .iter()

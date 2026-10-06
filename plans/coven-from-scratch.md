@@ -2829,6 +2829,12 @@ pub enum DbError {
     /// A downloaded write fails the merge's checks, such as a timestamp no
     /// later than a write it had read; it is never applied (§19.1).
     InvalidWrite { write: WriteId, error: MergeError },
+    /// A waiting record or its conversion violates the write format (§20.13).
+    WriteFormat(coven_format::Error),
+    /// A conversion changed or introduced a reference whose generation it cannot know (§20.13).
+    MigrationReference { table: String, column: String },
+    /// A converted row does not fit its operation or the migration's schema (§20.13).
+    MigrationConversion(&'static str),
     /// A write changes a file declared write-once (§20.2).
     FileWriteOnce { table: String, key: RowKey },
     /// A file reference no longer names the row's file (§16.3).
@@ -5212,6 +5218,11 @@ pub struct CircleMemberInfo {
 - A migration has two parts ([§17.1](#171-host-application)): the first
   changes the database, and the optional second changes writes made in the
   older version that still wait in `coven_uploads`.
+  - Each breaking migration converts them in version order, keeping the
+    device, write number, timestamp and causal positions. Tried uploads keep
+    their exact bytes. Additions run no conversion.
+  - Conversion changes only the waiting records. Their effects are already
+    in the device's merge records, carried through the migration by §17.1.
 - Coven decides whether a migration is an addition or a breaking change by
   comparing the schema before and after it. Statements that change rows of
   synced tables also make it breaking (§17.1).

@@ -19,11 +19,13 @@ mod live_query;
 mod lost;
 mod merge_store;
 mod migration;
+mod migration_change;
 mod migration_names;
 mod migration_references;
 mod migration_run;
 mod migration_snapshot;
 mod migration_state;
+mod migration_writes;
 mod observation;
 mod read;
 mod removal;
@@ -63,6 +65,7 @@ pub use lost::{Lost, LostCell, LostValue, RemovalRule, Replacement};
 pub use migration::{
     CovenMigrationPolicy, Migration, MigrationChange, MigrationContext, MigrationOutcome,
 };
+pub use migration_change::{ChangeOp, ColumnChange, RowChange};
 pub use read::{Read, SqlReadContext};
 pub use row_key::RowKey;
 pub use write::SqlContext;

@@ -127,6 +127,20 @@ pub enum DbError {
         #[source]
         error: coven_merge::MergeError,
     },
+    /// A waiting record or its conversion violates the write format (§20.13).
+    #[error(transparent)]
+    WriteFormat(coven_format::Error),
+    /// A conversion changed or introduced a reference whose generation it cannot know (§20.13).
+    #[error("conversion cannot change reference {table}.{column}")]
+    MigrationReference {
+        /// The referencing table in the converted change.
+        table: String,
+        /// The referencing column in the converted change.
+        column: String,
+    },
+    /// A converted row does not fit its operation or the migration's schema (§20.13).
+    #[error("invalid migration conversion: {0}")]
+    MigrationConversion(&'static str),
     /// Closing failed for these connections, after every one was tried (§20.1).
     #[error("closing database connections failed: {failures:?}")]
     Closing {
@@ -142,6 +156,23 @@ pub enum DbError {
         #[source]
         rollback: rusqlite::Error,
     },
+}
+
+impl From<coven_format::Error> for DbError {
+    fn from(error: coven_format::Error) -> Self {
+        match error {
+            coven_format::Error::Limit {
+                field,
+                actual,
+                maximum,
+            } => Self::TooLarge {
+                field,
+                actual: actual as u64,
+                maximum: maximum as u64,
+            },
+            error => Self::WriteFormat(error),
+        }
+    }
 }
 
 impl From<rusqlite::Error> for DbError {
