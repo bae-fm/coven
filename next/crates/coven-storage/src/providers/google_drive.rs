@@ -366,9 +366,8 @@ fn can_delete(item: &Value) -> Result<bool, StorageError> {
     let allowed = item["capabilities"]["canDelete"]
         .as_bool()
         .ok_or(StorageError::Protocol("missing Drive deletion right"))?;
-    // Shared-drive files have no individual owner. The store's deletion policy
-    // never turns a broader provider permission into authority over another
-    // uploader's objects.
+    // Account ownership permits permanent deletion; otherwise the account can
+    // only unlink the shared object. Sync chooses the device that calls delete.
     Ok(allowed && item["ownedByMe"].as_bool() == Some(true))
 }
 fn escape(value: &str) -> String {
@@ -464,32 +463,30 @@ impl Storage for GoogleDriveStorage {
         Ok(paths.into_values().map(|(_, object)| object).collect())
     }
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
-        let Some(item) = self.find(path).await? else {
-            tracing::debug!("Drive object already absent");
-            return Ok(());
-        };
-        let id = http::string(&item, "id")?;
-        let response = if can_delete(&item)? {
-            self.send(Method::DELETE, &self.url(&["files", id], &[])?, Body::Empty)
+        for item in self.copies(path).await? {
+            let id = http::string(&item, "id")?;
+            let response = if can_delete(&item)? {
+                self.send(Method::DELETE, &self.url(&["files", id], &[])?, Body::Empty)
+                    .await?
+            } else if item["capabilities"]["canRemoveMyDriveParent"].as_bool() == Some(true) {
+                self.send(
+                    Method::PATCH,
+                    &self.url(&["files", id], &[("removeParents", &self.folder)])?,
+                    Body::Json(json!({})),
+                )
                 .await?
-        } else if item["capabilities"]["canRemoveMyDriveParent"].as_bool() == Some(true) {
-            self.send(
-                Method::PATCH,
-                &self.url(&["files", id], &[("removeParents", &self.folder)])?,
-                Body::Json(json!({})),
-            )
-            .await?
-        } else {
-            return Err(StorageError::Provider {
-                provider: PROVIDER,
-                failure: StorageFailure::PermissionDenied,
-                source: Box::new(StorageError::Protocol(
-                    "Drive account cannot delete or remove this file",
-                )),
-            });
-        };
-        if response.status().as_u16() != 404 {
-            http::checked(PROVIDER, response).await?;
+            } else {
+                return Err(StorageError::Provider {
+                    provider: PROVIDER,
+                    failure: StorageFailure::PermissionDenied,
+                    source: Box::new(StorageError::Protocol(
+                        "Drive account cannot delete or remove this file",
+                    )),
+                });
+            };
+            if response.status().as_u16() != 404 {
+                http::checked(PROVIDER, response).await?;
+            }
         }
         Ok(())
     }

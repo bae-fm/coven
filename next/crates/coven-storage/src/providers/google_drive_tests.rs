@@ -695,3 +695,36 @@ async fn listing_uses_the_same_copy_as_reads_and_refuses_missing_metadata() {
         state.lock().unwrap().files.get_mut("a-later").unwrap().0[field] = old;
     }
 }
+
+#[tokio::test]
+async fn deleting_a_path_removes_its_copies_and_preserves_unlinked_bytes() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let path = ObjectPath::store_log(DeviceId(31), std::num::NonZeroU64::MIN);
+    {
+        let mut remote = state.lock().unwrap();
+        duplicate(&mut remote, &path, "first", "2026-10-06T00:00:00Z", 31);
+        duplicate(&mut remote, &path, "later", "2026-10-06T00:00:01Z", 31);
+        duplicate(
+            &mut remote,
+            &path,
+            "other-account",
+            "2026-10-06T00:00:02Z",
+            32,
+        );
+        remote.files.get_mut("other-account").unwrap().0["ownedByMe"] = json!(false);
+    }
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    state.lock().unwrap().lose_delete_reply = true;
+    assert_eq!(
+        storage.delete(&path).await.unwrap_err().failure(),
+        StorageFailure::Network
+    );
+    storage.delete(&path).await.unwrap();
+    assert!(storage.list(&ObjectPrefix::all()).await.unwrap().is_empty());
+    storage.delete(&path).await.unwrap();
+    let remote = state.lock().unwrap();
+    assert_eq!(remote.files.len(), 1);
+    assert_eq!(remote.files["other-account"].1, b"data");
+    assert_eq!(remote.files["other-account"].0["parents"], json!([]));
+}
