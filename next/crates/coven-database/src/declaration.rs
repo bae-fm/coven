@@ -83,7 +83,8 @@ impl SyncedTable {
         self
     }
 
-    /// Declare the file carried by each row.
+    /// Declare the file carried by each row. Opening and migrating check all
+    /// four column names against this synced table's actual schema.
     pub fn carries_files(mut self, declaration: FileDecl) -> Self {
         self.files = Some(declaration);
         self
@@ -170,13 +171,13 @@ impl FileDecl {
         self
     }
 
-    /// The content-hash column; defaults to `hash`.
+    /// The content-hash column, written by coven; defaults to `hash`.
     pub fn with_hash_column(mut self, column: impl Into<String>) -> Self {
         self.hash = column.into();
         self
     }
 
-    /// The location column; defaults to `location`.
+    /// The location column, written by coven; defaults to `location`.
     pub fn with_location_column(mut self, column: impl Into<String>) -> Self {
         self.location = column.into();
         self
@@ -192,3 +193,7 @@ impl FileDecl {
         [&self.id, &self.size, &self.hash, &self.location]
     }
 }
+
+#[cfg(test)]
+#[path = "declaration_tests.rs"]
+mod tests;
