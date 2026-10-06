@@ -1117,6 +1117,8 @@ Carol's tablet:
   - only admins add and remove members, and change roles;
   - each member adds and removes their own devices, with their own key, and
     admins can remove any device;
+  - a removal names a device its author had read the addition of, so it
+    knows whose device it is;
   - the store always has at least one admin.
 - Every device that has the same entries ends with the same member list,
   whatever order they arrived in.
@@ -1210,7 +1212,7 @@ Carol's tablet:
 
   ```
   Ana adds Dan               Ben makes Carol an admin   both: no conflict
-  Ben adds his new phone     Ana removes it             the removal
+  Ben adds his new phone     Ana removes Ben            the removal
   Ana makes Ben an admin     Carol makes him a member   member: an admin
                                                         grant loses
   Ana removes Ben            Ben removes Ana            the earlier
