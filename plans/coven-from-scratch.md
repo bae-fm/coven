@@ -237,9 +237,11 @@
     its size.
   - A device downloads and checks it a chunk at a time, and applies it in
     one transaction once every chunk and the signature check out.
-  - Its record waits in `coven_uploads` as one value, so a write's limit
-    is SQLite's largest value, 1 GB; a bigger one fails at commit with
-    `DbError::TooLarge`.
+  - Its record waits in `coven_uploads` as one value, and its sealed
+    bytes, once fixed, as one value in a row of their own, so a write's
+    limit is SQLite's largest value, 1 GB: a write whose sealed bytes
+    would be bigger, which its plaintext's size decides, fails at commit
+    with `DbError::TooLarge`.
   - E.g. Ana imports 50,000 notes in one transaction: one write, in many
     chunks.
   - It is named `devices/<device>/<n>`, created once and never changed.
