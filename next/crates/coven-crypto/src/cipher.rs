@@ -6,9 +6,12 @@ use chacha20poly1305::{
     KeyInit, XChaCha20Poly1305,
 };
 
+/// Bytes added to a file chunk: its authentication tag, without a stored nonce.
+pub const FILE_CHUNK_TAG_LEN: usize = <XChaCha20Poly1305 as AeadCore>::TagSize::USIZE;
+
 /// Bytes added to each sealed object chunk: its stored nonce and authentication tag.
-pub const SEALED_OBJECT_CHUNK_OVERHEAD: usize = <XChaCha20Poly1305 as AeadCore>::NonceSize::USIZE
-    + <XChaCha20Poly1305 as AeadCore>::TagSize::USIZE;
+pub const SEALED_OBJECT_CHUNK_OVERHEAD: usize =
+    <XChaCha20Poly1305 as AeadCore>::NonceSize::USIZE + FILE_CHUNK_TAG_LEN;
 
 pub(crate) fn storage_path(path: &str) -> &[u8] {
     assert!(!path.is_empty(), "storage paths must be nonempty");

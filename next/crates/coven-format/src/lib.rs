@@ -1,6 +1,7 @@
 //! Versioned plaintext frames and streaming sealed-object layouts (§21.1).
 //!
-//! No I/O, clock, randomness, sealing or signing occurs here. Plaintext frames
+//! No I/O, clock, randomness or signing occurs here. File chunks compose
+//! crypto with validated headers and ranges. Plaintext frames
 //! are bounded; writes and snapshots stream without an object-size bound.
 //! Appendix D of `plans/coven-format.md` specifies stored bytes.
 //! `FORMAT.md` describes the plaintext frame codecs.
@@ -8,6 +9,7 @@
 pub mod chunks;
 pub mod codes;
 pub mod error;
+pub mod file;
 pub mod key;
 pub mod merge_fields;
 mod merge_wire;
@@ -31,7 +33,7 @@ pub mod test_utils;
 pub use error::Error;
 
 use error::bound;
-use objects::{FileChunk, FileHeader, JoinRequest, PostedPositions};
+use objects::{JoinRequest, PostedPositions};
 use store_log::StoreLogEntry;
 use wire::{decode_frame, Encoder, Wire, MAX_OBJECT};
 
@@ -47,14 +49,10 @@ pub const FRAME_PREFIX_LEN: usize = 7;
 pub enum Object {
     /// One membership, device, circle, version or reset entry (§9).
     StoreLog(StoreLogEntry),
-    /// A file's chunk size and total size (§16.2).
-    FileHeader(FileHeader),
     /// A new person's public keys and device name (§12.2).
     JoinRequest(JoinRequest),
     /// A device's positions and keyed fingerprints (§6, §19.1).
     PostedPositions(PostedPositions),
-    /// One file chunk's index and plaintext (§16.2).
-    FileChunk(FileChunk),
 }
 
 impl Object {
@@ -63,10 +61,8 @@ impl Object {
         self.validate()?;
         match self {
             Self::StoreLog(v) => encode_frame(2, v),
-            Self::FileHeader(v) => encode_frame(7, v),
             Self::JoinRequest(v) => encode_frame(10, v),
             Self::PostedPositions(v) => encode_frame(11, v),
-            Self::FileChunk(v) => encode_frame(12, v),
         }
     }
     /// Decodes exactly one bounded frame, refusing unknown tags/versions, trailing
@@ -76,10 +72,8 @@ impl Object {
         let (kind, mut input) = decode_frame(bytes)?;
         let object = match kind {
             2 => Self::StoreLog(Wire::get(&mut input)?),
-            7 => Self::FileHeader(Wire::get(&mut input)?),
             10 => Self::JoinRequest(Wire::get(&mut input)?),
             11 => Self::PostedPositions(Wire::get(&mut input)?),
-            12 => Self::FileChunk(Wire::get(&mut input)?),
             tag => {
                 return Err(Error::UnknownTag {
                     field: "object kind",
@@ -94,10 +88,8 @@ impl Object {
     fn validate(&self) -> Result<(), Error> {
         match self {
             Self::StoreLog(v) => v.validate(),
-            Self::FileHeader(v) => v.validate(),
             Self::JoinRequest(v) => v.validate(),
             Self::PostedPositions(v) => v.validate(),
-            Self::FileChunk(v) => v.validate(),
         }
     }
 }
@@ -107,7 +99,7 @@ impl Object {
 /// are ignored here; [`Object::decode`] requires exactly one complete frame.
 pub fn frame_length(prefix: &[u8]) -> Result<usize, Error> {
     let bytes = prefix.get(..FRAME_PREFIX_LEN).ok_or(Error::Truncated)?;
-    if !matches!(bytes[0], 1..=5 | 7 | 10..=13) {
+    if !matches!(bytes[0], 1..=5 | 10 | 11 | 13) {
         return Err(Error::UnknownTag {
             field: "object kind",
             tag: bytes[0],

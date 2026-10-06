@@ -356,10 +356,6 @@ pub fn objects() -> Vec<Object> {
     vec![
         Object::StoreLog(store_log()),
         Object::StoreLog(member_removal()),
-        Object::FileHeader(FileHeader {
-            chunk_size: 65_536,
-            total_size: 3,
-        }),
         Object::JoinRequest(JoinRequest {
             invite: InviteId(Uuid::from_bytes([0x55; 16])),
             keys: member(),
@@ -374,10 +370,6 @@ pub fn objects() -> Vec<Object> {
                 key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([1; 16])),
                 bytes: coven_crypto::Fingerprint::from_bytes([0x88; 32]),
             }],
-        }),
-        Object::FileChunk(FileChunk {
-            index: 0,
-            bytes: vec![1, 2, 3],
         }),
     ]
 }

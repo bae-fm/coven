@@ -14,12 +14,12 @@ fn each_single_frame_envelope_authenticates_its_routing_and_signature() {
         ),
         (
             SingleChunkPrefix::PostedPositions(key.id()),
-            &objects[4],
+            &objects[3],
             "positions/1",
         ),
         (
             SingleChunkPrefix::JoinRequest,
-            &objects[3],
+            &objects[2],
             "join-requests/55555555-5555-5555-5555-555555555555",
         ),
     ] {

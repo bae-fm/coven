@@ -4536,6 +4536,16 @@ loop {
 
 ### 20.8 Files and the cache
 
+- The stored-file codec is `coven_format::file`: `FileHeader::new(size)`
+  chooses 64-KiB chunks; `with_chunk_size(size, chunk_size)` checks the app's
+  choice. `chunk(index)` gives a `FileChunk`'s index, storage offset and exact
+  plaintext length. `range(start..end)` returns a `FileRange`; fetch its
+  `encrypted_range()` and call `open(key, path, bytes)` to authenticate only
+  those chunks. Ranges are half-open; offsets that overflow u64 are refused.
+  `FileObject` decodes and re-encodes a complete borrowed envelope, and can
+  `read_range` from it. `FileError` distinguishes layout errors from crypto
+  errors. The stored header and chunks are not plaintext `Object` frames.
+
 - A *file reference*, `FileRef`, names one row's file as of that row's
   current version, so a later change to the row can't redirect a read.
 - Coven reads a file from wherever it is: the user's original, coven's own
@@ -5182,6 +5192,17 @@ match join_with_invite(
   `JoinRequest`, preserving the ciphertext and any signature on re-encoding.
 
 ```rust
+/// One immutable file's independent random key, erased on drop (§16.2).
+pub struct FileKey { /* private fields */ }
+impl FileKey {
+    pub fn generate() -> Result<Self, CryptoError>;
+    pub fn from_bytes(bytes: [u8; 32]) -> Self;
+    pub fn to_secret_bytes(&self) -> SecretBytes;
+    /// Binds the full cleartext header; nonce is the index as 24 big-endian bytes.
+    pub fn seal_chunk(&self, path: &str, header: &[u8], index: u64, plaintext: &[u8]) -> Vec<u8>;
+    pub fn open_chunk(&self, path: &str, header: &[u8], index: u64, sealed: &[u8]) -> Result<Vec<u8>, CryptoError>;
+}
+
 /// A store or circle key's kind-37 envelope, preserving its random bytes (§11.1).
 /// MemberKeys authenticates and opens the ciphertext after the envelope is decoded.
 pub struct SealedKey<'a> { /* private fields */ }

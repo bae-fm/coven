@@ -1,5 +1,5 @@
 use super::*;
-use crate::{CircleId, CircleKey, ContentHasher, InviteSecret, StoreKey};
+use crate::{CircleId, CircleKey, InviteSecret, StoreKey};
 use coven_foundation::id_source::{IdSource, KeyId};
 use uuid::Uuid;
 
@@ -16,16 +16,6 @@ fn purpose_labels_and_hkdf_answers_are_pinned() {
             APP_DATA,
             b"coven/app-data/v1",
             "cf37721dcdb2ed070d0ce5179c10bfbaa55338c73225231228a9a6a70cd2e59a",
-        ),
-        (
-            NAMING,
-            b"coven/naming/v1",
-            "42980d4d4896ec07579d1d248022928c916c470fb648942fbb5691e5cee5cf42",
-        ),
-        (
-            FILE_NONCES,
-            b"coven/file-nonces/v1",
-            "366f97a8e43e06089799b56c049f03b004ff2adce8e26b78615a8d0576577a55",
         ),
         (
             FINGERPRINTS,
@@ -53,25 +43,8 @@ fn purpose_labels_and_hkdf_answers_are_pinned() {
 }
 
 #[test]
-fn stored_file_name_nonce_chunk_and_fingerprint_answers_are_pinned() {
+fn fingerprint_key_answer_is_pinned() {
     let keys = StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [17; 32]).derive();
-    let mut hash = ContentHasher::new();
-    hash.update(b"hello file");
-    let name = keys.file_name(&hash.finish());
-    assert_eq!(
-        name.to_string(),
-        "0601bf90cd7e035ecfa03e23d033f2b669686c3bd4f3215da114f71487193d37"
-    );
-    assert_eq!(
-        hex::encode(keys.chunk_nonce(&name, 7)),
-        "c52f55f0a718bd6019d69b29ca74c0a00700000000000000"
-    );
-    // Independently calculated with libsodium's XChaCha20-Poly1305, using
-    // big-endian context lengths, raw name bytes and little-endian chunk index.
-    assert_eq!(
-        hex::encode(keys.seal_chunk(&name, 7, b"hello file")),
-        "4cdb8d3d0695280a9543c7ea803ccd795e76383acd9b32e4ec46"
-    );
     let mut fingerprint = keys.fingerprint_hasher();
     fingerprint.update(b"agreed state");
     assert_eq!(
@@ -157,63 +130,6 @@ fn a_join_request_is_bound_to_its_invite_and_path() {
             .unwrap(),
         b"Carol"
     );
-}
-
-#[test]
-fn file_chunks_repeat_only_for_the_same_key_name_index_and_bytes() {
-    let key = StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [17; 32]).derive();
-    let other_key = StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [18; 32]).derive();
-    let name = key.file_name(&ContentHash::from_bytes([4; 32]));
-    let other_name = key.file_name(&ContentHash::from_bytes([5; 32]));
-    for index in [0, 1, 7, u64::MAX] {
-        for plaintext in [b"".as_slice(), b"one chunk"] {
-            let sealed = key.seal_chunk(&name, index, plaintext);
-            assert_eq!(key.open_chunk(&name, index, &sealed).unwrap(), plaintext);
-            assert_eq!(sealed, key.seal_chunk(&name, index, plaintext));
-            assert_ne!(sealed, other_key.seal_chunk(&name, index, plaintext));
-            assert_ne!(sealed, key.seal_chunk(&other_name, index, plaintext));
-            assert_ne!(sealed, key.seal_chunk(&name, index ^ 1, plaintext));
-            for result in [
-                key.open_chunk(&other_name, index, &sealed),
-                key.open_chunk(&name, index ^ 1, &sealed),
-                other_key.open_chunk(&name, index, &sealed),
-            ] {
-                assert!(matches!(result, Err(CryptoError::Authentication)));
-            }
-            for i in 0..sealed.len() {
-                let mut altered = sealed.clone();
-                altered[i] ^= 1;
-                assert!(matches!(
-                    key.open_chunk(&name, index, &altered),
-                    Err(CryptoError::Authentication)
-                ));
-            }
-        }
-    }
-}
-
-#[test]
-fn chunks_authenticate_the_name_and_index_in_addition_to_the_nonce() {
-    let keys = StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [17; 32]).derive();
-    let name = StoredFileName::from_bytes([8; 32]);
-    let sealed = keys.seal_chunk(&name, 7, b"payload");
-    let nonce = keys.chunk_nonce(&name, 7);
-    let aad = cipher::context(&[b"coven/chunk/v1", name.as_bytes(), &7u64.to_le_bytes()]);
-    assert_eq!(
-        cipher::open(&keys.encryption.0, &nonce, &aad, &sealed).unwrap(),
-        b"payload"
-    );
-    // Keep the right nonce and key: these failures specifically exercise AAD.
-    for aad in [
-        chunk_aad(&name, 8),
-        chunk_aad(&StoredFileName::from_bytes([9; 32]), 7),
-        cipher::context(&[b"coven/object/v1", name.as_bytes(), &7u64.to_le_bytes()]),
-    ] {
-        assert!(matches!(
-            cipher::open(&keys.encryption.0, &nonce, &aad, &sealed),
-            Err(CryptoError::Authentication)
-        ));
-    }
 }
 
 #[test]

@@ -40,7 +40,7 @@ impl StoreKey {
         self.id
     }
 
-    /// Derive separate encryption, naming, file-nonce and fingerprint keys.
+    /// Derive separate encryption and fingerprint keys.
     pub fn derive(&self) -> DerivedKeys {
         DerivedKeys::new(&self.bytes)
     }
@@ -99,7 +99,7 @@ impl CircleKey {
         self.key.id()
     }
 
-    /// Derive separate encryption, naming, file-nonce and fingerprint keys.
+    /// Derive separate encryption and fingerprint keys.
     pub fn derive(&self) -> DerivedKeys {
         self.key.derive()
     }

@@ -387,7 +387,8 @@
 
   - Chunks are `ciphertext | tag:16 bytes`, each `chunk_size` bytes of the
     file except the last; a file of size 0 has none. `chunk_size` is 64 KiB
-    unless the app chose another, from 4 KiB to 8 MiB.
+    unless the app chose another, from 4 KiB to 8 MiB, inclusive; every
+    integer byte size in that range is valid.
   - Each is XChaCha20-Poly1305 under the file's own key
     ([§16.2](coven-from-scratch.md#162-storage-and-naming)), with its index
     as the nonce, a 24-byte big-endian number, and associated data binding

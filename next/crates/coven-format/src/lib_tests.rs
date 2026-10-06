@@ -182,7 +182,7 @@ fn prefix_limits_versions_and_trailing_bytes_are_typed_errors() {
         Err(Error::UnsupportedVersion(2))
     );
     assert!(matches!(
-        frame_length(&[7, 0, 1, 255, 255, 255, 255]),
+        frame_length(&[1, 0, 1, 255, 255, 255, 255]),
         Err(Error::Limit {
             field: "frame payload",
             ..
