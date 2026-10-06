@@ -1,125 +1,14 @@
-# Coven object format 1
+# Plaintext frame codecs
 
-This crate encodes the storage objects of `plans/coven-from-scratch.md`, §5,
-§7–§9, §11–§12, §14–§17 and §19. It depends on foundation, crypto and merge.
-Foundation owns store, device, circle, invite and key identities; crypto owns
-member identities, public keys, fingerprints and secrets; merge owns timestamps,
-audiences, write identities, row identities, changes, row state and removal rules.
-Format performs no I/O, clock reads, randomness, signing or sealing.
-
-## Frames and bounds
-
-Every frame is `kind:u8 | version:u16 | payload_length:u32 | payload`.
-Version is 1. Numbers are big-endian, except inside crypto's opaque member-key
-encoding. A signed SQL integer uses two's complement. `frame_length` validates
-the seven-byte prefix before allocation or fetching. A complete frame is at
-most 16 MiB. Unknown kinds, versions and trailing bytes are refused.
-
-Notation:
-
-- `bytes`: `length:u32 | raw bytes`, at most 8 MiB.
-- `text`: UTF-8 `bytes`, without Unicode normalization. SQL text can be empty
-  or contain NUL. Names contain 1–1,024 bytes and no NUL.
-- `[T]`: `count:u32 | T...`. Each collection and the sum of length-prefixed
-  collection counts in a frame are at most 65,536. String/blob lengths are not
-  collection counts. Maps encode a count followed by key/value pairs; sets a
-  count followed by members. Keys/members must be strictly increasing in their
-  type's order, including on decode; duplicates never silently overwrite.
-- Fixed byte arrays have no prefix. UUIDs are 16 bytes in UUID byte order.
-  Store, circle, invite and key ids wrap foundation's UUID types. Device ids are u64.
-  Member ids are 32 Ed25519 bytes from crypto's `MemberId::to_bytes`; decoding calls
-  `MemberId::from_bytes`, which rejects invalid and weak points. A sealing public
-  key is crypto's `SealingPublicKey`, encoded as its 32 public bytes.
-- `KeyId`: foundation's UUID wrapper, supplied by its id source and encoded as
-  16 UUID bytes. Storage paths use canonical lowercase hyphenated UUID text,
-  exactly as circle ids do. Every byte value, including zero, is representable.
-- `Timestamp`: `milliseconds:u48 | counter:u16 | device:u64`, exactly 16 bytes.
-  Byte order is timestamp order. Decode calls merge's `Timestamp::new`.
-- `WriteId` and `EntryId` both encode `device:u64 | number:u64`, with positive
-  numbers. They are different Rust types: `WriteId` names a write; format's
-  `EntryId` names a store-log entry. `WritePositions` and `EntryPositions` are
-  separate lists, strictly ordered by device. Zero positions are omitted.
-- `Audience`: `0` for the store, `1 | circle_uuid:16` for a circle. Store sorts
-  first, then circles in UUID order, as merge defines.
-- `Value`: `0` NULL; `1 | i64` integer; `2 | u64` real's IEEE 754 bits;
-  `3 | text`; `4 | bytes` blob. NaNs and negative zero are refused; infinities
-  and positive zero are valid. Outside keys, integer and real storage classes
-  remain distinct.
-- `RowId`: `table:text | key:bytes | audience:Audience`. The key bytes have the
-  ordered encoding below. Every row and parent key is decoded for validation.
-- `Parent`: `row:RowId | generation:u64`. Written references name odd
-  incarnations. A child can refer to its own audience or the store.
-- `ConstraintColumns`: `[text]`, the column names in declaration order. List
-  boundaries are encoded; `(a, bc)` and `(ab, c)` are different identities.
-  Column lists order lexicographically, without sorting their columns. A foreign
-  key has at least one column.
-- `ForeignKey`: `columns:ConstraintColumns | parent:text |
-  parent_columns:ConstraintColumns`. Both column lists are nonempty and have
-  equal lengths. Implicit targets name the parent's primary-key columns. Order
-  compares the source columns, then the parent table, then the target columns.
-  Two keys on one column into different tables or target columns stay distinct.
-- `UniqueConstraint`: `terms:[text] | partial`. Terms are nonempty and ordered,
-  each a column name or an expression's text as written. `partial` is `0` for a
-  full constraint or `1 | text` for the WHERE expression of a partial index.
-  Terms and predicates use the name bounds. Order compares terms, then the
-  optional predicate (absent first). `title`, `lower(title)` and `title` with
-  `WHERE active=1` identify three different constraints. An explicit COLLATE
-  stays in an expression term; ASC/DESC ordering is not part of the term.
-- `ColumnValue<Value>`: `value:Value | parents:map<ForeignKey, Parent>`.
-  This is merge's type, also used inside winning cells and lost values, without
-  copying its fields into another type.
-- `MemberPublicKeys`: `signing:32 | sealing:32`.
-- `SnapshotId`: `device:u64 | number:u64 | audience:Audience`. Its positive
-  number is in the device's snapshot sequence, not either log.
-
-Bounds are checked before decoding length-prefixed allocations. Collection
-counts must fit at least one byte per member, or two per map entry, in the
-remaining input. Encoder and decoder share the collection budget. Nesting depth
-is fixed by these types. No arbitrary recursively nested value is supported.
-
-## Ordered primary keys
-
-`encode_key` accepts a nonempty list of non-null `Value`s, in schema key-column
-order. Components concatenate without a list length or terminator. Thus a
-shorter composite prefix sorts first. Encoded keys are at most 8 MiB and contain
-at most 65,536 components. `decode_key` rejects noncanonical bytes.
-
-SQLite orders integers and reals together numerically, then text under its
-collation, then blobs by bytes ([SQLite sorting](https://www.sqlite.org/datatype3.html#sorting_grouping_and_compound_selects)).
-This encoding uses BINARY text collation. A caller using another collation must
-normalize its key components accordingly. Numerically equal integer and real
-keys have the same bytes: `1` and `1.0` identify the same key. Decode chooses an
-integer for an exactly integral number in i64 range; other numbers decode as
-reals. This does not change the values stored in write records or cells.
-
-Numeric component encodings:
-
-| Tag | Meaning | Following bytes |
-| --- | --- | --- |
-| 0x10 | Negative infinity | None |
-| 0x11 | Negative finite nonzero | Complemented exponent:u16 and significand:u64 |
-| 0x12 | Zero | None |
-| 0x13 | Positive finite nonzero | Exponent:u16 and significand:u64 |
-| 0x14 | Positive infinity | None |
-
-The absolute value is `significand * 2^(exponent - 1074 - 63)`. The significand's
-highest bit is one; the encoded exponent is 0–2097. Integer magnitudes are
-normalized exactly, without converting through f64, so adjacent i64 values
-above 2^53 remain distinct. Real values include subnormals. Negative finite
-values complement both fields to reverse magnitude order. Decode rejects any
-number not exactly representable as an i64 or permitted f64, and verifies that
-re-encoding produces identical bytes.
-
-Text components start with 0x20; blobs with 0x30. Each zero data byte is escaped
-as `00 FF`; other bytes are literal. `00 00` terminates a component. Text bytes
-must be UTF-8. The escaping preserves byte order, including embedded zeroes,
-empty strings/blobs and prefixes, without a length field affecting comparison.
+This describes coven-format's write, store-log, snapshot, join-request and
+posted-position frame codecs. [Appendix D](../../../plans/coven-format.md)
+defines the storage format, its shared primitives, sealed envelopes, files
+and codes.
 
 ## Object kinds
 
-Fields appear in exactly the order shown. All enum tags are u8. Kinds 1–5, 7 and 10–13
-identify plaintext frames; kinds 14 and 15 identify sealed layouts with their
-own prefixes, not frame envelopes. No sealed layout shares a frame kind.
+Fields appear in exactly the order shown. All enum tags are u8.
+These codecs identify their plaintext frames with kinds 1–5, 10, 11 and 13.
 
 | Kind | Object | Payload |
 | --- | --- | --- |
@@ -128,23 +17,19 @@ own prefixes, not frame envelopes. No sealed layout shares a frame kind.
 | 3 | Snapshot header | `id:SnapshotId, schema_version:u32, writes:WritePositions, store_log:EntryPositions, counts:5*u64` |
 | 4 | Snapshot record | `section:u8, record` |
 | 5 | Snapshot end | Empty |
-| 7 | File header | `chunk_size:u32, total_size:u64` |
 | 10 | Join request | `invite_uuid:16, keys:MemberPublicKeys, device_name:text` |
 | 11 | Posted positions | `device:u64, writes:WritePositions, store_log:EntryPositions, fingerprints:[Fingerprint]` |
-| 12 | File chunk | `index:u64, plaintext:bytes` |
 | 13 | Write row | `row:RowChange` |
-| 14 | Sealed write layout | Key prefix, sealed header, sealed part chunks, signature (below) |
-| 15 | Sealed snapshot layout | Audience/key prefix, sealed chunks (below) |
 
-Kinds 6, 8 and 9 are not defined by these plaintext codecs.
+Kinds 6–9 and 12 are not defined by these plaintext codecs.
 
-`Object` encodes and decodes kinds 2, 7, 10, 11 and 12. Writes and snapshots use their
+`Object` encodes and decodes kinds 2, 10 and 11. Writes and snapshots use their
 streaming encoder/decoder, with merge's oracle supplied on decode.
 
-A file's chunk size is 1–8 MiB in bytes (65,536 is the product default).
-Total size may be zero, meaning no chunks. Chunk data is nonempty.
-`FileHeader::validate_chunk` checks index, overflow and exact length, including
-the final partial chunk. It does not authenticate.
+`SnapshotId` in these plaintext frames is
+`device:u64 | number:u64 | audience:Audience`; its positive number belongs to
+the device's snapshot sequence. `UniqueConstraint` terms and predicates use
+the name bounds in these codecs.
 
 A fingerprint is `audience:Audience | key:KeyId | fingerprint:32`.
 Fingerprints are strictly ordered by audience and include the store first.
@@ -169,15 +54,14 @@ The header's descriptors are strictly ordered by audience, empty for a migration
 write and nonempty for every other disposition.
 Each part is a stream of kind-13 frames, one `RowChange` per frame, strictly
 increasing by `RowId`. Every row has its part's audience. Each part has at least
-one row and one chunk. `plaintext_length` includes every row frame's seven-byte
+one row. `plaintext_length` includes every row frame's seven-byte
 prefix. There is no collection count around the stream, and no bound on the
 write's aggregate size or row count beyond the lengths' u64 representation.
-Every individual frame retains the 16-MiB and collection bounds above.
+Every individual frame retains Appendix D's frame and collection bounds.
 
 `WriteRecord` and `WritePart` are in-memory values, not wire encodings.
 `WriteEncoder` measures each row frame to produce the header, then emits each
-part's stream in 65,536-byte chunks, with only its final chunk shorter. A row
-frame can cross chunks. `PartDecoder` retains at most one unfinished frame and
+part's frame stream. `PartDecoder` retains at most one unfinished frame and
 the previous row identity, yields complete rows from each chunk, and checks
 row count and plaintext length at `finish`. A frame announced past the stream's
 end is refused before allocating its payload. Row identity order is merge's order: table,
@@ -206,32 +90,6 @@ The database checks that length against its connection's SQLite length limit
 before allocating the buffer. `decode_plaintext` reconstructs the database's
 in-memory write using the same header and part decoders. The uploader encrypts
 and signs it on its first upload (§6).
-
-### Sealed writes
-
-The sealed write layout is:
-
-`kind:14 | version:u16 | header_key:KeyId | part_keys:[KeyId] |
- header_chunk | part_chunks... | signature:64`.
-
-The cleartext prefix's part-key list has the per-frame collection bound and
-must agree with the opened header's part count, including zero for a migration
-write. It has no frame-length field:
-its first 23 bytes give its full length. Each chunk is
-`sealed_length:u32 | nonce:24 | ciphertext | tag:16`. Format uses crypto's
-`SEALED_OBJECT_CHUNK_OVERHEAD` for the combined nonce and tag length, currently
-40 bytes. The header is one sealed chunk containing its complete kind-1 frame;
-its plaintext may be up to 16 MiB.
-Each part's plaintext chunks are exactly 64 KiB except its final chunk. Counts
-and plaintext lengths in the opened header determine every part boundary and
-the signature location, even if the device lacks a part's circle key.
-
-`WriteObjectPrefix` bounds and parses the prefix and sealed header.
-`WriteObjectLayout` supplies the next chunk's key, section, index and exact
-length, and reads or writes one length-prefixed piece at a time. Section 0,
-index 0 is the header. Part i uses section i + 1, with indices starting at 0.
-Readers must check EOF after the 64-byte signature and verify the signature
-before committing any staged rows. These layout APIs do no cryptography.
 
 ### Store-log entries
 
@@ -340,67 +198,3 @@ call leaves the cursor unchanged. EOF without the end marker is truncation.
 The consumer commits staged records only after `finish` succeeds. Cross-section
 completeness, SQL schema rules and app-row visibility are database concerns.
 No local row ids, uploads, operations or storage paths occur in a snapshot.
-
-### Sealed snapshots
-
-A sealed snapshot starts with `kind:15 | version:u16 | audience:Audience |
-key:KeyId`, followed by `sealed_length:u32 | sealed bytes` chunks until EOF.
-`SnapshotObjectPrefix` parses and bounds the prefix. `SnapshotObjectLayout`
-checks each sealed chunk is at most 64 KiB of plaintext plus nonce and tag,
-and that a shorter chunk is last. All chunks use section 0, with indices
-starting at 0, and the prefix's audience key. `SnapshotChunkDecoder` checks
-the opened header agrees with the prefix audience and feeds bounded frames to
-`SnapshotDecoder`, returning each record before decoding the next. This lets
-the consumer update its applied-write oracle between records in one chunk.
-`PlaintextChunks` cuts `SnapshotEncoder` frames into the canonical partition.
-
-An object ending at a chunk boundary is still truncated if the plaintext lacks
-the snapshot end marker. Neither EOF nor a final short chunk substitutes for
-that marker. The caller commits only after the opened stream's `finish`.
-
-### Fields stored in SQLite
-
-`merge_fields` exposes the snapshot field encodings without a frame prefix:
-`Timestamp`, `WriteId`, `WritePositions`, `ForeignKey`, `UniqueConstraint`,
-parent maps, `ColumnValue<Value>`,
-column maps, setter maps (`map<text, WriteId>`), removal-rule sets, and
-`LostWriteCause`. The database's schema version identifies their format.
-These functions use the same binary primitives and validation as snapshots;
-they do not define another encoding. Each call has the same collection and
-byte bounds and rejects trailing bytes. Cross-field relationships still need
-merge's validation.
-
-Present values live only in the app's tables. `coven_cells` retains setters.
-`coven_foreign_keys` interns reference identities, and `coven_references` holds
-one parent table, key, audience and generation per row, column and foreign key.
-`coven_constraints` interns unique identities, and `coven_claims` indexes each
-removed row's audience and equality-encoded claim. `coven_lost` retains lost
-values and removed rows; lost cells keep their written parents in their value.
-The database round-trip tests use these codecs with the actual tables. Local
-writes load only touched rows’ merge state and persist `coven-merge::apply` updates.
-
-## Verification and boundaries
-
-`fixtures/v1.hex` pins ordinary object kinds, including a member removal with
-replacement circle keys and deleted circles, and a complete snapshot of all five
-sections. It also pins a sealed-write prefix,
-a two-part plaintext write whose first part spans three chunks, and a
-sealed-snapshot prefix with its plaintext stream cut into chunks. Random
-sealed bytes and their signature are exercised with crypto in integration
-tests. `fixtures/migration.hex` pins a migration write with no parts.
-Seeds in these fixtures are public test data.
-Tests exercise every store change and removal rule, merge invariant rejection,
-schema/reset lost writes, SQLite numeric/text/blob/composite key ordering and
-streaming snapshots exceeding the frame bound. A decoded RowState is fed back
-into merge's actual `apply` function.
-
-Deterministic generated inputs exercise 25,000 binary inputs, all bounded-frame fixture
-truncations and bit flips, generated write/part/snapshot streams and prefixes,
-and 10,000 real keys. Every successful decode must re-encode identically.
-A compile-fail example checks that write and store-log positions cannot be
-interchanged.
-
-Authentication, signatures, key sealing, path/index binding, nonces, fingerprint
-computation and custody belong to crypto and its callers. A changed plaintext
-integer can still be a valid integer; this codec cannot authenticate it. There
-are no signature/ciphertext placeholders or obsolete format readers.

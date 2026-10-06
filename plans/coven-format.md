@@ -271,7 +271,7 @@
   from the named key (D11). `length` is the ciphertext's, which is the
   plaintext's, so the chunk takes `length + 44` bytes. Empty chunks are
   refused. A chunk holding one frame has 7 bytes to 16 MiB of plaintext; a
-  stream chunk has 1 to 64 KiB, and only its section's last may be shorter
+  stream chunk has 1 byte to 64 KiB, and only its section's last may be shorter
   than 64 KiB.
 - Chunks are grouped in *sections*, each sealed with one key:
   - a write: section 0 is the header frame, one chunk with the prefix's
