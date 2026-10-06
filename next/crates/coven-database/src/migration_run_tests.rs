@@ -293,8 +293,10 @@ async fn a_migration_write_failure_rolls_back_schema_data_and_metadata() {
     let db = seeded(&store).await;
     let old = records(&db);
     db.close().await.unwrap();
+    // The first millisecond a 48-bit timestamp can't hold; Windows can still
+    // represent it as a SystemTime.
     let clock = std::sync::Arc::new(coven_foundation::clock::FixedClock::new(
-        std::time::UNIX_EPOCH + std::time::Duration::from_secs(1 << 40),
+        std::time::UNIX_EPOCH + std::time::Duration::from_millis(1 << 48),
     ));
     let error = store
         .builder(
