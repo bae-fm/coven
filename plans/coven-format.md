@@ -269,7 +269,10 @@
 - A chunk is `length:u32 | nonce:24 bytes | ciphertext | tag:16 bytes`:
   XChaCha20-Poly1305 with a random nonce, under the encryption key derived
   from the named key (D11). `length` is the ciphertext's, which is the
-  plaintext's, so the chunk takes `length + 44` bytes.
+  plaintext's, so the chunk takes `length + 44` bytes. Empty chunks are
+  refused. A chunk holding one frame has 7 bytes to 16 MiB of plaintext; a
+  stream chunk has 1 to 64 KiB, and only its section's last may be shorter
+  than 64 KiB.
 - Chunks are grouped in *sections*, each sealed with one key:
   - a write: section 0 is the header frame, one chunk with the prefix's
     `header_key`; section `i + 1` is part `i`'s stream, with
@@ -278,6 +281,8 @@
     of the object;
   - an entry, positions or a join request: one section of one chunk
     holding its frame.
+  - The write prefix has exactly one key per declared part, including no
+    part keys for a migration write.
   - A write's parts' chunk counts come from its header; a device that
     can't open a part still finds its end.
 - Each chunk's associated data binds, as in D11's context encoding, the

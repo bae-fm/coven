@@ -5165,6 +5165,22 @@ match join_with_invite(
 
 ### 20.11 Keys and secrets
 
+- `coven-crypto`'s `EncryptionKey` and audience `DerivedKeys` seal and open
+  chunks with `seal_object_chunk(path, prefix, section, index, plaintext)`
+  and `open_object_chunk(path, prefix, section, index, sealed)`. The prefix
+  is every cleartext byte from kind through the end of the object's prefix;
+  section and index are u64. The returned sealed bytes include the random
+  nonce and tag; `coven-format` adds the length field (Appendix D9).
+- `coven-format` keeps frame parsing separate from sealed layout.
+  `WriteObjectLayout::new(prefix, header_bytes, part_lengths)` starts at
+  the header; `WriteObjectPrefix::opened_header(header_bytes, part_lengths)`
+  starts after it. Readers supply lengths from the authenticated, decoded
+  header, so skipped parts still have exact boundaries. Neither call parses
+  the header. `SnapshotObjectPrefix` carries `audience`, `key`, `writes`
+  and `store_log`; its layout streams section 0. `SingleChunkPrefix` and
+  `SingleChunkObject` distinguish `StoreLog`, `PostedPositions` and
+  `JoinRequest`, preserving the ciphertext and any signature on re-encoding.
+
 ```rust
 /// A store or circle key's kind-37 envelope, preserving its random bytes (§11.1).
 /// MemberKeys authenticates and opens the ciphertext after the envelope is decoded.

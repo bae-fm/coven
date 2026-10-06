@@ -149,9 +149,15 @@ fn anonymous_store_boxes_bind_recipient_path_and_all_ciphertext_bytes() {
     );
     let opened = member.open_store_key(&path, &sealed).unwrap();
     assert_eq!(opened.id(), store.id());
-    let ciphertext = store.derive().seal_object("write", b"secret").unwrap();
+    let ciphertext = store
+        .derive()
+        .seal_object_chunk("write", b"cleartext prefix", 0, 0, b"secret")
+        .unwrap();
     assert_eq!(
-        opened.derive().open_object("write", &ciphertext).unwrap(),
+        opened
+            .derive()
+            .open_object_chunk("write", b"cleartext prefix", 0, 0, &ciphertext)
+            .unwrap(),
         b"secret"
     );
     assert!(foreign.open_store_key(&path, &sealed).is_err());
@@ -189,10 +195,13 @@ fn anonymous_circle_boxes_preserve_circle_and_id() {
     assert_eq!(opened.id(), circle.id());
     let ciphertext = circle
         .derive()
-        .seal_object("write", b"circle secret")
+        .seal_object_chunk("write", b"cleartext prefix", 0, 0, b"circle secret")
         .unwrap();
     assert_eq!(
-        opened.derive().open_object("write", &ciphertext).unwrap(),
+        opened
+            .derive()
+            .open_object_chunk("write", b"cleartext prefix", 0, 0, &ciphertext)
+            .unwrap(),
         b"circle secret"
     );
     assert!(member

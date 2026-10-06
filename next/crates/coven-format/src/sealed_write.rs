@@ -4,7 +4,6 @@ use crate::chunks::CHUNK_SIZE;
 use crate::error::{bound, require, Error, Rule};
 use crate::sealed;
 use crate::wire::{Decoder, Encoder, Wire, MAX_ITEMS, MAX_OBJECT};
-use crate::write_stream::WriteHeaderFrame;
 use coven_crypto::{Signature, SEALED_OBJECT_CHUNK_OVERHEAD};
 use coven_foundation::id_source::KeyId;
 
@@ -20,7 +19,7 @@ impl WriteObjectPrefix {
     /// Encode kind, version, header key and the counted list of part keys.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         let mut out = Encoder::new();
-        14u8.put(&mut out)?;
+        32u8.put(&mut out)?;
         crate::FORMAT_VERSION.put(&mut out)?;
         self.store_key.put(&mut out)?;
         self.part_keys.put(&mut out)?;
@@ -30,7 +29,7 @@ impl WriteObjectPrefix {
     /// Determine the complete prefix size from its first 23 bytes, before
     /// allocating the counted key list. This is not a plaintext frame prefix.
     pub fn length(bytes: &[u8]) -> Result<usize, Error> {
-        sealed::prefix(bytes, 14)?;
+        sealed::prefix(bytes, 32)?;
         let count = bytes.get(19..23).ok_or(Error::Truncated)?;
         let count = u32::from_be_bytes(count.try_into().expect("four bytes")) as usize;
         bound(count, MAX_ITEMS, "write section keys")?;
@@ -47,28 +46,41 @@ impl WriteObjectPrefix {
             return Err(Error::TrailingBytes);
         }
         let mut input = Decoder::new(&bytes[3..])?;
-        Ok(Self {
+        let result = Self {
             store_key: KeyId::get(&mut input)?,
             part_keys: Vec::get(&mut input)?,
-        })
+        };
+        input.finish()?;
+        Ok(result)
     }
 
     /// Bound the following header's length prefix before fetching or allocating.
     pub fn header_chunk_length(prefix: &[u8]) -> Result<usize, Error> {
-        sealed::chunk_length(prefix, MAX_OBJECT)
+        let length = sealed::chunk_length(prefix, MAX_OBJECT)?;
+        require(
+            length >= crate::FRAME_PREFIX_LEN + 4 + SEALED_OBJECT_CHUNK_OVERHEAD,
+            "sealed header frame",
+            Rule::Chunk,
+        )?;
+        Ok(length)
     }
 
     /// Read the length-prefixed sealed header. Open it with `store_key`, the
     /// object's path, section 0 and index 0, then call [`Self::opened_header`].
     pub fn header_chunk(piece: &[u8]) -> Result<&[u8], Error> {
+        Self::header_chunk_length(piece)?;
         sealed::chunk(piece, MAX_OBJECT)
     }
 
-    /// Check the opened header and begin reading part chunks. Crypto has already
-    /// authenticated the header; the final member signature still must be checked.
-    pub fn opened_header(self, bytes: &[u8]) -> Result<WriteObjectLayout, Error> {
-        let header = WriteHeaderFrame::decode(bytes)?;
-        let mut layout = WriteObjectLayout::new(self, header)?;
+    /// Begin part chunks after the caller authenticates and decodes the header.
+    /// `part_lengths` must come from that header, in part order. This layer
+    /// treats frame bytes as opaque; the final signature still must be checked.
+    pub fn opened_header(
+        self,
+        bytes: &[u8],
+        part_lengths: Vec<u64>,
+    ) -> Result<WriteObjectLayout, Error> {
+        let mut layout = WriteObjectLayout::new(self, bytes, part_lengths)?;
         layout.advance();
         Ok(layout)
     }
@@ -99,22 +111,42 @@ enum Position {
 /// prefix and length fields, before the final signature.
 pub struct WriteObjectLayout {
     prefix: WriteObjectPrefix,
-    header: WriteHeaderFrame,
+    part_lengths: Vec<u64>,
     header_length: usize,
     position: Position,
 }
 impl WriteObjectLayout {
-    /// Begin producing a write; exactly one key is required for every part.
-    pub fn new(prefix: WriteObjectPrefix, header: WriteHeaderFrame) -> Result<Self, Error> {
-        let header_length = header.encode()?.len();
+    /// Begin producing a write from its header bytes and declared part lengths.
+    /// Exactly one key is required for every part; lengths come from the header's
+    /// plaintext codec, which remains responsible for validating its fields.
+    pub fn new(
+        prefix: WriteObjectPrefix,
+        header: &[u8],
+        part_lengths: Vec<u64>,
+    ) -> Result<Self, Error> {
+        let header_length = header.len();
+        bound(header_length, MAX_OBJECT, "write header")?;
         require(
-            prefix.part_keys.len() == header.parts.len(),
+            header_length >= crate::FRAME_PREFIX_LEN,
+            "write header",
+            Rule::StreamLength,
+        )?;
+        bound(part_lengths.len(), MAX_ITEMS, "write parts")?;
+        for length in &part_lengths {
+            require(
+                *length >= crate::FRAME_PREFIX_LEN as u64,
+                "write part length",
+                Rule::StreamLength,
+            )?;
+        }
+        require(
+            prefix.part_keys.len() == part_lengths.len(),
             "write section key count",
             Rule::StreamLength,
         )?;
         Ok(Self {
             prefix,
-            header,
+            part_lengths,
             header_length,
             position: Position::Chunk {
                 section: 0,
@@ -126,11 +158,6 @@ impl WriteObjectLayout {
     /// Encode the cleartext prefix before supplying sealed chunks.
     pub fn prefix(&self) -> Result<Vec<u8>, Error> {
         self.prefix.encode()
-    }
-
-    /// Header metadata for selecting audience keys and decoding opened parts.
-    pub fn header(&self) -> &WriteHeaderFrame {
-        &self.header
     }
 
     /// Coordinates for the next sealed chunk, or `None` when only the signature remains.
@@ -146,8 +173,7 @@ impl WriteObjectLayout {
                 plaintext_length: self.header_length,
             })
         } else {
-            let part = &self.header.parts[section - 1];
-            let left = part.plaintext_length - index * CHUNK_SIZE as u64;
+            let left = self.part_lengths[section - 1] - index * CHUNK_SIZE as u64;
             Some(ObjectChunk {
                 key: self.prefix.part_keys[section - 1],
                 section: section as u64,
@@ -238,12 +264,12 @@ impl WriteObjectLayout {
         let Position::Chunk { section, index } = self.position else {
             unreachable!("a chunk was checked");
         };
-        if section > 0 && index + 1 < self.header.parts[section - 1].chunk_count() {
+        if section > 0 && index + 1 < self.part_lengths[section - 1].div_ceil(CHUNK_SIZE as u64) {
             self.position = Position::Chunk {
                 section,
                 index: index + 1,
             };
-        } else if section < self.header.parts.len() {
+        } else if section < self.part_lengths.len() {
             self.position = Position::Chunk {
                 section: section + 1,
                 index: 0,

@@ -13,6 +13,7 @@ pub mod merge_fields;
 mod merge_wire;
 pub mod objects;
 mod sealed;
+pub mod sealed_single;
 pub mod sealed_snapshot;
 pub mod sealed_write;
 pub mod snapshot;

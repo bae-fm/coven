@@ -1,9 +1,10 @@
 //! Snapshots have one audience key and one stream of sealed chunks (§15).
 
 use crate::chunks::CHUNK_SIZE;
-use crate::error::{require, Error, Rule};
+use crate::error::{bound, require, Error, Rule};
 use crate::sealed;
-use crate::wire::{Decoder, Encoder, Wire};
+use crate::value::{EntryPositions, WritePositions};
+use crate::wire::{Decoder, Encoder, Wire, MAX_ITEMS};
 use coven_crypto::SEALED_OBJECT_CHUNK_OVERHEAD;
 use coven_foundation::id_source::KeyId;
 use coven_merge::Audience;
@@ -15,21 +16,73 @@ pub struct SnapshotObjectPrefix {
     pub audience: Audience,
     /// The audience key sealing every chunk.
     pub key: KeyId,
+    /// Applied write positions, strictly increasing by device.
+    pub writes: WritePositions,
+    /// Applied store-log positions, strictly increasing by device.
+    pub store_log: EntryPositions,
 }
 impl SnapshotObjectPrefix {
-    /// Encode kind 15, version, audience and key id.
+    /// Encode kind 34, version, audience, key and both counted position lists.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
+        self.writes.validate()?;
+        self.store_log.validate()?;
         let mut out = Encoder::new();
-        15u8.put(&mut out)?;
+        34u8.put(&mut out)?;
         crate::FORMAT_VERSION.put(&mut out)?;
         self.audience.put(&mut out)?;
         self.key.put(&mut out)?;
+        // This unframed prefix has two independently bounded collections.
+        let mut writes = Encoder::new();
+        self.writes.put(&mut writes)?;
+        out.bytes(&writes.bytes)?;
+        let mut entries = Encoder::new();
+        self.store_log.put(&mut entries)?;
+        out.bytes(&entries.bytes)?;
         Ok(out.bytes)
     }
 
-    /// Determine the prefix length from its first four bytes before allocation.
+    /// Bound the prefix from its routing fields and both list counts. The second
+    /// count follows the first list, so those bytes must already be available.
+    /// No position values are allocated or decoded here.
     pub fn length(bytes: &[u8]) -> Result<usize, Error> {
-        sealed::prefix(bytes, 15)?;
+        let writes = Self::routing_length(bytes)?;
+        let entries = positions_end(bytes, writes)?;
+        positions_end(bytes, entries)
+    }
+
+    /// Decode exactly the prefix, checking both lists fit before allocation.
+    pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        let length = Self::length(bytes)?;
+        if bytes.len() < length {
+            return Err(Error::Truncated);
+        }
+        if bytes.len() > length {
+            return Err(Error::TrailingBytes);
+        }
+        let writes_start = Self::routing_length(bytes)?;
+        let entries_start = positions_end(bytes, writes_start)?;
+        let mut routing = Decoder::new(&bytes[3..writes_start])?;
+        let audience = Audience::get(&mut routing)?;
+        let key = KeyId::get(&mut routing)?;
+        routing.finish()?;
+        let mut input = Decoder::new(&bytes[writes_start..entries_start])?;
+        let writes = WritePositions::get(&mut input)?;
+        input.finish()?;
+        let mut input = Decoder::new(&bytes[entries_start..])?;
+        let store_log = EntryPositions::get(&mut input)?;
+        input.finish()?;
+        writes.validate()?;
+        store_log.validate()?;
+        Ok(Self {
+            audience,
+            key,
+            writes,
+            store_log,
+        })
+    }
+
+    fn routing_length(bytes: &[u8]) -> Result<usize, Error> {
+        sealed::prefix(bytes, 34)?;
         match *bytes.get(3).ok_or(Error::Truncated)? {
             0 => Ok(20),
             1 => Ok(36),
@@ -39,22 +92,13 @@ impl SnapshotObjectPrefix {
             }),
         }
     }
+}
 
-    /// Decode exactly the prefix; no sealed chunk bytes are accepted here.
-    pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        let length = Self::length(bytes)?;
-        if bytes.len() < length {
-            return Err(Error::Truncated);
-        }
-        if bytes.len() > length {
-            return Err(Error::TrailingBytes);
-        }
-        let mut input = Decoder::new(&bytes[3..])?;
-        Ok(Self {
-            audience: Audience::get(&mut input)?,
-            key: KeyId::get(&mut input)?,
-        })
-    }
+fn positions_end(bytes: &[u8], offset: usize) -> Result<usize, Error> {
+    let count = bytes.get(offset..offset + 4).ok_or(Error::Truncated)?;
+    let count = u32::from_be_bytes(count.try_into().expect("four bytes")) as usize;
+    bound(count, MAX_ITEMS, "snapshot positions")?;
+    Ok(offset + 4 + count * 16)
 }
 
 /// Delimits sealed snapshot chunks without buffering the object. EOF is valid

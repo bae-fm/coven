@@ -455,6 +455,8 @@ pub fn encoded_examples() -> Vec<Zeroizing<Vec<u8>>> {
         crate::sealed_snapshot::SnapshotObjectPrefix {
             audience: Audience::Store,
             key: KeyId(Uuid::from_bytes([1; 16])),
+            writes: crate::test_utils::snapshot_header().writes,
+            store_log: crate::test_utils::snapshot_header().store_log,
         }
         .encode()
         .unwrap(),

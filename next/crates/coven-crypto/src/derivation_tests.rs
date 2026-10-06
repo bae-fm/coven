@@ -93,31 +93,39 @@ fn store_and_circle_objects_bind_path_and_use_random_nonces() {
     ];
     for key in keys {
         for plaintext in [b"".as_slice(), b"object payload"] {
-            let sealed = key.seal_object("devices/phone/3", plaintext).unwrap();
+            let sealed = key
+                .seal_object_chunk("devices/phone/3", b"cleartext prefix", 0, 0, plaintext)
+                .unwrap();
             assert_eq!(
-                key.open_object("devices/phone/3", &sealed).unwrap(),
+                key.open_object_chunk("devices/phone/3", b"cleartext prefix", 0, 0, &sealed)
+                    .unwrap(),
                 plaintext
             );
             assert_ne!(
                 sealed,
-                key.seal_object("devices/phone/3", plaintext).unwrap()
+                key.seal_object_chunk("devices/phone/3", b"cleartext prefix", 0, 0, plaintext)
+                    .unwrap()
             );
             assert!(matches!(
-                key.open_object("devices/phone/4", &sealed),
+                key.open_object_chunk("devices/phone/4", b"cleartext prefix", 0, 0, &sealed),
                 Err(CryptoError::Authentication)
             ));
             for i in 0..sealed.len() {
                 let mut altered = sealed.clone();
                 altered[i] ^= 1;
                 assert!(matches!(
-                    key.open_object("devices/phone/3", &altered),
+                    key.open_object_chunk("devices/phone/3", b"cleartext prefix", 0, 0, &altered),
                     Err(CryptoError::Authentication)
                 ));
-                assert!(key.open_object("devices/phone/3", &sealed[..i]).is_err());
+                assert!(key
+                    .open_object_chunk("devices/phone/3", b"cleartext prefix", 0, 0, &sealed[..i])
+                    .is_err());
             }
             let mut trailing = sealed;
             trailing.push(0);
-            assert!(key.open_object("devices/phone/3", &trailing).is_err());
+            assert!(key
+                .open_object_chunk("devices/phone/3", b"cleartext prefix", 0, 0, &trailing)
+                .is_err());
         }
     }
 }
@@ -126,21 +134,26 @@ fn store_and_circle_objects_bind_path_and_use_random_nonces() {
 fn a_join_request_is_bound_to_its_invite_and_path() {
     let invite = InviteSecret::generate().unwrap();
     let key = invite.join_request_key();
-    let sealed = key.seal_object("join-requests/42", b"Carol").unwrap();
+    let sealed = key
+        .seal_object_chunk("join-requests/42", b"cleartext prefix", 0, 0, b"Carol")
+        .unwrap();
     assert_eq!(
-        key.open_object("join-requests/42", &sealed).unwrap(),
+        key.open_object_chunk("join-requests/42", b"cleartext prefix", 0, 0, &sealed)
+            .unwrap(),
         b"Carol"
     );
-    assert!(key.open_object("join-requests/43", &sealed).is_err());
+    assert!(key
+        .open_object_chunk("join-requests/43", b"cleartext prefix", 0, 0, &sealed)
+        .is_err());
     assert!(InviteSecret::generate()
         .unwrap()
         .join_request_key()
-        .open_object("join-requests/42", &sealed)
+        .open_object_chunk("join-requests/42", b"cleartext prefix", 0, 0, &sealed)
         .is_err());
     let same = InviteSecret::from_bytes(invite.to_secret_bytes().as_bytes().try_into().unwrap());
     assert_eq!(
         same.join_request_key()
-            .open_object("join-requests/42", &sealed)
+            .open_object_chunk("join-requests/42", b"cleartext prefix", 0, 0, &sealed)
             .unwrap(),
         b"Carol"
     );
@@ -210,7 +223,7 @@ fn objects_cannot_be_sealed_without_a_storage_path() {
     let key = StoreKey::generate(KeyId(key_ids.new_id()))
         .unwrap()
         .derive();
-    let _sealed = key.seal_object("", b"payload");
+    let _sealed = key.seal_object_chunk("", b"cleartext prefix", 0, 0, b"payload");
 }
 
 #[test]
@@ -220,6 +233,8 @@ fn objects_cannot_be_opened_without_a_storage_path() {
     let key = StoreKey::generate(KeyId(key_ids.new_id()))
         .unwrap()
         .derive();
-    let sealed = key.seal_object("objects/1", b"payload").unwrap();
-    let _opened = key.open_object("", &sealed);
+    let sealed = key
+        .seal_object_chunk("objects/1", b"cleartext prefix", 0, 0, b"payload")
+        .unwrap();
+    let _opened = key.open_object_chunk("", b"cleartext prefix", 0, 0, &sealed);
 }

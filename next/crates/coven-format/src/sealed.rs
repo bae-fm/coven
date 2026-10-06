@@ -1,4 +1,4 @@
-//! Bounds shared by the write and snapshot sealed layouts.
+//! Bounds shared by every sealed object layout.
 
 use crate::error::{bound, require, Error, Rule};
 
@@ -6,7 +6,12 @@ use coven_crypto::SEALED_OBJECT_CHUNK_OVERHEAD;
 
 pub(crate) fn prefix(bytes: &[u8], kind: u8) -> Result<(), Error> {
     let prefix = bytes.get(..3).ok_or(Error::Truncated)?;
-    require(prefix[0] == kind, "sealed object kind", Rule::Kind)?;
+    if prefix[0] != kind {
+        return Err(Error::UnknownTag {
+            field: "sealed object kind",
+            tag: prefix[0],
+        });
+    }
     let version = u16::from_be_bytes([prefix[1], prefix[2]]);
     if version != crate::FORMAT_VERSION {
         return Err(Error::UnsupportedVersion(version));
@@ -21,17 +26,9 @@ pub(crate) fn chunk_length(prefix: &[u8], maximum: usize) -> Result<usize, Error
         .try_into()
         .expect("four bytes");
     let length = u32::from_be_bytes(bytes) as usize;
-    bound(
-        length,
-        maximum + SEALED_OBJECT_CHUNK_OVERHEAD,
-        "sealed chunk",
-    )?;
-    require(
-        length > SEALED_OBJECT_CHUNK_OVERHEAD,
-        "sealed chunk",
-        Rule::Chunk,
-    )?;
-    Ok(length + 4)
+    bound(length, maximum, "sealed chunk")?;
+    require(length > 0, "sealed chunk", Rule::Chunk)?;
+    Ok(length + 4 + SEALED_OBJECT_CHUNK_OVERHEAD)
 }
 
 pub(crate) fn chunk(bytes: &[u8], maximum: usize) -> Result<&[u8], Error> {
@@ -46,11 +43,17 @@ pub(crate) fn chunk(bytes: &[u8], maximum: usize) -> Result<&[u8], Error> {
 }
 
 pub(crate) fn encode_chunk(bytes: &[u8]) -> Result<Vec<u8>, Error> {
+    let length = bytes
+        .len()
+        .checked_sub(SEALED_OBJECT_CHUNK_OVERHEAD)
+        .ok_or(Error::Truncated)?;
+    require(length > 0, "sealed chunk", Rule::Chunk)?;
+    bound(length, crate::wire::MAX_OBJECT, "sealed chunk")?;
     let mut result = Vec::new();
     result
         .try_reserve_exact(4 + bytes.len())
         .map_err(|_| Error::Allocation)?;
-    result.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+    result.extend_from_slice(&(length as u32).to_be_bytes());
     result.extend_from_slice(bytes);
     Ok(result)
 }

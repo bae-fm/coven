@@ -17,15 +17,27 @@ fn object_chunks_bind_every_coordinate_and_use_stored_random_nonces() {
     ] {
         for (section, index) in [(0, 0), (1, 2), (u64::MAX, u64::MAX)] {
             let sealed = keys
-                .seal_object_chunk("devices/1/3", section, index, b"row bytes")
+                .seal_object_chunk(
+                    "devices/1/3",
+                    b"cleartext prefix",
+                    section,
+                    index,
+                    b"row bytes",
+                )
                 .unwrap();
             assert_eq!(sealed.len(), 9 + SEALED_OBJECT_CHUNK_OVERHEAD);
             let repeated = keys
-                .seal_object_chunk("devices/1/3", section, index, b"row bytes")
+                .seal_object_chunk(
+                    "devices/1/3",
+                    b"cleartext prefix",
+                    section,
+                    index,
+                    b"row bytes",
+                )
                 .unwrap();
             assert_ne!(&sealed[..24], &repeated[..24]);
             assert_eq!(
-                keys.open_object_chunk("devices/1/3", section, index, &sealed)
+                keys.open_object_chunk("devices/1/3", b"cleartext prefix", section, index, &sealed)
                     .unwrap(),
                 b"row bytes"
             );
@@ -35,7 +47,7 @@ fn object_chunks_bind_every_coordinate_and_use_stored_random_nonces() {
                 ("devices/1/3", section, index ^ 1),
             ] {
                 assert!(matches!(
-                    keys.open_object_chunk(path, part, chunk, &sealed),
+                    keys.open_object_chunk(path, b"cleartext prefix", part, chunk, &sealed),
                     Err(CryptoError::Authentication)
                 ));
             }
@@ -43,21 +55,22 @@ fn object_chunks_bind_every_coordinate_and_use_stored_random_nonces() {
                 .unwrap()
                 .derive();
             assert!(foreign
-                .open_object_chunk("devices/1/3", section, index, &sealed)
-                .is_err());
-            assert!(keys.open_object("devices/1/3", &sealed).is_err());
-            let one_piece = keys.seal_object("devices/1/3", b"row bytes").unwrap();
-            assert!(keys
-                .open_object_chunk("devices/1/3", section, index, &one_piece)
+                .open_object_chunk("devices/1/3", b"cleartext prefix", section, index, &sealed)
                 .is_err());
             for end in 0..sealed.len() {
                 assert!(keys
-                    .open_object_chunk("devices/1/3", section, index, &sealed[..end])
+                    .open_object_chunk(
+                        "devices/1/3",
+                        b"cleartext prefix",
+                        section,
+                        index,
+                        &sealed[..end]
+                    )
                     .is_err());
                 let mut altered = sealed.clone();
                 altered[end] ^= 1;
                 assert!(keys
-                    .open_object_chunk("devices/1/3", section, index, &altered)
+                    .open_object_chunk("devices/1/3", b"cleartext prefix", section, index, &altered)
                     .is_err());
             }
         }
@@ -74,13 +87,20 @@ fn swapping_parts_and_reordering_chunks_is_refused_even_with_identical_plaintext
     let chunks: Vec<_> = coordinates
         .iter()
         .map(|&(section, index)| {
-            keys.seal_object_chunk("devices/1/1", section, index, b"same bytes")
-                .unwrap()
+            keys.seal_object_chunk(
+                "devices/1/1",
+                b"cleartext prefix",
+                section,
+                index,
+                b"same bytes",
+            )
+            .unwrap()
         })
         .collect();
     for (source, chunk) in chunks.iter().enumerate() {
         for (target, &(section, index)) in coordinates.iter().enumerate() {
-            let result = keys.open_object_chunk("devices/1/1", section, index, chunk);
+            let result =
+                keys.open_object_chunk("devices/1/1", b"cleartext prefix", section, index, chunk);
             assert_eq!(result.is_ok(), source == target);
         }
     }
@@ -155,7 +175,7 @@ fn object_chunk_requires_a_path() {
     let _sealed = StoreKey::generate(KeyId(key_ids.new_id()))
         .unwrap()
         .derive()
-        .seal_object_chunk("", 0, 0, b"header");
+        .seal_object_chunk("", b"cleartext prefix", 0, 0, b"header");
 }
 
 #[test]
@@ -164,4 +184,58 @@ fn object_signature_requires_a_path() {
     let _signature = MemberKeys::generate()
         .unwrap()
         .sign_object("", &ObjectHasher::new().finish());
+}
+
+#[test]
+fn chunk_aad_includes_the_whole_prefix_and_big_endian_coordinates() {
+    let keys = StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [17; 32]).derive();
+    let prefix = b"whole cleartext kind, version, and prefix";
+    let section = 0x0102030405060708u64;
+    let index = 0x1122334455667788u64;
+    let sealed = keys
+        .seal_object_chunk("devices/1/3", prefix, section, index, b"payload")
+        .unwrap();
+    let key = crate::derivation::derive_label(&[17; 32], b"coven/encryption/v1");
+    let aad = cipher::context(&[
+        b"coven/object-chunk/v1",
+        b"devices/1/3",
+        prefix,
+        &section.to_be_bytes(),
+        &index.to_be_bytes(),
+    ]);
+    assert_eq!(
+        cipher::open_random(&key, &aad, &sealed).unwrap(),
+        b"payload"
+    );
+    for i in 0..prefix.len() {
+        let mut changed = prefix.to_vec();
+        changed[i] ^= 1;
+        assert!(keys
+            .open_object_chunk("devices/1/3", &changed, section, index, &sealed)
+            .is_err());
+    }
+    for aad in [
+        cipher::context(&[
+            b"coven/object-chunk/v1",
+            b"devices/1/3",
+            prefix,
+            &section.to_le_bytes(),
+            &index.to_le_bytes(),
+        ]),
+        cipher::context(&[
+            b"coven/object-chunk/v1",
+            b"devices/1/3",
+            &section.to_be_bytes(),
+            &index.to_be_bytes(),
+        ]),
+        cipher::context(&[
+            b"coven/object/v1",
+            b"devices/1/3",
+            prefix,
+            &section.to_be_bytes(),
+            &index.to_be_bytes(),
+        ]),
+    ] {
+        assert!(cipher::open_random(&key, &aad, &sealed).is_err());
+    }
 }

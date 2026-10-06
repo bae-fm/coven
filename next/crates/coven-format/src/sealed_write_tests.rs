@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     test_utils,
-    write_stream::{PartDecoder, WriteEncoder},
+    write_stream::{PartDecoder, WriteEncoder, WriteHeaderFrame},
 };
 use coven_crypto::{ObjectHasher, StoreKey};
 
@@ -32,13 +32,20 @@ fn object() -> Vec<Vec<u8>> {
             store_key: key(1).id(),
             part_keys: vec![key(1).id(), key(2).id()],
         },
-        encoder.header().clone(),
+        encoder.header_frame(),
+        encoder
+            .header()
+            .parts
+            .iter()
+            .map(|p| p.plaintext_length)
+            .collect(),
     )
     .unwrap();
-    let mut pieces = vec![layout.prefix().unwrap()];
+    let prefix = layout.prefix().unwrap();
+    let mut pieces = vec![prefix.clone()];
     let sealed = key(1)
         .derive()
-        .seal_object_chunk("devices/1/3", 0, 0, encoder.header_frame())
+        .seal_object_chunk("devices/1/3", &prefix, 0, 0, encoder.header_frame())
         .unwrap();
     pieces.push(layout.encode_chunk(&sealed).unwrap());
     for part in 0..record.parts.len() {
@@ -48,6 +55,7 @@ fn object() -> Vec<Vec<u8>> {
                 .derive()
                 .seal_object_chunk(
                     "devices/1/3",
+                    &prefix,
                     coordinate.section,
                     coordinate.index,
                     &plain.unwrap(),
@@ -80,13 +88,22 @@ fn read(pieces: &[Vec<u8>]) -> Result<(), Box<dyn std::error::Error>> {
     );
     let header = key(1).derive().open_object_chunk(
         "devices/1/3",
+        &pieces[0],
         0,
         0,
         WriteObjectPrefix::header_chunk(&pieces[1])?,
     )?;
     hash.update(&pieces[1]);
-    let mut layout = prefix.opened_header(&header)?;
-    let mut store = PartDecoder::new(layout.header().parts[0].clone())?;
+    let header_frame = WriteHeaderFrame::decode(&header)?;
+    let mut layout = prefix.opened_header(
+        &header,
+        header_frame
+            .parts
+            .iter()
+            .map(|p| p.plaintext_length)
+            .collect(),
+    )?;
+    let mut store = PartDecoder::new(header_frame.parts[0].clone())?;
     let mut rows = Vec::new();
     for piece in &pieces[2..pieces.len() - 1] {
         hash.update(piece);
@@ -95,6 +112,7 @@ fn read(pieces: &[Vec<u8>]) -> Result<(), Box<dyn std::error::Error>> {
         if coordinate.key == key(1).id() {
             let plain = key(1).derive().open_object_chunk(
                 "devices/1/3",
+                &pieces[0],
                 coordinate.section,
                 coordinate.index,
                 sealed,
@@ -131,7 +149,17 @@ fn layout_refuses_wrong_counts_lengths_signature_positions_and_trailing_bytes() 
         part_keys: vec![key(1).id()],
     };
     let signature = Signature::from_bytes([0; 64]);
-    let mut layout = WriteObjectLayout::new(prefix.clone(), encoder.header().clone()).unwrap();
+    let mut layout = WriteObjectLayout::new(
+        prefix.clone(),
+        encoder.header_frame(),
+        encoder
+            .header()
+            .parts
+            .iter()
+            .map(|p| p.plaintext_length)
+            .collect(),
+    )
+    .unwrap();
     assert!(layout.signature(&signature).is_err());
     assert!(layout.finish(&[]).is_err());
     for prefix in [0u32, SEALED_OBJECT_CHUNK_OVERHEAD as u32, u32::MAX] {
@@ -142,7 +170,17 @@ fn layout_refuses_wrong_counts_lengths_signature_positions_and_trailing_bytes() 
         part_keys: vec![],
         ..prefix.clone()
     };
-    assert!(WriteObjectLayout::new(bad, encoder.header().clone()).is_err());
+    assert!(WriteObjectLayout::new(
+        bad,
+        encoder.header_frame(),
+        encoder
+            .header()
+            .parts
+            .iter()
+            .map(|p| p.plaintext_length)
+            .collect()
+    )
+    .is_err());
     while let Some(chunk) = layout.next_chunk() {
         // Layout-only test: arbitrary bytes stand in for independently checked crypto output.
         layout
@@ -184,7 +222,7 @@ fn generated_prefixes_are_bounded_and_canonical() {
             })
             .collect();
         if n % 2 == 0 && bytes.len() >= 3 {
-            bytes[..3].copy_from_slice(&[14, 0, 1]);
+            bytes[..3].copy_from_slice(&[32, 0, 1]);
         }
         if let Ok(prefix) = WriteObjectPrefix::decode(&bytes) {
             assert_eq!(prefix.encode().unwrap(), bytes);
@@ -204,14 +242,20 @@ fn migration_object_authenticates_a_header_followed_directly_by_its_signature() 
             store_key: key(1).id(),
             part_keys: vec![],
         },
-        encoder.header().clone(),
+        encoder.header_frame(),
+        encoder
+            .header()
+            .parts
+            .iter()
+            .map(|p| p.plaintext_length)
+            .collect(),
     )
     .unwrap();
     let prefix = layout.prefix().unwrap();
     assert_eq!(WriteObjectPrefix::length(&prefix).unwrap(), 23);
     let sealed = key(1)
         .derive()
-        .seal_object_chunk("devices/1/3", 0, 0, encoder.header_frame())
+        .seal_object_chunk("devices/1/3", &prefix, 0, 0, encoder.header_frame())
         .unwrap();
     let chunk = layout.encode_chunk(&sealed).unwrap();
     assert!(layout.next_chunk().is_none());
@@ -226,6 +270,7 @@ fn migration_object_authenticates_a_header_followed_directly_by_its_signature() 
         .derive()
         .open_object_chunk(
             "devices/1/3",
+            &prefix,
             0,
             0,
             WriteObjectPrefix::header_chunk(&chunk).unwrap(),
@@ -233,7 +278,15 @@ fn migration_object_authenticates_a_header_followed_directly_by_its_signature() 
         .unwrap();
     let mut reader = WriteObjectPrefix::decode(&prefix)
         .unwrap()
-        .opened_header(&opened)
+        .opened_header(
+            &opened,
+            WriteHeaderFrame::decode(&opened)
+                .unwrap()
+                .parts
+                .iter()
+                .map(|p| p.plaintext_length)
+                .collect(),
+        )
         .unwrap();
     assert!(reader.next_chunk().is_none());
     assert!(reader.finish(&[]).is_err());
@@ -244,4 +297,14 @@ fn migration_object_authenticates_a_header_followed_directly_by_its_signature() 
         .unwrap();
     reader.finish(&[]).unwrap();
     assert!(reader.finish(&[0]).is_err());
+}
+
+#[test]
+fn stored_kind_and_chunk_length_match_the_storage_format() {
+    let pieces = object();
+    assert_eq!(&pieces[0][..3], &[32, 0, 1]);
+    for piece in &pieces[1..pieces.len() - 1] {
+        let length = u32::from_be_bytes(piece[..4].try_into().unwrap()) as usize;
+        assert_eq!(piece.len(), length + 44);
+    }
 }
