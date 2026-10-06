@@ -282,6 +282,9 @@ Two mechanisms order writes:
     reference that made it a parent's child is pointed elsewhere.
 - A removed row's `coven_lost` row names every rule that holds for it once
   the rules have run, and it comes back only when none holds.
+- A foreign key or unique constraint is named by its columns, in order,
+  since SQLite gives neither a lasting name; a CHECK by its name, or by its
+  expression when it has none, as SQLite reports a failed one.
   - E.g. todos need `start <= end`, and todo 7 is in list 3.
   - Ana deletes list 3, while Ben moves todo 7's start past its end.
   - Todo 7 is taken out for both reasons, on every device, whichever rule
@@ -3073,7 +3076,7 @@ pub enum Replacement {
 }
 
 pub enum RemovalRule {
-    ForeignKey { column: String },
+    ForeignKey { columns: Vec<String> },
     Check { constraint: String },
     /// The row is in a deleted circle (§14.7).
     DeletedCircle,
