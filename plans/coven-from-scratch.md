@@ -2183,6 +2183,9 @@ Carol's tablet:
 - Rows a removal rule had taken out before a breaking change stay out for
   good: they stay in `coven_lost`, and coven forgets their other merge
   records.
+  - Their values stay as they read at the migration: a reference whose
+    foreign key the migration drops keeps the null or default it showed
+    then, as a plain value ([§8.4](#84-foreign-keys)).
 - A device that updates runs the migration's second part on its own
   writes still waiting in `coven_uploads`, then uploads them.
   - Without a second part, it uploads them marked lost, and every device
