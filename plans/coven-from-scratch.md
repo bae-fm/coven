@@ -2606,28 +2606,6 @@ impl IdSource for UuidIds {
 /// One store's directory; its path and store id are private (§20.1).
 pub struct StoreDir { /* private fields */ }
 
-/// One named file capability; its filesystem path stays private (§21.2).
-pub struct AtomicFile { /* private fields */ }
-
-/// An unpublished file's writer; dropping it leaves its recorded name (§16.6).
-pub struct FileWriter { /* private fields */ }
-
-impl AtomicFile {
-    /// Create without replacing anything, after recording the name in
-    /// coven_file_removals. Call this filesystem operation off the async thread.
-    pub fn create_writer(&self) -> Result<FileWriter, FileError>;
-}
-
-impl FileWriter {
-    /// Read the source asynchronously once in bounded chunks. Notify `written`
-    /// after each disk write; sync the bytes and directory before success.
-    pub async fn write_from<R: AsyncRead + Unpin>(
-        self,
-        reader: &mut R,
-        written: impl FnMut(&[u8]),
-    ) -> Result<(), FileError>;
-}
-
 /// The app directory under which each store has its own directory (§20.1).
 pub struct StoreLayout { /* private fields */ }
 
@@ -4536,16 +4514,6 @@ loop {
 
 ### 20.8 Files and the cache
 
-- The stored-file codec is `coven_format::file`: `FileHeader::new(size)`
-  chooses 64-KiB chunks; `with_chunk_size(size, chunk_size)` checks the app's
-  choice. `chunk(index)` gives a `FileChunk`'s index, storage offset and exact
-  plaintext length. `range(start..end)` returns a `FileRange`; fetch its
-  `encrypted_range()` and call `open(key, path, bytes)` to authenticate only
-  those chunks. Ranges are half-open; offsets that overflow u64 are refused.
-  `FileObject` decodes and re-encodes a complete borrowed envelope, and can
-  `read_range` from it. `FileError` distinguishes layout errors from crypto
-  errors. The stored header and chunks are not plaintext `Object` frames.
-
 - A *file reference*, `FileRef`, names one row's file as of that row's
   current version, so a later change to the row can't redirect a read.
 - Coven reads a file from wherever it is: the user's original, coven's own
@@ -5175,45 +5143,7 @@ match join_with_invite(
 
 ### 20.11 Keys and secrets
 
-- `coven-crypto`'s `EncryptionKey` and audience `DerivedKeys` seal and open
-  chunks with `seal_object_chunk(path, prefix, section, index, plaintext)`
-  and `open_object_chunk(path, prefix, section, index, sealed)`. The prefix
-  is every cleartext byte from kind through the end of the object's prefix;
-  section and index are u64. The returned sealed bytes include the random
-  nonce and tag; `coven-format` adds the length field (Appendix D9).
-- `coven-format` keeps frame parsing separate from sealed layout.
-  `WriteObjectLayout::new(prefix, header_bytes, part_lengths)` starts at
-  the header; `WriteObjectPrefix::opened_header(header_bytes, part_lengths)`
-  starts after it. Readers supply lengths from the authenticated, decoded
-  header, so skipped parts still have exact boundaries. Neither call parses
-  the header. `SnapshotObjectPrefix` carries `audience`, `key`, `writes`
-  and `store_log`; its layout streams section 0. `SingleChunkPrefix` and
-  `SingleChunkObject` distinguish `StoreLog`, `PostedPositions` and
-  `JoinRequest`, preserving the ciphertext and any signature on re-encoding.
-
 ```rust
-/// One immutable file's independent random key, erased on drop (§16.2).
-pub struct FileKey { /* private fields */ }
-impl FileKey {
-    pub fn generate() -> Result<Self, CryptoError>;
-    pub fn from_bytes(bytes: [u8; 32]) -> Self;
-    pub fn to_secret_bytes(&self) -> SecretBytes;
-    /// Binds the full cleartext header; nonce is the index as 24 big-endian bytes.
-    pub fn seal_chunk(&self, path: &str, header: &[u8], index: u64, plaintext: &[u8]) -> Vec<u8>;
-    pub fn open_chunk(&self, path: &str, header: &[u8], index: u64, sealed: &[u8]) -> Result<Vec<u8>, CryptoError>;
-}
-
-/// A store or circle key's kind-37 envelope, preserving its random bytes (§11.1).
-/// MemberKeys authenticates and opens the ciphertext after the envelope is decoded.
-pub struct SealedKey<'a> { /* private fields */ }
-
-impl<'a> SealedKey<'a> {
-    /// Checks the kind, version and fixed envelope lengths without allocation.
-    pub fn decode(bytes: &'a [u8]) -> Result<Self, CryptoError>;
-    /// Encodes the original ephemeral key, nonce, ciphertext and tag.
-    pub fn encode(&self) -> Vec<u8>;
-}
-
 /// Initializing this device's member identity failed (§20.11).
 pub enum IdentityError {
     /// Custody already holds member keys.
