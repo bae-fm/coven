@@ -92,9 +92,11 @@
     - which device wrote it, its number, its timestamp, and what it had
       read;
     - the schema version it was made with;
-    - a signature over the record, made with the key of the member whose
-      device wrote it;
   - so every committed write gets uploaded, even after a crash.
+- A write needs no key: the record waits unencrypted and unsigned, and its
+  upload encrypts and signs it ([§6](#6-syncing-writes)).
+  - So the app writes before any key is unlocked
+    ([§20.1](#201-opening)).
 - A write record, for a write that fixes a note's title and deletes a tag:
 
   ```
@@ -125,6 +127,10 @@
   - Its name is part of its encryption, so the provider can't swap one
     object for another.
   - A retried upload writes the same name with the same bytes.
+- The first attempt to upload a write encrypts each part with its
+  audience's current key, signs the object with the device's member key
+  ([§14.4](#144-writes)), and keeps those bytes in `coven_uploads` before
+  sending them; every retry sends the kept bytes.
 - A write record leaves `coven_uploads` ([§5](#5-local-database)) once its upload succeeds.
 - Each device remembers how far it has applied every device's log.
 - It also posts those positions to storage at `positions/<device>`,
