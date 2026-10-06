@@ -4839,6 +4839,10 @@ match stream.read_at(resume_at, 256 * 1024).await {
   identify them. Permissions that also reach other accounts, come from a parent,
   identify no recipient, or belong to the owner are retained and returned for
   owner action; they are never reported as revoked.
+  Drive inspects `permissionDetails.inherited`: it removes a direct user grant
+  without changing parent permissions, then reports inherited access that remains.
+  Group, domain and public grants remain for owner action. Upgrading an inherited
+  reader adds a direct writer grant; upgrading a direct reader updates it in place.
 
 ```rust
 impl CovenHandle {

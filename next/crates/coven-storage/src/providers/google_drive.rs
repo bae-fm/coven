@@ -1,3 +1,5 @@
+use super::access::PermissionAccess;
+use super::google_drive_access as access;
 use super::http::{self, Body, OAuthSession};
 use crate::session::SessionState;
 use crate::*;
@@ -288,14 +290,14 @@ impl GoogleDriveStorage {
             None => Err(StorageError::Protocol("Drive omitted folder ownership")),
         }
     }
-    async fn permissions(&self, email: &str) -> Result<Vec<Value>, StorageError> {
+    async fn permissions(&self) -> Result<Vec<Value>, StorageError> {
         let mut token = None::<String>;
         let mut seen = BTreeSet::new();
         let mut found = Vec::new();
         loop {
             let mut query = vec![(
                 "fields",
-                "nextPageToken,permissions(id,emailAddress,role,type)",
+                "nextPageToken,permissions(id,emailAddress,role,type,domain,deleted,permissionDetails(inherited))",
             )];
             if let Some(token) = &token {
                 query.push(("pageToken", token));
@@ -310,20 +312,13 @@ impl GoogleDriveStorage {
                 .await?,
             )
             .await?;
-            for permission in http::array(&value, "permissions")? {
-                if permission["type"].as_str() == Some("user")
-                    && permission["emailAddress"]
-                        .as_str()
-                        .is_some_and(|e| e.eq_ignore_ascii_case(email))
-                {
-                    found.push(permission.clone());
-                }
-            }
+            found.extend(http::array(&value, "permissions")?.iter().cloned());
             let Some(next) = value.get("nextPageToken") else {
                 break;
             };
             let next = next
                 .as_str()
+                .filter(|value| !value.is_empty())
                 .ok_or(StorageError::Protocol("invalid permission page token"))?
                 .to_owned();
             if !seen.insert(next.clone()) {
@@ -492,48 +487,50 @@ impl Storage for GoogleDriveStorage {
     }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
         self.require_owner().await?;
-        let permissions = self.permissions(account).await?;
+        let permissions = self.permissions().await?;
         if permissions
             .iter()
-            .any(|p| matches!(p["role"].as_str(), Some("writer" | "owner")))
+            .any(|permission| access::writable_for(permission, account))
         {
             return Ok(AccessGrant::Granted);
         }
-        for permission in permissions {
-            let url = self.url(
-                &[
-                    "files",
-                    &self.folder,
-                    "permissions",
-                    http::string(&permission, "id")?,
-                ],
-                &[],
-            )?;
-            http::checked(
-                PROVIDER,
-                self.send(Method::PATCH, &url, Body::Json(json!({"role":"writer"})))
-                    .await?,
-            )
-            .await?;
+        let mut direct = Vec::new();
+        for permission in &permissions {
+            if matches!(
+                access::classify(permission, account)?,
+                PermissionAccess::Exclusive
+            ) {
+                direct.push(http::string(permission, "id")?);
+            }
         }
-        if self.permissions(account).await?.is_empty() {
+        if direct.is_empty() {
             let url = self.url(&["files", &self.folder, "permissions"], &[])?;
             http::checked(
                 PROVIDER,
                 self.send(
                     Method::POST,
                     &url,
-                    Body::Json(json!({"type":"user","role":"writer","emailAddress":account})),
+                    Body::Json(json!({"type":"user", "role":"writer", "emailAddress":account})),
                 )
                 .await?,
             )
             .await?;
+        } else {
+            for id in direct {
+                let url = self.url(&["files", &self.folder, "permissions", id], &[])?;
+                http::checked(
+                    PROVIDER,
+                    self.send(Method::PATCH, &url, Body::Json(json!({"role":"writer"})))
+                        .await?,
+                )
+                .await?;
+            }
         }
         if !self
-            .permissions(account)
+            .permissions()
             .await?
             .iter()
-            .any(|p| matches!(p["role"].as_str(), Some("writer" | "owner")))
+            .any(|permission| access::writable_for(permission, account))
         {
             return Err(StorageError::Protocol("Drive did not grant write access"));
         }
@@ -546,19 +543,21 @@ impl Storage for GoogleDriveStorage {
             ));
         };
         self.require_owner().await?;
-        for permission in self.permissions(email).await? {
+        let permissions = self.permissions().await?;
+        let mut direct = Vec::new();
+        for permission in &permissions {
+            if matches!(
+                access::classify(permission, email)?,
+                PermissionAccess::Exclusive
+            ) {
+                direct.push(http::string(permission, "id")?);
+            }
+        }
+        for id in direct {
             let response = self
                 .send(
                     Method::DELETE,
-                    &self.url(
-                        &[
-                            "files",
-                            &self.folder,
-                            "permissions",
-                            http::string(&permission, "id")?,
-                        ],
-                        &[],
-                    )?,
+                    &self.url(&["files", &self.folder, "permissions", id], &[])?,
                     Body::Empty,
                 )
                 .await?;
@@ -566,12 +565,26 @@ impl Storage for GoogleDriveStorage {
                 http::checked(PROVIDER, response).await?;
             }
         }
-        if !self.permissions(email).await?.is_empty() {
-            return Err(StorageError::Protocol(
-                "Drive access remains after revocation",
-            ));
+        let mut shares = Vec::new();
+        for permission in self.permissions().await? {
+            match access::classify(&permission, email)? {
+                PermissionAccess::Unrelated => {}
+                PermissionAccess::Exclusive => {
+                    return Err(StorageError::Protocol(
+                        "Drive access remains after revocation",
+                    ))
+                }
+                PermissionAccess::Retained(reason) => shares.push(RetainedAccess {
+                    provider_id: http::string(&permission, "id")?.into(),
+                    reason,
+                }),
+            }
         }
-        Ok(MemberRemoval::Revoked)
+        if shares.is_empty() {
+            Ok(MemberRemoval::Revoked)
+        } else {
+            Ok(MemberRemoval::AccessRemains { shares })
+        }
     }
     async fn begin_upload(
         &self,

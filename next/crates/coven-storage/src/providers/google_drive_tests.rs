@@ -20,6 +20,10 @@ struct Remote {
     fail_reply: bool,
     partial: Option<usize>,
     permissions: BTreeMap<String, String>,
+    extra_permissions: BTreeMap<String, Value>,
+    permission_mutations: Vec<(String, String)>,
+    refuse_share: bool,
+    lose_share_reply: bool,
     lose_delete_reply: bool,
 }
 fn metadata(mut value: Value, size: usize) -> Value {
@@ -161,23 +165,103 @@ fn respond(
     }
     if parts.len() >= 4 && parts[2] == "folder" && parts[3] == "permissions" {
         return match *method {
-            Method::GET => reply(
-                json!({"permissions":state.permissions.iter().map(|(email,role)|json!({"id":email,"type":"user","emailAddress":email,"role":role})).collect::<Vec<_>>()}),
-            ),
+            Method::GET => {
+                let entries: Vec<_> = state.permissions.iter().map(|(email,role)|json!({"id":email,"type":"user","emailAddress":email,"role":role,"permissionDetails":[{"inherited":false}]})).chain(state.extra_permissions.values().cloned()).collect();
+                let start = q
+                    .get("pageToken")
+                    .map(|value| value.parse::<usize>().unwrap())
+                    .unwrap_or(0);
+                let mut page =
+                    json!({"permissions":entries.iter().skip(start).take(1).collect::<Vec<_>>()});
+                if entries.len() > start + 1 {
+                    page["nextPageToken"] = json!((start + 1).to_string());
+                }
+                reply(page)
+            }
             Method::POST => {
-                state.permissions.insert(
-                    value["emailAddress"].as_str().unwrap().into(),
-                    value["role"].as_str().unwrap().into(),
-                );
+                let email = value["emailAddress"].as_str().unwrap();
+                state
+                    .permission_mutations
+                    .push(("create".into(), email.into()));
+                if state.refuse_share {
+                    return response(
+                        403,
+                        r#"{"error":{"errors":[{"reason":"insufficientFilePermissions"}]}}"#,
+                    );
+                }
+                if let Some(permission) = state
+                    .extra_permissions
+                    .values_mut()
+                    .find(|permission| permission["emailAddress"] == email)
+                {
+                    permission["role"] = value["role"].clone();
+                    permission["permissionDetails"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"inherited":false}));
+                } else {
+                    state
+                        .permissions
+                        .insert(email.into(), value["role"].as_str().unwrap().into());
+                }
+                if std::mem::replace(&mut state.lose_share_reply, false) {
+                    return response(503, "{}");
+                }
                 reply(json!({"id":"permission"}))
             }
             Method::PATCH => {
                 state
-                    .permissions
-                    .insert(parts[4].into(), value["role"].as_str().unwrap().into());
+                    .permission_mutations
+                    .push(("update".into(), parts[4].into()));
+                if state.refuse_share {
+                    return response(
+                        403,
+                        r#"{"error":{"errors":[{"reason":"insufficientFilePermissions"}]}}"#,
+                    );
+                }
+                if let Some(permission) = state.extra_permissions.get_mut(parts[4]) {
+                    if permission["permissionDetails"]
+                        .as_array()
+                        .is_some_and(|details| {
+                            details.iter().all(|detail| detail["inherited"] == true)
+                        })
+                    {
+                        return response(
+                            403,
+                            r#"{"error":{"errors":[{"reason":"cannotModifyInheritedTeamDrivePermission"}]}}"#,
+                        );
+                    }
+                    permission["role"] = value["role"].clone();
+                } else {
+                    state
+                        .permissions
+                        .insert(parts[4].into(), value["role"].as_str().unwrap().into());
+                }
+                if std::mem::replace(&mut state.lose_share_reply, false) {
+                    return response(503, "{}");
+                }
                 reply(json!({}))
             }
             Method::DELETE => {
+                state
+                    .permission_mutations
+                    .push(("delete".into(), parts[4].into()));
+                if let Some(permission) = state.extra_permissions.get_mut(parts[4]) {
+                    if permission["role"] == "owner" {
+                        return response(
+                            403,
+                            r#"{"error":{"errors":[{"reason":"cannotDeletePermission"}]}}"#,
+                        );
+                    }
+                    if let Some(details) = permission["permissionDetails"].as_array_mut() {
+                        details.retain(|detail| detail["inherited"] == true);
+                        if !details.is_empty() {
+                            permission["role"] = json!("reader");
+                            return response(204, Vec::new());
+                        }
+                    }
+                    state.extra_permissions.remove(parts[4]);
+                }
                 state.permissions.remove(parts[4]);
                 response(204, Vec::new())
             }
@@ -728,3 +812,6 @@ async fn deleting_a_path_removes_its_copies_and_preserves_unlinked_bytes() {
     assert_eq!(remote.files["other-account"].1, b"data");
     assert_eq!(remote.files["other-account"].0["parents"], json!([]));
 }
+
+#[path = "google_drive_access_tests.rs"]
+mod access_tests;

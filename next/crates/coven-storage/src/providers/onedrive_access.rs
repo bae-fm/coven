@@ -1,12 +1,7 @@
+use super::access::PermissionAccess;
 use crate::{RetainedAccessReason, StorageError};
 use serde_json::Value;
 use std::collections::BTreeSet;
-
-pub(super) enum PermissionAccess {
-    Unrelated,
-    Exclusive,
-    Retained(RetainedAccessReason),
-}
 
 /// Resolve native account ids from every email-bearing permission before any
 /// deletion. A permission id identifies the permission, not its recipient.

@@ -1,5 +1,6 @@
+use super::access::PermissionAccess;
 use super::http::{self, Body, OAuthSession};
-use super::onedrive_access::{AccountPermissions, PermissionAccess};
+use super::onedrive_access::AccountPermissions;
 use crate::session::SessionState;
 use crate::*;
 use async_trait::async_trait;
