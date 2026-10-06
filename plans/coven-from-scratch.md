@@ -1393,6 +1393,11 @@ Carol's tablet:
 - The *current* store key is the one named by the latest entry the replay
   keeps, in its order, that brings one in, and likewise for each circle; new
   writes, entries, snapshots and files use it.
+  - An entry already in place changes nothing, so it brings no key in,
+    though what was sealed with the key it names still opens: that key
+    is sealed to the same members.
+  - E.g. Ana and Ben both remove Dan: Ana's earlier removal brings its
+    key in, and Ben's applies without one.
 - Every encrypted object names, outside its encryption, the key that seals
   each of its parts, so a reader knows which key opens it.
 - So a member's key alone gets the current store key: a device holding it
