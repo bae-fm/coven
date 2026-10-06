@@ -1933,7 +1933,8 @@ Carol's tablet:
     tablet only Ana's writes 1 to 3; Carol's tablet holds back Ben's write
     9, and its app shows it is waiting for Ana's write 4.
 - An object that fails its check when read: it won't decrypt, its
-  signature doesn't match, or it doesn't parse.
+  signature doesn't match, it doesn't parse, or its write breaks the
+  merge's rules, such as a timestamp no later than a write it had read.
 - A damaged local database, found by SQLite's integrity check when the
   database opens.
 - Devices that disagree:
@@ -2329,6 +2330,9 @@ pub enum DbError {
     ReferenceAudience { table: String, key: RowKey, column: String },
     /// A write targets a circle whose deletion has been applied (§14.7).
     DeletedCircle(CircleId),
+    /// A downloaded write fails the merge's checks, such as a timestamp no
+    /// later than a write it had read; it is never applied (§19.1).
+    InvalidWrite { write: WriteId, error: MergeError },
     /// A write changes a file declared write-once (§20.2).
     FileWriteOnce { table: String, key: RowKey },
     /// A file reference no longer names the row's file (§16.3).
