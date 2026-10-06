@@ -382,8 +382,16 @@ Two mechanisms order writes:
     parent, so a lost reference reads as null or the default when its
     parent goes ([§8.4](#84-foreign-keys)).
 - The store log's effects that the database applies are kept with it:
-  `coven_deleted_circles` names each circle whose deletion it has applied
-  ([§14.7](#147-deleting-a-circle)).
+  - `coven_deleted_circles` names each circle whose deletion it has applied
+    ([§14.7](#147-deleting-a-circle));
+  - `coven_applied_boundaries` names each breaking change and reset it has
+    applied, with the writes its snapshot included, so a later write is
+    judged against it ([§17.1](#171-host-application),
+    [§19.3](#193-resetting-a-store)).
+- Fingerprints ([§19.1](#191-noticing)) are kept incrementally:
+  `coven_fingerprint_leaves` holds one hash per row and per lost write in
+  each audience, and `coven_fingerprint_sums` their sum per audience, so
+  a write updates only the hashes of the rows it changed.
 - Note 42 on Ben's phone, after Ana's write 4 and its own write 9:
 
   ```
