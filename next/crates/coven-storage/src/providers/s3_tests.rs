@@ -19,6 +19,9 @@ struct Remote {
     uploads: BTreeMap<String, BTreeMap<u32, Vec<u8>>>,
     metadata: BTreeMap<String, String>,
     fail_part_reply: bool,
+    lose_create_reply: bool,
+    refuse_delete: bool,
+    deletions: usize,
     fail_completion_reply: bool,
     setup_barrier: Option<Arc<tokio::sync::Barrier>>,
     forced_error: Option<(&'static str, u16)>,
@@ -148,6 +151,9 @@ fn respond(
                 return response(412, "<Error><Code>PreconditionFailed</Code></Error>");
             }
             state.objects.insert(key, body.to_vec());
+            if std::mem::replace(&mut state.lose_create_reply, false) {
+                return response(503, "<Error><Code>ServiceUnavailable</Code></Error>");
+            }
             response(200, Vec::new())
         }
         Method::GET => match state.objects.get(&key) {
@@ -170,6 +176,10 @@ fn respond(
             None => response(404, Vec::new()),
         },
         Method::DELETE => {
+            state.deletions += 1;
+            if state.refuse_delete {
+                return response(403, "<Error><Code>AccessDenied</Code></Error>");
+            }
             state.objects.remove(&key);
             response(204, Vec::new())
         }
@@ -389,4 +399,45 @@ async fn simultaneous_setups_expose_both_first_entries_for_sync() {
         [first, other]
     );
     assert_eq!(state.lock().unwrap().objects.len(), 2);
+}
+
+#[tokio::test]
+async fn probe_cleans_up_after_a_lost_create_reply_and_retains_both_failures() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let path = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    state.lock().unwrap().lose_create_reply = true;
+    assert_eq!(
+        storage.probe(&path, b"probe").await.unwrap_err().failure(),
+        StorageFailure::Network
+    );
+    assert!(state.lock().unwrap().objects.is_empty());
+    assert_eq!(state.lock().unwrap().deletions, 1);
+    state.lock().unwrap().lose_create_reply = true;
+    state.lock().unwrap().refuse_delete = true;
+    let StorageError::Cleanup { operation, cleanup } =
+        storage.probe(&path, b"probe").await.unwrap_err()
+    else {
+        panic!("both failures must reach the caller")
+    };
+    assert_eq!(operation.failure(), StorageFailure::Network);
+    assert_eq!(cleanup.failure(), StorageFailure::PermissionDenied);
+    assert!(matches!(*operation, StorageError::Provider { .. }));
+    assert!(matches!(*cleanup, StorageError::Provider { .. }));
+    state.lock().unwrap().refuse_delete = false;
+    storage.delete(&path).await.unwrap();
+    storage.probe(&path, b"probe").await.unwrap();
+    assert!(state.lock().unwrap().objects.is_empty());
+    storage.create(&path, b"preexisting").await.unwrap();
+    let deletes = state.lock().unwrap().deletions;
+    assert_eq!(
+        storage.probe(&path, b"probe").await.unwrap_err().failure(),
+        StorageFailure::AlreadyExists
+    );
+    assert_eq!(state.lock().unwrap().deletions, deletes);
+    assert_eq!(storage.read(&path).await.unwrap(), b"preexisting");
 }

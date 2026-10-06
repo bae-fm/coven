@@ -196,8 +196,15 @@ pub trait Storage: Send + Sync {
     /// local settings are committed. A failed cleanup is returned too.
     async fn probe(&self, path: &ObjectPath, encrypted_bytes: &[u8]) -> Result<(), StorageError> {
         let range = ByteRange::new(0, encrypted_bytes.len() as u64)?;
-        self.create(path, encrypted_bytes).await?;
+        let created = self.create(path, encrypted_bytes).await;
+        if created
+            .as_ref()
+            .is_err_and(|error| error.failure() == crate::StorageFailure::AlreadyExists)
+        {
+            return created;
+        }
         let check = async {
+            created?;
             if self.read(path).await? != encrypted_bytes
                 || self.read_range(path, range).await? != encrypted_bytes
             {
