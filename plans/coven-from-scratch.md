@@ -675,6 +675,12 @@ Carol's tablet:
     parent, and coven couldn't take it out.
 - Where SQLite would still refuse the default, such as one failing a
   CHECK, the child is taken out as under restrict.
+- Coven takes rows out with SQLite's foreign keys enforced, children
+  first, so SQLite's own actions reach only local children.
+  - Rows the app's schema makes impossible to delete stay so: e.g. two
+    rows pointing at each other with set default, whose default fails a
+    CHECK, can't be deleted by the app, and can't be taken out by coven.
+  - A write that would need it fails with SQLite's error.
 - A reference set to its default points at whichever generation of the
   default parent is current, and is never stale.
   - If that parent is deleted or taken out, the child is taken out as
