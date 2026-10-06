@@ -2872,6 +2872,8 @@ pub enum SchemaError {
     FileColumn { table: String, column: String },
     /// A hash or where-column cannot represent a row without a file (§16.1).
     FileColumnNotNullable { table: String, column: String },
+    /// SET NULL or SET DEFAULT would change one file column alone (§16.1).
+    FileForeignKeyAction { table: String, column: String },
     /// A trigger declared shared isn't on the table (§8.7).
     MissingTrigger { table: String, trigger: String },
     /// A synced table has no primary key (§8.5).

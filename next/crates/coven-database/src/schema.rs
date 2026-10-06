@@ -335,6 +335,16 @@ impl Schema {
                         }
                         .into());
                     }
+                    if table.foreign_keys.iter().any(|key| {
+                        key.replaces_reference()
+                            && key.columns.iter().any(|c| c.eq_ignore_ascii_case(column))
+                    }) {
+                        return Err(SchemaError::FileForeignKeyAction {
+                            table: error_table(),
+                            column: column.into(),
+                        }
+                        .into());
+                    }
                 }
             }
         }

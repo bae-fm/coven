@@ -277,6 +277,14 @@ pub enum SchemaError {
         /// The non-null managed column.
         column: String,
     },
+    /// SET NULL or SET DEFAULT would change one file column alone (§16.1).
+    #[error("file column {table}.{column} cannot use SET NULL or SET DEFAULT")]
+    FileForeignKeyAction {
+        /// The declared table.
+        table: String,
+        /// The referencing file column.
+        column: String,
+    },
     /// A declared file column isn't in the table (§20.2).
     #[error("file column {table}.{column} is missing")]
     FileColumn {
