@@ -144,11 +144,12 @@ impl OneDriveStorage {
         }
         let response = http::checked(PROVIDER, response).await?;
         let status = response.status().as_u16();
+        let headers = response.headers().clone();
         let body = response
             .bytes()
             .await
             .map_err(|e| http::transport(PROVIDER, e))?;
-        let invalid = || http::invalid_response(PROVIDER, status, body.to_vec());
+        let invalid = || http::invalid_response(PROVIDER, status, headers.clone(), body.to_vec());
         let value: Value = serde_json::from_slice(&body).map_err(|_| invalid())?;
         if let Some(ranges) = value.get("nextExpectedRanges") {
             let ranges = ranges.as_array().ok_or_else(invalid)?;

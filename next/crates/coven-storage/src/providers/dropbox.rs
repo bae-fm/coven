@@ -40,21 +40,25 @@ impl DropboxStorage {
         json!({".tag":"namespace_id","namespace_id":self.namespace}).to_string()
     }
     async fn rpc(&self, method: &str, value: Value) -> Result<Value, StorageError> {
-        let url = http::endpoint(&self.api, &method.split('/').collect::<Vec<_>>(), &[])?;
-        http::json(
-            PROVIDER,
-            self.session
-                .send(
-                    Method::POST,
-                    &url,
-                    &[("Dropbox-API-Path-Root", self.root())],
-                    Body::Json(value),
-                    true,
-                )
-                .await?,
-        )
-        .await
+        http::json(PROVIDER, self.rpc_response(method, value).await?).await
     }
+    async fn rpc_response(
+        &self,
+        method: &str,
+        value: Value,
+    ) -> Result<reqwest::Response, StorageError> {
+        let url = http::endpoint(&self.api, &method.split('/').collect::<Vec<_>>(), &[])?;
+        self.session
+            .send(
+                Method::POST,
+                &url,
+                &[("Dropbox-API-Path-Root", self.root())],
+                Body::Json(value),
+                true,
+            )
+            .await
+    }
+
     async fn content(
         &self,
         method: &str,
@@ -140,18 +144,20 @@ impl DropboxStorage {
         };
         if let Some(job) = job {
             for _ in 0..60 {
-                value = self
-                    .rpc(
+                let (status, original) = http::json_response(
+                    PROVIDER,
+                    self.rpc_response(
                         "sharing/check_remove_member_job_status",
                         json!({"async_job_id":job}),
                     )
-                    .await?;
+                    .await?,
+                )
+                .await?;
+                value = status;
                 match http::string(&value, ".tag")? {
                     "complete" => break,
                     "in_progress" => tokio::time::sleep(std::time::Duration::from_secs(1)).await,
-                    "failed" => {
-                        return Err(StorageError::Protocol("Dropbox member removal failed"))
-                    }
+                    "failed" => return Err(original.into_error(PROVIDER)),
                     _ => return Err(StorageError::Protocol("invalid Dropbox remove status")),
                 }
             }
@@ -204,6 +210,7 @@ fn upload_lookup(
                 _ => Err(http::invalid_response(
                     PROVIDER,
                     response.status(),
+                    response.headers().clone(),
                     response.body().to_vec(),
                 )),
             }

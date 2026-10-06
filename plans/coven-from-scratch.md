@@ -4064,6 +4064,21 @@ impl StorageError {
     pub fn retryable(&self) -> bool;
 }
 
+/// An HTTP provider's original response, retained as a StorageError cause.
+/// Bodies and headers are omitted from Display and Debug because providers
+/// can echo credentials. This also retains Dropbox's asynchronous job failures
+/// and malformed OneDrive progress responses, even when HTTP succeeded.
+pub struct ProviderResponse { /* private */ }
+
+impl ProviderResponse {
+    /// The native HTTP status.
+    pub fn status(&self) -> u16;
+    /// Inspect native headers explicitly, including Retry-After.
+    pub fn headers(&self) -> &reqwest::header::HeaderMap;
+    /// Inspect the unmodified response body explicitly.
+    pub fn body(&self) -> &[u8];
+}
+
 /// Storage setup failed before committing credentials and keys (§20.5).
 pub enum StorageSetupError {
     /// Another store already occupies the location.

@@ -106,12 +106,25 @@ pub(crate) fn transport(provider: CloudProvider, error: reqwest::Error) -> Stora
 /// The original error response. Its body is never printed; providers may echo secrets.
 pub struct ProviderResponse {
     status: u16,
+    headers: reqwest::header::HeaderMap,
     body: SecretBytes,
 }
 impl ProviderResponse {
     /// The HTTP status returned by the provider.
     pub fn status(&self) -> u16 {
         self.status
+    }
+    /// Original response headers, including Retry-After. Inspect explicitly;
+    /// they are redacted from ordinary error formatting along with the body.
+    pub fn headers(&self) -> &reqwest::header::HeaderMap {
+        &self.headers
+    }
+    pub(crate) fn into_error(self, provider: CloudProvider) -> StorageError {
+        StorageError::Provider {
+            provider,
+            failure: classify(provider, self.status, self.body()),
+            source: Box::new(self),
+        }
     }
     /// Inspect the original provider response explicitly at the app boundary.
     pub fn body(&self) -> &[u8] {
@@ -135,6 +148,7 @@ impl std::error::Error for ProviderResponse {}
 pub(crate) fn invalid_response(
     provider: CloudProvider,
     status: u16,
+    headers: reqwest::header::HeaderMap,
     body: Vec<u8>,
 ) -> StorageError {
     StorageError::Provider {
@@ -142,6 +156,7 @@ pub(crate) fn invalid_response(
         failure: StorageFailure::Protocol,
         source: Box::new(ProviderResponse {
             status,
+            headers,
             body: SecretBytes::new(body),
         }),
     }
@@ -158,19 +173,17 @@ pub(crate) async fn checked(
 }
 pub(crate) async fn response_error(provider: CloudProvider, response: Response) -> StorageError {
     let status = response.status().as_u16();
+    let headers = response.headers().clone();
     let body = match response.bytes().await {
         Ok(body) => body.to_vec(),
         Err(error) => return transport(provider, error),
     };
-    let failure = classify(provider, status, &body);
-    StorageError::Provider {
-        provider,
-        failure,
-        source: Box::new(ProviderResponse {
-            status,
-            body: SecretBytes::new(body),
-        }),
+    ProviderResponse {
+        status,
+        headers,
+        body: SecretBytes::new(body),
     }
+    .into_error(provider)
 }
 pub(crate) fn classify(provider: CloudProvider, status: u16, body: &[u8]) -> StorageFailure {
     let parsed = match serde_json::from_slice::<Value>(body) {
@@ -187,6 +200,11 @@ pub(crate) fn classify(provider: CloudProvider, status: u16, body: &[u8]) -> Sto
         )
     }) {
         return StorageFailure::Authentication;
+    }
+    if provider == CloudProvider::Dropbox {
+        if let Some(failure) = parsed.as_ref().and_then(dropbox_failure) {
+            return failure;
+        }
     }
     let code = parsed.as_ref().and_then(|value| match provider {
         CloudProvider::GoogleDrive => value["error"]["errors"][0]["reason"].as_str(),
@@ -210,29 +228,12 @@ pub(crate) fn classify(provider: CloudProvider, status: u16, body: &[u8]) -> Sto
             }
             _ => {}
         }
-        if provider == CloudProvider::Dropbox {
-            let tags: Vec<_> = code.trim_end_matches('.').split('/').collect();
-            if tags.contains(&"not_found") {
-                return StorageFailure::NotFound;
-            }
-            if tags.contains(&"insufficient_space") {
-                return StorageFailure::QuotaExceeded;
-            }
-            if tags.contains(&"conflict") {
-                return StorageFailure::AlreadyExists;
-            }
-            if tags.contains(&"no_permission") {
-                return StorageFailure::PermissionDenied;
-            }
-            if tags.contains(&"expired_access_token") || tags.contains(&"invalid_access_token") {
-                return StorageFailure::Authentication;
-            }
-        }
     }
     match status {
         401 => StorageFailure::Authentication,
         403 => StorageFailure::PermissionDenied,
         404 => StorageFailure::NotFound,
+        409 if provider == CloudProvider::Dropbox => StorageFailure::Refused,
         409 | 412 => StorageFailure::AlreadyExists,
         416 => StorageFailure::InvalidConfiguration,
         429 => StorageFailure::RateLimited,
@@ -241,16 +242,85 @@ pub(crate) fn classify(provider: CloudProvider, status: u16, body: &[u8]) -> Sto
         _ => StorageFailure::Refused,
     }
 }
+fn dropbox_failure(value: &Value) -> Option<StorageFailure> {
+    fn tags<'a>(value: &'a Value, result: &mut Vec<&'a str>) {
+        if let Some(object) = value.as_object() {
+            if let Some(tag) = object.get(".tag").and_then(Value::as_str) {
+                result.push(tag);
+            }
+            for child in object.values().filter(|child| child.is_object()) {
+                tags(child, result);
+            }
+        }
+    }
+    let mut names = Vec::new();
+    if let Some(summary) = value["error_summary"].as_str() {
+        names.extend(summary.trim_end_matches('.').split('/'));
+    }
+    tags(&value["error"], &mut names);
+    tags(&value["failed"], &mut names);
+    // Specific native failures take precedence over HTTP 409's many meanings.
+    if names.iter().any(|name| {
+        matches!(
+            *name,
+            "too_many_requests" | "too_many_write_operations" | "rate_limit"
+        )
+    }) {
+        Some(StorageFailure::RateLimited)
+    } else if names
+        .iter()
+        .any(|name| matches!(*name, "expired_access_token" | "invalid_access_token"))
+    {
+        Some(StorageFailure::Authentication)
+    } else if names.iter().any(|name| {
+        matches!(
+            *name,
+            "no_permission" | "access_denied" | "not_a_member" | "invalid_member"
+        )
+    }) {
+        Some(StorageFailure::PermissionDenied)
+    } else if names.contains(&"insufficient_space") {
+        Some(StorageFailure::QuotaExceeded)
+    } else if names.contains(&"conflict") {
+        Some(StorageFailure::AlreadyExists)
+    } else if names.contains(&"invalid_root")
+        || names.contains(&"invalid_namespace_id")
+        || names.contains(&"invalid_id")
+    {
+        Some(StorageFailure::ContainerNotFound)
+    } else if names.contains(&"not_found") {
+        Some(StorageFailure::NotFound)
+    } else {
+        None
+    }
+}
 pub(crate) async fn json(
     provider: CloudProvider,
     response: Response,
 ) -> Result<Value, StorageError> {
-    let bytes = checked(provider, response)
-        .await?
+    Ok(json_response(provider, response).await?.0)
+}
+pub(crate) async fn json_response(
+    provider: CloudProvider,
+    response: Response,
+) -> Result<(Value, ProviderResponse), StorageError> {
+    let response = checked(provider, response).await?;
+    let status = response.status().as_u16();
+    let headers = response.headers().clone();
+    let body = response
         .bytes()
         .await
-        .map_err(|e| transport(provider, e))?;
-    serde_json::from_slice(&bytes).map_err(|error| StorageError::Encoding(Box::new(error)))
+        .map_err(|error| transport(provider, error))?;
+    let value = serde_json::from_slice(&body)
+        .map_err(|_| invalid_response(provider, status, headers.clone(), body.to_vec()))?;
+    Ok((
+        value,
+        ProviderResponse {
+            status,
+            headers,
+            body: SecretBytes::new(body.to_vec()),
+        },
+    ))
 }
 pub(crate) fn string<'a>(value: &'a Value, field: &str) -> Result<&'a str, StorageError> {
     value[field]
@@ -336,7 +406,9 @@ pub(crate) fn validate_content_range(header: &str, range: ByteRange) -> Result<(
         .parse()
         .map_err(|_| StorageError::Protocol("invalid Content-Range total"))?;
     if bounds != format!("{}-{}", range.start(), range.end() - 1) || range.end() > total {
-        return Err(StorageError::InvalidRange);
+        return Err(StorageError::Protocol(
+            "Content-Range disagrees with request",
+        ));
     }
     Ok(())
 }

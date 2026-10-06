@@ -10,9 +10,14 @@ use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
 };
+struct RemovalJob {
+    member: String,
+    statuses: std::collections::VecDeque<Value>,
+}
 #[derive(Default)]
 struct Remote {
     non_owner: bool,
+    removal_job: Option<RemovalJob>,
     objects: BTreeMap<String, Vec<u8>>,
     upload: Vec<u8>,
     fail_reply: bool,
@@ -201,10 +206,28 @@ async fn endpoint(
         }
         "/2/sharing/remove_folder_member" => {
             state.sharing_mutations.push("remove".into());
+            if let Some(job) = &state.removal_job {
+                assert_eq!(arg["member"]["email"], job.member);
+                return reply(json!({".tag":"async_job_id","async_job_id":"removal"}));
+            }
             state
                 .members
                 .remove(arg["member"]["email"].as_str().unwrap());
             reply(json!({".tag":"complete"}))
+        }
+        "/2/sharing/check_remove_member_job_status" => {
+            assert_eq!(arg["async_job_id"], "removal");
+            let job = state.removal_job.as_mut().unwrap();
+            let status = if job.statuses.len() > 1 {
+                job.statuses.pop_front().unwrap()
+            } else {
+                job.statuses.front().unwrap().clone()
+            };
+            let member = job.member.clone();
+            if status[".tag"] == "complete" {
+                state.members.remove(&member);
+            }
+            reply(status)
         }
         other => panic!("unexpected Dropbox request {other}"),
     }
@@ -621,4 +644,104 @@ async fn listing_retains_server_time_and_size_across_pages_and_retries() {
     );
     storage.create_once(&first, b"first").await.unwrap();
     assert_eq!(storage.list(&ObjectPrefix::all()).await.unwrap(), expected);
+}
+
+#[tokio::test]
+async fn asynchronous_removal_keeps_the_native_failure_and_previous_access() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    storage.grant_access("member").await.unwrap();
+    for (failed, expected) in [
+        (
+            json!({".tag":"no_permission"}),
+            StorageFailure::PermissionDenied,
+        ),
+        (
+            json!({".tag":"access_error","access_error":{".tag":"not_a_member"}}),
+            StorageFailure::PermissionDenied,
+        ),
+        (json!({".tag":"team_folder"}), StorageFailure::Refused),
+    ] {
+        let body = json!({".tag":"failed","failed":failed});
+        state.lock().unwrap().removal_job = Some(RemovalJob {
+            member: "member".into(),
+            statuses: [body.clone()].into(),
+        });
+        let error = storage
+            .revoke_access(&MemberAccess::ProviderAccount("member".into()))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.failure(), expected);
+        let StorageError::Provider { source, .. } = error else {
+            panic!("native removal failure discarded")
+        };
+        let response = source.downcast_ref::<http::ProviderResponse>().unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            serde_json::from_slice::<Value>(response.body()).unwrap(),
+            body
+        );
+        assert!(state.lock().unwrap().members.contains_key("member"));
+    }
+}
+
+#[tokio::test]
+async fn asynchronous_removal_waits_for_publication_and_retries_after_completion() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    storage.grant_access("member").await.unwrap();
+    state.lock().unwrap().removal_job = Some(RemovalJob {
+        member: "member".into(),
+        statuses: [
+            json!({".tag":"in_progress"}),
+            json!({".tag":"complete", "complete":{}}),
+        ]
+        .into(),
+    });
+    storage
+        .revoke_access(&MemberAccess::ProviderAccount("member".into()))
+        .await
+        .unwrap();
+    storage
+        .revoke_access(&MemberAccess::ProviderAccount("member".into()))
+        .await
+        .unwrap();
+    assert!(!state.lock().unwrap().members.contains_key("member"));
+    assert_eq!(state.lock().unwrap().sharing_mutations, ["add", "remove"]);
+}
+
+#[tokio::test]
+async fn asynchronous_removal_times_out_without_hiding_remaining_access() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    storage.grant_access("member").await.unwrap();
+    state.lock().unwrap().removal_job = Some(RemovalJob {
+        member: "member".into(),
+        statuses: [json!({".tag":"in_progress"})].into(),
+    });
+    let error = storage
+        .revoke_access(&MemberAccess::ProviderAccount("member".into()))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error.failure(), StorageFailure::Network);
+    let StorageError::Provider { source, .. } = error else {
+        panic!("timeout cause discarded")
+    };
+    assert_eq!(
+        source.downcast_ref::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::TimedOut
+    );
+    assert!(state.lock().unwrap().members.contains_key("member"));
+    state.lock().unwrap().removal_job.as_mut().unwrap().statuses =
+        [json!({".tag":"complete", "complete":{}})].into();
+    storage
+        .revoke_access(&MemberAccess::ProviderAccount("member".into()))
+        .await
+        .unwrap();
+    assert!(!state.lock().unwrap().members.contains_key("member"));
 }
