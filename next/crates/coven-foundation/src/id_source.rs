@@ -33,6 +33,20 @@ impl std::fmt::Display for CircleId {
     }
 }
 
+/// A store or circle key's identity, named by the entry introducing it (§11).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct KeyId(
+    /// The key's UUID, supplied by the id source.
+    pub Uuid,
+);
+
+impl std::fmt::Display for KeyId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// An invitation's identity, independent of its one-time secret (§12.2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(transparent)]

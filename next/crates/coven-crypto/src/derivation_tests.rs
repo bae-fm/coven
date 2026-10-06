@@ -1,6 +1,6 @@
 use super::*;
 use crate::{CircleId, CircleKey, ContentHasher, InviteSecret, StoreKey};
-use std::num::NonZeroU64;
+use coven_foundation::id_source::{IdSource, KeyId};
 use uuid::Uuid;
 
 #[test]
@@ -51,7 +51,7 @@ fn purpose_labels_and_hkdf_answers_are_pinned() {
 
 #[test]
 fn stored_file_name_nonce_chunk_and_fingerprint_answers_are_pinned() {
-    let keys = StoreKey::from_bytes(NonZeroU64::MIN, [17; 32]).derive();
+    let keys = StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [17; 32]).derive();
     let mut hash = ContentHasher::new();
     hash.update(b"hello file");
     let name = keys.file_name(&hash.finish());
@@ -79,9 +79,12 @@ fn stored_file_name_nonce_chunk_and_fingerprint_answers_are_pinned() {
 
 #[test]
 fn store_and_circle_objects_bind_path_and_use_random_nonces() {
+    let key_ids = coven_foundation::id_source::SequentialIds::new();
     let keys = [
-        StoreKey::generate(NonZeroU64::MIN).unwrap().derive(),
-        CircleKey::generate(CircleId(Uuid::from_u128(5)), NonZeroU64::MIN)
+        StoreKey::generate(KeyId(key_ids.new_id()))
+            .unwrap()
+            .derive(),
+        CircleKey::generate(CircleId(Uuid::from_u128(5)), KeyId(key_ids.new_id()))
             .unwrap()
             .derive(),
     ];
@@ -142,8 +145,8 @@ fn a_join_request_is_bound_to_its_invite_and_path() {
 
 #[test]
 fn file_chunks_repeat_only_for_the_same_key_name_index_and_bytes() {
-    let key = StoreKey::from_bytes(NonZeroU64::MIN, [17; 32]).derive();
-    let other_key = StoreKey::from_bytes(NonZeroU64::MIN, [18; 32]).derive();
+    let key = StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [17; 32]).derive();
+    let other_key = StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [18; 32]).derive();
     let name = key.file_name(&ContentHash::from_bytes([4; 32]));
     let other_name = key.file_name(&ContentHash::from_bytes([5; 32]));
     for index in [0, 1, 7, u64::MAX] {
@@ -175,7 +178,7 @@ fn file_chunks_repeat_only_for_the_same_key_name_index_and_bytes() {
 
 #[test]
 fn chunks_authenticate_the_name_and_index_in_addition_to_the_nonce() {
-    let keys = StoreKey::from_bytes(NonZeroU64::MIN, [17; 32]).derive();
+    let keys = StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [17; 32]).derive();
     let name = StoredFileName::from_bytes([8; 32]);
     let sealed = keys.seal_chunk(&name, 7, b"payload");
     let nonce = keys.chunk_nonce(&name, 7);
@@ -200,14 +203,20 @@ fn chunks_authenticate_the_name_and_index_in_addition_to_the_nonce() {
 #[test]
 #[should_panic(expected = "storage paths must be nonempty")]
 fn objects_cannot_be_sealed_without_a_storage_path() {
-    let key = StoreKey::generate(NonZeroU64::MIN).unwrap().derive();
+    let key_ids = coven_foundation::id_source::SequentialIds::new();
+    let key = StoreKey::generate(KeyId(key_ids.new_id()))
+        .unwrap()
+        .derive();
     let _sealed = key.seal_object("", b"payload");
 }
 
 #[test]
 #[should_panic(expected = "storage paths must be nonempty")]
 fn objects_cannot_be_opened_without_a_storage_path() {
-    let key = StoreKey::generate(NonZeroU64::MIN).unwrap().derive();
+    let key_ids = coven_foundation::id_source::SequentialIds::new();
+    let key = StoreKey::generate(KeyId(key_ids.new_id()))
+        .unwrap()
+        .derive();
     let sealed = key.seal_object("objects/1", b"payload").unwrap();
     let _opened = key.open_object("", &sealed);
 }

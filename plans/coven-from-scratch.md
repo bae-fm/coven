@@ -2754,6 +2754,10 @@ pub enum CryptoError {
 pub enum MaterialError {
     /// The encoded secret or sealed value is malformed.
     Encoding,
+    /// A different key is already held under this store key id.
+    StoreKeyConflict(KeyId),
+    /// A different key is already held under this circle and key id.
+    CircleKeyConflict { circle: CircleId, key: KeyId },
     /// The keyring does not hold this store key.
     UnknownStoreKey(KeyId),
     /// The keyring does not hold this circle key.
@@ -2762,7 +2766,7 @@ pub enum MaterialError {
 
 /// A store or circle key's random id, named by the store log entry that
 /// brings the key in (§11).
-pub struct KeyId([u8; 16]);
+pub struct KeyId(pub Uuid);
 
 /// Registers the OS keychain service every key and secret is stored under.
 /// Called once at startup, before any store opens.

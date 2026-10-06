@@ -26,33 +26,33 @@ pub enum CryptoError {
     Material(#[from] MaterialError),
 }
 
-/// A numbered key or serialized secret violates its representation.
+/// A key or serialized secret violates its representation.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum MaterialError {
     /// The encoded secret or sealed value is malformed.
     #[error("invalid key material encoding")]
     Encoding,
-    /// A different key already has this store key number.
-    #[error("conflicting store key number {0}")]
-    StoreKeyConflict(u64),
-    /// A different key already has this circle id and key number.
-    #[error("conflicting key number {number} for circle {circle}")]
+    /// A different key already has this store key id.
+    #[error("conflicting store key id {0}")]
+    StoreKeyConflict(coven_foundation::id_source::KeyId),
+    /// A different key already has this circle id and key id.
+    #[error("conflicting key id {key} for circle {circle}")]
     CircleKeyConflict {
-        /// The circle whose number was reused.
+        /// The circle whose key id was reused.
         circle: crate::CircleId,
-        /// The conflicting key number.
-        number: u64,
+        /// The conflicting key id.
+        key: coven_foundation::id_source::KeyId,
     },
     /// The keyring does not hold this store key.
-    #[error("unknown store key number {0}")]
-    UnknownStoreKey(u64),
+    #[error("unknown store key id {0}")]
+    UnknownStoreKey(coven_foundation::id_source::KeyId),
     /// The keyring does not hold this circle key.
-    #[error("unknown key number {number} for circle {circle}")]
+    #[error("unknown key id {key} for circle {circle}")]
     UnknownCircleKey {
         /// The circle whose key is missing.
         circle: crate::CircleId,
-        /// The missing key number.
-        number: u64,
+        /// The missing key id.
+        key: coven_foundation::id_source::KeyId,
     },
 }
 

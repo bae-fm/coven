@@ -2,6 +2,7 @@ use super::*;
 use crate::tests::{database_error, TestStore};
 use crate::write::tests::{count, notes, records, sql, NOTES};
 use crate::{Database, Migration, RowIdentity, SyncedTable};
+use coven_foundation::id_source::KeyId;
 use coven_foundation::{clock::FixedClock, id_source::SequentialIds};
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,8 +19,8 @@ async fn open(store: &TestStore) -> Database {
 }
 
 async fn fingerprint(db: &Database, audience: Audience) -> coven_crypto::Fingerprint {
-    let key =
-        coven_crypto::StoreKey::from_bytes(std::num::NonZeroU64::new(1).unwrap(), [7; 32]).derive();
+    let key = coven_crypto::StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [7; 32])
+        .derive();
     db.sync_state(vec![(audience, key.fingerprint_hasher())])
         .await
         .unwrap()
@@ -532,7 +533,8 @@ async fn fingerprints_ignore_other_audience_removal_and_its_descendants() {
     assert_eq!(visible, cb.to_string());
     // A key can arrive after all writes; rekeying reads the same durable root.
     let other_key =
-        coven_crypto::StoreKey::from_bytes(std::num::NonZeroU64::new(1).unwrap(), [9; 32]).derive();
+        coven_crypto::StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [9; 32])
+            .derive();
     let rekeyed = both
         .sync_state(vec![(Audience::Circle(cb), other_key.fingerprint_hasher())])
         .await

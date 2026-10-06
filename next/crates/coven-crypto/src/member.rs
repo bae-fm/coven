@@ -197,7 +197,7 @@ pub fn seal_store_key(
     recipient: &SealingPublicKey,
     path: &str,
 ) -> Result<Vec<u8>, CryptoError> {
-    let mut bytes = Zeroizing::new(Vec::with_capacity(40));
+    let mut bytes = Zeroizing::new(Vec::with_capacity(48));
     key.encode_into(&mut bytes);
     seal_box(b"store", recipient, path, &bytes)
 }
@@ -209,7 +209,7 @@ pub fn seal_circle_key(
     recipient: &SealingPublicKey,
     path: &str,
 ) -> Result<Vec<u8>, CryptoError> {
-    let mut bytes = Zeroizing::new(Vec::with_capacity(56));
+    let mut bytes = Zeroizing::new(Vec::with_capacity(64));
     key.encode_into(&mut bytes);
     seal_box(b"circle", recipient, path, &bytes)
 }

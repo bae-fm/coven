@@ -1,6 +1,17 @@
 use super::*;
 
 #[test]
+fn key_identity_uses_the_id_source_and_serializes_as_its_uuid() {
+    let id = KeyId(UuidIds.new_id());
+    assert_eq!(id.0.get_version_num(), 4);
+    assert_ne!(id, KeyId(UuidIds.new_id()));
+    let encoded = serde_json::to_string(&id).unwrap();
+    assert_eq!(encoded, serde_json::to_string(&id.0).unwrap());
+    assert_eq!(serde_json::from_str::<KeyId>(&encoded).unwrap(), id);
+    assert_eq!(id.to_string(), id.0.hyphenated().to_string());
+}
+
+#[test]
 fn invite_identity_serializes_as_its_uuid() {
     let uuid = Uuid::from_u128(0x00112233_4455_6677_8899_aabbccddeeff);
     let invite = InviteId(uuid);

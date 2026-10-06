@@ -1,7 +1,7 @@
 use super::*;
 use crate::custody::{KeychainError, MemberKeyCustody, StoreKeyCustody};
 use crate::{MemberKeys, StoreKey, StoreKeyring};
-use std::num::NonZeroU64;
+use coven_foundation::id_source::KeyId;
 use uuid::Uuid;
 
 #[test]
@@ -38,7 +38,10 @@ fn only_restore_codes_sync_and_stores_can_be_discovered_without_ids() {
     let b_id = StoreId(Uuid::from_u128(2));
     let a = Arc::new(StoreKeychain::new(fake.clone(), a_id));
     let b = StoreKeychain::new(fake.clone(), b_id);
-    let keys = StoreKeyring::new(StoreKey::from_bytes(NonZeroU64::MIN, [17; 32]));
+    let keys = StoreKeyring::new(StoreKey::from_bytes(
+        KeyId(uuid::Uuid::from_bytes([1; 16])),
+        [17; 32],
+    ));
     let member = MemberKeys::generate().unwrap();
     let store_custody = KeyringCustody::<StoreKeyring>::new(a.clone());
     let member_custody = KeyringCustody::<MemberKeys>::new(a.clone());

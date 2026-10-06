@@ -1,5 +1,6 @@
 use crate::tests::TestStore;
 use crate::write::tests::{notes, sql, NOTES};
+use coven_foundation::id_source::KeyId;
 
 #[tokio::test]
 async fn changing_one_row_changes_only_one_leaf_and_its_audience_sum() {
@@ -164,8 +165,8 @@ async fn sums_agree_in_every_order_of_concurrent_and_excluded_writes() {
         records(&sources[1]).remove(0),
         excluded,
     ];
-    let key =
-        coven_crypto::StoreKey::from_bytes(std::num::NonZeroU64::new(1).unwrap(), [7; 32]).derive();
+    let key = coven_crypto::StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [7; 32])
+        .derive();
     let mut expected = None;
     for order in [
         [0, 1, 2],

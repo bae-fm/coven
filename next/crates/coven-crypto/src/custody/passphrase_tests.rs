@@ -1,11 +1,11 @@
 use super::*;
 use crate::custody::{MemberKeyCustody, StoreKeyCustody};
 use crate::{MemberKeys, StoreKey, StoreKeyring};
+use coven_foundation::id_source::{IdSource, KeyId};
 use coven_foundation::{
     files::{StoreFile, StoreLayout},
     id_source::SequentialIds,
 };
-use std::num::NonZeroU64;
 use uuid::Uuid;
 
 #[test]
@@ -39,12 +39,13 @@ fn file() -> (tempfile::TempDir, AtomicFile, StoreId) {
 
 #[test]
 fn wrong_passphrase_and_wrong_store_or_material_kind_fail_authentication() {
+    let key_ids = coven_foundation::id_source::SequentialIds::new();
     let (_temp, file, id) = file();
     let writer =
         PassphraseCustody::<StoreKeyring>::new(Passphrase::new("right".into()), file.clone(), id);
     writer
         .persist(&StoreKeyring::new(
-            StoreKey::generate(NonZeroU64::MIN).unwrap(),
+            StoreKey::generate(KeyId(key_ids.new_id())).unwrap(),
         ))
         .unwrap();
     let wrong =
@@ -71,47 +72,43 @@ fn wrong_passphrase_and_wrong_store_or_material_kind_fail_authentication() {
 
 #[test]
 fn a_live_custody_reads_the_parameters_of_the_current_file() {
+    let key_ids = coven_foundation::id_source::SequentialIds::new();
     let (_temp, file, id) = file();
     let original =
         PassphraseCustody::<StoreKeyring>::new(Passphrase::new("phrase".into()), file.clone(), id);
-    original
-        .persist(&StoreKeyring::new(
-            StoreKey::generate(NonZeroU64::MIN).unwrap(),
-        ))
-        .unwrap();
+    let first = StoreKeyring::new(StoreKey::generate(KeyId(key_ids.new_id())).unwrap());
+    original.persist(&first).unwrap();
     assert_eq!(
         original
             .unlock()
             .unwrap()
             .unwrap()
-            .current_store_key()
-            .number(),
-        1
+            .to_secret_bytes()
+            .as_bytes(),
+        first.to_secret_bytes().as_bytes()
     );
     let reopened =
         PassphraseCustody::<StoreKeyring>::new(Passphrase::new("phrase".into()), file, id);
-    reopened
-        .persist(&StoreKeyring::new(
-            StoreKey::generate(NonZeroU64::new(2).unwrap()).unwrap(),
-        ))
-        .unwrap();
+    let replacement = StoreKeyring::new(StoreKey::generate(KeyId(key_ids.new_id())).unwrap());
+    reopened.persist(&replacement).unwrap();
     assert_eq!(
         original
             .unlock()
             .unwrap()
             .unwrap()
-            .current_store_key()
-            .number(),
-        2
+            .to_secret_bytes()
+            .as_bytes(),
+        replacement.to_secret_bytes().as_bytes()
     );
 }
 
 #[test]
 fn parameters_are_recorded_authenticated_and_bounded_before_derivation() {
+    let key_ids = coven_foundation::id_source::SequentialIds::new();
     let (_temp, file, id) = file();
     let custody =
         PassphraseCustody::<StoreKeyring>::new(Passphrase::new("phrase".into()), file.clone(), id);
-    let keys = StoreKeyring::new(StoreKey::generate(NonZeroU64::MIN).unwrap());
+    let keys = StoreKeyring::new(StoreKey::generate(KeyId(key_ids.new_id())).unwrap());
     custody.persist(&keys).unwrap();
     let original = file.read_optional().unwrap().unwrap();
     assert_eq!(&original[..5], HEADER);
@@ -165,6 +162,7 @@ fn parameters_are_recorded_authenticated_and_bounded_before_derivation() {
 
 #[test]
 fn file_failures_are_not_absence_or_success() {
+    let key_ids = coven_foundation::id_source::SequentialIds::new();
     let temp = tempfile::tempdir().unwrap();
     let store =
         StoreLayout::new(temp.path().join("absent")).store_dir(&StoreId(Uuid::from_u128(1)));
@@ -175,7 +173,7 @@ fn file_failures_are_not_absence_or_success() {
     );
     assert!(matches!(
         custody.persist(&StoreKeyring::new(
-            StoreKey::generate(NonZeroU64::MIN).unwrap()
+            StoreKey::generate(KeyId(key_ids.new_id())).unwrap()
         )),
         Err(KeyError::File(_))
     ));

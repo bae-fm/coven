@@ -1,9 +1,9 @@
-//! Every opened key remains available by its store or circle key number (§11).
+//! Every opened key remains available by its store or circle key id (§11).
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::num::NonZeroU64;
 
+use coven_foundation::id_source::KeyId;
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -13,31 +13,31 @@ use crate::{
     CircleId, CryptoError, DerivedKeys, EncryptionKey, MaterialError, SealError, SecretBytes,
 };
 
-/// The store's `n`th 32-byte key (§11), erased on drop.
+/// A store's identified 32-byte key (§11), erased on drop.
 /// Cloning supplies an independent unlocked snapshot to in-memory custody.
 #[derive(Clone)]
 pub struct StoreKey {
-    number: NonZeroU64,
+    id: KeyId,
     bytes: Zeroizing<[u8; 32]>,
 }
 
 impl StoreKey {
-    /// Make the store's `number`th key using the operating system's randomness.
-    pub fn generate(number: NonZeroU64) -> Result<Self, CryptoError> {
+    /// Make random key material for an identity supplied by the id source.
+    pub fn generate(id: KeyId) -> Result<Self, CryptoError> {
         let mut bytes = Zeroizing::new([0; 32]);
         randomness::fill(bytes.as_mut())?;
-        Ok(Self { number, bytes })
+        Ok(Self { id, bytes })
     }
 
     /// Import a store key opened from custody or a member's sealed copy (§11).
-    pub fn from_bytes(number: NonZeroU64, bytes: [u8; 32]) -> Self {
+    pub fn from_bytes(id: KeyId, bytes: [u8; 32]) -> Self {
         let bytes = Zeroizing::new(bytes);
-        Self { number, bytes }
+        Self { id, bytes }
     }
 
-    /// Which store key this is, starting at one (§11).
-    pub fn number(&self) -> u64 {
-        self.number.get()
+    /// The random identity named by the entry introducing this key (§11).
+    pub fn id(&self) -> KeyId {
+        self.id
     }
 
     /// Derive separate encryption, naming, file-nonce and fingerprint keys.
@@ -46,25 +46,25 @@ impl StoreKey {
     }
 
     pub(crate) fn encode_into(&self, bytes: &mut Vec<u8>) {
-        bytes.extend_from_slice(&self.number().to_le_bytes());
+        bytes.extend_from_slice(self.id().0.as_bytes());
         bytes.extend_from_slice(self.bytes.as_ref());
     }
 
     pub(crate) fn decode(bytes: &mut &[u8]) -> Result<Self, MaterialError> {
-        let number = NonZeroU64::new(wire::number(bytes)?).ok_or(MaterialError::Encoding)?;
-        Ok(Self::from_bytes(number, wire::array(bytes)?))
+        let id = KeyId(Uuid::from_bytes(wire::array(bytes)?));
+        Ok(Self::from_bytes(id, wire::array(bytes)?))
     }
 }
 
 impl fmt::Debug for StoreKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StoreKey")
-            .field("number", &self.number)
+            .field("id", &self.id)
             .finish_non_exhaustive()
     }
 }
 
-/// One circle's numbered 32-byte key, replaced when someone leaves (§14.3).
+/// One circle's identified 32-byte key, replaced when someone leaves (§14.3).
 /// Cloning supplies an independent unlocked snapshot to in-memory custody.
 #[derive(Clone, Debug)]
 pub struct CircleKey {
@@ -74,18 +74,18 @@ pub struct CircleKey {
 
 impl CircleKey {
     /// Make a circle key using the operating system's randomness.
-    pub fn generate(circle: CircleId, number: NonZeroU64) -> Result<Self, CryptoError> {
+    pub fn generate(circle: CircleId, id: KeyId) -> Result<Self, CryptoError> {
         Ok(Self {
             circle,
-            key: StoreKey::generate(number)?,
+            key: StoreKey::generate(id)?,
         })
     }
 
     /// Import a circle key opened from custody or a member's sealed copy.
-    pub fn from_bytes(circle: CircleId, number: NonZeroU64, bytes: [u8; 32]) -> Self {
+    pub fn from_bytes(circle: CircleId, id: KeyId, bytes: [u8; 32]) -> Self {
         Self {
             circle,
-            key: StoreKey::from_bytes(number, bytes),
+            key: StoreKey::from_bytes(id, bytes),
         }
     }
 
@@ -94,9 +94,9 @@ impl CircleKey {
         self.circle
     }
 
-    /// Which key of this circle this is, starting at one.
-    pub fn number(&self) -> u64 {
-        self.key.number()
+    /// The random identity named by the entry introducing this key.
+    pub fn id(&self) -> KeyId {
+        self.key.id()
     }
 
     /// Derive separate encryption, naming, file-nonce and fingerprint keys.
@@ -121,39 +121,39 @@ impl CircleKey {
 /// Cloning lets in-memory custody keep its copy while returning an unlocked one.
 #[derive(Clone, Debug)]
 pub struct StoreKeyring {
-    stores: BTreeMap<u64, StoreKey>,
-    circles: BTreeMap<(CircleId, u64), CircleKey>,
+    stores: BTreeMap<KeyId, StoreKey>,
+    circles: BTreeMap<(CircleId, KeyId), CircleKey>,
 }
 
 impl StoreKeyring {
     /// Start with one opened store key. A keyring always holds a store key.
     pub fn new(key: StoreKey) -> Self {
         Self {
-            stores: BTreeMap::from([(key.number(), key)]),
+            stores: BTreeMap::from([(key.id(), key)]),
             circles: BTreeMap::new(),
         }
     }
 
-    /// Keep an opened store key; a different key at the same number is an error.
+    /// Keep an opened store key; a different key at the same id is an error.
     pub fn insert_store_key(&mut self, key: StoreKey) -> Result<(), MaterialError> {
-        if let Some(existing) = self.stores.get(&key.number()) {
+        if let Some(existing) = self.stores.get(&key.id()) {
             if !bool::from(existing.bytes.as_ref().ct_eq(key.bytes.as_ref())) {
-                return Err(MaterialError::StoreKeyConflict(key.number()));
+                return Err(MaterialError::StoreKeyConflict(key.id()));
             }
         } else {
-            self.stores.insert(key.number(), key);
+            self.stores.insert(key.id(), key);
         }
         Ok(())
     }
 
     /// Keep an opened circle key, retaining its earlier keys too (§14.3).
     pub fn insert_circle_key(&mut self, key: CircleKey) -> Result<(), MaterialError> {
-        let id = (key.circle(), key.number());
+        let id = (key.circle(), key.id());
         if let Some(existing) = self.circles.get(&id) {
             if !bool::from(existing.key.bytes.as_ref().ct_eq(key.key.bytes.as_ref())) {
                 return Err(MaterialError::CircleKeyConflict {
                     circle: id.0,
-                    number: id.1,
+                    key: id.1,
                 });
             }
         } else {
@@ -162,41 +162,25 @@ impl StoreKeyring {
         Ok(())
     }
 
-    /// The highest numbered store key, used for new writes and app data (§11).
-    pub fn current_store_key(&self) -> &StoreKey {
+    /// An opened store key by identity, so older writes still open (§11).
+    pub fn store_key(&self, key: KeyId) -> Result<&StoreKey, MaterialError> {
         self.stores
-            .last_key_value()
-            .map(|(_, key)| key)
-            .expect("StoreKeyring always contains at least one store key")
+            .get(&key)
+            .ok_or(MaterialError::UnknownStoreKey(key))
     }
 
-    /// An opened store key by its number, so older writes still open (§11).
-    pub fn store_key(&self, number: u64) -> Result<&StoreKey, MaterialError> {
-        self.stores
-            .get(&number)
-            .ok_or(MaterialError::UnknownStoreKey(number))
-    }
-
-    /// An opened circle key by its circle and number (§14.3).
-    pub fn circle_key(&self, circle: CircleId, number: u64) -> Result<&CircleKey, MaterialError> {
+    /// An opened circle key by its circle and identity (§14.3).
+    pub fn circle_key(&self, circle: CircleId, key: KeyId) -> Result<&CircleKey, MaterialError> {
         self.circles
-            .get(&(circle, number))
-            .ok_or(MaterialError::UnknownCircleKey { circle, number })
-    }
-
-    /// The highest numbered opened key of a circle, for its new rows and files.
-    pub fn current_circle_key(&self, circle: CircleId) -> Option<&CircleKey> {
-        self.circles
-            .range((circle, 1)..=(circle, u64::MAX))
-            .next_back()
-            .map(|(_, key)| key)
+            .get(&(circle, key))
+            .ok_or(MaterialError::UnknownCircleKey { circle, key })
     }
 
     /// Encode every opened key for custody. The returned bytes remain secret.
     pub fn to_secret_bytes(&self) -> SecretBytes {
         // Allocate once: growing a secret Vec would abandon an unerased copy.
         let mut bytes = Zeroizing::new(Vec::with_capacity(
-            21 + self.stores.len() * 40 + self.circles.len() * 56,
+            21 + self.stores.len() * 48 + self.circles.len() * 64,
         ));
         bytes.extend_from_slice(b"CVKR\x01");
         bytes.extend_from_slice(&(self.stores.len() as u64).to_le_bytes());
@@ -214,24 +198,24 @@ impl StoreKeyring {
     pub fn from_secret_bytes(mut bytes: &[u8]) -> Result<Self, MaterialError> {
         wire::prefix(&mut bytes, b"CVKR\x01")?;
         let count = wire::number(&mut bytes)?;
-        if count == 0 || count > (bytes.len() / 40) as u64 {
+        if count == 0 || count > (bytes.len() / 48) as u64 {
             return Err(MaterialError::Encoding);
         }
         let mut stores = BTreeMap::new();
         for _ in 0..count {
             let key = StoreKey::decode(&mut bytes)?;
-            if stores.insert(key.number(), key).is_some() {
+            if stores.insert(key.id(), key).is_some() {
                 return Err(MaterialError::Encoding);
             }
         }
         let count = wire::number(&mut bytes)?;
-        if count > (bytes.len() / 56) as u64 {
+        if count > (bytes.len() / 64) as u64 {
             return Err(MaterialError::Encoding);
         }
         let mut circles = BTreeMap::new();
         for _ in 0..count {
             let key = CircleKey::decode(&mut bytes)?;
-            if circles.insert((key.circle(), key.number()), key).is_some() {
+            if circles.insert((key.circle(), key.id()), key).is_some() {
                 return Err(MaterialError::Encoding);
             }
         }
@@ -239,13 +223,18 @@ impl StoreKeyring {
         Ok(Self { stores, circles })
     }
 
-    /// Encrypt app data with its own key derived from the current store key (§20.11).
+    /// Encrypt app data with its own key derived from the named store key (§20.11).
     /// The app's associated data binds the value to its place.
-    /// The authenticated header records the store key number for later opening.
-    pub fn seal_app_data(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, SealError> {
-        let key = self.current_store_key();
+    /// The authenticated header records the store key id for later opening.
+    pub fn seal_app_data(
+        &self,
+        key: KeyId,
+        plaintext: &[u8],
+        aad: &[u8],
+    ) -> Result<Vec<u8>, SealError> {
+        let key = self.store_key(key)?;
         let mut header = b"CVAD\x01".to_vec();
-        header.extend_from_slice(&key.number().to_le_bytes());
+        header.extend_from_slice(key.id().0.as_bytes());
         let context = cipher::context(&[&header, aad]);
         let encryption = derivation::derive(&key.bytes, derivation::APP_DATA);
         let body = cipher::seal_random(&encryption, &context, plaintext)?;
@@ -257,9 +246,9 @@ impl StoreKeyring {
     pub fn open_app_data(&self, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>, SealError> {
         let mut bytes = sealed;
         wire::prefix(&mut bytes, b"CVAD\x01")?;
-        let number = wire::number(&mut bytes)?;
-        let header = sealed.get(..13).ok_or(MaterialError::Encoding)?;
-        let key = self.store_key(number)?;
+        let id = KeyId(Uuid::from_bytes(wire::array(&mut bytes)?));
+        let header = sealed.get(..21).ok_or(MaterialError::Encoding)?;
+        let key = self.store_key(id)?;
         let encryption = derivation::derive(&key.bytes, derivation::APP_DATA);
         Ok(cipher::open_random(
             &encryption,

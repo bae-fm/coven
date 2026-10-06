@@ -1,10 +1,10 @@
 use super::*;
 use crate::{CircleId, CircleKey, StoreKey};
+use coven_foundation::id_source::{IdSource, KeyId};
 use coven_foundation::{
     files::{StoreDir, StoreFile, StoreLayout},
     id_source::{SequentialIds, StoreId},
 };
-use std::num::NonZeroU64;
 use uuid::Uuid;
 
 fn directory() -> (tempfile::TempDir, StoreDir) {
@@ -20,11 +20,12 @@ fn directory() -> (tempfile::TempDir, StoreDir) {
 }
 
 fn exercise_store_custody(custody: &dyn StoreKeyCustody) {
-    let mut keys = StoreKeyring::new(StoreKey::generate(NonZeroU64::MIN).unwrap());
-    keys.insert_store_key(StoreKey::generate(NonZeroU64::new(2).unwrap()).unwrap())
+    let key_ids = coven_foundation::id_source::SequentialIds::new();
+    let mut keys = StoreKeyring::new(StoreKey::generate(KeyId(key_ids.new_id())).unwrap());
+    keys.insert_store_key(StoreKey::generate(KeyId(key_ids.new_id())).unwrap())
         .unwrap();
     keys.insert_circle_key(
-        CircleKey::generate(CircleId(Uuid::from_u128(4)), NonZeroU64::MIN).unwrap(),
+        CircleKey::generate(CircleId(Uuid::from_u128(4)), KeyId(key_ids.new_id())).unwrap(),
     )
     .unwrap();
     custody.persist(&keys).unwrap();
@@ -57,8 +58,9 @@ fn exercise_member_custody(custody: &dyn MemberKeyCustody) {
 
 #[test]
 fn in_memory_custody_keeps_both_material_kinds_for_one_session() {
+    let key_ids = coven_foundation::id_source::SequentialIds::new();
     let store = InMemoryCustody::new(StoreKeyring::new(
-        StoreKey::generate(NonZeroU64::MIN).unwrap(),
+        StoreKey::generate(KeyId(key_ids.new_id())).unwrap(),
     ));
     let member = InMemoryCustody::new(MemberKeys::generate().unwrap());
     assert!(store.unlock().unwrap().is_some());
@@ -98,6 +100,7 @@ fn passphrase_files_round_trip_both_material_kinds() {
 
 #[test]
 fn keyring_custody_uses_the_fake_and_isolates_stores_and_material_kinds() {
+    let key_ids = coven_foundation::id_source::SequentialIds::new();
     let keychain = Keychain::in_memory("custody-tests").unwrap();
     let first = Arc::new(StoreKeychain::new(
         keychain.clone(),
@@ -108,7 +111,7 @@ fn keyring_custody_uses_the_fake_and_isolates_stores_and_material_kinds() {
     let member = KeyringCustody::<MemberKeys>::new(first);
     assert!(store.unlock().unwrap().is_none());
     assert!(member.unlock().unwrap().is_none());
-    let keys = StoreKeyring::new(StoreKey::generate(NonZeroU64::MIN).unwrap());
+    let keys = StoreKeyring::new(StoreKey::generate(KeyId(key_ids.new_id())).unwrap());
     store.persist(&keys).unwrap();
     assert!(member.unlock().unwrap().is_none());
     assert!(KeyringCustody::<StoreKeyring>::new(second.clone())
@@ -126,13 +129,14 @@ fn keyring_custody_uses_the_fake_and_isolates_stores_and_material_kinds() {
 
 #[test]
 fn keychain_failure_preserves_material_and_reaches_the_caller() {
+    let key_ids = coven_foundation::id_source::SequentialIds::new();
     let fake = Keychain::in_memory("failure").unwrap();
     let store = Arc::new(StoreKeychain::new(
         fake.clone(),
         StoreId(Uuid::from_u128(1)),
     ));
     let custody = KeyringCustody::<StoreKeyring>::new(store);
-    let original = StoreKeyring::new(StoreKey::generate(NonZeroU64::MIN).unwrap());
+    let original = StoreKeyring::new(StoreKey::generate(KeyId(key_ids.new_id())).unwrap());
     custody.persist(&original).unwrap();
     fake.fail_next_operation();
     assert!(matches!(custody.forget(), Err(KeyError::Keychain(_))));
@@ -148,7 +152,7 @@ fn keychain_failure_preserves_material_and_reaches_the_caller() {
     fake.fail_next_operation();
     assert!(matches!(
         custody.persist(&StoreKeyring::new(
-            StoreKey::generate(NonZeroU64::new(2).unwrap()).unwrap()
+            StoreKey::generate(KeyId(key_ids.new_id())).unwrap()
         )),
         Err(KeyError::Keychain(_))
     ));
@@ -157,9 +161,9 @@ fn keychain_failure_preserves_material_and_reaches_the_caller() {
             .unlock()
             .unwrap()
             .unwrap()
-            .current_store_key()
-            .number(),
-        1
+            .to_secret_bytes()
+            .as_bytes(),
+        original.to_secret_bytes().as_bytes()
     );
     fake.fail_next_operation();
     assert!(matches!(custody.unlock(), Err(KeyError::Keychain(_))));
@@ -168,7 +172,12 @@ fn keychain_failure_preserves_material_and_reaches_the_caller() {
 #[test]
 fn custody_debug_never_prints_secrets() {
     let phrase = || Passphrase::new("passphrase-must-not-print".into());
-    let keys = || StoreKeyring::new(StoreKey::from_bytes(NonZeroU64::MIN, [88; 32]));
+    let keys = || {
+        StoreKeyring::new(StoreKey::from_bytes(
+            KeyId(uuid::Uuid::from_bytes([1; 16])),
+            [88; 32],
+        ))
+    };
     let member = || MemberKeys::generate().unwrap();
     let (_temp, directory) = directory();
     let fake = Keychain::in_memory("debug").unwrap();

@@ -1,6 +1,6 @@
 use super::*;
 use crate::CircleId;
-use std::num::NonZeroU64;
+use coven_foundation::id_source::{IdSource, KeyId};
 use uuid::Uuid;
 
 #[test]
@@ -9,22 +9,26 @@ fn member_identity_retains_only_the_public_key_bytes() {
 }
 
 #[test]
-fn zero_key_numbers_in_authenticated_boxes_are_malformed_material() {
+fn truncated_keys_in_authenticated_boxes_are_malformed_material() {
     let member = MemberKeys::generate().unwrap();
     let recipient = member.sealing_public_key();
-    let store = StoreKey::from_bytes(NonZeroU64::MIN, [17; 32]);
-    let circle = CircleKey::from_bytes(CircleId(Uuid::from_u128(11)), NonZeroU64::MIN, [18; 32]);
-    let mut store_bytes = Zeroizing::new(Vec::with_capacity(40));
+    let store = StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [17; 32]);
+    let circle = CircleKey::from_bytes(
+        CircleId(Uuid::from_u128(11)),
+        KeyId(uuid::Uuid::from_bytes([1; 16])),
+        [18; 32],
+    );
+    let mut store_bytes = Zeroizing::new(Vec::with_capacity(48));
     store.encode_into(&mut store_bytes);
-    store_bytes[..8].fill(0);
+    store_bytes.pop();
     let sealed = seal_box(b"store", &recipient, "keys/store/1/member", &store_bytes).unwrap();
     assert!(matches!(
         member.open_store_key("keys/store/1/member", &sealed),
         Err(CryptoError::Material(MaterialError::Encoding))
     ));
-    let mut circle_bytes = Zeroizing::new(Vec::with_capacity(56));
+    let mut circle_bytes = Zeroizing::new(Vec::with_capacity(64));
     circle.encode_into(&mut circle_bytes);
-    circle_bytes[16..24].fill(0);
+    circle_bytes.pop();
     let sealed = seal_box(
         b"circle",
         &recipient,
@@ -42,7 +46,7 @@ fn zero_key_numbers_in_authenticated_boxes_are_malformed_material() {
 #[should_panic(expected = "storage paths must be nonempty")]
 fn sealed_keys_require_a_storage_path() {
     let member = MemberKeys::generate().unwrap();
-    let store = StoreKey::from_bytes(NonZeroU64::MIN, [17; 32]);
+    let store = StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [17; 32]);
     let _sealed = seal_store_key(&store, &member.sealing_public_key(), "");
 }
 
@@ -131,17 +135,18 @@ fn invalid_and_weak_member_ids_are_rejected() {
 
 #[test]
 fn anonymous_store_boxes_bind_recipient_path_and_all_ciphertext_bytes() {
+    let key_ids = coven_foundation::id_source::SequentialIds::new();
     let member = MemberKeys::generate().unwrap();
     let foreign = MemberKeys::generate().unwrap();
-    let store = StoreKey::generate(NonZeroU64::new(7).unwrap()).unwrap();
-    let path = format!("keys/store/7/{}", member.member_id());
+    let store = StoreKey::generate(KeyId(key_ids.new_id())).unwrap();
+    let path = format!("keys/store/{}/{}", store.id(), member.member_id());
     let sealed = seal_store_key(&store, &member.sealing_public_key(), &path).unwrap();
     assert_ne!(
         sealed,
         seal_store_key(&store, &member.sealing_public_key(), &path).unwrap()
     );
     let opened = member.open_store_key(&path, &sealed).unwrap();
-    assert_eq!(opened.number(), 7);
+    assert_eq!(opened.id(), store.id());
     let ciphertext = store.derive().seal_object("write", b"secret").unwrap();
     assert_eq!(
         opened.derive().open_object("write", &ciphertext).unwrap(),
@@ -164,10 +169,11 @@ fn anonymous_store_boxes_bind_recipient_path_and_all_ciphertext_bytes() {
 }
 
 #[test]
-fn anonymous_circle_boxes_preserve_circle_and_number() {
+fn anonymous_circle_boxes_preserve_circle_and_id() {
+    let key_ids = coven_foundation::id_source::SequentialIds::new();
     let member = MemberKeys::generate().unwrap();
     let circle =
-        CircleKey::generate(CircleId(Uuid::from_u128(11)), NonZeroU64::new(3).unwrap()).unwrap();
+        CircleKey::generate(CircleId(Uuid::from_u128(11)), KeyId(key_ids.new_id())).unwrap();
     let sealed = seal_circle_key(
         &circle,
         &member.sealing_public_key(),
@@ -178,7 +184,7 @@ fn anonymous_circle_boxes_preserve_circle_and_number() {
         .open_circle_key("keys/circle/11/3/member", &sealed)
         .unwrap();
     assert_eq!(opened.circle(), circle.circle());
-    assert_eq!(opened.number(), circle.number());
+    assert_eq!(opened.id(), circle.id());
     let ciphertext = circle
         .derive()
         .seal_object("write", b"circle secret")
@@ -203,8 +209,9 @@ fn anonymous_circle_boxes_preserve_circle_and_number() {
 
 #[test]
 fn low_order_x25519_keys_are_rejected_in_both_directions() {
+    let key_ids = coven_foundation::id_source::SequentialIds::new();
     let member = MemberKeys::generate().unwrap();
-    let store = StoreKey::generate(NonZeroU64::MIN).unwrap();
+    let store = StoreKey::generate(KeyId(key_ids.new_id())).unwrap();
     for first_byte in [0, 1] {
         let mut low = [0; 32];
         low[0] = first_byte;
