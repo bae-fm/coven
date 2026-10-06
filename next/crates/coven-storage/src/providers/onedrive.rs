@@ -1,4 +1,5 @@
 use super::http::{self, Body, OAuthSession};
+use super::onedrive_access::{AccountPermissions, PermissionAccess};
 use crate::session::SessionState;
 use crate::*;
 use async_trait::async_trait;
@@ -194,7 +195,7 @@ impl OneDriveStorage {
         }
         Ok(())
     }
-    async fn permissions(&self, email: &str) -> Result<Vec<Value>, StorageError> {
+    async fn permissions(&self) -> Result<Vec<Value>, StorageError> {
         let mut url = self.item(&self.folder, &["permissions"])?;
         let mut seen = BTreeSet::new();
         let mut result = Vec::new();
@@ -205,26 +206,7 @@ impl OneDriveStorage {
             http::same_origin(&self.api, &url)?;
             let value =
                 http::json(PROVIDER, self.send(Method::GET, &url, Body::Empty).await?).await?;
-            for permission in http::array(&value, "value")? {
-                let matches = permission["invitation"]["email"]
-                    .as_str()
-                    .is_some_and(|e| e.eq_ignore_ascii_case(email))
-                    || permission["grantedToV2"]["user"]["email"]
-                        .as_str()
-                        .is_some_and(|e| e.eq_ignore_ascii_case(email))
-                    || permission["grantedToIdentitiesV2"]
-                        .as_array()
-                        .is_some_and(|identities| {
-                            identities.iter().any(|i| {
-                                i["user"]["email"]
-                                    .as_str()
-                                    .is_some_and(|e| e.eq_ignore_ascii_case(email))
-                            })
-                        });
-                if matches {
-                    result.push(permission.clone());
-                }
-            }
+            result.extend(http::array(&value, "value")?.iter().cloned());
             match value.get("@odata.nextLink") {
                 None => break,
                 Some(next) => {
@@ -236,6 +218,19 @@ impl OneDriveStorage {
             }
         }
         Ok(result)
+    }
+    async fn has_write_access(&self, email: &str) -> Result<bool, StorageError> {
+        let permissions = self.permissions().await?;
+        let account = AccountPermissions::new(email, &permissions)?;
+        for permission in &permissions {
+            if account.matches(permission)?
+                && writable(permission)
+                && permission["link"]["scope"].as_str() != Some("existingAccess")
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 fn validate_download_url(api: &str, target: &str) -> Result<(), StorageError> {
@@ -389,10 +384,10 @@ impl Storage for OneDriveStorage {
     }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
         self.require_owner().await?;
-        if !self.permissions(account).await?.iter().any(writable) {
+        if !self.has_write_access(account).await? {
             http::checked(PROVIDER,self.send(Method::POST,&self.item(&self.folder,&["invite"])?,Body::Json(json!({"recipients":[{"email":account}],"roles":["write"],"requireSignIn":true,"sendInvitation":true}))).await?).await?;
         }
-        if !self.permissions(account).await?.iter().any(writable) {
+        if !self.has_write_access(account).await? {
             return Err(StorageError::Protocol(
                 "OneDrive did not grant write access",
             ));
@@ -406,14 +401,25 @@ impl Storage for OneDriveStorage {
             ));
         };
         self.require_owner().await?;
-        for permission in self.permissions(email).await? {
+        let permissions = self.permissions().await?;
+        let account = AccountPermissions::new(email, &permissions)?;
+        let mut exclusive = Vec::new();
+        for permission in &permissions {
+            if matches!(account.classify(permission)?, PermissionAccess::Exclusive) {
+                exclusive.push((
+                    account.is_named(permission)?,
+                    http::string(permission, "id")?.to_owned(),
+                ));
+            }
+        }
+        // Keep email-bearing permissions until id-only grants are gone. If a
+        // deletion reply is lost, a retry can still resolve the native account.
+        exclusive.sort();
+        for (_, id) in exclusive {
             let response = self
                 .send(
                     Method::DELETE,
-                    &self.item(
-                        &self.folder,
-                        &["permissions", http::string(&permission, "id")?],
-                    )?,
+                    &self.item(&self.folder, &["permissions", &id])?,
                     Body::Empty,
                 )
                 .await?;
@@ -421,13 +427,28 @@ impl Storage for OneDriveStorage {
                 http::checked(PROVIDER, response).await?;
             }
         }
-        if !self.permissions(email).await?.is_empty() {
-            return Err(StorageError::Protocol(
-                "OneDrive access remains after revocation",
-            ));
+        let mut shares = Vec::new();
+        for permission in self.permissions().await? {
+            match account.classify(&permission)? {
+                PermissionAccess::Unrelated => {}
+                PermissionAccess::Exclusive => {
+                    return Err(StorageError::Protocol(
+                        "OneDrive access remains after revocation",
+                    ))
+                }
+                PermissionAccess::Retained(reason) => shares.push(RetainedAccess {
+                    provider_id: http::string(&permission, "id")?.into(),
+                    reason,
+                }),
+            }
         }
-        Ok(MemberRemoval::Revoked)
+        if shares.is_empty() {
+            Ok(MemberRemoval::Revoked)
+        } else {
+            Ok(MemberRemoval::AccessRemains { shares })
+        }
     }
+
     async fn begin_upload(
         &self,
         path: &ObjectPath,
@@ -551,9 +572,11 @@ impl Storage for OneDriveStorage {
     }
 }
 fn writable(value: &Value) -> bool {
-    value["roles"]
-        .as_array()
-        .is_some_and(|roles| roles.iter().any(|r| r.as_str() == Some("write")))
+    value["roles"].as_array().is_some_and(|roles| {
+        roles
+            .iter()
+            .any(|r| matches!(r.as_str(), Some("write" | "owner")))
+    })
 }
 
 #[cfg(test)]

@@ -86,11 +86,39 @@ pub enum AccessGrant {
 pub enum MemberRemoval {
     /// The provider no longer shares with the account.
     Revoked,
+    /// Exclusive grants were removed; these grants remain for owner action.
+    /// They cannot safely be removed for this account alone.
+    AccessRemains {
+        /// Native grants the owner can inspect in the provider's console.
+        shares: Vec<RetainedAccess>,
+    },
     /// The admin deletes this member's key in the provider console.
     DeleteAccessKey {
         /// Public identifier of the key to delete in the provider console.
         access_key_id: String,
     },
+}
+
+/// A grant that revocation left for the owner to inspect.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RetainedAccess {
+    /// The native permission, membership or group id, scoped to this store.
+    pub provider_id: String,
+    /// Why removing this grant cannot revoke only the requested account.
+    pub reason: RetainedAccessReason,
+}
+
+/// The provider's reason that a grant was retained.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetainedAccessReason {
+    /// The grant also reaches other accounts, including public or group access.
+    OtherAccounts,
+    /// The grant comes from a parent location.
+    Inherited,
+    /// The provider did not identify the recipient sufficiently to remove it safely.
+    UnidentifiedAccount,
+    /// The grant belongs to the store's owner, whose access cannot be removed.
+    StoreOwner,
 }
 
 /// One complete object listed by its provider.

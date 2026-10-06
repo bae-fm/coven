@@ -10,6 +10,7 @@ pub use google_drive::GoogleDriveStorage;
 mod dropbox;
 pub use dropbox::DropboxStorage;
 mod onedrive;
+mod onedrive_access;
 pub use onedrive::OneDriveStorage;
 mod cloudkit;
 pub use cloudkit::{CloudKitOps, CloudKitStorage, CloudKitUpload, CloudKitUploadStatus};

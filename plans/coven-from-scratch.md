@@ -4832,6 +4832,13 @@ match stream.read_at(resume_at, 256 * 1024).await {
 - Only admins add and remove members, and change roles; each member removes
   their own devices, and admins any device ([§9](#9-members-and-roles)).
 - Removing a member is an operation ([§18.1](#181-operations)).
+- Storage removes only permissions that reach the requested account alone.
+  OneDrive resolves native account ids from invitation and recipient identities
+  across all permission pages before deletion, keeping email-bearing permissions
+  until the account's other exclusive permissions are gone so retries can still
+  identify them. Permissions that also reach other accounts, come from a parent,
+  identify no recipient, or belong to the owner are retained and returned for
+  owner action; they are never reported as revoked.
 
 ```rust
 impl CovenHandle {
@@ -4879,12 +4886,33 @@ pub enum MemberAccess {
     S3AccessKey { access_key_id: String },
 }
 
-/// Revoked sharing or the instruction to delete an S3 key (§13).
+/// Revoked sharing or remaining owner actions (§13).
 pub enum MemberRemoval {
     /// The provider no longer shares with the account.
     Revoked,
+    /// Exclusive grants were removed; these grants remain for owner action.
+    AccessRemains { shares: Vec<RetainedAccess> },
     /// The admin deletes the key with this public id in the provider's console.
     DeleteAccessKey { access_key_id: String },
+}
+
+/// A grant that revocation left for the owner to inspect.
+pub struct RetainedAccess {
+    /// Native permission, membership or group id, scoped to this store.
+    pub provider_id: String,
+    /// Why this grant cannot revoke only the requested account.
+    pub reason: RetainedAccessReason,
+}
+
+pub enum RetainedAccessReason {
+    /// The grant also reaches other accounts, including public or group access.
+    OtherAccounts,
+    /// The grant comes from a parent location.
+    Inherited,
+    /// The provider did not identify the recipient sufficiently for safe removal.
+    UnidentifiedAccount,
+    /// The grant belongs to the store's owner.
+    StoreOwner,
 }
 
 pub struct MemberInfo {
