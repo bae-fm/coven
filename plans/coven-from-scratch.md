@@ -1794,6 +1794,9 @@ Carol's tablet:
   - A user-provided file is written to a path the user picks, which must
     not already exist; an app-provided one goes into coven's own folder.
   - The uploaded copy is then deleted like any unused file.
+- A row with no file has NULL in its hash and where-columns, so both
+  must allow NULL; the app never writes them, and coven fills them in the
+  write that attaches a file.
 - A write that changes any of a row's file columns, its file, size, hash
   or where-column, writes all four, unchanged ones included, so a row's
   file always comes whole from one write.
