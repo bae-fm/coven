@@ -185,6 +185,15 @@ pub(crate) async fn response_error(provider: CloudProvider, response: Response) 
     }
     .into_error(provider)
 }
+pub(crate) fn container_error(mut error: StorageError) -> StorageError {
+    match &mut error {
+        StorageError::Provider { failure, .. } if *failure == StorageFailure::NotFound => {
+            *failure = StorageFailure::ContainerNotFound;
+        }
+        _ => {}
+    }
+    error
+}
 pub(crate) fn classify(provider: CloudProvider, status: u16, body: &[u8]) -> StorageFailure {
     let parsed = match serde_json::from_slice::<Value>(body) {
         Ok(value) => Some(value),

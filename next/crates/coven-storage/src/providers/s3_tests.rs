@@ -602,3 +602,32 @@ async fn interrupted_ranged_body_retains_the_sdk_cause() {
     assert!(matches!(error, StorageError::Provider { .. }));
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn permission_failures_reach_every_object_and_upload_caller() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let denied = Arc::new(AtomicBool::new(false));
+    let failures = denied.clone();
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(
+        move |method: Method, uri: Uri, headers: HeaderMap, body: Bytes| {
+            let denied = failures.clone();
+            let state = state.clone();
+            async move {
+                if denied.load(Ordering::SeqCst) {
+                    response(
+                        403,
+                        "<Error><Code>AccessDenied</Code><Message>native-refusal</Message></Error>",
+                    )
+                } else {
+                    endpoint(State(state), method, uri, headers, body).await
+                }
+            }
+        },
+    ))
+    .await;
+    crate::providers::tests::assert_permission_failures(Arc::new(provider(&server.url)), || {
+        denied.store(true, Ordering::SeqCst)
+    })
+    .await;
+}

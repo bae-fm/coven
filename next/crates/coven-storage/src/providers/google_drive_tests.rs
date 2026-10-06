@@ -65,7 +65,9 @@ fn respond(
         Value::Null
     };
     if parts == ["drive", "files", "folder"] && method == Method::GET {
-        return reply(json!({"id":"folder", "ownedByMe":!state.non_owner}));
+        return reply(
+            json!({"id":"folder", "ownedByMe":!state.non_owner,"mimeType":"application/vnd.google-apps.folder"}),
+        );
     }
     if parts == ["drive", "files", "generateIds"] {
         state.next += 1;
@@ -478,7 +480,7 @@ async fn interrupted_part_continues_at_the_confirmed_byte() {
 async fn refreshed_tokens_reach_the_same_adapter() {
     crate::providers::tests::assert_token_refresh(
         |url| Arc::new(provider(url)),
-        json!({"files":[]}),
+        json!({"files":[],"id":"folder","mimeType":"application/vnd.google-apps.folder"}),
     )
     .await;
 }
@@ -815,3 +817,84 @@ async fn deleting_a_path_removes_its_copies_and_preserves_unlinked_bytes() {
 
 #[path = "google_drive_access_tests.rs"]
 mod access_tests;
+
+#[tokio::test]
+async fn missing_container_is_not_an_empty_store_or_a_missing_object() {
+    for (status, expected) in [
+        (404, StorageFailure::ContainerNotFound),
+        (403, StorageFailure::PermissionDenied),
+    ] {
+        let server = TestServer::new(Router::new().fallback(move |uri: Uri| async move {
+            if uri.path().ends_with("/folder") {
+                response(status, "native-folder-cause")
+            } else if uri.path().ends_with("/files") {
+                reply(json!({"files":[]}))
+            } else {
+                response(status, "native-folder-cause")
+            }
+        }))
+        .await;
+        let storage = provider(&server.url);
+        let path = ObjectPath::store_log(
+            coven_foundation::id_source::DeviceId(31),
+            std::num::NonZeroU64::MIN,
+        );
+        for error in [
+            storage.list(&ObjectPrefix::all()).await.err().unwrap(),
+            storage.read(&path).await.err().unwrap(),
+            storage.delete(&path).await.err().unwrap(),
+            storage.create(&path, b"first").await.err().unwrap(),
+        ] {
+            assert_eq!(error.failure(), expected);
+            assert!(matches!(error, StorageError::Provider { .. }));
+        }
+    }
+    let server = TestServer::new(Router::new().fallback(|uri: Uri| async move {
+        if uri.path().ends_with("/folder") {
+            reply(
+                json!({"id":"folder","mimeType":"application/vnd.google-apps.folder","folder":{}}),
+            )
+        } else if uri.path().ends_with("/files") {
+            reply(json!({"files":[]}))
+        } else {
+            response(404, "missing-object")
+        }
+    }))
+    .await;
+    let storage = provider(&server.url);
+    let path = ObjectPath::store_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    assert_eq!(
+        storage.read(&path).await.unwrap_err().failure(),
+        StorageFailure::NotFound
+    );
+    storage.delete(&path).await.unwrap();
+}
+
+#[tokio::test]
+async fn permission_failures_reach_every_object_and_upload_caller() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let denied = Arc::new(AtomicBool::new(false));
+    let failures = denied.clone();
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(
+        move |method: Method, uri: Uri, headers: HeaderMap, body: Bytes| {
+            let denied = failures.clone();
+            let state = state.clone();
+            async move {
+                if denied.load(Ordering::SeqCst) {
+                    response(403, "native-refusal")
+                } else {
+                    endpoint(State(state), method, uri, headers, body).await
+                }
+            }
+        },
+    ))
+    .await;
+    crate::providers::tests::assert_permission_failures(Arc::new(provider(&server.url)), || {
+        denied.store(true, Ordering::SeqCst)
+    })
+    .await;
+}

@@ -64,15 +64,36 @@ impl OneDriveStorage {
         };
         self.session.send(method, url, &headers, body, true).await
     }
+    async fn check_folder(&self) -> Result<(), StorageError> {
+        let value = http::json(
+            PROVIDER,
+            self.send(Method::GET, &self.item(&self.folder, &[])?, Body::Empty)
+                .await?,
+        )
+        .await
+        .map_err(http::container_error)?;
+        if http::string(&value, "id")? != self.folder || !value["folder"].is_object() {
+            return Err(StorageError::InvalidPath);
+        }
+        Ok(())
+    }
     async fn metadata(&self, path: &ObjectPath) -> Result<Value, StorageError> {
-        http::json(
+        let result = http::json(
             PROVIDER,
             self.send(Method::GET, &self.by_path(path, "")?, Body::Empty)
                 .await?,
         )
-        .await
+        .await;
+        if result
+            .as_ref()
+            .is_err_and(|error| error.failure() == StorageFailure::NotFound)
+        {
+            self.check_folder().await?;
+        }
+        result
     }
     async fn parents(&self, path: &ObjectPath) -> Result<(), StorageError> {
+        self.check_folder().await?;
         let mut id = self.folder.clone();
         let parts = path.components();
         for name in &parts[..parts.len() - 1] {
@@ -329,6 +350,7 @@ impl Storage for OneDriveStorage {
         self.get(path, Some(range)).await
     }
     async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
+        self.check_folder().await?;
         let mut folders = vec![(self.folder.clone(), Vec::new())];
         let mut visited = BTreeSet::new();
         let mut paths = BTreeMap::new();
@@ -391,7 +413,9 @@ impl Storage for OneDriveStorage {
         let response = self
             .send(Method::DELETE, &self.by_path(path, "")?, Body::Empty)
             .await?;
-        if response.status().as_u16() != 404 {
+        if response.status().as_u16() == 404 {
+            self.check_folder().await?;
+        } else {
             http::checked(PROVIDER, response).await?;
         }
         Ok(())

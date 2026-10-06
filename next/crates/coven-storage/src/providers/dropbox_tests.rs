@@ -554,125 +554,6 @@ async fn create_uploads_an_oversized_write_in_parts() {
 }
 
 #[tokio::test]
-async fn sharing_requires_the_store_owners_account() {
-    let state = Arc::new(Mutex::new(Remote::default()));
-    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-    let storage = provider(&server.url);
-    storage.grant_access("kept@example.test").await.unwrap();
-    state.lock().unwrap().non_owner = true;
-    for error in [
-        storage
-            .grant_access("new@example.test")
-            .await
-            .err()
-            .unwrap(),
-        storage
-            .revoke_access(&MemberAccess::ProviderAccount("kept@example.test".into()))
-            .await
-            .err()
-            .unwrap(),
-    ] {
-        assert!(matches!(error, StorageError::NotStoreOwner));
-        assert_eq!(error.failure(), StorageFailure::PermissionDenied);
-    }
-    assert_eq!(
-        state
-            .lock()
-            .unwrap()
-            .members
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>(),
-        ["kept@example.test"]
-    );
-}
-
-#[tokio::test]
-async fn viewer_upgrade_preserves_access_when_the_provider_refuses_it() {
-    let state = Arc::new(Mutex::new(Remote::default()));
-    state
-        .lock()
-        .unwrap()
-        .members
-        .insert("member@example.test".into(), "viewer".into());
-    state.lock().unwrap().refuse_share = true;
-    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-    let storage = provider(&server.url);
-    assert_eq!(
-        storage
-            .grant_access("member@example.test")
-            .await
-            .err()
-            .unwrap()
-            .failure(),
-        StorageFailure::PermissionDenied
-    );
-    assert_eq!(
-        state
-            .lock()
-            .unwrap()
-            .members
-            .get("member@example.test")
-            .map(String::as_str),
-        Some("viewer")
-    );
-    assert_eq!(state.lock().unwrap().sharing_mutations, ["update"]);
-    state.lock().unwrap().refuse_share = false;
-    storage.grant_access("member@example.test").await.unwrap();
-    assert_eq!(
-        state.lock().unwrap().members["member@example.test"],
-        "editor"
-    );
-    assert_eq!(
-        state.lock().unwrap().sharing_mutations,
-        ["update", "update"]
-    );
-}
-
-#[tokio::test]
-async fn viewer_upgrade_retries_a_lost_reply_without_removing_access() {
-    let state = Arc::new(Mutex::new(Remote::default()));
-    state
-        .lock()
-        .unwrap()
-        .members
-        .insert("member@example.test".into(), "viewer_no_comment".into());
-    state.lock().unwrap().lose_update_reply = true;
-    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-    let storage = provider(&server.url);
-    assert_eq!(
-        storage
-            .grant_access("member@example.test")
-            .await
-            .err()
-            .unwrap()
-            .failure(),
-        StorageFailure::Network
-    );
-    storage.grant_access("member@example.test").await.unwrap();
-    assert_eq!(
-        state.lock().unwrap().members["member@example.test"],
-        "editor"
-    );
-    assert_eq!(state.lock().unwrap().sharing_mutations, ["update"]);
-}
-
-#[tokio::test]
-async fn granting_an_owner_does_not_downgrade_their_access() {
-    let state = Arc::new(Mutex::new(Remote::default()));
-    state
-        .lock()
-        .unwrap()
-        .members
-        .insert("owner@example.test".into(), "owner".into());
-    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-    let storage = provider(&server.url);
-    storage.grant_access("owner@example.test").await.unwrap();
-    assert_eq!(state.lock().unwrap().members["owner@example.test"], "owner");
-    assert!(state.lock().unwrap().sharing_mutations.is_empty());
-}
-
-#[tokio::test]
 async fn setup_refuses_unrelated_empty_folders_and_accepts_its_own_parents() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
@@ -898,5 +779,72 @@ async fn recipient_join_mounts_the_invited_namespace_and_retries_a_lost_reply() 
             panic!()
         };
         assert!(source.downcast_ref::<http::ProviderResponse>().is_some());
+    }
+}
+
+#[tokio::test]
+async fn permission_failures_reach_every_object_and_upload_caller() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let denied = Arc::new(AtomicBool::new(false));
+    let failures = denied.clone();
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(
+        move |uri: Uri, headers: HeaderMap, body: Bytes| {
+            let denied = failures.clone();
+            let state = state.clone();
+            async move {
+                if denied.load(Ordering::SeqCst) {
+                    response(403, "native-refusal")
+                } else {
+                    endpoint(State(state), uri, headers, body).await
+                }
+            }
+        },
+    ))
+    .await;
+    crate::providers::tests::assert_permission_failures(Arc::new(provider(&server.url)), || {
+        denied.store(true, Ordering::SeqCst)
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn missing_namespace_and_revoked_membership_keep_the_native_cause() {
+    for (tag, expected) in [
+        ("invalid_root", StorageFailure::ContainerNotFound),
+        ("invalid_namespace_id", StorageFailure::ContainerNotFound),
+        ("not_a_member", StorageFailure::PermissionDenied),
+    ] {
+        let body = json!({"error":{".tag":tag}}).to_string();
+        let source = body.clone();
+        let server = TestServer::new(Router::new().fallback(move || {
+            let body = body.clone();
+            async move { response(409, body) }
+        }))
+        .await;
+        let storage = provider(&server.url);
+        let path = ObjectPath::store_log(
+            coven_foundation::id_source::DeviceId(31),
+            std::num::NonZeroU64::MIN,
+        );
+        for error in [
+            storage.list(&ObjectPrefix::all()).await.err().unwrap(),
+            storage.read(&path).await.err().unwrap(),
+            storage.delete(&path).await.err().unwrap(),
+            storage.create(&path, b"first").await.err().unwrap(),
+            storage.grant_access("member").await.err().unwrap(),
+        ] {
+            assert_eq!(error.failure(), expected);
+            let StorageError::Provider { source: native, .. } = error else {
+                panic!("native error lost")
+            };
+            assert_eq!(
+                native
+                    .downcast_ref::<crate::providers::ProviderResponse>()
+                    .unwrap()
+                    .body(),
+                source.as_bytes()
+            );
+        }
     }
 }

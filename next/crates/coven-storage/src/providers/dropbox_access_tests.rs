@@ -139,3 +139,122 @@ async fn a_pending_viewer_without_an_account_id_keeps_their_invitation() {
     ));
     assert!(state.lock().unwrap().invitees.is_empty());
 }
+
+#[tokio::test]
+async fn sharing_requires_the_store_owners_account() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    storage.grant_access("kept@example.test").await.unwrap();
+    state.lock().unwrap().non_owner = true;
+    for error in [
+        storage
+            .grant_access("new@example.test")
+            .await
+            .err()
+            .unwrap(),
+        storage
+            .revoke_access(&MemberAccess::ProviderAccount("kept@example.test".into()))
+            .await
+            .err()
+            .unwrap(),
+    ] {
+        assert!(matches!(error, StorageError::NotStoreOwner));
+        assert_eq!(error.failure(), StorageFailure::PermissionDenied);
+    }
+    assert_eq!(
+        state
+            .lock()
+            .unwrap()
+            .members
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        ["kept@example.test"]
+    );
+}
+
+#[tokio::test]
+async fn viewer_upgrade_preserves_access_when_the_provider_refuses_it() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    state
+        .lock()
+        .unwrap()
+        .members
+        .insert("member@example.test".into(), "viewer".into());
+    state.lock().unwrap().refuse_share = true;
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    assert_eq!(
+        storage
+            .grant_access("member@example.test")
+            .await
+            .err()
+            .unwrap()
+            .failure(),
+        StorageFailure::PermissionDenied
+    );
+    assert_eq!(
+        state
+            .lock()
+            .unwrap()
+            .members
+            .get("member@example.test")
+            .map(String::as_str),
+        Some("viewer")
+    );
+    assert_eq!(state.lock().unwrap().sharing_mutations, ["update"]);
+    state.lock().unwrap().refuse_share = false;
+    storage.grant_access("member@example.test").await.unwrap();
+    assert_eq!(
+        state.lock().unwrap().members["member@example.test"],
+        "editor"
+    );
+    assert_eq!(
+        state.lock().unwrap().sharing_mutations,
+        ["update", "update"]
+    );
+}
+
+#[tokio::test]
+async fn viewer_upgrade_retries_a_lost_reply_without_removing_access() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    state
+        .lock()
+        .unwrap()
+        .members
+        .insert("member@example.test".into(), "viewer_no_comment".into());
+    state.lock().unwrap().lose_update_reply = true;
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    assert_eq!(
+        storage
+            .grant_access("member@example.test")
+            .await
+            .err()
+            .unwrap()
+            .failure(),
+        StorageFailure::Network
+    );
+    storage.grant_access("member@example.test").await.unwrap();
+    assert_eq!(
+        state.lock().unwrap().members["member@example.test"],
+        "editor"
+    );
+    assert_eq!(state.lock().unwrap().sharing_mutations, ["update"]);
+}
+
+#[tokio::test]
+async fn granting_an_owner_does_not_downgrade_their_access() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    state
+        .lock()
+        .unwrap()
+        .members
+        .insert("owner@example.test".into(), "owner".into());
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    storage.grant_access("owner@example.test").await.unwrap();
+    assert_eq!(state.lock().unwrap().members["owner@example.test"], "owner");
+    assert!(state.lock().unwrap().sharing_mutations.is_empty());
+}

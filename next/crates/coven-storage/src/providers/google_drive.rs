@@ -128,6 +128,7 @@ impl GoogleDriveStorage {
         Ok(copies.into_iter().next())
     }
     async fn pages(&self, query: &str) -> Result<Vec<Value>, StorageError> {
+        self.folder_metadata().await?;
         let mut token = None::<String>;
         let mut seen = BTreeSet::new();
         let mut files = Vec::new();
@@ -273,20 +274,35 @@ impl GoogleDriveStorage {
             Err(http::response_error(PROVIDER, response).await)
         }
     }
-    async fn require_owner(&self) -> Result<(), StorageError> {
+    async fn folder_metadata(&self) -> Result<Value, StorageError> {
         let value = http::json(
             PROVIDER,
             self.send(
                 Method::GET,
-                &self.url(&["files", &self.folder], &[("fields", "ownedByMe")])?,
+                &self.url(
+                    &["files", &self.folder],
+                    &[("fields", "id,mimeType,trashed,ownedByMe,driveId")],
+                )?,
                 Body::Empty,
             )
             .await?,
         )
-        .await?;
+        .await
+        .map_err(http::container_error)?;
+        if http::string(&value, "id")? != self.folder
+            || value["mimeType"].as_str() != Some("application/vnd.google-apps.folder")
+            || value["trashed"].as_bool() == Some(true)
+        {
+            return Err(StorageError::InvalidPath);
+        }
+        Ok(value)
+    }
+    async fn require_owner(&self) -> Result<(), StorageError> {
+        let value = self.folder_metadata().await?;
         match value["ownedByMe"].as_bool() {
             Some(true) => Ok(()),
             Some(false) => Err(StorageError::NotStoreOwner),
+            None if value["driveId"].as_str().is_some() => Err(StorageError::NotStoreOwner),
             None => Err(StorageError::Protocol("Drive omitted folder ownership")),
         }
     }

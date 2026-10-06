@@ -109,6 +109,9 @@ pub(crate) async fn assert_token_refresh(
     .await;
     let storage = make(&server.url);
     storage.list(&crate::ObjectPrefix::all()).await.unwrap();
+    let initial = std::mem::take(&mut *requests.lock().unwrap());
+    assert!(!initial.is_empty());
+    assert!(initial.iter().all(|token| token == "Bearer token"));
     storage
         .set_oauth_tokens(OAuthTokens {
             access_token: SecretText::new("refreshed".into()),
@@ -118,8 +121,67 @@ pub(crate) async fn assert_token_refresh(
         .await
         .unwrap();
     storage.list(&crate::ObjectPrefix::all()).await.unwrap();
-    assert_eq!(
-        *requests.lock().unwrap(),
-        ["Bearer token", "Bearer refreshed"]
+    let refreshed = requests.lock().unwrap();
+    assert_eq!(refreshed.len(), initial.len());
+    assert!(refreshed.iter().all(|token| token == "Bearer refreshed"));
+}
+
+pub(crate) async fn assert_permission_failures(
+    storage: Arc<dyn crate::Storage>,
+    deny: impl FnOnce(),
+) {
+    use crate::*;
+    let path = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
     );
+    let positions = ObjectPath::positions(coven_foundation::id_source::DeviceId(31));
+    let mut pending = storage.begin_upload(&path, 4).await.unwrap();
+    let mut ready = storage.begin_upload(&path, 4).await.unwrap();
+    storage.upload_part(&mut ready, b"data").await.unwrap();
+    // Drive and OneDrive publish the final part immediately. Test finish by
+    // recovering its still-incomplete recording after the reply was lost.
+    if ready.is_complete() {
+        ready = pending.clone();
+    }
+    deny();
+    let mut errors = vec![
+        storage.create(&path, b"data").await.err().unwrap(),
+        storage.replace(&positions, b"data").await.err().unwrap(),
+        storage.read(&path).await.err().unwrap(),
+        storage
+            .read_range(&path, ByteRange::new(0, 1).unwrap())
+            .await
+            .err()
+            .unwrap(),
+        storage.list(&ObjectPrefix::all()).await.err().unwrap(),
+        storage.delete(&path).await.err().unwrap(),
+        storage.begin_upload(&path, 4).await.err().unwrap(),
+        storage.resume_upload(&mut pending).await.err().unwrap(),
+        storage
+            .upload_part(&mut pending, b"data")
+            .await
+            .err()
+            .unwrap(),
+        storage.finish_upload(&mut ready).await.err().unwrap(),
+        storage.abort_upload(&pending).await.err().unwrap(),
+    ];
+    if storage.config().provider() != CloudProvider::S3 {
+        errors.push(storage.grant_access("member").await.err().unwrap());
+        errors.push(
+            storage
+                .revoke_access(&MemberAccess::ProviderAccount("member".into()))
+                .await
+                .err()
+                .unwrap(),
+        );
+    }
+    for error in errors {
+        assert_eq!(
+            error.failure(),
+            StorageFailure::PermissionDenied,
+            "{error:?}"
+        );
+        assert!(matches!(error, StorageError::Provider { .. }));
+    }
 }
