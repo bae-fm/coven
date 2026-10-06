@@ -1369,10 +1369,11 @@ Carol's tablet:
   copies are kept in storage, at `keys/store/<key>/<member>`.
 - Sealed circle keys live at `keys/circles/<circle>/<key>/<member>`
   ([§14.3](#143-circles)).
-- So two concurrent removals each make their own key under its own id,
-  and both keys work.
+- So two concurrent removals never write their keys to the same paths.
   - E.g. Ana removes Dan while Ben, offline, removes Erin: each removal
-    names its own new store key, and both apply.
+    names its own new store key; the two conflict, since each key is
+    sealed to the member the other removes, so the earlier applies and
+    the other is redone against it ([§9](#9-members-and-roles)).
 - The *current* store key is the one named by the latest entry the replay
   keeps, in its order, that brings one in, and likewise for each circle; new
   writes, entries, snapshots and files use it.
