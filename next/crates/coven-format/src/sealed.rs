@@ -57,3 +57,7 @@ pub(crate) fn encode_chunk(bytes: &[u8]) -> Result<Vec<u8>, Error> {
     result.extend_from_slice(bytes);
     Ok(result)
 }
+
+#[cfg(test)]
+#[path = "sealed_tests.rs"]
+mod tests;

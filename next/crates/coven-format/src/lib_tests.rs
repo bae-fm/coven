@@ -309,3 +309,19 @@ fn check_encoding(bytes: &[u8]) {
         assert_eq!(key.encode(), bytes);
     }
 }
+
+pub(super) fn mutations(bytes: &[u8], mut decode: impl FnMut(&[u8])) {
+    for end in 0..bytes.len() {
+        decode(&bytes[..end]);
+    }
+    let mut changed = bytes.to_vec();
+    for index in 0..bytes.len() {
+        for bit in 0..8 {
+            changed[index] ^= 1 << bit;
+            decode(&changed);
+            changed[index] ^= 1 << bit;
+        }
+    }
+    changed.push(0);
+    decode(&changed);
+}

@@ -197,3 +197,35 @@ fn non_power_of_two_chunks_and_eight_mib_chunks_share_the_range_layout() {
         }
     }
 }
+
+// Public test material sealed independently with Python ctypes and libsodium.
+#[test]
+fn file_fixture_opens_reencodes_and_decodes_every_mutation() {
+    let bytes = crate::tests::hex(include_str!("../fixtures/file.hex"));
+    let key = FileKey::from_bytes([0x77; 32]);
+    let file = FileObject::decode(&bytes).unwrap();
+    assert_eq!(file.header().chunk_size(), 4096);
+    assert_eq!(file.header().size(), 4125);
+    assert_eq!(file.header().chunk_count(), 2);
+    assert_eq!(file.encode().unwrap(), bytes);
+    let plain: Vec<_> = (0..4125).map(|i| (i % 251) as u8).collect();
+    assert_eq!(file.read_range(&key, PATH, 0..4125).unwrap(), plain);
+    assert_eq!(
+        file.read_range(&key, PATH, 4095..4098).unwrap(),
+        plain[4095..4098]
+    );
+    let mut encoded = file.header().encode().to_vec();
+    for (index, chunk) in plain.chunks(4096).enumerate() {
+        encoded.extend(
+            file.header()
+                .seal_chunk(&key, PATH, index as u64, chunk)
+                .unwrap(),
+        );
+    }
+    assert_eq!(encoded, bytes);
+    crate::tests::mutations(&bytes, |changed| {
+        if let Ok(file) = FileObject::decode(changed) {
+            assert_eq!(file.encode().unwrap(), changed);
+        }
+    });
+}

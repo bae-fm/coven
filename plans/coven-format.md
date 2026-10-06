@@ -428,3 +428,12 @@
   - a migration write.
 - Every successful decode re-encodes to the same bytes; tests decode every
   truncation and single-bit change of every fixture without panicking.
+
+- The sealed fixtures are `sealed-write.hex`, `sealed-store-log.hex`,
+  `sealed-snapshot.hex`, `sealed-positions.hex` and `sealed-join-request.hex`;
+  `sealed-store-key.hex` and `sealed-circle-key.hex` hold the two key boxes.
+  `file.hex` has a full 4-KiB chunk and a 29-byte last chunk. The code frames
+  are `restore-code.hex` and `invite-code.hex`, with their text in `codes.txt`.
+  All key material and fixed nonces in these fixtures are public test data.
+  Ciphertext, HKDF and signatures were calculated independently using
+  Python hashlib/hmac and libsodium; tests open them through the Rust APIs.
