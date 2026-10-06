@@ -271,16 +271,6 @@ impl Storage for S3Storage {
             Err(error) => Err(s3_error(error)),
         }
     }
-    async fn deletion_rights(&self, path: &ObjectPath) -> Result<DeletionRights, StorageError> {
-        self.client
-            .head_object()
-            .bucket(&self.bucket)
-            .key(path.under(&self.prefix))
-            .send()
-            .await
-            .map_err(s3_error)?;
-        Ok(DeletionRights::Delete)
-    }
     async fn grant_access(&self, _account: &str) -> Result<AccessGrant, StorageError> {
         Ok(AccessGrant::CreateAccessKey)
     }

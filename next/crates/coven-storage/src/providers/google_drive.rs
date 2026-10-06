@@ -409,21 +409,6 @@ impl Storage for GoogleDriveStorage {
         }
         Ok(())
     }
-    async fn deletion_rights(&self, path: &ObjectPath) -> Result<DeletionRights, StorageError> {
-        let item = self.find(path).await?.ok_or(StorageError::NotFound)?;
-        let uploader = http::string(&item["properties"], "covenDevice")?
-            .parse()
-            .map_err(|_| StorageError::Protocol("invalid Drive uploader"))?;
-        let can_delete = can_delete(&item)?;
-        let can_remove = item["capabilities"]["canRemoveMyDriveParent"]
-            .as_bool()
-            .ok_or(StorageError::Protocol("missing Drive removal right"))?;
-        Ok(DeletionRights::GoogleDrive {
-            uploader: DeviceId(uploader),
-            can_delete,
-            can_remove,
-        })
-    }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
         let permissions = self.permissions(account).await?;
         if permissions

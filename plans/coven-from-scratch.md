@@ -3870,6 +3870,10 @@ while let Ok(values) = lost.next().await {
     `LocationOccupied`.
   - Creating uploads the store's first entry and its key sealed to this
     member; waiting writes then go up through sync like any others.
+- Storage exposes `delete`, not a deletion-rights query. Sync chooses the
+  deleting device by §15; Drive deletes an object the account owns and
+  otherwise removes it from the store's folder. Provider refusals keep
+  their typed cause.
 - Setup commits the storage credentials and keys only once the connection
   is ready; a failed setup leaves the device as it was.
 - A device that isn't connected still reads and writes

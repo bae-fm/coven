@@ -275,11 +275,6 @@ impl Storage for DropboxStorage {
             Err(e) => Err(e),
         }
     }
-    async fn deletion_rights(&self, path: &ObjectPath) -> Result<DeletionRights, StorageError> {
-        self.rpc("files/get_metadata", json!({"path":path.absolute()}))
-            .await?;
-        Ok(DeletionRights::Delete)
-    }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
         if self.members(account).await?.as_deref() != Some("editor") {
             if self.members(account).await?.is_some() {

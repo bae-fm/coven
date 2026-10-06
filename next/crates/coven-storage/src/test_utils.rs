@@ -158,10 +158,6 @@ impl Storage for MemoryStorage {
         self.state.lock().await.objects.remove(path);
         Ok(())
     }
-    async fn deletion_rights(&self, path: &ObjectPath) -> Result<DeletionRights, StorageError> {
-        self.read(path).await?;
-        Ok(DeletionRights::Delete)
-    }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
         self.before().await?;
         if self.config.provider() == CloudProvider::S3 {

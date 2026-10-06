@@ -360,17 +360,12 @@ async fn session_reopens_and_only_uploader_deletes() {
     assert!(lost_reply.is_complete());
     let id = state.lock().unwrap().files.keys().next().unwrap().clone();
     state.lock().unwrap().files.get_mut(&id).unwrap().0["ownedByMe"] = json!(false);
-    assert_eq!(
-        storage.deletion_rights(&path).await.unwrap(),
-        DeletionRights::GoogleDrive {
-            uploader: DeviceId(31),
-            can_delete: false,
-            can_remove: true
-        }
-    );
     storage.delete(&path).await.unwrap();
     assert!(storage.list(&ObjectPrefix::all()).await.unwrap().is_empty());
-    assert!(state.lock().unwrap().files.contains_key(&id));
+    assert_eq!(
+        state.lock().unwrap().files[&id].1.len(),
+        8 * 1024 * 1024 + 1
+    );
 }
 #[tokio::test]
 async fn two_uploads_cannot_publish_different_bytes_at_one_path() {

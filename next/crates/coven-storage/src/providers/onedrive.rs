@@ -351,10 +351,6 @@ impl Storage for OneDriveStorage {
         }
         Ok(())
     }
-    async fn deletion_rights(&self, path: &ObjectPath) -> Result<DeletionRights, StorageError> {
-        self.metadata(path).await?;
-        Ok(DeletionRights::Delete)
-    }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
         if !self.permissions(account).await?.iter().any(writable) {
             http::checked(PROVIDER,self.send(Method::POST,&self.item(&self.folder,&["invite"])?,Body::Json(json!({"recipients":[{"email":account}],"roles":["write"],"requireSignIn":true,"sendInvitation":true}))).await?).await?;

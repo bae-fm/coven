@@ -170,10 +170,6 @@ impl Storage for CloudKitStorage {
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         self.ops.delete(&self.config, path).await
     }
-    async fn deletion_rights(&self, path: &ObjectPath) -> Result<DeletionRights, StorageError> {
-        self.ops.read(&self.config, path, None).await?;
-        Ok(DeletionRights::Delete)
-    }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
         self.ops.set_access(&self.config, account, true).await?;
         Ok(AccessGrant::Granted)

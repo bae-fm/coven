@@ -3,7 +3,6 @@ use crate::{
     UploadSession,
 };
 use async_trait::async_trait;
-use coven_foundation::id_source::DeviceId;
 
 /// A nonempty half-open byte range; end must not exceed the object's length.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,23 +63,6 @@ pub enum ProviderSignOut {
     ReplaceAccessKey,
 }
 
-/// Who may delete an object (§15), as reported by the provider.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DeletionRights {
-    /// The provider permits deletion with this account; sync applies §15's device rules.
-    Delete,
-    /// Drive's uploader account may delete; the store owner may only remove it
-    /// from the shared folder, leaving the uploader's own copy.
-    GoogleDrive {
-        /// Device that uploaded the object, for sync's deletion rules.
-        uploader: DeviceId,
-        /// Whether this account may permanently delete it.
-        can_delete: bool,
-        /// Whether this account may remove it from the store folder.
-        can_remove: bool,
-    },
-}
-
 /// An account to share with, or the member's S3 key to revoke.
 pub enum MemberAccess {
     /// The member's provider account email.
@@ -137,8 +119,6 @@ pub trait Storage: Send + Sync {
     /// Delete an object, or remove it from Drive's folder when only that is allowed.
     /// An already absent object succeeds, making operation retries safe.
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError>;
-    /// The provider's deletion restrictions; sync also enforces §15.
-    async fn deletion_rights(&self, path: &ObjectPath) -> Result<DeletionRights, StorageError>;
     /// Share the store with an account, or tell an S3 admin to create a key.
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError>;
     /// Unshare the store, or tell an S3 admin which key to delete.
