@@ -2114,10 +2114,12 @@ Carol's tablet:
     in the store log ([§9](#9-members-and-roles)).
   - A device whose app is older can't sync until it updates; it then
     reloads from that snapshot.
-  - It snapshots every audience it can read. For a circle it can't read,
-    the first device of one of that circle's members to update writes
-    the circle's snapshot in the new version, with an entry raising the
-    circle to it; the circle's other devices reload from that one.
+  - It snapshots every audience it can read, with one entry raising each
+    to the new version; the store's own entry raises the store.
+  - For a circle it can't read, the first device of one of that circle's
+    members to update writes the circle's snapshot in the new version,
+    with an entry raising the circle to it; the circle's other devices
+    reload from that one.
   - A device that has migrated holds its new-version writes back until
     the store log has the entry raising the store to that version, its
     own or another device's.
