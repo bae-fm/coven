@@ -1733,6 +1733,11 @@ Carol's tablet:
   writes still waiting in `coven_uploads`, then uploads them.
   - Without a second part, it uploads them marked lost, and every device
     records them in `coven_lost` without applying them.
+  - A lost write names the breaking change by the schema version it raised
+    the store to, which the device knows when it migrates, before any
+    store log entry for it exists.
+  - It converts or marks only writes no upload has tried yet; a tried
+    write's bytes are fixed ([§6](#6-syncing-writes)).
   - E.g. Ana's app renames `title` to `name`, while Ben's phone, offline,
     edits a title; when Ben updates, his edit becomes a `name` edit, and
     reaches every device.
@@ -3112,8 +3117,9 @@ pub enum Replacement {
     /// Removal rules took the row out: every one that holds (§8.4, §8.5,
     /// §8.6, §14).
     Rules(Vec<RemovalRule>),
-    /// A breaking schema change the write hadn't read (§17.1).
-    SchemaChange(EntryId),
+    /// A breaking schema change the write hadn't read, named by the
+    /// schema version it raised the store to (§17.1).
+    SchemaChange { version: u32 },
     /// A reset the write hadn't read (§19.3).
     Reset(EntryId),
 }
