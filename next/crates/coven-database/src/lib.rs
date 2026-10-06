@@ -12,6 +12,9 @@ mod database;
 mod declaration;
 mod download;
 mod error;
+mod file_authorization;
+mod file_row;
+mod file_write;
 mod fingerprint;
 mod internal_schema;
 mod key_scope;
@@ -39,8 +42,10 @@ mod schema_source;
 mod sql;
 mod sql_value;
 mod sqlite;
+mod user_file;
 mod write;
 mod write_apply;
+mod write_batch;
 mod write_boundary;
 mod write_capture;
 mod write_commit;
@@ -68,7 +73,9 @@ pub use migration::{
 pub use migration_change::{ChangeOp, ColumnChange, RowChange};
 pub use read::{Read, SqlReadContext};
 pub use row_key::RowKey;
+pub use user_file::{prepare_user_file, PreparedUserFile, UserFile};
 pub use write::SqlContext;
+pub use write_batch::{FileSource, WriteBatch};
 
 // SQL values and parameters are part of the API. Connections remain private.
 pub use rusqlite::{named_params, params, types, Params, Row, ToSql};

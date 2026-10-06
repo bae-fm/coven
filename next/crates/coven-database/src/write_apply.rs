@@ -42,7 +42,7 @@ impl<'a> WriteApply<'a> {
         &self,
         record: Option<&WriteRecord>,
         mut touched: BTreeSet<RowId>,
-    ) -> Result<(), DbError> {
+    ) -> Result<BTreeSet<crate::write_rows::AppKey>, DbError> {
         let updates = match record {
             Some(record) => self.store.apply(record)?,
             None => BTreeMap::new(),
@@ -80,7 +80,11 @@ impl<'a> WriteApply<'a> {
         self.database.batch("PRAGMA defer_foreign_keys=ON")?;
         crate::removal::materialize(self.database, self.schema, self.visible, &new, &removal)?;
         crate::fingerprint::update(self.database, &new, &fingerprint)?;
-        Ok(())
+        Ok(removal
+            .region
+            .into_iter()
+            .map(|row| (row.table, row.key))
+            .collect())
     }
 }
 

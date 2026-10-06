@@ -157,3 +157,31 @@ async fn a_view_or_another_tables_columns_cannot_satisfy_a_file_declaration() {
         assert!(matches!(database_error(error), DbError::Schema(SchemaError::MissingTable { table }) if table == "attachments"));
     }
 }
+
+#[tokio::test]
+async fn hash_and_location_must_allow_null_on_both_opens_and_after_migrating() {
+    for (schema, column) in [
+        ("CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB NOT NULL,location TEXT)", "hash"),
+        ("CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT NOT NULL)", "location"),
+    ] {
+        let store = TestStore::new();
+        // The table is valid ordinary SQL, but not a valid file declaration.
+        let ordinary = || vec![SyncedTable::new("attachments", RowIdentity::SharedKey)];
+        store.schema(ordinary(), schema).await.unwrap().close().await.unwrap();
+        for read_only in [false, true] {
+            let builder = store.builder(table(declaration()), vec![Migration::sql(1, "files", schema)]);
+            let result = if read_only {builder.open_read_only().await.map(|_| ())} else {builder.open().await.map(|_| ())};
+            assert!(matches!(database_error(result.unwrap_err()), DbError::Schema(SchemaError::FileColumnNotNullable {table,column: actual}) if table=="attachments" && actual==column));
+        }
+        let fresh = TestStore::new();
+        fresh.schema(table(declaration()), SCHEMA).await.unwrap().close().await.unwrap();
+        let error = fresh.builder(table(declaration()), vec![
+            Migration::sql(1, "files", SCHEMA),
+            Migration::run(2, "rebuild", move |sql| {sql.execute_batch(&format!("DROP TABLE attachments; {schema}"))?; Ok(())}),
+        ]).open().await.err().unwrap();
+        assert!(matches!(database_error(error), DbError::Schema(SchemaError::FileColumnNotNullable {table,column: actual}) if table=="attachments" && actual==column));
+        let db = fresh.schema(table(declaration()), SCHEMA).await.unwrap();
+        assert_eq!(db.schema_version().await.unwrap(),1);
+        db.close().await.unwrap();
+    }
+}

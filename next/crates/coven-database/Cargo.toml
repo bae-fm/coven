@@ -14,7 +14,7 @@ coven-format.workspace = true
 rusqlite = { workspace = true, features = ["bundled", "session", "hooks", "preupdate_hook", "functions", "limits"] }
 sqlite3-parser.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "sync", "macros"] }
+tokio = { workspace = true, features = ["rt", "sync", "macros", "io-util"] }
 uuid.workspace = true
 
 [dev-dependencies]

@@ -127,15 +127,15 @@ pub enum Uploads {
 /// A table's file columns and declared file choices (§16, §20.2).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileDecl {
-    namespace: String,
-    provenance: Provenance,
+    pub(crate) namespace: String,
+    pub(crate) provenance: Provenance,
     uploads: Uploads,
     fill: CacheFill,
-    id: String,
-    size: String,
-    hash: String,
-    location: String,
-    write_once: bool,
+    pub(crate) id: String,
+    pub(crate) size: String,
+    pub(crate) hash: String,
+    pub(crate) location: String,
+    pub(crate) write_once: bool,
 }
 
 impl FileDecl {

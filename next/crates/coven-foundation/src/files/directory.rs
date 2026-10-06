@@ -33,7 +33,7 @@ pub enum FileArea {
 
 /// A portable single filename: ASCII letters, digits, `-`, `_` and interior
 /// dots, up to 255 bytes. Windows device names are refused on every platform.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct FileName(String);
 
 /// A name that could escape its directory or alias a Windows device.
@@ -51,6 +51,11 @@ pub enum FileNameError {
 }
 
 impl FileName {
+    /// The validated filename, for recording an owned file in local metadata.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
     /// Validate a single filename before it is joined to an owned directory.
     pub fn new(name: impl Into<String>) -> Result<Self, FileNameError> {
         let name = name.into();
@@ -136,6 +141,15 @@ impl StoreDir {
             FileArea::Cache => CACHE,
         };
         AtomicFile::new(self.path.join(area).join(&name.0))
+    }
+
+    /// Stream a new app-provided file into this store and sync it before returning
+    /// its unique name. A failed write removes its unpublished bytes.
+    pub fn write_file<T>(
+        &self,
+        write: impl FnOnce(&mut dyn std::io::Write) -> std::io::Result<T>,
+    ) -> Result<(FileName, T), crate::files::FileError> {
+        crate::files::atomic_file::write_owned(&self.path.join(APP_FILES), write)
     }
 }
 

@@ -2845,8 +2845,15 @@ pub enum DbError {
     UserFileMissing { path: PathBuf },
     /// The user's file changed during preparation or since it was prepared (§20.3).
     UserFileChanged { path: PathBuf },
+    /// App SQL tried to assign a hash or where-column, including NULL (§16.1).
+    FileColumnWrite { table: String, column: String },
+    /// Supplied files cannot be attached to the declared namespace, kind or row (§20.3).
+    FileAttachment { reason: String },
     /// Reading or keeping file bytes failed (§20.3).
     Disk(DiskError),
+    /// Removing owned bytes failed. A committed write stays committed; an
+    /// unsuccessful write retains its original error (§16.6).
+    FileCleanup { write: Result<(), Box<DbError>>, failures: Vec<DiskError> },
     /// A transaction failed and rolling it back failed too.
     Rollback { operation: Box<DbError>, rollback: rusqlite::Error },
     /// Closing failed for these connections, after every one was tried (§20.1).
@@ -2863,6 +2870,8 @@ pub enum SchemaError {
     TwoAudiences { table: String },
     /// A declared file column isn't in the table (§20.2).
     FileColumn { table: String, column: String },
+    /// A hash or where-column cannot represent a row without a file (§16.1).
+    FileColumnNotNullable { table: String, column: String },
     /// A trigger declared shared isn't on the table (§8.7).
     MissingTrigger { table: String, trigger: String },
     /// A synced table has no primary key (§8.5).
@@ -3313,13 +3322,14 @@ impl FileDecl {
     pub fn with_size_column(self, column: impl Into<String>) -> Self;
 
     /// The column holding the file's content hash, the SHA-256 of its bytes,
-    /// which coven fills in (§16.2). Defaults to `hash`.
+    /// which coven fills in (§16.2). Must allow NULL; app SQL cannot assign it.
+    /// Defaults to `hash`.
     pub fn with_hash_column(self, column: impl Into<String>) -> Self;
 
     /// The column holding where the file is, which coven fills in:
     /// `uploaded` with the file's id and key, or the id of the device that
     /// has it (§16.1, §16.2). Read it through `FileRef::location`.
-    /// Defaults to `location`.
+    /// Must allow NULL; app SQL cannot assign it. Defaults to `location`.
     pub fn with_location_column(self, column: impl Into<String>) -> Self;
 
     /// Refuses a write that points an existing row at a different file.
@@ -3445,8 +3455,9 @@ impl SqlContext<'_, '_> {
         prepared: PreparedUserFile,
     ) -> Result<(), DbError>;
 
-    /// Forgets the user-provided file recorded on a row. The file itself is
-    /// untouched.
+    /// Forgets the user-provided file recorded on a row and clears its hash
+    /// and where-columns to NULL. All four file columns go in the write
+    /// (§16.1). The original is untouched.
     pub fn clear_user_file(&self, table: &str, key: impl Into<RowKey>) -> Result<(), DbError>;
 
     /// Checks that a file reference taken earlier still names the row's

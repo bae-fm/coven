@@ -141,6 +141,59 @@ pub enum DbError {
     /// A converted row does not fit its operation or the migration's schema (§20.13).
     #[error("invalid migration conversion: {0}")]
     MigrationConversion(&'static str),
+    /// A write tried to replace a file declared write-once (§16).
+    #[error("file on {table} at {key:?} cannot be replaced")]
+    FileWriteOnce {
+        /// The declared table.
+        table: String,
+        /// The row's key.
+        key: crate::RowKey,
+    },
+    /// The supplied bytes disagree with the row's size (§16).
+    #[error("file size is {actual}, expected {expected}")]
+    FileSizeMismatch {
+        /// The row's declared size.
+        expected: u64,
+        /// The bytes' measured size.
+        actual: u64,
+    },
+    /// The user's original disappeared.
+    #[error("user file is missing: {}", path.display())]
+    UserFileMissing {
+        /// The original path.
+        path: std::path::PathBuf,
+    },
+    /// The user's original changed after it was observed.
+    #[error("user file changed: {}", path.display())]
+    UserFileChanged {
+        /// The original path.
+        path: std::path::PathBuf,
+    },
+    /// App SQL named a column only coven writes.
+    #[error("app SQL cannot write file column {table}.{column}")]
+    FileColumnWrite {
+        /// The declared table.
+        table: String,
+        /// The managed column.
+        column: String,
+    },
+    /// A file operation has no compatible declaration or row.
+    #[error("invalid file attachment: {reason}")]
+    FileAttachment {
+        /// The failed attachment requirement.
+        reason: String,
+    },
+    /// An owned file operation failed.
+    #[error(transparent)]
+    Disk(#[from] coven_foundation::files::FileError),
+    /// File cleanup failed, retaining the write's outcome and every failure.
+    #[error("file cleanup failed: {failures:?}; write outcome: {write:?}")]
+    FileCleanup {
+        /// Ok if the transaction committed; otherwise its original error.
+        write: Result<(), Box<DbError>>,
+        /// Each failed removal.
+        failures: Vec<coven_foundation::files::FileError>,
+    },
     /// Closing failed for these connections, after every one was tried (§20.1).
     #[error("closing database connections failed: {failures:?}")]
     Closing {
@@ -215,6 +268,14 @@ pub enum SchemaError {
     TwoAudiences {
         /// The declared table.
         table: String,
+    },
+    /// Hash and location must represent a row without a file (§16.1).
+    #[error("file column {table}.{column} must allow NULL")]
+    FileColumnNotNullable {
+        /// The declared table.
+        table: String,
+        /// The non-null managed column.
+        column: String,
     },
     /// A declared file column isn't in the table (§20.2).
     #[error("file column {table}.{column} is missing")]

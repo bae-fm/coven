@@ -49,6 +49,9 @@ struct AuthorizationState {
     shared: BTreeSet<String>,
     hidden_rowids: BTreeSet<(String, String)>,
     tables_changed: bool,
+    files: crate::file_authorization::FileAuthorization,
+    filling_file: bool,
+    file_violation: Option<(String, String)>,
 }
 
 impl SqlAuthorization {
@@ -73,6 +76,9 @@ impl SqlAuthorization {
                     .collect(),
                 hidden_rowids: BTreeSet::new(),
                 tables_changed: false,
+                files: crate::file_authorization::FileAuthorization::new(tables),
+                filling_file: false,
+                file_violation: None,
             })),
         }
     }
@@ -138,6 +144,9 @@ impl SqlAuthorization {
             }
             match state.refusal(context) {
                 Some(error) => {
+                    if let DbError::FileColumnWrite { table, column } = &error {
+                        state.file_violation = Some((table.clone(), column.clone()));
+                    }
                     state.denied = Some(error);
                     Authorization::Deny
                 }
@@ -290,7 +299,46 @@ impl SqlAuthorization {
         result
     }
 
+    pub(crate) fn take_file_violation(&self) -> Result<(), DbError> {
+        match self
+            .state
+            .lock()
+            .expect("SQL authorization lock poisoned")
+            .file_violation
+            .take()
+        {
+            Some((table, column)) => Err(DbError::FileColumnWrite { table, column }),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn set_file_triggers(
+        &self,
+        triggers: Vec<(String, String)>,
+    ) -> rusqlite::Result<()> {
+        self.state
+            .lock()
+            .expect("SQL authorization lock poisoned")
+            .files
+            .triggers(triggers)
+    }
+
+    pub(crate) fn filling_file(&self) -> FillingFile<'_> {
+        self.state
+            .lock()
+            .expect("SQL authorization lock poisoned")
+            .filling_file = true;
+        FillingFile(self)
+    }
+
     pub(crate) fn check_sql(&self, sql: &str) -> rusqlite::Result<()> {
+        {
+            let mut state = self.state.lock().expect("SQL authorization lock poisoned");
+            if state.writing && !state.applying {
+                state.files.statement(sql)?;
+            }
+        }
+
         // FTS prepares PRAGMA data_version itself. Permit that internal read,
         // while keeping direct app PRAGMAs outside the SQL capability.
         if crate::sql::tokens(sql)
@@ -365,6 +413,17 @@ pub(crate) struct InternalSql<'a> {
     previous: bool,
 }
 
+pub(crate) struct FillingFile<'a>(&'a SqlAuthorization);
+impl Drop for FillingFile<'_> {
+    fn drop(&mut self) {
+        self.0
+            .state
+            .lock()
+            .expect("SQL authorization lock poisoned")
+            .filling_file = false;
+    }
+}
+
 pub(crate) struct ApplyingSql<'a>(&'a SqlAuthorization);
 
 impl Drop for ApplyingSql<'_> {
@@ -406,11 +465,13 @@ pub(crate) struct WriteSql<'a>(&'a SqlAuthorization);
 
 impl Drop for WriteSql<'_> {
     fn drop(&mut self) {
-        self.0
+        let mut state = self
+            .0
             .state
             .lock()
-            .expect("SQL authorization lock poisoned")
-            .writing = false;
+            .expect("SQL authorization lock poisoned");
+        state.writing = false;
+        state.file_violation = None;
     }
 }
 
@@ -553,6 +614,21 @@ impl AuthorizationState {
             return Some(DbError::StatementForbidden {
                 operation: "writing through a read context",
             });
+        }
+        if self.writing && !self.applying && context.database_name == Some("main") {
+            let error = match context.action {
+                Update {
+                    table_name,
+                    column_name,
+                } if !self.filling_file || context.accessor.is_some() => {
+                    self.files.update(table_name, column_name)
+                }
+                Insert { table_name } => self.files.insert(table_name, context.accessor),
+                _ => None,
+            };
+            if error.is_some() {
+                return error;
+            }
         }
         if self.writing
             && matches!(

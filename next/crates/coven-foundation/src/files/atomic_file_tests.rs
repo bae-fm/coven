@@ -195,3 +195,45 @@ fn a_published_file_is_not_marked_temporary() {
         0
     );
 }
+
+#[test]
+fn streaming_owned_files_keep_unique_synced_copies_and_remove_failed_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut names = Vec::new();
+    for byte in [1u8, 2] {
+        let (name, count) = write_owned(directory.path(), |out| {
+            for _ in 0..10 {
+                out.write_all(&[byte; 4096])?;
+            }
+            Ok(10 * 4096)
+        })
+        .unwrap();
+        assert_eq!(count, 40960);
+        assert_eq!(
+            fs::read(directory.path().join(name.as_str())).unwrap(),
+            vec![byte; count]
+        );
+        names.push(name);
+    }
+    assert_ne!(names[0], names[1]);
+    let error = write_owned(directory.path(), |out| {
+        out.write_all(b"partial")?;
+        Err::<(), _>(io::Error::other("source failed"))
+    })
+    .unwrap_err();
+    assert!(matches!(error, FileError::Io { .. }));
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 2);
+}
+
+#[test]
+fn a_panicking_stream_removes_its_partial_file_before_unwinding() {
+    let directory = tempfile::tempdir().unwrap();
+    let failure = std::panic::catch_unwind(|| {
+        write_owned(directory.path(), |out| -> io::Result<()> {
+            out.write_all(b"partial")?;
+            panic!("source panicked");
+        })
+    });
+    assert!(failure.is_err());
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
+}

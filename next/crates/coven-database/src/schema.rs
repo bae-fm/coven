@@ -310,6 +310,19 @@ impl Schema {
             if let Some(file) = &declaration.files {
                 // The spec assigns column meanings, not SQLite storage classes.
                 // Check each named column against the actual table.
+                for column in [&file.hash, &file.location] {
+                    if table
+                        .columns
+                        .iter()
+                        .any(|c| c.name.eq_ignore_ascii_case(column) && c.not_null)
+                    {
+                        return Err(SchemaError::FileColumnNotNullable {
+                            table: error_table(),
+                            column: column.clone(),
+                        }
+                        .into());
+                    }
+                }
                 for column in file.columns() {
                     if !table
                         .columns

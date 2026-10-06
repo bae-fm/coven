@@ -17,9 +17,22 @@ pub(crate) struct WriteSchema {
 impl WriteSchema {
     pub(crate) fn read(
         db: &DatabaseConnection,
-        declarations: Vec<SyncedTable>,
+        mut declarations: Vec<SyncedTable>,
     ) -> Result<Self, DbError> {
         let schema = Schema::read(db)?;
+        for declaration in &mut declarations {
+            let table = &schema.tables[&declaration.name.to_ascii_lowercase()];
+            if let Some(file) = &mut declaration.files {
+                for column in [
+                    &mut file.id,
+                    &mut file.size,
+                    &mut file.hash,
+                    &mut file.location,
+                ] {
+                    *column = crate::write_rows::column_name(table, column).to_owned();
+                }
+            }
+        }
         let mut rules = BTreeMap::new();
         for declaration in &declarations {
             let table = &schema.tables[&declaration.name.to_ascii_lowercase()];

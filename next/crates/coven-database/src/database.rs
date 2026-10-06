@@ -102,6 +102,7 @@ impl DatabaseBuilder {
             Some((settings.device_id, clock.now())),
         )?;
         let write_schema = crate::write_schema::WriteSchema::read(&writer, tables.clone())?;
+        writer.prepare_file_triggers()?;
         let observer = CommitObserver::new();
         #[cfg(test)]
         drop(profile);
@@ -122,6 +123,7 @@ impl DatabaseBuilder {
                 migrations,
                 lock,
                 write_schema,
+                directory: self.directory,
                 device: settings.device_id,
                 clock,
             }))),
@@ -172,6 +174,7 @@ struct DatabaseInner {
     migrations: Vec<MigrationOutcome>,
     lock: StoreLock,
     write_schema: crate::write_schema::WriteSchema,
+    directory: StoreDir,
     device: DeviceId,
     clock: ClockRef,
 }
@@ -269,10 +272,22 @@ impl Database {
     /// one IMMEDIATE transaction (§5). The closure's result is returned after commit.
     pub async fn write<F, R>(&self, sql: F) -> Result<R, DbError>
     where
-        F: FnOnce(crate::SqlContext<'_>) -> Result<R, DbError> + Send + 'static,
+        F: FnOnce(crate::SqlContext<'_, '_>) -> Result<R, DbError> + Send + 'static,
+        R: Send + 'static,
+    {
+        self.write_with_files(|_| Ok(()), sql).await
+    }
+
+    /// Stream app-provided files to durable storage, then commit their rows and
+    /// metadata atomically. A failed write discards all newly supplied bytes.
+    pub async fn write_with_files<F, S, R>(&self, build: F, sql: S) -> Result<R, DbError>
+    where
+        F: FnOnce(&mut crate::WriteBatch) -> Result<(), DbError> + Send + 'static,
+        S: FnOnce(crate::SqlContext<'_, '_>) -> Result<R, DbError> + Send + 'static,
         R: Send + 'static,
     {
         let database = self.clone();
+        let runtime = tokio::runtime::Handle::current();
         finish_blocking(
             tokio::task::spawn_blocking(move || {
                 let slot = database.inner.read().expect("database lock poisoned");
@@ -281,16 +296,37 @@ impl Database {
                     .writer
                     .lock()
                     .expect("writer connection lock poisoned");
+                let mut files = crate::file_write::FileWrite::new(
+                    &writer,
+                    &inner.directory,
+                    &inner.write_schema,
+                    inner.device,
+                );
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    writer.local_write(&inner.write_schema, inner.device, inner.clock.now(), sql)
+                    let mut batch = crate::WriteBatch::new();
+                    build(&mut batch)?;
+                    files.stage(batch, &runtime)?;
+                    writer.local_write(
+                        &inner.write_schema,
+                        inner.device,
+                        inner.clock.now(),
+                        &files,
+                        sql,
+                    )
                 }));
-                // The transaction rolls back during unwinding. Release the mutex
-                // before propagating the app panic so later calls can still use it.
+                let result = match result {
+                    Ok(result) => files.finish(result),
+                    Err(panic) => {
+                        let cleanup = files.rollback();
+                        drop(writer);
+                        if let Err(error) = cleanup {
+                            panic!("file cleanup after app panic failed: {error:?}");
+                        }
+                        std::panic::resume_unwind(panic)
+                    }
+                };
                 drop(writer);
-                match result {
-                    Ok(result) => result,
-                    Err(panic) => std::panic::resume_unwind(panic),
-                }
+                result
             })
             .await,
         )
@@ -311,7 +347,19 @@ impl Database {
                     .writer
                     .lock()
                     .expect("writer connection lock poisoned");
-                crate::download::apply(&writer, &inner.write_schema, inner.clock.now(), write)
+                let files = crate::file_write::FileWrite::new(
+                    &writer,
+                    &inner.directory,
+                    &inner.write_schema,
+                    inner.device,
+                );
+                files.finish(crate::download::apply(
+                    &writer,
+                    &inner.write_schema,
+                    inner.clock.now(),
+                    write,
+                    &files,
+                ))
             })
             .await,
         )
@@ -377,7 +425,18 @@ impl Database {
                     .writer
                     .lock()
                     .expect("writer connection lock poisoned");
-                crate::download::delete_circle(&writer, &inner.write_schema, circle)
+                let files = crate::file_write::FileWrite::new(
+                    &writer,
+                    &inner.directory,
+                    &inner.write_schema,
+                    inner.device,
+                );
+                files.finish(crate::download::delete_circle(
+                    &writer,
+                    &inner.write_schema,
+                    circle,
+                    &files,
+                ))
             })
             .await,
         )

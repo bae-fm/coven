@@ -233,10 +233,11 @@ impl DatabaseConnection {
         schema: &crate::write_schema::WriteSchema,
         device: DeviceId,
         now: SystemTime,
+        files: &crate::file_write::FileWrite<'_>,
         sql: F,
     ) -> Result<R, DbError>
     where
-        F: FnOnce(crate::SqlContext<'_>) -> Result<R, DbError>,
+        F: FnOnce(crate::SqlContext<'_, '_>) -> Result<R, DbError>,
     {
         #[cfg(test)]
         let _profile = self.profile_statements();
@@ -248,15 +249,28 @@ impl DatabaseConnection {
             }
             let result = {
                 let _scope = database.authorization.write();
-                sql(crate::SqlContext::new(database))?
+                let result = sql(crate::SqlContext::new(files))?;
+                database.authorization.take_file_violation()?;
+                files.attach_app_files()?;
+                result
             };
             database.require_transaction()?;
             let changeset = {
                 let _scope = database.authorization.internal();
                 session.changeset()?
             };
+            let captured = crate::write_capture::capture(&changeset, schema)?;
+            {
+                let _scope = database.authorization.write();
+                files.clear_null_ids(&captured)?;
+            }
+            let changeset = {
+                let _scope = database.authorization.internal();
+                session.changeset()?
+            };
             drop(session);
             let captured = crate::write_capture::capture(&changeset, schema)?;
+            files.validate(&captured)?;
             let before = crate::write_rows::AppView::before(database, schema, &captured)?;
             let after = crate::write_rows::AppView::after(database, schema);
             let store = crate::merge_store::MergeStore::new(database, &before);
@@ -274,7 +288,7 @@ impl DatabaseConnection {
             } else {
                 Some(crate::write_record::record(database, device, now, changes)?)
             };
-            crate::write_apply::WriteApply::new(
+            let affected = crate::write_apply::WriteApply::new(
                 database,
                 schema,
                 &store,
@@ -291,9 +305,11 @@ impl DatabaseConnection {
                 }
                 error => error,
             })?;
+            files.retain_rows(affected, &deleted_circles)?;
             if let Some(record) = &record {
                 crate::write_commit::queue(database, record)?;
             }
+            files.before_commit()?;
             Ok(result)
         })
     }
@@ -390,6 +406,17 @@ impl DatabaseConnection {
         self.begin_app_statement()?;
         self.authorization
             .mutations(|| self.authorization.app_result(self.connection.prepare(sql)))
+    }
+
+    pub(crate) fn prepare_file_triggers(&self) -> Result<(), DbError> {
+        let triggers = self.query("SELECT name,sql FROM main.sqlite_schema WHERE type='trigger' UNION ALL SELECT name,sql FROM temp.sqlite_schema WHERE type='trigger'", [], |r| Ok((r.get(0)?,r.get(1)?)))?;
+        self.authorization.set_file_triggers(triggers)?;
+        Ok(())
+    }
+
+    pub(crate) fn file_execute<P: Params>(&self, sql: &str, params: P) -> Result<usize, DbError> {
+        let _fill = self.authorization.filling_file();
+        Ok(self.app_execute(sql, params)?)
     }
 
     pub(crate) fn app_execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {

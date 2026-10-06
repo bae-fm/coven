@@ -148,7 +148,7 @@ pub(crate) fn changes(
             let row = row_id(key, &new);
             let generation = generation(database, &row)?;
             let (operation, old_values) = if let Some(old) = old.filter(|_| !moving) {
-                let new_values: AppValues = new
+                let mut new_values: AppValues = new
                     .values
                     .iter()
                     .filter(|(c, _)| changed[key].contains(*c))
@@ -156,6 +156,17 @@ pub(crate) fn changes(
                     .collect();
                 if new_values.is_empty() {
                     continue;
+                }
+                if let Some(file) = &schema.declaration(&key.0).files {
+                    if file
+                        .columns()
+                        .iter()
+                        .any(|column| new_values.contains_key(*column))
+                    {
+                        for column in file.columns() {
+                            new_values.insert(column.to_owned(), new.values[column].clone());
+                        }
+                    }
                 }
                 let old_values = new_values
                     .keys()

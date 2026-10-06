@@ -168,6 +168,29 @@ macro_rules! coven_tables {
                 PRIMARY KEY(device, number)
             ) STRICT;
         ");
+        $visit!(coven_user_files, "
+            CREATE TABLE coven_user_files (
+                table_name TEXT NOT NULL,
+                key BLOB NOT NULL,
+                column_name TEXT NOT NULL,
+                identity BLOB NOT NULL,
+                path BLOB NOT NULL,
+                size BLOB NOT NULL CHECK(length(size)=8),
+                modified_at BLOB NOT NULL CHECK(length(modified_at)=13),
+                PRIMARY KEY(table_name,key,column_name)
+            ) STRICT, WITHOUT ROWID;
+        ");
+        $visit!(coven_device_files, "
+            CREATE TABLE coven_device_files (
+                table_name TEXT NOT NULL,
+                key BLOB NOT NULL,
+                column_name TEXT NOT NULL,
+                identity BLOB NOT NULL,
+                path TEXT NOT NULL,
+                PRIMARY KEY(table_name,key,column_name)
+            ) STRICT, WITHOUT ROWID;
+            CREATE INDEX coven_device_files_path ON coven_device_files(path);
+        ");
         $visit!(coven_operations, "
             CREATE TABLE coven_operations (
                 id INTEGER PRIMARY KEY,

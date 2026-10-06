@@ -102,6 +102,7 @@ pub(crate) fn apply(
     schema: &WriteSchema,
     now: SystemTime,
     download: DownloadedWrite,
+    files: &crate::file_write::FileWrite<'_>,
 ) -> Result<ApplyOutcome, DbError> {
     database.transaction(|database| {
         let positions = positions(database)?;
@@ -140,7 +141,9 @@ pub(crate) fn apply(
                 header.schema_version,
             )));
         }
-        apply_opened(database, schema, download)
+        let result = apply_opened(database, schema, download, files)?;
+        files.before_commit()?;
+        Ok(result)
     })
 }
 
@@ -148,6 +151,7 @@ fn apply_opened(
     database: &DatabaseConnection,
     schema: &WriteSchema,
     download: DownloadedWrite,
+    files: &crate::file_write::FileWrite<'_>,
 ) -> Result<ApplyOutcome, DbError> {
     let mut record = WriteRecord {
         header: download.header,
@@ -180,8 +184,10 @@ fn apply_opened(
         }
     }
     record.parts = kept;
-    crate::write_apply::WriteApply::new(database, schema, &store, &visible, &visible, &deleted)
-        .apply(Some(&record), BTreeSet::new())?;
+    let affected =
+        crate::write_apply::WriteApply::new(database, schema, &store, &visible, &visible, &deleted)
+            .apply(Some(&record), BTreeSet::new())?;
+    files.retain_rows(affected, &deleted)?;
     Ok(ApplyOutcome::Applied)
 }
 
@@ -237,6 +243,7 @@ pub(crate) fn delete_circle(
     database: &DatabaseConnection,
     schema: &WriteSchema,
     circle: CircleId,
+    files: &crate::file_write::FileWrite<'_>,
 ) -> Result<bool, DbError> {
     database.transaction(|database| {
         let mut deleted = deleted_circles(database)?;
@@ -257,8 +264,12 @@ pub(crate) fn delete_circle(
             .collect();
         let visible = AppView::after(database, schema);
         let store = MergeStore::new(database, &visible);
-        crate::write_apply::WriteApply::new(database, schema, &store, &visible, &visible, &deleted)
-            .apply(None, touched)?;
+        let affected = crate::write_apply::WriteApply::new(
+            database, schema, &store, &visible, &visible, &deleted,
+        )
+        .apply(None, touched)?;
+        files.retain_rows(affected, &deleted)?;
+        files.before_commit()?;
         Ok(true)
     })
 }

@@ -186,12 +186,76 @@ pub(crate) fn replace(path: &Path, bytes: &[u8]) -> Result<(), FileError> {
 }
 
 fn prepare(path: &Path, bytes: &[u8]) -> Result<tempfile::NamedTempFile, FileError> {
+    let mut temp = temporary(path, ".coven-write-")?;
+    if let Err(source) = temp
+        .write_all(bytes)
+        .and_then(|()| temp.as_file().sync_all())
+    {
+        return Err(cleanup(
+            temp,
+            FileError::at("write and sync temporary file", path, source),
+        ));
+    }
+    Ok(temp)
+}
+
+pub(crate) fn write_owned<T>(
+    directory: &Path,
+    write: impl FnOnce(&mut dyn Write) -> io::Result<T>,
+) -> Result<(super::FileName, T), FileError> {
+    let mut temp = temporary(&directory.join("file"), "file-")?;
+    let path = temp.path().to_owned();
+    let written = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| write(&mut temp)));
+    let written = match written {
+        Ok(result) => result,
+        Err(panic) => {
+            if let Err(cleanup) = temp.close() {
+                panic!("removing owned file after source panic failed: {cleanup}");
+            }
+            std::panic::resume_unwind(panic)
+        }
+    };
+    let result = written.and_then(|result| {
+        temp.as_file().sync_all()?;
+        #[cfg(unix)]
+        sync_directory(parent(&path))?;
+        Ok(result)
+    });
+    let result = match result {
+        Ok(result) => result,
+        Err(source) => {
+            return Err(cleanup(
+                temp,
+                FileError::at("write owned file", &path, source),
+            ))
+        }
+    };
+    let name = super::FileName::new(
+        path.file_name()
+            .expect("temporary filename")
+            .to_str()
+            .expect("ASCII temporary filename"),
+    )
+    .expect("portable temporary filename");
+    match temp.keep() {
+        Ok((file, _)) => drop(file),
+        Err(error) => {
+            return Err(cleanup(
+                error.file,
+                FileError::at("keep owned file", &path, error.error),
+            ))
+        }
+    }
+    Ok((name, result))
+}
+
+fn temporary(path: &Path, prefix: &str) -> Result<tempfile::NamedTempFile, FileError> {
     // Canonicalization also supplies Windows' extended-length prefix. The
     // directory already exists, so there is no guess about a relative parent.
     let directory = fs::canonicalize(parent(path))
         .map_err(|source| FileError::at("resolve parent directory", path, source))?;
     let mut builder = tempfile::Builder::new();
-    builder.prefix(".coven-write-");
+    builder.prefix(prefix);
     #[cfg(unix)]
     let temp = builder.tempfile_in(directory);
     #[cfg(windows)]
@@ -217,17 +281,7 @@ fn prepare(path: &Path, bytes: &[u8]) -> Result<tempfile::NamedTempFile, FileErr
             .custom_flags(FILE_FLAG_WRITE_THROUGH)
             .open(path)
     });
-    let mut temp = temp.map_err(|source| FileError::at("create temporary file", path, source))?;
-    if let Err(source) = temp
-        .write_all(bytes)
-        .and_then(|()| temp.as_file().sync_all())
-    {
-        return Err(cleanup(
-            temp,
-            FileError::at("write and sync temporary file", path, source),
-        ));
-    }
-    Ok(temp)
+    temp.map_err(|source| FileError::at("create temporary file", path, source))
 }
 
 fn cleanup(temp: tempfile::NamedTempFile, operation: FileError) -> FileError {
