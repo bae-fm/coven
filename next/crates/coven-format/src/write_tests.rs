@@ -1,13 +1,45 @@
 use super::*;
-use crate::{encode_frame, test_utils, Object};
+use crate::write_stream::{decode_plaintext, PartHeader, WriteHeaderFrame};
+use crate::{encode_frame, test_utils};
 use coven_foundation::id_source::{CircleId, DeviceId};
 use coven_merge::{ColumnValue, MergeError, Parent};
 use uuid::Uuid;
 
+// Bypass validation to exercise the decoder's independent checks.
+fn raw(write: &WriteRecord) -> Vec<u8> {
+    let streams: Vec<Vec<u8>> = write
+        .parts
+        .iter()
+        .map(|part| {
+            part.rows
+                .iter()
+                .flat_map(|row| encode_frame(13, row).unwrap())
+                .collect()
+        })
+        .collect();
+    let header = WriteHeaderFrame {
+        header: write.header.clone(),
+        parts: write
+            .parts
+            .iter()
+            .zip(&streams)
+            .map(|(part, bytes)| PartHeader {
+                audience: part.audience.clone(),
+                row_count: part.rows.len() as u64,
+                plaintext_length: bytes.len() as u64,
+            })
+            .collect(),
+    };
+    let mut bytes = encode_frame(1, &header).unwrap();
+    for stream in streams {
+        bytes.extend(stream);
+    }
+    bytes
+}
 fn refuses(write: WriteRecord, expected: Error) {
     for result in [
-        Object::Write(write.clone()).encode().map(|_| ()),
-        Object::decode(&encode_frame(1, &write).unwrap()).map(|_| ()),
+        test_utils::write_plaintext(&write).map(|_| ()),
+        decode_plaintext(&raw(&write)).map(|_| ()),
     ] {
         assert_eq!(result.as_ref().map(|_| ()), Err(&expected));
     }
@@ -39,8 +71,10 @@ fn merge_operations_own_generation_checks_and_preserve_old_values() {
             operation,
         };
         row.old = old;
-        let object = Object::Write(write.clone());
-        assert_eq!(Object::decode(&object.encode().unwrap()).unwrap(), object);
+        assert_eq!(
+            decode_plaintext(&test_utils::write_plaintext(&write).unwrap()).unwrap(),
+            write
+        );
         write.parts[0].rows[0].change.generation += 1;
         refuses(
             write,
@@ -96,8 +130,10 @@ fn row_part_and_reference_audiences_are_enforced() {
     circle.audience = circle_id.clone();
     circle.rows[0].row.audience = circle_id;
     write.parts.push(circle);
-    let object = Object::Write(write.clone());
-    assert_eq!(Object::decode(&object.encode().unwrap()).unwrap(), object);
+    assert_eq!(
+        decode_plaintext(&test_utils::write_plaintext(&write).unwrap()).unwrap(),
+        write
+    );
     set_parent(
         &mut write,
         1,
@@ -157,8 +193,10 @@ fn timestamp_had_read_and_parent_generation_are_checked() {
 fn schema_change_marker_uses_a_positive_schema_version() {
     let mut write = test_utils::write();
     write.header.disposition = WriteDisposition::Lost(u32::MAX);
-    let object = Object::Write(write.clone());
-    assert_eq!(Object::decode(&object.encode().unwrap()).unwrap(), object);
+    assert_eq!(
+        decode_plaintext(&test_utils::write_plaintext(&write).unwrap()).unwrap(),
+        write
+    );
     write.header.disposition = WriteDisposition::Lost(0);
     refuses(
         write,

@@ -115,6 +115,22 @@ pub struct RowChange {
 }
 wire_struct!(RowChange, row, change, old);
 impl RowChange {
+    /// Validate and encode one bounded row-change frame (kind 13).
+    pub fn encode(&self) -> Result<Vec<u8>, Error> {
+        self.validate()?;
+        crate::encode_frame(13, self)
+    }
+
+    /// Decode exactly one row-change frame.
+    pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        let (kind, mut input) = crate::wire::decode_frame(bytes)?;
+        require(kind == 13, "row change kind", Rule::Kind)?;
+        let row = Self::get(&mut input)?;
+        input.finish()?;
+        row.validate()?;
+        Ok(row)
+    }
+
     pub(crate) fn validate(&self) -> Result<(), Error> {
         row(&self.row)?;
         self.change.validate(&self.row).map_err(Error::Merge)?;
@@ -147,7 +163,6 @@ pub struct WritePart {
     /// One change per row, in increasing merge row-identity order.
     pub rows: Vec<RowChange>,
 }
-wire_struct!(WritePart, audience, rows);
 impl WritePart {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         require(!self.rows.is_empty(), "write part rows", Rule::Required)?;
@@ -176,7 +191,6 @@ pub struct WriteRecord {
     /// Nonempty, strictly increasing audience parts, store before circles.
     pub parts: Vec<WritePart>,
 }
-wire_struct!(WriteRecord, header, parts);
 impl WriteRecord {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         self.header.validate()?;

@@ -1,21 +1,27 @@
-//! Deterministic, versioned plaintext encodings of coven's storage objects (§21.1).
+//! Versioned plaintext frames and streaming sealed-object layouts (§21.1).
 //!
-//! No I/O, clock, randomness, sealing or signing occurs here. Every object starts
-//! with a kind byte, a big-endian u16 format version, and a big-endian u32 payload
-//! length. See the crate's `FORMAT.md` for every layout, bound and ordering rule.
+//! No I/O, clock, randomness, sealing or signing occurs here. Plaintext frames
+//! are bounded; writes and snapshots stream without an object-size bound.
+//! See `FORMAT.md` for every layout, bound and ordering rule.
 
+pub mod chunks;
 pub mod codes;
 pub mod error;
 pub mod key;
 pub mod merge_fields;
 mod merge_wire;
 pub mod objects;
+mod sealed;
+pub mod sealed_snapshot;
+pub mod sealed_write;
 pub mod snapshot;
 pub mod snapshot_rows;
+pub mod snapshot_stream;
 pub mod store_log;
 pub mod value;
 mod wire;
 pub mod write;
+pub mod write_stream;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
@@ -26,19 +32,17 @@ use error::bound;
 use objects::{FileChunk, FileHeader, JoinRequest, PostedPositions};
 use store_log::StoreLogEntry;
 use wire::{decode_frame, Encoder, Wire, MAX_OBJECT};
-use write::WriteRecord;
 
 /// The single supported plaintext format version (§17.2).
 pub const FORMAT_VERSION: u16 = 1;
 /// The fixed prefix length: kind, format version, payload length.
 pub const FRAME_PREFIX_LEN: usize = 7;
 
-/// Independently decoded plaintext objects. Snapshots use [`snapshot::SnapshotDecoder`]
+/// Independently decoded plaintext objects. Writes use [`write_stream::WriteEncoder`];
+/// snapshots use [`snapshot::SnapshotDecoder`]
 /// with merge metadata; restore and invite codes use their zeroizing byte APIs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Object {
-    /// One transaction, with a header and a part per audience (§5, §14.4).
-    Write(WriteRecord),
     /// One membership, device, circle, version or reset entry (§9).
     StoreLog(StoreLogEntry),
     /// A file's chunk size and total size (§16.2).
@@ -56,7 +60,6 @@ impl Object {
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         self.validate()?;
         match self {
-            Self::Write(v) => encode_frame(1, v),
             Self::StoreLog(v) => encode_frame(2, v),
             Self::FileHeader(v) => encode_frame(7, v),
             Self::JoinRequest(v) => encode_frame(10, v),
@@ -70,7 +73,6 @@ impl Object {
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let (kind, mut input) = decode_frame(bytes)?;
         let object = match kind {
-            1 => Self::Write(Wire::get(&mut input)?),
             2 => Self::StoreLog(Wire::get(&mut input)?),
             7 => Self::FileHeader(Wire::get(&mut input)?),
             10 => Self::JoinRequest(Wire::get(&mut input)?),
@@ -89,7 +91,6 @@ impl Object {
     }
     fn validate(&self) -> Result<(), Error> {
         match self {
-            Self::Write(v) => v.validate(),
             Self::StoreLog(v) => v.validate(),
             Self::FileHeader(v) => v.validate(),
             Self::JoinRequest(v) => v.validate(),
@@ -104,7 +105,7 @@ impl Object {
 /// are ignored here; [`Object::decode`] requires exactly one complete frame.
 pub fn frame_length(prefix: &[u8]) -> Result<usize, Error> {
     let bytes = prefix.get(..FRAME_PREFIX_LEN).ok_or(Error::Truncated)?;
-    if !matches!(bytes[0], 1..=5 | 7..=12) {
+    if !matches!(bytes[0], 1..=5 | 7..=13) {
         return Err(Error::UnknownTag {
             field: "object kind",
             tag: bytes[0],

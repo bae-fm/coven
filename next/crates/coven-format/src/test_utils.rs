@@ -10,7 +10,7 @@ use crate::value::*;
 use crate::write::*;
 use crate::Object;
 use coven_crypto::{InviteSecret, MemberKeys, SecretBytes};
-use coven_foundation::id_source::{CircleId, DeviceId, InviteId, StoreId};
+use coven_foundation::id_source::{CircleId, DeviceId, InviteId, KeyId, StoreId};
 use coven_merge::{
     Audience, Cell, Change, ColumnValue, LostKey, LostValue, MergeError, Operation, Parent, RowId,
     RowState, Timestamp, WriteId, WriteOracle,
@@ -294,11 +294,33 @@ pub fn snapshot_records() -> Vec<SnapshotRecord> {
         column: "x".into(),
     }));
     records.push(SnapshotRecord::Merge(merge_row()));
-    records.push(SnapshotRecord::LostWrite(LostWrite {
-        write: write(),
-        cause: LostWriteCause::SchemaChange(2),
-    }));
+    records.push(SnapshotRecord::LostWrite(lost_write()));
+    records.push(SnapshotRecord::LostWriteRow(lost_write_row()));
     records
+}
+/// Header of the fixture's excluded write.
+pub fn lost_write() -> LostWrite {
+    LostWrite {
+        header: write().header,
+        audience: coven_merge::Audience::Store,
+        row_count: 1,
+        cause: LostWriteCause::SchemaChange(2),
+    }
+}
+/// The fixture's excluded row, following its lost-write header.
+pub fn lost_write_row() -> LostWriteRow {
+    LostWriteRow {
+        change: write().parts.remove(0).rows.remove(0),
+    }
+}
+/// A plaintext queue value produced by the format's queue encoder.
+pub fn write_plaintext(record: &WriteRecord) -> Result<Vec<u8>, crate::Error> {
+    let encoder = crate::write_stream::WriteEncoder::new(record)?;
+    let length =
+        usize::try_from(encoder.plaintext_length()).map_err(|_| crate::Error::Allocation)?;
+    let mut bytes = vec![0; length];
+    encoder.encode_plaintext(&mut bytes)?;
+    Ok(bytes)
 }
 /// A complete example snapshot emitted by the production streaming encoder.
 pub fn snapshot_frames() -> Vec<Vec<u8>> {
@@ -332,7 +354,6 @@ pub fn invite() -> InviteCode {
 /// Every independently decoded ordinary object kind.
 pub fn objects() -> Vec<Object> {
     vec![
-        Object::Write(write()),
         Object::StoreLog(store_log()),
         Object::StoreLog(member_removal()),
         Object::FileHeader(FileHeader {
@@ -360,14 +381,89 @@ pub fn objects() -> Vec<Object> {
         }),
     ]
 }
-/// Pinned examples of every frame kind and snapshot section, in fixture order.
-pub fn encoded_examples() -> Vec<Zeroizing<Vec<u8>>> {
+/// A two-audience write with a row frame spanning three chunks.
+pub fn chunked_write() -> WriteRecord {
+    let mut record = write();
+    let mut circle = record.parts[0].clone();
+    circle.audience = Audience::Circle(CircleId(Uuid::from_u128(1)));
+    circle.rows[0].row.audience = circle.audience.clone();
+    record.parts.push(circle);
+    record.parts[0].rows[0].change.operation = Operation::Update(BTreeMap::from([(
+        "x".into(),
+        column(Value::Blob(vec![0x41; crate::chunks::CHUNK_SIZE * 2 + 29])),
+    )]));
+    record
+}
+/// A snapshot with a synced row spanning chunk boundaries.
+pub fn chunked_snapshot_frames() -> Vec<Vec<u8>> {
+    let (mut encoder, header) = SnapshotEncoder::start(snapshot_header()).unwrap();
+    let mut records = snapshot_records();
+    let SnapshotRecord::Synced(row) = &mut records[0] else {
+        unreachable!()
+    };
+    row.columns.insert(
+        "x".into(),
+        column(Value::Blob(vec![0x42; crate::chunks::CHUNK_SIZE + 31])),
+    );
+    let mut frames = vec![header];
+    for record in records {
+        frames.push(encoder.record(record).unwrap());
+    }
+    frames.push(encoder.finish().unwrap());
+    frames
+}
+/// Bounded canonical frames used to exercise every byte and truncation.
+pub fn frame_examples() -> Vec<Zeroizing<Vec<u8>>> {
     let mut frames: Vec<_> = objects()
         .iter()
         .map(|v| Zeroizing::new(v.encode().unwrap()))
         .collect();
+    let record = write();
+    let encoder = crate::write_stream::WriteEncoder::new(&record).unwrap();
+    frames.push(Zeroizing::new(encoder.header_frame().to_vec()));
+    frames.push(Zeroizing::new(record.parts[0].rows[0].encode().unwrap()));
     frames.extend(snapshot_frames().into_iter().map(Zeroizing::new));
     frames.push(restore().to_bytes().unwrap());
     frames.push(invite().to_bytes().unwrap());
     frames
+}
+/// Pinned plaintext frames, then a write prefix/header/part chunks and a
+/// snapshot prefix/plaintext chunks. Crypto supplies sealed bytes separately.
+pub fn encoded_examples() -> Vec<Zeroizing<Vec<u8>>> {
+    let mut pieces = frame_examples();
+    let record = chunked_write();
+    let encoder = crate::write_stream::WriteEncoder::new(&record).unwrap();
+    pieces.push(Zeroizing::new(
+        crate::sealed_write::WriteObjectPrefix {
+            store_key: KeyId(Uuid::from_bytes([1; 16])),
+            part_keys: vec![
+                KeyId(Uuid::from_bytes([1; 16])),
+                KeyId(Uuid::from_bytes([2; 16])),
+            ],
+        }
+        .encode()
+        .unwrap(),
+    ));
+    pieces.push(Zeroizing::new(encoder.header_frame().to_vec()));
+    for index in 0..record.parts.len() {
+        pieces.extend(
+            encoder
+                .part_chunks(index)
+                .unwrap()
+                .map(|v| Zeroizing::new(v.unwrap())),
+        );
+    }
+    pieces.push(Zeroizing::new(
+        crate::sealed_snapshot::SnapshotObjectPrefix {
+            audience: Audience::Store,
+            key: KeyId(Uuid::from_bytes([1; 16])),
+        }
+        .encode()
+        .unwrap(),
+    ));
+    pieces.extend(
+        crate::chunks::PlaintextChunks::new(chunked_snapshot_frames().into_iter().map(Ok))
+            .map(|v| Zeroizing::new(v.unwrap())),
+    );
+    pieces
 }

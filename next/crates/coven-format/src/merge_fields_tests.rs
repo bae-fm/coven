@@ -139,9 +139,14 @@ fn applied_write_and_lost_write_fields_match_snapshot_records() {
             }
             SnapshotRecord::LostWrite(write) => {
                 assert_eq!(
-                    crate::write::WriteRecord::get(&mut input).unwrap(),
-                    write.write
+                    crate::write::WriteHeader::get(&mut input).unwrap(),
+                    write.header
                 );
+                assert_eq!(
+                    coven_merge::Audience::get(&mut input).unwrap(),
+                    write.audience
+                );
+                assert_eq!(u64::get(&mut input).unwrap(), write.row_count);
                 take_field(
                     &mut input,
                     &write.cause,
@@ -155,7 +160,9 @@ fn applied_write_and_lost_write_fields_match_snapshot_records() {
                 take_field(&mut input, &row.columns, encode_columns, decode_columns);
                 input.finish().unwrap();
             }
-            SnapshotRecord::Column(_) | SnapshotRecord::Merge(_) => {}
+            SnapshotRecord::Column(_)
+            | SnapshotRecord::Merge(_)
+            | SnapshotRecord::LostWriteRow(_) => {}
         }
     }
     encoder.finish().unwrap();

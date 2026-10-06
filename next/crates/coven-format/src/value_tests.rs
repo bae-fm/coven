@@ -127,8 +127,11 @@ fn sqlite_values_keep_their_storage_classes_outside_keys() {
         write.parts[0].rows[0].change.operation = coven_merge::Operation::Update(
             std::collections::BTreeMap::from([("x".into(), test_utils::column(value))]),
         );
-        let object = Object::Write(write);
-        assert_eq!(Object::decode(&object.encode().unwrap()).unwrap(), object);
+        assert_eq!(
+            crate::write_stream::decode_plaintext(&test_utils::write_plaintext(&write).unwrap())
+                .unwrap(),
+            write
+        );
     }
     for bits in [
         f64::NAN.to_bits(),
@@ -139,8 +142,11 @@ fn sqlite_values_keep_their_storage_classes_outside_keys() {
         write.parts[0].rows[0].change.operation = coven_merge::Operation::Update(
             std::collections::BTreeMap::from([("x".into(), test_utils::column(Value::Real(bits)))]),
         );
-        assert!(Object::Write(write.clone()).encode().is_err());
-        assert!(Object::decode(&encode_frame(1, &write).unwrap()).is_err());
+        assert!(test_utils::write_plaintext(&write).is_err());
+        assert!(crate::write::RowChange::decode(
+            &encode_frame(13, &write.parts[0].rows[0]).unwrap()
+        )
+        .is_err());
     }
 }
 #[test]

@@ -29,8 +29,19 @@ fn round_trip(record: SnapshotRecord, audience: Audience) {
                 &test_utils::oracle()
             )
             .unwrap(),
-        Some(record)
+        Some(record.clone())
     );
+    if let SnapshotRecord::LostWrite(write) = record {
+        let mut row = test_utils::lost_write_row();
+        row.change.row.audience = write.audience;
+        let row = SnapshotRecord::LostWriteRow(row);
+        assert_eq!(
+            reader
+                .frame(&writer.record(row.clone()).unwrap(), &test_utils::oracle())
+                .unwrap(),
+            Some(row)
+        );
+    }
     reader
         .frame(&writer.finish().unwrap(), &test_utils::oracle())
         .unwrap();
@@ -336,7 +347,9 @@ fn lost_writes_preserve_both_causes_and_require_matching_author_markers() {
     ] {
         round_trip(
             SnapshotRecord::LostWrite(LostWrite {
-                write: test_utils::write(),
+                header: test_utils::write().header,
+                audience: Audience::Store,
+                row_count: 1,
                 cause,
             }),
             Audience::Store,
@@ -346,7 +359,9 @@ fn lost_writes_preserve_both_causes_and_require_matching_author_markers() {
     write.header.disposition = crate::write::WriteDisposition::Lost(1);
     round_trip(
         SnapshotRecord::LostWrite(LostWrite {
-            write: write.clone(),
+            header: write.header.clone(),
+            audience: Audience::Store,
+            row_count: 1,
             cause: LostWriteCause::SchemaChange(1),
         }),
         Audience::Store,
@@ -356,7 +371,9 @@ fn lost_writes_preserve_both_causes_and_require_matching_author_markers() {
         LostWriteCause::SchemaChange(2),
     ] {
         let record = SnapshotRecord::LostWrite(LostWrite {
-            write: write.clone(),
+            header: write.header.clone(),
+            audience: Audience::Store,
+            row_count: 1,
             cause,
         });
         let (mut writer, first) =
@@ -381,28 +398,27 @@ fn lost_writes_preserve_both_causes_and_require_matching_author_markers() {
 #[test]
 fn lost_write_audience_cause_coverage_and_write_order_are_checked() {
     let circle = Audience::Circle(CircleId(Uuid::from_bytes([1; 16])));
-    let mut write = test_utils::write();
-    let mut part = write.parts[0].clone();
-    part.audience = circle.clone();
-    part.rows[0].row.audience = circle.clone();
-    write.parts.push(part);
     let entry = test_utils::loss_entry();
-    let make = |write| {
-        SnapshotRecord::LostWrite(LostWrite {
-            write,
-            cause: LostWriteCause::Reset(entry),
-        })
-    };
     let (mut writer, first) = SnapshotEncoder::start(single_header(4, circle.clone(), 2)).unwrap();
     let mut reader = SnapshotDecoder::start(&first).unwrap();
     let oracle = test_utils::oracle();
-    let both = make(write.clone());
-    assert!(writer.record(both.clone()).is_err());
-    assert!(reader.frame(&raw(&both), &oracle).is_err());
-    write.parts.remove(0);
-    let good = make(write);
+    let wrong = SnapshotRecord::LostWrite(test_utils::lost_write());
+    assert!(writer.record(wrong.clone()).is_err());
+    assert!(reader.frame(&raw(&wrong), &oracle).is_err());
+    let good = SnapshotRecord::LostWrite(LostWrite {
+        audience: circle.clone(),
+        ..test_utils::lost_write()
+    });
     reader
         .frame(&writer.record(good.clone()).unwrap(), &oracle)
+        .unwrap();
+    let mut row = test_utils::lost_write_row();
+    row.change.row.audience = circle;
+    reader
+        .frame(
+            &writer.record(SnapshotRecord::LostWriteRow(row)).unwrap(),
+            &oracle,
+        )
         .unwrap();
     assert!(writer.record(good.clone()).is_err());
     assert!(reader.frame(&raw(&good), &oracle).is_err());
@@ -469,7 +485,7 @@ fn snapshot_fixture_classifies_every_consumed_write_once() {
         match reader.frame(frame, &test_utils::oracle()).unwrap() {
             Some(SnapshotRecord::Write(write)) => assert!(classified.insert(write.id)),
             Some(SnapshotRecord::LostWrite(lost)) => {
-                assert!(classified.insert(lost.write.header.position))
+                assert!(classified.insert(lost.header.position))
             }
             _ => {}
         }
@@ -493,7 +509,9 @@ fn schema_loss_coverage_uses_the_snapshot_version_without_a_store_log_entry() {
     let mut reader = SnapshotDecoder::start(&first).unwrap();
     let make = |version| {
         SnapshotRecord::LostWrite(LostWrite {
-            write: test_utils::write(),
+            header: test_utils::write().header,
+            audience: Audience::Store,
+            row_count: 1,
             cause: LostWriteCause::SchemaChange(version),
         })
     };
@@ -508,7 +526,90 @@ fn schema_loss_coverage_uses_the_snapshot_version_without_a_store_log_entry() {
         Some(make(7))
     );
     reader
+        .frame(
+            &writer
+                .record(SnapshotRecord::LostWriteRow(test_utils::lost_write_row()))
+                .unwrap(),
+            &test_utils::oracle(),
+        )
+        .unwrap();
+    reader
         .frame(&writer.finish().unwrap(), &test_utils::oracle())
         .unwrap();
     reader.finish().unwrap();
+}
+
+#[test]
+fn lost_row_records_require_their_header_audience_order_and_exact_count() {
+    let mut header = test_utils::snapshot_header();
+    header.counts = [0, 0, 0, 0, 1];
+    let (mut encoder, frame) = SnapshotEncoder::start(header).unwrap();
+    let mut decoder = SnapshotDecoder::start(&frame).unwrap();
+    let oracle = test_utils::oracle();
+    let row = SnapshotRecord::LostWriteRow(test_utils::lost_write_row());
+    assert!(encoder.record(row.clone()).is_err());
+    assert!(decoder.frame(&raw(&row), &oracle).is_err());
+    let lost = SnapshotRecord::LostWrite(LostWrite {
+        row_count: 2,
+        ..test_utils::lost_write()
+    });
+    decoder
+        .frame(&encoder.record(lost.clone()).unwrap(), &oracle)
+        .unwrap();
+    let mut wrong_audience = test_utils::lost_write_row();
+    wrong_audience.change.row.audience = Audience::Circle(CircleId(Uuid::from_u128(1)));
+    for invalid in [SnapshotRecord::LostWriteRow(wrong_audience), lost] {
+        assert!(encoder.record(invalid.clone()).is_err());
+        assert!(decoder.frame(&raw(&invalid), &oracle).is_err());
+    }
+    decoder
+        .frame(&encoder.record(row.clone()).unwrap(), &oracle)
+        .unwrap();
+    assert!(encoder.record(row.clone()).is_err());
+    assert!(decoder.frame(&raw(&row), &oracle).is_err());
+    assert!(encoder.finish().is_err());
+    assert!(decoder
+        .frame(&encode_frame_with(5, |_| Ok(())).unwrap(), &oracle)
+        .is_err());
+    let mut next = test_utils::lost_write_row();
+    next.change.row.key = crate::key::encode_key(&[Value::Text("later".into())]).unwrap();
+    decoder
+        .frame(
+            &encoder.record(SnapshotRecord::LostWriteRow(next)).unwrap(),
+            &oracle,
+        )
+        .unwrap();
+    assert!(encoder.record(row.clone()).is_err());
+    assert!(decoder.frame(&raw(&row), &oracle).is_err());
+    decoder.frame(&encoder.finish().unwrap(), &oracle).unwrap();
+    decoder.finish().unwrap();
+}
+
+#[test]
+fn lost_rows_belong_to_the_preceding_header_without_repeating_its_id() {
+    let first = test_utils::lost_write();
+    let mut second = first.clone();
+    second.header.position.number += 1;
+    let mut header = single_header(4, Audience::Store, 2);
+    header.writes.0[0] = second.header.position;
+    let (mut encoder, frame) = SnapshotEncoder::start(header).unwrap();
+    let mut decoder = SnapshotDecoder::start(&frame).unwrap();
+    let oracle = test_utils::oracle();
+    let row = SnapshotRecord::LostWriteRow(test_utils::lost_write_row());
+    let mut row_frames = Vec::new();
+    for write in [first, second] {
+        let header = SnapshotRecord::LostWrite(write);
+        assert_eq!(
+            decoder
+                .frame(&encoder.record(header.clone()).unwrap(), &oracle)
+                .unwrap(),
+            Some(header)
+        );
+        let frame = encoder.record(row.clone()).unwrap();
+        assert_eq!(decoder.frame(&frame, &oracle).unwrap(), Some(row.clone()));
+        row_frames.push(frame);
+    }
+    assert_eq!(row_frames[0], row_frames[1]);
+    decoder.frame(&encoder.finish().unwrap(), &oracle).unwrap();
+    decoder.finish().unwrap();
 }

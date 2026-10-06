@@ -1,4 +1,4 @@
-# Coven plaintext format 1
+# Coven object format 1
 
 This crate encodes the storage objects of `plans/coven-from-scratch.md`, §5,
 §7–§9, §11–§12, §14–§17 and §19. It depends on foundation, crypto and merge.
@@ -117,11 +117,13 @@ empty strings/blobs and prefixes, without a length field affecting comparison.
 
 ## Object kinds
 
-Fields appear in exactly the order shown. All enum tags are u8.
+Fields appear in exactly the order shown. All enum tags are u8. Kinds 1–5 and 7–13
+identify plaintext frames; kinds 14 and 15 identify sealed layouts with their
+own prefixes, not frame envelopes. No sealed layout shares a frame kind.
 
 | Kind | Object | Payload |
 | --- | --- | --- |
-| 1 | Write | `header:WriteHeader, parts:[WritePart]` |
+| 1 | Write header | `header:WriteHeader, parts:[PartHeader]` |
 | 2 | Store-log entry | `position:EntryId, timestamp:Timestamp, author:MemberId, had_read:EntryPositions, change:StoreChange` |
 | 3 | Snapshot header | `id:SnapshotId, schema_version:u32, writes:WritePositions, store_log:EntryPositions, counts:5*u64` |
 | 4 | Snapshot record | `section:u8, record` |
@@ -132,12 +134,15 @@ Fields appear in exactly the order shown. All enum tags are u8.
 | 10 | Join request | `invite_uuid:16, keys:MemberPublicKeys, device_name:text` |
 | 11 | Posted positions | `device:u64, writes:WritePositions, store_log:EntryPositions, fingerprints:[Fingerprint]` |
 | 12 | File chunk | `index:u64, plaintext:bytes` |
+| 13 | Write row | `row:RowChange` |
+| 14 | Sealed write layout | Key prefix, sealed header, sealed part chunks, signature (below) |
+| 15 | Sealed snapshot layout | Audience/key prefix, sealed chunks (below) |
 
 Kind 6 is not defined. Sealed keys, their plaintext, recipient binding and path
 binding belong entirely to crypto's `seal_store_key` and `seal_circle_key`.
 There is no format-owned sealed-key envelope or reader for one.
 
-`Object` encodes and decodes kinds 1, 2, 7, 10, 11 and 12. Snapshots use their
+`Object` encodes and decodes kinds 2, 7, 10, 11 and 12. Writes and snapshots use their
 streaming encoder/decoder, with merge's oracle supplied on decode. Restore and
 invite codes use their own zeroizing binary and text APIs; they cannot be
 encoded through the ordinary `Vec<u8>` object API.
@@ -162,9 +167,22 @@ to apply or `1 | breaking_version:u32` to upload the write marked lost.
 The breaking version is positive and names the version the change raised the
 store to.
 
-`WritePart` is `audience:Audience | rows:[RowChange]`. Parts and their row lists
-are nonempty and strictly ordered by audience and `RowId`, respectively.
-Every row has its part's audience. Row identity order is merge's order: table,
+`PartHeader` is `audience:Audience | row_count:u64 | plaintext_length:u64`.
+The header's descriptors are nonempty and strictly ordered by audience.
+Each part is a stream of kind-13 frames, one `RowChange` per frame, strictly
+increasing by `RowId`. Every row has its part's audience. Each part has at least
+one row and one chunk. `plaintext_length` includes every row frame's seven-byte
+prefix. There is no collection count around the stream, and no bound on the
+write's aggregate size or row count beyond the lengths' u64 representation.
+Every individual frame retains the 16-MiB and collection bounds above.
+
+`WriteRecord` and `WritePart` are in-memory values, not wire encodings.
+`WriteEncoder` measures each row frame to produce the header, then emits each
+part's stream in 65,536-byte chunks, with only its final chunk shorter. A row
+frame can cross chunks. `PartDecoder` retains at most one unfinished frame and
+the previous row identity, yields complete rows from each chunk, and checks
+row count and plaintext length at `finish`. A frame announced past the stream's
+end is refused before allocating its payload. Row identity order is merge's order: table,
 encoded key bytes, then audience. Table and column names sort by UTF-8 bytes.
 
 `RowChange` is `row:RowId | change:Change<Value> | old:map<text, Value>`.
@@ -182,8 +200,48 @@ exactly the same column names in old and new maps; deletes may retain old values
 or omit them.
 Parent metadata belongs to each new `ColumnValue`, keyed by the full `ForeignKey` identity.
 
-The local upload queue holds the canonical kind-1 frame, unencrypted and
-unsigned. Its uploader encrypts and signs it on its first upload (§6).
+The local upload queue holds one plaintext value: the complete kind-1 header
+frame, then every part's frame stream in descriptor order, with no chunk-length
+fields between them. `WriteEncoder::encode_plaintext` fills a buffer of exactly
+`plaintext_length` bytes; a different buffer length is refused before writing.
+The database checks that length against its connection's SQLite length limit
+before allocating the buffer. `decode_plaintext` reconstructs the database's
+in-memory write using the same header and part decoders. The uploader encrypts
+and signs it on its first upload (§6).
+
+### Sealed writes
+
+The sealed write layout is:
+
+`kind:14 | version:u16 | header_key:KeyId | part_keys:[KeyId] |
+ header_chunk | part_chunks... | signature:64`.
+
+The cleartext prefix's part-key list has the per-frame collection bound and
+must agree with the opened header's part count. It has no frame-length field:
+its first 23 bytes give its full length. Each chunk is
+`sealed_length:u32 | nonce:24 | ciphertext | tag:16`. Format uses crypto's
+`SEALED_OBJECT_CHUNK_OVERHEAD` for the combined nonce and tag length, currently
+40 bytes. The header is one sealed chunk containing its complete kind-1 frame;
+its plaintext may be up to 16 MiB.
+Each part's plaintext chunks are exactly 64 KiB except its final chunk. Counts
+and plaintext lengths in the opened header determine every part boundary and
+the signature location, even if the device lacks a part's circle key.
+
+`WriteObjectPrefix` bounds and parses the prefix and sealed header.
+`WriteObjectLayout` supplies the next chunk's key, section, index and exact
+length, and reads or writes one length-prefixed piece at a time. Section 0,
+index 0 is the header. Part i uses section i + 1, with indices starting at 0.
+Readers must check EOF after the 64-byte signature and verify the signature
+before committing any staged rows. These layout APIs do no cryptography.
+
+Crypto's chunk authentication context has four length-prefixed components:
+`coven/object-chunk/v1`, the storage path's UTF-8 bytes, section:u64 and
+index:u64. Component lengths and the two coordinates are little-endian.
+Each chunk has its own random nonce. The signature message has three such
+components: `coven/object-signature/v1`, the storage path, and SHA-256 of all
+object bytes before the signature, including the cleartext prefix, chunk
+length fields, nonces, ciphertext and tags. `ObjectHasher`, `sign_object` and
+`verify_object` supply incremental hashing and domain-separated Ed25519 signing.
 
 ### Store-log entries
 
@@ -262,14 +320,23 @@ Format checks names, keys, positive ids and encodings. Removed rows must be
 present in merge state; DeletedCircle and OtherAudience rules require a circle.
 Which removal rules actually hold is established by the removal computation.
 
-`LostWrite` is `write:WriteRecord | cause:LostWriteCause`. Cause is
-`0 | schema_version:u32` or `1 | reset_entry:EntryId`. These writes were never
-applied; nothing in the merged state replaced them. The record contains only
-the snapshot audience's part, exactly one part. The producer filters parts;
-the codec refuses a mismatched or multi-audience record. If the write header
-contains `WriteDisposition::Lost(version)`, its cause must be
-`SchemaChange(version)`. A schema-change cause is positive and no greater than
-the snapshot schema version.
+`LostWrite` is `header:WriteHeader | audience:Audience | row_count:u64 |
+cause:LostWriteCause`. Cause is `0 | schema_version:u32` or
+`1 | reset_entry:EntryId`. A lost-write header (record tag 4) is followed by
+exactly `row_count` kind-4 records with tag 5, each
+`change:RowChange`. The count is positive and counts only the snapshot
+audience's rows. These rows belong to the preceding lost-write header by their
+position, without repeating its WriteId, and have its audience in strictly
+increasing RowId order. No other record or end marker can interrupt them; an
+extra row after the count is refused. The snapshot header's fifth count counts
+lost-write headers, not their rows.
+No frame grows with the number of rows in a lost write.
+
+These writes were never applied; nothing in the merged state replaced them.
+If the write header contains `WriteDisposition::Lost(version)`, its cause must
+be `SchemaChange(version)`. A schema-change cause is positive and no greater
+than the snapshot schema version. The lost-write header's audience must match
+the snapshot, as must every following row.
 Merge's lost values and these lost writes remain separate; the database owns
 presenting both through its `coven_lost` API.
 
@@ -288,6 +355,23 @@ call leaves the cursor unchanged. EOF without the end marker is truncation.
 The consumer commits staged records only after `finish` succeeds. Cross-section
 completeness, SQL schema rules and app-row visibility are database concerns.
 No local row ids, uploads, operations or storage paths occur in a snapshot.
+
+### Sealed snapshots
+
+A sealed snapshot starts with `kind:15 | version:u16 | audience:Audience |
+key:KeyId`, followed by `sealed_length:u32 | sealed bytes` chunks until EOF.
+`SnapshotObjectPrefix` parses and bounds the prefix. `SnapshotObjectLayout`
+checks each sealed chunk is at most 64 KiB of plaintext plus nonce and tag,
+and that a shorter chunk is last. All chunks use section 0, with indices
+starting at 0, and the prefix's audience key. `SnapshotChunkDecoder` checks
+the opened header agrees with the prefix audience and feeds bounded frames to
+`SnapshotDecoder`, returning each record before decoding the next. This lets
+the consumer update its applied-write oracle between records in one chunk.
+`PlaintextChunks` cuts `SnapshotEncoder` frames into the canonical partition.
+
+An object ending at a chunk boundary is still truncated if the plaintext lacks
+the snapshot end marker. Neither EOF nor a final short chunk substitutes for
+that marker. The caller commits only after the opened stream's `finish`.
 
 ### Fields stored in SQLite
 
@@ -342,15 +426,18 @@ or supplied to a QR encoder; QR capacity limits what fits in one symbol.
 
 `fixtures/v1.hex` pins ordinary object kinds, including a member removal with
 replacement circle keys and deleted circles, a complete snapshot of all five
-sections, and both secret frame kinds. `fixtures/codes.txt` pins both text
-codes. Seeds and credentials in these fixtures are public test data.
+sections and both secret frame kinds. It also pins a sealed-write prefix,
+a two-part plaintext write whose first part spans three chunks, and a
+sealed-snapshot prefix with its plaintext stream cut into chunks. Random
+sealed bytes and their signature are exercised with crypto in integration
+tests. `fixtures/codes.txt` pins both text codes. Seeds and credentials in these fixtures are public test data.
 Tests exercise every store change and removal rule, merge invariant rejection,
 schema/reset lost writes, SQLite numeric/text/blob/composite key ordering and
 streaming snapshots exceeding the frame bound. A decoded RowState is fed back
 into merge's actual `apply` function.
 
-Deterministic generated inputs exercise 25,000 binary inputs, all fixture
-truncations and bit flips, 10,000 real keys and 5,000 code strings. Every
+Deterministic generated inputs exercise 25,000 binary inputs, all bounded-frame fixture
+truncations and bit flips, generated write/part/snapshot streams and prefixes, 10,000 real keys and 5,000 code strings. Every
 successful decode must re-encode identically. Both codes reject single ASCII
 substitutions, alphabet insertions and deletions at every position. Tests also
 check maximum credentials, crypto-owned key restoration and weak public-key

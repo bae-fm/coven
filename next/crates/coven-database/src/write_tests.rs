@@ -16,12 +16,7 @@ pub(crate) fn records(database: &Database) -> Vec<WriteRecord> {
             .unwrap()
         })
         .into_iter()
-        .map(
-            |bytes| match coven_format::Object::decode(&bytes).unwrap() {
-                coven_format::Object::Write(record) => record,
-                _ => panic!("upload queue must contain kind-1 writes"),
-            },
-        )
+        .map(|bytes| coven_format::write_stream::decode_plaintext(&bytes).unwrap())
         .collect()
 }
 

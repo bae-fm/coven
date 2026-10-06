@@ -4,7 +4,7 @@
 use crate::error::{require, Error, Rule as FormatRule};
 use crate::value::{positive, row, EntryId, Value, WritePositions};
 use crate::wire::{wire_struct, Decoder, Encoder, Wire};
-use crate::write::{WriteDisposition, WriteRecord};
+use crate::write::{RowChange, WriteDisposition, WriteHeader};
 use coven_merge::{ColumnValue, RowId, RowState, Rule, Timestamp, WriteId, WriteOracle};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -163,20 +163,25 @@ impl Wire for LostWriteCause {
     }
 }
 
-/// A write never applied to merged state, retaining only the snapshot audience's part.
+/// Header of an excluded write, followed by its declared row-change records.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LostWrite {
-    /// The original header and this audience's part, including old/new values.
-    pub write: WriteRecord,
+    /// The original write header.
+    pub header: WriteHeader,
+    /// The snapshot audience whose excluded rows follow.
+    pub audience: coven_merge::Audience,
+    /// Number of following row records, without a per-write collection bound.
+    pub row_count: u64,
     /// The breaking schema version or reset entry that excluded it.
     pub cause: LostWriteCause,
 }
-wire_struct!(LostWrite, write, cause);
+wire_struct!(LostWrite, header, audience, row_count, cause);
 impl LostWrite {
     pub(crate) fn validate(&self) -> Result<(), Error> {
-        self.write.validate()?;
+        self.header.validate()?;
+        require(self.row_count > 0, "lost write rows", FormatRule::Required)?;
         self.cause.validate()?;
-        if let WriteDisposition::Lost(version) = self.write.header.disposition {
+        if let WriteDisposition::Lost(version) = self.header.disposition {
             require(
                 self.cause == LostWriteCause::SchemaChange(version),
                 "lost write disposition",
@@ -186,3 +191,11 @@ impl LostWrite {
         Ok(())
     }
 }
+
+/// One row belonging to the immediately preceding lost-write header.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LostWriteRow {
+    /// Its next row change in strictly increasing row-identity order.
+    pub change: RowChange,
+}
+wire_struct!(LostWriteRow, change);

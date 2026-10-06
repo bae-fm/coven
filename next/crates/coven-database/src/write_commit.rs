@@ -3,7 +3,7 @@ use crate::merge_store::MergeStore;
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{audience_text, encoded};
 use crate::DbError;
-use coven_format::{merge_fields, value::Value, write::WriteRecord, Object};
+use coven_format::{merge_fields, value::Value, write::WriteRecord, write_stream::WriteEncoder};
 use coven_merge::{LostChange, RowId, RowUpdate, WriteId};
 use rusqlite::params;
 use std::collections::BTreeMap;
@@ -120,7 +120,13 @@ pub(crate) fn commit(
 }
 
 pub(crate) fn queue(database: &DatabaseConnection, record: &WriteRecord) -> Result<(), DbError> {
-    let bytes = encoded(Object::Write(record.clone()).encode())?;
+    let encoder = encoded(WriteEncoder::new(record))?;
+    let mut bytes = encoder.header_frame().to_vec();
+    for index in 0..encoder.header().parts.len() {
+        for chunk in encoded(encoder.part_chunks(index))? {
+            bytes.extend(encoded(chunk)?);
+        }
+    }
     database.internal_execute(
         "INSERT INTO coven_uploads(device,number,record) VALUES(?1,?2,?3)",
         params![

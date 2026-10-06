@@ -37,6 +37,8 @@ pub enum Rule {
     Coverage,
     /// Snapshot sections, counts or their end marker did not match the header.
     SnapshotSequence,
+    /// A stream's declared byte length or row count disagrees with its frames.
+    StreamLength,
     /// A chunk's index or byte length did not match its file header.
     Chunk,
 }
