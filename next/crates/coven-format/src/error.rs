@@ -19,8 +19,6 @@ pub enum Rule {
     OwnPosition,
     /// A part, row or removal rule named an audience it cannot contain or describe.
     Audience,
-    /// A member removal both replaces a circle's key and deletes that circle.
-    CircleRemoval,
     /// Old and new column values did not match the operation.
     ColumnOperation,
     /// A foreign key names different numbers of source and target columns.

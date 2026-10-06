@@ -4102,20 +4102,20 @@ pub enum DropReason {
 
 /// What a dropped store log entry would have changed, for its author to see (§9).
 pub enum StoreLogChange {
-    /// Creates the store and names its first admin.
-    CreateStore { store: StoreId, name: String, admin: MemberId },
+    /// Creates the store, names its first admin and registers the writing device.
+    CreateStore { store: StoreId, name: String, admin: MemberId, device_name: String },
     /// Adds a member with this role.
     AddMember { member: MemberId, role: MemberRole },
     /// Removes the member and their devices (§13).
     RemoveMember { member: MemberId },
     /// Sets the member's role.
     SetMemberRole { member: MemberId, role: MemberRole },
-    /// Adds a device belonging to this member (§10).
-    AddDevice { member: MemberId, device: DeviceId },
+    /// Adds a device belonging to the entry's author (§10).
+    AddDevice { device: DeviceId },
     /// Removes a device.
     RemoveDevice { device: DeviceId },
-    /// Makes a named circle with its creator as a member (§20.12).
-    CreateCircle { circle: CircleId, name: String, member: MemberId },
+    /// Makes a named circle with the entry's author as its first member (§20.12).
+    CreateCircle { circle: CircleId, name: String },
     /// Renames a circle (§20.12).
     RenameCircle { circle: CircleId, name: String },
     /// Deletes a circle (§14.7).

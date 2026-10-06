@@ -12,12 +12,12 @@ fn entries_preserve_every_key_id_byte_including_zero() {
                 store: StoreId(uuid::Uuid::from_u128(1)),
                 name: "S".into(),
                 admin: test_utils::member(),
+                device_name: "D".into(),
                 key,
             },
             StoreChange::CreateCircle {
                 circle: circle(1),
                 name: "C".into(),
-                creator: test_utils::member().signing,
                 key,
             },
             StoreChange::RemoveMember {
@@ -27,7 +27,6 @@ fn entries_preserve_every_key_id_byte_including_zero() {
                     circle: circle(1),
                     key,
                 }],
-                deleted_circles: vec![],
             },
             StoreChange::RemoveCircleMember {
                 circle: circle(1),
@@ -46,20 +45,19 @@ fn entries_preserve_every_key_id_byte_including_zero() {
 }
 
 #[test]
-fn member_removal_encodes_both_circle_lists_when_empty() {
+fn member_removal_encodes_empty_replacement_keys() {
     let mut entry = test_utils::store_log();
     entry.change = StoreChange::RemoveMember {
         member: test_utils::member().signing,
         key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([2; 16])),
         circle_keys: vec![],
-        deleted_circles: vec![],
     };
     let object = Object::StoreLog(entry);
     let bytes = object.encode().unwrap();
-    assert_eq!(bytes.len(), 132);
+    assert_eq!(bytes.len(), 128);
     assert_eq!(bytes[75], 2);
     assert_eq!(&bytes[108..124], &[2; 16]);
-    assert_eq!(&bytes[124..], &[0; 8]);
+    assert_eq!(&bytes[124..], &[0; 4]);
     assert_eq!(Object::decode(&bytes).unwrap(), object);
 }
 
@@ -75,21 +73,13 @@ fn circle_key(circle_number: u128, key: u8) -> CircleKeyId {
 }
 
 #[test]
-fn member_removal_round_trips_independent_circle_lists() {
-    for (circle_keys, deleted_circles) in [
-        (vec![circle_key(1, u8::MAX), circle_key(3, 1)], vec![]),
-        (vec![], vec![circle(2), circle(4)]),
-        (
-            vec![circle_key(1, 5), circle_key(3, 2)],
-            vec![circle(2), circle(4)],
-        ),
-    ] {
+fn member_removal_round_trips_replacement_keys() {
+    for circle_keys in [vec![], vec![circle_key(1, u8::MAX), circle_key(3, 1)]] {
         let mut entry = test_utils::member_removal();
         entry.change = StoreChange::RemoveMember {
             member: test_utils::member().signing,
             key: KeyId(uuid::Uuid::from_bytes([u8::MAX; 16])),
             circle_keys,
-            deleted_circles,
         };
         let object = Object::StoreLog(entry);
         assert_eq!(Object::decode(&object.encode().unwrap()).unwrap(), object);
@@ -97,51 +87,85 @@ fn member_removal_round_trips_independent_circle_lists() {
 }
 
 #[test]
-fn member_removal_rejects_unordered_lists_and_overlap() {
-    for (key, circle_keys, deleted_circles, expected) in [
-        (
-            1,
-            vec![circle_key(1, 2), circle_key(1, 3)],
-            vec![],
-            Rule::Order,
-        ),
-        (
-            1,
-            vec![circle_key(3, 2), circle_key(1, 3)],
-            vec![],
-            Rule::Order,
-        ),
-        (1, vec![], vec![circle(2), circle(2)], Rule::Order),
-        (1, vec![], vec![circle(4), circle(2)], Rule::Order),
-        (
-            1,
-            vec![circle_key(1, 2)],
-            vec![circle(1)],
-            Rule::CircleRemoval,
-        ),
-        (
-            1,
-            vec![circle_key(1, 2), circle_key(3, 4)],
-            vec![circle(2), circle(3), circle(4)],
-            Rule::CircleRemoval,
-        ),
+fn member_removal_rejects_repeated_or_unordered_replacement_circles() {
+    for circle_keys in [
+        vec![circle_key(1, 2), circle_key(1, 3)],
+        vec![circle_key(3, 2), circle_key(1, 3)],
     ] {
         let mut entry = test_utils::member_removal();
         entry.change = StoreChange::RemoveMember {
             member: test_utils::member().signing,
-            key: KeyId(uuid::Uuid::from_bytes([key; 16])),
+            key: KeyId(uuid::Uuid::from_bytes([1; 16])),
             circle_keys,
-            deleted_circles,
         };
         for result in [
             Object::StoreLog(entry.clone()).encode().map(|_| ()),
             Object::decode(&encode_frame(2, &entry).unwrap()).map(|_| ()),
         ] {
             assert!(
-                matches!(result, Err(Error::Invalid { rule, .. }) if rule == expected),
+                matches!(
+                    result,
+                    Err(Error::Invalid {
+                        rule: Rule::Order,
+                        ..
+                    })
+                ),
                 "{result:?}"
             );
         }
+    }
+}
+
+#[test]
+fn creation_names_its_writing_device() {
+    for device_name in ["Ana’s phone", "", "bad\0name", &"x".repeat(1025)] {
+        let mut entry = test_utils::store_log();
+        let StoreChange::CreateStore {
+            device_name: name, ..
+        } = &mut entry.change
+        else {
+            unreachable!()
+        };
+        *name = device_name.into();
+        let encoded = Object::StoreLog(entry.clone()).encode();
+        let decoded = Object::decode(&encode_frame(2, &entry).unwrap());
+        if device_name == "Ana’s phone" {
+            let object = Object::StoreLog(entry);
+            assert_eq!(Object::decode(&encoded.unwrap()).unwrap(), object);
+            assert_eq!(decoded.unwrap(), object);
+        } else {
+            assert!(encoded.is_err());
+            assert!(decoded.is_err());
+        }
+    }
+}
+
+#[test]
+fn device_and_circle_creation_encode_no_derived_member() {
+    for (change, length) in [
+        (
+            StoreChange::AddDevice {
+                device: DeviceId(2),
+                name: "D".into(),
+            },
+            89,
+        ),
+        (
+            StoreChange::CreateCircle {
+                circle: circle(1),
+                name: "C".into(),
+                key: KeyId(uuid::Uuid::from_u128(2)),
+            },
+            113,
+        ),
+    ] {
+        let object = Object::StoreLog(StoreLogEntry {
+            change,
+            ..test_utils::store_log()
+        });
+        let bytes = object.encode().unwrap();
+        assert_eq!(bytes.len(), length);
+        assert_eq!(Object::decode(&bytes).unwrap(), object);
     }
 }
 
@@ -162,7 +186,6 @@ fn every_store_log_change_round_trips_with_a_pinned_tag() {
             role: MemberRole::Admin,
         },
         StoreChange::AddDevice {
-            member: m.clone(),
             device: DeviceId(2),
             name: "D".into(),
         },
@@ -172,7 +195,6 @@ fn every_store_log_change_round_trips_with_a_pinned_tag() {
         StoreChange::CreateCircle {
             circle: c,
             name: "C".into(),
-            creator: m.clone(),
             key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([1; 16])),
         },
         StoreChange::RenameCircle {
@@ -245,6 +267,13 @@ fn first_entry_and_versions_are_checked() {
     entry.author = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
         .parse()
         .unwrap();
+    assert!(matches!(
+        Object::decode(&encode_frame(2, &entry).unwrap()),
+        Err(Error::Invalid {
+            field: "first admin",
+            rule: Rule::Required
+        })
+    ));
     assert!(Object::StoreLog(entry).encode().is_err());
     let snapshot = test_utils::snapshot_header().id;
     for change in [

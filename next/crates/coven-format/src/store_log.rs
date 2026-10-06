@@ -67,7 +67,7 @@ wire_struct!(CircleKeyId, circle, key);
 /// Every kind of store-log change listed in §9, including the first entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoreChange {
-    /// Create a store and name its first admin.
+    /// Create a store, name its first admin and register the writing device.
     CreateStore {
         /// The store's id.
         store: StoreId,
@@ -77,6 +77,8 @@ pub enum StoreChange {
         admin: MemberPublicKeys,
         /// The first store key, introduced by this entry.
         key: KeyId,
+        /// The name of the device that wrote this entry, belonging to its author.
+        device_name: String,
     },
     /// Add a member with both public keys and their initial role.
     AddMember {
@@ -94,8 +96,6 @@ pub enum StoreChange {
         /// Each remaining circle the member was in and its replacement key,
         /// strictly increasing by circle.
         circle_keys: Vec<CircleKeyId>,
-        /// Circles the member was alone in, deleted by this entry, strictly increasing.
-        deleted_circles: Vec<CircleId>,
     },
     /// Set a member's role.
     ChangeRole {
@@ -104,10 +104,8 @@ pub enum StoreChange {
         /// The target role.
         role: MemberRole,
     },
-    /// Add an install belonging to a member.
+    /// Add an install belonging to the entry's author.
     AddDevice {
-        /// The member whose key authorizes the device.
-        member: MemberId,
         /// The install's id.
         device: DeviceId,
         /// The device's name.
@@ -124,8 +122,6 @@ pub enum StoreChange {
         circle: CircleId,
         /// The circle's name.
         name: String,
-        /// Its first member.
-        creator: MemberId,
         /// The first circle key, introduced by this entry.
         key: KeyId,
     },
@@ -181,25 +177,19 @@ pub enum StoreChange {
 impl StoreChange {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         match self {
-            Self::CreateStore { name: n, .. }
-            | Self::AddDevice { name: n, .. }
-            | Self::CreateCircle { name: n, .. }
-            | Self::RenameCircle { name: n, .. } => name(n),
-            Self::RemoveMember {
-                circle_keys,
-                deleted_circles,
+            Self::CreateStore {
+                name: n,
+                device_name,
                 ..
             } => {
-                ordered(circle_keys, |key| key.circle, "replacement circle keys")?;
-                ordered(deleted_circles, |circle| *circle, "deleted circles")?;
-                for key in circle_keys {
-                    require(
-                        deleted_circles.binary_search(&key.circle).is_err(),
-                        "removed member circles",
-                        Rule::CircleRemoval,
-                    )?;
-                }
-                Ok(())
+                name(n)?;
+                name(device_name)
+            }
+            Self::AddDevice { name: n, .. }
+            | Self::CreateCircle { name: n, .. }
+            | Self::RenameCircle { name: n, .. } => name(n),
+            Self::RemoveMember { circle_keys, .. } => {
+                ordered(circle_keys, |key| key.circle, "replacement circle keys")
             }
             Self::RaiseSchema { version, snapshot } => {
                 require(*version > 0, "schema version", Rule::Required)?;
@@ -249,13 +239,13 @@ macro_rules! store_changes {
     };
 }
 store_changes!(
-    0 => CreateStore { store, name, admin, key },
+    0 => CreateStore { store, name, admin, key, device_name },
     1 => AddMember { keys, role },
-    2 => RemoveMember { member, key, circle_keys, deleted_circles },
+    2 => RemoveMember { member, key, circle_keys },
     3 => ChangeRole { member, role },
-    4 => AddDevice { member, device, name },
+    4 => AddDevice { device, name },
     5 => RemoveDevice { device },
-    6 => CreateCircle { circle, name, creator, key },
+    6 => CreateCircle { circle, name, key },
     7 => RenameCircle { circle, name },
     8 => DeleteCircle { circle },
     9 => AddCircleMember { circle, member },

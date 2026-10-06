@@ -113,6 +113,7 @@ pub fn store_log() -> StoreLogEntry {
             name: "S".into(),
             admin: member(),
             key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([1; 16])),
+            device_name: "D".into(),
         },
     }
 }
@@ -144,7 +145,6 @@ pub fn member_removal() -> StoreLogEntry {
                     key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([2; 16])),
                 },
             ],
-            deleted_circles: vec![CircleId(Uuid::from_u128(2)), CircleId(Uuid::from_u128(4))],
         },
     }
 }

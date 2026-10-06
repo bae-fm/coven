@@ -95,17 +95,20 @@ and signs it on its first upload (§6).
 
 Had-read lists store-log entries, not writes. Own-device positions, when
 included, precede the entry. A create-store entry is number 1, has no had-read
-entries, and is authored by the first admin. `MemberRole` is admin 0 or member 1.
+entries, and is authored by the first admin: decoding refuses an admin signing
+key different from the author. It registers the writing device with its supplied
+name. Added devices belong to the author; a new circle's first member is the
+author. These identities are derived during replay. `MemberRole` is admin 0 or member 1.
 
 | Tag | Change | Fields after tag |
 | --- | --- | --- |
-| 0 | Create store | `store_uuid:16, name:text, admin:MemberPublicKeys, key:KeyId` |
+| 0 | Create store | `store_uuid:16, name:text, admin:MemberPublicKeys, key:KeyId, device_name:text` |
 | 1 | Add member | `keys:MemberPublicKeys, role:u8` |
-| 2 | Remove member | `member:32, key:KeyId, circle_keys:[CircleKeyId], deleted_circles:[CircleId]` |
+| 2 | Remove member | `member:32, key:KeyId, circle_keys:[CircleKeyId]` |
 | 3 | Change role | `member:32, role:u8` |
-| 4 | Add device | `member:32, device:u64, name:text` |
+| 4 | Add device | `device:u64, name:text` |
 | 5 | Remove device | `device:u64` |
-| 6 | Create circle | `circle:16, name:text, creator:32, key:KeyId` |
+| 6 | Create circle | `circle:16, name:text, key:KeyId` |
 | 7 | Rename circle | `circle:16, name:text` |
 | 8 | Delete circle | `circle:16` |
 | 9 | Add circle member | `circle:16, member:32` |
@@ -115,10 +118,11 @@ entries, and is authored by the first admin. `MemberRole` is admin 0 or member 1
 | 13 | Reset | `snapshot:SnapshotId` |
 
 `CircleKeyId` is `circle:16 | key:KeyId`. A member removal records the
-replacement store key, the replacement keys of circles the member shared with
-others, and circles deleted because the member was alone in them (§13).
-Both circle lists are strictly increasing by circle UUID, and no circle occurs
-in both. Either list may be empty; both count fields are always encoded.
+replacement store key and the replacement keys of circles the member shared
+with others in the author's view (§13). The replacement list is strictly
+increasing by circle UUID; its count is encoded even when empty. Replay checks
+that it names exactly those shared circles and derives which circles the
+removal deletes from the author's view; the entry carries no deletion list.
 
 Each create-store or create-circle entry names its first key; removals name
 the replacement keys. Key ids carry no numerical order. Raised versions are
