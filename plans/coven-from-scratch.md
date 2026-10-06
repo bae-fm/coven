@@ -124,15 +124,16 @@
   their uploads.
   - Each object is one write from that device: its write record ([§5](#5-local-database)),
     encrypted.
-  - A write of any size is one object, encrypted in chunks like a file
-    ([§16.2](#162-storage-and-naming)), so no device holds a whole write
-    in memory.
-  - A device checks each chunk as it reads it, applies the write's row
-    changes as they arrive, in one transaction, and commits only once
-    every chunk and the signature check out; a failed check rolls the
-    write back.
-  - E.g. Ana imports 50,000 notes in one transaction: one write, read and
-    applied a chunk at a time.
+  - A write is one object however big, encrypted in chunks like a file
+    ([§16.2](#162-storage-and-naming)), so the format puts no limit on
+    its size.
+  - A device downloads and checks it a chunk at a time, and applies it in
+    one transaction once every chunk and the signature check out.
+  - Its record waits in `coven_uploads` as one value, so a write's limit
+    is SQLite's largest value, 1 GB; a bigger one fails at commit with
+    `DbError::TooLarge`.
+  - E.g. Ana imports 50,000 notes in one transaction: one write, in many
+    chunks.
   - It is named `devices/<device>/<n>`, created once and never changed.
   - `<n>` counts that device's own writes: 1, 2, 3, with no gaps.
   - Its name is part of its encryption, so the provider can't swap one
@@ -142,8 +143,6 @@
   audience's current key, signs the object with the device's member key
   ([§14.4](#144-writes)), and keeps those bytes in `coven_uploads` before
   sending them; every retry sends the kept bytes.
-- `coven_uploads` keeps a write's record, and later its sealed bytes, in
-  chunks too, so no stored value grows with the write.
 - A write record leaves `coven_uploads` ([§5](#5-local-database)) once its upload succeeds.
 - Each device remembers how far it has applied every device's log, in
   coven's `coven_positions` table: one row per device, naming its last
