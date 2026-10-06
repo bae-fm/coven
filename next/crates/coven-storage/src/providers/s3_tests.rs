@@ -13,10 +13,17 @@ use std::{
     sync::{Arc, Mutex},
     time::SystemTime,
 };
+struct PendingUpload {
+    key: String,
+    token: String,
+    parts: BTreeMap<u32, Vec<u8>>,
+}
 #[derive(Default)]
 struct Remote {
     objects: BTreeMap<String, Vec<u8>>,
-    uploads: BTreeMap<String, BTreeMap<u32, Vec<u8>>>,
+    uploads: BTreeMap<String, PendingUpload>,
+    next_upload: u64,
+    part_pages: usize,
     metadata: BTreeMap<String, String>,
     fail_part_reply: bool,
     lose_create_reply: bool,
@@ -66,20 +73,30 @@ fn respond(
     let q = query(&uri);
     let key = uri.path().strip_prefix("/bucket/").unwrap_or("").to_owned();
     if q.contains_key("uploads") {
-        state.uploads.insert(key.clone(), BTreeMap::new());
-        state.metadata.insert(
-            key.clone(),
-            headers["x-amz-meta-coven-upload"].to_str().unwrap().into(),
+        state.next_upload += 1;
+        let id = state.next_upload.to_string();
+        state.uploads.insert(
+            id.clone(),
+            PendingUpload {
+                key,
+                token: headers["x-amz-meta-coven-upload"].to_str().unwrap().into(),
+                parts: BTreeMap::new(),
+            },
         );
-        return response(200,"<InitiateMultipartUploadResult><UploadId>upload</UploadId></InitiateMultipartUploadResult>");
+        return response(200,format!("<InitiateMultipartUploadResult><UploadId>{id}</UploadId></InitiateMultipartUploadResult>"));
     }
-    if q.contains_key("uploadId") {
+    if let Some(id) = q.get("uploadId") {
+        let Some(upload) = state.uploads.get(id) else {
+            return response(404, "<Error><Code>NoSuchUpload</Code></Error>");
+        };
+        assert_eq!(upload.key, key);
         if method == Method::PUT {
             let number = q["partNumber"].parse().unwrap();
             state
                 .uploads
-                .get_mut(&key)
+                .get_mut(id)
                 .unwrap()
+                .parts
                 .insert(number, body.to_vec());
             if std::mem::replace(&mut state.fail_part_reply, false) {
                 return response(503, "<Error><Code>ServiceUnavailable</Code></Error>");
@@ -90,15 +107,23 @@ fn respond(
                 .unwrap();
         }
         if method == Method::GET {
-            let Some(parts) = state.uploads.get(&key) else {
-                return response(404, "<Error><Code>NoSuchUpload</Code></Error>");
+            state.part_pages += 1;
+            let after = q
+                .get("part-number-marker")
+                .map(|value| value.parse::<u32>().unwrap())
+                .unwrap_or(0);
+            let parts = &state.uploads[id].parts;
+            let remaining = parts
+                .iter()
+                .filter(|(number, _)| **number > after)
+                .collect::<Vec<_>>();
+            let (part, next) = match remaining.first() {
+                Some((n,b)) => (format!("<Part><PartNumber>{n}</PartNumber><ETag>\"part-{n}\"</ETag><Size>{}</Size></Part>",b.len()), if remaining.len() > 1 {format!("<IsTruncated>true</IsTruncated><NextPartNumberMarker>{n}</NextPartNumberMarker>")} else {"<IsTruncated>false</IsTruncated>".into()}),
+                None => (String::new(), "<IsTruncated>false</IsTruncated>".into()),
             };
-            let parts=parts.iter().map(|(n,b)|format!("<Part><PartNumber>{n}</PartNumber><ETag>\"part-{n}\"</ETag><Size>{}</Size></Part>",b.len())).collect::<String>();
             return response(
                 200,
-                format!(
-                    "<ListPartsResult><IsTruncated>false</IsTruncated>{parts}</ListPartsResult>"
-                ),
+                format!("<ListPartsResult>{next}{part}</ListPartsResult>"),
             );
         }
         if method == Method::POST {
@@ -106,18 +131,18 @@ fn respond(
             if state.objects.contains_key(&key) {
                 return response(412, "<Error><Code>PreconditionFailed</Code></Error>");
             }
-            let parts = state.uploads.remove(&key).unwrap();
+            let upload = state.uploads.remove(id).unwrap();
+            state.metadata.insert(key.clone(), upload.token);
             state
                 .objects
-                .insert(key, parts.into_values().flatten().collect());
+                .insert(key, upload.parts.into_values().flatten().collect());
             if std::mem::replace(&mut state.fail_completion_reply, false) {
                 return response(503, "<Error><Code>ServiceUnavailable</Code></Error>");
             }
             return response(200,"<CompleteMultipartUploadResult><ETag>\"complete\"</ETag></CompleteMultipartUploadResult>");
         }
-        if state.uploads.remove(&key).is_none() {
-            return response(404, "<Error><Code>NoSuchUpload</Code></Error>");
-        }
+        assert_eq!(method, Method::DELETE);
+        state.uploads.remove(id);
         return response(204, Vec::new());
     }
     if q.contains_key("list-type") {
@@ -486,4 +511,68 @@ async fn listing_retains_server_time_and_size_across_pages_and_retries() {
     );
     storage.create_once(&first, b"first").await.unwrap();
     assert_eq!(storage.list(&ObjectPrefix::all()).await.unwrap(), expected);
+}
+
+#[tokio::test]
+async fn multipart_publication_and_abort_are_bound_to_the_native_session() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let path = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    let mut first = storage.begin_upload(&path, 4).await.unwrap();
+    let mut other = storage.begin_upload(&path, 4).await.unwrap();
+    storage.upload_part(&mut first, b"data").await.unwrap();
+    storage.upload_part(&mut other, b"else").await.unwrap();
+    state.lock().unwrap().fail_completion_reply = true;
+    assert_eq!(
+        storage
+            .finish_upload(&mut first)
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageFailure::Network
+    );
+    storage.resume_upload(&mut first).await.unwrap();
+    assert!(first.is_complete());
+    assert_eq!(storage.read(&path).await.unwrap(), b"data");
+    assert!(matches!(
+        storage.finish_upload(&mut other).await,
+        Err(StorageError::AlreadyExists)
+    ));
+    storage.abort_upload(&other).await.unwrap();
+    storage.abort_upload(&other).await.unwrap();
+    assert!(matches!(
+        storage.resume_upload(&mut other).await,
+        Err(StorageError::AlreadyExists)
+    ));
+    assert_eq!(storage.read(&path).await.unwrap(), b"data");
+    assert!(state.lock().unwrap().uploads.is_empty());
+}
+
+#[tokio::test]
+async fn resumed_multipart_parts_follow_every_page_before_advancing() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let path = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    let mut upload = storage
+        .begin_upload(&path, 8 * 1024 * 1024 + 1)
+        .await
+        .unwrap();
+    let mut recorded = upload.clone();
+    storage
+        .upload_part(&mut upload, &vec![1; 8 * 1024 * 1024])
+        .await
+        .unwrap();
+    storage.upload_part(&mut upload, b"z").await.unwrap();
+    storage.resume_upload(&mut recorded).await.unwrap();
+    assert_eq!(state.lock().unwrap().part_pages, 2);
+    assert_eq!(recorded.confirmed_bytes(), recorded.total_bytes());
+    storage.finish_upload(&mut recorded).await.unwrap();
 }
