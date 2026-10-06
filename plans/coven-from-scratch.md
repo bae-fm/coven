@@ -332,7 +332,7 @@ Two mechanisms order writes:
   by machine for the merged state and the removal rules.
 - When a write changes which rows are removed, coven makes the change in
   the app's table with ordinary SQL, which triggers see like any other.
-- Merging uses five of coven's internal tables:
+- Merging uses these internal tables:
   - `coven_writes`, one row per write the device has applied, naming:
     - the write's timestamp, which includes its device;
     - the write's number;
@@ -351,9 +351,20 @@ Two mechanisms order writes:
   - `coven_cells`, one row per synced cell, naming:
     - its `coven_columns` row;
     - its `coven_rows` row;
-    - the write that set it;
-    - for a reference, the generation of the row it points at
+    - the write that set it.
+  - `coven_references`, one row per reference a synced row holds, naming:
+    - the row's `coven_rows` row;
+    - its `coven_foreign_keys` row;
+    - the parent's table, key, audience, and the generation it points at
       ([§8.4](#84-foreign-keys)).
+  - `coven_foreign_keys`, one row per foreign key of a synced table, naming
+    it as below.
+  - `coven_claims`, one row per unique value a removed row claims, naming:
+    - the row's `coven_rows` row;
+    - its `coven_constraints` row, which names the unique constraint as
+      below;
+    - the row's audience and the value it claims
+      ([§8.5](#85-keys-and-uniqueness)).
   - A present row's values are in the app's table, and only there.
   - `coven_lost`, one row per lost value or removed row, naming:
     - the cell, or the row;
