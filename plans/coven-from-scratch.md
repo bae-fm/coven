@@ -131,7 +131,9 @@
   ([§14.4](#144-writes)), and keeps those bytes in `coven_uploads` before
   sending them; every retry sends the kept bytes.
 - A write record leaves `coven_uploads` ([§5](#5-local-database)) once its upload succeeds.
-- Each device remembers how far it has applied every device's log.
+- Each device remembers how far it has applied every device's log, in
+  coven's `coven_positions` table: one row per device, naming its last
+  applied write's number.
 - It also posts those positions to storage at `positions/<device>`,
   replacing its own object when the positions advance.
 
