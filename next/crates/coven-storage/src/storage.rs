@@ -137,6 +137,17 @@ pub trait Storage: Send + Sync {
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError>;
+    /// Begin a fresh recorded session after `resume_upload` reports `SessionExpired`.
+    /// The destination and total stay fixed; the caller records the returned value
+    /// and supplies the retained encrypted bytes again, starting at offset zero.
+    async fn restart_upload(&self, expired: &UploadSession) -> Result<UploadSession, StorageError> {
+        expired.check(&self.config())?;
+        if expired.is_complete() {
+            return Err(StorageError::InvalidPart);
+        }
+        self.begin_upload(expired.path(), expired.total_bytes())
+            .await
+    }
     /// Refresh a recorded session from the provider after interruption.
     async fn resume_upload(&self, session: &mut UploadSession) -> Result<(), StorageError>;
     /// Send the next part, advancing the value only after confirmation. After

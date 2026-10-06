@@ -3877,6 +3877,10 @@ while let Ok(values) = lost.next().await {
   - Decoding a recorded session validates its provider and location, state
     variant, identifiers, part sizes and counts, and confirmed byte offset.
     Adapters refuse a session naming another location before making a request.
+  - After `SessionExpired`, `Storage::restart_upload(&UploadSession)` returns
+    a new recorded session for the same path and total length, with zero
+    confirmed bytes. The caller records it and supplies the kept encrypted
+    bytes again. A completed session cannot be restarted.
 - Storage exposes `delete`, not a deletion-rights query. Sync chooses the
   deleting device by §15; Drive deletes an object the account owns and
   otherwise removes it from the store's folder. Provider refusals keep

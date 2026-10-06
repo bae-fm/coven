@@ -105,3 +105,47 @@ async fn faults_are_counted_and_delay_is_awaited() {
         .is_empty());
     assert_eq!(start.elapsed(), Duration::from_secs(9));
 }
+
+#[tokio::test]
+async fn expired_upload_restarts_with_a_new_recording_at_the_same_destination() {
+    let storage = MemoryStorage::new(config()).unwrap();
+    let path = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    let mut expired = storage.begin_upload(&path, 5).await.unwrap();
+    storage.upload_part(&mut expired, b"abcd").await.unwrap();
+    storage.abort_upload(&expired).await.unwrap();
+    assert!(matches!(
+        storage.resume_upload(&mut expired).await,
+        Err(StorageError::SessionExpired)
+    ));
+    let replacement = storage.restart_upload(&expired).await.unwrap();
+    assert_eq!(replacement.path(), &path);
+    assert_eq!(replacement.total_bytes(), 5);
+    assert_eq!(replacement.confirmed_bytes(), 0);
+    assert_ne!(
+        replacement.encode().unwrap().as_bytes(),
+        expired.encode().unwrap().as_bytes()
+    );
+    let mut replacement = UploadSession::decode(replacement.encode().unwrap().as_bytes()).unwrap();
+    storage
+        .upload_part(&mut replacement, b"abcd")
+        .await
+        .unwrap();
+    storage.upload_part(&mut replacement, b"e").await.unwrap();
+    storage.finish_upload(&mut replacement).await.unwrap();
+    assert_eq!(storage.read(&path).await.unwrap(), b"abcde");
+    assert!(matches!(
+        storage.restart_upload(&replacement).await,
+        Err(StorageError::InvalidPart)
+    ));
+    let other = MemoryStorage::new(StorageConfig::Dropbox {
+        namespace_id: "elsewhere".into(),
+    })
+    .unwrap();
+    assert!(matches!(
+        other.restart_upload(&expired).await,
+        Err(StorageError::SessionMismatch)
+    ));
+}

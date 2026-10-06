@@ -200,6 +200,19 @@ async fn missing_session_and_destination_is_expired() {
         storage.resume_upload(&mut upload).await,
         Err(StorageError::SessionExpired)
     ));
+    let replacement = storage.restart_upload(&upload).await.unwrap();
+    assert_eq!(replacement.path(), &path);
+    assert_eq!(replacement.total_bytes(), b"data".len() as u64);
+    assert_eq!(replacement.confirmed_bytes(), 0);
+    let recorded = replacement.encode().unwrap();
+    let mut replacement = UploadSession::decode(recorded.as_bytes()).unwrap();
+    storage.resume_upload(&mut replacement).await.unwrap();
+    storage
+        .upload_part(&mut replacement, b"data")
+        .await
+        .unwrap();
+    storage.finish_upload(&mut replacement).await.unwrap();
+    assert_eq!(storage.read(&path).await.unwrap(), b"data");
 }
 #[tokio::test]
 async fn conformance_ranges_pagination_and_account_sharing() {

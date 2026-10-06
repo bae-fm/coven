@@ -210,3 +210,31 @@ async fn bridge_conforms_and_retains_parts_across_adapter_restart() {
         StorageFailure::PermissionDenied
     );
 }
+
+#[tokio::test]
+async fn expired_bridge_session_restarts_from_retained_bytes() {
+    let bridge = Arc::new(Bridge::new());
+    let storage = CloudKitStorage::new(config(), bridge).unwrap();
+    let path = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    let mut expired = storage.begin_upload(&path, 5).await.unwrap();
+    storage.upload_part(&mut expired, b"abcd").await.unwrap();
+    storage.abort_upload(&expired).await.unwrap();
+    assert!(matches!(
+        storage.resume_upload(&mut expired).await,
+        Err(StorageError::SessionExpired)
+    ));
+    let replacement = storage.restart_upload(&expired).await.unwrap();
+    assert_eq!(replacement.path(), &path);
+    assert_eq!(replacement.confirmed_bytes(), 0);
+    let mut replacement = UploadSession::decode(replacement.encode().unwrap().as_bytes()).unwrap();
+    storage
+        .upload_part(&mut replacement, b"abcd")
+        .await
+        .unwrap();
+    storage.upload_part(&mut replacement, b"e").await.unwrap();
+    storage.finish_upload(&mut replacement).await.unwrap();
+    assert_eq!(storage.read(&path).await.unwrap(), b"abcde");
+}
