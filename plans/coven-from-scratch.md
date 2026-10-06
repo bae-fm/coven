@@ -555,8 +555,9 @@ Two mechanisms order writes:
     parent, so a lost reference reads as null or the default when its
     parent goes ([§8.4](#84-foreign-keys)).
 - The store log's effects that the database applies are kept with it:
-  - `coven_deleted_circles` names each circle whose deletion it has applied
-    ([§14.7](#147-deleting-a-circle));
+  - `coven_circles.deleted` records whether each circle is deleted; local
+    writes, downloaded writes and row recomputation all read that same fact
+    ([§9](#9-members-and-roles), [§14.7](#147-deleting-a-circle));
   - `coven_applied_boundaries` names each breaking change and reset it has
     applied, with the writes its snapshot included, so a later write is
     judged against it ([§17.1](#171-host-application),

@@ -91,11 +91,6 @@ macro_rules! coven_tables {
                 included BLOB NOT NULL
             ) STRICT;
         ");
-        $visit!(coven_deleted_circles, "
-            CREATE TABLE coven_deleted_circles (
-                circle TEXT PRIMARY KEY NOT NULL
-            ) STRICT, WITHOUT ROWID;
-        ");
         $visit!(coven_fingerprint_leaves, "
             CREATE TABLE coven_fingerprint_leaves (
                 audience TEXT NOT NULL,

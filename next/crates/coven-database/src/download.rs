@@ -11,7 +11,7 @@ use coven_format::{
     value::WritePositions,
     write::{WriteDisposition, WriteHeader, WritePart, WriteRecord},
 };
-use coven_foundation::id_source::{CircleId, DeviceId};
+use coven_foundation::id_source::DeviceId;
 use coven_merge::{Audience, ColumnValue, Operation, Timestamp, WriteId};
 use rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
@@ -83,20 +83,6 @@ pub(crate) fn positions(database: &DatabaseConnection) -> Result<WritePositions,
     )?))
 }
 
-pub(crate) fn deleted_circles(
-    database: &DatabaseConnection,
-) -> Result<BTreeSet<CircleId>, DbError> {
-    Ok(database
-        .query("SELECT circle FROM coven_deleted_circles", [], |r| {
-            match crate::write_encoding::audience(&r.get::<_, String>(0)?)? {
-                Audience::Circle(circle) => Ok(circle),
-                Audience::Store => Err(rusqlite::Error::InvalidQuery),
-            }
-        })?
-        .into_iter()
-        .collect())
-}
-
 pub(crate) fn apply(
     database: &DatabaseConnection,
     schema: &WriteSchema,
@@ -165,7 +151,7 @@ fn apply_opened(
             .collect(),
     };
     let boundaries = crate::write_boundary::WriteBoundary::load(database)?;
-    let deleted = deleted_circles(database)?;
+    let deleted = crate::store_log_tables::deleted_circles(database)?;
     let visible = AppView::after(database, schema);
     let store = MergeStore::new(database, &visible);
     let mut kept = Vec::new();

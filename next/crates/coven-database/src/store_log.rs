@@ -161,20 +161,15 @@ pub(crate) fn apply(
             "INSERT INTO coven_store_log(device,number,record,outcome) VALUES(?1,?2,?3,'kept') ON CONFLICT(device,number) DO NOTHING",
             (entry.position.device.0.to_be_bytes().as_slice(), entry.position.number.to_be_bytes().as_slice(), &bytes),
         )?;
-        let previous = crate::download::deleted_circles(database)?;
+        let previous = crate::store_log_tables::deleted_circles(database)?;
         crate::store_log_tables::replace(database, &replay)?;
-        let deleted: BTreeSet<_> = replay.state.circles.iter()
-            .filter_map(|(id, circle)| circle.deleted.then_some(*id)).collect();
+        let deleted = crate::store_log_tables::deleted_circles(database)?;
         let mut touched = BTreeSet::new();
         for circle in previous.symmetric_difference(&deleted) {
             touched.extend(database.query(
                 "SELECT DISTINCT table_name,key,audience FROM coven_rows WHERE audience=?1",
                 [circle.to_string()], crate::row_queries::read_identity,
             )?);
-        }
-        database.internal_execute("DELETE FROM coven_deleted_circles", [])?;
-        for circle in &deleted {
-            database.internal_execute("INSERT INTO coven_deleted_circles(circle) VALUES(?1)", [circle.to_string()])?;
         }
         let visible = crate::write_rows::AppView::after(database, schema);
         let store = crate::merge_store::MergeStore::new(database, &visible);

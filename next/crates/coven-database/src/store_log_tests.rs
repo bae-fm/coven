@@ -220,7 +220,7 @@ async fn deletion_and_reversal_commit_marks_and_visible_rows_together() {
     assert_eq!(db.store_log().await.unwrap(), before);
     assert_eq!(count(&db, "notes"), 1);
     assert_eq!(count(&db, "children"), 1);
-    assert_eq!(count(&db, "coven_deleted_circles"), 0);
+    assert!(!db.store_log().await.unwrap().replay.state.circles[&circle].deleted);
     assert!(!rows.is_marked_for_rerun());
     assert!(!losses.is_marked_for_rerun());
     db.inspect_writer(|sql| sql.batch("DROP TRIGGER refuse").unwrap());
@@ -230,7 +230,7 @@ async fn deletion_and_reversal_commit_marks_and_visible_rows_together() {
     assert_eq!(next(&mut rows).await, (0, 0));
     assert_eq!(next(&mut losses).await.len(), 2);
     assert_eq!(db.store_log().await.unwrap().replay, deleted);
-    assert_eq!(count(&db, "coven_deleted_circles"), 1);
+    assert!(db.store_log().await.unwrap().replay.state.circles[&circle].deleted);
 
     // §9: Ana's earlier concurrent removal of Ben beats Ben's deletion.
     let remove = entry(
@@ -257,7 +257,7 @@ async fn deletion_and_reversal_commit_marks_and_visible_rows_together() {
         .await
         .is_err());
     assert_eq!(db.store_log().await.unwrap(), before);
-    assert_eq!(count(&db, "coven_deleted_circles"), 1);
+    assert!(db.store_log().await.unwrap().replay.state.circles[&circle].deleted);
     assert_eq!(count(&db, "notes"), 0);
     assert!(!rows.is_marked_for_rerun());
     db.inspect_writer(|sql| sql.batch("DROP TRIGGER refuse").unwrap());
@@ -266,7 +266,7 @@ async fn deletion_and_reversal_commit_marks_and_visible_rows_together() {
         .unwrap();
     assert_eq!(next(&mut rows).await, (1, 1));
     assert!(next(&mut losses).await.is_empty());
-    assert_eq!(count(&db, "coven_deleted_circles"), 0);
+    assert!(!db.store_log().await.unwrap().replay.state.circles[&circle].deleted);
     assert_eq!(records(&db).len(), 1, "recomputation creates no app write");
     let committed = db.store_log().await.unwrap();
     assert_eq!(committed.replay, restored);

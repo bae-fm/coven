@@ -2,7 +2,7 @@ use super::*;
 use crate::tests::{database_error, TestStore};
 use crate::write::tests::{count, notes, records, sql, NOTES};
 use crate::{Database, Migration, RowIdentity, SyncedTable};
-use coven_foundation::id_source::KeyId;
+use coven_foundation::id_source::{CircleId, KeyId};
 use coven_foundation::{clock::FixedClock, id_source::SequentialIds};
 use std::sync::Arc;
 use std::time::Duration;
@@ -575,7 +575,7 @@ async fn deleted_circle_takes_out_late_downloads_and_deletion_rolls_back_on_trig
     );
     assert_eq!(count(&source, "notes"), 1);
     assert_eq!(count(&source, "children"), 1);
-    assert_eq!(count(&source, "coven_deleted_circles"), 0);
+    assert!(!source.store_log().await.unwrap().replay.state.circles[&circle].deleted);
     assert_eq!(count(&source, "coven_lost"), 0);
     source.inspect_writer(|sql| sql.batch("DROP TRIGGER refuse").unwrap());
     crate::store_log::tests::delete_circle(&source, circle)

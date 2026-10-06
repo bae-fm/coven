@@ -242,7 +242,7 @@ impl DatabaseConnection {
         #[cfg(test)]
         let _profile = self.profile_statements();
         self.transaction(|database| {
-            let deleted_circles = crate::download::deleted_circles(database)?;
+            let deleted_circles = crate::store_log_tables::deleted_circles(database)?;
             let mut session = rusqlite::session::Session::new(&database.connection)?;
             for table in &schema.declarations {
                 session.attach(Some(table.name.as_str()))?;

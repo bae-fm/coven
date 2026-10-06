@@ -173,7 +173,7 @@ fn finish(
         &store,
         &mut changed,
     )?;
-    let deleted = crate::download::deleted_circles(database)?;
+    let deleted = crate::store_log_tables::deleted_circles(database)?;
     let changes = crate::write_record::changes(
         database, &schema, &before, &visible, &store, &changed, &deleted,
     )?;

@@ -43,6 +43,19 @@ fn circle(text: String) -> rusqlite::Result<CircleId> {
     }
 }
 
+pub(crate) fn deleted_circles(
+    database: &DatabaseConnection,
+) -> Result<BTreeSet<CircleId>, DbError> {
+    Ok(database
+        .query(
+            "SELECT circle FROM coven_circles WHERE deleted=1",
+            [],
+            |row| circle(row.get(0)?),
+        )?
+        .into_iter()
+        .collect())
+}
+
 pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
     let mut log = StoreLog::default();
     for (entry, outcome) in database.query(

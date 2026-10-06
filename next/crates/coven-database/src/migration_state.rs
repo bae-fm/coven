@@ -326,7 +326,7 @@ pub(crate) fn refresh(
     schema: &WriteSchema,
     tables: &BTreeSet<String>,
 ) -> Result<(), DbError> {
-    let deleted = crate::download::deleted_circles(db)?;
+    let deleted = crate::store_log_tables::deleted_circles(db)?;
     for table in tables {
         db.visit(
             "SELECT DISTINCT table_name,key,audience FROM coven_rows WHERE table_name=?1",
