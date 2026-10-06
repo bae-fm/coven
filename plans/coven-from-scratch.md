@@ -1110,7 +1110,8 @@ Carol's tablet:
                                had read: ana-phone 2
     ```
 
-  - The store's first entry creates it, and names its first admin.
+  - The store's first entry creates it, names its first admin, and adds
+    the device that wrote it, with its name.
 - Roles:
   - several equal admins;
   - only admins add and remove members, and change roles;
