@@ -1852,6 +1852,8 @@ Carol's tablet:
   - So a device that runs the same migration later, then reloads from that
     snapshot, changes nothing anywhere with its own migration write; nor
     does one whose breaking change loses to a concurrent one.
+- An update that runs several breaking migrations makes one migration
+  write, and raises the store once, to the newest version.
 - Rows a removal rule had taken out before a breaking change stay out for
   good: they stay in `coven_lost`, and coven forgets their other merge
   records.
