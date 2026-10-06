@@ -4668,6 +4668,10 @@ pub struct CircleMemberInfo {
   older version that still wait in `coven_uploads`.
 - Coven decides whether a migration is an addition or a breaking change by
   comparing the schema before and after it.
+- A converted change keeps the references its columns carried, renamed
+  with them. Changing a reference's value, or adding a column that is a
+  reference, fails the migration: the device can't know which generation
+  of the parent the old write meant.
 
 ```rust
 impl Migration {
@@ -4721,10 +4725,18 @@ impl RowChange {
     pub fn rename_column(&mut self, from: &str, to: &str);
 }
 
+/// One column of a row change. A column that holds a reference also keeps,
+/// privately, which generation of its parent the write named (§8.4).
 pub struct ColumnChange {
     pub name: String,
     pub old: Option<rusqlite::types::Value>,
     pub new: Option<rusqlite::types::Value>,
+    /* private: the references the new value carries */
+}
+
+impl ColumnChange {
+    /// A column the conversion adds; it carries no references.
+    pub fn new(name: impl Into<String>, old: Option<rusqlite::types::Value>, new: Option<rusqlite::types::Value>) -> Self;
 }
 
 pub enum MigrationError {
