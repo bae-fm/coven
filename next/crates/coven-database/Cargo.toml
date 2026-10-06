@@ -21,7 +21,7 @@ uuid.workspace = true
 rusqlite = { workspace = true, features = ["trace"] }
 coven-foundation = { workspace = true, features = ["test-utils"] }
 tempfile.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net", "fs"] }
 
 [lints]
 workspace = true

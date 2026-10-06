@@ -340,7 +340,8 @@ pub(crate) fn refresh(
                 crate::write_apply::WriteApply::new(
                     db, schema, &store, &visible, &visible, &deleted,
                 )
-                .apply(None, [row].into())
+                .apply(None, [row].into())?;
+                Ok(())
             },
         )?;
     }

@@ -1,7 +1,11 @@
 //! Opening is the composition root; a shared handle owns all connections and
 //! the writer lock. Blocking calls keep that owner alive until they finish.
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
+
+#[path = "file_staging.rs"]
+mod file_staging;
 
 use coven_foundation::clock::{ClockRef, SystemClock};
 use coven_foundation::files::{StoreDir, StoreLock};
@@ -113,7 +117,8 @@ impl DatabaseBuilder {
             policy,
             Some((settings.device_id, clock.now())),
         )?;
-        crate::file_removals::FileRemovals::new(&writer, &self.directory).finish(Ok(()))?;
+        crate::file_removals::FileRemovals::new(&writer, &self.directory, &BTreeSet::new())
+            .finish(Ok(()))?;
         let write_schema = crate::write_schema::WriteSchema::read(&writer, tables.clone())?;
         writer.prepare_file_triggers()?;
         let observer = CommitObserver::new();
@@ -129,6 +134,7 @@ impl DatabaseBuilder {
             )?));
         }
         Ok(Database {
+            file_tasks: Arc::new(tokio::sync::RwLock::new(())),
             inner: Arc::new(RwLock::new(Some(DatabaseInner {
                 observer,
                 writer: Mutex::new(writer),
@@ -140,6 +146,7 @@ impl DatabaseBuilder {
                 device: settings.device_id,
                 clock,
                 ids,
+                staging: Mutex::new(BTreeSet::new()),
             }))),
         })
     }
@@ -182,6 +189,7 @@ impl DatabaseBuilder {
 #[derive(Clone)]
 pub struct Database {
     inner: Arc<RwLock<Option<DatabaseInner>>>,
+    file_tasks: Arc<tokio::sync::RwLock<()>>,
 }
 
 struct DatabaseInner {
@@ -196,6 +204,7 @@ struct DatabaseInner {
     device: DeviceId,
     clock: ClockRef,
     ids: IdSourceRef,
+    staging: Mutex<BTreeSet<coven_foundation::files::FileName>>,
 }
 
 impl Database {
@@ -349,51 +358,16 @@ impl Database {
         S: FnOnce(crate::SqlContext<'_, '_>) -> Result<R, DbError> + Send + 'static,
         R: Send + 'static,
     {
+        let lease = self.file_tasks.clone().read_owned().await;
         let database = self.clone();
-        let runtime = tokio::runtime::Handle::current();
-        finish_blocking(
+        let staging = finish_blocking(
             tokio::task::spawn_blocking(move || {
-                let slot = database.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let writer = inner
-                    .writer
-                    .lock()
-                    .expect("writer connection lock poisoned");
-                let mut files = crate::file_write::FileWrite::new(
-                    &writer,
-                    &inner.directory,
-                    &inner.write_schema,
-                    inner.device,
-                    inner.ids.as_ref(),
-                );
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let mut batch = crate::WriteBatch::new();
-                    build(&mut batch)?;
-                    files.stage(batch, &runtime)?;
-                    writer.local_write(
-                        &inner.write_schema,
-                        inner.device,
-                        inner.clock.now(),
-                        &files,
-                        sql,
-                    )
-                }));
-                let result = match result {
-                    Ok(result) => files.finish(result),
-                    Err(panic) => {
-                        let cleanup = files.rollback();
-                        drop(writer);
-                        if let Err(error) = cleanup {
-                            panic!("file cleanup after app panic failed: {error:?}");
-                        }
-                        std::panic::resume_unwind(panic)
-                    }
-                };
-                drop(writer);
-                result
+                file_staging::FileStaging::new(database, lease, build)
             })
             .await,
-        )
+        )?;
+        let (staging, result) = staging.write().await;
+        finish_blocking(tokio::task::spawn_blocking(move || staging.finish(result, sql)).await)
     }
 
     /// Apply one authenticated download, or report the prerequisite it awaits.
@@ -416,7 +390,8 @@ impl Database {
                     &inner.directory,
                     &inner.write_schema,
                     inner.device,
-                    inner.ids.as_ref(),
+                    &inner.staging,
+                    Vec::new(),
                 );
                 files.finish(crate::download::apply(
                     &writer,
@@ -495,7 +470,8 @@ impl Database {
                     &inner.directory,
                     &inner.write_schema,
                     inner.device,
-                    inner.ids.as_ref(),
+                    &inner.staging,
+                    Vec::new(),
                 );
                 files.finish(crate::download::delete_circle(
                     &writer,
@@ -570,9 +546,11 @@ impl Database {
     /// Wait for database calls, close all connections, then release the writer lock.
     /// Every subsequent database call, including close, reports `StoreClosed`.
     pub async fn close(&self) -> Result<(), DbError> {
+        let file_tasks = self.file_tasks.clone().write_owned().await;
         let database = self.clone();
         finish_blocking(
             tokio::task::spawn_blocking(move || {
+                let _file_tasks = file_tasks;
                 let mut slot = database.inner.write().expect("database lock poisoned");
                 let Some(inner) = slot.take() else {
                     return Err(DbError::StoreClosed);

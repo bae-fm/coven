@@ -6,26 +6,25 @@ use crate::{
     write_capture::CapturedRow,
     write_rows::{AppKey, AppView},
     write_schema::WriteSchema,
-    DbError, FileSource, PreparedUserFile, Provenance, RowKey, WriteBatch,
+    DbError, PreparedUserFile, Provenance, RowKey,
 };
-use coven_crypto::{ContentHash, ContentHasher};
+use coven_crypto::ContentHash;
 use coven_format::value::Value;
 use coven_foundation::{
-    files::{FileArea, FileName, StoreDir},
+    files::{FileName, StoreDir},
     id_source::DeviceId,
 };
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
 };
-use tokio::io::AsyncReadExt;
 
-struct StagedFile {
-    namespace: String,
-    id: String,
-    name: FileName,
-    size: u64,
-    hash: ContentHash,
+pub(crate) struct StagedFile {
+    pub(crate) namespace: String,
+    pub(crate) id: String,
+    pub(crate) name: FileName,
+    pub(crate) size: u64,
+    pub(crate) hash: ContentHash,
 }
 
 #[cfg(test)]
@@ -43,7 +42,7 @@ pub(crate) struct FileWrite<'a> {
     directory: &'a StoreDir,
     schema: &'a WriteSchema,
     device: DeviceId,
-    ids: &'a dyn coven_foundation::id_source::IdSource,
+    staging: &'a std::sync::Mutex<BTreeSet<FileName>>,
     staged: Vec<StagedFile>,
     originals: RefCell<Vec<PreparedUserFile>>,
     attached: RefCell<BTreeMap<AppKey, AttachedFile>>,
@@ -57,15 +56,16 @@ impl<'a> FileWrite<'a> {
         directory: &'a StoreDir,
         schema: &'a WriteSchema,
         device: DeviceId,
-        ids: &'a dyn coven_foundation::id_source::IdSource,
+        staging: &'a std::sync::Mutex<BTreeSet<FileName>>,
+        staged: Vec<StagedFile>,
     ) -> Self {
         Self {
             database,
             directory,
             schema,
             device,
-            ids,
-            staged: Vec::new(),
+            staging,
+            staged,
             originals: RefCell::new(Vec::new()),
             attached: RefCell::new(BTreeMap::new()),
             obsolete: RefCell::new(BTreeSet::new()),
@@ -101,75 +101,6 @@ impl<'a> FileWrite<'a> {
         map: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
     ) -> rusqlite::Result<Vec<T>> {
         self.database.app_query(sql, params, map)
-    }
-
-    pub(crate) fn stage(
-        &mut self,
-        batch: WriteBatch,
-        runtime: &tokio::runtime::Handle,
-    ) -> Result<(), DbError> {
-        let mut identities = BTreeSet::new();
-        for (namespace, id, source) in batch.files {
-            if !identities.insert((namespace.clone(), id.clone())) {
-                return Err(file_row::invalid("a batch supplies the same file twice"));
-            }
-            if !self.schema.declarations.iter().any(|d| {
-                d.files.as_ref().is_some_and(|f| {
-                    f.namespace == namespace && f.provenance == Provenance::AppProvided
-                })
-            }) {
-                return Err(file_row::invalid(format!(
-                    "{namespace} is not an app-provided file namespace"
-                )));
-            }
-            let name =
-                FileName::new(self.ids.new_id().to_string()).expect("UUID is a portable filename");
-            let recorded = self.database.internal_execute(
-                "INSERT INTO coven_file_removals(path) SELECT ?1 WHERE NOT EXISTS(SELECT 1 FROM coven_device_files WHERE path=?1)",
-                [name.as_str()],
-            )?;
-            if recorded != 1 {
-                return Err(file_row::invalid("the id source reused a kept file's name"));
-            }
-            let (size, hash) = self
-                .directory
-                .file(FileArea::AppProvided, &name)
-                .create(|out| {
-                    let mut hash = ContentHasher::new();
-                    let mut size = 0;
-                    match source {
-                        FileSource::Bytes(bytes) => {
-                            for bytes in bytes.chunks(64 * 1024) {
-                                out.write_all(bytes)?;
-                                hash.update(bytes);
-                                size += bytes.len() as u64;
-                            }
-                        }
-                        FileSource::Stream(mut reader) => runtime.block_on(async {
-                            let mut buffer = [0; 64 * 1024];
-                            loop {
-                                let read = reader.read(&mut buffer).await?;
-                                if read == 0 {
-                                    break;
-                                }
-                                out.write_all(&buffer[..read])?;
-                                hash.update(&buffer[..read]);
-                                size += read as u64;
-                            }
-                            Ok::<_, std::io::Error>(())
-                        })?,
-                    }
-                    Ok((size, hash.finish()))
-                })?;
-            self.staged.push(StagedFile {
-                namespace,
-                id,
-                name,
-                size,
-                hash,
-            });
-        }
-        Ok(())
     }
 
     pub(crate) fn attach_app_files(&self) -> Result<(), DbError> {
@@ -481,12 +412,21 @@ impl<'a> FileWrite<'a> {
     }
 
     pub(crate) fn finish<R>(&self, result: Result<R, DbError>) -> Result<R, DbError> {
-        crate::file_removals::FileRemovals::new(self.database, self.directory).finish(result)
+        crate::file_removals::FileRemovals::new(
+            self.database,
+            self.directory,
+            &self.staging.lock().expect("file staging lock poisoned"),
+        )
+        .finish(result)
     }
 
     pub(crate) fn rollback(&self) -> Result<(), Vec<DbError>> {
-        let failures =
-            crate::file_removals::FileRemovals::new(self.database, self.directory).remove_unused();
+        let failures = crate::file_removals::FileRemovals::new(
+            self.database,
+            self.directory,
+            &self.staging.lock().expect("file staging lock poisoned"),
+        )
+        .remove_unused();
         if failures.is_empty() {
             Ok(())
         } else {

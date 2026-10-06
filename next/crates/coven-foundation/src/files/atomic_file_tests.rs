@@ -196,47 +196,32 @@ fn a_published_file_is_not_marked_temporary() {
     );
 }
 
-#[test]
-fn streamed_creation_syncs_bytes_and_refuses_to_overwrite_a_kept_file() {
+#[tokio::test]
+async fn streamed_creation_syncs_bytes_and_refuses_to_overwrite_a_kept_file() {
     let directory = tempfile::tempdir().unwrap();
     let file = AtomicFile::new(directory.path().join("kept"));
-    let count = file
-        .create(|out| {
-            for _ in 0..10 {
-                out.write_all(&[1; 4096])?;
-            }
-            Ok(40960)
-        })
+    let bytes = vec![1; 40960];
+    let mut count = 0;
+    file.create_writer()
+        .unwrap()
+        .write_from(&mut bytes.as_slice(), |chunk| count += chunk.len())
+        .await
         .unwrap();
-    assert_eq!(file.read_optional().unwrap().unwrap(), vec![1; count]);
-    let error = file.create(|out| out.write_all(b"different")).unwrap_err();
+    assert_eq!(count, bytes.len());
+    assert_eq!(file.read_optional().unwrap().unwrap(), bytes);
+    let error = file.create_writer().err().unwrap();
     assert!(
         matches!(error, FileError::Io {source, ..} if source.kind() == io::ErrorKind::AlreadyExists)
     );
-    assert_eq!(file.read_optional().unwrap().unwrap(), vec![1; count]);
+    assert_eq!(file.read_optional().unwrap().unwrap(), bytes);
 }
 
-#[test]
-fn failed_or_panicking_streams_leave_the_named_bytes_for_the_callers_recorded_cleanup() {
+#[tokio::test]
+async fn a_dropped_writer_leaves_its_name_for_recorded_cleanup() {
     let directory = tempfile::tempdir().unwrap();
     let file = AtomicFile::new(directory.path().join("partial"));
-    let error = file
-        .create(|out| {
-            out.write_all(b"partial")?;
-            Err::<(), _>(io::Error::other("source failed"))
-        })
-        .unwrap_err();
-    assert!(matches!(error, FileError::Io { .. }));
-    assert_eq!(file.read_optional().unwrap().unwrap(), b"partial");
-    file.remove().unwrap();
-    let failure = std::panic::catch_unwind(|| {
-        file.create(|out| -> io::Result<()> {
-            out.write_all(b"partial")?;
-            panic!("source panicked");
-        })
-    });
-    assert!(failure.is_err());
-    assert_eq!(file.read_optional().unwrap().unwrap(), b"partial");
+    drop(file.create_writer().unwrap());
+    assert_eq!(file.read_optional().unwrap().unwrap(), b"");
     file.remove().unwrap();
     assert!(file.read_optional().unwrap().is_none());
 }

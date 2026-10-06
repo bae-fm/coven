@@ -2604,6 +2604,28 @@ impl IdSource for UuidIds {
 /// One store's directory; its path and store id are private (§20.1).
 pub struct StoreDir { /* private fields */ }
 
+/// One named file capability; its filesystem path stays private (§21.2).
+pub struct AtomicFile { /* private fields */ }
+
+/// An unpublished file's writer; dropping it leaves its recorded name (§16.6).
+pub struct FileWriter { /* private fields */ }
+
+impl AtomicFile {
+    /// Create without replacing anything, after recording the name in
+    /// coven_file_removals. Call this filesystem operation off the async thread.
+    pub fn create_writer(&self) -> Result<FileWriter, FileError>;
+}
+
+impl FileWriter {
+    /// Read the source asynchronously once in bounded chunks. Notify `written`
+    /// after each disk write; sync the bytes and directory before success.
+    pub async fn write_from<R: AsyncRead + Unpin>(
+        self,
+        reader: &mut R,
+        written: impl FnMut(&[u8]),
+    ) -> Result<(), FileError>;
+}
+
 /// The app directory under which each store has its own directory (§20.1).
 pub struct StoreLayout { /* private fields */ }
 
@@ -3401,7 +3423,9 @@ impl CovenHandle {
         R: Send + 'static;
 
     /// Runs one write that also hands coven app-provided files. `build` adds
-    /// the files, then `sql` runs the write that refers to them.
+    /// the files, then `sql` runs the write that refers to them. Streams are
+    /// read asynchronously before taking the transaction's writer; close waits
+    /// for staging and its cleanup, including cancellation.
     pub async fn write_with_files<F, S, R>(&self, build: F, sql: S) -> CovenResult<R>
     where
         F: FnOnce(&mut WriteBatch) -> CovenResult<()> + Send + 'static,

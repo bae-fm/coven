@@ -8,7 +8,7 @@ mod lock;
 mod observed_file;
 mod settings;
 
-pub use atomic_file::{AtomicFile, FileError};
+pub use atomic_file::{AtomicFile, FileError, FileWriter};
 pub use creation::StoreCreationError;
 pub use directory::{FileArea, FileName, FileNameError, StoreDir, StoreFile};
 pub use layout::{StoreInfo, StoreLayout, StoreLayoutError};

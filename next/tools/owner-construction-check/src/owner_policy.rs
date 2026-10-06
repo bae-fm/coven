@@ -48,6 +48,12 @@ pub(crate) const POLICY: Policy = Policy {
     // They do not acquire an unrelated directory or file for another owner.
     capability_factories: &[
         (
+            "crates/coven-foundation/src/files/atomic_file.rs",
+            "AtomicFile",
+            "create_writer",
+            "FileWriter",
+        ),
+        (
             "crates/coven-foundation/src/files/directory.rs",
             "StoreDir",
             "lock_exclusive",
@@ -90,6 +96,7 @@ pub(crate) const POLICY: Policy = Policy {
         "StoreLayout",
         "StoreDir",
         "AtomicFile",
+        "FileWriter",
         "StoreLock",
         "Keychain",
         "StoreKeychain",
@@ -114,6 +121,7 @@ pub(crate) const POLICY: Policy = Policy {
         "StoreDir",
         "StoreLock",
         "AtomicFile",
+        "FileWriter",
         "ClockRef",
         "IdSourceRef",
         "Keychain",
@@ -144,6 +152,7 @@ pub(crate) const POLICY: Policy = Policy {
     ],
     root_owner_types: &["Database", "CovenReadHandle"],
     task_types: &[
+        "FileStaging",
         "FileWrite",
         "FileRemovals",
         "SqlReadContext",
@@ -359,7 +368,10 @@ const CAPABILITIES: Capabilities = Capabilities {
     // There is no long-lived task or runtime construction in this graph.
     runtimes: Capability {
         name: "runtimes and spawned work",
-        homes: &["crates/coven-database/src/database.rs"],
+        homes: &[
+            "crates/coven-database/src/database.rs",
+            "crates/coven-database/src/file_staging.rs",
+        ],
         gates: &[
             Gate {
                 kind: "runtime construction",

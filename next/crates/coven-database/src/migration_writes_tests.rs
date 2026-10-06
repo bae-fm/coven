@@ -344,26 +344,24 @@ async fn a_sealed_prefix_stays_fixed_while_its_later_update_converts() {
 
 #[tokio::test]
 async fn another_applied_winner_is_preserved_while_older_waiting_writes_convert() {
-    let store = TestStore::new();
+    let ids = coven_foundation::id_source::SequentialIds::new();
+    let store = TestStore::with_ids(&ids);
+    let peer_store = TestStore::with_ids(&ids);
     let db = store.schema(notes(), NOTES).await.unwrap();
+    let peer = peer_store.schema(notes(), NOTES).await.unwrap();
     sql(&db, "INSERT INTO notes VALUES('42','one','body')")
         .await
         .unwrap();
-    let remote = coven_foundation::id_source::DeviceId(123);
-    db.inspect_writer_schema(|db, schema| {
-        db.local_write(schema, remote, std::time::SystemTime::UNIX_EPOCH, |sql| {
-            sql.execute_batch("UPDATE notes SET title='other device'")?;
-            Ok(())
-        })
-        .unwrap()
-    });
-    db.inspect_writer(|db| {
-        db.internal_execute(
-            "DELETE FROM coven_uploads WHERE device=?1",
-            [remote.0.to_be_bytes().as_slice()],
-        )
-        .unwrap()
-    });
+    peer.apply_downloaded(records(&db).remove(0).into())
+        .await
+        .unwrap();
+    sql(&peer, "UPDATE notes SET title='other device'")
+        .await
+        .unwrap();
+    let record = records(&peer).remove(0);
+    let remote = record.header.position.device;
+    db.apply_downloaded(record.into()).await.unwrap();
+    peer.close().await.unwrap();
     db.close().await.unwrap();
     let db = store
         .builder(notes(), vec![initial(), rename(2, "title", "name")])

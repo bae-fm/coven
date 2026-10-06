@@ -93,13 +93,9 @@ impl AtomicFile {
         replace(&self.path, bytes)
     }
 
-    /// Create a named file without replacing anything, streaming and syncing
-    /// its bytes before returning. The caller records the name before this call
-    /// and owns removal of partial bytes on failure or panic (§16.6).
-    pub fn create<T>(
-        &self,
-        write: impl FnOnce(&mut dyn Write) -> io::Result<T>,
-    ) -> Result<T, FileError> {
+    /// Create a named file for asynchronous streaming without replacing anything.
+    /// The caller records its name first and removes partial bytes after failure.
+    pub fn create_writer(&self) -> Result<FileWriter, FileError> {
         let directory = fs::canonicalize(parent(&self.path))
             .map_err(|source| FileError::at("resolve parent directory", &self.path, source))?;
         let name = self.path.file_name().ok_or_else(|| {
@@ -109,15 +105,13 @@ impl AtomicFile {
                 io::Error::new(io::ErrorKind::InvalidInput, "file name required"),
             )
         })?;
-        let mut file = create_new(&directory.join(name))
-            .map_err(|source| FileError::at("create owned file", &self.path, source))?;
-        let written = write(&mut file).and_then(|written| {
-            file.sync_all()?;
-            #[cfg(unix)]
-            sync_directory(&directory)?;
-            Ok(written)
-        });
-        written.map_err(|source| FileError::at("write and sync owned file", &self.path, source))
+        let path = directory.join(name);
+        let file = create_new(&path)
+            .map_err(|source| FileError::at("create owned file", &path, source))?;
+        Ok(FileWriter {
+            file: tokio::fs::File::from_std(file),
+            path,
+        })
     }
 
     /// Remove the owned file; an absent file is success. On Unix, sync the
@@ -145,6 +139,48 @@ impl AtomicFile {
             }
         }
         Ok(())
+    }
+}
+
+/// An unpublished file's open writer. Its OS handle and path stay private.
+/// Dropping it leaves the named bytes for the caller's recorded cleanup.
+pub struct FileWriter {
+    file: tokio::fs::File,
+    path: PathBuf,
+}
+
+impl FileWriter {
+    /// Read once in 64 KiB chunks, reporting each chunk after its disk write.
+    /// Sync the bytes and their directory before returning success.
+    pub async fn write_from<R: tokio::io::AsyncRead + Unpin>(
+        mut self,
+        reader: &mut R,
+        mut written: impl FnMut(&[u8]),
+    ) -> Result<(), FileError> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let result = async {
+            let mut buffer = [0; 64 * 1024];
+            loop {
+                let count = reader.read(&mut buffer).await?;
+                if count == 0 {
+                    break;
+                }
+                self.file.write_all(&buffer[..count]).await?;
+                // Tokio may return from write_all with a blocking write queued.
+                // Complete it before asking the source for another chunk.
+                self.file.flush().await?;
+                written(&buffer[..count]);
+            }
+            self.file.sync_all().await?;
+            #[cfg(unix)]
+            tokio::fs::File::open(parent(&self.path))
+                .await?
+                .sync_all()
+                .await?;
+            Ok(())
+        }
+        .await;
+        result.map_err(|source| FileError::at("stream and sync owned file", &self.path, source))
     }
 }
 

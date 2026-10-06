@@ -1,18 +1,26 @@
 //! Pending deletion remains durable until both the bytes and their record are gone.
 
+use std::collections::BTreeSet;
+
 use crate::{sqlite::DatabaseConnection, DbError};
 use coven_foundation::files::{FileArea, FileName, StoreDir};
 
 pub(crate) struct FileRemovals<'a> {
     database: &'a DatabaseConnection,
     directory: &'a StoreDir,
+    active: &'a BTreeSet<FileName>,
 }
 
 impl<'a> FileRemovals<'a> {
-    pub(crate) fn new(database: &'a DatabaseConnection, directory: &'a StoreDir) -> Self {
+    pub(crate) fn new(
+        database: &'a DatabaseConnection,
+        directory: &'a StoreDir,
+        active: &'a BTreeSet<FileName>,
+    ) -> Self {
         Self {
             database,
             directory,
+            active,
         }
     }
 
@@ -41,6 +49,9 @@ impl<'a> FileRemovals<'a> {
             for name in names {
                 let result = (|| {
                     let name = FileName::new(name).map_err(|_| DbError::DamagedDatabase)?;
+                    if self.active.contains(&name) {
+                        return Ok(());
+                    }
                     if database.query_row(
                         "SELECT EXISTS(SELECT 1 FROM coven_device_files WHERE path=?1)",
                         [name.as_str()],
