@@ -123,15 +123,18 @@ impl MergeRow {
 /// Why an entire write was excluded from the merged state (§17.1, §19.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LostWriteCause {
-    /// A breaking schema change the write had not read, including author-marked loss.
-    SchemaChange(EntryId),
+    /// The schema version reached by a breaking change, including author-marked loss.
+    SchemaChange(u32),
     /// A reset whose snapshot dropped one of the write's causes.
     Reset(EntryId),
 }
 impl LostWriteCause {
-    pub(crate) fn entry(self) -> EntryId {
+    pub(crate) fn validate(self) -> Result<(), Error> {
         match self {
-            Self::SchemaChange(e) | Self::Reset(e) => e,
+            Self::SchemaChange(version) => {
+                require(version > 0, "breaking schema version", FormatRule::Required)
+            }
+            Self::Reset(entry) => entry.validate(),
         }
     }
 }
@@ -165,17 +168,17 @@ impl Wire for LostWriteCause {
 pub struct LostWrite {
     /// The original header and this audience's part, including old/new values.
     pub write: WriteRecord,
-    /// The store-log entry that excluded it.
+    /// The breaking schema version or reset entry that excluded it.
     pub cause: LostWriteCause,
 }
 wire_struct!(LostWrite, write, cause);
 impl LostWrite {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         self.write.validate()?;
-        self.cause.entry().validate()?;
-        if let WriteDisposition::Lost(entry) = self.write.header.disposition {
+        self.cause.validate()?;
+        if let WriteDisposition::Lost(version) = self.write.header.disposition {
             require(
-                self.cause == LostWriteCause::SchemaChange(entry),
+                self.cause == LostWriteCause::SchemaChange(version),
                 "lost write disposition",
                 FormatRule::LostWriteCause,
             )?;

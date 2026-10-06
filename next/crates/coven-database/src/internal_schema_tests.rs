@@ -14,6 +14,51 @@ use coven_merge::{
 
 const NOTE_ID: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 
+#[tokio::test]
+async fn uploads_start_unattempted_and_retain_sealed_bytes_across_reopen() {
+    use crate::write::tests::{notes, records, sql, NOTES};
+    let store = TestStore::new();
+    let db = store.schema(notes(), NOTES).await.unwrap();
+    sql(&db, "INSERT INTO notes VALUES('42','title','body')")
+        .await
+        .unwrap();
+    let original = records(&db);
+    db.inspect_writer(|db| {
+        let sealed: Option<Vec<u8>> = db
+            .query_row("SELECT sealed_bytes FROM coven_uploads", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(sealed, None);
+        db.internal_execute(
+            "UPDATE coven_uploads SET sealed_bytes=?1",
+            [b"sealed upload".as_slice()],
+        )
+        .unwrap();
+    });
+    db.close().await.unwrap();
+    let db = store.schema(notes(), NOTES).await.unwrap();
+    assert_eq!(records(&db), original);
+    db.inspect_writer(|db| {
+        let sealed: Vec<u8> = db
+            .query_row("SELECT sealed_bytes FROM coven_uploads", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(sealed, b"sealed upload");
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM coven_uploads WHERE sealed_bytes IS NULL",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+    });
+    db.close().await.unwrap();
+}
+
 fn declarations() -> Vec<SyncedTable> {
     vec![SyncedTable::new("notes", RowIdentity::IndependentUuid)
         .key_columns(["id", "number"])
@@ -520,7 +565,7 @@ async fn a_lost_row_does_not_require_an_accepted_generation() {
         number: u64::MAX,
     };
     for cause in [
-        LostWriteCause::SchemaChange(entry),
+        LostWriteCause::SchemaChange(u32::MAX),
         LostWriteCause::Reset(entry),
     ] {
         db.inspect_writer(|sql| {

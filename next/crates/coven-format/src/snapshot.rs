@@ -160,7 +160,14 @@ impl SnapshotRecord {
             Self::LostWrite(v) => {
                 covered(v.write.header.position)?;
                 require(
-                    h.store_log.covers(v.cause.entry()),
+                    match v.cause {
+                        crate::snapshot_rows::LostWriteCause::SchemaChange(version) => {
+                            version <= h.schema_version
+                        }
+                        crate::snapshot_rows::LostWriteCause::Reset(entry) => {
+                            h.store_log.covers(entry)
+                        }
+                    },
                     "lost write cause",
                     Rule::Coverage,
                 )?;

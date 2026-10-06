@@ -38,7 +38,7 @@ pub struct LostCell {
     pub set_by: WriteId,
 }
 
-/// The write, rules or store-log entry responsible for a loss.
+/// The write, rules, breaking schema version or reset entry responsible for a loss.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Replacement {
     /// A write that had not read the displaced value.
@@ -46,7 +46,10 @@ pub enum Replacement {
     /// All removal rules holding for the row.
     Rules(Vec<RemovalRule>),
     /// A breaking schema change the write had not read.
-    SchemaChange(EntryId),
+    SchemaChange {
+        /// The schema version reached by the breaking change.
+        version: u32,
+    },
     /// A reset the write had not read.
     Reset(EntryId),
 }
@@ -171,7 +174,7 @@ impl LostRecord {
                     .collect(),
             ),
             "excluded" => match decoded(decode_lost_write_cause(&self.replacement))? {
-                LostWriteCause::SchemaChange(entry) => Replacement::SchemaChange(entry),
+                LostWriteCause::SchemaChange(version) => Replacement::SchemaChange { version },
                 LostWriteCause::Reset(entry) => Replacement::Reset(entry),
             },
             _ => return Err(DbError::DamagedDatabase.into()),

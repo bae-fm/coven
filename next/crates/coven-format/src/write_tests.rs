@@ -154,22 +154,16 @@ fn timestamp_had_read_and_parent_generation_are_checked() {
     refuses(write, Error::Merge(MergeError::ParentGeneration(2)));
 }
 #[test]
-fn schema_change_marker_uses_a_store_log_identity() {
+fn schema_change_marker_uses_a_positive_schema_version() {
     let mut write = test_utils::write();
-    write.header.disposition = WriteDisposition::Lost(EntryId {
-        device: DeviceId(1),
-        number: 1,
-    });
+    write.header.disposition = WriteDisposition::Lost(u32::MAX);
     let object = Object::Write(write.clone());
     assert_eq!(Object::decode(&object.encode().unwrap()).unwrap(), object);
-    write.header.disposition = WriteDisposition::Lost(EntryId {
-        device: DeviceId(1),
-        number: 0,
-    });
+    write.header.disposition = WriteDisposition::Lost(0);
     refuses(
         write,
         Error::Invalid {
-            field: "log number",
+            field: "breaking schema version",
             rule: Rule::Required,
         },
     );

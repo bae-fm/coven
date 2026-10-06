@@ -87,7 +87,7 @@ async fn losses_preserve_storage_classes_each_setter_and_every_replacement() {
         number: u64::MAX,
     };
     for cause in [
-        LostWriteCause::SchemaChange(entry),
+        LostWriteCause::SchemaChange(u32::MAX),
         LostWriteCause::Reset(entry),
     ] {
         insert(
@@ -146,7 +146,10 @@ async fn losses_preserve_storage_classes_each_setter_and_every_replacement() {
             RemovalRule::OtherAudience
         ])
     );
-    assert_eq!(losses[2].replaced_by, Replacement::SchemaChange(entry));
+    assert_eq!(
+        losses[2].replaced_by,
+        Replacement::SchemaChange { version: u32::MAX }
+    );
     assert_eq!(losses[3].replaced_by, Replacement::Reset(entry));
     db.close().await.unwrap();
     let ro = store

@@ -1,7 +1,7 @@
 //! A write's old values and merge-owned changes, split into audience parts (§5, §14.4).
 
 use crate::error::{require, Error, Rule};
-use crate::value::{name, positive, row, EntryId, Value, WritePositions};
+use crate::value::{name, positive, row, Value, WritePositions};
 use crate::wire::{wire_struct, Decoder, Encoder, Wire};
 use coven_merge::{Audience, Change, Operation, RowId, Timestamp, WriteId};
 use std::collections::BTreeMap;
@@ -37,8 +37,8 @@ impl WriteHeader {
             Rule::TimestampDevice,
         )?;
         self.had_read.own_before(self.position, false)?;
-        if let WriteDisposition::Lost(entry) = self.disposition {
-            entry.validate()?;
+        if let WriteDisposition::Lost(version) = self.disposition {
+            require(version > 0, "breaking schema version", Rule::Required)?;
         }
         Ok(())
     }
@@ -49,8 +49,8 @@ impl WriteHeader {
 pub enum WriteDisposition {
     /// Apply its changes under the merge rules.
     Apply,
-    /// Keep the whole write as lost, naming the breaking store-log entry.
-    Lost(EntryId),
+    /// Keep the whole write as lost, naming the version reached by the breaking change.
+    Lost(u32),
 }
 impl Wire for WriteDisposition {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {

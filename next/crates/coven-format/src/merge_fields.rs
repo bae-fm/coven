@@ -158,14 +158,14 @@ pub fn decode_rules(bytes: &[u8]) -> Result<BTreeSet<Rule>, Error> {
 
 /// Encode an excluded write’s replacement cause using its snapshot field bytes.
 pub fn encode_lost_write_cause(value: &LostWriteCause) -> Result<Vec<u8>, Error> {
-    value.entry().validate()?;
+    value.validate()?;
     encode(value)
 }
 
 /// Decode exactly one snapshot field containing an excluded write’s replacement cause.
 pub fn decode_lost_write_cause(bytes: &[u8]) -> Result<LostWriteCause, Error> {
     let value: LostWriteCause = decode(bytes)?;
-    value.entry().validate()?;
+    value.validate()?;
     Ok(value)
 }
 

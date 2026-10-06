@@ -147,7 +147,7 @@ pub fn member_removal() -> StoreLogEntry {
         },
     }
 }
-/// A breaking change or reset after the fixture's create-store entry.
+/// A reset after the fixture's create-store entry.
 pub fn loss_entry() -> EntryId {
     EntryId {
         device: DeviceId(1),
@@ -269,7 +269,7 @@ pub fn snapshot_header() -> SnapshotHeader {
             number: 1,
             audience: Audience::Store,
         },
-        schema_version: 1,
+        schema_version: 2,
         writes: WritePositions(vec![
             position(),
             WriteId {
@@ -295,7 +295,7 @@ pub fn snapshot_records() -> Vec<SnapshotRecord> {
     records.push(SnapshotRecord::Merge(merge_row()));
     records.push(SnapshotRecord::LostWrite(LostWrite {
         write: write(),
-        cause: LostWriteCause::SchemaChange(loss_entry()),
+        cause: LostWriteCause::SchemaChange(2),
     }));
     records
 }

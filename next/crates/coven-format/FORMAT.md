@@ -155,7 +155,9 @@ encoded through its `as_bytes` and decoded through `from_bytes`.
 had_read:WritePositions | schema_version:u32 | disposition`. The timestamp's
 device matches the write. Had-read contains other devices only; own earlier
 writes are implicit. Schema version zero is representable. Disposition is `0`
-to apply or `1 | breaking_change:EntryId` to upload the write marked lost.
+to apply or `1 | breaking_version:u32` to upload the write marked lost.
+The breaking version is positive and names the version the change raised the
+store to.
 
 `WritePart` is `audience:Audience | rows:[RowChange]`. Parts and their row lists
 are nonempty and strictly ordered by audience and `RowId`, respectively.
@@ -252,11 +254,13 @@ present in merge state; DeletedCircle and OtherAudience rules require a circle.
 Which removal rules actually hold is established by the removal computation.
 
 `LostWrite` is `write:WriteRecord | cause:LostWriteCause`. Cause is
-`0 | schema_entry:EntryId` or `1 | reset_entry:EntryId`. These writes were never
+`0 | schema_version:u32` or `1 | reset_entry:EntryId`. These writes were never
 applied; nothing in the merged state replaced them. The record contains only
 the snapshot audience's part, exactly one part. The producer filters parts;
 the codec refuses a mismatched or multi-audience record. If the write header
-contains `WriteDisposition::Lost(e)`, its cause must be `SchemaChange(e)`.
+contains `WriteDisposition::Lost(version)`, its cause must be
+`SchemaChange(version)`. A schema-change cause is positive and no greater than
+the snapshot schema version.
 Merge's lost values and these lost writes remain separate; the database owns
 presenting both through its `coven_lost` API.
 
@@ -268,8 +272,8 @@ Lost writes are excluded from that oracle. This lets a database supply indexed
 metadata without collecting the snapshot in memory.
 
 The stream checks ordering, duplicates, audience, counts, and coverage of all
-referenced write ids and store-log causes. Header write positions describe
-consumed writes, including lost writes; a lost write's excluded dependencies
+referenced write ids, reset entries and breaking schema versions. Header write
+positions describe consumed writes, including lost writes; a lost write's excluded dependencies
 need not be covered. Applied write read positions must be covered. Every failed
 call leaves the cursor unchanged. EOF without the end marker is truncation.
 The consumer commits staged records only after `finish` succeeds. Cross-section

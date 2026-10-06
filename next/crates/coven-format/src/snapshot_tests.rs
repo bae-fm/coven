@@ -331,7 +331,7 @@ fn merge_owns_snapshot_row_invariants_and_a_rejected_row_can_be_retried() {
 fn lost_writes_preserve_both_causes_and_require_matching_author_markers() {
     let entry = test_utils::loss_entry();
     for cause in [
-        LostWriteCause::SchemaChange(entry),
+        LostWriteCause::SchemaChange(1),
         LostWriteCause::Reset(entry),
     ] {
         round_trip(
@@ -343,17 +343,17 @@ fn lost_writes_preserve_both_causes_and_require_matching_author_markers() {
         );
     }
     let mut write = test_utils::write();
-    write.header.disposition = crate::write::WriteDisposition::Lost(entry);
+    write.header.disposition = crate::write::WriteDisposition::Lost(1);
     round_trip(
         SnapshotRecord::LostWrite(LostWrite {
             write: write.clone(),
-            cause: LostWriteCause::SchemaChange(entry),
+            cause: LostWriteCause::SchemaChange(1),
         }),
         Audience::Store,
     );
     for cause in [
         LostWriteCause::Reset(entry),
-        LostWriteCause::SchemaChange(crate::value::EntryId { number: 3, ..entry }),
+        LostWriteCause::SchemaChange(2),
     ] {
         let record = SnapshotRecord::LostWrite(LostWrite {
             write: write.clone(),
@@ -483,4 +483,32 @@ fn snapshot_fixture_classifies_every_consumed_write_once() {
             }));
         }
     }
+}
+#[test]
+fn schema_loss_coverage_uses_the_snapshot_version_without_a_store_log_entry() {
+    let mut header = single_header(4, Audience::Store, 1);
+    header.schema_version = 7;
+    header.store_log.0.clear();
+    let (mut writer, first) = SnapshotEncoder::start(header).unwrap();
+    let mut reader = SnapshotDecoder::start(&first).unwrap();
+    let make = |version| {
+        SnapshotRecord::LostWrite(LostWrite {
+            write: test_utils::write(),
+            cause: LostWriteCause::SchemaChange(version),
+        })
+    };
+    for record in [make(0), make(8)] {
+        assert!(writer.record(record.clone()).is_err());
+        assert!(reader.frame(&raw(&record), &test_utils::oracle()).is_err());
+    }
+    assert_eq!(
+        reader
+            .frame(&writer.record(make(7)).unwrap(), &test_utils::oracle())
+            .unwrap(),
+        Some(make(7))
+    );
+    reader
+        .frame(&writer.finish().unwrap(), &test_utils::oracle())
+        .unwrap();
+    reader.finish().unwrap();
 }

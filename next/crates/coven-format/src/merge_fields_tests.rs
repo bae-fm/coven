@@ -329,3 +329,15 @@ fn unique_identity_retains_terms_order_and_partial_predicate() {
         assert!(decode_unique_constraint(&encode(&identity).unwrap()).is_err());
     }
 }
+#[test]
+fn schema_loss_uses_a_positive_u32_while_reset_retains_its_entry() {
+    use crate::snapshot_rows::LostWriteCause;
+    for version in [1, u32::MAX] {
+        let cause = LostWriteCause::SchemaChange(version);
+        let bytes = encode_lost_write_cause(&cause).unwrap();
+        assert_eq!(bytes, [vec![0], version.to_be_bytes().to_vec()].concat());
+        assert_eq!(decode_lost_write_cause(&bytes).unwrap(), cause);
+    }
+    assert!(encode_lost_write_cause(&LostWriteCause::SchemaChange(0)).is_err());
+    assert!(decode_lost_write_cause(&[0, 0, 0, 0, 0]).is_err());
+}
