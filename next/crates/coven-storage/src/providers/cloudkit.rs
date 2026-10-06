@@ -99,7 +99,8 @@ pub trait CloudKitOps: Send + Sync {
         location: &StorageConfig,
         id: &SecretText,
     ) -> Result<(), StorageError>;
-    /// Discard pending parts without deleting a published object.
+    /// Discard pending parts without deleting a published object. Already closed
+    /// or absent sessions may return success or a classified not-found error.
     async fn abort_upload(
         &self,
         location: &StorageConfig,
@@ -261,7 +262,10 @@ impl Storage for CloudKitStorage {
         if session.is_complete() {
             return Ok(());
         }
-        self.ops.abort_upload(&self.config, self.id(session)?).await
+        match self.ops.abort_upload(&self.config, self.id(session)?).await {
+            Err(error) if error.failure() == StorageFailure::NotFound => Ok(()),
+            result => result,
+        }
     }
 }
 

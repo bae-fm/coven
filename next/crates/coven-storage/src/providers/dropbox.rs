@@ -160,6 +160,46 @@ impl DropboxStorage {
         Ok(())
     }
 }
+enum UploadLookup {
+    Offset { confirmed: u64, cause: StorageError },
+    Gone,
+}
+fn upload_lookup(
+    error: StorageError,
+    confirmed: u64,
+    total: u64,
+) -> Result<UploadLookup, StorageError> {
+    let StorageError::Provider { source, .. } = &error else {
+        return Err(error);
+    };
+    let Some(response) = source.downcast_ref::<http::ProviderResponse>() else {
+        return Err(error);
+    };
+    let value: Value = match serde_json::from_slice(response.body()) {
+        Ok(value) => value,
+        // Preserve the provider failure, including a non-JSON body, for the caller.
+        Err(_) => return Err(error),
+    };
+    match value["error"][".tag"].as_str() {
+        Some("not_found" | "closed") => Ok(UploadLookup::Gone),
+        Some("incorrect_offset") => {
+            let offset = value["error"]["correct_offset"].as_u64();
+            match offset {
+                Some(offset) if offset > confirmed && offset <= total => Ok(UploadLookup::Offset {
+                    confirmed: offset,
+                    cause: error,
+                }),
+                _ => Err(http::invalid_response(
+                    PROVIDER,
+                    response.status(),
+                    response.body().to_vec(),
+                )),
+            }
+        }
+        _ => Err(error),
+    }
+}
+
 fn ascii_json(value: &Value) -> String {
     let mut result = String::new();
     for character in value.to_string().chars() {
@@ -347,47 +387,31 @@ impl Storage for DropboxStorage {
             return Ok(());
         }
         let error = http::response_error(PROVIDER, response).await;
-        if let StorageError::Provider { source, .. } = &error {
-            if let Some(response) = source.downcast_ref::<http::ProviderResponse>() {
-                let value: Value = serde_json::from_slice(response.body())
-                    .map_err(|error| StorageError::Encoding(Box::new(error)))?;
-                if value["error"][".tag"].as_str() == Some("incorrect_offset") {
-                    let offset = value["error"]["correct_offset"]
-                        .as_u64()
-                        .ok_or(StorageError::Protocol("Dropbox omitted confirmed offset"))?;
-                    if offset < session.confirmed || offset > session.total {
-                        return Err(StorageError::Protocol(
-                            "Dropbox upload offset outside session",
-                        ));
+        match upload_lookup(error, session.confirmed, session.total)? {
+            UploadLookup::Offset { confirmed, .. } => {
+                session.confirmed = confirmed;
+                Ok(())
+            }
+            UploadLookup::Gone => {
+                let value = match self
+                    .rpc(
+                        "files/get_metadata",
+                        json!({"path":session.path.absolute()}),
+                    )
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(error) if error.failure() == StorageFailure::NotFound => {
+                        return Err(StorageError::SessionExpired)
                     }
-                    session.confirmed = offset;
-                    return Ok(());
-                }
-                if matches!(
-                    value["error"][".tag"].as_str(),
-                    Some("not_found" | "closed")
-                ) {
-                    let value = match self
-                        .rpc(
-                            "files/get_metadata",
-                            json!({"path":session.path.absolute()}),
-                        )
-                        .await
-                    {
-                        Ok(value) => value,
-                        Err(error) if error.failure() == StorageFailure::NotFound => {
-                            return Err(StorageError::SessionExpired)
-                        }
-                        Err(error) => return Err(error),
-                    };
-                    check_file(&value, &session.path, session.total)?;
-                    session.confirmed = 0;
-                    session.state = SessionState::VerifyPublished;
-                    return Ok(());
-                }
+                    Err(error) => return Err(error),
+                };
+                check_file(&value, &session.path, session.total)?;
+                session.confirmed = 0;
+                session.state = SessionState::VerifyPublished;
+                Ok(())
             }
         }
-        Err(error)
     }
     async fn upload_part(
         &self,
@@ -423,9 +447,32 @@ impl Storage for DropboxStorage {
         if session.is_complete() || matches!(session.state, SessionState::VerifyPublished) {
             return Ok(());
         }
-        let response = self.content("files/upload_session/append_v2",json!({"cursor":{"session_id":self.id(session)?,"offset":session.confirmed},"close":true}),Vec::new(),None).await?;
-        http::checked(PROVIDER, response).await?;
-        Ok(())
+        let mut offset = session.confirmed;
+        let mut retried = false;
+        loop {
+            let response = self
+                .content(
+                    "files/upload_session/append_v2",
+                    json!({"cursor":{"session_id":self.id(session)?,"offset":offset},"close":true}),
+                    Vec::new(),
+                    None,
+                )
+                .await?;
+            if response.status().is_success() {
+                return Ok(());
+            }
+            let error = http::response_error(PROVIDER, response).await;
+            match upload_lookup(error, offset, session.total)? {
+                UploadLookup::Gone => return Ok(()),
+                UploadLookup::Offset { confirmed, cause } => {
+                    if retried {
+                        return Err(cause);
+                    }
+                    offset = confirmed;
+                    retried = true;
+                }
+            }
+        }
     }
 }
 

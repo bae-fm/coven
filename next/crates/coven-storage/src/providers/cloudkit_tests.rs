@@ -238,3 +238,25 @@ async fn expired_bridge_session_restarts_from_retained_bytes() {
     storage.finish_upload(&mut replacement).await.unwrap();
     assert_eq!(storage.read(&path).await.unwrap(), b"abcde");
 }
+
+#[tokio::test]
+async fn abort_accepts_a_forgotten_session_and_keeps_published_objects() {
+    let bridge = Arc::new(Bridge::new());
+    let storage = CloudKitStorage::new(config(), bridge.clone()).unwrap();
+    let path = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    let upload = storage.begin_upload(&path, 4).await.unwrap();
+    storage.abort_upload(&upload).await.unwrap();
+    bridge.uploads.lock().await.clear();
+    storage.abort_upload(&upload).await.unwrap();
+    let mut upload = storage.begin_upload(&path, 4).await.unwrap();
+    storage.upload_part(&mut upload, b"data").await.unwrap();
+    let unconfirmed = upload.clone();
+    storage.finish_upload(&mut upload).await.unwrap();
+    storage.abort_upload(&unconfirmed).await.unwrap();
+    bridge.uploads.lock().await.clear();
+    storage.abort_upload(&unconfirmed).await.unwrap();
+    assert_eq!(storage.read(&path).await.unwrap(), b"data");
+}

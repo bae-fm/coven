@@ -19,6 +19,7 @@ struct Remote {
     uploads: BTreeMap<String, BTreeMap<u32, Vec<u8>>>,
     metadata: BTreeMap<String, String>,
     fail_part_reply: bool,
+    fail_completion_reply: bool,
     forced_error: Option<(&'static str, u16)>,
 }
 async fn endpoint(
@@ -82,9 +83,14 @@ async fn endpoint(
             state
                 .objects
                 .insert(key, parts.into_values().flatten().collect());
+            if std::mem::replace(&mut state.fail_completion_reply, false) {
+                return response(503, "<Error><Code>ServiceUnavailable</Code></Error>");
+            }
             return response(200,"<CompleteMultipartUploadResult><ETag>\"complete\"</ETag></CompleteMultipartUploadResult>");
         }
-        state.uploads.remove(&key);
+        if state.uploads.remove(&key).is_none() {
+            return response(404, "<Error><Code>NoSuchUpload</Code></Error>");
+        }
         return response(204, Vec::new());
     }
     if q.contains_key("list-type") {
@@ -314,5 +320,26 @@ async fn missing_session_and_destination_is_expired() {
         .await
         .unwrap();
     storage.finish_upload(&mut replacement).await.unwrap();
+    assert_eq!(storage.read(&path).await.unwrap(), b"data");
+}
+
+#[tokio::test]
+async fn abort_retries_and_preserves_an_object_after_a_lost_completion_reply() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let path = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    let upload = storage.begin_upload(&path, 4).await.unwrap();
+    storage.abort_upload(&upload).await.unwrap();
+    storage.abort_upload(&upload).await.unwrap();
+    let mut upload = storage.begin_upload(&path, 4).await.unwrap();
+    storage.upload_part(&mut upload, b"data").await.unwrap();
+    state.lock().unwrap().fail_completion_reply = true;
+    assert!(storage.finish_upload(&mut upload).await.is_err());
+    storage.abort_upload(&upload).await.unwrap();
+    storage.abort_upload(&upload).await.unwrap();
     assert_eq!(storage.read(&path).await.unwrap(), b"data");
 }

@@ -110,8 +110,12 @@ fn respond(
     if parts.first() == Some(&"session") {
         let id = parts[1].to_owned();
         if method == Method::DELETE {
-            state.uploads.remove(&id);
-            return response(204, Vec::new());
+            let status = if state.uploads.remove(&id).is_some() {
+                499
+            } else {
+                404
+            };
+            return response(status, Vec::new());
         }
         if let Some((metadata, _)) = state.files.get(&id) {
             return reply(metadata.clone());
@@ -513,4 +517,26 @@ async fn first_positions_write_uses_one_content_request() {
     storage.replace(&path, b"next").await.unwrap();
     assert_eq!(state.lock().unwrap().single_uploads, 1);
     assert_eq!(storage.read(&path).await.unwrap(), b"next");
+}
+
+#[tokio::test]
+async fn abort_retries_after_cancellation_and_preserves_published_objects() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let path = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    let upload = storage.begin_upload(&path, 4).await.unwrap();
+    storage.abort_upload(&upload).await.unwrap();
+    storage.abort_upload(&upload).await.unwrap();
+    assert!(state.lock().unwrap().uploads.is_empty());
+    let mut upload = storage.begin_upload(&path, 4).await.unwrap();
+    let recorded = upload.encode().unwrap();
+    storage.upload_part(&mut upload, b"data").await.unwrap();
+    let unconfirmed = UploadSession::decode(recorded.as_bytes()).unwrap();
+    storage.abort_upload(&unconfirmed).await.unwrap();
+    storage.abort_upload(&unconfirmed).await.unwrap();
+    assert_eq!(storage.read(&path).await.unwrap(), b"data");
 }

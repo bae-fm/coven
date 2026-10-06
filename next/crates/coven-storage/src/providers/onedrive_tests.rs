@@ -43,8 +43,12 @@ async fn endpoint(
     if let Some(id) = uri.path().strip_prefix("/session/") {
         assert!(headers.get("authorization").is_none());
         if method == Method::DELETE {
-            state.uploads.remove(id);
-            return response(204, Vec::new());
+            let status = if state.uploads.remove(id).is_some() {
+                204
+            } else {
+                404
+            };
+            return response(status, Vec::new());
         }
         if method == Method::GET && state.uploads.contains_key(id) {
             if let Some(ranges) = &state.expected_ranges {
@@ -392,4 +396,26 @@ async fn refreshed_tokens_reach_the_same_adapter() {
         json!({"value":[]}),
     )
     .await;
+}
+
+#[tokio::test]
+async fn abort_retries_after_cancellation_and_preserves_published_objects() {
+    let state = remote();
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let path = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    let upload = storage.begin_upload(&path, 4).await.unwrap();
+    storage.abort_upload(&upload).await.unwrap();
+    storage.abort_upload(&upload).await.unwrap();
+    assert!(state.lock().unwrap().uploads.is_empty());
+    let mut upload = storage.begin_upload(&path, 4).await.unwrap();
+    let recorded = upload.encode().unwrap();
+    storage.upload_part(&mut upload, b"data").await.unwrap();
+    let unconfirmed = UploadSession::decode(recorded.as_bytes()).unwrap();
+    storage.abort_upload(&unconfirmed).await.unwrap();
+    storage.abort_upload(&unconfirmed).await.unwrap();
+    assert_eq!(storage.read(&path).await.unwrap(), b"data");
 }

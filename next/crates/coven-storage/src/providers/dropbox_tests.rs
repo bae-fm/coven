@@ -16,6 +16,8 @@ struct Remote {
     upload: Vec<u8>,
     fail_reply: bool,
     closed: bool,
+    missing: bool,
+    close_requests: Vec<u64>,
     members: BTreeSet<String>,
     range_reads: usize,
 }
@@ -93,6 +95,18 @@ async fn endpoint(
         }
         "/2/files/upload_session/append_v2" => {
             assert_eq!(arg["cursor"]["session_id"], "session");
+            if arg["close"] == true {
+                state
+                    .close_requests
+                    .push(arg["cursor"]["offset"].as_u64().unwrap());
+            }
+            if state.missing {
+                return response(
+                    409,
+                    json!({"error_summary":"not_found/...","error":{".tag":"not_found"}})
+                        .to_string(),
+                );
+            }
             if state.closed {
                 return response(
                     409,
@@ -103,6 +117,9 @@ async fn endpoint(
                 return response(409,json!({"error_summary":"incorrect_offset/...","error":{".tag":"incorrect_offset","correct_offset":state.upload.len()}}).to_string());
             }
             state.upload.extend_from_slice(&body);
+            if arg["close"] == true {
+                state.closed = true;
+            }
             if std::mem::replace(&mut state.fail_reply, false) {
                 return response(503, "{}");
             }
@@ -284,4 +301,70 @@ async fn refreshed_tokens_reach_the_same_adapter() {
         json!({"entries":[],"has_more":false}),
     )
     .await;
+}
+
+#[tokio::test]
+async fn abort_retries_a_lost_close_and_accepts_an_expired_session() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let path = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    let upload = storage.begin_upload(&path, 4).await.unwrap();
+    state.lock().unwrap().fail_reply = true;
+    assert_eq!(
+        storage.abort_upload(&upload).await.unwrap_err().failure(),
+        StorageFailure::Network
+    );
+    assert!(state.lock().unwrap().closed);
+    storage.abort_upload(&upload).await.unwrap();
+    state.lock().unwrap().missing = true;
+    storage.abort_upload(&upload).await.unwrap();
+    assert!(state.lock().unwrap().objects.is_empty());
+}
+
+#[tokio::test]
+async fn abort_uses_the_remote_offset_after_a_lost_part_reply() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let path = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    let mut upload = storage.begin_upload(&path, 4).await.unwrap();
+    state.lock().unwrap().fail_reply = true;
+    assert_eq!(
+        storage
+            .upload_part(&mut upload, b"data")
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageFailure::Network
+    );
+    assert_eq!(upload.confirmed_bytes(), 0);
+    storage.abort_upload(&upload).await.unwrap();
+    assert_eq!(state.lock().unwrap().close_requests, [0, 4]);
+    assert!(state.lock().unwrap().closed);
+    storage.abort_upload(&upload).await.unwrap();
+    assert!(state.lock().unwrap().objects.is_empty());
+}
+
+#[tokio::test]
+async fn abort_does_not_remove_an_upload_published_before_a_lost_reply() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let path = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    let mut upload = storage.begin_upload(&path, 4).await.unwrap();
+    storage.upload_part(&mut upload, b"data").await.unwrap();
+    state.lock().unwrap().fail_reply = true;
+    assert!(storage.finish_upload(&mut upload).await.is_err());
+    storage.abort_upload(&upload).await.unwrap();
+    assert_eq!(storage.read(&path).await.unwrap(), b"data");
 }
