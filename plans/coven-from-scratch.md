@@ -1931,8 +1931,13 @@ Carol's tablet:
     changed.
   - A cell the migration left as it was keeps the write that set it, so a
     late write competes with that write, not with the migration.
-  - A table or column renamed with `ALTER TABLE … RENAME` keeps its cells'
-    writes under its new name; a dropped one loses them.
+  - Only the tables before and after count, not the statements between:
+    a table or column after the migration is the same one if it has the
+    same name, or was renamed to it with `ALTER TABLE … RENAME` from one
+    that existed before.
+  - So a renamed column keeps its cells' writes under its new name, and so
+    does a table rebuilt by copying it into a new one and renaming that
+    back; a table or column with no match after the migration loses them.
   - E.g. Ana's migration renames `title` to `name` and fills a new column
     `slug` from it: each note's `name` keeps the write that last set its
     title, and each `slug` is set by the migration write.
