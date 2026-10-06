@@ -842,6 +842,11 @@ Carol's tablet:
   - The cell still names the write whose reference won; it only reads as
     null or the default, and later writes to it compete with that write's
     timestamp, as with any cell. Nothing is recorded as lost.
+  - Coven's merge records keep the reference as written, and its parent
+    generation: the cell reads as null or the default while that
+    generation is deleted, and as written again if a reset brings the
+    generation back ([§19.3](#193-resetting-a-store)). Snapshots carry the
+    reference as written.
   - E.g. links point at notes with set null, and three writes happen:
 
     ```
