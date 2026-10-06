@@ -61,26 +61,32 @@ macro_rules! coven_tables {
                 PRIMARY KEY(circle,member)
             ) STRICT, WITHOUT ROWID;
         ");
-        $visit!(coven_store_state, "
-            CREATE TABLE coven_store_state (
-                kind TEXT NOT NULL CHECK(kind IN ('store','schema','format','reset')),
+        $visit!(coven_store, "
+            CREATE TABLE coven_store (
+                id TEXT PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL,
+                key BLOB NOT NULL CHECK(length(key)=16)
+            ) STRICT, WITHOUT ROWID;
+            CREATE UNIQUE INDEX coven_one_store ON coven_store ((1));
+        ");
+        $visit!(coven_versions, "
+            CREATE TABLE coven_versions (
                 audience TEXT NOT NULL,
-                store TEXT,
-                name TEXT,
-                key BLOB CHECK(length(key)=16),
-                version INTEGER CHECK(version>0),
-                snapshot_device BLOB CHECK(length(snapshot_device)=8),
-                snapshot_number BLOB CHECK(length(snapshot_number)=8 AND snapshot_number>x'0000000000000000'),
-                entry_device BLOB CHECK(length(entry_device)=8),
-                entry_number BLOB CHECK(length(entry_number)=8),
-                PRIMARY KEY(kind,audience),
-                FOREIGN KEY(entry_device,entry_number) REFERENCES coven_store_log(device,number),
-                CHECK((kind='store' AND audience='store' AND store IS NOT NULL AND name IS NOT NULL AND key IS NOT NULL
-                        AND version IS NULL AND snapshot_device IS NULL AND snapshot_number IS NULL AND entry_device IS NULL AND entry_number IS NULL)
-                   OR (kind IN ('schema','format') AND store IS NULL AND name IS NULL AND key IS NULL
-                        AND version IS NOT NULL AND snapshot_device IS NOT NULL AND snapshot_number IS NOT NULL AND entry_device IS NOT NULL AND entry_number IS NOT NULL)
-                   OR (kind='reset' AND store IS NULL AND name IS NULL AND key IS NULL AND version IS NULL
-                        AND snapshot_device IS NOT NULL AND snapshot_number IS NOT NULL AND entry_device IS NULL AND entry_number IS NULL))
+                kind TEXT NOT NULL CHECK(kind IN ('schema','format')),
+                version INTEGER NOT NULL CHECK(version>0),
+                snapshot_device BLOB NOT NULL CHECK(length(snapshot_device)=8),
+                snapshot_number BLOB NOT NULL CHECK(length(snapshot_number)=8 AND snapshot_number>x'0000000000000000'),
+                entry_device BLOB NOT NULL CHECK(length(entry_device)=8),
+                entry_number BLOB NOT NULL CHECK(length(entry_number)=8),
+                PRIMARY KEY(audience,kind),
+                FOREIGN KEY(entry_device,entry_number) REFERENCES coven_store_log(device,number)
+            ) STRICT, WITHOUT ROWID;
+        ");
+        $visit!(coven_resets, "
+            CREATE TABLE coven_resets (
+                audience TEXT PRIMARY KEY NOT NULL,
+                snapshot_device BLOB NOT NULL CHECK(length(snapshot_device)=8),
+                snapshot_number BLOB NOT NULL CHECK(length(snapshot_number)=8 AND snapshot_number>x'0000000000000000')
             ) STRICT, WITHOUT ROWID;
         ");
         $visit!(coven_applied_boundaries, "

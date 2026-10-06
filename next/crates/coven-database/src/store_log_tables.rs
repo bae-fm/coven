@@ -1,4 +1,4 @@
-//! Store-log values in the six local tables. No replay decisions happen here.
+//! Store-log values in their local tables. No replay decisions happen here.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -153,29 +153,39 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
             .insert(member);
     }
     state.store = database
-        .query(
-            "SELECT store,name,key FROM coven_store_state WHERE kind='store'",
-            [],
-            |row| {
-                let text: String = row.get(0)?;
-                let id = uuid::Uuid::parse_str(&text).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
-                })?;
-                Ok(StoreIdentity {
-                    id: StoreId(id),
-                    name: row.get(1)?,
-                    key: KeyId(uuid::Uuid::from_bytes(row.get(2)?)),
-                })
-            },
-        )?
+        .query("SELECT id,name,key FROM coven_store", [], |row| {
+            let text: String = row.get(0)?;
+            let id = uuid::Uuid::parse_str(&text).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
+            })?;
+            Ok(StoreIdentity {
+                id: StoreId(id),
+                name: row.get(1)?,
+                key: KeyId(uuid::Uuid::from_bytes(row.get(2)?)),
+            })
+        })?
         .into_iter()
         .next();
     state.schema = read_versions(database, "schema")?;
     state.format = read_versions(database, "format")?;
-    state.resets = database.query("SELECT audience,snapshot_device,snapshot_number FROM coven_store_state WHERE kind='reset'", [], |row| {
-        let audience = audience(&row.get::<_, String>(0)?)?;
-        Ok((audience.clone(), SnapshotId { audience, device: DeviceId(counter(row.get(1)?)), number: counter(row.get(2)?) }))
-    })?.into_iter().collect();
+    state.resets = database
+        .query(
+            "SELECT audience,snapshot_device,snapshot_number FROM coven_resets",
+            [],
+            |row| {
+                let audience = audience(&row.get::<_, String>(0)?)?;
+                Ok((
+                    audience.clone(),
+                    SnapshotId {
+                        audience,
+                        device: DeviceId(counter(row.get(1)?)),
+                        number: counter(row.get(2)?),
+                    },
+                ))
+            },
+        )?
+        .into_iter()
+        .collect();
     Ok(log)
 }
 
@@ -183,7 +193,7 @@ fn read_versions<N: FromSql>(
     database: &DatabaseConnection,
     kind: &str,
 ) -> Result<BTreeMap<Audience, StoreVersion<N>>, DbError> {
-    Ok(database.query("SELECT version,snapshot_device,snapshot_number,entry_device,entry_number,audience FROM coven_store_state WHERE kind=?1", [kind], |row| {
+    Ok(database.query("SELECT version,snapshot_device,snapshot_number,entry_device,entry_number,audience FROM coven_versions WHERE kind=?1", [kind], |row| {
         let audience = audience(&row.get::<_, String>(5)?)?;
         Ok((audience.clone(), StoreVersion { number: row.get(0)?, snapshot: SnapshotId { audience, device: DeviceId(counter(row.get(1)?)), number: counter(row.get(2)?) }, entry: entry_id(row, 3)? }))
     })?.into_iter().collect())
@@ -211,7 +221,9 @@ pub(crate) fn replace(
         "coven_devices",
         "coven_circles",
         "coven_members",
-        "coven_store_state",
+        "coven_store",
+        "coven_versions",
+        "coven_resets",
     ] {
         database.internal_execute(&format!("DELETE FROM {table}"), [])?;
     }
@@ -260,7 +272,14 @@ pub(crate) fn replace(
         }
     }
     if let Some(store) = &state.store {
-        database.internal_execute("INSERT INTO coven_store_state(kind,audience,store,name,key) VALUES('store','store',?1,?2,?3)", (store.id.to_string(), &store.name, store.key.0.as_bytes().as_slice()))?;
+        database.internal_execute(
+            "INSERT INTO coven_store(id,name,key) VALUES(?1,?2,?3)",
+            (
+                store.id.to_string(),
+                &store.name,
+                store.key.0.as_bytes().as_slice(),
+            ),
+        )?;
     }
     for (audience, version) in &state.schema {
         put_version(database, "schema", audience, version)?;
@@ -269,7 +288,14 @@ pub(crate) fn replace(
         put_version(database, "format", audience, version)?;
     }
     for (audience, snapshot) in &state.resets {
-        database.internal_execute("INSERT INTO coven_store_state(kind,audience,snapshot_device,snapshot_number) VALUES('reset',?1,?2,?3)", (audience_text(audience), snapshot.device.0.to_be_bytes().as_slice(), snapshot.number.to_be_bytes().as_slice()))?;
+        database.internal_execute(
+            "INSERT INTO coven_resets(audience,snapshot_device,snapshot_number) VALUES(?1,?2,?3)",
+            (
+                audience_text(audience),
+                snapshot.device.0.to_be_bytes().as_slice(),
+                snapshot.number.to_be_bytes().as_slice(),
+            ),
+        )?;
     }
     Ok(())
 }
@@ -280,6 +306,6 @@ fn put_version<N: ToSql>(
     audience: &Audience,
     version: &StoreVersion<N>,
 ) -> Result<(), DbError> {
-    database.internal_execute("INSERT INTO coven_store_state(kind,audience,version,snapshot_device,snapshot_number,entry_device,entry_number) VALUES(?1,?2,?3,?4,?5,?6,?7)", params![kind, audience_text(audience), version.number, version.snapshot.device.0.to_be_bytes().as_slice(), version.snapshot.number.to_be_bytes().as_slice(), version.entry.device.0.to_be_bytes().as_slice(), version.entry.number.to_be_bytes().as_slice()])?;
+    database.internal_execute("INSERT INTO coven_versions(kind,audience,version,snapshot_device,snapshot_number,entry_device,entry_number) VALUES(?1,?2,?3,?4,?5,?6,?7)", params![kind, audience_text(audience), version.number, version.snapshot.device.0.to_be_bytes().as_slice(), version.snapshot.number.to_be_bytes().as_slice(), version.entry.device.0.to_be_bytes().as_slice(), version.entry.number.to_be_bytes().as_slice()])?;
     Ok(())
 }

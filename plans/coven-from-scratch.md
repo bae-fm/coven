@@ -1219,8 +1219,10 @@ Carol's tablet:
     `coven_devices` (every device a kept entry added, its member and name,
     and whether it was removed), `coven_circles` (every circle a kept
     entry made, its name and current key's id, and whether it was deleted),
-    `coven_circle_members`, and `coven_store_state` (the current store
-    key's id, and each audience's schema and format versions and reset).
+    `coven_circle_members`, `coven_store` (one row: the store's id, name,
+    and current key's id), `coven_versions` (one row per audience and
+    schema or format kind: its version, snapshot, and raise entry), and
+    `coven_resets` (each audience's reset snapshot).
   - Keys themselves are only ever in key custody
     ([§11](#11-keys)); these tables hold their ids.
   - Removed members and devices stay, since their writes that reached

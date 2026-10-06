@@ -658,7 +658,7 @@ async fn audience_versions_round_trip_and_a_failed_raise_keeps_every_audience() 
         },
     );
     replay.entries.insert(raised.position, EntryOutcome::Kept);
-    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER coven_refuse BEFORE INSERT ON coven_store_state WHEN NEW.version=13 BEGIN SELECT RAISE(ABORT,'refuse circle raise'); END").unwrap());
+    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER coven_refuse BEFORE INSERT ON coven_versions WHEN NEW.version=13 BEGIN SELECT RAISE(ABORT,'refuse circle raise'); END").unwrap());
     assert!(db
         .apply_store_log(raised.clone(), replay.clone())
         .await
@@ -670,5 +670,42 @@ async fn audience_versions_round_trip_and_a_failed_raise_keeps_every_audience() 
     db.close().await.unwrap();
     let db = open(&store).await;
     assert_eq!(db.store_log().await.unwrap().replay, replay);
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn store_facts_have_one_row_and_versions_and_resets_require_snapshots() {
+    let store = TestStore::new();
+    let db = open(&store).await;
+    let (entry, replay) = circle_history(CircleId(uuid::Uuid::from_u128(2)))[0].clone();
+    db.apply_store_log(entry, replay).await.unwrap();
+    let before = db.store_log().await.unwrap();
+    db.inspect_writer(|sql| {
+        assert!(
+            sql.internal_execute(
+                "INSERT INTO coven_store(id,name,key) VALUES(?1,'Another',?2)",
+                (
+                    StoreId(uuid::Uuid::from_u128(99)).to_string(),
+                    key(99).0.as_bytes().as_slice()
+                ),
+            )
+            .is_err(),
+            "a different id still cannot create a second store"
+        );
+        assert!(
+            sql.internal_execute(
+                "INSERT INTO coven_versions(audience,kind,version) VALUES('store','schema',2)",
+                [],
+            )
+            .is_err(),
+            "a version must name its snapshot and raise entry"
+        );
+        assert!(
+            sql.internal_execute("INSERT INTO coven_resets(audience) VALUES('store')", [],)
+                .is_err(),
+            "a reset must name its snapshot"
+        );
+    });
+    assert_eq!(db.store_log().await.unwrap(), before);
     db.close().await.unwrap();
 }

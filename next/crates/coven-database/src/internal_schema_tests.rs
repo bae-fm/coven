@@ -535,11 +535,13 @@ async fn only_the_spec_tables_are_created() {
                 "coven_operations",
                 "coven_positions",
                 "coven_references",
+                "coven_resets",
                 "coven_rows",
+                "coven_store",
                 "coven_store_log",
-                "coven_store_state",
                 "coven_uploads",
                 "coven_user_files",
+                "coven_versions",
                 "coven_writes"
             ]
         );
