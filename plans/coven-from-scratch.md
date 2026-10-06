@@ -2637,8 +2637,12 @@ impl ObjectPrefix {
     pub fn all() -> Self;
     /// Every write of a device.
     pub fn device_log(device: DeviceId) -> Self;
+    /// Every device's writes, to find devices not yet known (§6).
+    pub fn device_logs() -> Self;
     /// Every store log entry of a device.
     pub fn store_log(device: DeviceId) -> Self;
+    /// Every device's store log entries (§6, §9).
+    pub fn store_logs() -> Self;
     /// Every snapshot.
     pub fn snapshots() -> Self;
     /// Every stored file.
@@ -2769,6 +2773,9 @@ pub enum DbError {
     ReferenceAudience { table: String, key: RowKey, column: String },
     /// A write targets a circle whose deletion has been applied (§14.7).
     DeletedCircle(CircleId),
+    /// A write puts a row in a circle this member isn't in, or in no circle
+    /// the store log has (§14.5, §14.6).
+    NotInCircle(CircleId),
     /// An inserted row's independent key holds no UUID (§8.5).
     KeyNotUuid { table: String, key: RowKey },
     /// A downloaded write fails the merge's checks, such as a timestamp no
@@ -3099,12 +3106,14 @@ impl CovenBuilder {
     /// Opens the store for reading and writing, taking the store's lock.
     /// Opening runs migrations and reads no key, so a store opens and works
     /// on the device before any key is unlocked; the first call that needs a
-    /// key reads it.
+    /// key reads it. Opening never starts syncing; `connect_sync` does.
     pub async fn open(self) -> CovenResult<CovenHandle>;
 
     /// Opens a store whose database is damaged (§19.2): moves the damaged
     /// file aside, loads the latest snapshot, and queues the waiting writes it
-    /// can still read from the old file.
+    /// can still read from the old file, then resumes unfinished operations.
+    /// It needs storage and the store key; without either it fails, leaving
+    /// the damaged file where it was.
     pub async fn open_reloading(self) -> CovenResult<CovenHandle>;
 
     /// Opens the store for reading only, alongside a handle that has it open,
@@ -3527,6 +3536,10 @@ impl CovenHandle {
     /// Every lost value and removed row, as `coven_lost` holds them (§8).
     pub async fn lost_values(&self) -> CovenResult<Vec<LostValue>>;
 
+    /// Dismisses lost values the app has dealt with, in a write, so every
+    /// device drops them from `coven_lost`.
+    pub async fn dismiss_lost_values(&self, values: &[LostValue]) -> CovenResult<()>;
+
     /// The same, as a live query.
     pub fn subscribe_lost_values(&self) -> LiveQuery<Vec<LostValue>>;
 }
@@ -3665,6 +3678,11 @@ while let Ok(values) = lost.next().await {
 
 - *Setting up storage* creates the store at a location on a provider, the
   first time it connects, and connects this device to it.
+  - At a location that already holds this store, such as after
+    `disconnect_storage`, setup reconnects to it; one that holds another
+    store fails with `LocationOccupied`.
+  - Creating uploads the store's first entry and its key sealed to this
+    member; waiting writes then go up through sync like any others.
 - Setup commits the storage credentials and keys only once the connection
   is ready; a failed setup leaves the device as it was.
 - A device that isn't connected still reads and writes
@@ -3876,6 +3894,9 @@ pub enum SyncError {
     PermissionDenied,
     /// Removing or demoting the member would leave no admin (§9).
     LastAdmin,
+    /// The member's provider account holds the store, so they can't be
+    /// removed (§4, §13).
+    StoreOwner,
     /// The store needs a newer schema or format (§17).
     UpdateRequired,
     /// A restore code could not be decoded (§20.9).
@@ -4011,7 +4032,8 @@ impl CovenHandle {
     pub async fn probe_storage(&self, storage: &StorageConfig) -> Result<(), SyncError>;
 
     /// Opens the current store key from its copy sealed to this member in
-    /// storage (§11), keeps it in key custody, and connects.
+    /// storage (§11), keeps it in key custody, and connects, without
+    /// starting to sync.
     pub async fn unlock_store_key(&self) -> Result<ConnectedStorage, StoreKeyUnlockError>;
 
     /// Whether key custody holds the store key: `Available` or `Locked`.
@@ -4037,7 +4059,8 @@ impl CovenHandle {
     /// Stops syncing and drops the connection.
     pub fn disconnect_sync(&self);
 
-    /// Syncs now instead of at the next idle tick.
+    /// Syncs now instead of at the next idle tick. While idle, coven syncs
+    /// every 30 seconds, and at once after a local write.
     pub fn sync_now(&self);
 
     /// The sync status, live. The first value is the current status.
@@ -4082,9 +4105,18 @@ pub struct SyncReport {
     pub blocked_operations: Vec<BlockedOperation>,
     /// This member's store log entries dropped during replay, with their reasons (§9).
     pub dropped_entries: Vec<DroppedEntry>,
+    /// S3 keys an admin must delete in the provider's console, until the
+    /// admin confirms each is gone (§13).
+    pub access_keys_to_delete: Vec<AccessKeyToDelete>,
     /// The rows the sync's writes changed, as a hint for refreshing views
     /// that aren't live queries. Not a complete list.
     pub row_changes: Option<Vec<RowChange>>,
+}
+
+/// An S3 key whose member no longer has access, or whose invite ended (§13).
+pub struct AccessKeyToDelete {
+    pub access_key_id: String,
+    pub member: Option<MemberId>,
 }
 
 pub struct WaitingWrite {
@@ -4112,6 +4144,11 @@ impl StorageSetupError {
 pub enum SyncFailure {
     /// The store's schema or format version is newer than this app (§17).
     UpdateRequired,
+    /// This device, or its member, was removed from the store (§10).
+    Removed,
+    /// Another store was set up in this location at the same moment, first;
+    /// set this one up somewhere else (§4).
+    LocationTaken,
     /// Storage refused or failed a request.
     Storage(Arc<StorageError>),
     /// Anything else, with its cause.
@@ -4282,7 +4319,8 @@ impl CovenHandle {
     /// its progress. The first result is the current state.
     pub fn subscribe_uploads(&self) -> UploadsLiveQuery;
 
-    /// Retries every waiting upload now, instead of after its retry delay.
+    /// Retries every waiting upload now, instead of after its retry delay,
+    /// which starts at 1 second and doubles to at most 5 minutes.
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError>;
 
     /// Pauses uploads, or resumes them. A paused upload keeps its place,
@@ -4551,6 +4589,10 @@ impl CovenHandle {
 
     /// Changes a member's role, as an admin (§9).
     pub async fn set_member_role(&self, member: &MemberId, role: MemberRole) -> Result<(), SyncError>;
+
+    /// Records that the admin deleted an S3 key in the provider's console,
+    /// so the sync status stops asking for it (§13).
+    pub async fn confirm_access_key_deleted(&self, access_key_id: &str) -> Result<(), SyncError>;
 
     /// Removes a member and all their devices, rotates the store key, and
     /// revokes their storage access; on S3 the result says to delete their
