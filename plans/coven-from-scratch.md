@@ -3905,6 +3905,13 @@ while let Ok(values) = lost.next().await {
   fails with `StorageError::NotStoreOwner`, classified `PermissionDenied`,
   before any grant or revocation. S3's console-key instructions need no sharing
   account check.
+- Dropbox lists direct and inherited members separately, through every page.
+  Revocation removes only direct account membership, waits for the native removal
+  job, and reports group and parent-folder access as `MemberRemoval::AccessRemains`.
+  An existing viewer is upgraded with `update_folder_member`; a pending viewer
+  without a native account id returns `AccountIdUnavailable` (`Refused`) and
+  retains its invitation. The provider's schema does not establish an in-place
+  upgrade for that case.
 - `Storage::list` and `CloudKitOps::list` return `Vec<StoredObject>`, each with
   `path: ObjectPath`, `size: u64` (complete encrypted bytes) and
   `stored_at: SystemTime` from the provider. Drive uses `createdTime`, Dropbox
@@ -4039,6 +4046,8 @@ pub enum StorageError {
     AlreadyExists,
     /// Only the account holding the store may change its sharing.
     NotStoreOwner,
+    /// Dropbox cannot upgrade a pending viewer until its account id is available.
+    AccountIdUnavailable,
     /// The upload session belongs to another provider or location.
     SessionMismatch,
     /// The provider no longer retains the recorded upload.

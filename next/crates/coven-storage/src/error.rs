@@ -62,6 +62,9 @@ pub enum StorageError {
     /// Only the account holding the store may change its sharing.
     #[error("sharing requires the store owner's account")]
     NotStoreOwner,
+    /// Dropbox cannot upgrade a pending viewer without the recipient's account id.
+    #[error("the provider has not supplied the account id needed to upgrade this invitation")]
+    AccountIdUnavailable,
     /// The session belongs to another provider or location.
     #[error("upload session belongs to another location")]
     SessionMismatch,
@@ -116,6 +119,7 @@ impl StorageError {
             Self::NotFound | Self::SessionExpired => StorageFailure::NotFound,
             Self::AlreadyExists => StorageFailure::AlreadyExists,
             Self::NotStoreOwner => StorageFailure::PermissionDenied,
+            Self::AccountIdUnavailable => StorageFailure::Refused,
             Self::SessionMismatch | Self::Protocol(_) | Self::Encoding(_) | Self::File(_) => {
                 StorageFailure::Protocol
             }

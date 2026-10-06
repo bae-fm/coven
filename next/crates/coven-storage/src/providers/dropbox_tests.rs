@@ -17,6 +17,10 @@ struct RemovalJob {
 #[derive(Default)]
 struct Remote {
     non_owner: bool,
+    inherited_members: BTreeMap<String, String>,
+    invitees: Vec<Value>,
+    groups: Vec<Value>,
+    lose_remove_reply: bool,
     removal_job: Option<RemovalJob>,
     objects: BTreeMap<String, Vec<u8>>,
     upload: Vec<u8>,
@@ -165,9 +169,39 @@ async fn endpoint(
             }
             reply(json!({"path_lower":path,"size":size,"id":"id:file"}))
         }
-        "/2/sharing/list_folder_members" => reply(
-            json!({"users":state.members.iter().map(|(email,role)|json!({"user":{"email":email,"account_id":format!("dbid:{email}")},"access_type":{".tag":role}})).collect::<Vec<_>>(),"invitees":[]}),
-        ),
+        "/2/sharing/list_folder_members" | "/2/sharing/list_folder_members/continue" => {
+            assert!(arg.get("include_inherited").is_none());
+            let (inherited, start) = if let Some(cursor) = arg["cursor"].as_str() {
+                let (kind, offset) = cursor.split_once(':').unwrap();
+                (kind == "parent", offset.parse::<usize>().unwrap())
+            } else {
+                (arg.get("path").is_some(), 0)
+            };
+            if arg.get("path").is_some() {
+                assert_eq!(arg["path"], "ns:namespace");
+            }
+            let members = if inherited {
+                &state.inherited_members
+            } else {
+                &state.members
+            };
+            let all: Vec<_> = members.iter().map(|(email, role)| (
+                "users", json!({"user":{"email":email,"account_id":format!("dbid:{email}")},"access_type":{".tag":role},"is_inherited":state.inherited_members.contains_key(email)})
+            )).chain(state.invitees.iter().filter(|_| !inherited).cloned().map(|m| ("invitees",m)))
+                .chain(state.groups.iter().filter(|_| !inherited).cloned().map(|m| ("groups",m))).collect();
+            let mut value = json!({"users":[],"invitees":[],"groups":[]});
+            if let Some((kind, member)) = all.get(start) {
+                value[*kind] = json!([member]);
+            }
+            if start + 1 < all.len() {
+                value["cursor"] = json!(format!(
+                    "{}:{}",
+                    if inherited { "parent" } else { "direct" },
+                    start + 1
+                ));
+            }
+            reply(value)
+        }
         "/2/sharing/add_folder_member" => {
             state.sharing_mutations.push("add".into());
             if state.refuse_share {
@@ -206,14 +240,37 @@ async fn endpoint(
         }
         "/2/sharing/remove_folder_member" => {
             state.sharing_mutations.push("remove".into());
-            if let Some(job) = &state.removal_job {
-                assert_eq!(arg["member"]["email"], job.member);
-                return reply(json!({".tag":"async_job_id","async_job_id":"removal"}));
+            let email = match arg["member"][".tag"].as_str().unwrap() {
+                "email" => arg["member"]["email"].as_str().unwrap(),
+                "dropbox_id" => arg["member"]["dropbox_id"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("dbid:")
+                    .unwrap(),
+                other => panic!("unexpected selector {other}"),
+            };
+            if state.members.get(email).is_some_and(|role| role == "owner") {
+                return response(409, json!({"error":{".tag":"folder_owner"}}).to_string());
             }
-            state
-                .members
-                .remove(arg["member"]["email"].as_str().unwrap());
-            reply(json!({".tag":"complete"}))
+            if let Some(job) = &state.removal_job {
+                assert_eq!(email, job.member);
+            } else {
+                let complete = match state.inherited_members.get(email) {
+                    Some(role) => {
+                        json!({"access_level":{".tag":role},"access_details":[{"shared_folder_id":"parent-folder","folder_name":"Parent","path":"/parent","permissions":[]}]})
+                    }
+                    None => json!({}),
+                };
+                state.removal_job = Some(RemovalJob {
+                    member: email.into(),
+                    statuses: [json!({".tag":"complete","complete":complete})].into(),
+                });
+            }
+            if std::mem::replace(&mut state.lose_remove_reply, false) {
+                state.members.remove(email);
+                return response(503, "{}");
+            }
+            reply(json!({".tag":"async_job_id","async_job_id":"removal"}))
         }
         "/2/sharing/check_remove_member_job_status" => {
             assert_eq!(arg["async_job_id"], "removal");
@@ -226,6 +283,9 @@ async fn endpoint(
             let member = job.member.clone();
             if status[".tag"] == "complete" {
                 state.members.remove(&member);
+                state
+                    .invitees
+                    .retain(|m| m["invitee"]["email"] != member && m["user"]["email"] != member);
             }
             reply(status)
         }
@@ -745,3 +805,6 @@ async fn asynchronous_removal_times_out_without_hiding_remaining_access() {
         .unwrap();
     assert!(!state.lock().unwrap().members.contains_key("member"));
 }
+
+#[path = "dropbox_access_tests.rs"]
+mod access_tests;

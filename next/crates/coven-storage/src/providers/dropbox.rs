@@ -1,3 +1,4 @@
+use super::dropbox_access::{remaining_parent_access, FolderMembers, MemberId};
 use super::http::{self, Body, OAuthSession};
 use crate::session::SessionState;
 use crate::*;
@@ -103,28 +104,21 @@ impl DropboxStorage {
         }
         Ok(())
     }
-    async fn members(&self, email: &str) -> Result<Option<Value>, StorageError> {
+    async fn members(&self, email: &str, inherited: bool) -> Result<FolderMembers, StorageError> {
         let mut method = "sharing/list_folder_members";
-        let mut request = json!({"shared_folder_id":self.namespace,"include_inherited":false});
+        let mut request = json!({"shared_folder_id":self.namespace});
+        if inherited {
+            request["path"] = json!(format!("ns:{}", self.namespace));
+        }
         let mut seen = BTreeSet::new();
+        let mut members = FolderMembers::default();
         loop {
             let value = self.rpc(method, request).await?;
-            for (array, field) in [("users", "user"), ("invitees", "invitee")] {
-                for member in http::array(&value, array)? {
-                    if member[field]["email"]
-                        .as_str()
-                        .is_some_and(|e| e.eq_ignore_ascii_case(email))
-                    {
-                        return Ok(Some(member.clone()));
-                    }
-                }
-            }
-            let Some(cursor) = value.get("cursor") else {
-                return Ok(None);
+            members.append(&value, email, inherited)?;
+            let Some(_) = value.get("cursor") else {
+                return Ok(members);
             };
-            let cursor = cursor
-                .as_str()
-                .ok_or(StorageError::Protocol("invalid Dropbox member cursor"))?;
+            let cursor = http::string(&value, "cursor")?;
             if !seen.insert(cursor.to_owned()) {
                 return Err(StorageError::Protocol("repeated Dropbox member cursor"));
             }
@@ -132,50 +126,37 @@ impl DropboxStorage {
             request = json!({"cursor":cursor});
         }
     }
-    async fn remove_member(&self, email: &str) -> Result<(), StorageError> {
-        if self.members(email).await?.is_none() {
-            return Ok(());
+    async fn remove_member(&self, member: &MemberId) -> Result<Vec<RetainedAccess>, StorageError> {
+        let value = self.rpc("sharing/remove_folder_member",json!({"shared_folder_id":self.namespace,"member":member.selector(),"leave_a_copy":false})).await?;
+        if http::string(&value, ".tag")? != "async_job_id" {
+            return Err(StorageError::Protocol("invalid Dropbox remove launch"));
         }
-        let mut value = self.rpc("sharing/remove_folder_member",json!({"shared_folder_id":self.namespace,"member":{".tag":"email","email":email},"leave_a_copy":false})).await?;
-        let job = match http::string(&value, ".tag")? {
-            "complete" => None,
-            "async_job_id" => Some(http::string(&value, "async_job_id")?.to_owned()),
-            _ => return Err(StorageError::Protocol("invalid Dropbox remove launch")),
-        };
-        if let Some(job) = job {
-            for _ in 0..60 {
-                let (status, original) = http::json_response(
-                    PROVIDER,
-                    self.rpc_response(
-                        "sharing/check_remove_member_job_status",
-                        json!({"async_job_id":job}),
-                    )
-                    .await?,
+        let job = http::string(&value, "async_job_id")?;
+        for _ in 0..60 {
+            let (value, original) = http::json_response(
+                PROVIDER,
+                self.rpc_response(
+                    "sharing/check_remove_member_job_status",
+                    json!({"async_job_id":job}),
                 )
-                .await?;
-                value = status;
-                match http::string(&value, ".tag")? {
-                    "complete" => break,
-                    "in_progress" => tokio::time::sleep(std::time::Duration::from_secs(1)).await,
-                    "failed" => return Err(original.into_error(PROVIDER)),
-                    _ => return Err(StorageError::Protocol("invalid Dropbox remove status")),
-                }
-            }
-            if value[".tag"].as_str() != Some("complete") {
-                return Err(StorageError::Provider {
-                    provider: PROVIDER,
-                    failure: StorageFailure::Network,
-                    source: Box::new(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "Dropbox member removal timed out",
-                    )),
-                });
+                .await?,
+            )
+            .await?;
+            match http::string(&value, ".tag")? {
+                "complete" => return remaining_parent_access(&value["complete"], member),
+                "in_progress" => tokio::time::sleep(std::time::Duration::from_secs(1)).await,
+                "failed" => return Err(original.into_error(PROVIDER)),
+                _ => return Err(StorageError::Protocol("invalid Dropbox remove status")),
             }
         }
-        if self.members(email).await?.is_some() {
-            return Err(StorageError::Protocol("Dropbox member access remains"));
-        }
-        Ok(())
+        Err(StorageError::Provider {
+            provider: PROVIDER,
+            failure: StorageFailure::Network,
+            source: Box::new(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Dropbox member removal timed out",
+            )),
+        })
     }
 }
 enum UploadLookup {
@@ -364,29 +345,33 @@ impl Storage for DropboxStorage {
     }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
         self.require_owner().await?;
-        match self.members(account).await? {
-            Some(member) => {
-                match http::string(&member["access_type"], ".tag")? {
-                    "editor" | "owner" => return Ok(AccessGrant::Granted),
-                    "viewer" | "viewer_no_comment" => {}
-                    _ => return Err(StorageError::Protocol("unexpected Dropbox account access")),
-                }
-                // Dropbox requires its account id for an in-place membership update.
-                let id = http::string(&member["user"], "account_id")?;
-                self.rpc("sharing/update_folder_member", json!({"shared_folder_id":self.namespace,"member":{".tag":"dropbox_id","dropbox_id":id},"access_level":{".tag":"editor"}})).await?;
-            }
-            None => {
-                self.rpc("sharing/add_folder_member", json!({"shared_folder_id":self.namespace,"members":[{"member":{".tag":"email","email":account},"access_level":{".tag":"editor"}}],"quiet":false})).await?;
-            }
+        let members = self.members(account, false).await?;
+        if members.direct.iter().any(|member| member.role == "editor")
+            || members
+                .retained
+                .iter()
+                .any(|share| share.reason == RetainedAccessReason::StoreOwner)
+        {
+            return Ok(AccessGrant::Granted);
         }
-        let member = self
-            .members(account)
-            .await?
-            .ok_or(StorageError::Protocol("Dropbox omitted the granted member"))?;
-        if !matches!(
-            http::string(&member["access_type"], ".tag")?,
-            "editor" | "owner"
-        ) {
+        if let Some(member) = members
+            .direct
+            .iter()
+            .find(|member| matches!(member.id, MemberId::Account(_)))
+        {
+            self.rpc("sharing/update_folder_member", json!({"shared_folder_id":self.namespace,"member":member.id.selector(),"access_level":{".tag":"editor"}})).await?;
+        } else if !members.direct.is_empty() {
+            return Err(StorageError::AccountIdUnavailable);
+        } else {
+            self.rpc("sharing/add_folder_member", json!({"shared_folder_id":self.namespace,"members":[{"member":{".tag":"email","email":account},"access_level":{".tag":"editor"}}],"quiet":false})).await?;
+        }
+        let members = self.members(account, false).await?;
+        if !members.direct.iter().any(|member| member.role == "editor")
+            && !members
+                .retained
+                .iter()
+                .any(|share| share.reason == RetainedAccessReason::StoreOwner)
+        {
             return Err(StorageError::Protocol(
                 "Dropbox did not grant editor access",
             ));
@@ -400,8 +385,30 @@ impl Storage for DropboxStorage {
             ));
         };
         self.require_owner().await?;
-        self.remove_member(email).await?;
-        Ok(MemberRemoval::Revoked)
+        let members = self.members(email, false).await?;
+        let mut completed = Vec::new();
+        for member in members.direct {
+            completed.extend(self.remove_member(&member.id).await?);
+        }
+        let mut remaining = self.members(email, false).await?;
+        if !remaining.direct.is_empty() {
+            return Err(StorageError::Protocol("Dropbox direct access remains"));
+        }
+        remaining
+            .retained
+            .extend(self.members(email, true).await?.retained);
+        remaining.retained.extend(completed);
+        let mut shares = Vec::new();
+        for share in remaining.retained {
+            if !shares.contains(&share) {
+                shares.push(share);
+            }
+        }
+        if shares.is_empty() {
+            Ok(MemberRemoval::Revoked)
+        } else {
+            Ok(MemberRemoval::AccessRemains { shares })
+        }
     }
     async fn begin_upload(
         &self,

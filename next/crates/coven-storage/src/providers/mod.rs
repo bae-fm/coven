@@ -10,6 +10,7 @@ mod google_drive;
 mod google_drive_access;
 pub use google_drive::GoogleDriveStorage;
 mod dropbox;
+mod dropbox_access;
 pub use dropbox::DropboxStorage;
 mod onedrive;
 mod onedrive_access;
