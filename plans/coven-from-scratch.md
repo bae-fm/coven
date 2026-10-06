@@ -295,9 +295,13 @@ Two mechanisms order writes:
     a device ran first.
   - Unique and other-audience losers count their rule as holding, from the
     step that judged it.
-- A foreign key or unique constraint is named by its columns, in order,
-  since SQLite gives neither a lasting name; a CHECK by its name, or by its
-  expression when it has none, as SQLite reports a failed one.
+- SQLite gives foreign keys and unique constraints no lasting name, so
+  coven names them by what they are:
+  - a foreign key by its columns, in order, and the table and columns it
+    points at, so two keys on one column into different tables stay two;
+  - a unique constraint by its columns, in order;
+  - a CHECK by its name, or by its expression when it has none, as SQLite
+    reports a failed one.
 - The app can't see a removed row, so it can insert the same shared key
   again.
   - The write records that insert as an update of the removed row, setting
@@ -3083,7 +3087,7 @@ pub enum Replacement {
 }
 
 pub enum RemovalRule {
-    ForeignKey { columns: Vec<String> },
+    ForeignKey { columns: Vec<String>, parent: String, parent_columns: Vec<String> },
     Check { constraint: String },
     /// The row is in a deleted circle (§14.7).
     DeletedCircle,
