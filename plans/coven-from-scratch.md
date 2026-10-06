@@ -124,6 +124,15 @@
   their uploads.
   - Each object is one write from that device: its write record ([§5](#5-local-database)),
     encrypted.
+  - A write of any size is one object, encrypted in chunks like a file
+    ([§16.2](#162-storage-and-naming)), so no device holds a whole write
+    in memory.
+  - A device checks each chunk as it reads it, applies the write's row
+    changes as they arrive, in one transaction, and commits only once
+    every chunk and the signature check out; a failed check rolls the
+    write back.
+  - E.g. Ana imports 50,000 notes in one transaction: one write, read and
+    applied a chunk at a time.
   - It is named `devices/<device>/<n>`, created once and never changed.
   - `<n>` counts that device's own writes: 1, 2, 3, with no gaps.
   - Its name is part of its encryption, so the provider can't swap one
@@ -133,6 +142,8 @@
   audience's current key, signs the object with the device's member key
   ([§14.4](#144-writes)), and keeps those bytes in `coven_uploads` before
   sending them; every retry sends the kept bytes.
+- `coven_uploads` keeps a write's record, and later its sealed bytes, in
+  chunks too, so no stored value grows with the write.
 - A write record leaves `coven_uploads` ([§5](#5-local-database)) once its upload succeeds.
 - Each device remembers how far it has applied every device's log, in
   coven's `coven_positions` table: one row per device, naming its last
@@ -1196,7 +1207,8 @@ Carol's tablet:
   chunks.
   - Each object's storage path is bound into its authentication, so the
     provider can't swap one object for another.
-  - Each file chunk also binds its index.
+  - Each chunk of a write or a file also binds its index, and a write's
+    chunk binds its part.
 - Nonces:
   - for a file's chunks, derived from the key and the file's name, combined
     with the chunk's index, so the same file under the same key encrypts to
@@ -1439,9 +1451,9 @@ Carol's tablet:
 
     ```
     devices/ana-phone/12
-      header, sealed with the store key:    ana-phone, write 12, timestamp, had read …
-      part 1, sealed with the store key:    notes  row 47  insert "Paint colors"
-      part 2, sealed with Ana's circle key: pins   row 4   insert note → 47
+      header, sealed with the store key:             ana-phone, write 12, timestamp, had read …
+      part 1, chunk 0, sealed with the store key:    notes  row 47  insert "Paint colors"
+      part 2, chunk 0, sealed with Ana's circle key: pins   row 4   insert note → 47
       signed with Ana's key, over all of the above
     ```
 
@@ -1759,6 +1771,9 @@ Carol's tablet:
     indexes and triggers, and to views, are neither: they don't sync.
   - Dropping or renaming a table is a breaking change, since it may have
     synced.
+  - A migration that inserts, updates or deletes rows of synced tables is a
+    breaking change, even if it only adds tables or columns: each device
+    would otherwise compute those changes from its own rows.
 - For each breaking change, the app supplies a *migration* in two parts:
   - one changes the database, e.g. `ALTER TABLE notes RENAME COLUMN title
     TO name`;
@@ -1777,6 +1792,26 @@ Carol's tablet:
     in the store log ([§9](#9-members-and-roles)).
   - A device whose app is older can't sync until it updates; it then
     reloads from that snapshot.
+- What a breaking migration changes in the synced tables is one write by
+  the device that runs it, in the new version: its *migration write*.
+  - It holds what differs between the synced tables before and after the
+    migration: each row inserted or deleted, and each cell whose value
+    changed.
+  - A cell the migration left as it was keeps the write that set it, so a
+    late write competes with that write, not with the migration.
+  - A table or column renamed with `ALTER TABLE … RENAME` keeps its cells'
+    writes under its new name; a dropped one loses them.
+  - E.g. Ana's migration renames `title` to `name` and fills a new column
+    `slug` from it: each note's `name` keeps the write that last set its
+    title, and each `slug` is set by the migration write.
+  - Its object in the device log names it and holds no row changes: its
+    changes reach other devices only in the breaking change's snapshot.
+  - So a device that runs the same migration later, then reloads from that
+    snapshot, changes nothing anywhere with its own migration write; nor
+    does one whose breaking change loses to a concurrent one.
+- Rows a removal rule had taken out before a breaking change stay out for
+  good: they stay in `coven_lost`, and coven forgets their other merge
+  records.
 - A device that updates runs the migration's second part on its own
   writes still waiting in `coven_uploads`, then uploads them.
   - Without a second part, it uploads them marked lost, and every device
@@ -1887,7 +1922,7 @@ Carol's tablet:
   3. upload the store log entry removing them from the circle, naming the
      new key's number.
 - A breaking schema or format change ([§17](#17-schema-changes)):
-  1. migrate the database, in one transaction;
+  1. migrate the database, with its migration write, in one transaction;
   2. upload a snapshot in the new version;
   3. upload the store log entry raising the version.
 - Reloading from a snapshot ([§15](#15-snapshots)):
