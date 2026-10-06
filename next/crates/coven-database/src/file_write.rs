@@ -138,10 +138,13 @@ impl<'a> FileWrite<'a> {
                         Some((staged.hash, staged.size)),
                         self.device,
                     )?;
-                    let attached_values = crate::write_rows::read_values(db, table, &key.1)?
-                        .ok_or_else(|| {
-                            file_row::invalid("the row was removed while attaching its file")
-                        })?;
+                    let Some(attached_values) = crate::write_rows::read_values(db, table, &key.1)?
+                    else {
+                        return Err(DbError::FileRowRemoved {
+                            table: key.0.clone(),
+                            key: file_row::key(&key)?,
+                        });
+                    };
                     db.internal_execute("INSERT INTO coven_device_files(table_name,key,column_name,identity,path) VALUES(?1,?2,?3,?4,?5)", (&key.0, &key.1, &file.id, file_row::identity(file, &attached_values)?, staged.name.as_str()))?;
                     self.attached.borrow_mut().insert(
                         key,
@@ -155,10 +158,10 @@ impl<'a> FileWrite<'a> {
                 }
             }
             if !attached {
-                return Err(file_row::invalid(format!(
-                    "no row refers to {}/{}",
-                    staged.namespace, staged.id
-                )));
+                return Err(DbError::FileUnreferenced {
+                    namespace: staged.namespace.clone(),
+                    id: staged.id.clone(),
+                });
             }
         }
         Ok(())
@@ -173,9 +176,9 @@ impl<'a> FileWrite<'a> {
         let db = self.database;
         let (_, file) = file_row::declaration(self.schema, table)?;
         if file.provenance != Provenance::UserProvided {
-            return Err(file_row::invalid(format!(
-                "{table} does not declare user-provided files"
-            )));
+            return Err(DbError::FileTableNotUserProvided {
+                table: table.into(),
+            });
         }
         prepared.observed.validate()?;
         let (key, values) = file_row::lookup(db, self.schema, table, &key)?;
@@ -209,9 +212,9 @@ impl<'a> FileWrite<'a> {
         let db = self.database;
         let (_, file) = file_row::declaration(self.schema, table)?;
         if file.provenance != Provenance::UserProvided {
-            return Err(file_row::invalid(format!(
-                "{table} does not declare user-provided files"
-            )));
+            return Err(DbError::FileTableNotUserProvided {
+                table: table.into(),
+            });
         }
         let (key, _) = file_row::lookup(db, self.schema, table, &key)?;
         file_row::set(db, self.schema, &key, None, self.device)?;
@@ -256,7 +259,9 @@ impl<'a> FileWrite<'a> {
             if let Some(new) = &new {
                 if has_file(new) {
                     if new.values[&file.id] == Value::Null {
-                        return Err(file_row::invalid("an attached file must have an id"));
+                        return Err(DbError::FileIdMissing {
+                            column: file.id.clone(),
+                        });
                     }
                     if let Some(attached) = self.attached.borrow().get(key) {
                         file_row::check_size(&new.values, file, attached.size)?;
@@ -264,14 +269,18 @@ impl<'a> FileWrite<'a> {
                             || new.values[&file.hash]
                                 != Value::Blob(attached.hash.as_bytes().to_vec())
                         {
-                            return Err(file_row::invalid("row no longer names the attached file"));
+                            return Err(DbError::FileAttachmentChanged {
+                                table: key.0.clone(),
+                                key: file_row::key(key)?,
+                            });
                         }
                     }
                 }
                 if has_file(new) != (new.values[&file.location] != Value::Null) {
-                    return Err(file_row::invalid(
-                        "hash and location must both be NULL or both identify a file",
-                    ));
+                    return Err(DbError::FileHashLocationMismatch {
+                        table: key.0.clone(),
+                        key: file_row::key(key)?,
+                    });
                 }
                 if let Some(old) = old.as_ref().filter(|r| has_file(r)) {
                     if has_file(new) {
@@ -285,9 +294,10 @@ impl<'a> FileWrite<'a> {
                             });
                         }
                         if different && !self.attached.borrow().contains_key(key) {
-                            return Err(file_row::invalid(
-                                "changing a row's file requires supplying its bytes",
-                            ));
+                            return Err(DbError::FileBytesRequired {
+                                table: key.0.clone(),
+                                key: file_row::key(key)?,
+                            });
                         }
                     }
                 } else if has_file(new) && !self.attached.borrow().contains_key(key) {

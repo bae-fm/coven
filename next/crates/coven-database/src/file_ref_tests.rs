@@ -275,7 +275,7 @@ async fn original_facts_survive_reopen_and_are_not_replaced_by_new_disk_metadata
     assert_eq!(db.user_file("files", "absent").await.unwrap(), None);
     assert!(matches!(
         db.file_ref("files", "7").await,
-        Err(DbError::FileAttachment { .. })
+        Err(DbError::FileAbsent { .. })
     ));
     let stale = reference.clone();
     assert!(matches!(
@@ -497,16 +497,16 @@ async fn absent_files_and_invalid_keys_return_errors_without_panicking() {
     })
     .await
     .unwrap();
-    for key in [
-        RowKey::from("empty"),
-        RowKey::from("absent"),
-        RowKey(vec![rusqlite::types::Value::Null]),
-    ] {
+    for key in [RowKey::from("empty"), RowKey::from("absent")] {
         assert!(matches!(
             db.file_ref("files", key).await,
-            Err(DbError::FileAttachment { .. })
+            Err(DbError::FileAbsent { .. })
         ));
     }
+    assert!(matches!(
+        db.file_ref("files", RowKey(vec![types::Value::Null])).await,
+        Err(DbError::FileKeyNull { table, column }) if table == "files" && column == "id"
+    ));
     assert!(db.user_file("files", "empty").await.unwrap().is_none());
     db.close().await.unwrap();
     assert!(matches!(

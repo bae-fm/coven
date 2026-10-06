@@ -302,3 +302,81 @@ async fn replacing_a_reference_target_cannot_reuse_the_old_parents_generation() 
         matches!(error,CovenError::Migration(MigrationError::Failed{version:2,name:"retarget",source}) if matches!(*source,DbError::MigrationReference{..}))
     );
 }
+
+#[tokio::test]
+async fn invalid_conversions_report_typed_causes_and_roll_back() {
+    const SCHEMA: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT)";
+    for case in 0..6 {
+        let store = TestStore::new();
+        let declarations = || vec![SyncedTable::new("notes", RowIdentity::SharedKey)];
+        let db = store.schema(declarations(), SCHEMA).await.unwrap();
+        sql(&db, "INSERT INTO notes VALUES('7','before')")
+            .await
+            .unwrap();
+        let original = records(&db);
+        db.close().await.unwrap();
+        let migration = Migration::sql(
+            2,
+            "conversion",
+            "CREATE TABLE no_key(id TEXT,title TEXT); UPDATE notes SET title='after'",
+        )
+        .writes(move |row| {
+            let column = row
+                .columns
+                .iter()
+                .find(|c| c.name == "title")
+                .unwrap()
+                .clone();
+            match case {
+                0 => row.columns.push(column),
+                1 => row.op = ChangeOp::Update,
+                2 => row.rename_column("title", "absent"),
+                3 => row.key = RowKey(vec!["7".to_owned().into(), "extra".to_owned().into()]),
+                4 => row.table = "missing".into(),
+                5 => row.table = "no_key".into(),
+                _ => unreachable!(),
+            }
+            Ok(())
+        });
+        let error = store
+            .builder(
+                declarations(),
+                vec![Migration::sql(1, "initial", SCHEMA), migration],
+            )
+            .open()
+            .await
+            .err()
+            .unwrap();
+        let CovenError::Migration(MigrationError::Failed {
+            version: 2, source, ..
+        }) = error
+        else {
+            panic!("{error:?}");
+        };
+        match case {
+            0 => assert!(
+                matches!(*source, DbError::MigrationDuplicateColumn { table, column } if table == "notes" && column == "title")
+            ),
+            1 => assert!(
+                matches!(*source, DbError::MigrationColumnOperation { table, op: ChangeOp::Update, has_old: false, has_new: true, .. } if table == "notes")
+            ),
+            2 => assert!(
+                matches!(*source, DbError::MigrationColumnMissing { table, column } if table == "notes" && column == "absent")
+            ),
+            3 => assert!(
+                matches!(*source, DbError::MigrationKeyArity { table, expected: 1, actual: 2 } if table == "notes")
+            ),
+            4 => assert!(
+                matches!(*source, DbError::MigrationTableMissing { table } if table == "missing")
+            ),
+            5 => assert!(
+                matches!(*source, DbError::MigrationPrimaryKeyMissing { table } if table == "no_key")
+            ),
+            _ => unreachable!(),
+        }
+        let db = store.schema(declarations(), SCHEMA).await.unwrap();
+        assert_eq!(records(&db), original);
+        assert_eq!(db.schema_version().await.unwrap(), 1);
+        db.close().await.unwrap();
+    }
+}

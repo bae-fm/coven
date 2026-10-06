@@ -138,9 +138,82 @@ pub enum DbError {
         /// The referencing column in the converted change.
         column: String,
     },
-    /// A converted row does not fit its operation or the migration's schema (§20.13).
-    #[error("invalid migration conversion: {0}")]
-    MigrationConversion(&'static str),
+    /// A converted row names the same column twice.
+    #[error("migration conversion repeats {table}.{column}")]
+    MigrationDuplicateColumn {
+        /// The converted table.
+        table: String,
+        /// The repeated column.
+        column: String,
+    },
+    /// A converted column has old/new values incompatible with its operation.
+    #[error("migration conversion of {table}.{column} does not fit {op:?}")]
+    MigrationColumnOperation {
+        /// The converted table.
+        table: String,
+        /// The converted column.
+        column: String,
+        /// The requested operation.
+        op: crate::ChangeOp,
+        /// Whether an old value was supplied.
+        has_old: bool,
+        /// Whether a new value was supplied.
+        has_new: bool,
+    },
+    /// A converted column is absent from the target schema.
+    #[error("converted column {table}.{column} is absent from the schema")]
+    MigrationColumnMissing {
+        /// The converted table.
+        table: String,
+        /// The absent column.
+        column: String,
+    },
+    /// A converted table has no primary index.
+    #[error("converted table {table} has no primary index")]
+    MigrationPrimaryKeyMissing {
+        /// The converted table.
+        table: String,
+    },
+    /// A converted key has the wrong number of values.
+    #[error("converted key of {table} has {actual} values, expected {expected}")]
+    MigrationKeyArity {
+        /// The converted table.
+        table: String,
+        /// The primary index width.
+        expected: usize,
+        /// The supplied key width.
+        actual: usize,
+    },
+    /// A converted row or reference names an absent table.
+    #[error("converted table {table} is absent from the schema")]
+    MigrationTableMissing {
+        /// The absent table.
+        table: String,
+    },
+    /// Distinct original references became the same converted reference.
+    #[error("converted references of {table} collide at {reference:?}")]
+    MigrationReferenceCollision {
+        /// The original referencing table.
+        table: String,
+        /// The repeated converted reference.
+        reference: coven_merge::ForeignKey,
+    },
+    /// A waiting write is not older than the migration converting it.
+    #[error("waiting write {write:?} has schema {schema_version}, not older than migration {migration_version}")]
+    MigrationWriteVersion {
+        /// The waiting write.
+        write: coven_merge::WriteId,
+        /// The recorded schema version.
+        schema_version: u32,
+        /// The migration being applied.
+        migration_version: u32,
+    },
+    /// A waiting upload disappeared while its conversion was being recorded.
+    #[error("waiting upload {write:?} disappeared during migration")]
+    MigrationUploadMissing {
+        /// The missing waiting write.
+        write: coven_merge::WriteId,
+    },
     /// A write tried to replace a file declared write-once (§16).
     #[error("file on {table} at {key:?} cannot be replaced")]
     FileWriteOnce {
@@ -185,11 +258,123 @@ pub enum DbError {
         /// The managed column.
         column: String,
     },
-    /// A file operation has no compatible declaration or row.
-    #[error("invalid file attachment: {reason}")]
-    FileAttachment {
-        /// The failed attachment requirement.
-        reason: String,
+    /// A batch supplies the same namespace and file id twice.
+    #[error("batch repeats file {namespace}/{id}")]
+    FileBatchDuplicate {
+        /// The declared namespace.
+        namespace: String,
+        /// The repeated file id.
+        id: String,
+    },
+    /// A batch names no app-provided file declaration.
+    #[error("namespace {namespace} is not app-provided")]
+    FileNamespaceNotAppProvided {
+        /// The supplied namespace.
+        namespace: String,
+    },
+    /// The id source reused the physical name of a kept file.
+    #[error("file name {name:?} is already kept by this device")]
+    FileNameReused {
+        /// The refused physical file name.
+        name: coven_foundation::files::FileName,
+    },
+    /// No row in the namespace names a supplied file.
+    #[error("no row names file {namespace}/{id}")]
+    FileUnreferenced {
+        /// The supplied namespace.
+        namespace: String,
+        /// The unreferenced file id.
+        id: String,
+    },
+    /// A file operation targets a table that is not synced.
+    #[error("file table {table} is not synced")]
+    FileTableNotSynced {
+        /// The supplied table.
+        table: String,
+    },
+    /// A synced table has no declared file columns.
+    #[error("table {table} does not declare a file")]
+    FileNotDeclared {
+        /// The supplied table.
+        table: String,
+    },
+    /// Registration or clearing requires a user-provided declaration.
+    #[error("table {table} does not declare user-provided files")]
+    FileTableNotUserProvided {
+        /// The supplied table.
+        table: String,
+    },
+    /// A file lookup has the wrong number of primary-key values.
+    #[error("file key of {table} has {actual} values, expected {expected}")]
+    FileKeyArity {
+        /// The declared table.
+        table: String,
+        /// The declared key width.
+        expected: usize,
+        /// The supplied key width.
+        actual: usize,
+    },
+    /// A file lookup supplies NULL for a primary-key column.
+    #[error("file key {table}.{column} cannot be NULL")]
+    FileKeyNull {
+        /// The declared table.
+        table: String,
+        /// The key column supplied as NULL.
+        column: String,
+    },
+    /// An attached file has no id.
+    #[error("attached file column {column} has no id")]
+    FileIdMissing {
+        /// The declared id column.
+        column: String,
+    },
+    /// The size column is not a nonnegative integer byte count.
+    #[error("file size column {column} is not a nonnegative integer: {value:?}")]
+    FileSizeInvalid {
+        /// The declared size column.
+        column: String,
+        /// The refused SQL value.
+        value: rusqlite::types::Value,
+    },
+    /// A trigger removed a row while coven filled its file columns.
+    #[error("row {table} at {key:?} was removed while attaching its file")]
+    FileRowRemoved {
+        /// The declared table.
+        table: String,
+        /// The removed row key.
+        key: crate::RowKey,
+    },
+    /// A row no longer names the file attached during this write.
+    #[error("row {table} at {key:?} no longer names its attached file")]
+    FileAttachmentChanged {
+        /// The declared table.
+        table: String,
+        /// The changed row key.
+        key: crate::RowKey,
+    },
+    /// Hash and location are neither both NULL nor both set.
+    #[error("file hash and location disagree on {table} at {key:?}")]
+    FileHashLocationMismatch {
+        /// The declared table.
+        table: String,
+        /// The inconsistent row key.
+        key: crate::RowKey,
+    },
+    /// A write changes an existing file without supplying its bytes.
+    #[error("changing the file on {table} at {key:?} requires its bytes")]
+    FileBytesRequired {
+        /// The declared table.
+        table: String,
+        /// The changed row key.
+        key: crate::RowKey,
+    },
+    /// The requested row is absent or carries no file.
+    #[error("row {table} at {key:?} has no file")]
+    FileAbsent {
+        /// The requested table.
+        table: String,
+        /// The requested row key.
+        key: crate::RowKey,
     },
     /// Reading or keeping file bytes failed.
     #[error(transparent)]

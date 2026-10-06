@@ -108,7 +108,10 @@ impl RowChange {
         let mut columns_seen = std::collections::BTreeSet::new();
         for column in &self.columns {
             if !columns_seen.insert(&column.name) {
-                return Err(invalid("duplicate converted column"));
+                return Err(DbError::MigrationDuplicateColumn {
+                    table: self.table.clone(),
+                    column: column.name.clone(),
+                });
             }
             let valid = match self.op {
                 ChangeOp::Insert => column.old.is_none() && column.new.is_some(),
@@ -116,10 +119,19 @@ impl RowChange {
                 ChangeOp::Delete => column.old.is_some() && column.new.is_none(),
             };
             if !valid {
-                return Err(invalid("converted column operation"));
+                return Err(DbError::MigrationColumnOperation {
+                    table: self.table.clone(),
+                    column: column.name.clone(),
+                    op: self.op,
+                    has_old: column.old.is_some(),
+                    has_new: column.new.is_some(),
+                });
             }
             if !table.columns.iter().any(|c| c.name == column.name) {
-                return Err(invalid("converted column is absent from the schema"));
+                return Err(DbError::MigrationColumnMissing {
+                    table: self.table.clone(),
+                    column: column.name.clone(),
+                });
             }
             let reference = column
                 .source
@@ -179,9 +191,15 @@ impl RowChange {
             .indices
             .iter()
             .find(|index| index.primary)
-            .ok_or_else(|| invalid("converted table has no primary index"))?;
+            .ok_or_else(|| DbError::MigrationPrimaryKeyMissing {
+                table: self.table.clone(),
+            })?;
         if key.len() != primary.collations.len() {
-            return Err(invalid("converted primary key arity"));
+            return Err(DbError::MigrationKeyArity {
+                table: self.table.clone(),
+                expected: primary.collations.len(),
+                actual: key.len(),
+            });
         }
         let key = crate::write_rows::equality_key(&key, &primary.collations)?;
         Ok(WrittenRow {
@@ -268,7 +286,7 @@ fn table<'a>(schema: &'a Schema, name: &str) -> Result<&'a TableSchema, DbError>
     schema
         .tables
         .get(&name.to_ascii_lowercase())
-        .ok_or_else(|| invalid("converted table is absent from the schema"))
+        .ok_or_else(|| DbError::MigrationTableMissing { table: name.into() })
 }
 
 fn references(
@@ -343,8 +361,16 @@ fn rename_parents(
         }
         let mut parent = parent.clone();
         parent.row.table = identity.parent.clone();
-        if renamed.insert(identity, parent).is_some() {
-            return Err(invalid("converted references collide"));
+        match renamed.entry(identity) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(parent);
+            }
+            std::collections::btree_map::Entry::Occupied(entry) => {
+                return Err(DbError::MigrationReferenceCollision {
+                    table: source_table.into(),
+                    reference: entry.key().clone(),
+                })
+            }
         }
     }
     Ok(renamed)
@@ -355,10 +381,6 @@ fn reference_error(table: &str, column: &str) -> DbError {
         table: table.to_owned(),
         column: column.to_owned(),
     }
-}
-
-pub(crate) fn invalid(reason: &'static str) -> DbError {
-    DbError::MigrationConversion(reason)
 }
 
 #[cfg(test)]

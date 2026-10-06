@@ -65,7 +65,10 @@ pub(crate) fn read(
     table: &str,
     key: &RowKey,
 ) -> Result<FileRef, DbError> {
-    current(db, schema, table, key)?.ok_or_else(|| file_row::invalid("row has no file"))
+    current(db, schema, table, key)?.ok_or_else(|| DbError::FileAbsent {
+        table: table.into(),
+        key: key.clone(),
+    })
 }
 
 pub(crate) fn validate(

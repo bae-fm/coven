@@ -313,7 +313,7 @@ async fn a_reused_id_cannot_claim_or_delete_a_kept_file() {
     let db = open().open().await.unwrap();
     assert!(matches!(
         attach(&db, b"replacement".to_vec(), false).await,
-        Err(DbError::FileAttachment { .. })
+        Err(DbError::FileNameReused { name }) if name.as_str() == original.file_name().unwrap().to_str().unwrap()
     ));
     assert_eq!(std::fs::read(original).unwrap(), b"original");
     assert_eq!(db.file_ref("files", "7").await.unwrap().plaintext_size(), 8);

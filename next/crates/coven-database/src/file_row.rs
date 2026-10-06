@@ -20,11 +20,11 @@ pub(crate) fn declaration<'a>(
         .declarations
         .iter()
         .find(|d| d.name.eq_ignore_ascii_case(name))
-        .ok_or_else(|| invalid(format!("{name} is not a synced table")))?;
+        .ok_or_else(|| DbError::FileTableNotSynced { table: name.into() })?;
     let file = table
         .files
         .as_ref()
-        .ok_or_else(|| invalid(format!("{name} does not declare a file")))?;
+        .ok_or_else(|| DbError::FileNotDeclared { table: name.into() })?;
     Ok((schema.table(&table.name), file))
 }
 
@@ -36,15 +36,22 @@ pub(crate) fn lookup(
 ) -> Result<(AppKey, AppValues), DbError> {
     let (table, _) = declaration(schema, table)?;
     if key.0.len() != key_columns(table).len() {
-        return Err(invalid("file row key has the wrong number of columns"));
+        return Err(DbError::FileKeyArity {
+            table: table.name.clone(),
+            expected: key_columns(table).len(),
+            actual: key.0.len(),
+        });
     }
     let values = key
         .0
         .iter()
         .map(|v| value(v.into()))
         .collect::<Result<Vec<_>, _>>()?;
-    if values.contains(&Value::Null) {
-        return Err(invalid("file row key cannot contain NULL"));
+    if let Some(index) = values.iter().position(|v| v == &Value::Null) {
+        return Err(DbError::FileKeyNull {
+            table: table.name.clone(),
+            column: key_columns(table)[index].name.clone(),
+        });
     }
     let key = encoded(coven_format::key::encode_key(&values))?;
     let values = read_values(database, table, &key)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
@@ -109,10 +116,10 @@ pub(crate) fn set(
 pub(crate) fn size(values: &AppValues, file: &FileDecl) -> Result<u64, DbError> {
     match values[&file.size] {
         Value::Integer(n) if n >= 0 => Ok(n as u64),
-        _ => Err(invalid(format!(
-            "{} must contain a nonnegative integer byte count",
-            file.size
-        ))),
+        _ => Err(DbError::FileSizeInvalid {
+            column: file.size.clone(),
+            value: sql_value(&values[&file.size]),
+        }),
     }
 }
 
@@ -134,19 +141,21 @@ pub(crate) fn key(key: &AppKey) -> Result<RowKey, DbError> {
     ))
 }
 
-pub(crate) fn invalid(reason: impl Into<String>) -> DbError {
-    DbError::FileAttachment {
-        reason: reason.into(),
-    }
-}
-
 /// The facts binding local bytes to a file, independent of its audience/location.
 pub(crate) fn identity(file: &FileDecl, values: &AppValues) -> Result<Option<Vec<u8>>, DbError> {
     if values[&file.hash] == Value::Null {
         return Ok(None);
     }
-    if values[&file.id] == Value::Null || values[&file.size] == Value::Null {
-        return Err(invalid("an attached file must have an id and size"));
+    if values[&file.id] == Value::Null {
+        return Err(DbError::FileIdMissing {
+            column: file.id.clone(),
+        });
+    }
+    if values[&file.size] == Value::Null {
+        return Err(DbError::FileSizeInvalid {
+            column: file.size.clone(),
+            value: rusqlite::types::Value::Null,
+        });
     }
     encoded(coven_format::key::encode_key(&[
         values[&file.id].clone(),
@@ -155,3 +164,7 @@ pub(crate) fn identity(file: &FileDecl, values: &AppValues) -> Result<Option<Vec
     ]))
     .map(Some)
 }
+
+#[cfg(test)]
+#[path = "file_row_tests.rs"]
+mod tests;

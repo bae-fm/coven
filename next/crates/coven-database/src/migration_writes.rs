@@ -1,7 +1,6 @@
 //! Convert waiting records without changing their already-applied merge effects.
 
 use crate::migration::WriteConversion;
-use crate::migration_change::invalid;
 use crate::migration_names::MigrationMatch;
 use crate::schema::Schema;
 use crate::sqlite::DatabaseConnection;
@@ -36,7 +35,11 @@ pub(crate) fn convert(
             continue;
         }
         if record.header.schema_version >= version {
-            return Err(invalid("waiting write is not older than its migration"));
+            return Err(DbError::MigrationWriteVersion {
+                write: id,
+                schema_version: record.header.schema_version,
+                migration_version: version,
+            });
         }
         if let Some(conversion) = conversion {
             for part in &mut record.parts {
@@ -57,7 +60,7 @@ pub(crate) fn convert(
             params![bytes,id.device.0.to_be_bytes().as_slice(),id.number.to_be_bytes().as_slice()],
         )?;
         if updated != 1 {
-            return Err(invalid("waiting upload disappeared during migration"));
+            return Err(DbError::MigrationUploadMissing { write: id });
         }
     }
     Ok(())

@@ -269,7 +269,9 @@ async fn failed_sql_stream_and_commit_discard_new_bytes_and_preserve_old_bytes()
         match failure {
             "sql" => assert!(matches!(error, DbError::StoreClosed)),
             "stream" => assert!(matches!(error, DbError::Disk(_))),
-            "unused" => assert!(matches!(error, DbError::FileAttachment { .. })),
+            "unused" => assert!(
+                matches!(error, DbError::FileUnreferenced { namespace, id } if namespace == "files" && id == "unattached")
+            ),
             "commit" => assert!(matches!(error, DbError::Sqlite(_)), "{error:?}"),
             _ => unreachable!(),
         }
@@ -839,7 +841,7 @@ async fn a_trigger_cannot_leave_a_new_owned_file_without_its_row() {
     })]).open().await.unwrap();
     assert!(matches!(
         attach(&db, b"original".to_vec(), true).await,
-        Err(DbError::FileAttachment { .. })
+        Err(DbError::FileRowRemoved { table, key }) if table == "files" && key == RowKey::from("7")
     ));
     assert_eq!(local_count(&db, "files"), 0);
     assert_eq!(local_count(&db, "coven_device_files"), 0);

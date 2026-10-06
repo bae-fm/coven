@@ -2855,8 +2855,24 @@ pub enum DbError {
     WriteFormat(coven_format::Error),
     /// A conversion changed or introduced a reference whose generation it cannot know (§20.13).
     MigrationReference { table: String, column: String },
-    /// A converted row does not fit its operation or the migration's schema (§20.13).
-    MigrationConversion(&'static str),
+    /// A converted row names the same column twice.
+    MigrationDuplicateColumn { table: String, column: String },
+    /// A converted column has old/new values incompatible with its operation.
+    MigrationColumnOperation { table: String, column: String, op: ChangeOp, has_old: bool, has_new: bool },
+    /// A converted column is absent from the target schema.
+    MigrationColumnMissing { table: String, column: String },
+    /// A converted table has no primary index.
+    MigrationPrimaryKeyMissing { table: String },
+    /// A converted key has the wrong number of values.
+    MigrationKeyArity { table: String, expected: usize, actual: usize },
+    /// A converted row or reference names an absent table.
+    MigrationTableMissing { table: String },
+    /// Distinct original references became the same converted reference.
+    MigrationReferenceCollision { table: String, reference: coven_merge::ForeignKey },
+    /// A waiting write is not older than the migration converting it.
+    MigrationWriteVersion { write: coven_merge::WriteId, schema_version: u32, migration_version: u32 },
+    /// A waiting upload disappeared while its conversion was being recorded.
+    MigrationUploadMissing { write: coven_merge::WriteId },
     /// A write changes a file declared write-once (§20.2).
     FileWriteOnce { table: String, key: RowKey },
     /// A file reference no longer names the row's file (§16.3).
@@ -2869,8 +2885,38 @@ pub enum DbError {
     UserFileChanged { path: PathBuf },
     /// App SQL tried to assign a hash or where-column, including NULL (§16.1).
     FileColumnWrite { table: String, column: String },
-    /// Supplied files cannot be attached to the declared namespace, kind or row (§20.3).
-    FileAttachment { reason: String },
+    /// A batch supplies the same namespace and file id twice.
+    FileBatchDuplicate { namespace: String, id: String },
+    /// A batch names no app-provided file declaration.
+    FileNamespaceNotAppProvided { namespace: String },
+    /// The id source reused the physical name of a kept file.
+    FileNameReused { name: FileName },
+    /// No row in the namespace names a supplied file.
+    FileUnreferenced { namespace: String, id: String },
+    /// A file operation targets a table that is not synced.
+    FileTableNotSynced { table: String },
+    /// A synced table has no declared file columns.
+    FileNotDeclared { table: String },
+    /// Registration or clearing requires a user-provided declaration.
+    FileTableNotUserProvided { table: String },
+    /// A file lookup has the wrong number of primary-key values.
+    FileKeyArity { table: String, expected: usize, actual: usize },
+    /// A file lookup supplies NULL for a primary-key column.
+    FileKeyNull { table: String, column: String },
+    /// An attached file has no id.
+    FileIdMissing { column: String },
+    /// The size column is not a nonnegative integer byte count.
+    FileSizeInvalid { column: String, value: rusqlite::types::Value },
+    /// A trigger removed a row while coven filled its file columns.
+    FileRowRemoved { table: String, key: RowKey },
+    /// A row no longer names the file attached during this write.
+    FileAttachmentChanged { table: String, key: RowKey },
+    /// Hash and location are neither both NULL nor both set.
+    FileHashLocationMismatch { table: String, key: RowKey },
+    /// A write changes an existing file without supplying its bytes.
+    FileBytesRequired { table: String, key: RowKey },
+    /// The requested row is absent or carries no file.
+    FileAbsent { table: String, key: RowKey },
     /// Reading or keeping file bytes failed (§20.3).
     Disk(DiskError),
     /// Removing owned bytes or their pending records failed. A committed write
@@ -4527,7 +4573,7 @@ pub enum EagerCacheFillStatus {
 impl CovenHandle {
     /// The file a row carries, as of its current file version. Its four file
     /// columns, audience and version are read in one committed state. A row
-    /// without a file returns `DbError::FileAttachment`; malformed stored
+    /// without a file returns `DbError::FileAbsent`; malformed stored
     /// file facts return `DbError::DamagedDatabase`.
     pub async fn file_ref(&self, table: &str, key: impl Into<RowKey>) -> Result<FileRef, DbError>;
 

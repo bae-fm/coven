@@ -1,7 +1,7 @@
 //! Async sources are consumed without holding SQLite or a blocking worker.
 
 use super::{finish_blocking, Database};
-use crate::{file_row, file_write::StagedFile, DbError, FileSource, Provenance, WriteBatch};
+use crate::{file_write::StagedFile, DbError, FileSource, Provenance, WriteBatch};
 use coven_crypto::ContentHasher;
 use coven_foundation::files::{FileArea, FileName};
 use std::collections::{BTreeSet, VecDeque};
@@ -65,16 +65,14 @@ impl FileStaging {
                     let mut sources = VecDeque::new();
                     for (namespace, id, source) in batch.files {
                         if !identities.insert((namespace.clone(), id.clone())) {
-                            return Err(file_row::invalid("a batch supplies the same file twice"));
+                            return Err(DbError::FileBatchDuplicate { namespace, id });
                         }
                         if !inner.write_schema.declarations.iter().any(|d| {
                             d.files.as_ref().is_some_and(|f| {
                                 f.namespace == namespace && f.provenance == Provenance::AppProvided
                             })
                         }) {
-                            return Err(file_row::invalid(format!(
-                                "{namespace} is not an app-provided file namespace"
-                            )));
+                            return Err(DbError::FileNamespaceNotAppProvided { namespace });
                         }
                         let name = FileName::new(inner.ids.new_id().to_string())
                             .expect("UUID is a portable filename");
@@ -84,9 +82,7 @@ impl FileStaging {
                             [name.as_str()],
                         )?;
                         if recorded != 1 {
-                            return Err(file_row::invalid(
-                                "the id source reused a kept file's name",
-                            ));
+                            return Err(DbError::FileNameReused { name });
                         }
                         sources.push_back(StagingSource {
                             namespace,
