@@ -2485,7 +2485,9 @@ Carol's tablet:
 
 ## 20. API
 
-- The API is listed as Rust declarations with their doc comments.
+- The API is what apps call, listed as Rust declarations with their doc
+  comments. What one coven crate offers another is documented in its code,
+  not here.
 - Long parameter lists are abbreviated: `/* … */` marks parameters left out,
   and the comment beside it names them.
 - Calls on `handle` are on the `CovenHandle` that opening a store returns.
