@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 struct Bridge {
     memory: MemoryStorage,
     abort_failure: Option<StorageFailure>,
+    non_owner: bool,
     uploads: tokio::sync::Mutex<BTreeMap<String, UploadSession>>,
 }
 fn config() -> StorageConfig {
@@ -19,12 +20,17 @@ impl Bridge {
         Self {
             memory: MemoryStorage::new(config()).unwrap(),
             abort_failure: None,
+            non_owner: false,
             uploads: tokio::sync::Mutex::new(BTreeMap::new()),
         }
     }
 }
 #[async_trait]
 impl CloudKitOps for Bridge {
+    async fn is_owner(&self, location: &StorageConfig) -> Result<bool, StorageError> {
+        assert_eq!(location, &config());
+        Ok(!self.non_owner)
+    }
     fn single_request_limit(&self) -> u64 {
         16
     }
@@ -82,6 +88,7 @@ impl CloudKitOps for Bridge {
         granted: bool,
     ) -> Result<(), StorageError> {
         assert_eq!(location, &config());
+        assert!(!self.non_owner, "sharing must check ownership first");
         if granted {
             self.memory.grant_access(email).await?;
         } else {
@@ -320,4 +327,21 @@ async fn automatic_upload_keeps_both_transfer_and_abort_failures() {
     assert_eq!(operation.failure(), StorageFailure::Network);
     assert_eq!(cleanup.failure(), StorageFailure::PermissionDenied);
     assert!(storage.list(&ObjectPrefix::all()).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn sharing_requires_the_store_owners_account() {
+    let mut bridge = Bridge::new();
+    bridge.non_owner = true;
+    let storage = CloudKitStorage::new(config(), Arc::new(bridge)).unwrap();
+    assert!(matches!(
+        storage.grant_access("new@example.test").await,
+        Err(StorageError::NotStoreOwner)
+    ));
+    assert!(matches!(
+        storage
+            .revoke_access(&MemberAccess::ProviderAccount("kept@example.test".into()))
+            .await,
+        Err(StorageError::NotStoreOwner)
+    ));
 }

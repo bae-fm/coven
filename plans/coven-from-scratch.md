@@ -2776,6 +2776,8 @@ pub enum CloudKitUploadStatus {
 /// Native CloudKit calls implemented by the app (§4, §20.1).
 #[async_trait]
 pub trait CloudKitOps: Send + Sync {
+    /// Whether the signed-in Apple account owns this store's shared zone.
+    async fn is_owner(&self, location: &StorageConfig) -> Result<bool, StorageError>;
     /// Maximum encrypted body in one native call; nonzero, set by the asset representation.
     fn single_request_limit(&self) -> u64;
     /// Creates complete encrypted bytes using the server's create-only policy.
@@ -3891,6 +3893,12 @@ while let Ok(values) = lost.next().await {
     a new recorded session for the same path and total length, with zero
     confirmed bytes. The caller records it and supplies the kept encrypted
     bytes again. A completed session cannot be restarted.
+- Before sharing changes, storage checks that the signed-in account owns the
+  store: Drive's folder `ownedByMe`, Dropbox's folder `access_type`, OneDrive's
+  current-account drive id, or CloudKit's native `is_owner` call. Another account
+  fails with `StorageError::NotStoreOwner`, classified `PermissionDenied`,
+  before any grant or revocation. S3's console-key instructions need no sharing
+  account check.
 - Storage exposes `delete`, not a deletion-rights query. Sync chooses the
   deleting device by §15; Drive deletes an object the account owns and
   otherwise removes it from the store's folder. Provider refusals keep
@@ -4009,6 +4017,8 @@ pub enum StorageError {
     NotFound,
     /// The path already holds an object; creation never replaces it.
     AlreadyExists,
+    /// Only the account holding the store may change its sharing.
+    NotStoreOwner,
     /// The upload session belongs to another provider or location.
     SessionMismatch,
     /// The provider no longer retains the recorded upload.

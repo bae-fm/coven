@@ -12,6 +12,7 @@ use std::{
 };
 #[derive(Default)]
 struct Remote {
+    non_owner: bool,
     objects: BTreeMap<String, Vec<u8>>,
     upload: Vec<u8>,
     fail_reply: bool,
@@ -46,6 +47,12 @@ async fn endpoint(
         )
     };
     match uri.path() {
+        "/2/sharing/get_folder_metadata" => {
+            assert_eq!(arg["shared_folder_id"], "namespace");
+            reply(
+                json!({"shared_folder_id":"namespace", "access_type":{".tag":if state.non_owner {"editor"} else {"owner"}}}),
+            )
+        }
         "/2/files/upload" => {
             if body.len() > 150 * 1024 * 1024 {
                 return response(413, "single request limit exceeded");
@@ -390,4 +397,38 @@ async fn create_uploads_an_oversized_write_in_parts() {
     storage.create(&path, &bytes).await.unwrap();
     assert_eq!(state.lock().unwrap().objects[&path.absolute()], bytes);
     assert!(state.lock().unwrap().closed);
+}
+
+#[tokio::test]
+async fn sharing_requires_the_store_owners_account() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    storage.grant_access("kept@example.test").await.unwrap();
+    state.lock().unwrap().non_owner = true;
+    for error in [
+        storage
+            .grant_access("new@example.test")
+            .await
+            .err()
+            .unwrap(),
+        storage
+            .revoke_access(&MemberAccess::ProviderAccount("kept@example.test".into()))
+            .await
+            .err()
+            .unwrap(),
+    ] {
+        assert!(matches!(error, StorageError::NotStoreOwner));
+        assert_eq!(error.failure(), StorageFailure::PermissionDenied);
+    }
+    assert_eq!(
+        state
+            .lock()
+            .unwrap()
+            .members
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        ["kept@example.test"]
+    );
 }

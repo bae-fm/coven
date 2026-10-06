@@ -34,6 +34,8 @@ pub enum CloudKitUploadStatus {
 /// classification. None of these calls starts unowned background work.
 #[async_trait]
 pub trait CloudKitOps: Send + Sync {
+    /// Whether the signed-in Apple account owns this store's shared zone.
+    async fn is_owner(&self, location: &StorageConfig) -> Result<bool, StorageError>;
     /// Largest encrypted object this bridge saves in one native call. Must be
     /// nonzero; larger objects use the bridge's durable bounded-asset upload.
     fn single_request_limit(&self) -> u64;
@@ -130,6 +132,12 @@ impl CloudKitStorage {
         }
         Ok(Self { config, ops })
     }
+    async fn require_owner(&self) -> Result<(), StorageError> {
+        if !self.ops.is_owner(&self.config).await? {
+            return Err(StorageError::NotStoreOwner);
+        }
+        Ok(())
+    }
     fn id<'a>(&self, session: &'a UploadSession) -> Result<&'a SecretText, StorageError> {
         session.check(&self.config)?;
         match &session.state {
@@ -190,6 +198,7 @@ impl Storage for CloudKitStorage {
         self.ops.delete(&self.config, path).await
     }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
+        self.require_owner().await?;
         self.ops.set_access(&self.config, account, true).await?;
         Ok(AccessGrant::Granted)
     }
@@ -199,6 +208,7 @@ impl Storage for CloudKitStorage {
                 "CloudKit requires an account",
             ));
         };
+        self.require_owner().await?;
         self.ops.set_access(&self.config, email, false).await?;
         Ok(MemberRemoval::Revoked)
     }

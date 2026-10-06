@@ -172,3 +172,69 @@ async fn failed_automatic_upload_is_aborted_without_publishing() {
     storage.create(&path, &[1; 17]).await.unwrap();
     assert_eq!(storage.read(&path).await.unwrap(), [1; 17]);
 }
+
+#[tokio::test]
+async fn sharing_authority_belongs_to_the_adapters_account() {
+    for config in [
+        StorageConfig::GoogleDrive {
+            folder_id: "folder".into(),
+        },
+        StorageConfig::Dropbox {
+            namespace_id: "namespace".into(),
+        },
+        StorageConfig::OneDrive {
+            drive_id: "drive".into(),
+            folder_id: "folder".into(),
+        },
+        StorageConfig::CloudKit {
+            container: "container".into(),
+            owner: "owner".into(),
+            zone: "zone".into(),
+        },
+    ] {
+        let owner = MemoryStorage::new(config).unwrap();
+        owner.grant_access("kept@example.test").await.unwrap();
+        let mut recipient = owner.clone();
+        recipient.set_owner(false);
+        assert!(matches!(
+            recipient.grant_access("new@example.test").await,
+            Err(StorageError::NotStoreOwner)
+        ));
+        assert!(matches!(
+            recipient
+                .revoke_access(&MemberAccess::ProviderAccount("kept@example.test".into()))
+                .await,
+            Err(StorageError::NotStoreOwner)
+        ));
+        assert_eq!(
+            owner
+                .state
+                .lock()
+                .await
+                .accounts
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            ["kept@example.test"]
+        );
+        owner
+            .revoke_access(&MemberAccess::ProviderAccount("kept@example.test".into()))
+            .await
+            .unwrap();
+        assert!(owner.state.lock().await.accounts.is_empty());
+    }
+    let mut s3 = MemoryStorage::new(config()).unwrap();
+    s3.set_owner(false);
+    assert!(matches!(
+        s3.grant_access("member").await.unwrap(),
+        AccessGrant::CreateAccessKey
+    ));
+    assert!(matches!(
+        s3.revoke_access(&MemberAccess::S3AccessKey {
+            access_key_id: "key".into()
+        })
+        .await
+        .unwrap(),
+        MemberRemoval::DeleteAccessKey { .. }
+    ));
+}

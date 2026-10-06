@@ -51,6 +51,7 @@ struct State {
 #[derive(Clone)]
 pub struct MemoryStorage {
     config: StorageConfig,
+    owns_location: bool,
     state: Arc<Mutex<State>>,
 }
 impl MemoryStorage {
@@ -60,6 +61,7 @@ impl MemoryStorage {
         config.validate()?;
         Ok(Self {
             config,
+            owns_location: true,
             state: Arc::new(Mutex::new(State {
                 objects: BTreeMap::new(),
                 uploads: BTreeMap::new(),
@@ -68,6 +70,11 @@ impl MemoryStorage {
                 faults: Faults::none(),
             })),
         })
+    }
+    /// Set whether this adapter's account owns the shared location. Clones keep
+    /// their own account authority while sharing objects and pending uploads.
+    pub fn set_owner(&mut self, owns_location: bool) {
+        self.owns_location = owns_location;
     }
     /// Set faults absolutely, so repeating the command has the same effect.
     pub async fn set_faults(&self, faults: Faults) {
@@ -172,6 +179,9 @@ impl Storage for MemoryStorage {
         if self.config.provider() == CloudProvider::S3 {
             return Ok(AccessGrant::CreateAccessKey);
         }
+        if !self.owns_location {
+            return Err(StorageError::NotStoreOwner);
+        }
         self.state.lock().await.accounts.insert(account.into());
         Ok(AccessGrant::Granted)
     }
@@ -184,6 +194,9 @@ impl Storage for MemoryStorage {
                 })
             }
             (_, MemberAccess::ProviderAccount(account)) => {
+                if !self.owns_location {
+                    return Err(StorageError::NotStoreOwner);
+                }
                 self.state.lock().await.accounts.remove(account);
                 Ok(MemberRemoval::Revoked)
             }

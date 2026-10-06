@@ -59,6 +59,9 @@ pub enum StorageError {
     /// The path already holds an object; creation never replaces it.
     #[error("object already exists")]
     AlreadyExists,
+    /// Only the account holding the store may change its sharing.
+    #[error("sharing requires the store owner's account")]
+    NotStoreOwner,
     /// The session belongs to another provider or location.
     #[error("upload session belongs to another location")]
     SessionMismatch,
@@ -112,6 +115,7 @@ impl StorageError {
             | Self::SingleRequestTooLarge { .. } => StorageFailure::InvalidConfiguration,
             Self::NotFound | Self::SessionExpired => StorageFailure::NotFound,
             Self::AlreadyExists => StorageFailure::AlreadyExists,
+            Self::NotStoreOwner => StorageFailure::PermissionDenied,
             Self::SessionMismatch | Self::Protocol(_) | Self::Encoding(_) | Self::File(_) => {
                 StorageFailure::Protocol
             }

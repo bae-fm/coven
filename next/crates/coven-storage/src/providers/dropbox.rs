@@ -87,6 +87,18 @@ impl DropboxStorage {
             _ => Err(StorageError::SessionMismatch),
         }
     }
+    async fn require_owner(&self) -> Result<(), StorageError> {
+        let value = self
+            .rpc(
+                "sharing/get_folder_metadata",
+                json!({"shared_folder_id":self.namespace}),
+            )
+            .await?;
+        if http::string(&value["access_type"], ".tag")? != "owner" {
+            return Err(StorageError::NotStoreOwner);
+        }
+        Ok(())
+    }
     async fn members(&self, email: &str) -> Result<Option<String>, StorageError> {
         let mut method = "sharing/list_folder_members";
         let mut request = json!({"shared_folder_id":self.namespace,"include_inherited":false});
@@ -324,6 +336,7 @@ impl Storage for DropboxStorage {
         }
     }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
+        self.require_owner().await?;
         if self.members(account).await?.as_deref() != Some("editor") {
             if self.members(account).await?.is_some() {
                 self.remove_member(account).await?;
@@ -343,6 +356,7 @@ impl Storage for DropboxStorage {
                 "Dropbox requires an account",
             ));
         };
+        self.require_owner().await?;
         self.remove_member(email).await?;
         Ok(MemberRemoval::Revoked)
     }

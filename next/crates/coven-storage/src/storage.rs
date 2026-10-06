@@ -130,9 +130,10 @@ pub trait Storage: Send + Sync {
     /// Delete an object, or remove it from Drive's folder when only that is allowed.
     /// An already absent object succeeds, making operation retries safe.
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError>;
-    /// Share the store with an account, or tell an S3 admin to create a key.
+    /// Share the store using its owner's account, or tell an S3 admin to create a key.
+    /// A signed-in sharing account that does not own the location gets `NotStoreOwner`.
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError>;
-    /// Unshare the store, or tell an S3 admin which key to delete.
+    /// Unshare through the owner's account, or tell an S3 admin which key to delete.
     async fn revoke_access(&self, member: &MemberAccess) -> Result<MemberRemoval, StorageError>;
     /// Begin a create-once upload, returning the value to record before parts are sent.
     /// Posted positions are refused: replacement always sends complete bytes in one request.

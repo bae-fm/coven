@@ -185,6 +185,14 @@ impl OneDriveStorage {
         }
         Ok(())
     }
+    async fn require_owner(&self) -> Result<(), StorageError> {
+        let url = http::endpoint(&self.api, &["me", "drive"], &[("$select", "id")])?;
+        let value = http::json(PROVIDER, self.send(Method::GET, &url, Body::Empty).await?).await?;
+        if http::string(&value, "id")? != self.drive {
+            return Err(StorageError::NotStoreOwner);
+        }
+        Ok(())
+    }
     async fn permissions(&self, email: &str) -> Result<Vec<Value>, StorageError> {
         let mut url = self.item(&self.folder, &["permissions"])?;
         let mut seen = BTreeSet::new();
@@ -365,6 +373,7 @@ impl Storage for OneDriveStorage {
         Ok(())
     }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
+        self.require_owner().await?;
         if !self.permissions(account).await?.iter().any(writable) {
             http::checked(PROVIDER,self.send(Method::POST,&self.item(&self.folder,&["invite"])?,Body::Json(json!({"recipients":[{"email":account}],"roles":["write"],"requireSignIn":true,"sendInvitation":true}))).await?).await?;
         }
@@ -381,6 +390,7 @@ impl Storage for OneDriveStorage {
                 "OneDrive requires an account",
             ));
         };
+        self.require_owner().await?;
         for permission in self.permissions(email).await? {
             let response = self
                 .send(

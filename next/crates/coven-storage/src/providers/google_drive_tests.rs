@@ -13,6 +13,7 @@ use std::{
 #[derive(Default)]
 struct Remote {
     next: u64,
+    non_owner: bool,
     single_uploads: usize,
     files: BTreeMap<String, (Value, Vec<u8>)>,
     uploads: BTreeMap<String, (Value, Vec<u8>, usize)>,
@@ -59,6 +60,9 @@ fn respond(
     } else {
         Value::Null
     };
+    if parts == ["drive", "files", "folder"] && method == Method::GET {
+        return reply(json!({"id":"folder", "ownedByMe":!state.non_owner}));
+    }
     if parts == ["drive", "files", "generateIds"] {
         state.next += 1;
         return reply(json!({"ids":[format!("id{}",state.next)]}));
@@ -559,4 +563,38 @@ async fn create_switches_to_a_session_above_the_multipart_request_limit() {
     storage.create(&path, &bytes).await.unwrap();
     assert_eq!(state.lock().unwrap().single_uploads, 1);
     assert_eq!(storage.read(&path).await.unwrap(), bytes);
+}
+
+#[tokio::test]
+async fn sharing_requires_the_store_owners_account() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    storage.grant_access("kept@example.test").await.unwrap();
+    state.lock().unwrap().non_owner = true;
+    for error in [
+        storage
+            .grant_access("new@example.test")
+            .await
+            .err()
+            .unwrap(),
+        storage
+            .revoke_access(&MemberAccess::ProviderAccount("kept@example.test".into()))
+            .await
+            .err()
+            .unwrap(),
+    ] {
+        assert!(matches!(error, StorageError::NotStoreOwner));
+        assert_eq!(error.failure(), StorageFailure::PermissionDenied);
+    }
+    assert_eq!(
+        state
+            .lock()
+            .unwrap()
+            .permissions
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        ["kept@example.test"]
+    );
 }

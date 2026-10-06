@@ -16,6 +16,7 @@ struct Remote {
     files: BTreeMap<String, Vec<u8>>,
     uploads: BTreeMap<String, (String, Vec<u8>)>,
     next: u64,
+    non_owner: bool,
     single_uploads: usize,
     session_starts: usize,
     fail_reply: bool,
@@ -99,6 +100,9 @@ async fn endpoint(
         );
     }
     assert_eq!(headers["authorization"], "Bearer token");
+    if uri.path() == "/graph/me/drive" {
+        return reply(json!({"id": if state.non_owner { "other" } else { "drive" }}));
+    }
     let tail = uri
         .path()
         .strip_prefix("/graph/drives/drive/items/")
@@ -457,4 +461,38 @@ async fn create_switches_to_a_session_above_the_content_limit() {
     assert_eq!(state.lock().unwrap().single_uploads, 1);
     assert_eq!(state.lock().unwrap().session_starts, 1);
     assert_eq!(state.lock().unwrap().files[path.as_str()], bytes);
+}
+
+#[tokio::test]
+async fn sharing_requires_the_store_owners_account() {
+    let state = remote();
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    storage.grant_access("kept@example.test").await.unwrap();
+    state.lock().unwrap().non_owner = true;
+    for error in [
+        storage
+            .grant_access("new@example.test")
+            .await
+            .err()
+            .unwrap(),
+        storage
+            .revoke_access(&MemberAccess::ProviderAccount("kept@example.test".into()))
+            .await
+            .err()
+            .unwrap(),
+    ] {
+        assert!(matches!(error, StorageError::NotStoreOwner));
+        assert_eq!(error.failure(), StorageFailure::PermissionDenied);
+    }
+    assert_eq!(
+        state
+            .lock()
+            .unwrap()
+            .members
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        ["kept@example.test"]
+    );
 }

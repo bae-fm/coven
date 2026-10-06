@@ -271,6 +271,23 @@ impl GoogleDriveStorage {
             Err(http::response_error(PROVIDER, response).await)
         }
     }
+    async fn require_owner(&self) -> Result<(), StorageError> {
+        let value = http::json(
+            PROVIDER,
+            self.send(
+                Method::GET,
+                &self.url(&["files", &self.folder], &[("fields", "ownedByMe")])?,
+                Body::Empty,
+            )
+            .await?,
+        )
+        .await?;
+        match value["ownedByMe"].as_bool() {
+            Some(true) => Ok(()),
+            Some(false) => Err(StorageError::NotStoreOwner),
+            None => Err(StorageError::Protocol("Drive omitted folder ownership")),
+        }
+    }
     async fn permissions(&self, email: &str) -> Result<Vec<Value>, StorageError> {
         let mut token = None::<String>;
         let mut seen = BTreeSet::new();
@@ -461,6 +478,7 @@ impl Storage for GoogleDriveStorage {
         Ok(())
     }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
+        self.require_owner().await?;
         let permissions = self.permissions(account).await?;
         if permissions
             .iter()
@@ -514,6 +532,7 @@ impl Storage for GoogleDriveStorage {
                 "Drive requires an account",
             ));
         };
+        self.require_owner().await?;
         for permission in self.permissions(email).await? {
             let response = self
                 .send(
