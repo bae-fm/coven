@@ -167,6 +167,7 @@ fn apply_opened(
     let mut kept = Vec::new();
     for part in record.parts {
         let cause = match record.header.disposition {
+            WriteDisposition::Migration => continue,
             WriteDisposition::Lost(version) => Some(LostWriteCause::SchemaChange(version)),
             WriteDisposition::Apply => boundaries
                 .iter()

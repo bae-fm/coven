@@ -39,7 +39,7 @@ impl PartHeader {
 pub struct WriteHeaderFrame {
     /// Identity, causal positions, timestamp and schema.
     pub header: WriteHeader,
-    /// Nonempty descriptors in strictly increasing audience order.
+    /// Descriptors in strictly increasing audience order. Empty only for a migration.
     pub parts: Vec<PartHeader>,
 }
 wire_struct!(WriteHeaderFrame, header, parts);
@@ -62,7 +62,7 @@ impl WriteHeaderFrame {
 
     fn validate(&self) -> Result<(), Error> {
         self.header.validate()?;
-        require(!self.parts.is_empty(), "write parts", Rule::Required)?;
+        self.header.disposition.validate_parts(self.parts.len())?;
         require(
             self.parts.windows(2).all(|p| p[0].audience < p[1].audience),
             "write parts",

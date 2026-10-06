@@ -206,3 +206,48 @@ fn schema_change_marker_uses_a_positive_schema_version() {
         },
     );
 }
+
+#[test]
+fn only_migration_writes_have_no_parts() {
+    let mut write = test_utils::write();
+    write.parts.clear();
+    for disposition in [WriteDisposition::Apply, WriteDisposition::Lost(2)] {
+        write.header.disposition = disposition;
+        refuses(
+            write.clone(),
+            Error::Invalid {
+                field: "write parts",
+                rule: Rule::Required,
+            },
+        );
+    }
+    write.header.disposition = WriteDisposition::Migration;
+    let mut lost = test_utils::lost_write();
+    lost.header = write.header.clone();
+    assert_eq!(
+        lost.validate(),
+        Err(Error::Invalid {
+            field: "migration write parts",
+            rule: Rule::StreamLength,
+        })
+    );
+    let bytes = test_utils::write_plaintext(&write).unwrap();
+    assert_eq!(decode_plaintext(&bytes).unwrap(), write);
+    assert_eq!(
+        bytes,
+        include_str!("../fixtures/migration.hex")
+            .trim()
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect::<Vec<_>>()
+    );
+    write.parts = test_utils::write().parts;
+    refuses(
+        write,
+        Error::Invalid {
+            field: "migration write parts",
+            rule: Rule::StreamLength,
+        },
+    );
+}

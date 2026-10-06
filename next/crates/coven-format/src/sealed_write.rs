@@ -19,11 +19,6 @@ pub struct WriteObjectPrefix {
 impl WriteObjectPrefix {
     /// Encode kind, version, header key and the counted list of part keys.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
-        require(
-            !self.part_keys.is_empty(),
-            "write section keys",
-            Rule::Required,
-        )?;
         let mut out = Encoder::new();
         14u8.put(&mut out)?;
         crate::FORMAT_VERSION.put(&mut out)?;
@@ -39,7 +34,6 @@ impl WriteObjectPrefix {
         let count = bytes.get(19..23).ok_or(Error::Truncated)?;
         let count = u32::from_be_bytes(count.try_into().expect("four bytes")) as usize;
         bound(count, MAX_ITEMS, "write section keys")?;
-        require(count > 0, "write section keys", Rule::Required)?;
         Ok(23 + count * 16)
     }
 

@@ -179,6 +179,7 @@ wire_struct!(LostWrite, header, audience, row_count, cause);
 impl LostWrite {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         self.header.validate()?;
+        self.header.disposition.validate_parts(1)?;
         require(self.row_count > 0, "lost write rows", FormatRule::Required)?;
         self.cause.validate()?;
         if let WriteDisposition::Lost(version) = self.header.disposition {

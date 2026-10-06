@@ -17,7 +17,7 @@ pub struct WriteHeader {
     pub had_read: WritePositions,
     /// The app schema version (§17.1).
     pub schema_version: u32,
-    /// Whether the author has marked the write lost after a breaking change.
+    /// Whether to apply rows, retain them as lost, or consume a migration write.
     pub disposition: WriteDisposition,
 }
 wire_struct!(
@@ -51,6 +51,16 @@ pub enum WriteDisposition {
     Apply,
     /// Keep the whole write as lost, naming the version reached by the breaking change.
     Lost(u32),
+    /// Its changes travel only in the breaking change's snapshot; the log has no parts.
+    Migration,
+}
+impl WriteDisposition {
+    pub(crate) fn validate_parts(self, count: usize) -> Result<(), Error> {
+        match self {
+            Self::Migration => require(count == 0, "migration write parts", Rule::StreamLength),
+            Self::Apply | Self::Lost(_) => require(count > 0, "write parts", Rule::Required),
+        }
+    }
 }
 impl Wire for WriteDisposition {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {
@@ -60,12 +70,14 @@ impl Wire for WriteDisposition {
                 1u8.put(out)?;
                 p.put(out)
             }
+            Self::Migration => 2u8.put(out),
         }
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
         match u8::get(input)? {
             0 => Ok(Self::Apply),
             1 => Ok(Self::Lost(Wire::get(input)?)),
+            2 => Ok(Self::Migration),
             tag => Err(Error::UnknownTag {
                 field: "write disposition",
                 tag,
@@ -188,13 +200,13 @@ impl WritePart {
 pub struct WriteRecord {
     /// Who wrote it, when, what it had read and its schema.
     pub header: WriteHeader,
-    /// Nonempty, strictly increasing audience parts, store before circles.
+    /// Strictly increasing audience parts, store before circles. Empty only for a migration.
     pub parts: Vec<WritePart>,
 }
 impl WriteRecord {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         self.header.validate()?;
-        require(!self.parts.is_empty(), "write parts", Rule::Required)?;
+        self.header.disposition.validate_parts(self.parts.len())?;
         require(
             self.parts.windows(2).all(|p| p[0].audience < p[1].audience),
             "write parts",

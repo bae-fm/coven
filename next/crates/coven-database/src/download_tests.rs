@@ -872,3 +872,48 @@ async fn a_reset_successor_can_read_another_post_reset_write() {
         db.close().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn migration_download_advances_position_without_rows_or_losses() {
+    let store = TestStore::new();
+    let db = open(&store).await;
+    let before = fingerprint(&db, Audience::Store).await;
+    let device = DeviceId(99);
+    let record = WriteRecord {
+        header: WriteHeader {
+            position: WriteId { device, number: 1 },
+            timestamp: Timestamp::new(1_000, 0, device).unwrap(),
+            had_read: WritePositions(vec![]),
+            schema_version: 1,
+            disposition: WriteDisposition::Migration,
+        },
+        parts: vec![],
+    };
+    assert_eq!(
+        db.apply_downloaded(record.clone().into()).await.unwrap(),
+        ApplyOutcome::Applied
+    );
+    assert_eq!(
+        db.apply_downloaded(record.clone().into()).await.unwrap(),
+        ApplyOutcome::AlreadyApplied
+    );
+    assert_eq!(
+        db.sync_state(vec![]).await.unwrap().positions.0,
+        [record.header.position]
+    );
+    for table in [
+        "notes",
+        "coven_rows",
+        "coven_cells",
+        "coven_lost",
+        "coven_uploads",
+    ] {
+        assert_eq!(count(&db, table), 0);
+    }
+    assert_eq!(fingerprint(&db, Audience::Store).await, before);
+    sql(&db, "INSERT INTO notes VALUES('n','after migration','')")
+        .await
+        .unwrap();
+    assert_eq!(records(&db)[0].header.had_read.0, [record.header.position]);
+    db.close().await.unwrap();
+}

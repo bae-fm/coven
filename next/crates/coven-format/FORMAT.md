@@ -163,12 +163,16 @@ encoded through its `as_bytes` and decoded through `from_bytes`.
 had_read:WritePositions | schema_version:u32 | disposition`. The timestamp's
 device matches the write. Had-read contains other devices only; own earlier
 writes are implicit. Schema version zero is representable. Disposition is `0`
-to apply or `1 | breaking_version:u32` to upload the write marked lost.
+to apply, `1 | breaking_version:u32` to upload the write marked lost, or `2`
+for a migration write. A migration write has no parts: only the breaking
+change's snapshot carries its changes (§17.1). Applying its log object consumes
+the position without changing rows.
 The breaking version is positive and names the version the change raised the
 store to.
 
 `PartHeader` is `audience:Audience | row_count:u64 | plaintext_length:u64`.
-The header's descriptors are nonempty and strictly ordered by audience.
+The header's descriptors are strictly ordered by audience, empty for a migration
+write and nonempty for every other disposition.
 Each part is a stream of kind-13 frames, one `RowChange` per frame, strictly
 increasing by `RowId`. Every row has its part's audience. Each part has at least
 one row and one chunk. `plaintext_length` includes every row frame's seven-byte
@@ -217,7 +221,8 @@ The sealed write layout is:
  header_chunk | part_chunks... | signature:64`.
 
 The cleartext prefix's part-key list has the per-frame collection bound and
-must agree with the opened header's part count. It has no frame-length field:
+must agree with the opened header's part count, including zero for a migration
+write. It has no frame-length field:
 its first 23 bytes give its full length. Each chunk is
 `sealed_length:u32 | nonce:24 | ciphertext | tag:16`. Format uses crypto's
 `SEALED_OBJECT_CHUNK_OVERHEAD` for the combined nonce and tag length, currently
@@ -430,7 +435,8 @@ sections and both secret frame kinds. It also pins a sealed-write prefix,
 a two-part plaintext write whose first part spans three chunks, and a
 sealed-snapshot prefix with its plaintext stream cut into chunks. Random
 sealed bytes and their signature are exercised with crypto in integration
-tests. `fixtures/codes.txt` pins both text codes. Seeds and credentials in these fixtures are public test data.
+tests. `fixtures/migration.hex` pins a migration write with no parts.
+`fixtures/codes.txt` pins both text codes. Seeds and credentials in these fixtures are public test data.
 Tests exercise every store change and removal rule, merge invariant rejection,
 schema/reset lost writes, SQLite numeric/text/blob/composite key ordering and
 streaming snapshots exceeding the frame bound. A decoded RowState is fed back

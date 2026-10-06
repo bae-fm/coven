@@ -192,3 +192,56 @@ fn generated_prefixes_are_bounded_and_canonical() {
         let _length = WriteObjectPrefix::header_chunk_length(&bytes);
     }
 }
+
+#[test]
+fn migration_object_authenticates_a_header_followed_directly_by_its_signature() {
+    let mut record = test_utils::write();
+    record.header.disposition = crate::write::WriteDisposition::Migration;
+    record.parts.clear();
+    let encoder = WriteEncoder::new(&record).unwrap();
+    let mut layout = WriteObjectLayout::new(
+        WriteObjectPrefix {
+            store_key: key(1).id(),
+            part_keys: vec![],
+        },
+        encoder.header().clone(),
+    )
+    .unwrap();
+    let prefix = layout.prefix().unwrap();
+    assert_eq!(WriteObjectPrefix::length(&prefix).unwrap(), 23);
+    let sealed = key(1)
+        .derive()
+        .seal_object_chunk("devices/1/3", 0, 0, encoder.header_frame())
+        .unwrap();
+    let chunk = layout.encode_chunk(&sealed).unwrap();
+    assert!(layout.next_chunk().is_none());
+    let mut hash = ObjectHasher::new();
+    hash.update(&prefix);
+    hash.update(&chunk);
+    let digest = hash.finish();
+    let signature = test_utils::member_keys().sign_object("devices/1/3", &digest);
+    let signature = layout.signature(&signature).unwrap();
+    layout.finish(&[]).unwrap();
+    let opened = key(1)
+        .derive()
+        .open_object_chunk(
+            "devices/1/3",
+            0,
+            0,
+            WriteObjectPrefix::header_chunk(&chunk).unwrap(),
+        )
+        .unwrap();
+    let mut reader = WriteObjectPrefix::decode(&prefix)
+        .unwrap()
+        .opened_header(&opened)
+        .unwrap();
+    assert!(reader.next_chunk().is_none());
+    assert!(reader.finish(&[]).is_err());
+    let signature = reader.read_signature(&signature).unwrap();
+    test_utils::member()
+        .signing
+        .verify_object("devices/1/3", &digest, &signature)
+        .unwrap();
+    reader.finish(&[]).unwrap();
+    assert!(reader.finish(&[0]).is_err());
+}
