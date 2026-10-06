@@ -24,7 +24,7 @@ struct Remote {
     members: BTreeSet<String>,
 }
 fn file(path: &str, bytes: &[u8], host: &str) -> Value {
-    json!({"id":format!("file:{path}"),"name":path.rsplit('/').next().unwrap(),"size":bytes.len(),"file":{},"@microsoft.graph.downloadUrl":format!("http://{host}/download/{path}")})
+    json!({"id":format!("file:{path}"),"name":path.rsplit('/').next().unwrap(),"size":bytes.len(),"file":{},"createdDateTime":"2026-10-06T00:00:00Z","fileSystemInfo":{"createdDateTime":"2000-01-01T00:00:00Z"},"@microsoft.graph.downloadUrl":format!("http://{host}/download/{path}")})
 }
 async fn endpoint(
     State(state): State<Arc<Mutex<Remote>>>,
@@ -516,4 +516,44 @@ async fn setup_refuses_an_unrelated_empty_folder() {
         StorageSetupFailure::LocationOccupied
     );
     assert!(state.lock().unwrap().files.is_empty());
+}
+
+#[tokio::test]
+async fn listing_retains_server_time_and_size_across_pages_and_retries() {
+    let state = remote();
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
+    let storage = provider(&server.url);
+    let first = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    let second = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(32),
+        std::num::NonZeroU64::MIN,
+    );
+    storage.create_once(&first, b"first").await.unwrap();
+    storage.create_once(&second, b"second").await.unwrap();
+    let time = crate::providers::http::timestamp(
+        &serde_json::json!({"time":"2026-10-06T00:00:00Z"}),
+        "time",
+    )
+    .unwrap();
+    let expected = vec![
+        StoredObject {
+            path: first.clone(),
+            size: 5,
+            stored_at: time,
+        },
+        StoredObject {
+            path: second,
+            size: 6,
+            stored_at: time,
+        },
+    ];
+    assert_eq!(
+        storage.list(&ObjectPrefix::device_logs()).await.unwrap(),
+        expected
+    );
+    storage.create_once(&first, b"first").await.unwrap();
+    assert_eq!(storage.list(&ObjectPrefix::all()).await.unwrap(), expected);
 }

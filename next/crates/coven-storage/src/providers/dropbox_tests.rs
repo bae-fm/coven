@@ -86,7 +86,7 @@ async fn endpoint(
             let all: Vec<_> = state
                 .objects
                 .iter()
-                .map(|(path, bytes)| json!({".tag":"file","path_lower":path,"size":bytes.len()}))
+                .map(|(path, bytes)| json!({".tag":"file","path_lower":path,"size":bytes.len(),"server_modified":"2026-10-06T00:00:00Z","client_modified":"2000-01-01T00:00:00Z"}))
                 .chain(
                     state
                         .folders
@@ -104,7 +104,9 @@ async fn endpoint(
             None => error("path_lookup/not_found/..."),
         },
         "/2/files/get_metadata" => match state.objects.get(&path) {
-            Some(bytes) => reply(json!({"path_lower":path,"size":bytes.len()})),
+            Some(bytes) => reply(
+                json!({"path_lower":path,"size":bytes.len(),"server_modified":"2026-10-06T00:00:00Z","client_modified":"2000-01-01T00:00:00Z"}),
+            ),
             None => error("path/not_found/..."),
         },
         "/2/files/upload_session/start" => {
@@ -579,4 +581,44 @@ async fn setup_refuses_unrelated_empty_folders_and_accepts_its_own_parents() {
     state.lock().unwrap().folders = ["/store-log".into(), "/store-log/31".into()].into();
     storage.setup(&first, b"first").await.unwrap();
     storage.setup(&first, b"first").await.unwrap();
+}
+
+#[tokio::test]
+async fn listing_retains_server_time_and_size_across_pages_and_retries() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
+    let storage = provider(&server.url);
+    let first = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    let second = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(32),
+        std::num::NonZeroU64::MIN,
+    );
+    storage.create_once(&first, b"first").await.unwrap();
+    storage.create_once(&second, b"second").await.unwrap();
+    let time = crate::providers::http::timestamp(
+        &serde_json::json!({"time":"2026-10-06T00:00:00Z"}),
+        "time",
+    )
+    .unwrap();
+    let expected = vec![
+        StoredObject {
+            path: first.clone(),
+            size: 5,
+            stored_at: time,
+        },
+        StoredObject {
+            path: second,
+            size: 6,
+            stored_at: time,
+        },
+    ];
+    assert_eq!(
+        storage.list(&ObjectPrefix::device_logs()).await.unwrap(),
+        expected
+    );
+    storage.create_once(&first, b"first").await.unwrap();
+    assert_eq!(storage.list(&ObjectPrefix::all()).await.unwrap(), expected);
 }

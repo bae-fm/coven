@@ -619,3 +619,79 @@ async fn setup_refuses_a_folder_even_when_its_name_is_an_object_path() {
         Err(StorageError::InvalidPath)
     ));
 }
+
+#[tokio::test]
+async fn listing_retains_server_time_and_size_across_pages_and_retries() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
+    let storage = provider(&server.url);
+    let first = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    let second = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(32),
+        std::num::NonZeroU64::MIN,
+    );
+    storage.create_once(&first, b"first").await.unwrap();
+    storage.create_once(&second, b"second").await.unwrap();
+    let time = crate::providers::http::timestamp(
+        &serde_json::json!({"time":"2026-10-06T00:00:00Z"}),
+        "time",
+    )
+    .unwrap();
+    let expected = vec![
+        StoredObject {
+            path: first.clone(),
+            size: 5,
+            stored_at: time,
+        },
+        StoredObject {
+            path: second,
+            size: 6,
+            stored_at: time,
+        },
+    ];
+    assert_eq!(
+        storage.list(&ObjectPrefix::device_logs()).await.unwrap(),
+        expected
+    );
+    storage.create_once(&first, b"first").await.unwrap();
+    assert_eq!(storage.list(&ObjectPrefix::all()).await.unwrap(), expected);
+}
+
+#[tokio::test]
+async fn listing_uses_the_same_copy_as_reads_and_refuses_missing_metadata() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let path = ObjectPath::store_log(DeviceId(31), std::num::NonZeroU64::MIN);
+    {
+        let mut remote = state.lock().unwrap();
+        duplicate(&mut remote, &path, "z-first", "2026-10-06T00:00:00Z", 31);
+        duplicate(&mut remote, &path, "a-later", "2026-10-06T00:00:01Z", 31);
+        remote.files.get_mut("a-later").unwrap().0["size"] = json!("9");
+    }
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    assert_eq!(storage.list(&ObjectPrefix::all()).await.unwrap()[0].size, 4);
+    state.lock().unwrap().files.get_mut("a-later").unwrap().0["createdTime"] =
+        json!("2026-10-06T00:00:00Z");
+    assert_eq!(storage.list(&ObjectPrefix::all()).await.unwrap()[0].size, 9);
+    for (field, invalid) in [
+        ("size", json!(null)),
+        ("size", json!("-1")),
+        ("createdTime", json!(null)),
+        ("createdTime", json!("not-time")),
+    ] {
+        let old = state.lock().unwrap().files["a-later"].0[field].clone();
+        state.lock().unwrap().files.get_mut("a-later").unwrap().0[field] = invalid;
+        assert_eq!(
+            storage
+                .list(&ObjectPrefix::all())
+                .await
+                .unwrap_err()
+                .failure(),
+            StorageFailure::Protocol
+        );
+        state.lock().unwrap().files.get_mut("a-later").unwrap().0[field] = old;
+    }
+}

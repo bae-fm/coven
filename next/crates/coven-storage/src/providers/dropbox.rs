@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use coven_crypto::SecretText;
 use reqwest::Method;
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 const PROVIDER: CloudProvider = CloudProvider::Dropbox;
 
 /// Dropbox objects reached through the shared namespace, independent of mount names.
@@ -286,11 +286,11 @@ impl Storage for DropboxStorage {
         )
         .await
     }
-    async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<ObjectPath>, StorageError> {
+    async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
         let mut method = "files/list_folder";
         let mut request = json!({"path":"","recursive":true,"include_deleted":false,"limit":2000});
         let mut seen = BTreeSet::new();
-        let mut paths = BTreeSet::new();
+        let mut paths = BTreeMap::new();
         loop {
             let value = self.rpc(method, request).await?;
             for entry in http::array(&value, "entries")? {
@@ -312,7 +312,20 @@ impl Storage for DropboxStorage {
                         .ok_or(StorageError::Protocol("Dropbox path outside namespace"))?,
                 )?;
                 if prefix.contains(&path) {
-                    paths.insert(path);
+                    let object = StoredObject {
+                        path: path.clone(),
+                        size: entry["size"]
+                            .as_u64()
+                            .ok_or(StorageError::Protocol("Dropbox omitted object size"))?,
+                        stored_at: http::timestamp(entry, "server_modified")?,
+                    };
+                    if let Some(previous) = paths.insert(path, object.clone()) {
+                        if previous != object {
+                            return Err(StorageError::Protocol(
+                                "Dropbox listed conflicting objects",
+                            ));
+                        }
+                    }
                 }
             }
             match value["has_more"].as_bool() {
@@ -327,7 +340,7 @@ impl Storage for DropboxStorage {
             method = "files/list_folder/continue";
             request = json!({"cursor":cursor});
         }
-        Ok(paths.into_iter().collect())
+        Ok(paths.into_values().collect())
     }
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         match self

@@ -9,14 +9,28 @@ fn config() -> StorageConfig {
 }
 #[tokio::test]
 async fn memory_conforms() {
-    Conformance::new(Arc::new(MemoryStorage::new(config()).unwrap()))
-        .run()
-        .await
-        .unwrap();
+    Conformance::new(Arc::new(
+        MemoryStorage::new(
+            config(),
+            Arc::new(coven_foundation::clock::FixedClock::new(
+                std::time::SystemTime::UNIX_EPOCH,
+            )),
+        )
+        .unwrap(),
+    ))
+    .run()
+    .await
+    .unwrap();
 }
 #[tokio::test]
 async fn crash_after_accepted_part_and_dropped_part_resumes() {
-    let provider = MemoryStorage::new(config()).unwrap();
+    let provider = MemoryStorage::new(
+        config(),
+        Arc::new(coven_foundation::clock::FixedClock::new(
+            std::time::SystemTime::UNIX_EPOCH,
+        )),
+    )
+    .unwrap();
     let path = ObjectPath::file(coven_foundation::id_source::FileId(uuid::Uuid::from_bytes(
         [0xaa; 16],
     )));
@@ -54,7 +68,13 @@ async fn crash_after_accepted_part_and_dropped_part_resumes() {
 }
 #[tokio::test]
 async fn setup_refuses_other_store_and_retries_its_own_entry() {
-    let provider = MemoryStorage::new(config()).unwrap();
+    let provider = MemoryStorage::new(
+        config(),
+        Arc::new(coven_foundation::clock::FixedClock::new(
+            std::time::SystemTime::UNIX_EPOCH,
+        )),
+    )
+    .unwrap();
     let path = ObjectPath::store_log(
         coven_foundation::id_source::DeviceId(1),
         std::num::NonZeroU64::MIN,
@@ -78,7 +98,13 @@ async fn setup_refuses_other_store_and_retries_its_own_entry() {
 }
 #[tokio::test(start_paused = true)]
 async fn faults_are_counted_and_delay_is_awaited() {
-    let provider = MemoryStorage::new(config()).unwrap();
+    let provider = MemoryStorage::new(
+        config(),
+        Arc::new(coven_foundation::clock::FixedClock::new(
+            std::time::SystemTime::UNIX_EPOCH,
+        )),
+    )
+    .unwrap();
     provider
         .set_faults(Faults {
             fail_next: 2,
@@ -108,7 +134,13 @@ async fn faults_are_counted_and_delay_is_awaited() {
 
 #[tokio::test]
 async fn expired_upload_restarts_with_a_new_recording_at_the_same_destination() {
-    let storage = MemoryStorage::new(config()).unwrap();
+    let storage = MemoryStorage::new(
+        config(),
+        Arc::new(coven_foundation::clock::FixedClock::new(
+            std::time::SystemTime::UNIX_EPOCH,
+        )),
+    )
+    .unwrap();
     let path = ObjectPath::device_log(
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
@@ -140,9 +172,14 @@ async fn expired_upload_restarts_with_a_new_recording_at_the_same_destination() 
         storage.restart_upload(&replacement).await,
         Err(StorageError::InvalidPart)
     ));
-    let other = MemoryStorage::new(StorageConfig::Dropbox {
-        namespace_id: "elsewhere".into(),
-    })
+    let other = MemoryStorage::new(
+        StorageConfig::Dropbox {
+            namespace_id: "elsewhere".into(),
+        },
+        Arc::new(coven_foundation::clock::FixedClock::new(
+            std::time::SystemTime::UNIX_EPOCH,
+        )),
+    )
     .unwrap();
     assert!(matches!(
         other.restart_upload(&expired).await,
@@ -152,7 +189,13 @@ async fn expired_upload_restarts_with_a_new_recording_at_the_same_destination() 
 
 #[tokio::test]
 async fn failed_automatic_upload_is_aborted_without_publishing() {
-    let storage = MemoryStorage::new(config()).unwrap();
+    let storage = MemoryStorage::new(
+        config(),
+        Arc::new(coven_foundation::clock::FixedClock::new(
+            std::time::SystemTime::UNIX_EPOCH,
+        )),
+    )
+    .unwrap();
     storage
         .set_faults(Faults {
             lose_part_reply: true,
@@ -192,7 +235,13 @@ async fn sharing_authority_belongs_to_the_adapters_account() {
             zone: "zone".into(),
         },
     ] {
-        let owner = MemoryStorage::new(config).unwrap();
+        let owner = MemoryStorage::new(
+            config,
+            Arc::new(coven_foundation::clock::FixedClock::new(
+                std::time::SystemTime::UNIX_EPOCH,
+            )),
+        )
+        .unwrap();
         owner.grant_access("kept@example.test").await.unwrap();
         let mut recipient = owner.clone();
         recipient.set_owner(false);
@@ -223,7 +272,13 @@ async fn sharing_authority_belongs_to_the_adapters_account() {
             .unwrap();
         assert!(owner.state.lock().await.accounts.is_empty());
     }
-    let mut s3 = MemoryStorage::new(config()).unwrap();
+    let mut s3 = MemoryStorage::new(
+        config(),
+        Arc::new(coven_foundation::clock::FixedClock::new(
+            std::time::SystemTime::UNIX_EPOCH,
+        )),
+    )
+    .unwrap();
     s3.set_owner(false);
     assert!(matches!(
         s3.grant_access("member").await.unwrap(),
@@ -242,7 +297,13 @@ async fn sharing_authority_belongs_to_the_adapters_account() {
 #[tokio::test]
 async fn reconnect_accepts_its_first_entry_after_the_store_has_uploaded_more() {
     use coven_foundation::id_source::DeviceId;
-    let storage = MemoryStorage::new(config()).unwrap();
+    let storage = MemoryStorage::new(
+        config(),
+        Arc::new(coven_foundation::clock::FixedClock::new(
+            std::time::SystemTime::UNIX_EPOCH,
+        )),
+    )
+    .unwrap();
     let first = ObjectPath::store_log(DeviceId(31), std::num::NonZeroU64::MIN);
     storage.setup(&first, b"first").await.unwrap();
     let later = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
@@ -267,4 +328,37 @@ async fn reconnect_accepts_its_first_entry_after_the_store_has_uploaded_more() {
     );
     assert_eq!(storage.read(&first).await.unwrap(), b"first");
     assert_eq!(storage.read(&later).await.unwrap(), b"later");
+}
+
+#[tokio::test]
+async fn listing_records_publication_time_and_keeps_it_on_retry() {
+    use coven_foundation::{clock::FixedClock, id_source::DeviceId};
+    use std::time::{Duration, SystemTime};
+    let started = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
+    let published = started + Duration::from_secs(20);
+    let clock = Arc::new(FixedClock::new(started));
+    let storage = MemoryStorage::new(config(), clock.clone()).unwrap();
+    let path = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
+    let mut upload = storage.begin_upload(&path, 4).await.unwrap();
+    storage.upload_part(&mut upload, b"data").await.unwrap();
+    assert!(storage.list(&ObjectPrefix::all()).await.unwrap().is_empty());
+    clock.set(published);
+    storage.finish_upload(&mut upload).await.unwrap();
+    clock.set(published + Duration::from_secs(30));
+    storage.create_once(&path, b"data").await.unwrap();
+    assert_eq!(
+        storage.list(&ObjectPrefix::all()).await.unwrap(),
+        [StoredObject {
+            path,
+            size: 4,
+            stored_at: published
+        }]
+    );
+    let positions = ObjectPath::positions(DeviceId(31));
+    storage.replace(&positions, b"old").await.unwrap();
+    clock.set(published + Duration::from_secs(40));
+    storage.replace(&positions, b"new position").await.unwrap();
+    let listed = storage.list(&ObjectPrefix::positions()).await.unwrap();
+    assert_eq!(listed[0].stored_at, published + Duration::from_secs(40));
+    assert_eq!(listed[0].size, 12);
 }

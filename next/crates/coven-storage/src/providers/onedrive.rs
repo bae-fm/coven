@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use coven_crypto::SecretText;
 use reqwest::Method;
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 const PROVIDER: CloudProvider = CloudProvider::OneDrive;
 
 /// OneDrive objects under the store's shared folder, reached with each member's account.
@@ -318,10 +318,10 @@ impl Storage for OneDriveStorage {
     ) -> Result<Vec<u8>, StorageError> {
         self.get(path, Some(range)).await
     }
-    async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<ObjectPath>, StorageError> {
+    async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
         let mut folders = vec![(self.folder.clone(), Vec::new())];
         let mut visited = BTreeSet::new();
-        let mut paths = BTreeSet::new();
+        let mut paths = BTreeMap::new();
         while let Some((folder, names)) = folders.pop() {
             if !visited.insert(folder.clone()) {
                 return Err(StorageError::Protocol("OneDrive folder cycle"));
@@ -345,7 +345,20 @@ impl Storage for OneDriveStorage {
                     } else if item["file"].is_object() {
                         let path = ObjectPath::from_components(&names, name)?;
                         if prefix.contains(&path) {
-                            paths.insert(path);
+                            let object = StoredObject {
+                                path: path.clone(),
+                                size: item["size"].as_u64().ok_or(StorageError::Protocol(
+                                    "OneDrive omitted object size",
+                                ))?,
+                                stored_at: http::timestamp(item, "createdDateTime")?,
+                            };
+                            if let Some(previous) = paths.insert(path, object.clone()) {
+                                if previous != object {
+                                    return Err(StorageError::Protocol(
+                                        "OneDrive listed conflicting objects",
+                                    ));
+                                }
+                            }
                         }
                     } else {
                         return Err(StorageError::Protocol("unexpected OneDrive item kind"));
@@ -362,7 +375,7 @@ impl Storage for OneDriveStorage {
                 }
             }
         }
-        Ok(paths.into_iter().collect())
+        Ok(paths.into_values().collect())
     }
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         let response = self

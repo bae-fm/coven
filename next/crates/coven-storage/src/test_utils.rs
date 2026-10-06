@@ -2,6 +2,7 @@
 use crate::session::SessionState;
 use crate::*;
 use async_trait::async_trait;
+use coven_foundation::clock::ClockRef;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,13 +35,17 @@ impl Faults {
     }
 }
 
+struct Object {
+    bytes: Vec<u8>,
+    stored_at: std::time::SystemTime,
+}
 struct Pending {
     path: ObjectPath,
     total: u64,
     bytes: Vec<u8>,
 }
 struct State {
-    objects: BTreeMap<ObjectPath, Vec<u8>>,
+    objects: BTreeMap<ObjectPath, Object>,
     uploads: BTreeMap<u64, Pending>,
     next: u64,
     accounts: BTreeSet<String>,
@@ -52,15 +57,17 @@ struct State {
 pub struct MemoryStorage {
     config: StorageConfig,
     owns_location: bool,
+    clock: ClockRef,
     state: Arc<Mutex<State>>,
 }
 impl MemoryStorage {
     /// A store at the supplied location, with a sixteen-byte single-request limit
     /// and four-byte parts for transfer and crash tests.
-    pub fn new(config: StorageConfig) -> Result<Self, StorageError> {
+    pub fn new(config: StorageConfig, clock: ClockRef) -> Result<Self, StorageError> {
         config.validate()?;
         Ok(Self {
             config,
+            clock,
             owns_location: true,
             state: Arc::new(Mutex::new(State {
                 objects: BTreeMap::new(),
@@ -121,7 +128,13 @@ impl Storage for MemoryStorage {
             if state.objects.contains_key(path) {
                 return Err(StorageError::AlreadyExists);
             }
-            state.objects.insert(path.clone(), bytes.to_vec());
+            state.objects.insert(
+                path.clone(),
+                Object {
+                    bytes: bytes.to_vec(),
+                    stored_at: self.clock.now(),
+                },
+            );
             Ok(())
         })
         .await
@@ -133,11 +146,13 @@ impl Storage for MemoryStorage {
         }
         crate::transfer::check_single_request(bytes.len() as u64, self.single_request_limit())?;
         self.before().await?;
-        self.state
-            .lock()
-            .await
-            .objects
-            .insert(path.clone(), bytes.to_vec());
+        self.state.lock().await.objects.insert(
+            path.clone(),
+            Object {
+                bytes: bytes.to_vec(),
+                stored_at: self.clock.now(),
+            },
+        );
         Ok(())
     }
     async fn read(&self, path: &ObjectPath) -> Result<Vec<u8>, StorageError> {
@@ -147,7 +162,7 @@ impl Storage for MemoryStorage {
             .await
             .objects
             .get(path)
-            .cloned()
+            .map(|object| object.bytes.clone())
             .ok_or(StorageError::NotFound)
     }
     async fn read_range(
@@ -157,16 +172,20 @@ impl Storage for MemoryStorage {
     ) -> Result<Vec<u8>, StorageError> {
         range.select(&self.read(path).await?)
     }
-    async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<ObjectPath>, StorageError> {
+    async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
         self.before().await?;
         Ok(self
             .state
             .lock()
             .await
             .objects
-            .keys()
-            .filter(|path| prefix.contains(path))
-            .cloned()
+            .iter()
+            .filter(|(path, _)| prefix.contains(path))
+            .map(|(path, object)| StoredObject {
+                path: path.clone(),
+                size: object.bytes.len() as u64,
+                stored_at: object.stored_at,
+            })
             .collect())
     }
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
@@ -299,12 +318,18 @@ impl Storage for MemoryStorage {
             return Err(StorageError::InvalidPart);
         }
         if let Some(existing) = state.objects.get(&session.path) {
-            if existing != &pending.bytes {
+            if existing.bytes != pending.bytes {
                 return Err(StorageError::AlreadyExists);
             }
         } else {
             let bytes = pending.bytes.clone();
-            state.objects.insert(session.path.clone(), bytes);
+            state.objects.insert(
+                session.path.clone(),
+                Object {
+                    bytes,
+                    stored_at: self.clock.now(),
+                },
+            );
         }
         session.state = SessionState::Memory { id, complete: true };
         Ok(())
@@ -374,7 +399,10 @@ impl Conformance {
             .storage
             .list(&ObjectPrefix::device_log(DeviceId(31)))
             .await?
-            != [path.clone()]
+            .into_iter()
+            .map(|object| (object.path, object.size))
+            .collect::<Vec<_>>()
+            != [(path.clone(), data.len() as u64)]
         {
             return Err(StorageError::Protocol("prefix listing"));
         }

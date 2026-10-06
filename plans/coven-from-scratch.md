@@ -2787,7 +2787,7 @@ pub trait CloudKitOps: Send + Sync {
     /// Reads the whole object or only the asset parts covering the range (§16.3).
     async fn read(&self, location: &StorageConfig, path: &ObjectPath, range: Option<ByteRange>) -> Result<Vec<u8>, StorageError>;
     /// Lists every object under the prefix, following every native query cursor.
-    async fn list(&self, location: &StorageConfig, prefix: &ObjectPrefix) -> Result<Vec<ObjectPath>, StorageError>;
+    async fn list(&self, location: &StorageConfig, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError>;
     /// Deletes an object and its parts; an already absent object succeeds (§18).
     async fn delete(&self, location: &StorageConfig, path: &ObjectPath) -> Result<(), StorageError>;
     /// Sets read/write sharing for the named Apple account (§12.2, §13).
@@ -3905,6 +3905,16 @@ while let Ok(values) = lost.next().await {
   fails with `StorageError::NotStoreOwner`, classified `PermissionDenied`,
   before any grant or revocation. S3's console-key instructions need no sharing
   account check.
+- `Storage::list` and `CloudKitOps::list` return `Vec<StoredObject>`, each with
+  `path: ObjectPath`, `size: u64` (complete encrypted bytes) and
+  `stored_at: SystemTime` from the provider. Drive uses `createdTime`, Dropbox
+  `server_modified`, OneDrive `createdDateTime`, CloudKit the publication
+  record's server time, and S3 `LastModified`. S3 documents multipart
+  `LastModified` as upload initiation, so it does not establish the completed
+  object's retention age; that provider requirement remains unresolved.
+  Listings follow every page and reject absent or malformed metadata. Drive
+  lists the earliest stored copy, with id breaking timestamp ties.
+  `MemoryStorage::new` takes an injected `ClockRef` and timestamps publication.
 - Storage exposes `delete`, not a deletion-rights query. Sync chooses the
   deleting device by §15; Drive deletes an object the account owns and
   otherwise removes it from the store's folder. Provider refusals keep

@@ -6,7 +6,7 @@ use coven_crypto::SecretText;
 use coven_foundation::id_source::DeviceId;
 use reqwest::Method;
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 const PROVIDER: CloudProvider = CloudProvider::GoogleDrive;
 
 /// Encrypted objects named by their full coven path in a shared Drive folder.
@@ -436,19 +436,32 @@ impl Storage for GoogleDriveStorage {
     ) -> Result<Vec<u8>, StorageError> {
         self.read_object(path, Some(range)).await
     }
-    async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<ObjectPath>, StorageError> {
+    async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
         let query = format!("'{}' in parents and trashed = false", escape(&self.folder));
-        let mut paths = BTreeSet::new();
+        let mut paths = BTreeMap::new();
         for item in self.pages(&query).await? {
             if item["mimeType"].as_str() == Some("application/vnd.google-apps.folder") {
                 return Err(StorageError::InvalidPath);
             }
             let path = ObjectPath::parse(http::string(&item, "name")?)?;
             if prefix.contains(&path) {
-                paths.insert(path);
+                let object = StoredObject {
+                    path: path.clone(),
+                    size: http::string(&item, "size")?
+                        .parse()
+                        .map_err(|_| StorageError::Protocol("invalid Drive size"))?,
+                    stored_at: http::timestamp(&item, "createdTime")?,
+                };
+                let id = http::string(&item, "id")?.to_owned();
+                let keep = paths
+                    .entry(path)
+                    .or_insert_with(|| (id.clone(), object.clone()));
+                if (object.stored_at, &id) < (keep.1.stored_at, &keep.0) {
+                    *keep = (id, object);
+                }
             }
         }
-        Ok(paths.into_iter().collect())
+        Ok(paths.into_values().map(|(_, object)| object).collect())
     }
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         let Some(item) = self.find(path).await? else {

@@ -93,6 +93,20 @@ pub enum MemberRemoval {
     },
 }
 
+/// One complete object listed by its provider.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredObject {
+    /// Validated path relative to the store's location.
+    pub path: ObjectPath,
+    /// Complete encrypted length in bytes.
+    pub size: u64,
+    /// Provider timestamp, never the uploading device's clock. Drive and OneDrive
+    /// return creation time; Dropbox returns server modification time; CloudKit
+    /// returns publication time. S3 returns Last-Modified, which is initiation
+    /// time for multipart objects and cannot establish their age since completion.
+    pub stored_at: std::time::SystemTime,
+}
+
 /// The operations coven needs from a provider (§4).
 ///
 /// Implementations are capabilities assembled at composition roots. They own no
@@ -126,7 +140,7 @@ pub trait Storage: Send + Sync {
         range: ByteRange,
     ) -> Result<Vec<u8>, StorageError>;
     /// List every object under the prefix, across all pages.
-    async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<ObjectPath>, StorageError>;
+    async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError>;
     /// Delete an object, or remove it from Drive's folder when only that is allowed.
     /// An already absent object succeeds, making operation retries safe.
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError>;
@@ -219,7 +233,12 @@ pub trait Storage: Send + Sync {
                     ))
                 }
             }
-            if !self.list(&ObjectPrefix::all()).await?.contains(path) {
+            if !self
+                .list(&ObjectPrefix::all())
+                .await?
+                .iter()
+                .any(|object| &object.path == path)
+            {
                 return Err(StorageError::Protocol("probe absent from listing"));
             }
             Ok(())
@@ -254,7 +273,9 @@ pub trait Storage: Send + Sync {
             Err(error) => return Err(error.into()),
         };
         if !objects.is_empty() {
-            if !objects.contains(first_entry) || self.read(first_entry).await? != encrypted_entry {
+            if !objects.iter().any(|object| &object.path == first_entry)
+                || self.read(first_entry).await? != encrypted_entry
+            {
                 return Err(StorageSetupError::LocationOccupied);
             }
         } else {

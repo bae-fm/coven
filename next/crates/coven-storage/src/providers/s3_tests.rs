@@ -138,7 +138,7 @@ fn respond(
         };
         let entry = entries
             .first()
-            .map(|key| format!("<Contents><Key>{key}</Key></Contents>"))
+            .map(|key| format!("<Contents><Key>{key}</Key><Size>{}</Size><LastModified>2026-10-06T00:00:00Z</LastModified></Contents>",state.objects[*key].len()))
             .unwrap_or_default();
         return response(
             200,
@@ -395,7 +395,13 @@ async fn simultaneous_setups_expose_both_first_entries_for_sync() {
     assert_eq!(left.unwrap(), storage.config());
     assert_eq!(right.unwrap(), storage.config());
     assert_eq!(
-        storage.list(&ObjectPrefix::store_logs()).await.unwrap(),
+        storage
+            .list(&ObjectPrefix::store_logs())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|object| object.path)
+            .collect::<Vec<_>>(),
         [first, other]
     );
     assert_eq!(state.lock().unwrap().objects.len(), 2);
@@ -440,4 +446,44 @@ async fn probe_cleans_up_after_a_lost_create_reply_and_retains_both_failures() {
     );
     assert_eq!(state.lock().unwrap().deletions, deletes);
     assert_eq!(storage.read(&path).await.unwrap(), b"preexisting");
+}
+
+#[tokio::test]
+async fn listing_retains_server_time_and_size_across_pages_and_retries() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
+    let storage = provider(&server.url);
+    let first = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    let second = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(32),
+        std::num::NonZeroU64::MIN,
+    );
+    storage.create_once(&first, b"first").await.unwrap();
+    storage.create_once(&second, b"second").await.unwrap();
+    let time = crate::providers::http::timestamp(
+        &serde_json::json!({"time":"2026-10-06T00:00:00Z"}),
+        "time",
+    )
+    .unwrap();
+    let expected = vec![
+        StoredObject {
+            path: first.clone(),
+            size: 5,
+            stored_at: time,
+        },
+        StoredObject {
+            path: second,
+            size: 6,
+            stored_at: time,
+        },
+    ];
+    assert_eq!(
+        storage.list(&ObjectPrefix::device_logs()).await.unwrap(),
+        expected
+    );
+    storage.create_once(&first, b"first").await.unwrap();
+    assert_eq!(storage.list(&ObjectPrefix::all()).await.unwrap(), expected);
 }

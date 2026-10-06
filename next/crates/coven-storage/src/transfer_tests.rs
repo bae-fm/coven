@@ -4,9 +4,14 @@ use crate::{StorageConfig, StorageFailure};
 use coven_foundation::id_source::DeviceId;
 
 fn storage() -> MemoryStorage {
-    MemoryStorage::new(StorageConfig::Dropbox {
-        namespace_id: "namespace".into(),
-    })
+    MemoryStorage::new(
+        StorageConfig::Dropbox {
+            namespace_id: "namespace".into(),
+        },
+        std::sync::Arc::new(coven_foundation::clock::FixedClock::new(
+            std::time::SystemTime::UNIX_EPOCH,
+        )),
+    )
     .unwrap()
 }
 

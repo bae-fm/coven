@@ -6,6 +6,7 @@ struct Bridge {
     memory: MemoryStorage,
     abort_failure: Option<StorageFailure>,
     non_owner: bool,
+    listed: Option<Vec<StoredObject>>,
     uploads: tokio::sync::Mutex<BTreeMap<String, UploadSession>>,
 }
 fn config() -> StorageConfig {
@@ -16,11 +17,12 @@ fn config() -> StorageConfig {
     }
 }
 impl Bridge {
-    fn new() -> Self {
+    fn new(memory: MemoryStorage) -> Self {
         Self {
-            memory: MemoryStorage::new(config()).unwrap(),
+            memory,
             abort_failure: None,
             non_owner: false,
+            listed: None,
             uploads: tokio::sync::Mutex::new(BTreeMap::new()),
         }
     }
@@ -69,8 +71,11 @@ impl CloudKitOps for Bridge {
         &self,
         location: &StorageConfig,
         prefix: &ObjectPrefix,
-    ) -> Result<Vec<ObjectPath>, StorageError> {
+    ) -> Result<Vec<StoredObject>, StorageError> {
         assert_eq!(location, &config());
+        if let Some(listed) = &self.listed {
+            return Ok(listed.clone());
+        }
         self.memory.list(prefix).await
     }
     async fn delete(
@@ -187,7 +192,15 @@ impl CloudKitOps for Bridge {
 }
 #[tokio::test]
 async fn bridge_conforms_and_retains_parts_across_adapter_restart() {
-    let bridge = Arc::new(Bridge::new());
+    let bridge = Arc::new(Bridge::new(
+        MemoryStorage::new(
+            config(),
+            Arc::new(coven_foundation::clock::FixedClock::new(
+                std::time::SystemTime::UNIX_EPOCH,
+            )),
+        )
+        .unwrap(),
+    ));
     let storage = Arc::new(CloudKitStorage::new(config(), bridge.clone()).unwrap());
     Conformance::new(storage.clone()).run().await.unwrap();
     let path = ObjectPath::file(coven_foundation::id_source::FileId(uuid::Uuid::from_bytes(
@@ -229,7 +242,15 @@ async fn bridge_conforms_and_retains_parts_across_adapter_restart() {
 
 #[tokio::test]
 async fn expired_bridge_session_restarts_from_retained_bytes() {
-    let bridge = Arc::new(Bridge::new());
+    let bridge = Arc::new(Bridge::new(
+        MemoryStorage::new(
+            config(),
+            Arc::new(coven_foundation::clock::FixedClock::new(
+                std::time::SystemTime::UNIX_EPOCH,
+            )),
+        )
+        .unwrap(),
+    ));
     let storage = CloudKitStorage::new(config(), bridge).unwrap();
     let path = ObjectPath::device_log(
         coven_foundation::id_source::DeviceId(31),
@@ -257,7 +278,15 @@ async fn expired_bridge_session_restarts_from_retained_bytes() {
 
 #[tokio::test]
 async fn abort_accepts_a_forgotten_session_and_keeps_published_objects() {
-    let bridge = Arc::new(Bridge::new());
+    let bridge = Arc::new(Bridge::new(
+        MemoryStorage::new(
+            config(),
+            Arc::new(coven_foundation::clock::FixedClock::new(
+                std::time::SystemTime::UNIX_EPOCH,
+            )),
+        )
+        .unwrap(),
+    ));
     let storage = CloudKitStorage::new(config(), bridge.clone()).unwrap();
     let path = ObjectPath::device_log(
         coven_foundation::id_source::DeviceId(31),
@@ -279,7 +308,15 @@ async fn abort_accepts_a_forgotten_session_and_keeps_published_objects() {
 
 #[tokio::test]
 async fn create_respects_the_bridges_single_request_limit() {
-    let bridge = Arc::new(Bridge::new());
+    let bridge = Arc::new(Bridge::new(
+        MemoryStorage::new(
+            config(),
+            Arc::new(coven_foundation::clock::FixedClock::new(
+                std::time::SystemTime::UNIX_EPOCH,
+            )),
+        )
+        .unwrap(),
+    ));
     let storage = CloudKitStorage::new(config(), bridge.clone()).unwrap();
     assert_eq!(storage.single_request_limit(), 16);
     let path = ObjectPath::device_log(
@@ -305,7 +342,15 @@ async fn create_respects_the_bridges_single_request_limit() {
 
 #[tokio::test]
 async fn automatic_upload_keeps_both_transfer_and_abort_failures() {
-    let mut bridge = Bridge::new();
+    let mut bridge = Bridge::new(
+        MemoryStorage::new(
+            config(),
+            Arc::new(coven_foundation::clock::FixedClock::new(
+                std::time::SystemTime::UNIX_EPOCH,
+            )),
+        )
+        .unwrap(),
+    );
     bridge.abort_failure = Some(StorageFailure::PermissionDenied);
     bridge
         .memory
@@ -331,7 +376,15 @@ async fn automatic_upload_keeps_both_transfer_and_abort_failures() {
 
 #[tokio::test]
 async fn sharing_requires_the_store_owners_account() {
-    let mut bridge = Bridge::new();
+    let mut bridge = Bridge::new(
+        MemoryStorage::new(
+            config(),
+            Arc::new(coven_foundation::clock::FixedClock::new(
+                std::time::SystemTime::UNIX_EPOCH,
+            )),
+        )
+        .unwrap(),
+    );
     bridge.non_owner = true;
     let storage = CloudKitStorage::new(config(), Arc::new(bridge)).unwrap();
     assert!(matches!(
@@ -344,4 +397,67 @@ async fn sharing_requires_the_store_owners_account() {
             .await,
         Err(StorageError::NotStoreOwner)
     ));
+}
+
+#[tokio::test]
+async fn listing_keeps_the_native_publication_metadata() {
+    let bridge = Arc::new(Bridge::new(
+        MemoryStorage::new(
+            config(),
+            Arc::new(coven_foundation::clock::FixedClock::new(
+                std::time::SystemTime::UNIX_EPOCH,
+            )),
+        )
+        .unwrap(),
+    ));
+    let storage = CloudKitStorage::new(config(), bridge.clone()).unwrap();
+    let path = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    storage.create(&path, b"data").await.unwrap();
+    let listed = storage.list(&ObjectPrefix::all()).await.unwrap();
+    assert_eq!(
+        listed,
+        [StoredObject {
+            path,
+            size: 4,
+            stored_at: std::time::SystemTime::UNIX_EPOCH
+        }]
+    );
+}
+
+#[tokio::test]
+async fn listing_refuses_duplicate_paths_and_objects_outside_the_requested_prefix() {
+    let path = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    let object = StoredObject {
+        path,
+        size: 4,
+        stored_at: std::time::SystemTime::UNIX_EPOCH,
+    };
+    for listed in [vec![object.clone()], vec![object.clone(), object.clone()]] {
+        let mut bridge = Bridge::new(
+            MemoryStorage::new(
+                config(),
+                Arc::new(coven_foundation::clock::FixedClock::new(
+                    std::time::SystemTime::UNIX_EPOCH,
+                )),
+            )
+            .unwrap(),
+        );
+        bridge.listed = Some(listed.clone());
+        let storage = CloudKitStorage::new(config(), Arc::new(bridge)).unwrap();
+        let prefix = if listed.len() == 1 {
+            ObjectPrefix::positions()
+        } else {
+            ObjectPrefix::all()
+        };
+        assert_eq!(
+            storage.list(&prefix).await.unwrap_err().failure(),
+            StorageFailure::Protocol
+        );
+    }
 }

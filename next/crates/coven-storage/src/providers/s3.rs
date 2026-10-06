@@ -10,7 +10,7 @@ use aws_sdk_s3::{
 };
 use coven_crypto::SecretText;
 use coven_foundation::{clock::ClockRef, id_source::IdSourceRef};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 /// S3 and compatible endpoints, using only object operations and manually supplied keys.
@@ -215,12 +215,12 @@ impl Storage for S3Storage {
     ) -> Result<Vec<u8>, StorageError> {
         self.get(path, Some(range)).await
     }
-    async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<ObjectPath>, StorageError> {
+    async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
         let full = prefix.under(&self.prefix);
         let root = ObjectPrefix::all().under(&self.prefix);
         let mut marker = None;
         let mut seen = BTreeSet::new();
-        let mut paths = BTreeSet::new();
+        let mut paths = BTreeMap::new();
         loop {
             let response = self
                 .client
@@ -242,7 +242,25 @@ impl Storage for S3Storage {
                 if !prefix.contains(&path) {
                     return Err(StorageError::Protocol("S3 listed outside prefix"));
                 }
-                paths.insert(path);
+                let size = object
+                    .size()
+                    .and_then(|size| u64::try_from(size).ok())
+                    .ok_or(StorageError::Protocol("S3 omitted object size"))?;
+                let stored_at = (*object
+                    .last_modified()
+                    .ok_or(StorageError::Protocol("S3 omitted storage time"))?)
+                .try_into()
+                .map_err(|error| StorageError::Encoding(Box::new(error)))?;
+                let object = StoredObject {
+                    path: path.clone(),
+                    size,
+                    stored_at,
+                };
+                if let Some(previous) = paths.insert(path, object.clone()) {
+                    if previous != object {
+                        return Err(StorageError::Protocol("S3 listed conflicting objects"));
+                    }
+                }
             }
             if response.is_truncated() != Some(true) {
                 break;
@@ -256,7 +274,7 @@ impl Storage for S3Storage {
             }
             marker = Some(next);
         }
-        Ok(paths.into_iter().collect())
+        Ok(paths.into_values().collect())
     }
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         match self

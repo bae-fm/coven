@@ -60,12 +60,13 @@ pub trait CloudKitOps: Send + Sync {
         path: &ObjectPath,
         range: Option<ByteRange>,
     ) -> Result<Vec<u8>, StorageError>;
-    /// Follow native query cursors through all records under the prefix.
+    /// Follow every native query cursor. Return encrypted size and server publication
+    /// time of each complete object; pending assets are not listed.
     async fn list(
         &self,
         location: &StorageConfig,
         prefix: &ObjectPrefix,
-    ) -> Result<Vec<ObjectPath>, StorageError>;
+    ) -> Result<Vec<StoredObject>, StorageError>;
     /// Delete an object and its parts; repeat deletion succeeds when absent.
     async fn delete(&self, location: &StorageConfig, path: &ObjectPath)
         -> Result<(), StorageError>;
@@ -184,15 +185,17 @@ impl Storage for CloudKitStorage {
         }
         Ok(bytes)
     }
-    async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<ObjectPath>, StorageError> {
+    async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
         let paths = self.ops.list(&self.config, prefix).await?;
-        let mut unique = std::collections::BTreeSet::new();
-        for path in paths {
-            if !prefix.contains(&path) || !unique.insert(path) {
+        let mut unique = std::collections::BTreeMap::new();
+        for object in paths {
+            if !prefix.contains(&object.path)
+                || unique.insert(object.path.clone(), object).is_some()
+            {
                 return Err(StorageError::Protocol("invalid CloudKit prefix listing"));
             }
         }
-        Ok(unique.into_iter().collect())
+        Ok(unique.into_values().collect())
     }
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         self.ops.delete(&self.config, path).await
