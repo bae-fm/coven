@@ -224,16 +224,32 @@
   - Its name is part of its encryption, so the provider can't swap one
     object for another.
   - A retried upload writes the same name with the same bytes.
-- The first attempt to upload a write encrypts each part with its
-  audience's current key, signs the object with the device's member key
-  ([§14.4](#144-writes)), and keeps those bytes in `coven_uploads` before
-  sending them; every retry sends the kept bytes.
+  - A retry that finds its path already holds an object counts it as
+    stored: only this device writes that path, and every attempt sends the
+    same kept bytes.
+- A device uploads its writes in number order; a write never goes up
+  before an earlier one.
+- The first attempt to upload a write encrypts each part with the newest
+  key of its audience this device holds, signs the object with the
+  device's member key ([§14.4](#144-writes)), and keeps those bytes in
+  `coven_uploads` before sending them; every retry sends the kept bytes.
+  - E.g. Ana's phone commits a Gifts pin offline, then reads her removal
+    from Gifts before uploading it: the pin's part is sealed with the
+    Gifts key she held, and counts like any write made before she read
+    her removal ([§14.6](#146-leaving-a-circle)).
+- Every other object a device uploads has its bytes fixed the same way
+  before its first attempt, and kept until it is stored: store log
+  entries, sealed keys, snapshots and files
+  ([§18](#18-operations)).
 - A write record leaves `coven_uploads` ([§5](#5-local-database)) once its upload succeeds.
 - Each device remembers how far it has applied every device's log, in
   coven's `coven_positions` table: one row per device, naming its last
   applied write's number.
 - It also posts those positions to storage at `positions/<device>`,
   replacing its own object when the positions advance.
+  - In its own log it posts the last write it has uploaded.
+- A device finds devices it doesn't know yet, and their logs, by listing
+  `devices/` and `store-log/` ([§20.5](#205-storage-and-sync)).
 
 ## 7. Order
 
@@ -250,6 +266,20 @@ Two mechanisms order writes:
   - and Carol's tablet's log up to 1.
 - A device applies a write only after it has applied everything that
   write's device had read.
+- Every write also records how far its device had read the store log
+  ([§9](#9-members-and-roles)), and is applied only after those entries.
+  - So a device knows a write's circles, members and keys before it opens
+    the write.
+  - E.g. Ana's phone makes Gifts and pins note 4 in it. Her tablet holds
+    the pin back until it has the entry making Gifts, then opens the pin
+    with Gifts' key.
+- A write counts only if its author was a member, and its device one of
+  theirs, in the store log the write had read, judged like an entry's
+  authority ([§9](#9-members-and-roles)); otherwise every device records
+  it lost.
+  - So a write made after its device read its own removal never counts,
+    and a write from a device whose addition a later entry drops still
+    counts if its author had read that addition.
 - A device has always read its own earlier writes.
 - So no device ever sees an effect before its cause:
   - cause: every write a write's device had read when making it;
@@ -297,6 +327,9 @@ Two mechanisms order writes:
     fails the write with `DbError::ClockOutOfRange`.
 - A write stamped more than five minutes ahead of the receiving device's
   clock waits until that clock catches up, instead of being applied.
+- Store log entries are stamped the same way, from the same latest
+  timestamp, and applying one advances it like applying a write; one
+  stamped more than five minutes ahead waits too.
 
 ### 7.3 Example
 
@@ -1594,6 +1627,13 @@ Carol's tablet:
     encrypted bytes.
 - A skipped part counts as applied, so a device never waits on a write it
   can't read ([§7.1](#71-causality)).
+  - A device has applied every entry the write had read, so it knows each
+    part's key; it skips a part only when it isn't in that key's audience.
+- A part sealed with a key whose entry the replay drops counts on no
+  device: every device records it lost, whether or not it holds the key.
+  - E.g. Ana removes Ben and makes key K2, and her devices write with it;
+    then Ben's earlier, concurrent removal of Ana wins. Carol holds K2 but
+    Ben doesn't; neither applies those parts, so they agree.
 - All members can see that a circle exists, who writes to it, when, and how
   much.
 
