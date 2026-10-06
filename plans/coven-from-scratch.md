@@ -84,6 +84,7 @@
   - [A.7 Schema changes](#a7-schema-changes)
 - [Appendix B. Proof of convergence](coven-merge-proof.md), in its own file
 - [Appendix C. Proof of the store log](coven-storelog-proof.md), in its own file
+- [Appendix D. Storage format](coven-format.md), in its own file
 
 ## 1. What coven is
 
@@ -2168,7 +2169,8 @@ Carol's tablet:
 - Coven's own tables in the local database, such as `coven_rows`, are
   local only, and a newer coven migrates them in place when the app starts.
 - What coven writes to storage has a *format*: write records, store log
-  entries, snapshots, paths.
+  entries, snapshots, paths, every byte of it given in
+  [Appendix D](coven-format.md).
 - Every object records the format version it was written in, outside its
   encryption, so an older coven tells a newer object from a damaged one,
   and asks for an update instead of reporting it.
@@ -5273,10 +5275,10 @@ fn migrations() -> Vec<Migration> {
 
 | Crate | Owns | Spec |
 | --- | --- | --- |
-| `coven-foundation` | The clock, the id source, atomic file writes, the store's directory and its lock | |
+| `coven-foundation` | The clock, the id source, atomic file writes, the store's directory and its lock | [§7.2](#72-timestamps), [§10](#10-device-identity), [§20.1](#201-opening) |
 | `coven-crypto` | Ciphers, sealed boxes, derived keys, file naming, member keys and their custody | [§11.1](#111-cryptography) |
 | `coven-merge` | Timestamps, the merged state, the removal rules and lost values, as functions with no I/O | [§7](#7-order), [§8](#8-merge), [§14](#14-audiences) |
-| `coven-format` | The bytes in storage: write records, store log entries, snapshots, file headers and chunks, encoded, decoded and checked, using merge's and crypto's types | |
+| `coven-format` | The bytes in storage: write records, store log entries, snapshots, file headers and chunks, encoded, decoded and checked, using merge's and crypto's types | [Appendix D](coven-format.md) |
 | `coven-database` | The SQLite connection, coven's internal tables, applying the merge's results, triggers, live queries, migrations | [§5](#5-local-database) |
 | `coven-storage` | Each provider, and the operations coven needs from it, including upload sessions | [§4](#4-storage-providers-and-access) |
 | `coven-sync` | Device logs, the store log, members, circles, snapshots, files and the cache, operations, recovery | [§6](#6-syncing-writes), [§9](#9-members-and-roles), [§12](#12-joining-and-restore) to [§19](#19-recovery) |
