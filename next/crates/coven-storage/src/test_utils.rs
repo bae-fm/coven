@@ -3,7 +3,7 @@ use crate::session::SessionState;
 use crate::*;
 use async_trait::async_trait;
 use coven_foundation::clock::ClockRef;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -81,11 +81,20 @@ fn confirm_published(
     Ok(())
 }
 
+#[derive(Clone)]
+enum Account {
+    Owner,
+    Recipient(String),
+}
+enum AccountAccess {
+    Invited,
+    Joined,
+}
 struct State {
     objects: BTreeMap<ObjectPath, Object>,
     uploads: BTreeMap<u64, Pending>,
     next: u64,
-    accounts: BTreeSet<String>,
+    accounts: BTreeMap<String, AccountAccess>,
     faults: Faults,
 }
 
@@ -93,7 +102,7 @@ struct State {
 #[derive(Clone)]
 pub struct MemoryStorage {
     config: StorageConfig,
-    owns_location: bool,
+    account: Account,
     clock: ClockRef,
     tokens: Arc<Mutex<Option<OAuthTokens>>>,
     state: Arc<Mutex<State>>,
@@ -107,26 +116,38 @@ impl MemoryStorage {
             config,
             clock,
             tokens: Arc::new(Mutex::new(None)),
-            owns_location: true,
+            account: Account::Owner,
             state: Arc::new(Mutex::new(State {
                 objects: BTreeMap::new(),
                 uploads: BTreeMap::new(),
                 next: 1,
-                accounts: BTreeSet::new(),
+                accounts: BTreeMap::new(),
                 faults: Faults::none(),
             })),
         })
     }
-    /// Set whether this adapter's account owns the shared location. Clones keep
-    /// their own account authority while sharing objects and pending uploads.
-    pub fn set_owner(&mut self, owns_location: bool) {
-        self.owns_location = owns_location;
+    /// A separate non-owner account using the same provider location. Its sign-in
+    /// is independent; access requires a grant and, where needed, recipient joining.
+    /// S3 keys are administered outside the fake's account-sharing model.
+    pub fn for_recipient(owner: &Self, email: &str) -> Result<Self, StorageError> {
+        if owner.config.provider() == CloudProvider::S3 || email.is_empty() {
+            return Err(StorageError::InvalidConfiguration(
+                "recipient requires a sharing account",
+            ));
+        }
+        Ok(Self {
+            config: owner.config(),
+            account: Account::Recipient(email.to_ascii_lowercase()),
+            clock: owner.clock.clone(),
+            tokens: Arc::new(Mutex::new(None)),
+            state: owner.state.clone(),
+        })
     }
     /// Set faults absolutely, so repeating the command has the same effect.
     pub async fn set_faults(&self, faults: Faults) {
         self.state.lock().await.faults = faults;
     }
-    async fn before(&self) -> Result<(), StorageError> {
+    async fn before_request(&self) -> Result<(), StorageError> {
         let (delay, failure) = {
             let mut state = self.state.lock().await;
             if std::mem::replace(&mut state.faults.expire_uploads, false) {
@@ -156,6 +177,23 @@ impl MemoryStorage {
                 Ok(())
             }
         }
+    }
+    async fn before(&self) -> Result<(), StorageError> {
+        self.before_request().await?;
+        if let Account::Recipient(email) = &self.account {
+            let state = self.state.lock().await;
+            let allowed = match state.accounts.get(email) {
+                Some(AccountAccess::Joined) => true,
+                Some(AccountAccess::Invited) => {
+                    self.config.provider() == CloudProvider::GoogleDrive
+                }
+                None => false,
+            };
+            if !allowed {
+                return Err(StorageError::Injected(StorageFailure::PermissionDenied));
+            }
+        }
+        Ok(())
     }
     fn session_id(&self, session: &UploadSession) -> Result<u64, StorageError> {
         session.check(&self.config)?;
@@ -261,14 +299,22 @@ impl Storage for MemoryStorage {
         Ok(())
     }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
-        self.before().await?;
+        self.before_request().await?;
         if self.config.provider() == CloudProvider::S3 {
             return Ok(AccessGrant::CreateAccessKey);
         }
-        if !self.owns_location {
+        if !matches!(self.account, Account::Owner) {
             return Err(StorageError::NotStoreOwner);
         }
-        self.state.lock().await.accounts.insert(account.into());
+        if account.is_empty() {
+            return Err(StorageError::InvalidConfiguration("empty sharing account"));
+        }
+        self.state
+            .lock()
+            .await
+            .accounts
+            .entry(account.to_ascii_lowercase())
+            .or_insert(AccountAccess::Invited);
         let invitation = match self.config.provider() {
             CloudProvider::CloudKit => StorageInvitation::new(
                 self.config(),
@@ -276,12 +322,48 @@ impl Storage for MemoryStorage {
                     url: coven_crypto::SecretText::new("https://icloud.com/share/memory".into()),
                 },
             )?,
+            CloudProvider::OneDrive => StorageInvitation::new(
+                self.config(),
+                crate::invitation::InvitationAcceptance::OneDriveShare {
+                    token: coven_crypto::SecretText::new(account.to_ascii_lowercase()),
+                },
+            )?,
             _ => StorageInvitation::for_account(self.config())?,
         };
         Ok(AccessGrant::Granted { invitation })
     }
+    async fn join(&self, invitation: &StorageInvitation) -> Result<(), StorageError> {
+        invitation.check(&self.config)?;
+        self.before_request().await?;
+        use crate::invitation::InvitationAcceptance as Acceptance;
+        if matches!(invitation.acceptance, Acceptance::Granted) {
+            self.list(&ObjectPrefix::all()).await?;
+            return Ok(());
+        }
+        if let Acceptance::CloudKitShare { url } = &invitation.acceptance {
+            if url.as_str() != "https://icloud.com/share/memory" {
+                return Err(StorageError::InvitationMismatch);
+            }
+        }
+        if let Account::Recipient(email) = &self.account {
+            match &invitation.acceptance {
+                Acceptance::OneDriveShare { token } if token.as_str() != email => {
+                    return Err(StorageError::InvitationMismatch)
+                }
+                _ => {}
+            }
+            let mut state = self.state.lock().await;
+            let access = state
+                .accounts
+                .get_mut(email)
+                .ok_or(StorageError::Injected(StorageFailure::PermissionDenied))?;
+            *access = AccountAccess::Joined;
+        }
+        self.list(&ObjectPrefix::all()).await?;
+        Ok(())
+    }
     async fn revoke_access(&self, member: &MemberAccess) -> Result<MemberRemoval, StorageError> {
-        self.before().await?;
+        self.before_request().await?;
         match (self.config.provider(), member) {
             (CloudProvider::S3, MemberAccess::S3AccessKey { access_key_id }) => {
                 Ok(MemberRemoval::DeleteAccessKey {
@@ -295,10 +377,14 @@ impl Storage for MemoryStorage {
                 | CloudProvider::CloudKit,
                 MemberAccess::ProviderAccount(account),
             ) => {
-                if !self.owns_location {
+                if !matches!(self.account, Account::Owner) {
                     return Err(StorageError::NotStoreOwner);
                 }
-                self.state.lock().await.accounts.remove(account);
+                self.state
+                    .lock()
+                    .await
+                    .accounts
+                    .remove(&account.to_ascii_lowercase());
                 Ok(MemberRemoval::Revoked)
             }
             _ => Err(StorageError::InvalidConfiguration(

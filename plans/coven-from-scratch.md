@@ -3931,6 +3931,11 @@ while let Ok(values) = lost.next().await {
   completed uploads discard pending parts and retain their session identity on
   the published object. OAuth replacement tokens govern subsequent calls on the
   same fake adapter.
+  `MemoryStorage::for_recipient(owner, email)` models a separate non-owner account at the
+  same location, with independent sign-in tokens. Grants and recipient acceptance
+  control its reads, writes and recorded uploads; revocation removes that account
+  without affecting the owner or other recipients. Clones retain their account's
+  sign-in and backend state. S3 keys remain outside this account-sharing fake.
 - Storage exposes `delete`, not a deletion-rights query. Sync chooses the
   deleting device by §15; Drive deletes an object the account owns and
   otherwise removes it from the store's folder. Provider refusals keep

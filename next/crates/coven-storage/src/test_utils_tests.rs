@@ -218,23 +218,7 @@ async fn failed_automatic_upload_is_aborted_without_publishing() {
 
 #[tokio::test]
 async fn sharing_authority_belongs_to_the_adapters_account() {
-    for config in [
-        StorageConfig::GoogleDrive {
-            folder_id: "folder".into(),
-        },
-        StorageConfig::Dropbox {
-            namespace_id: "namespace".into(),
-        },
-        StorageConfig::OneDrive {
-            drive_id: "drive".into(),
-            folder_id: "folder".into(),
-        },
-        StorageConfig::CloudKit {
-            container: "container".into(),
-            owner: "owner".into(),
-            zone: "zone".into(),
-        },
-    ] {
+    for config in sharing_configs() {
         let owner = MemoryStorage::new(
             config,
             Arc::new(coven_foundation::clock::FixedClock::new(
@@ -243,8 +227,7 @@ async fn sharing_authority_belongs_to_the_adapters_account() {
         )
         .unwrap();
         owner.grant_access("kept@example.test").await.unwrap();
-        let mut recipient = owner.clone();
-        recipient.set_owner(false);
+        let recipient = MemoryStorage::for_recipient(&owner, "kept@example.test").unwrap();
         assert!(matches!(
             recipient.grant_access("new@example.test").await,
             Err(StorageError::NotStoreOwner)
@@ -261,7 +244,7 @@ async fn sharing_authority_belongs_to_the_adapters_account() {
                 .lock()
                 .await
                 .accounts
-                .iter()
+                .keys()
                 .cloned()
                 .collect::<Vec<_>>(),
             ["kept@example.test"]
@@ -272,14 +255,13 @@ async fn sharing_authority_belongs_to_the_adapters_account() {
             .unwrap();
         assert!(owner.state.lock().await.accounts.is_empty());
     }
-    let mut s3 = MemoryStorage::new(
+    let s3 = MemoryStorage::new(
         config(),
         Arc::new(coven_foundation::clock::FixedClock::new(
             std::time::SystemTime::UNIX_EPOCH,
         )),
     )
     .unwrap();
-    s3.set_owner(false);
     assert!(matches!(
         s3.grant_access("member").await.unwrap(),
         AccessGrant::CreateAccessKey
@@ -561,4 +543,173 @@ async fn lost_publication_replies_and_expired_parts_are_distinct() {
     let mut fresh = storage.restart_upload(&upload).await.unwrap();
     storage.upload_part(&mut fresh, b"data").await.unwrap();
     storage.finish_upload(&mut fresh).await.unwrap();
+}
+
+fn sharing_configs() -> [StorageConfig; 4] {
+    [
+        StorageConfig::GoogleDrive {
+            folder_id: "folder".into(),
+        },
+        StorageConfig::Dropbox {
+            namespace_id: "namespace".into(),
+        },
+        StorageConfig::OneDrive {
+            drive_id: "drive".into(),
+            folder_id: "folder".into(),
+        },
+        StorageConfig::CloudKit {
+            container: "container".into(),
+            owner: "owner".into(),
+            zone: "zone".into(),
+        },
+    ]
+}
+
+#[tokio::test]
+async fn recipient_access_follows_account_grants_and_acceptance() {
+    for config in sharing_configs() {
+        let owner = MemoryStorage::new(
+            config,
+            Arc::new(coven_foundation::clock::FixedClock::new(
+                std::time::SystemTime::UNIX_EPOCH,
+            )),
+        )
+        .unwrap();
+        let path = ObjectPath::store_log(
+            coven_foundation::id_source::DeviceId(1),
+            std::num::NonZeroU64::MIN,
+        );
+        owner.create(&path, b"first").await.unwrap();
+        let member = MemoryStorage::for_recipient(&owner, "member").unwrap();
+        assert_eq!(
+            member.read(&path).await.unwrap_err().failure(),
+            StorageFailure::PermissionDenied
+        );
+        let AccessGrant::Granted { invitation } = owner.grant_access("member").await.unwrap()
+        else {
+            panic!()
+        };
+        if owner.config().provider() != CloudProvider::GoogleDrive {
+            assert_eq!(
+                member.read(&path).await.unwrap_err().failure(),
+                StorageFailure::PermissionDenied
+            );
+        }
+        member
+            .join(&StorageInvitation::decode(invitation.encode().unwrap().as_bytes()).unwrap())
+            .await
+            .unwrap();
+        member.join(&invitation).await.unwrap();
+        if owner.config().provider() == CloudProvider::OneDrive {
+            member
+                .join(&StorageInvitation::for_account(owner.config()).unwrap())
+                .await
+                .unwrap();
+        }
+        assert_eq!(member.read(&path).await.unwrap(), b"first");
+        let kept = MemoryStorage::for_recipient(&owner, "kept").unwrap();
+        let AccessGrant::Granted {
+            invitation: kept_invite,
+        } = owner.grant_access("kept").await.unwrap()
+        else {
+            panic!()
+        };
+        kept.join(&kept_invite).await.unwrap();
+        let upload_path = ObjectPath::device_log(
+            coven_foundation::id_source::DeviceId(2),
+            std::num::NonZeroU64::MIN,
+        );
+        let mut upload = member.begin_upload(&upload_path, 4).await.unwrap();
+        owner
+            .revoke_access(&MemberAccess::ProviderAccount("member".into()))
+            .await
+            .unwrap();
+        for error in [
+            member.read(&path).await.unwrap_err(),
+            member.list(&ObjectPrefix::all()).await.unwrap_err(),
+            member.create(&upload_path, b"data").await.unwrap_err(),
+            member.delete(&path).await.unwrap_err(),
+            member.upload_part(&mut upload, b"data").await.unwrap_err(),
+            member.abort_upload(&upload).await.unwrap_err(),
+            member.join(&invitation).await.unwrap_err(),
+        ] {
+            assert_eq!(error.failure(), StorageFailure::PermissionDenied);
+        }
+        assert_eq!(owner.read(&path).await.unwrap(), b"first");
+        assert_eq!(kept.read(&path).await.unwrap(), b"first");
+        let AccessGrant::Granted { invitation } = owner.grant_access("member").await.unwrap()
+        else {
+            panic!()
+        };
+        member.join(&invitation).await.unwrap();
+        member.upload_part(&mut upload, b"data").await.unwrap();
+        member.finish_upload(&mut upload).await.unwrap();
+        assert_eq!(owner.read(&upload_path).await.unwrap(), b"data");
+    }
+}
+
+#[tokio::test]
+async fn recipients_keep_their_own_tokens_while_clones_share_the_same_sign_in() {
+    let owner = MemoryStorage::new(
+        StorageConfig::Dropbox {
+            namespace_id: "store".into(),
+        },
+        Arc::new(coven_foundation::clock::FixedClock::new(
+            std::time::SystemTime::UNIX_EPOCH,
+        )),
+    )
+    .unwrap();
+    let AccessGrant::Granted { invitation } = owner.grant_access("member").await.unwrap() else {
+        panic!()
+    };
+    let member = MemoryStorage::for_recipient(&owner, "member").unwrap();
+    member.join(&invitation).await.unwrap();
+    let cloned = member.clone();
+    let another_sign_in = MemoryStorage::for_recipient(&owner, "member").unwrap();
+    member
+        .set_oauth_tokens(OAuthTokens {
+            access_token: coven_crypto::SecretText::new("expired".into()),
+            refresh_token: None,
+            expires_at: Some(std::time::SystemTime::UNIX_EPOCH),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        cloned
+            .list(&ObjectPrefix::all())
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageFailure::Authentication
+    );
+    owner.list(&ObjectPrefix::all()).await.unwrap();
+    another_sign_in.list(&ObjectPrefix::all()).await.unwrap();
+    member
+        .set_oauth_tokens(OAuthTokens {
+            access_token: coven_crypto::SecretText::new("refreshed".into()),
+            refresh_token: None,
+            expires_at: None,
+        })
+        .await
+        .unwrap();
+    cloned.list(&ObjectPrefix::all()).await.unwrap();
+}
+
+#[tokio::test]
+async fn invalid_account_grants_leave_the_fake_unchanged() {
+    for config in sharing_configs() {
+        let owner = MemoryStorage::new(
+            config,
+            Arc::new(coven_foundation::clock::FixedClock::new(
+                std::time::SystemTime::UNIX_EPOCH,
+            )),
+        )
+        .unwrap();
+        assert!(matches!(
+            owner.grant_access("").await,
+            Err(StorageError::InvalidConfiguration(_))
+        ));
+        assert!(owner.state.lock().await.accounts.is_empty());
+        assert!(MemoryStorage::for_recipient(&owner, "").is_err());
+    }
 }
