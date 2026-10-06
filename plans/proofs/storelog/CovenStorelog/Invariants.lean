@@ -152,9 +152,10 @@ theorem device_add_authority (M : Log) (n : Nat) (S : EntrySet) {w m d : Nat}
 
 theorem device_removal_authority (M : Log) (n : Nat) (S : EntrySet) {w m d : Nat}
     (hw : w ∈ (resolve M n S).kept) (he : (M w).action = .removeDevice m d) :
-    member (authorView M w) (M w).author = true ∧
+    lookup (authorView M w).devices d = some m ∧
+      member (authorView M w) (M w).author = true ∧
       ((M w).author = m ∨ admin (authorView M w) (M w).author = true) := by
-  simpa [authorized, he] using authority_uses_author_view M n S hw
+  simpa [authorized, he, and_assoc] using authority_uses_author_view M n S hw
 
 theorem circle_delete_authority (M : Log) (n : Nat) (S : EntrySet) {w c : Nat}
     (hw : w ∈ (resolve M n S).kept) (he : (M w).action = .deleteCircle c) :

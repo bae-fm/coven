@@ -121,7 +121,8 @@ def authorized (s : State) (e : Entry) : Bool :=
   | .create => !s.created
   | .addMember _ _ | .removeMember _ _ | .changeRole _ _ => admin s e.author
   | .addDevice m _ => member s e.author && e.author == m
-  | .removeDevice m _ => member s e.author && (e.author == m || admin s e.author)
+  | .removeDevice m d => lookup s.devices d == some m &&
+      member s e.author && (e.author == m || admin s e.author)
   | .makeCircle _ _ | .raiseVersion _ _ _ => member s e.author
   | .renameCircle c _ | .deleteCircle c | .addToCircle c _ | .removeFromCircle c _ =>
       inCircle s c e.author

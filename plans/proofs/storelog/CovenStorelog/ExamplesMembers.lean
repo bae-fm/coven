@@ -19,9 +19,9 @@ def both : Log
   | 5 => entry 1 1 [0, 1, 2, 3] (.changeRole 2 .admin)
   | w => household .admin .member w
 
-def phone : Log
+def phoneAndRemoval : Log
   | 3 => entry 1 4 [0, 1, 2] (.addDevice 1 4)
-  | 4 => entry 0 0 [0, 1, 2] (.removeDevice 1 4)
+  | 4 => entry 0 0 [0, 1, 2] (.removeMember 1 [])
   | w => household .admin .member w
 
 def roles : Log
@@ -68,7 +68,7 @@ def openingLog : Log
 /-- The entry examples are valid, so their universal causal-order claims
 have actual arrival orders (in particular, timestamp order). -/
 theorem member_examples_valid :
-    validCheck both 6 = true ∧ validCheck phone 5 = true ∧ validCheck roles 7 = true ∧
+    validCheck both 6 = true ∧ validCheck phoneAndRemoval 5 = true ∧ validCheck roles 7 = true ∧
     validCheck mutualRemovals 5 = true ∧ validCheck carol 7 = true ∧
     validCheck equalAdds 5 = true ∧ validCheck threeRemovals 8 = true ∧
     validCheck removalAndPhone 7 = true ∧ validCheck openingLog 4 = true := by decide
@@ -84,14 +84,24 @@ theorem example_add_and_promote : EveryOrder both 6 (List.range 6) (fun r =>
     member r.state 3 = true ∧ admin r.state 2 = true ∧ r.dropped = []) := by
   apply every_order; decide
 
-/-- §9 table, row 2, and §12.1: the new phone registers itself. -/
-theorem example_remove_phone : EveryOrder phone 5 (List.range 5) (fun r =>
-    lookup r.state.devices 4 = none ∧ r.dropped = [3] ∧ reports phone r 1 = [3]) := by
+/-- §9 table, row 2: removing Ben defeats his concurrent phone addition. -/
+theorem example_member_removal_beats_phone : EveryOrder phoneAndRemoval 5 (List.range 5) (fun r =>
+    member r.state 1 = false ∧ lookup r.state.devices 4 = none ∧
+    4 ∈ r.kept ∧ r.dropped = [3] ∧ reports phoneAndRemoval r 1 = [3]) := by
   apply every_order; decide
 
-theorem new_device_registers_itself : EveryOrder phone 4 (List.range 4) (fun r =>
+/-- §12.1: the new phone registers itself before the concurrent removal arrives. -/
+theorem new_device_registers_itself : EveryOrder phoneAndRemoval 4 (List.range 4) (fun r =>
     lookup r.state.devices 4 = some 1 ∧ r.dropped = []) := by
   apply every_order; decide
+
+/-- Even an admin must have read the device's addition, with the matching owner. -/
+theorem device_removal_checks_owner :
+    let view := authorView phoneAndRemoval 3
+    authorized view (entry 0 0 [0, 1, 2] (.removeDevice 1 4)) = false ∧
+    authorized view (entry 0 0 [0, 1, 2] (.removeDevice 0 1)) = false ∧
+    authorized view (entry 0 0 [0, 1, 2] (.removeDevice 1 1)) = true ∧
+    authorized view (entry 1 1 [0, 1, 2] (.removeDevice 1 1)) = true := by decide
 
 /-- §9 table, row 3. -/
 theorem example_lower_role : EveryOrder roles 7 (List.range 7) (fun r =>

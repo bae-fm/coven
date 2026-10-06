@@ -209,10 +209,13 @@
 - **Authority uses the author's view.** Every kept identity passed this
   check, including an unchanged effect. Lean: `authority_uses_author_view`.
 - **Device actions use the member's signature.** A member adds their own
-  device; its owner or an admin removes it. Writing-device registration
-  is not an additional authority condition, so a new device adds itself.
+  device; its owner or an admin removes it. A removal requires the device
+  to belong to its named member in the author's view: an unseen device
+  cannot be removed. The model carries that member explicitly; Rust derives
+  it from the author's view. Writing-device registration is not an additional
+  authority condition, so a new device adds itself.
   Lean: `device_add_authority`, `device_removal_authority`,
-  `Examples.new_device_registers_itself`.
+  `Examples.device_removal_checks_owner`, `Examples.new_device_registers_itself`.
 - **Circle members manage their circle.** An outside store admin cannot
   rename it, change its members, delete it, or reset it. Lean:
   `circle_delete_authority`, `Examples.outsider_cannot_manage`.
@@ -229,8 +232,9 @@
 - [§9](coven-from-scratch.md#9-members-and-roles)'s five table rows:
   - Ana adds Dan while Ben promotes Carol: both apply.
     Lean: `Examples.example_add_and_promote`.
-  - Ben adds his phone while Ana removes it: the removal wins.
-    Lean: `Examples.example_remove_phone`.
+  - Ben adds his phone while Ana removes Ben: the removal wins, and the
+    phone addition is dropped and reported to Ben.
+    Lean: `Examples.example_member_removal_beats_phone`.
   - Ben is concurrently made admin and member: member wins.
     Lean: `Examples.example_lower_role`.
   - Ana and Ben remove one another: the earlier removal applies.

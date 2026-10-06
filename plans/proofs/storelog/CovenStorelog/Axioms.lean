@@ -78,8 +78,9 @@ import CovenStorelog
 #print axioms CovenStorelog.Examples.member_examples_valid
 #print axioms CovenStorelog.Examples.opening_log
 #print axioms CovenStorelog.Examples.example_add_and_promote
-#print axioms CovenStorelog.Examples.example_remove_phone
+#print axioms CovenStorelog.Examples.example_member_removal_beats_phone
 #print axioms CovenStorelog.Examples.new_device_registers_itself
+#print axioms CovenStorelog.Examples.device_removal_checks_owner
 #print axioms CovenStorelog.Examples.example_lower_role
 #print axioms CovenStorelog.Examples.example_mutual_removal
 #print axioms CovenStorelog.Examples.example_carol
