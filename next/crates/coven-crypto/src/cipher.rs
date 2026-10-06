@@ -2,9 +2,13 @@
 
 use crate::{randomness, CryptoError};
 use chacha20poly1305::{
-    aead::{consts::U24, Aead, Payload},
+    aead::{array::typenum::Unsigned, consts::U24, Aead, AeadCore, Payload},
     KeyInit, XChaCha20Poly1305,
 };
+
+/// Bytes added to each sealed object chunk: its stored nonce and authentication tag.
+pub const SEALED_OBJECT_CHUNK_OVERHEAD: usize = <XChaCha20Poly1305 as AeadCore>::NonceSize::USIZE
+    + <XChaCha20Poly1305 as AeadCore>::TagSize::USIZE;
 
 pub(crate) fn storage_path(path: &str) -> &[u8] {
     assert!(!path.is_empty(), "storage paths must be nonempty");

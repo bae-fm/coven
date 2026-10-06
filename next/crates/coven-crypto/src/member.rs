@@ -1,7 +1,7 @@
 //! A member's signing and sealing key pairs, kept together (§11.1).
 
 use crate::{cipher, derivation, randomness, wire};
-use crate::{CircleKey, CryptoError, MaterialError, SecretBytes, StoreKey};
+use crate::{CircleKey, CryptoError, MaterialError, ObjectDigest, SecretBytes, StoreKey};
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use std::{fmt, str::FromStr};
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -32,6 +32,18 @@ impl MemberId {
             .expect("MemberId contains a validated Ed25519 public key");
         key.verify_strict(message, &ed25519_dalek::Signature::from_bytes(&signature.0))
             .map_err(|_| CryptoError::Signature)
+    }
+
+    /// Verify an object's signature after hashing all bytes before it (§14.4).
+    /// The domain and path are authenticated along with the SHA-256 digest.
+    /// Panics if the storage path is empty.
+    pub fn verify_object(
+        &self,
+        path: &str,
+        digest: &ObjectDigest,
+        signature: &Signature,
+    ) -> Result<(), CryptoError> {
+        self.verify(&object_message(path, digest), signature)
     }
 }
 
@@ -124,6 +136,21 @@ impl MemberKeys {
         Signature(self.signing.sign(bytes).to_bytes())
     }
 
+    /// Sign the digest of every object byte before the signature (§14.4).
+    /// Feed the prefix, length fields and sealed chunks to [`crate::ObjectHasher`]
+    /// in storage order. The signed message binds its domain, path and digest.
+    /// Panics if the storage path is empty.
+    ///
+    /// A file's content hash cannot stand in for an object's digest.
+    /// ```compile_fail
+    /// use coven_crypto::{ContentHasher, MemberKeys};
+    /// let member = MemberKeys::generate().unwrap();
+    /// member.sign_object("devices/1/1", &ContentHasher::new().finish());
+    /// ```
+    pub fn sign_object(&self, path: &str, digest: &ObjectDigest) -> Signature {
+        self.sign(&object_message(path, digest))
+    }
+
     /// Encode both private seeds for custody or the person's restore code (§12.1).
     pub fn to_secret_bytes(&self) -> SecretBytes {
         let mut bytes = Zeroizing::new(Vec::with_capacity(69));
@@ -212,6 +239,14 @@ pub fn seal_circle_key(
     let mut bytes = Zeroizing::new(Vec::with_capacity(64));
     key.encode_into(&mut bytes);
     seal_box(b"circle", recipient, path, &bytes)
+}
+
+fn object_message(path: &str, digest: &ObjectDigest) -> Vec<u8> {
+    cipher::context(&[
+        b"coven/object-signature/v1",
+        cipher::storage_path(path),
+        digest.as_bytes(),
+    ])
 }
 
 fn box_context(kind: &[u8], path: &str, sender: &[u8; 32], recipient: &[u8; 32]) -> Vec<u8> {

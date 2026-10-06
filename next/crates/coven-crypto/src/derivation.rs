@@ -51,6 +51,32 @@ impl EncryptionKey {
             sealed,
         )
     }
+
+    /// Seal one write or snapshot chunk with a stored random nonce (§11.1).
+    /// Section 0 holds a write's header; part i uses section i + 1. A snapshot
+    /// uses section 0. Indices start at zero within each section.
+    /// Panics if the storage path is empty.
+    pub fn seal_object_chunk(
+        &self,
+        path: &str,
+        section: u64,
+        index: u64,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        cipher::seal_random(&self.0, &object_chunk_aad(path, section, index), plaintext)
+    }
+
+    /// Open a chunk only at its authenticated path, section and index (§11.1).
+    /// Panics if the storage path is empty.
+    pub fn open_object_chunk(
+        &self,
+        path: &str,
+        section: u64,
+        index: u64,
+        sealed: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        cipher::open_random(&self.0, &object_chunk_aad(path, section, index), sealed)
+    }
 }
 
 impl std::fmt::Debug for EncryptionKey {
@@ -87,6 +113,32 @@ impl DerivedKeys {
     /// Panics if the storage path is empty.
     pub fn open_object(&self, path: &str, sealed: &[u8]) -> Result<Vec<u8>, CryptoError> {
         self.encryption.open_object(path, sealed)
+    }
+
+    /// Seal one chunk with this audience's derived encryption key (§11.1).
+    /// See [`EncryptionKey::seal_object_chunk`] for section and index numbering.
+    pub fn seal_object_chunk(
+        &self,
+        path: &str,
+        section: u64,
+        index: u64,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        self.encryption
+            .seal_object_chunk(path, section, index, plaintext)
+    }
+
+    /// Open a chunk only at its authenticated path, section and index (§11.1).
+    /// Panics if the storage path is empty.
+    pub fn open_object_chunk(
+        &self,
+        path: &str,
+        section: u64,
+        index: u64,
+        sealed: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        self.encryption
+            .open_object_chunk(path, section, index, sealed)
     }
 
     /// HMAC-SHA256 of a file's content hash with the naming key (§16.2).
@@ -148,6 +200,15 @@ impl std::fmt::Debug for DerivedKeys {
 
 fn chunk_aad(name: &StoredFileName, index: u64) -> Vec<u8> {
     cipher::context(&[b"coven/chunk/v1", name.as_bytes(), &index.to_le_bytes()])
+}
+
+fn object_chunk_aad(path: &str, section: u64, index: u64) -> Vec<u8> {
+    cipher::context(&[
+        b"coven/object-chunk/v1",
+        cipher::storage_path(path),
+        &section.to_le_bytes(),
+        &index.to_le_bytes(),
+    ])
 }
 
 #[cfg(test)]

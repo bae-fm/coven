@@ -1327,8 +1327,12 @@ Carol's tablet:
   chunks.
   - Each object's storage path is bound into its authentication, so the
     provider can't swap one object for another.
-  - Each chunk of a write or a file also binds its index, and a write's
-    chunk binds its part.
+  - Each chunk of a file binds its index; each chunk of a write or a
+    snapshot binds its section and its index: a write's header is
+    section 0 and its part i is section i + 1, and a snapshot is one
+    section.
+- A write's signature covers its path and a SHA-256 hash of every byte
+  before it, so a device checks it as the object streams in.
 - Nonces:
   - for a file's chunks, derived from the key and the file's name, combined
     with the chunk's index, so the same file under the same key encrypts to
