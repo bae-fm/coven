@@ -1965,6 +1965,9 @@ Carol's tablet:
   - E.g. Ana's phone and Ben's laptop each attach a different file to row
     7: the later write wins all four columns, never one file's size with
     the other's hash.
+  - So coven refuses a foreign key with set null or set default on any of
+    the four, checked when the database opens and after migrating: its
+    action would change one column alone ([§8.4](#84-foreign-keys)).
 - Concurrent changes to where a file is follow [§8.2](#82-concurrent-writes-to-one-row):
   the later write wins.
   - E.g. an album is uploaded; at 10:00 Ana's laptop keeps it on the
