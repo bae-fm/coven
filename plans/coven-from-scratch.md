@@ -282,15 +282,15 @@ Two mechanisms order writes:
     reference that made it a parent's child is pointed elsewhere.
 - A removed row's `coven_lost` row names every rule that holds for it once
   the rules have run, and it comes back only when none holds.
-- A foreign key or unique constraint is named by its columns, in order,
-  since SQLite gives neither a lasting name; a CHECK by its name, or by its
-  expression when it has none, as SQLite reports a failed one.
   - E.g. todos need `start <= end`, and todo 7 is in list 3.
   - Ana deletes list 3, while Ben moves todo 7's start past its end.
   - Todo 7 is taken out for both reasons, on every device, whichever rule
     a device ran first.
   - Unique and other-audience losers count their rule as holding, from the
     step that judged it.
+- A foreign key or unique constraint is named by its columns, in order,
+  since SQLite gives neither a lasting name; a CHECK by its name, or by its
+  expression when it has none, as SQLite reports a failed one.
 - The app can't see a removed row, so it can insert the same shared key
   again.
   - The write records that insert as an update of the removed row, setting
