@@ -15,13 +15,17 @@ pub(crate) const FINGERPRINTS: &[u8] = b"coven/fingerprints/v1";
 pub(crate) const JOIN_REQUEST: &[u8] = b"coven/join-request/v1";
 pub(crate) const SEALED_BOX: &[u8] = b"coven/sealed-box/v1";
 
-pub(crate) fn derive(key: &[u8; 32], label: &[u8]) -> Zeroizing<[u8; 32]> {
+pub(crate) fn derive(key: &[u8; 32], context: &[u8]) -> Zeroizing<[u8; 32]> {
     let mut output = Zeroizing::new([0; 32]);
     let (mut extracted, hkdf) = Hkdf::<Sha256>::extract(None, key);
     extracted.as_mut_slice().zeroize();
-    hkdf.expand(label, output.as_mut())
+    hkdf.expand(context, output.as_mut())
         .expect("32-byte derived keys fit HKDF-SHA256's output limit");
     output
+}
+
+pub(crate) fn derive_label(key: &[u8; 32], label: &[u8]) -> Zeroizing<[u8; 32]> {
+    derive(key, &cipher::context(&[label]))
 }
 
 pub(crate) fn mac(key: &[u8; 32]) -> Hmac<Sha256> {
@@ -96,10 +100,10 @@ pub struct DerivedKeys {
 impl DerivedKeys {
     pub(crate) fn new(key: &[u8; 32]) -> Self {
         Self {
-            encryption: EncryptionKey(derive(key, ENCRYPTION)),
-            naming: derive(key, NAMING),
-            file_nonces: derive(key, FILE_NONCES),
-            fingerprints: derive(key, FINGERPRINTS),
+            encryption: EncryptionKey(derive_label(key, ENCRYPTION)),
+            naming: derive_label(key, NAMING),
+            file_nonces: derive_label(key, FILE_NONCES),
+            fingerprints: derive_label(key, FINGERPRINTS),
         }
     }
 

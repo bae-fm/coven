@@ -239,15 +239,6 @@ index 0 is the header. Part i uses section i + 1, with indices starting at 0.
 Readers must check EOF after the 64-byte signature and verify the signature
 before committing any staged rows. These layout APIs do no cryptography.
 
-Crypto's chunk authentication context has four length-prefixed components:
-`coven/object-chunk/v1`, the storage path's UTF-8 bytes, section:u64 and
-index:u64. Component lengths and the two coordinates are little-endian.
-Each chunk has its own random nonce. The signature message has three such
-components: `coven/object-signature/v1`, the storage path, and SHA-256 of all
-object bytes before the signature, including the cleartext prefix, chunk
-length fields, nonces, ciphertext and tags. `ObjectHasher`, `sign_object` and
-`verify_object` supply incremental hashing and domain-separated Ed25519 signing.
-
 ### Store-log entries
 
 Had-read lists store-log entries, not writes. Own-device positions, when

@@ -1,6 +1,18 @@
 use super::*;
 use chacha20poly1305::aead::{self, consts::U16, AeadCore, Nonce, TagPosition};
 
+#[test]
+fn context_lengths_are_big_endian_and_preserve_empty_components() {
+    assert_eq!(
+        context(&[b"ab", b"", b"c"]),
+        [
+            0, 0, 0, 0, 0, 0, 0, 2, b'a', b'b', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+            b'c'
+        ]
+    );
+    assert_ne!(context(&[b"ab", b"c"]), context(&[b"a", b"bc"]));
+}
+
 struct RefusingCipher;
 
 impl AeadCore for RefusingCipher {

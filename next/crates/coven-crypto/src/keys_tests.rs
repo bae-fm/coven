@@ -144,8 +144,8 @@ fn app_data_uses_its_own_key_in_both_directions() {
     assert_eq!(&sealed[..5], b"CVAD\x01");
     assert_eq!(&sealed[5..21], &[7; 16]);
     let context = cipher::context(&[&sealed[..21], b"row/42"]);
-    let app_key = derivation::derive(&[17; 32], b"coven/app-data/v1");
-    let object_key = derivation::derive(&[17; 32], derivation::ENCRYPTION);
+    let app_key = derivation::derive_label(&[17; 32], b"coven/app-data/v1");
+    let object_key = derivation::derive_label(&[17; 32], derivation::ENCRYPTION);
     assert_eq!(
         cipher::open_random(&app_key, &context, &sealed[21..]).unwrap(),
         b"private field"

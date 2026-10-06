@@ -17,7 +17,7 @@ pub(crate) fn storage_path(path: &str) -> &[u8] {
 pub(crate) fn context(parts: &[&[u8]]) -> Vec<u8> {
     let mut aad = Vec::new();
     for part in parts {
-        aad.extend_from_slice(&(part.len() as u64).to_le_bytes());
+        aad.extend_from_slice(&(part.len() as u64).to_be_bytes());
         aad.extend_from_slice(part);
     }
     aad

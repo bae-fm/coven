@@ -236,7 +236,7 @@ impl StoreKeyring {
         let mut header = b"CVAD\x01".to_vec();
         header.extend_from_slice(key.id().0.as_bytes());
         let context = cipher::context(&[&header, aad]);
-        let encryption = derivation::derive(&key.bytes, derivation::APP_DATA);
+        let encryption = derivation::derive_label(&key.bytes, derivation::APP_DATA);
         let body = cipher::seal_random(&encryption, &context, plaintext)?;
         header.extend(body);
         Ok(header)
@@ -249,7 +249,7 @@ impl StoreKeyring {
         let id = KeyId(Uuid::from_bytes(wire::array(&mut bytes)?));
         let header = sealed.get(..21).ok_or(MaterialError::Encoding)?;
         let key = self.store_key(id)?;
-        let encryption = derivation::derive(&key.bytes, derivation::APP_DATA);
+        let encryption = derivation::derive_label(&key.bytes, derivation::APP_DATA);
         Ok(cipher::open_random(
             &encryption,
             &cipher::context(&[header, aad]),
@@ -281,7 +281,7 @@ impl InviteSecret {
 
     /// Derive the join request's encryption key with its own HKDF label (§11.1).
     pub fn join_request_key(&self) -> EncryptionKey {
-        EncryptionKey(derivation::derive(&self.0, derivation::JOIN_REQUEST))
+        EncryptionKey(derivation::derive_label(&self.0, derivation::JOIN_REQUEST))
     }
 }
 

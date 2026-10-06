@@ -10,42 +10,45 @@ fn purpose_labels_and_hkdf_answers_are_pinned() {
         (
             ENCRYPTION,
             b"coven/encryption/v1",
-            "6e4806cf1fac1920e0d53eaca1d210cf46e8f507ae4f145db33af65af7a81f60",
+            "5c09ce5876164485843f2637bb370094c8dfd799637cda80fbc4c88c5b63229f",
         ),
         (
             APP_DATA,
             b"coven/app-data/v1",
-            "871d415cbde4e9545645d52de9825f4db26b81419b460bf8f746edf5e39c4bf9",
+            "cf37721dcdb2ed070d0ce5179c10bfbaa55338c73225231228a9a6a70cd2e59a",
         ),
         (
             NAMING,
             b"coven/naming/v1",
-            "5bc6b49fd5a2bf93a95d600007f9964ad8ce2c2e3eccb9f708b444fc62522a6a",
+            "42980d4d4896ec07579d1d248022928c916c470fb648942fbb5691e5cee5cf42",
         ),
         (
             FILE_NONCES,
             b"coven/file-nonces/v1",
-            "2a9c072dee57a1c050372bdd247cde778f55c82943b8f51e6c1fb4d4365bd68a",
+            "366f97a8e43e06089799b56c049f03b004ff2adce8e26b78615a8d0576577a55",
         ),
         (
             FINGERPRINTS,
             b"coven/fingerprints/v1",
-            "06e608064126fc629ea0520d046942bab83c691d600a95a2f8f0368b8627d0fa",
+            "795d9756ca6212a6f38d5cd68fccbd5952ec59e52d8f5aa4bdd76e8bb95ceff6",
         ),
         (
             JOIN_REQUEST,
             b"coven/join-request/v1",
-            "2692bf8b7e07bf0df6a8d63d23214ffaccd0e1556fbe51a467b443da48d07a40",
+            "80dc795abb07ec2ebea022802dcd893f27e018e45157d78fa7ac42bf691440f5",
         ),
         (
             SEALED_BOX,
             b"coven/sealed-box/v1",
-            "6a17f4475434ab900c563f04d475aa0ecd60f1bca93bb3eb8cdaf10a73d3949d",
+            "2507974c84457b2d7fb35034f7de475379c05d8b428ab43e1d22ecebff2f3b07",
         ),
     ];
     for (label, expected, answer) in vectors {
         assert_eq!(label, expected);
-        assert_eq!(hex::encode(derive(&[17; 32], label).as_ref()), *answer);
+        assert_eq!(
+            hex::encode(derive_label(&[17; 32], label).as_ref()),
+            *answer
+        );
     }
 }
 
@@ -57,23 +60,23 @@ fn stored_file_name_nonce_chunk_and_fingerprint_answers_are_pinned() {
     let name = keys.file_name(&hash.finish());
     assert_eq!(
         name.to_string(),
-        "418312d742b95e056668ba4f91c034c0a49cb5159067a43f67b7cf73ce8c6956"
+        "0601bf90cd7e035ecfa03e23d033f2b669686c3bd4f3215da114f71487193d37"
     );
     assert_eq!(
         hex::encode(keys.chunk_nonce(&name, 7)),
-        "12358369de655ceb9f1358b5720a43ce0700000000000000"
+        "c52f55f0a718bd6019d69b29ca74c0a00700000000000000"
     );
     // Independently calculated with libsodium's XChaCha20-Poly1305, using
-    // length-framed domain, raw name bytes and the little-endian chunk index.
+    // big-endian context lengths, raw name bytes and little-endian chunk index.
     assert_eq!(
         hex::encode(keys.seal_chunk(&name, 7, b"hello file")),
-        "6ec239349217077c8df98772b3ef4c2dc6c69d9a26f9cae3363e"
+        "4cdb8d3d0695280a9543c7ea803ccd795e76383acd9b32e4ec46"
     );
     let mut fingerprint = keys.fingerprint_hasher();
     fingerprint.update(b"agreed state");
     assert_eq!(
         hex::encode(fingerprint.finish().as_bytes()),
-        "0a4f4296e6d9572ff2ccc6bbd7b70a470c7335fe3eda75e2d958922d365dd091"
+        "e03357024e1ed6e2bb91ce154bb87a62e77f452a810274561035e99551516440"
     );
 }
 
