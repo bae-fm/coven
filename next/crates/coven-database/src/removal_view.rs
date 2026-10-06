@@ -53,6 +53,13 @@ pub(crate) struct EvaluatedRow {
     pub(crate) readings: BTreeMap<ForeignKey, ReferenceValue>,
 }
 
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct ReferenceTarget {
+    table: String,
+    columns: Vec<String>,
+    value: Vec<u8>,
+}
+
 pub(crate) struct DatabaseRemovalView<'a> {
     database: &'a crate::sqlite::DatabaseConnection,
     store: &'a MergeStore<'a>,
@@ -64,7 +71,7 @@ pub(crate) struct DatabaseRemovalView<'a> {
     rows: RefCell<BTreeMap<RowId, EvaluatedRow>>,
     edges: BTreeMap<RowId, BTreeSet<RowId>>,
     extra_groups: RefCell<BTreeMap<Group, BTreeSet<RowId>>>,
-    lookups: BTreeMap<(String, Vec<String>, Vec<u8>), BTreeSet<RowId>>,
+    lookups: RefCell<BTreeMap<ReferenceTarget, BTreeSet<RowId>>>,
 }
 
 impl<'a> DatabaseRemovalView<'a> {
@@ -78,7 +85,6 @@ impl<'a> DatabaseRemovalView<'a> {
         arriving: Option<(WriteId, Timestamp)>,
     ) -> Result<Self, DbError> {
         let mut edges = BTreeMap::<RowId, BTreeSet<RowId>>::new();
-        let mut lookups = BTreeMap::<_, BTreeSet<RowId>>::new();
         for (id, update) in updates {
             for value in update
                 .state
@@ -94,33 +100,6 @@ impl<'a> DatabaseRemovalView<'a> {
                         .insert(id.clone());
                 }
             }
-            let table = schema.table(&id.table);
-            if update.state.generation() % 2 == 1 {
-                let values: AppValues = update
-                    .state
-                    .cells()
-                    .iter()
-                    .map(|(n, c)| (n.clone(), c.value.value.clone()))
-                    .collect();
-                let values = crate::removal_sql::evaluate_values(database, table, &values)?;
-                for index in &table.indices {
-                    if let Some(columns) = index.columns.iter().cloned().collect::<Option<Vec<_>>>()
-                    {
-                        let values: Vec<_> = columns.iter().map(|c| values[c].clone()).collect();
-                        if values.iter().any(|v| matches!(v, Value::Null)) {
-                            continue;
-                        }
-                        lookups
-                            .entry((
-                                table.name.clone(),
-                                columns,
-                                equality_key(&values, &index.collations)?,
-                            ))
-                            .or_default()
-                            .insert(id.clone());
-                    }
-                }
-            }
         }
         Ok(Self {
             database,
@@ -133,7 +112,7 @@ impl<'a> DatabaseRemovalView<'a> {
             rows: RefCell::new(BTreeMap::new()),
             edges,
             extra_groups: RefCell::new(BTreeMap::new()),
-            lookups,
+            lookups: RefCell::new(BTreeMap::new()),
         })
     }
 
@@ -148,9 +127,47 @@ impl<'a> DatabaseRemovalView<'a> {
         }
     }
 
+    fn index(&self, id: &RowId) -> Result<(), DbError> {
+        let state = self.state(id)?;
+        if !state.present() {
+            return Ok(());
+        }
+        let table = self.schema.table(&id.table);
+        let values = state
+            .cells()
+            .iter()
+            .map(|(name, cell)| (name.clone(), cell.value.value.clone()))
+            .collect();
+        let values = crate::removal_sql::evaluate_values(self.database, table, &values)?;
+        for index in &table.indices {
+            if let Some(columns) = index.columns.iter().cloned().collect::<Option<Vec<_>>>() {
+                let values: Vec<_> = columns
+                    .iter()
+                    .map(|column| values[column].clone())
+                    .collect();
+                if !values.iter().any(|value| matches!(value, Value::Null)) {
+                    self.lookups
+                        .borrow_mut()
+                        .entry(ReferenceTarget {
+                            table: table.name.clone(),
+                            columns,
+                            value: equality_key(&values, &index.collations)?,
+                        })
+                        .or_default()
+                        .insert(id.clone());
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn prime(&self, changed: impl IntoIterator<Item = RowId>) -> Result<(), DbError> {
         // Changes are indexed by their old/new claims so either view can find
         // them even while the physical app table already holds the new values.
+        let changed: Vec<_> = changed.into_iter().collect();
+        for row in &changed {
+            self.index(row)?;
+        }
         for row in changed {
             for group in self.row_groups(&row)? {
                 self.extra_groups
@@ -435,11 +452,11 @@ impl<'a> DatabaseRemovalView<'a> {
                 )?);
             }
         }
-        if let Some(added) = self.lookups.get(&(
-            target.name.clone(),
-            ordered_columns,
-            equality_key(&ordered_values, &index.collations)?,
-        )) {
+        if let Some(added) = self.lookups.borrow().get(&ReferenceTarget {
+            table: target.name.clone(),
+            columns: ordered_columns,
+            value: equality_key(&ordered_values, &index.collations)?,
+        }) {
             parents.extend(added.iter().cloned());
         }
         let wanted = equality_key(&ordered_values, &index.collations)?;

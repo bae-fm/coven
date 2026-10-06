@@ -431,6 +431,16 @@ pub enum DbError {
     /// This device has used every store-log number.
     #[error("store-log entry numbers exhausted")]
     StoreLogNumberExhausted,
+    /// Reload coverage must catch up before recording a synced write or
+    /// snapshot (§7.1, §15).
+    #[error("reload is waiting for writes {writes:?}")]
+    ReloadPending {
+        /// Positions that must be consumed before this operation can continue.
+        writes: Vec<coven_merge::WriteId>,
+    },
+    /// Loading plaintext supplied by sync failed without changing the database.
+    #[error(transparent)]
+    Snapshot(#[from] crate::SnapshotError),
     /// Closing failed for these connections, after every one was tried (§20.1).
     #[error("closing database connections failed: {failures:?}")]
     Closing {

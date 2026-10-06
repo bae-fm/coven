@@ -207,19 +207,20 @@ pub(crate) fn retire_losses(
     database: &DatabaseConnection,
     row: &coven_merge::RowId,
 ) -> Result<(), DbError> {
-    let fields = database.query("SELECT l.generation,c.column_name,l.value,l.set_by,l.replacement_kind,l.replaced_by FROM coven_lost l LEFT JOIN coven_columns c ON c.id=l.column_id WHERE l.table_name=?1 AND l.key=?2 AND l.audience=?3 AND l.retired=0 AND l.replacement_kind IN ('rules','write')", params![row.table,row.key,audience_text(&row.audience)], |r| Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,Vec<u8>>(2)?,r.get::<_,Vec<u8>>(3)?,r.get::<_,String>(4)?,r.get::<_,Vec<u8>>(5)?)))?;
-    for (generation, column, value, setter, kind, cause) in fields {
-        let column = column.unwrap_or_default();
-        retired(
-            database,
-            row,
-            &generation,
-            &column,
-            &setter,
-            &[&value, &setter, kind.as_bytes(), &cause],
-        )?;
-    }
-    Ok(())
+    database.visit("SELECT id FROM coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND retired=0 AND replacement_kind IN ('rules','write')", params![row.table,row.key,audience_text(&row.audience)], |r| retained(database,r.get(0)?))
+}
+
+pub(crate) fn retained(database: &DatabaseConnection, ordinal: i64) -> Result<(), DbError> {
+    let (row,generation,column,value,setter,kind,cause)=database.query_row("SELECT l.table_name,l.key,l.audience,l.generation,c.column_name,l.value,l.set_by,l.replacement_kind,l.replaced_by FROM coven_lost l LEFT JOIN coven_columns c ON c.id=l.column_id WHERE l.id=?1",[ordinal],|r|Ok((crate::row_queries::read_identity(r)?,r.get::<_,Vec<u8>>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,Vec<u8>>(5)?,r.get::<_,Vec<u8>>(6)?,r.get::<_,String>(7)?,r.get::<_,Vec<u8>>(8)?)))?;
+    let column = column.unwrap_or_default();
+    retired(
+        database,
+        &row,
+        &generation,
+        &column,
+        &setter,
+        &[&value, &setter, kind.as_bytes(), &cause],
+    )
 }
 
 pub(crate) fn read(

@@ -319,6 +319,8 @@ impl Database {
     /// Stream an audience's plaintext snapshot frames from one committed reader
     /// transaction. The consumer can seal and upload each frame as it arrives;
     /// commits on the writer connection continue throughout this call.
+    /// Replayed waiting writes beyond recorded coverage return `ReloadPending` before
+    /// any frame is emitted.
     pub async fn write_snapshot<F, E>(
         &self,
         id: coven_format::store_log::SnapshotId,
@@ -339,6 +341,65 @@ impl Database {
                         crate::snapshot_write::write(reader, &inner.write_schema, id, emit)
                     })
                 })
+            })
+            .await,
+        )
+    }
+
+    /// Load authenticated plaintext supplied by sync, reading at most 64 KiB
+    /// at a time. The audience's history, derived visibility, coverage and local
+    /// waiting writes commit together; read, format and validation errors roll back.
+    /// `SnapshotError::Writes` refuses a snapshot that cannot causally replay
+    /// the waiting parts, preserving the database and queue.
+    pub async fn load_snapshot<R>(
+        &self,
+        expected: coven_format::store_log::SnapshotId,
+        plaintext: R,
+    ) -> Result<(), DbError>
+    where
+        R: std::io::Read + Send + 'static,
+    {
+        let database = self.clone();
+        finish_blocking(
+            tokio::task::spawn_blocking(move || {
+                let slot = database.inner.read().expect("database lock poisoned");
+                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+                // Reserve a reader before locking the writer: snapshot consumers
+                // may be waiting for a commit before releasing their readers.
+                let reader = inner.readers.acquire_reader();
+                let writer = inner
+                    .writer
+                    .lock()
+                    .expect("writer connection lock poisoned");
+                let files = crate::file_write::FileWrite::new(
+                    &writer,
+                    &inner.directory,
+                    &inner.write_schema,
+                    inner.device,
+                    &inner.staging,
+                    Vec::new(),
+                );
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    reader.with_reader(|reader| {
+                        reader.read_transaction(|| {
+                            inner.write_schema.prepare(reader)?;
+                            crate::snapshot_load::load(
+                                &writer,
+                                reader,
+                                &inner.write_schema,
+                                expected,
+                                plaintext,
+                                &files,
+                            )
+                        })
+                    })?;
+                    files.finish(Ok(()))
+                }));
+                drop(writer);
+                match result {
+                    Ok(result) => result,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                }
             })
             .await,
         )

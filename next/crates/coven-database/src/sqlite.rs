@@ -198,6 +198,17 @@ impl DatabaseConnection {
                 author.expect("writable migration"),
                 &mut at,
             )?;
+            if let Some(minimum) = outcomes
+                .iter()
+                .filter(|outcome| outcome.change == crate::MigrationChange::Breaking)
+                .map(|outcome| outcome.version)
+                .max()
+            {
+                db.internal_execute(
+                    "UPDATE coven_snapshot_schema SET minimum=?1 WHERE singleton=1",
+                    [minimum],
+                )?;
+            }
             db.refresh_hidden_rowids()?;
             Ok(outcomes)
         });

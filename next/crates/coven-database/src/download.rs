@@ -11,7 +11,7 @@ use coven_format::{
     value::WritePositions,
     write::{WriteDisposition, WriteHeader, WritePart, WriteRecord},
 };
-use coven_foundation::id_source::DeviceId;
+use coven_foundation::id_source::{CircleId, DeviceId};
 use coven_merge::{Audience, ColumnValue, Operation, Timestamp, WriteId};
 use rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
@@ -134,18 +134,20 @@ pub(crate) fn apply(
                 header.schema_version,
             )));
         }
-        let result = apply_opened(database, schema, download, files)?;
+        let deleted = crate::store_log_tables::deleted_circles(database)?;
+        let affected = apply_opened(database, schema, download, &deleted)?;
+        files.retain_rows(affected, &deleted)?;
         files.before_commit()?;
-        Ok(result)
+        Ok(ApplyOutcome::Applied)
     })
 }
 
-fn apply_opened(
+pub(crate) fn apply_opened(
     database: &DatabaseConnection,
     schema: &WriteSchema,
     download: DownloadedWrite,
-    files: &crate::file_write::FileWrite<'_>,
-) -> Result<ApplyOutcome, DbError> {
+    deleted: &BTreeSet<CircleId>,
+) -> Result<BTreeSet<crate::write_rows::AppKey>, DbError> {
     let mut record = WriteRecord {
         header: download.header,
         parts: download
@@ -158,11 +160,13 @@ fn apply_opened(
             .collect(),
     };
     let boundaries = crate::write_boundary::WriteBoundary::load(database)?;
-    let deleted = crate::store_log_tables::deleted_circles(database)?;
     let visible = AppView::after(database, schema);
     let store = MergeStore::new(database, &visible);
     let mut kept = Vec::new();
     for part in record.parts {
+        if crate::snapshot_coverage::covers(database, &part.audience, record.header.position)? {
+            continue;
+        }
         let cause = match record.header.disposition {
             WriteDisposition::Migration => continue,
             WriteDisposition::Lost(version) => Some(LostWriteCause::SchemaChange(version)),
@@ -179,15 +183,17 @@ fn apply_opened(
                 });
             }
         } else {
+            let missing =
+                crate::snapshot_coverage::missing_past(database, &part.audience, &record.header)?;
+            if !missing.is_empty() {
+                return Err(crate::SnapshotError::Writes { missing }.into());
+            }
             kept.push(part);
         }
     }
     record.parts = kept;
-    let affected =
-        crate::write_apply::WriteApply::new(database, schema, &store, &visible, &visible, &deleted)
-            .apply(Some(&record), BTreeSet::new())?;
-    files.retain_rows(affected, &deleted)?;
-    Ok(ApplyOutcome::Applied)
+    crate::write_apply::WriteApply::new(database, schema, &store, &visible, &visible, deleted)
+        .apply(Some(&record), BTreeSet::new())
 }
 
 fn exclude(
@@ -207,45 +213,55 @@ fn exclude(
         };
         crate::excluded_write::retain(database, &record, cause)?;
     }
-    let cause = encoded(merge_fields::encode_lost_write_cause(&cause))?;
-    let setter = encoded(merge_fields::encode_write_id(&header.position))?;
     for change in &part.rows {
-        let values = match &change.change.operation {
-            Operation::Insert(values) | Operation::Update(values) => values.clone(),
-            Operation::Delete => change
-                .old
-                .iter()
-                .map(|(name, value)| {
-                    (
-                        name.clone(),
-                        ColumnValue {
-                            value: value.clone(),
-                            parents: BTreeMap::new(),
-                        },
-                    )
-                })
-                .collect(),
-        };
-        let setters = values
-            .keys()
-            .map(|name| (name.clone(), header.position))
-            .collect();
-        let values = encoded(merge_fields::encode_columns(&values))?;
-        let setters = encoded(merge_fields::encode_setters(&setters))?;
-        let audience = audience_text(&part.audience);
-        database.internal_execute("INSERT INTO coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,NULL,?5,?6,'excluded',?7)", params![change.row.table,change.row.key,audience,change.change.generation.to_be_bytes().as_slice(),values,setters,cause])?;
-        crate::fingerprint::excluded(
-            database,
-            &change.row,
-            &setter,
-            &[
-                &change.change.generation.to_be_bytes(),
-                &values,
-                &setters,
-                &cause,
-            ],
-        )?;
+        exclude_row(database, header, cause, change)?;
     }
+    Ok(())
+}
+
+pub(crate) fn exclude_row(
+    database: &DatabaseConnection,
+    header: &WriteHeader,
+    reason: LostWriteCause,
+    change: &coven_format::write::RowChange,
+) -> Result<(), DbError> {
+    let cause = encoded(merge_fields::encode_lost_write_cause(&reason))?;
+    let setter = encoded(merge_fields::encode_write_id(&header.position))?;
+    let values = match &change.change.operation {
+        Operation::Insert(values) | Operation::Update(values) => values.clone(),
+        Operation::Delete => change
+            .old
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.clone(),
+                    ColumnValue {
+                        value: value.clone(),
+                        parents: BTreeMap::new(),
+                    },
+                )
+            })
+            .collect(),
+    };
+    let setters = values
+        .keys()
+        .map(|name| (name.clone(), header.position))
+        .collect();
+    let values = encoded(merge_fields::encode_columns(&values))?;
+    let setters = encoded(merge_fields::encode_setters(&setters))?;
+    let audience = audience_text(&change.row.audience);
+    database.internal_execute("INSERT INTO coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,NULL,?5,?6,'excluded',?7)", params![change.row.table,change.row.key,audience,change.change.generation.to_be_bytes().as_slice(),values,setters,cause])?;
+    crate::fingerprint::excluded(
+        database,
+        &change.row,
+        &setter,
+        &[
+            &change.change.generation.to_be_bytes(),
+            &values,
+            &setters,
+            &cause,
+        ],
+    )?;
     Ok(())
 }
 

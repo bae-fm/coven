@@ -46,7 +46,12 @@ mod row_key;
 mod row_queries;
 mod schema;
 mod schema_source;
+mod snapshot_coverage;
+mod snapshot_error;
+mod snapshot_load;
 mod snapshot_loss;
+mod snapshot_metadata;
+mod snapshot_state;
 mod snapshot_write;
 mod sql;
 mod sql_value;
@@ -89,6 +94,7 @@ pub use migration::{
 pub use migration_change::{ChangeOp, ColumnChange, RowChange};
 pub use read::{Read, SqlReadContext};
 pub use row_key::RowKey;
+pub use snapshot_error::SnapshotError;
 pub use snapshot_write::SnapshotWriteError;
 pub use store_log::{
     DropReason, EntryOutcome, StoreCircle, StoreDevice, StoreIdentity, StoreLog, StoreLogReplay,

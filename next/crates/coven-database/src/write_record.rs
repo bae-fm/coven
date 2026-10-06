@@ -335,18 +335,27 @@ pub(crate) fn record(
     now: SystemTime,
     changes: BTreeMap<RowId, RowChange>,
 ) -> Result<WriteRecord, DbError> {
+    crate::snapshot_coverage::require_caught_up(database)?;
     let latest = crate::write_encoding::latest_timestamp(database)?;
     let timestamp = timestamp(latest, now, device)?;
     let mut positions: BTreeMap<DeviceId,u64> = database.query(
         "SELECT device,number FROM coven_positions WHERE device>=x'0000000000000000' ORDER BY device", [],
         |r| Ok((DeviceId(counter(r.get(0)?)),counter(r.get(1)?))),
     )?.into_iter().collect();
-    let number = match positions.remove(&device) {
-        Some(number) => number
-            .checked_add(1)
-            .expect("write numbers exhausted before timestamps"),
-        None => 1,
-    };
+    let own_position = positions.remove(&device).unwrap_or(0);
+    let last: Option<Vec<u8>> = database.query_row(
+        "SELECT max(number) FROM coven_writes WHERE substr(timestamp,9,8)=?1",
+        [device.0.to_be_bytes().as_slice()],
+        |r| r.get(0),
+    )?;
+    let last = last.map_or(0, counter);
+    assert_eq!(
+        own_position, last,
+        "local write history and its applied position disagree"
+    );
+    let number = last
+        .checked_add(1)
+        .expect("write numbers exhausted before timestamps");
     let header = WriteHeader {
         position: WriteId { device, number },
         timestamp,

@@ -29,7 +29,7 @@ impl WriteOracle for Oracle {
     }
 }
 
-fn id(audience: Audience) -> SnapshotId {
+pub(crate) fn id(audience: Audience) -> SnapshotId {
     SnapshotId {
         device: DeviceId(99),
         number: 1,
@@ -37,7 +37,7 @@ fn id(audience: Audience) -> SnapshotId {
     }
 }
 
-async fn frames(database: &Database, audience: Audience) -> Vec<Vec<u8>> {
+pub(crate) async fn frames(database: &Database, audience: Audience) -> Vec<Vec<u8>> {
     let frames = Arc::new(Mutex::new(Vec::new()));
     let output = frames.clone();
     database
@@ -50,7 +50,7 @@ async fn frames(database: &Database, audience: Audience) -> Vec<Vec<u8>> {
     Arc::try_unwrap(frames).unwrap().into_inner().unwrap()
 }
 
-fn decode(frames: &[Vec<u8>]) -> (SnapshotHeader, Vec<SnapshotRecord>) {
+pub(crate) fn decode(frames: &[Vec<u8>]) -> (SnapshotHeader, Vec<SnapshotRecord>) {
     let mut decoder = SnapshotDecoder::start(&frames[0]).unwrap();
     let mut oracle = Oracle::default();
     let mut records = Vec::new();
@@ -145,6 +145,7 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
     assert_eq!(lost_row.change, excluded.parts[0].rows[0]);
     assert_eq!(count(&source, "coven_uploads"), 5);
     assert_eq!(count(&receiver, "coven_uploads"), 0);
+    assert_loaded_losses(&receiver, &source).await;
     source.close().await.unwrap();
     receiver.close().await.unwrap();
 }
@@ -348,7 +349,54 @@ async fn a_migration_preserves_removed_rows_and_their_concurrent_losses_in_snaps
     assert!(
         matches!(&retained[1].values, coven_format::retained_loss::RetainedValues::Row { cells, .. } if cells.contains_key("body") && !cells.contains_key("content"))
     );
-    for database in [a, b, c] {
+    // Retired history also survives a new incarnation with the same identity.
+    sql(
+        &a,
+        "INSERT INTO notes VALUES('b','different','new incarnation')",
+    )
+    .await
+    .unwrap();
+    let d_store = TestStore::with_ids(&ids);
+    let d = d_store
+        .builder(
+            notes(),
+            vec![
+                crate::Migration::sql(1, "unique notes", UNIQUE_NOTES),
+                crate::Migration::sql(
+                    2,
+                    "rename body",
+                    "ALTER TABLE notes RENAME COLUMN body TO content",
+                ),
+            ],
+        )
+        .open()
+        .await
+        .unwrap();
+    // The empty device also authored its schema migration. Compare snapshots
+    // only after both devices have consumed the same writes.
+    for write in records(&d) {
+        a.apply_downloaded(write.into()).await.unwrap();
+    }
+    for _ in 0..2 {
+        assert_loaded_losses(&a, &d).await;
+    }
+    let cells: Vec<_> = a
+        .lost_values()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|loss| matches!(loss.lost, crate::Lost::Cell(_)))
+        .collect();
+    a.dismiss_lost_values(&cells).await.unwrap();
+    assert_loaded_losses(&a, &d).await;
+    assert_eq!(decode(&frames(&d, Audience::Store).await).0.counts[5], 1);
+    a.dismiss_lost_values(&a.lost_values().await.unwrap())
+        .await
+        .unwrap();
+    assert_loaded_losses(&a, &d).await;
+    assert_eq!(decode(&frames(&d, Audience::Store).await).0.counts[5], 0);
+    assert_eq!(count(&d, "notes"), 2);
+    for database in [a, b, c, d] {
         database.close().await.unwrap();
     }
 }
@@ -522,6 +570,13 @@ async fn excluded_snapshots_keep_only_undismissed_cells_and_rows() {
             ),
         }
         assert_eq!(rows[1], excluded.parts[0].rows[1]);
+        let target_store = TestStore::with_ids(&ids);
+        let target = if operation == "insert" {
+            target_store.schema(Vec::new(), "SELECT 1").await.unwrap()
+        } else {
+            target_store.schema(notes(), NOTES).await.unwrap()
+        };
+        assert_loaded_losses(&receiver, &target).await;
         receiver
             .dismiss_lost_values(&receiver.lost_values().await.unwrap())
             .await
@@ -534,7 +589,39 @@ async fn excluded_snapshots_keep_only_undismissed_cells_and_rows() {
         )));
         assert_eq!(count(&receiver, "coven_excluded_writes"), 0);
         assert_eq!(count(&receiver, "coven_excluded_rows"), 0);
+        assert_loaded_losses(&receiver, &target).await;
+        target.close().await.unwrap();
         source.close().await.unwrap();
         receiver.close().await.unwrap();
     }
+}
+
+async fn assert_loaded_losses(source: &Database, target: &Database) {
+    let snapshot = frames(source, Audience::Store).await;
+    target
+        .load_snapshot(id(Audience::Store), std::io::Cursor::new(snapshot.concat()))
+        .await
+        .unwrap();
+    assert_eq!(frames(target, Audience::Store).await, snapshot);
+    let loaded = target.lost_values().await.unwrap();
+    let expected = source.lost_values().await.unwrap();
+    assert_eq!(loaded.len(), expected.len());
+    assert!(expected.iter().all(|loss| loaded.contains(loss)));
+    let key = coven_crypto::StoreKey::from_bytes(
+        coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([1; 16])),
+        [7; 32],
+    )
+    .derive();
+    assert_eq!(
+        target
+            .sync_state(vec![(Audience::Store, key.fingerprint_hasher())])
+            .await
+            .unwrap()
+            .fingerprints,
+        source
+            .sync_state(vec![(Audience::Store, key.fingerprint_hasher())])
+            .await
+            .unwrap()
+            .fingerprints,
+    );
 }

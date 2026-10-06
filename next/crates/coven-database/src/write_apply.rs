@@ -67,19 +67,18 @@ impl<'a> WriteApply<'a> {
             self.deleted,
             record.map(|r| (r.header.position, r.header.timestamp)),
         )?;
-        old.prime(touched.iter().cloned())?;
-        new.prime(touched.iter().cloned())?;
-        let write = record.map(|record| record.header.position);
-        let removal = coven_merge::recompute(&old, &new, touched.clone())
-            .map_err(|error| error.into_db_error(write))?;
-        let fingerprint = coven_merge::recompute_fingerprint(&old, &new, touched)
-            .map_err(|error| error.into_db_error(write))?;
-        if let Some(record) = record {
-            crate::write_commit::commit(self.database, record, self.store, &updates)?;
-        }
-        self.database.batch("PRAGMA defer_foreign_keys=ON")?;
-        crate::removal::materialize(self.database, self.schema, self.visible, &new, &removal)?;
-        crate::fingerprint::update(self.database, &new, &fingerprint)?;
+        let affected = self.finish(
+            &old,
+            &new,
+            touched,
+            record.map(|record| record.header.position),
+            || {
+                if let Some(record) = record {
+                    crate::write_commit::commit(self.database, record, self.store, &updates)?;
+                }
+                Ok(())
+            },
+        )?;
         if let Some(record) = record {
             let dismissed = crate::dismissal::apply(self.database, record)?;
             if !dismissed.is_empty() {
@@ -101,6 +100,45 @@ impl<'a> WriteApply<'a> {
                 crate::fingerprint::update(self.database, &view, &result)?;
             }
         }
+        Ok(affected)
+    }
+
+    pub(crate) fn replace(
+        &self,
+        old: &DatabaseRemovalView<'_>,
+        touched: BTreeSet<RowId>,
+    ) -> Result<BTreeSet<crate::write_rows::AppKey>, DbError> {
+        let updates = BTreeMap::new();
+        let new = DatabaseRemovalView::new(
+            self.database,
+            self.store,
+            self.schema,
+            self.visible,
+            &updates,
+            self.deleted,
+            None,
+        )?;
+        self.finish(old, &new, touched, None, || Ok(()))
+    }
+
+    fn finish(
+        &self,
+        old: &DatabaseRemovalView<'_>,
+        new: &DatabaseRemovalView<'_>,
+        touched: BTreeSet<RowId>,
+        write: Option<coven_merge::WriteId>,
+        persist: impl FnOnce() -> Result<(), DbError>,
+    ) -> Result<BTreeSet<crate::write_rows::AppKey>, DbError> {
+        old.prime(touched.iter().cloned())?;
+        new.prime(touched.iter().cloned())?;
+        let removal = coven_merge::recompute(old, new, touched.clone())
+            .map_err(|error| error.into_db_error(write))?;
+        let fingerprint = coven_merge::recompute_fingerprint(old, new, touched)
+            .map_err(|error| error.into_db_error(write))?;
+        persist()?;
+        self.database.batch("PRAGMA defer_foreign_keys=ON")?;
+        crate::removal::materialize(self.database, self.schema, self.visible, new, &removal)?;
+        crate::fingerprint::update(self.database, new, &fingerprint)?;
         Ok(removal
             .region
             .into_iter()

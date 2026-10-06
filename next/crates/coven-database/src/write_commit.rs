@@ -14,40 +14,64 @@ pub(crate) fn commit(
     store: &MergeStore<'_>,
     updates: &BTreeMap<RowId, RowUpdate<Value>>,
 ) -> Result<(), DbError> {
-    let write_id: i64 = database.query_row(
-        "INSERT INTO coven_writes(timestamp,number,had_read) VALUES(?1,?2,?3) RETURNING id",
-        params![
-            encoded(merge_fields::encode_timestamp(&record.header.timestamp))?,
-            record.header.position.number.to_be_bytes().as_slice(),
-            encoded(merge_fields::encode_write_positions(
-                &record.header.had_read
-            ))?
-        ],
-        |r| r.get(0),
+    let write_id = retain_metadata(
+        database,
+        &coven_format::snapshot_rows::AppliedWrite {
+            id: record.header.position,
+            timestamp: record.header.timestamp,
+            had_read: record.header.had_read.clone(),
+        },
     )?;
-    database.internal_execute("INSERT INTO coven_positions(device,number) VALUES(?1,?2) ON CONFLICT(device) DO UPDATE SET number=excluded.number",params![record.header.position.device.0.to_be_bytes().as_slice(),record.header.position.number.to_be_bytes().as_slice()])?;
-    let ordinal = |id: WriteId| {
-        if id == record.header.position {
-            write_id
-        } else {
-            store.write_ordinal(id)
+    crate::snapshot_coverage::committed(database, record)?;
+    persist(
+        database,
+        updates,
+        |row| store.row(row),
+        |id| {
+            Ok(if id == record.header.position {
+                write_id
+            } else {
+                store.write_ordinal(id)
+            })
+        },
+    )
+}
+
+pub(crate) fn retain_metadata(
+    database: &DatabaseConnection,
+    write: &coven_format::snapshot_rows::AppliedWrite,
+) -> Result<i64, DbError> {
+    let stamp = encoded(merge_fields::encode_timestamp(&write.timestamp))?;
+    let past = encoded(merge_fields::encode_write_positions(&write.had_read))?;
+    let known=database.query("SELECT id,timestamp,had_read FROM coven_writes WHERE substr(timestamp,9,8)=?1 AND number=?2",params![write.id.device.0.to_be_bytes().as_slice(),write.id.number.to_be_bytes().as_slice()],|r| Ok((r.get::<_,i64>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,Vec<u8>>(2)?)))?;
+    if let Some((ordinal, old_stamp, old_past)) = known.into_iter().next() {
+        if old_stamp != stamp || old_past != past {
+            return Err(DbError::InvalidWrite {
+                write: write.id,
+                error: coven_merge::MergeError::DuplicateWrite(write.id),
+            });
         }
-    };
-    persist(database, updates, |row| store.row(row), ordinal)
+        return Ok(ordinal);
+    }
+    database.query_row(
+        "INSERT INTO coven_writes(timestamp,number,had_read) VALUES(?1,?2,?3) RETURNING id",
+        params![stamp, write.id.number.to_be_bytes().as_slice(), past],
+        |r| r.get(0),
+    )
 }
 
 pub(crate) fn persist(
     database: &DatabaseConnection,
     updates: &BTreeMap<RowId, RowUpdate<Value>>,
     prior: impl Fn(&RowId) -> Result<crate::merge_store::StoredRow, DbError>,
-    ordinal: impl Fn(WriteId) -> i64,
+    ordinal: impl Fn(WriteId) -> Result<i64, DbError>,
 ) -> Result<(), DbError> {
     for (row, update) in updates {
         let old = prior(row)?;
         let audience = audience_text(&row.audience);
         for (generation, writer) in update.state.generations() {
             if old.state.generations().get(generation) != Some(writer) {
-                database.internal_execute("INSERT INTO coven_rows(table_name,key,audience,generation,write_id) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(table_name,key,audience,generation) DO UPDATE SET write_id=excluded.write_id",params![row.table,row.key,audience,generation.to_be_bytes().as_slice(),ordinal(*writer)])?;
+                database.internal_execute("INSERT INTO coven_rows(table_name,key,audience,generation,write_id) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(table_name,key,audience,generation) DO UPDATE SET write_id=excluded.write_id",params![row.table,row.key,audience,generation.to_be_bytes().as_slice(),ordinal(*writer)?])?;
             }
         }
         let advanced = old.state.generation() != update.state.generation();
@@ -69,7 +93,7 @@ pub(crate) fn persist(
                     continue;
                 }
                 let column = column(database, &row.table, name)?;
-                database.internal_execute("INSERT INTO coven_cells(column_id,row_id,write_id) VALUES(?1,?2,?3) ON CONFLICT(column_id,row_id) DO UPDATE SET write_id=excluded.write_id",params![column,row_ordinal,ordinal(cell.write)])?;
+                database.internal_execute("INSERT INTO coven_cells(column_id,row_id,write_id) VALUES(?1,?2,?3) ON CONFLICT(column_id,row_id) DO UPDATE SET write_id=excluded.write_id",params![column,row_ordinal,ordinal(cell.write)?])?;
                 let previous = old.state.cells().get(name).map(|c| &c.value.parents);
                 if !advanced {
                     if let Some(previous) = previous {
@@ -152,7 +176,11 @@ pub(crate) fn plaintext(
     Ok(bytes)
 }
 
-fn column(database: &DatabaseConnection, table: &str, column: &str) -> Result<i64, DbError> {
+pub(crate) fn column(
+    database: &DatabaseConnection,
+    table: &str,
+    column: &str,
+) -> Result<i64, DbError> {
     database.internal_execute(
         "INSERT INTO coven_columns(table_name,column_name) VALUES(?1,?2) ON CONFLICT DO NOTHING",
         params![table, column],

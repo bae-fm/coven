@@ -52,9 +52,31 @@ pub(crate) fn write<E>(
         }
         Ok::<_, SnapshotWriteError<E>>(())
     })?;
-    counts[1] = database.query_row("SELECT count(*) FROM coven_writes", [], |r| {
-        r.get::<_, i64>(0).map(|n| n as u64)
-    })?;
+    let writes = crate::snapshot_coverage::frontier(database, &selected)?;
+    // A prefix cannot describe isolated waiting writes replayed beyond it.
+    // Refuse before emitting anything until downloads fill those gaps.
+    let pending: Vec<_> = database.query(
+        "SELECT device,max(number) FROM coven_snapshot_parts WHERE audience=?1 GROUP BY device ORDER BY device",
+        [&audience],
+        |r| Ok(WriteId { device: DeviceId(counter(r.get(0)?)), number: counter(r.get(1)?) }),
+    )?.into_iter().filter(|write| !writes.covers(*write)).collect();
+    if !pending.is_empty() {
+        return Err(DbError::ReloadPending { writes: pending }.into());
+    }
+    database.for_each(
+        "SELECT substr(timestamp,9,8),number FROM coven_writes",
+        [],
+        |r| {
+            let id = WriteId {
+                device: DeviceId(counter(r.get(0).map_err(DbError::from)?)),
+                number: counter(r.get(1).map_err(DbError::from)?),
+            };
+            if writes.covers(id) {
+                counts[1] += 1;
+            }
+            Ok::<_, SnapshotWriteError<E>>(())
+        },
+    )?;
     counts[2] = database.query_row(
         &format!("SELECT count(*) FROM ({COLUMNS})"),
         [&audience],
@@ -69,7 +91,7 @@ pub(crate) fn write<E>(
     let header = SnapshotHeader {
         id,
         schema_version: database.schema_version()?,
-        writes: crate::download::positions(database)?,
+        writes: writes.clone(),
         store_log: EntryPositions(database.query(
             "SELECT device,max(number) FROM coven_store_log GROUP BY device ORDER BY device",
             [],
@@ -118,7 +140,10 @@ pub(crate) fn write<E>(
         [],
         |r| {
             let write = read_write(r).map_err(DbError::from)?;
-            record(SnapshotRecord::Write(write))
+            if writes.covers(write.id) {
+                record(SnapshotRecord::Write(write))?;
+            }
+            Ok::<_, SnapshotWriteError<E>>(())
         },
     )?;
     database.for_each(
@@ -202,4 +227,4 @@ fn read_write(r: &rusqlite::Row<'_>) -> rusqlite::Result<AppliedWrite> {
 
 #[cfg(test)]
 #[path = "snapshot_write_tests.rs"]
-mod tests;
+pub(crate) mod tests;

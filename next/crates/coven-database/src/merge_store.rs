@@ -6,8 +6,8 @@ use crate::write_rows::AppView;
 use crate::DbError;
 use coven_format::{merge_fields, snapshot_rows::AppliedWrite, value::Value, write::WriteRecord};
 use coven_merge::{
-    Cell, ColumnValue, LostKey, LostValue, MergeError, RowId, RowState, RowUpdate, Timestamp,
-    WriteId, WriteOracle,
+    Audience, Cell, ColumnValue, LostKey, LostValue, MergeError, RowId, RowState, RowUpdate,
+    Timestamp, WriteId, WriteOracle,
 };
 use rusqlite::params;
 use std::cell::RefCell;
@@ -102,6 +102,7 @@ pub(crate) struct MergeStore<'a> {
 enum RowValues<'a> {
     App(&'a AppView<'a>),
     Schema(&'a crate::schema::Schema),
+    Snapshot(&'a crate::schema::Schema, &'a Audience),
 }
 
 impl<'a> MergeStore<'a> {
@@ -130,6 +131,19 @@ impl<'a> MergeStore<'a> {
     pub(crate) fn stamp(&self, id: WriteId) -> Timestamp {
         self.metadata.stamp(id)
     }
+    pub(crate) fn from_snapshot(
+        database: &'a DatabaseConnection,
+        schema: &'a crate::schema::Schema,
+        audience: &'a Audience,
+    ) -> Self {
+        Self {
+            database,
+            values: RowValues::Snapshot(schema, audience),
+            metadata: WriteMetadata::new(database),
+            rows: RefCell::new(BTreeMap::new()),
+        }
+    }
+
     pub(crate) fn write_ordinal(&self, id: WriteId) -> i64 {
         self.metadata.ordinal(id)
     }
@@ -167,12 +181,17 @@ impl<'a> MergeStore<'a> {
                         }
                         app.values
                     }
-                    RowValues::Schema(schema) => crate::write_rows::read_values(
-                        self.database,
-                        &schema.tables[&id.table.to_ascii_lowercase()],
-                        &id.key,
-                    )?
-                    .ok_or(DbError::DamagedDatabase)?,
+                    RowValues::Snapshot(_, audience) if *audience == id.audience => {
+                        crate::snapshot_state::values(self.database, id)?
+                    }
+                    RowValues::Schema(schema) | RowValues::Snapshot(schema, _) => {
+                        crate::write_rows::read_values(
+                            self.database,
+                            &schema.tables[&id.table.to_ascii_lowercase()],
+                            &id.key,
+                        )?
+                        .ok_or(DbError::DamagedDatabase)?
+                    }
                 }
             };
             values.extend(crate::reference_values::load(self.database, ordinal)?);

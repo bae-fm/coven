@@ -61,7 +61,7 @@ impl WriteSchema {
         self.schema.foreign_key(table, key)
     }
 
-    fn prepare(&self, db: &DatabaseConnection) -> Result<(), DbError> {
+    pub(crate) fn prepare(&self, db: &DatabaseConnection) -> Result<(), DbError> {
         for declaration in &self.declarations {
             let table = self.table(&declaration.name);
             let rules = &self.rules[&table.name];

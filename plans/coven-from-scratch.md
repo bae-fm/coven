@@ -1964,8 +1964,8 @@ Carol's tablet:
     ([§19.1](#191-noticing)).
   - Its own writes still waiting in `coven_uploads` keep their numbers, and
     it uploads them after.
-  - Every device then applies them like any late write: they had read only
-    writes the snapshot covers, which count as applied.
+  - Every device then applies them like any late write, after their prior
+    reads are covered by the snapshot or applied from the logs.
   - E.g. Ana's old phone made writes 31 to 33 offline, then stayed offline
     for a year:
 
@@ -2939,6 +2939,8 @@ pub enum DbError {
     /// A downloaded write fails the merge's checks, such as a timestamp no
     /// later than a write it had read; it is never applied (§19.1).
     InvalidWrite { write: WriteId, error: MergeError },
+    /// Reloading must catch up through these known writes before a new synced write (§15).
+    ReloadPending { writes: Vec<WriteId> },
     /// A waiting record or its conversion violates the write format (§20.13).
     WriteFormat(coven_format::Error),
     /// A conversion changed or introduced a reference whose generation it cannot know (§20.13).
