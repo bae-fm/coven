@@ -1693,6 +1693,12 @@ Carol's tablet:
     separately, sealed with the circle's key ([§14.3](#143-circles)).
 - A new device loads the store's latest snapshot and its member's circles',
   then the writes after them.
+  - The snapshots can reach different points in each log, so the device
+    starts each log at the lowest point any of them reaches, and a write's
+    part that its own audience's snapshot already covers counts as applied
+    and is skipped.
+  - E.g. the store's snapshot reaches ana-phone 40 and Gifts' reaches 38:
+    the device applies ana-phone 39 and 40, but only their Gifts parts.
 - Each device posts its positions only after uploading its own earlier
   writes.
 - A log object is deleted once snapshots cover every part of it, and either
