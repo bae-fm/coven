@@ -214,3 +214,22 @@ async fn local_redirect_exchanges_code_and_cancellation_closes_listener() {
     assert!(matches!(result, Err(OAuthError::Cancelled)));
     assert!(tokio::net::TcpStream::connect(address).await.is_err());
 }
+
+#[test]
+fn onedrive_sign_in_accepts_personal_and_organization_accounts() {
+    let clients = OAuthClients::new(
+        None,
+        None,
+        Some("app".into()),
+        Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
+    );
+    let request = clients
+        .build_authorize_request(CloudProvider::OneDrive, "coven://callback")
+        .unwrap();
+    let url = url::Url::parse(&request.auth_url).unwrap();
+    assert_eq!(url.path(), "/common/oauth2/v2.0/authorize");
+    assert_eq!(
+        clients.config(CloudProvider::OneDrive).unwrap().2,
+        "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+    );
+}

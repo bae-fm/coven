@@ -98,7 +98,7 @@ impl OAuthClients {
         let (id, auth, token, scope) = match provider {
             CloudProvider::GoogleDrive => (&self.google, "https://accounts.google.com/o/oauth2/v2/auth", "https://oauth2.googleapis.com/token", "https://www.googleapis.com/auth/drive"),
             CloudProvider::Dropbox => (&self.dropbox, "https://www.dropbox.com/oauth2/authorize", "https://api.dropboxapi.com/oauth2/token", "files.content.read files.content.write files.metadata.read sharing.read sharing.write account_info.read"),
-            CloudProvider::OneDrive => (&self.onedrive, "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize", "https://login.microsoftonline.com/consumers/oauth2/v2.0/token", "Files.ReadWrite.All offline_access User.Read"),
+            CloudProvider::OneDrive => (&self.onedrive, "https://login.microsoftonline.com/common/oauth2/v2.0/authorize", "https://login.microsoftonline.com/common/oauth2/v2.0/token", "Files.ReadWrite.All offline_access User.Read"),
             _ => return Err(OAuthError::Unavailable(provider)),
         };
         let id = id
