@@ -19,7 +19,10 @@ struct Remote {
     closed: bool,
     missing: bool,
     close_requests: Vec<u64>,
-    members: BTreeSet<String>,
+    members: BTreeMap<String, String>,
+    sharing_mutations: Vec<String>,
+    refuse_share: bool,
+    lose_update_reply: bool,
     range_reads: usize,
 }
 async fn endpoint(
@@ -150,18 +153,46 @@ async fn endpoint(
             reply(json!({"path_lower":path,"size":size,"id":"id:file"}))
         }
         "/2/sharing/list_folder_members" => reply(
-            json!({"users":state.members.iter().map(|email|json!({"user":{"email":email},"access_type":{".tag":"editor"}})).collect::<Vec<_>>(),"invitees":[]}),
+            json!({"users":state.members.iter().map(|(email,role)|json!({"user":{"email":email,"account_id":format!("dbid:{email}")},"access_type":{".tag":role}})).collect::<Vec<_>>(),"invitees":[]}),
         ),
         "/2/sharing/add_folder_member" => {
+            state.sharing_mutations.push("add".into());
+            if state.refuse_share {
+                return response(403, r#"{"error_summary":"access_denied/..."}"#);
+            }
             state.members.insert(
                 arg["members"][0]["member"]["email"]
+                    .as_str()
+                    .unwrap()
+                    .into(),
+                arg["members"][0]["access_level"][".tag"]
                     .as_str()
                     .unwrap()
                     .into(),
             );
             reply(Value::Null)
         }
+        "/2/sharing/update_folder_member" => {
+            state.sharing_mutations.push("update".into());
+            if state.refuse_share {
+                return response(403, r#"{"error_summary":"access_denied/..."}"#);
+            }
+            assert_eq!(arg["shared_folder_id"], "namespace");
+            let role = arg["access_level"][".tag"].as_str().unwrap();
+            assert_eq!(arg["member"][".tag"], "dropbox_id");
+            let email = arg["member"]["dropbox_id"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("dbid:")
+                .unwrap();
+            *state.members.get_mut(email).unwrap() = role.into();
+            if std::mem::replace(&mut state.lose_update_reply, false) {
+                return response(503, "{}");
+            }
+            reply(json!({"access_level":{".tag":role}}))
+        }
         "/2/sharing/remove_folder_member" => {
+            state.sharing_mutations.push("remove".into());
             state
                 .members
                 .remove(arg["member"]["email"].as_str().unwrap());
@@ -426,9 +457,94 @@ async fn sharing_requires_the_store_owners_account() {
             .lock()
             .unwrap()
             .members
-            .iter()
+            .keys()
             .cloned()
             .collect::<Vec<_>>(),
         ["kept@example.test"]
     );
+}
+
+#[tokio::test]
+async fn viewer_upgrade_preserves_access_when_the_provider_refuses_it() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    state
+        .lock()
+        .unwrap()
+        .members
+        .insert("member@example.test".into(), "viewer".into());
+    state.lock().unwrap().refuse_share = true;
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    assert_eq!(
+        storage
+            .grant_access("member@example.test")
+            .await
+            .err()
+            .unwrap()
+            .failure(),
+        StorageFailure::PermissionDenied
+    );
+    assert_eq!(
+        state
+            .lock()
+            .unwrap()
+            .members
+            .get("member@example.test")
+            .map(String::as_str),
+        Some("viewer")
+    );
+    assert_eq!(state.lock().unwrap().sharing_mutations, ["update"]);
+    state.lock().unwrap().refuse_share = false;
+    storage.grant_access("member@example.test").await.unwrap();
+    assert_eq!(
+        state.lock().unwrap().members["member@example.test"],
+        "editor"
+    );
+    assert_eq!(
+        state.lock().unwrap().sharing_mutations,
+        ["update", "update"]
+    );
+}
+
+#[tokio::test]
+async fn viewer_upgrade_retries_a_lost_reply_without_removing_access() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    state
+        .lock()
+        .unwrap()
+        .members
+        .insert("member@example.test".into(), "viewer_no_comment".into());
+    state.lock().unwrap().lose_update_reply = true;
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    assert_eq!(
+        storage
+            .grant_access("member@example.test")
+            .await
+            .err()
+            .unwrap()
+            .failure(),
+        StorageFailure::Network
+    );
+    storage.grant_access("member@example.test").await.unwrap();
+    assert_eq!(
+        state.lock().unwrap().members["member@example.test"],
+        "editor"
+    );
+    assert_eq!(state.lock().unwrap().sharing_mutations, ["update"]);
+}
+
+#[tokio::test]
+async fn granting_an_owner_does_not_downgrade_their_access() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    state
+        .lock()
+        .unwrap()
+        .members
+        .insert("owner@example.test".into(), "owner".into());
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    storage.grant_access("owner@example.test").await.unwrap();
+    assert_eq!(state.lock().unwrap().members["owner@example.test"], "owner");
+    assert!(state.lock().unwrap().sharing_mutations.is_empty());
 }

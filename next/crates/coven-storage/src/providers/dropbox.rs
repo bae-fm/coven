@@ -99,7 +99,7 @@ impl DropboxStorage {
         }
         Ok(())
     }
-    async fn members(&self, email: &str) -> Result<Option<String>, StorageError> {
+    async fn members(&self, email: &str) -> Result<Option<Value>, StorageError> {
         let mut method = "sharing/list_folder_members";
         let mut request = json!({"shared_folder_id":self.namespace,"include_inherited":false});
         let mut seen = BTreeSet::new();
@@ -111,7 +111,7 @@ impl DropboxStorage {
                         .as_str()
                         .is_some_and(|e| e.eq_ignore_ascii_case(email))
                     {
-                        return Ok(Some(http::string(&member["access_type"], ".tag")?.into()));
+                        return Ok(Some(member.clone()));
                     }
                 }
             }
@@ -337,13 +337,29 @@ impl Storage for DropboxStorage {
     }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
         self.require_owner().await?;
-        if self.members(account).await?.as_deref() != Some("editor") {
-            if self.members(account).await?.is_some() {
-                self.remove_member(account).await?;
+        match self.members(account).await? {
+            Some(member) => {
+                match http::string(&member["access_type"], ".tag")? {
+                    "editor" | "owner" => return Ok(AccessGrant::Granted),
+                    "viewer" | "viewer_no_comment" => {}
+                    _ => return Err(StorageError::Protocol("unexpected Dropbox account access")),
+                }
+                // Dropbox requires its account id for an in-place membership update.
+                let id = http::string(&member["user"], "account_id")?;
+                self.rpc("sharing/update_folder_member", json!({"shared_folder_id":self.namespace,"member":{".tag":"dropbox_id","dropbox_id":id},"access_level":{".tag":"editor"}})).await?;
             }
-            self.rpc("sharing/add_folder_member",json!({"shared_folder_id":self.namespace,"members":[{"member":{".tag":"email","email":account},"access_level":{".tag":"editor"}}],"quiet":false})).await?;
+            None => {
+                self.rpc("sharing/add_folder_member", json!({"shared_folder_id":self.namespace,"members":[{"member":{".tag":"email","email":account},"access_level":{".tag":"editor"}}],"quiet":false})).await?;
+            }
         }
-        if self.members(account).await?.as_deref() != Some("editor") {
+        let member = self
+            .members(account)
+            .await?
+            .ok_or(StorageError::Protocol("Dropbox omitted the granted member"))?;
+        if !matches!(
+            http::string(&member["access_type"], ".tag")?,
+            "editor" | "owner"
+        ) {
             return Err(StorageError::Protocol(
                 "Dropbox did not grant editor access",
             ));
