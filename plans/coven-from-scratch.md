@@ -684,6 +684,18 @@ Carol's tablet:
     rows pointing at each other with set default, whose default fails a
     CHECK, can't be deleted by the app, and can't be taken out by coven.
   - A write that would need it fails with SQLite's error.
+- A synced row coven deletes or takes out can have children that only this
+  device has, in local tables, so a local foreign key must never stop it:
+  - coven refuses, checked when the database opens and after migrating, a
+    foreign key from a local table into a synced table, or into a local
+    table one of these reaches, unless its delete action is cascade, or
+    set null on a column that allows NULL;
+  - e.g. `pins(note_id REFERENCES notes ON DELETE RESTRICT)` is refused:
+    Ben's phone, holding a pin, couldn't take out a note that Ana's phone
+    could, and the two would differ.
+- Anything else in the app's local schema that refuses such a delete, such
+  as a trigger that raises an error, fails the write or the apply that
+  needs it on that device, until the app changes its schema.
 - A reference set to its default points at whichever generation of the
   default parent is current, and is never stale.
   - If that parent is deleted or taken out, the child is taken out as
@@ -2340,6 +2352,8 @@ pub enum SchemaError {
     NullableKey { table: String, column: String },
     /// SET NULL or SET DEFAULT would put NULL in a NOT NULL column (§8.4).
     ImpossibleAction { table: String, column: String },
+    /// A local table's foreign key could stop coven deleting a synced row (§8.4).
+    LocalChildAction { table: String, column: String },
     /// SQLite chooses the primary key itself (§8.5).
     GeneratedPrimaryKey { table: String },
     /// An independent key does not contain a UUID (§8.5).
