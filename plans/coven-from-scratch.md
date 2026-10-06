@@ -5413,7 +5413,7 @@ fn migrations() -> Vec<Migration> {
 | Crate | Owns | Spec |
 | --- | --- | --- |
 | `coven-foundation` | The clock, the id source, atomic file writes, the store's directory and its lock | [§7.2](#72-timestamps), [§10](#10-device-identity), [§20.1](#201-opening) |
-| `coven-crypto` | Ciphers, sealed boxes, derived keys, file naming, member keys and their custody | [§11.1](#111-cryptography) |
+| `coven-crypto` | Ciphers, sealed boxes, derived keys, file keys, member keys and their custody | [§11.1](#111-cryptography) |
 | `coven-merge` | Timestamps, the merged state, the removal rules and lost values, as functions with no I/O | [§7](#7-order), [§8](#8-merge), [§14](#14-audiences) |
 | `coven-format` | The bytes in storage: write records, store log entries, snapshots, file headers and chunks, encoded, decoded and checked, using merge's and crypto's types | [Appendix D](coven-format.md) |
 | `coven-database` | The SQLite connection, coven's internal tables, applying the merge's results, triggers, live queries, migrations | [§5](#5-local-database) |
