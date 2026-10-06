@@ -2,14 +2,16 @@ name: next
 
 # The from-scratch coven in next/: one script runs every check of §21.4, and
 # this runs that same script on every platform.
+# Spec edits alone don't run it, so they never cancel a run checking code.
 on:
   push:
     branches: [main]
-  pull_request:
-    paths:
+    paths: &next_paths
       - "next/**"
       - "plans/proofs/**"
       - ".github/workflows/next.yml"
+  pull_request:
+    paths: *next_paths
 
 concurrency:
   group: next-${{ github.ref }}
