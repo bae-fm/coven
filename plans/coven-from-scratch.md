@@ -172,6 +172,18 @@
   - any admin removes a member, and that member's access is taken back by
     the owner's device when it applies the removal
     ([§13](#13-removing-members-and-devices)).
+  - Sharing is per account, not per invite: taking access back takes the
+    account's access, whatever shared it.
+  - So the owner's device leaves an account shared while a member in its
+    store log reaches storage through it, or another of its own open
+    invites names it.
+  - An invite made at the same time on another of the owner's devices can
+    still lose its access this way: the invited device's join fails with
+    the provider's permission error, and an admin invites them again, as
+    with access taken back in [§13](#13-removing-members-and-devices).
+  - Taking access back removes only what grants that one account; a share
+    that also grants others is left, and reported to the owner, who
+    changes it in the provider.
 - Setting up a store refuses a location that already holds one.
   - Two devices setting up different stores in one empty location at the
     same moment can both succeed; whichever store's first entry has the
