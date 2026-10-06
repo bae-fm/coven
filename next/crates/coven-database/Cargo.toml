@@ -11,7 +11,7 @@ coven-crypto.workspace = true
 coven-foundation.workspace = true
 coven-merge.workspace = true
 coven-format.workspace = true
-rusqlite = { workspace = true, features = ["bundled", "session", "hooks", "functions"] }
+rusqlite = { workspace = true, features = ["bundled", "session", "hooks", "functions", "limits"] }
 sqlite3-parser.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "macros"] }

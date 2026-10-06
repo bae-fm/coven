@@ -186,6 +186,25 @@ impl DatabaseConnection {
         })
     }
 
+    /// Refuse a queued value before allocating it, using this connection's limit.
+    pub(crate) fn check_value_length(
+        &self,
+        field: &'static str,
+        length: u64,
+    ) -> Result<usize, DbError> {
+        let maximum = self
+            .connection
+            .limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH)? as u64;
+        if length > maximum {
+            return Err(DbError::TooLarge {
+                field,
+                actual: length,
+                maximum,
+            });
+        }
+        Ok(length as usize)
+    }
+
     pub(crate) fn local_write<F, R>(
         &self,
         schema: &crate::write_schema::WriteSchema,

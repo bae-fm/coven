@@ -121,12 +121,9 @@ pub(crate) fn commit(
 
 pub(crate) fn queue(database: &DatabaseConnection, record: &WriteRecord) -> Result<(), DbError> {
     let encoder = encoded(WriteEncoder::new(record))?;
-    let mut bytes = encoder.header_frame().to_vec();
-    for index in 0..encoder.header().parts.len() {
-        for chunk in encoded(encoder.part_chunks(index))? {
-            bytes.extend(encoded(chunk)?);
-        }
-    }
+    let length = database.check_value_length("write plaintext", encoder.plaintext_length())?;
+    let mut bytes = vec![0; length];
+    encoded(encoder.encode_plaintext(&mut bytes))?;
     database.internal_execute(
         "INSERT INTO coven_uploads(device,number,record) VALUES(?1,?2,?3)",
         params![

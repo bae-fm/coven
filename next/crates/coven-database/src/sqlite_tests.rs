@@ -22,6 +22,12 @@ impl Drop for StatementProfile<'_> {
 }
 
 impl DatabaseConnection {
+    pub(crate) fn set_value_limit(&self, bytes: i32) -> i32 {
+        self.connection
+            .set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, bytes)
+            .unwrap()
+    }
+
     pub(crate) fn profile_statements(&self) -> StatementProfile<'_> {
         SCANS.with(|scans| scans.borrow_mut().clear());
         self.connection.trace_v2(

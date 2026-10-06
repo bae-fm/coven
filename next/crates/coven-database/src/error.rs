@@ -86,15 +86,16 @@ pub enum DbError {
     /// The wall clock or next timestamp exceeds its representation (§7.2).
     #[error("clock is outside the timestamp range")]
     ClockOutOfRange,
-    /// A value or write exceeds the format's bounds (§5).
+    /// A value or a row is larger than the format holds (§5), or a write's record
+    /// is larger than SQLite's largest value (§6).
     #[error("{field} length {actual} exceeds {maximum}")]
     TooLarge {
         /// The bounded field or collection.
         field: &'static str,
         /// Its actual length.
-        actual: usize,
+        actual: u64,
         /// Its maximum length.
-        maximum: usize,
+        maximum: u64,
     },
     /// A reference reaches an audience the source row's readers cannot read (§14.5).
     #[error("reference {table}.{column} at {key:?} reaches another audience")]

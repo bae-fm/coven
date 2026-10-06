@@ -17,8 +17,8 @@ pub(crate) fn encoded<T>(result: Result<T, coven_format::Error>) -> Result<T, Db
             maximum,
         } => DbError::TooLarge {
             field,
-            actual,
-            maximum,
+            actual: actual as u64,
+            maximum: maximum as u64,
         },
         error => panic!("invalid locally constructed write: {error:?}"),
     })

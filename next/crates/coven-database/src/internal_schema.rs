@@ -7,7 +7,9 @@
 //! coven-format's snapshot field encodings inside blobs.
 //! Loss targets name their row directly: a write excluded by a schema change
 //! or reset need not have an accepted generation in `coven_rows`.
-//! An upload's `sealed_bytes` is NULL until its first attempt fixes its bytes.
+//! An upload's `record` is one plaintext value: the write header frame followed
+//! by its audience parts' row-frame streams. Its `sealed_bytes` is NULL until
+//! its first attempt fixes its bytes.
 
 pub(crate) const VERSION: u32 = 1;
 

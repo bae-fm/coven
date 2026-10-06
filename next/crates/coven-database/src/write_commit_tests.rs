@@ -22,6 +22,8 @@ const TABLES: &[&str] = &[
     "coven_references",
     "coven_constraints",
     "coven_claims",
+    "coven_fingerprint_leaves",
+    "coven_fingerprint_sums",
 ];
 const STEPS: &[(&str, &str)] = &[
     ("notes", "UPDATE"),
@@ -116,6 +118,122 @@ async fn failure_after_every_step_restores_app_rows_records_and_metadata() {
     assert_eq!(records(&database)[1].header.position.number, 2);
     assert_eq!(count(&database, "coven_lost"), 0);
     assert_eq!(count(&database, "local_rows"), 1);
+    database.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn sqlite_value_limit_refuses_the_whole_write_and_rolls_back() {
+    let store = TestStore::new();
+    let database = store.builder(tables(), migrations()).open().await.unwrap();
+    seed(&database).await;
+    let before = state(&database);
+    let old_limit = database.inspect_writer(|db| db.set_value_limit(4096));
+    const INSERT: &str = "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<100) INSERT INTO notes SELECT 'import-'||i,'Imported note','' FROM n; INSERT INTO local_rows VALUES('import')";
+    let error = sql(&database, INSERT).await.unwrap_err();
+    database.inspect_writer(|db| db.set_value_limit(old_limit));
+    assert_eq!(state(&database), before);
+    assert!(
+        matches!(error, crate::DbError::TooLarge { field: "write plaintext", actual, maximum: 4096 } if actual > 4096),
+        "{error:?}"
+    );
+    sql(&database, INSERT).await.unwrap();
+    let queued = records(&database);
+    assert_eq!(queued.len(), 2);
+    assert_eq!(queued[1].header.position.number, 2);
+    assert_eq!(queued[1].parts[0].rows.len(), 100);
+    assert_eq!(count(&database, "local_rows"), 1);
+    database.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn queued_value_errors_preserve_full_width_lengths() {
+    let store = TestStore::new();
+    let database = store.builder(tables(), migrations()).open().await.unwrap();
+    database.inspect_writer(|db| {
+        db.set_value_limit(4096);
+        assert_eq!(
+            db.check_value_length("write plaintext", 4096).unwrap(),
+            4096
+        );
+        for length in [4097, u64::from(u32::MAX) + 1, u64::MAX] {
+            let error = db
+                .check_value_length("write plaintext", length)
+                .unwrap_err();
+            let crate::DbError::TooLarge {
+                field,
+                actual,
+                maximum,
+            } = error
+            else {
+                panic!("expected TooLarge, got {error:?}");
+            };
+            assert_eq!(field, "write plaintext");
+            assert_eq!(actual, length);
+            assert_eq!(maximum, 4096u64);
+        }
+    });
+    database.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn seventy_thousand_rows_commit_as_one_queued_write_and_decode_after_reopen() {
+    use coven_format::write_stream::{decode_plaintext, WriteEncoder};
+    use coven_merge::{Audience, Operation};
+
+    let store = TestStore::new();
+    let database = store.schema(notes(), NOTES).await.unwrap();
+    sql(&database, "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<70000) INSERT INTO notes SELECT printf('%05d',i),'Imported note','' FROM n").await.unwrap();
+    assert_eq!(count(&database, "notes"), 70_000);
+    assert_eq!(count(&database, "coven_writes"), 1);
+    assert_eq!(count(&database, "coven_uploads"), 1);
+    database.close().await.unwrap();
+
+    let database = store.schema(notes(), NOTES).await.unwrap();
+    let bytes = database.inspect_writer(|db| {
+        db.query_row(
+            "SELECT record FROM coven_uploads WHERE sealed_bytes IS NULL",
+            [],
+            |r| r.get::<_, Vec<u8>>(0),
+        )
+        .unwrap()
+    });
+    let record = decode_plaintext(&bytes).unwrap();
+    assert_eq!(record.header.position.number, 1);
+    assert_eq!(record.parts.len(), 1);
+    let part = &record.parts[0];
+    assert_eq!(part.audience, Audience::Store);
+    assert_eq!(part.rows.len(), 70_000);
+    for (index, change) in part.rows.iter().enumerate() {
+        let id = format!("{:05}", index + 1);
+        assert_eq!(change.row.table, "notes");
+        assert_eq!(change.row.audience, Audience::Store);
+        assert_eq!(
+            coven_format::key::decode_key(&change.row.key).unwrap(),
+            [Value::Text(id)]
+        );
+        assert_eq!(change.change.generation, 0);
+        assert!(change.old.is_empty());
+        let Operation::Insert(columns) = &change.change.operation else {
+            panic!("insert must carry its columns");
+        };
+        assert_eq!(columns["title"].value, Value::Text("Imported note".into()));
+        assert_eq!(columns["body"].value, Value::Text(String::new()));
+    }
+    let encoder = WriteEncoder::new(&record).unwrap();
+    assert_eq!(encoder.plaintext_length(), bytes.len() as u64);
+    assert_eq!(encoder.header().parts[0].row_count, 70_000);
+    let mut reencoded = vec![0; bytes.len()];
+    encoder.encode_plaintext(&mut reencoded).unwrap();
+    assert_eq!(reencoded, bytes);
+    let mut offset = encoder.header_frame().len();
+    assert_eq!(&bytes[..offset], encoder.header_frame());
+    for chunk in encoder.part_chunks(0).unwrap() {
+        let chunk = chunk.unwrap();
+        assert_eq!(bytes[offset..offset + chunk.len()], chunk);
+        offset += chunk.len();
+    }
+    assert_eq!(offset, bytes.len());
+    assert_eq!(count(&database, "notes"), 70_000);
     database.close().await.unwrap();
 }
 
