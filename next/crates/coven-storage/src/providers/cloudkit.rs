@@ -70,12 +70,26 @@ pub trait CloudKitOps: Send + Sync {
     /// Delete an object and its parts; repeat deletion succeeds when absent.
     async fn delete(&self, location: &StorageConfig, path: &ObjectPath)
         -> Result<(), StorageError>;
-    /// Set read/write CKShare participation for the named Apple account.
-    async fn set_access(
+    /// Save read/write CKShare participation and return its server-issued share URL.
+    async fn grant_access(
         &self,
         location: &StorageConfig,
         email: &str,
-        granted: bool,
+    ) -> Result<SecretText, StorageError>;
+    /// Remove only the named account. Preserve the owner and grants reaching other
+    /// accounts, returning those grants for owner action.
+    async fn revoke_access(
+        &self,
+        location: &StorageConfig,
+        email: &str,
+    ) -> Result<MemberRemoval, StorageError>;
+    /// Fetch CKShare metadata for this URL and verify its container, owner and zone
+    /// against location before accepting it with the signed-in recipient account.
+    /// Repeated acceptance succeeds; native permission errors retain their causes.
+    async fn accept_share(
+        &self,
+        location: &StorageConfig,
+        url: &SecretText,
     ) -> Result<(), StorageError>;
     /// Prepare a durable upload that has not yet published its destination.
     async fn begin_upload(
@@ -202,8 +216,23 @@ impl Storage for CloudKitStorage {
     }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
         self.require_owner().await?;
-        self.ops.set_access(&self.config, account, true).await?;
-        Ok(AccessGrant::Granted)
+        let url = self.ops.grant_access(&self.config, account).await?;
+        Ok(AccessGrant::Granted {
+            invitation: StorageInvitation::new(
+                self.config(),
+                crate::invitation::InvitationAcceptance::CloudKitShare { url },
+            )?,
+        })
+    }
+    async fn join(&self, invitation: &StorageInvitation) -> Result<(), StorageError> {
+        invitation.check(&self.config)?;
+        let crate::invitation::InvitationAcceptance::CloudKitShare { url } = &invitation.acceptance
+        else {
+            return Err(StorageError::InvitationMismatch);
+        };
+        self.ops.accept_share(&self.config, url).await?;
+        self.list(&ObjectPrefix::all()).await?;
+        Ok(())
     }
     async fn revoke_access(&self, member: &MemberAccess) -> Result<MemberRemoval, StorageError> {
         let MemberAccess::ProviderAccount(email) = member else {
@@ -212,8 +241,7 @@ impl Storage for CloudKitStorage {
             ));
         };
         self.require_owner().await?;
-        self.ops.set_access(&self.config, email, false).await?;
-        Ok(MemberRemoval::Revoked)
+        self.ops.revoke_access(&self.config, email).await
     }
     async fn begin_upload(
         &self,

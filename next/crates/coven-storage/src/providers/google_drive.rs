@@ -492,7 +492,9 @@ impl Storage for GoogleDriveStorage {
             .iter()
             .any(|permission| access::writable_for(permission, account))
         {
-            return Ok(AccessGrant::Granted);
+            return Ok(AccessGrant::Granted {
+                invitation: StorageInvitation::for_account(self.config())?,
+            });
         }
         let mut direct = Vec::new();
         for permission in &permissions {
@@ -534,7 +536,9 @@ impl Storage for GoogleDriveStorage {
         {
             return Err(StorageError::Protocol("Drive did not grant write access"));
         }
-        Ok(AccessGrant::Granted)
+        Ok(AccessGrant::Granted {
+            invitation: StorageInvitation::for_account(self.config())?,
+        })
     }
     async fn revoke_access(&self, member: &MemberAccess) -> Result<MemberRemoval, StorageError> {
         let MemberAccess::ProviderAccount(email) = member else {

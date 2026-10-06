@@ -2,7 +2,17 @@ use super::*;
 use crate::test_utils::{Conformance, Faults, MemoryStorage};
 use coven_crypto::SecretText;
 use std::collections::BTreeMap;
+#[derive(Default)]
+struct Shares {
+    granted: std::collections::BTreeSet<String>,
+    accepted: std::collections::BTreeSet<String>,
+    accept_calls: usize,
+    lose_reply: bool,
+    retained: Vec<RetainedAccess>,
+}
 struct Bridge {
+    recipient: Option<String>,
+    shares: Arc<tokio::sync::Mutex<Shares>>,
     memory: MemoryStorage,
     abort_failure: Option<StorageFailure>,
     non_owner: bool,
@@ -20,11 +30,33 @@ impl Bridge {
     fn new(memory: MemoryStorage) -> Self {
         Self {
             memory,
+            recipient: None,
+            shares: Arc::new(tokio::sync::Mutex::new(Shares::default())),
             abort_failure: None,
             non_owner: false,
             listed: None,
             uploads: tokio::sync::Mutex::new(BTreeMap::new()),
         }
+    }
+    fn recipient(&self, email: &str) -> Self {
+        Self {
+            recipient: Some(email.into()),
+            shares: self.shares.clone(),
+            memory: self.memory.clone(),
+            abort_failure: None,
+            non_owner: true,
+            listed: None,
+            uploads: tokio::sync::Mutex::new(BTreeMap::new()),
+        }
+    }
+    async fn authorize(&self) -> Result<(), StorageError> {
+        if let Some(email) = &self.recipient {
+            let shares = self.shares.lock().await;
+            if !shares.granted.contains(email) || !shares.accepted.contains(email) {
+                return Err(permission_error());
+            }
+        }
+        Ok(())
     }
 }
 #[async_trait]
@@ -43,6 +75,7 @@ impl CloudKitOps for Bridge {
         bytes: &[u8],
     ) -> Result<(), StorageError> {
         assert_eq!(location, &config());
+        self.authorize().await?;
         assert!(bytes.len() <= 16);
         self.memory.create(path, bytes).await
     }
@@ -53,6 +86,7 @@ impl CloudKitOps for Bridge {
         bytes: &[u8],
     ) -> Result<(), StorageError> {
         assert_eq!(location, &config());
+        self.authorize().await?;
         self.memory.replace(path, bytes).await
     }
     async fn read(
@@ -62,6 +96,7 @@ impl CloudKitOps for Bridge {
         range: Option<ByteRange>,
     ) -> Result<Vec<u8>, StorageError> {
         assert_eq!(location, &config());
+        self.authorize().await?;
         match range {
             Some(range) => self.memory.read_range(path, range).await,
             None => self.memory.read(path).await,
@@ -73,6 +108,7 @@ impl CloudKitOps for Bridge {
         prefix: &ObjectPrefix,
     ) -> Result<Vec<StoredObject>, StorageError> {
         assert_eq!(location, &config());
+        self.authorize().await?;
         if let Some(listed) = &self.listed {
             return Ok(listed.clone());
         }
@@ -84,22 +120,58 @@ impl CloudKitOps for Bridge {
         path: &ObjectPath,
     ) -> Result<(), StorageError> {
         assert_eq!(location, &config());
+        self.authorize().await?;
         self.memory.delete(path).await
     }
-    async fn set_access(
+    async fn grant_access(
         &self,
         location: &StorageConfig,
         email: &str,
-        granted: bool,
-    ) -> Result<(), StorageError> {
+    ) -> Result<SecretText, StorageError> {
         assert_eq!(location, &config());
         assert!(!self.non_owner, "sharing must check ownership first");
-        if granted {
-            self.memory.grant_access(email).await?;
+        self.shares.lock().await.granted.insert(email.into());
+        Ok(SecretText::new("https://icloud.com/share/native".into()))
+    }
+    async fn revoke_access(
+        &self,
+        location: &StorageConfig,
+        email: &str,
+    ) -> Result<MemberRemoval, StorageError> {
+        assert_eq!(location, &config());
+        assert!(!self.non_owner, "sharing must check ownership first");
+        let mut shares = self.shares.lock().await;
+        shares.granted.remove(email);
+        shares.accepted.remove(email);
+        if shares.retained.is_empty() {
+            Ok(MemberRemoval::Revoked)
         } else {
-            self.memory
-                .revoke_access(&MemberAccess::ProviderAccount(email.into()))
-                .await?;
+            Ok(MemberRemoval::AccessRemains {
+                shares: shares.retained.clone(),
+            })
+        }
+    }
+    async fn accept_share(
+        &self,
+        location: &StorageConfig,
+        url: &SecretText,
+    ) -> Result<(), StorageError> {
+        assert_eq!(location, &config());
+        if url.as_str() != "https://icloud.com/share/native" {
+            return Err(StorageError::InvitationMismatch);
+        }
+        let email = self
+            .recipient
+            .as_ref()
+            .expect("acceptance runs as recipient");
+        let mut shares = self.shares.lock().await;
+        if !shares.granted.contains(email) {
+            return Err(permission_error());
+        }
+        shares.accept_calls += 1;
+        shares.accepted.insert(email.clone());
+        if std::mem::replace(&mut shares.lose_reply, false) {
+            return Err(StorageError::Injected(StorageFailure::Network));
         }
         Ok(())
     }
@@ -110,6 +182,7 @@ impl CloudKitOps for Bridge {
         total: u64,
     ) -> Result<CloudKitUpload, StorageError> {
         assert_eq!(location, &config());
+        self.authorize().await?;
         let session = self.memory.begin_upload(path, total).await?;
         let mut uploads = self.uploads.lock().await;
         let id = uploads.len().to_string();
@@ -126,6 +199,7 @@ impl CloudKitOps for Bridge {
         id: &SecretText,
     ) -> Result<CloudKitUploadStatus, StorageError> {
         assert_eq!(location, &config());
+        self.authorize().await?;
         let mut uploads = self.uploads.lock().await;
         let session = uploads
             .get_mut(id.as_str())
@@ -147,6 +221,7 @@ impl CloudKitOps for Bridge {
         bytes: &[u8],
     ) -> Result<(), StorageError> {
         assert_eq!(location, &config());
+        self.authorize().await?;
         let mut uploads = self.uploads.lock().await;
         let session = uploads
             .get_mut(id.as_str())
@@ -160,6 +235,7 @@ impl CloudKitOps for Bridge {
         id: &SecretText,
     ) -> Result<(), StorageError> {
         assert_eq!(location, &config());
+        self.authorize().await?;
         self.memory
             .finish_upload(
                 self.uploads
@@ -176,6 +252,7 @@ impl CloudKitOps for Bridge {
         id: &SecretText,
     ) -> Result<(), StorageError> {
         assert_eq!(location, &config());
+        self.authorize().await?;
         if let Some(failure) = self.abort_failure {
             return Err(StorageError::Injected(failure));
         }
@@ -460,4 +537,106 @@ async fn listing_refuses_duplicate_paths_and_objects_outside_the_requested_prefi
             StorageFailure::Protocol
         );
     }
+}
+
+fn permission_error() -> StorageError {
+    StorageError::Provider {
+        provider: CloudProvider::CloudKit,
+        failure: StorageFailure::PermissionDenied,
+        source: Box::new(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "native CKShare participant missing",
+        )),
+    }
+}
+
+#[tokio::test]
+async fn recipient_join_accepts_the_native_share_before_reading_the_zone() {
+    let bridge = Arc::new(Bridge::new(
+        MemoryStorage::new(
+            config(),
+            Arc::new(coven_foundation::clock::FixedClock::new(
+                std::time::SystemTime::UNIX_EPOCH,
+            )),
+        )
+        .unwrap(),
+    ));
+    let owner = CloudKitStorage::new(config(), bridge.clone()).unwrap();
+    let path = ObjectPath::store_log(
+        coven_foundation::id_source::DeviceId(1),
+        std::num::NonZeroU64::MIN,
+    );
+    owner.create(&path, b"first").await.unwrap();
+    let AccessGrant::Granted { invitation } = owner.grant_access("member").await.unwrap() else {
+        panic!()
+    };
+    let invitation = StorageInvitation::decode(invitation.encode().unwrap().as_bytes()).unwrap();
+    let recipient = CloudKitStorage::new(config(), Arc::new(bridge.recipient("member"))).unwrap();
+    assert_eq!(
+        recipient.read(&path).await.unwrap_err().failure(),
+        StorageFailure::PermissionDenied
+    );
+    let wrong = StorageInvitation::new(
+        config(),
+        crate::invitation::InvitationAcceptance::CloudKitShare {
+            url: SecretText::new("https://icloud.com/share/other".into()),
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        recipient.join(&wrong).await,
+        Err(StorageError::InvitationMismatch)
+    ));
+    assert_eq!(bridge.shares.lock().await.accept_calls, 0);
+    bridge.shares.lock().await.lose_reply = true;
+    assert_eq!(
+        recipient.join(&invitation).await.unwrap_err().failure(),
+        StorageFailure::Network
+    );
+    recipient.join(&invitation).await.unwrap();
+    assert_eq!(recipient.read(&path).await.unwrap(), b"first");
+    owner
+        .revoke_access(&MemberAccess::ProviderAccount("member".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        recipient.read(&path).await.unwrap_err().failure(),
+        StorageFailure::PermissionDenied
+    );
+    let error = recipient.join(&invitation).await.unwrap_err();
+    assert_eq!(error.failure(), StorageFailure::PermissionDenied);
+    let StorageError::Provider { source, .. } = error else {
+        panic!()
+    };
+    assert_eq!(
+        source.downcast_ref::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+}
+
+#[tokio::test]
+async fn bridge_retained_grants_reach_the_owner() {
+    let bridge = Arc::new(Bridge::new(
+        MemoryStorage::new(
+            config(),
+            Arc::new(coven_foundation::clock::FixedClock::new(
+                std::time::SystemTime::UNIX_EPOCH,
+            )),
+        )
+        .unwrap(),
+    ));
+    let retained = RetainedAccess {
+        provider_id: "native-owner-participant".into(),
+        reason: RetainedAccessReason::StoreOwner,
+    };
+    bridge.shares.lock().await.retained.push(retained.clone());
+    let owner = CloudKitStorage::new(config(), bridge).unwrap();
+    let MemberRemoval::AccessRemains { shares } = owner
+        .revoke_access(&MemberAccess::ProviderAccount("owner".into()))
+        .await
+        .unwrap()
+    else {
+        panic!("native retained access discarded")
+    };
+    assert_eq!(shares, [retained]);
 }

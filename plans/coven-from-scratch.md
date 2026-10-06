@@ -2790,8 +2790,13 @@ pub trait CloudKitOps: Send + Sync {
     async fn list(&self, location: &StorageConfig, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError>;
     /// Deletes an object and its parts; an already absent object succeeds (§18).
     async fn delete(&self, location: &StorageConfig, path: &ObjectPath) -> Result<(), StorageError>;
-    /// Sets read/write sharing for the named Apple account (§12.2, §13).
-    async fn set_access(&self, location: &StorageConfig, email: &str, granted: bool) -> Result<(), StorageError>;
+    /// Saves read/write CKShare participation and returns its native share URL.
+    async fn grant_access(&self, location: &StorageConfig, email: &str) -> Result<SecretText, StorageError>;
+    /// Removes only this account, preserving the owner and grants reaching others.
+    async fn revoke_access(&self, location: &StorageConfig, email: &str) -> Result<MemberRemoval, StorageError>;
+    /// Fetches share metadata, verifies container/owner/zone against location, then
+    /// accepts as the signed-in recipient. Repeating acceptance succeeds.
+    async fn accept_share(&self, location: &StorageConfig, url: &SecretText) -> Result<(), StorageError>;
     /// Prepares a durable upload without publishing its destination (§16.5).
     async fn begin_upload(&self, location: &StorageConfig, path: &ObjectPath, total: u64) -> Result<CloudKitUpload, StorageError>;
     /// Returns confirmed progress, including parts whose replies were lost.
@@ -4048,6 +4053,8 @@ pub enum StorageError {
     NotStoreOwner,
     /// Dropbox cannot upgrade a pending viewer until its account id is available.
     AccountIdUnavailable,
+    /// The invite belongs to another provider location.
+    InvitationMismatch,
     /// The upload session belongs to another provider or location.
     SessionMismatch,
     /// The provider no longer retains the recorded upload.
@@ -5095,6 +5102,24 @@ impl CovenHandle {
     pub async fn cancel_invite(&self, invite: &InviteId) -> Result<(), SyncError>;
 }
 
+/// Provider acceptance material carried inside the encrypted invite code.
+/// It identifies the location and admission step, never a per-invite grant.
+/// Serialization erases its secret buffer on drop; Debug omits native share tokens.
+pub struct StorageInvitation { /* private */ }
+impl StorageInvitation {
+    /// Direct account access or a Dropbox namespace to mount; an S3 admin uses
+    /// this after creating the member's key. CloudKit needs grant_access's URL.
+    pub fn for_account(location: StorageConfig) -> Result<Self, StorageError>;
+    pub fn location(&self) -> &StorageConfig;
+    pub fn encode(&self) -> Result<SecretBytes, StorageError>;
+    pub fn decode(bytes: &[u8]) -> Result<Self, StorageError>;
+}
+
+pub enum AccessGrant {
+    Granted { invitation: StorageInvitation },
+    CreateAccessKey,
+}
+
 /// How the new person reaches storage (§12.2).
 pub enum InviteAccess {
     /// Google Drive, Dropbox, OneDrive or iCloud: the store is shared with
@@ -5157,6 +5182,16 @@ pub async fn restore_from_keychain(
     cancel: &watch::Receiver<bool>,
 ) -> Result<Option<StoreDir>, BootstrapError>;
 
+/// Before coven's join request, Storage::join(&StorageInvitation) completes the
+/// provider's recipient onboarding: Dropbox mounts the namespace; OneDrive
+/// inspects the share target, verifies drive/folder ids, then redeems it durably;
+/// CloudKit fetches and validates share metadata and accepts through the app's
+/// calls. Storage verifies readability afterward. Grant removal during joining
+/// returns the provider's permission failure; an admin can invite again.
+/// The facade verifies store identity and commits keys and credentials only
+/// after its own bootstrap succeeds. Native tokens are inside the encrypted
+/// invite code and are not used to identify access for revocation.
+///
 /// On the new person's device: makes their member keys, writes a join
 /// request to storage, and waits for the admin to approve it, then loads
 /// the store. Picks up where it left off after a restart. Returns `None`

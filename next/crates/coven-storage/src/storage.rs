@@ -77,7 +77,10 @@ pub enum MemberAccess {
 /// Granting access succeeds either through the provider or through an admin action.
 pub enum AccessGrant {
     /// The provider shared the store with the account.
-    Granted,
+    Granted {
+        /// Provider acceptance information to include in the encrypted invite code.
+        invitation: crate::StorageInvitation,
+    },
     /// The admin makes a key in the provider console and enters it in the invite.
     CreateAccessKey,
 }
@@ -175,6 +178,21 @@ pub trait Storage: Send + Sync {
     /// Share the store using its owner's account, or tell an S3 admin to create a key.
     /// A signed-in sharing account that does not own the location gets `NotStoreOwner`.
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError>;
+    /// Finish provider onboarding under the invited account, then check that the
+    /// location can be read. The facade verifies coven's store identity and keys.
+    async fn join(&self, invitation: &crate::StorageInvitation) -> Result<(), StorageError> {
+        invitation.check(&self.config())?;
+        if !matches!(
+            invitation.acceptance,
+            crate::invitation::InvitationAcceptance::Granted
+        ) {
+            return Err(StorageError::InvalidConfiguration(
+                "provider acceptance required",
+            ));
+        }
+        self.list(&ObjectPrefix::all()).await?;
+        Ok(())
+    }
     /// Unshare through the owner's account, or tell an S3 admin which key to delete.
     async fn revoke_access(&self, member: &MemberAccess) -> Result<MemberRemoval, StorageError>;
     /// Begin a create-once upload, returning the value to record before parts are sent.

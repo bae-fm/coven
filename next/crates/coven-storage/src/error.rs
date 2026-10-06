@@ -65,6 +65,9 @@ pub enum StorageError {
     /// Dropbox cannot upgrade a pending viewer without the recipient's account id.
     #[error("the provider has not supplied the account id needed to upgrade this invitation")]
     AccountIdUnavailable,
+    /// The invite belongs to another provider location.
+    #[error("invitation belongs to another location")]
+    InvitationMismatch,
     /// The session belongs to another provider or location.
     #[error("upload session belongs to another location")]
     SessionMismatch,
@@ -120,9 +123,11 @@ impl StorageError {
             Self::AlreadyExists => StorageFailure::AlreadyExists,
             Self::NotStoreOwner => StorageFailure::PermissionDenied,
             Self::AccountIdUnavailable => StorageFailure::Refused,
-            Self::SessionMismatch | Self::Protocol(_) | Self::Encoding(_) | Self::File(_) => {
-                StorageFailure::Protocol
-            }
+            Self::InvitationMismatch
+            | Self::SessionMismatch
+            | Self::Protocol(_)
+            | Self::Encoding(_)
+            | Self::File(_) => StorageFailure::Protocol,
             Self::Cleanup { operation, .. } => operation.failure(),
             #[cfg(any(test, feature = "test-utils"))]
             Self::Injected(failure) => *failure,

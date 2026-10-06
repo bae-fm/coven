@@ -17,6 +17,10 @@ struct Remote {
     uploads: BTreeMap<String, (String, Vec<u8>)>,
     next: u64,
     non_owner: bool,
+    redeemed: BTreeSet<String>,
+    redeem_requests: Vec<String>,
+    wrong_share_destination: bool,
+    lose_redeem_reply: bool,
     single_uploads: usize,
     session_starts: usize,
     fail_reply: bool,
@@ -102,9 +106,42 @@ async fn endpoint(
             json!({"nextExpectedRanges":[format!("{size}-")]}).to_string(),
         );
     }
-    assert_eq!(headers["authorization"], "Bearer token");
+    let token = headers["authorization"].to_str().unwrap();
+    let recipient = token.strip_prefix("Bearer recipient:");
+    assert!(token == "Bearer token" || recipient.is_some());
+    if let Some(share) = uri.path().strip_prefix("/graph/shares/") {
+        let email = share
+            .strip_prefix("share-")
+            .unwrap()
+            .strip_suffix("/driveItem")
+            .unwrap();
+        assert_eq!(recipient, Some(email));
+        if !state.members.contains(email) {
+            return response(403, json!({"error":{"code":"accessDenied"}}).to_string());
+        }
+        let prefer = headers["prefer"].to_str().unwrap();
+        state.redeem_requests.push(prefer.into());
+        if prefer == "redeemSharingLink" {
+            state.redeemed.insert(email.into());
+            if std::mem::replace(&mut state.lose_redeem_reply, false) {
+                return response(503, "{}");
+            }
+        } else {
+            assert_eq!(prefer, "redeemSharingLinkIfNecessary");
+        }
+        return reply(
+            json!({"id":if state.wrong_share_destination {"other"} else {"root"},"folder":{},"parentReference":{"driveId":"drive"}}),
+        );
+    }
+    if let Some(email) = recipient {
+        if !state.members.contains(email) || !state.redeemed.contains(email) {
+            return response(403, json!({"error":{"code":"accessDenied"}}).to_string());
+        }
+    }
     if uri.path() == "/graph/me/drive" {
-        return reply(json!({"id": if state.non_owner { "other" } else { "drive" }}));
+        return reply(
+            json!({"id": if state.non_owner || recipient.is_some() { "other" } else { "drive" }}),
+        );
     }
     let tail = uri
         .path()
@@ -222,7 +259,7 @@ async fn endpoint(
             let entries: Vec<_> = state
                 .members
                 .iter()
-                .map(|email| json!({"id":email,"invitation":{"email":email},"roles":["write"]}))
+                .map(|email| json!({"id":email,"invitation":{"email":email},"roles":["write"],"shareId":format!("share-{email}")}))
                 .chain(state.permissions.values().cloned())
                 .collect();
             let start = q
@@ -838,4 +875,71 @@ async fn native_identity_fields_identify_the_account_without_an_invitation() {
         MemberRemoval::Revoked
     ));
     assert!(state.lock().unwrap().permissions.is_empty());
+}
+
+#[tokio::test]
+async fn recipient_join_redeems_only_the_invited_destination_and_keeps_native_refusals() {
+    let state = remote();
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let owner = provider(&server.url);
+    let path = ObjectPath::store_log(
+        coven_foundation::id_source::DeviceId(1),
+        std::num::NonZeroU64::MIN,
+    );
+    owner.create(&path, b"first").await.unwrap();
+    let AccessGrant::Granted { invitation } = owner.grant_access("member").await.unwrap() else {
+        panic!()
+    };
+    let invitation = StorageInvitation::decode(invitation.encode().unwrap().as_bytes()).unwrap();
+    let recipient = provider(&server.url);
+    recipient
+        .set_oauth_tokens(OAuthTokens {
+            access_token: SecretText::new("recipient:member".into()),
+            refresh_token: None,
+            expires_at: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        recipient.read(&path).await.unwrap_err().failure(),
+        StorageFailure::PermissionDenied
+    );
+    state.lock().unwrap().wrong_share_destination = true;
+    assert!(matches!(
+        recipient.join(&invitation).await,
+        Err(StorageError::InvitationMismatch)
+    ));
+    assert!(state.lock().unwrap().redeemed.is_empty());
+    state.lock().unwrap().wrong_share_destination = false;
+    state.lock().unwrap().lose_redeem_reply = true;
+    assert_eq!(
+        recipient.join(&invitation).await.unwrap_err().failure(),
+        StorageFailure::Network
+    );
+    recipient.join(&invitation).await.unwrap();
+    assert_eq!(recipient.read(&path).await.unwrap(), b"first");
+    assert_eq!(
+        state.lock().unwrap().redeem_requests,
+        [
+            "redeemSharingLinkIfNecessary",
+            "redeemSharingLinkIfNecessary",
+            "redeemSharingLink",
+            "redeemSharingLinkIfNecessary",
+            "redeemSharingLink"
+        ]
+    );
+    owner
+        .revoke_access(&MemberAccess::ProviderAccount("member".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        recipient.read(&path).await.unwrap_err().failure(),
+        StorageFailure::PermissionDenied
+    );
+    let error = recipient.join(&invitation).await.unwrap_err();
+    assert_eq!(error.failure(), StorageFailure::PermissionDenied);
+    let StorageError::Provider { source, .. } = error else {
+        panic!()
+    };
+    assert!(source.downcast_ref::<http::ProviderResponse>().is_some());
 }

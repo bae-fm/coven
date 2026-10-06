@@ -220,7 +220,7 @@ impl OneDriveStorage {
         }
         Ok(result)
     }
-    async fn has_write_access(&self, email: &str) -> Result<bool, StorageError> {
+    async fn invitation(&self, email: &str) -> Result<Option<StorageInvitation>, StorageError> {
         let permissions = self.permissions().await?;
         let account = AccountPermissions::new(email, &permissions)?;
         for permission in &permissions {
@@ -228,10 +228,23 @@ impl OneDriveStorage {
                 && writable(permission)
                 && permission["link"]["scope"].as_str() != Some("existingAccess")
             {
-                return Ok(true);
+                let acceptance = match permission.get("shareId") {
+                    Some(_) => crate::invitation::InvitationAcceptance::OneDriveShare {
+                        token: SecretText::new(http::string(permission, "shareId")?.into()),
+                    },
+                    None if permission
+                        .get("invitation")
+                        .is_some_and(|value| !value.is_null())
+                        || permission.get("link").is_some_and(|value| !value.is_null()) =>
+                    {
+                        return Err(StorageError::Protocol("OneDrive omitted acceptance token"))
+                    }
+                    None => crate::invitation::InvitationAcceptance::Granted,
+                };
+                return Ok(Some(StorageInvitation::new(self.config(), acceptance)?));
             }
         }
-        Ok(false)
+        Ok(None)
     }
 }
 fn validate_download_url(api: &str, target: &str) -> Result<(), StorageError> {
@@ -385,15 +398,49 @@ impl Storage for OneDriveStorage {
     }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
         self.require_owner().await?;
-        if !self.has_write_access(account).await? {
-            http::checked(PROVIDER,self.send(Method::POST,&self.item(&self.folder,&["invite"])?,Body::Json(json!({"recipients":[{"email":account}],"roles":["write"],"requireSignIn":true,"sendInvitation":true}))).await?).await?;
+        if let Some(invitation) = self.invitation(account).await? {
+            return Ok(AccessGrant::Granted { invitation });
         }
-        if !self.has_write_access(account).await? {
-            return Err(StorageError::Protocol(
+        http::checked(PROVIDER,self.send(Method::POST,&self.item(&self.folder,&["invite"])?,Body::Json(json!({"recipients":[{"email":account}],"roles":["write"],"requireSignIn":true,"sendInvitation":true}))).await?).await?;
+        let invitation = self
+            .invitation(account)
+            .await?
+            .ok_or(StorageError::Protocol(
                 "OneDrive did not grant write access",
-            ));
+            ))?;
+        Ok(AccessGrant::Granted { invitation })
+    }
+
+    async fn join(&self, invitation: &StorageInvitation) -> Result<(), StorageError> {
+        invitation.check(&self.config)?;
+        if let crate::invitation::InvitationAcceptance::OneDriveShare { token } =
+            &invitation.acceptance
+        {
+            let url = http::endpoint(&self.api, &["shares", token.as_str(), "driveItem"], &[])?;
+            for prefer in ["redeemSharingLinkIfNecessary", "redeemSharingLink"] {
+                let value = http::json(
+                    PROVIDER,
+                    self.session
+                        .send(
+                            Method::GET,
+                            &url,
+                            &[("Prefer", prefer.into())],
+                            Body::Empty,
+                            true,
+                        )
+                        .await?,
+                )
+                .await?;
+                if http::string(&value, "id")? != self.folder
+                    || http::string(&value["parentReference"], "driveId")? != self.drive
+                    || !value["folder"].is_object()
+                {
+                    return Err(StorageError::InvitationMismatch);
+                }
+            }
         }
-        Ok(AccessGrant::Granted)
+        self.list(&ObjectPrefix::all()).await?;
+        Ok(())
     }
     async fn revoke_access(&self, member: &MemberAccess) -> Result<MemberRemoval, StorageError> {
         let MemberAccess::ProviderAccount(email) = member else {

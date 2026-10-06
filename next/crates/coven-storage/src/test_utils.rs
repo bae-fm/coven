@@ -269,7 +269,16 @@ impl Storage for MemoryStorage {
             return Err(StorageError::NotStoreOwner);
         }
         self.state.lock().await.accounts.insert(account.into());
-        Ok(AccessGrant::Granted)
+        let invitation = match self.config.provider() {
+            CloudProvider::CloudKit => StorageInvitation::new(
+                self.config(),
+                crate::invitation::InvitationAcceptance::CloudKitShare {
+                    url: coven_crypto::SecretText::new("https://icloud.com/share/memory".into()),
+                },
+            )?,
+            _ => StorageInvitation::for_account(self.config())?,
+        };
+        Ok(AccessGrant::Granted { invitation })
     }
     async fn revoke_access(&self, member: &MemberAccess) -> Result<MemberRemoval, StorageError> {
         self.before().await?;

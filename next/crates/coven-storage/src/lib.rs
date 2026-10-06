@@ -6,6 +6,7 @@
 mod config;
 mod credentials;
 mod error;
+mod invitation;
 mod path;
 pub mod providers;
 mod secret_json;
@@ -17,6 +18,7 @@ mod transfer;
 pub use config::*;
 pub use credentials::*;
 pub use error::*;
+pub use invitation::StorageInvitation;
 pub use path::*;
 pub use session::UploadSession;
 pub use settings::StorageSettings;

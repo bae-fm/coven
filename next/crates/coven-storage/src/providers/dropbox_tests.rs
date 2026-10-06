@@ -17,6 +17,9 @@ struct RemovalJob {
 #[derive(Default)]
 struct Remote {
     non_owner: bool,
+    mounted: BTreeSet<String>,
+    mount_requests: usize,
+    lose_mount_reply: bool,
     inherited_members: BTreeMap<String, String>,
     invitees: Vec<Value>,
     groups: Vec<Value>,
@@ -41,11 +44,17 @@ async fn endpoint(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
-    assert_eq!(headers["authorization"], "Bearer token");
-    assert_eq!(
-        headers["dropbox-api-path-root"],
-        r#"{".tag":"namespace_id","namespace_id":"namespace"}"#
-    );
+    let token = headers["authorization"].to_str().unwrap();
+    let recipient = token.strip_prefix("Bearer recipient:");
+    assert!(token == "Bearer token" || recipient.is_some());
+    if uri.path().starts_with("/2/files/") {
+        assert_eq!(
+            headers["dropbox-api-path-root"],
+            r#"{".tag":"namespace_id","namespace_id":"namespace"}"#
+        );
+    } else {
+        assert!(!headers.contains_key("dropbox-api-path-root"));
+    }
     let mut state = state.lock().unwrap();
     let arg: Value = match headers.get("dropbox-api-arg") {
         Some(arg) => serde_json::from_str(arg.to_str().unwrap()).unwrap(),
@@ -59,11 +68,34 @@ async fn endpoint(
                 .to_string(),
         )
     };
+    if let Some(email) = recipient {
+        if !state.members.contains_key(email)
+            || (uri.path().starts_with("/2/files/") && !state.mounted.contains(email))
+        {
+            return response(
+                409,
+                json!({"error":{".tag":"access_error","access_error":{".tag":"not_a_member"}}})
+                    .to_string(),
+            );
+        }
+    }
     match uri.path() {
+        "/2/sharing/mount_folder" => {
+            assert_eq!(arg["shared_folder_id"], "namespace");
+            state.mount_requests += 1;
+            let email = recipient.expect("mount runs under recipient account");
+            if !state.mounted.insert(email.into()) {
+                return response(409, json!({"error":{".tag":"already_mounted"}}).to_string());
+            }
+            if std::mem::replace(&mut state.lose_mount_reply, false) {
+                return response(503, "{}");
+            }
+            reply(json!({"shared_folder_id":"namespace"}))
+        }
         "/2/sharing/get_folder_metadata" => {
             assert_eq!(arg["shared_folder_id"], "namespace");
             reply(
-                json!({"shared_folder_id":"namespace", "access_type":{".tag":if state.non_owner {"editor"} else {"owner"}}}),
+                json!({"shared_folder_id":"namespace", "access_type":{".tag":if state.non_owner || recipient.is_some() {"editor"} else {"owner"}}}),
             )
         }
         "/2/files/upload" => {
@@ -375,7 +407,7 @@ async fn conformance_ranges_pagination_and_account_sharing() {
     assert_eq!(state.lock().unwrap().range_reads, 5);
     assert!(matches!(
         storage.grant_access("member@example.com").await.unwrap(),
-        AccessGrant::Granted
+        AccessGrant::Granted { .. }
     ));
     storage.grant_access("member@example.com").await.unwrap();
     storage
@@ -808,3 +840,63 @@ async fn asynchronous_removal_times_out_without_hiding_remaining_access() {
 
 #[path = "dropbox_access_tests.rs"]
 mod access_tests;
+
+#[tokio::test]
+async fn recipient_join_mounts_the_invited_namespace_and_retries_a_lost_reply() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let owner = provider(&server.url);
+    let path = ObjectPath::store_log(
+        coven_foundation::id_source::DeviceId(1),
+        std::num::NonZeroU64::MIN,
+    );
+    owner.create(&path, b"first").await.unwrap();
+    let AccessGrant::Granted { invitation } = owner.grant_access("member").await.unwrap() else {
+        panic!()
+    };
+    let invitation = StorageInvitation::decode(invitation.encode().unwrap().as_bytes()).unwrap();
+    let recipient = provider(&server.url);
+    recipient
+        .set_oauth_tokens(OAuthTokens {
+            access_token: SecretText::new("recipient:member".into()),
+            refresh_token: None,
+            expires_at: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        recipient.read(&path).await.unwrap_err().failure(),
+        StorageFailure::PermissionDenied
+    );
+    let elsewhere = StorageInvitation::for_account(StorageConfig::Dropbox {
+        namespace_id: "elsewhere".into(),
+    })
+    .unwrap();
+    assert!(matches!(
+        recipient.join(&elsewhere).await,
+        Err(StorageError::InvitationMismatch)
+    ));
+    assert_eq!(state.lock().unwrap().mount_requests, 0);
+    state.lock().unwrap().lose_mount_reply = true;
+    assert_eq!(
+        recipient.join(&invitation).await.unwrap_err().failure(),
+        StorageFailure::Network
+    );
+    recipient.join(&invitation).await.unwrap();
+    assert_eq!(recipient.read(&path).await.unwrap(), b"first");
+    assert_eq!(state.lock().unwrap().mount_requests, 2);
+    owner
+        .revoke_access(&MemberAccess::ProviderAccount("member".into()))
+        .await
+        .unwrap();
+    for error in [
+        recipient.read(&path).await.unwrap_err(),
+        recipient.join(&invitation).await.unwrap_err(),
+    ] {
+        assert_eq!(error.failure(), StorageFailure::PermissionDenied);
+        let StorageError::Provider { source, .. } = error else {
+            panic!()
+        };
+        assert!(source.downcast_ref::<http::ProviderResponse>().is_some());
+    }
+}

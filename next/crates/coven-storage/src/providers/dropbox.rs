@@ -49,14 +49,13 @@ impl DropboxStorage {
         value: Value,
     ) -> Result<reqwest::Response, StorageError> {
         let url = http::endpoint(&self.api, &method.split('/').collect::<Vec<_>>(), &[])?;
+        let headers = if method.starts_with("files/") {
+            vec![("Dropbox-API-Path-Root", self.root())]
+        } else {
+            Vec::new()
+        };
         self.session
-            .send(
-                Method::POST,
-                &url,
-                &[("Dropbox-API-Path-Root", self.root())],
-                Body::Json(value),
-                true,
-            )
+            .send(Method::POST, &url, &headers, Body::Json(value), true)
             .await
     }
 
@@ -352,7 +351,9 @@ impl Storage for DropboxStorage {
                 .iter()
                 .any(|share| share.reason == RetainedAccessReason::StoreOwner)
         {
-            return Ok(AccessGrant::Granted);
+            return Ok(AccessGrant::Granted {
+                invitation: StorageInvitation::for_account(self.config())?,
+            });
         }
         if let Some(member) = members
             .direct
@@ -376,7 +377,43 @@ impl Storage for DropboxStorage {
                 "Dropbox did not grant editor access",
             ));
         }
-        Ok(AccessGrant::Granted)
+        Ok(AccessGrant::Granted {
+            invitation: StorageInvitation::for_account(self.config())?,
+        })
+    }
+    async fn join(&self, invitation: &StorageInvitation) -> Result<(), StorageError> {
+        invitation.check(&self.config)?;
+        let response = self
+            .rpc_response(
+                "sharing/mount_folder",
+                json!({"shared_folder_id":self.namespace}),
+            )
+            .await?;
+        if response.status().is_success() {
+            let value = http::json(PROVIDER, response).await?;
+            if http::string(&value, "shared_folder_id")? != self.namespace {
+                return Err(StorageError::InvitationMismatch);
+            }
+        } else {
+            let error = http::response_error(PROVIDER, response).await;
+            let mounted = match &error {
+                StorageError::Provider { source, .. } => {
+                    match source.downcast_ref::<http::ProviderResponse>() {
+                        Some(response) => match serde_json::from_slice::<Value>(response.body()) {
+                            Ok(value) => value["error"][".tag"].as_str() == Some("already_mounted"),
+                            Err(_) => false,
+                        },
+                        None => false,
+                    }
+                }
+                _ => false,
+            };
+            if !mounted {
+                return Err(error);
+            }
+        }
+        self.list(&ObjectPrefix::all()).await?;
+        Ok(())
     }
     async fn revoke_access(&self, member: &MemberAccess) -> Result<MemberRemoval, StorageError> {
         let MemberAccess::ProviderAccount(email) = member else {
