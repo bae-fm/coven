@@ -2,8 +2,11 @@
 
 use std::collections::BTreeMap;
 
-use coven_database::{DropReason, EntryOutcome, StoreLogReplay, StoreLogState};
+use coven_database::{
+    DropReason, EntryOutcome, ReplayEntry, StoreLog, StoreLogCheck, StoreLogReplay, StoreLogState,
+};
 use coven_format::{store_log::StoreLogEntry, value::EntryId};
+use coven_foundation::id_source::DeviceId;
 
 use crate::{conflicts, effects};
 
@@ -23,9 +26,36 @@ pub fn replay(entries: &[StoreLogEntry]) -> StoreLogReplay {
         let past = (0..index)
             .filter(|&prior| had_read(entry, entries[prior]))
             .collect::<Vec<_>>();
-        views.push(settle(&entries, &views, &past).state);
+        let view = settle(&entries, &views, &past).state;
+        views.push(effects::check(&view, entry));
     }
     settle(&entries, &views, &(0..entries.len()).collect::<Vec<_>>())
+}
+
+/// Replay one ready entry using checks retained with the previously applied entries.
+///
+/// `log` must be a committed result (or the equivalent pure result), and `entry`
+/// must be new and have its entire recorded past in that log. The returned entry
+/// and result are passed together to [`coven_database::Database::apply_store_log`].
+/// Past checks never change; kept and dropped marks are recomputed from scratch.
+pub fn replay_entry(log: &StoreLog, entry: StoreLogEntry) -> (ReplayEntry, StoreLogReplay) {
+    let mut prior: Vec<_> = log.entries.iter().collect();
+    prior.sort_by_key(|applied| applied.entry.timestamp);
+    let mut entries: Vec<_> = prior.iter().map(|applied| &applied.entry).collect();
+    let mut views: Vec<_> = prior.iter().map(|applied| applied.check.clone()).collect();
+    let past: Vec<_> = (0..entries.len())
+        .filter(|&i| had_read(&entry, entries[i]))
+        .collect();
+    let check = if past.len() == entries.len() {
+        effects::check(&log.replay.state, &entry)
+    } else {
+        effects::check(&settle(&entries, &views, &past).state, &entry)
+    };
+    let index = entries.partition_point(|prior| prior.timestamp < entry.timestamp);
+    entries.insert(index, &entry);
+    views.insert(index, check.clone());
+    let result = settle(&entries, &views, &(0..entries.len()).collect::<Vec<_>>());
+    (ReplayEntry { entry, check }, result)
 }
 
 pub(crate) fn had_read(entry: &StoreLogEntry, prior: &StoreLogEntry) -> bool {
@@ -36,7 +66,7 @@ pub(crate) fn had_read(entry: &StoreLogEntry, prior: &StoreLogEntry) -> bool {
 
 fn settle(
     entries: &[&StoreLogEntry],
-    views: &[StoreLogState],
+    views: &[StoreLogCheck],
     selected: &[usize],
 ) -> StoreLogReplay {
     let mut dropped = BTreeMap::<EntryId, DropReason>::new();
@@ -45,31 +75,47 @@ fn settle(
     for _ in 0..=selected.len() {
         let mut state = StoreLogState::default();
         let mut kept = Vec::<usize>::new();
+        let mut devices = BTreeMap::<DeviceId, Vec<usize>>::new();
         let mut restart = false;
         for &index in selected {
             let entry = entries[index];
             if dropped.contains_key(&entry.position) {
                 continue;
             }
-            if let Err(reason) = effects::authorize(&views[index], entry) {
-                dropped.insert(entry.position, reason);
-                continue;
+            match &views[index] {
+                StoreLogCheck::NotAllowed => {
+                    dropped.insert(entry.position, DropReason::NotAllowed);
+                    continue;
+                }
+                StoreLogCheck::WrongCircleKeys => {
+                    dropped.insert(entry.position, DropReason::WrongCircleKeys);
+                    continue;
+                }
+                _ => {}
             }
             if effects::already_in_place(&state, entry) {
                 kept.push(index);
+                devices
+                    .entry(entry.position.device)
+                    .or_default()
+                    .push(index);
                 continue;
             }
-            let next = match effects::effect(&state, &views[index], entry) {
-                Ok(next) => next,
-                Err(reason) => {
-                    dropped.insert(entry.position, reason);
-                    continue;
-                }
-            };
-            let opponents: Vec<_> = kept
-                .iter()
-                .rev()
-                .copied()
+            if let Err(reason) = effects::check_effect(&state, &views[index], entry) {
+                dropped.insert(entry.position, reason);
+                continue;
+            }
+            // Had-read positions cover a prefix of each device's entries.
+            // Keep the remaining candidates in reverse timestamp order so the
+            // reported winner matches Appendix C's reverse scan of kept entries.
+            let mut concurrent = Vec::new();
+            for indices in devices.values() {
+                let read = indices.partition_point(|&i| had_read(entry, entries[i]));
+                concurrent.extend_from_slice(&indices[read..]);
+            }
+            concurrent.sort_unstable_by(|a, b| b.cmp(a));
+            let opponents: Vec<_> = concurrent
+                .into_iter()
                 .filter(|&prior| {
                     conflicts::conflict(entry, &views[index], entries[prior], &views[prior])
                 })
@@ -83,8 +129,12 @@ fn settle(
                     DropReason::BeatenBy(entries[winner].position),
                 );
             } else if opponents.is_empty() {
-                state = next;
+                effects::apply_effect(&mut state, entry);
                 kept.push(index);
+                devices
+                    .entry(entry.position.device)
+                    .or_default()
+                    .push(index);
             } else {
                 for prior in opponents {
                     let old = dropped.insert(

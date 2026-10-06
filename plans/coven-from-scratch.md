@@ -1213,7 +1213,8 @@ Carol's tablet:
 - A device applies an entry once it has every entry that entry had read.
 - Each device keeps, in coven's local tables:
   - `coven_store_log`: every entry it has applied, as downloaded and
-    checked, and whether the replay kept or dropped it;
+    checked, its immutable author-view checks, and whether the replay kept
+    or dropped it;
   - the replay's result: `coven_members` (every member a kept entry
     added, their public keys and role, and whether they were removed),
     `coven_devices` (every device a kept entry added, its member and name,
@@ -1245,6 +1246,12 @@ Carol's tablet:
     the first, so the result depends only on which entries it has.
   - The member list an entry's author had read is the replay of just the
     entries that entry had read.
+  - That past never changes once the entry is applied. The device keeps
+    the checks derived from it with the entry: authority, whether a
+    removal's circle keys match, a removed device's observed owner, and
+    the circles a member removal deletes in that view. These commit in
+    the same transaction as the entry and are reused on later replays.
+    Kept and dropped marks still start afresh for each arriving entry.
 - At its place in the replay, an entry applies only if its author's role
   allowed it, in the member list the author had read.
 - Then, an entry whose change is already in place applies and changes
@@ -2866,7 +2873,7 @@ pub enum DbError {
     InvalidStoreLogEntry { entry: EntryId, error: coven_format::Error },
     /// A replay result does not cover exactly the stored entries and the incoming entry.
     StoreLogEntriesChanged,
-    /// An already applied entry was supplied again with different bytes.
+    /// An already applied entry was supplied again with different bytes or author-view check.
     StoreLogEntryChanged(EntryId),
     /// A write changes a file declared write-once (§20.2).
     FileWriteOnce { table: String, key: RowKey },
@@ -4807,12 +4814,16 @@ use coven_format::store_log::{SnapshotId, StoreLogEntry};
 /// Input order has no effect. Authority and circle-key failures are dropped marks.
 pub fn replay(entries: &[StoreLogEntry]) -> StoreLogReplay;
 
+/// Replay a new, ready entry using the checks retained with the applied entries.
+/// Returns the entry with its own check and the whole new replay result.
+pub fn replay_entry(log: &StoreLog, entry: StoreLogEntry) -> (ReplayEntry, StoreLogReplay);
+
 impl Database {
     /// Commit the entry, every kept/dropped mark, and the whole replay result.
     /// Circle deletions and reversals recompute rows in this transaction too.
     /// Refuses a result for a stale or different applied-entry set.
     pub async fn apply_store_log(
-        &self, entry: StoreLogEntry, replay: StoreLogReplay,
+        &self, entry: ReplayEntry, replay: StoreLogReplay,
     ) -> Result<(), DbError>;
 
     /// Applied entries and their result from one committed snapshot.
@@ -4821,8 +4832,22 @@ impl Database {
 
 pub struct StoreLog {
     /// All applied entries, including dropped entries, in timestamp order.
-    pub entries: Vec<StoreLogEntry>,
+    pub entries: Vec<ReplayEntry>,
     pub replay: StoreLogReplay,
+}
+
+pub struct ReplayEntry {
+    pub entry: StoreLogEntry,
+    /// Immutable facts computed against exactly this entry's recorded past.
+    pub check: StoreLogCheck,
+}
+
+pub enum StoreLogCheck {
+    Allowed,
+    NotAllowed,
+    WrongCircleKeys,
+    DeviceOwner(MemberId),
+    DeletedCircles(BTreeSet<CircleId>),
 }
 
 pub struct StoreLogReplay {

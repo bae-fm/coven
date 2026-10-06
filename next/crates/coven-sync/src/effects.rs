@@ -2,7 +2,8 @@
 
 use coven_crypto::MemberId;
 use coven_database::{
-    DropReason, StoreCircle, StoreDevice, StoreIdentity, StoreLogState, StoreMember, StoreVersion,
+    DropReason, StoreCircle, StoreDevice, StoreIdentity, StoreLogCheck, StoreLogState, StoreMember,
+    StoreVersion,
 };
 use coven_format::store_log::{MemberRole, StoreChange, StoreLogEntry};
 use coven_foundation::id_source::{CircleId, DeviceId};
@@ -29,7 +30,7 @@ fn in_circle(state: &StoreLogState, id: CircleId, who: &MemberId) -> bool {
         && circle(state, id).is_some_and(|circle| circle.members.contains(who))
 }
 
-pub(crate) fn authorize(view: &StoreLogState, entry: &StoreLogEntry) -> Result<(), DropReason> {
+pub(crate) fn check(view: &StoreLogState, entry: &StoreLogEntry) -> StoreLogCheck {
     use StoreChange::*;
     let author = &entry.author;
     let allowed = match &entry.change {
@@ -53,7 +54,7 @@ pub(crate) fn authorize(view: &StoreLogState, entry: &StoreLogEntry) -> Result<(
         },
     };
     if !allowed {
-        return Err(DropReason::NotAllowed);
+        return StoreLogCheck::NotAllowed;
     }
     // The model assumes truthful lists at its boundary. Real entries must
     // prove that list against the same author view, even for an unchanged effect.
@@ -68,10 +69,36 @@ pub(crate) fn authorize(view: &StoreLogState, entry: &StoreLogEntry) -> Result<(
                 .then_some(*id)
         });
         if !expected.eq(circle_keys.iter().map(|key| key.circle)) {
-            return Err(DropReason::WrongCircleKeys);
+            return StoreLogCheck::WrongCircleKeys;
         }
     }
-    Ok(())
+    match &entry.change {
+        RemoveDevice { device: id } => StoreLogCheck::DeviceOwner(
+            device(view, *id)
+                .expect("authorized device removal")
+                .member
+                .clone(),
+        ),
+        RemoveMember { member, .. } | RemoveCircleMember { member, .. } => {
+            let circles = view
+                .circles
+                .iter()
+                .filter_map(|(id, circle)| {
+                    let targets = match &entry.change {
+                        RemoveCircleMember { circle, .. } => circle == id,
+                        _ => true,
+                    };
+                    (targets
+                        && !circle.deleted
+                        && circle.members.len() == 1
+                        && circle.members.contains(member))
+                    .then_some(*id)
+                })
+                .collect();
+            StoreLogCheck::DeletedCircles(circles)
+        }
+        _ => StoreLogCheck::Allowed,
+    }
 }
 
 pub(crate) fn already_in_place(state: &StoreLogState, entry: &StoreLogEntry) -> bool {
@@ -108,24 +135,81 @@ pub(crate) fn already_in_place(state: &StoreLogState, entry: &StoreLogEntry) -> 
     }
 }
 
-pub(crate) fn effect(
+pub(crate) fn check_effect(
     state: &StoreLogState,
-    view: &StoreLogState,
+    view: &StoreLogCheck,
     entry: &StoreLogEntry,
-) -> Result<StoreLogState, DropReason> {
+) -> Result<(), DropReason> {
     use StoreChange::*;
-    let mut next = state.clone();
-    if let RaiseSchema { snapshot, .. } | RaiseFormat { snapshot, .. } | Reset { snapshot } =
-        &entry.change
-    {
-        let exists = match snapshot.audience {
-            Audience::Store => state.store.is_some(),
-            Audience::Circle(id) => circle(state, id).is_some(),
-        };
-        if !exists {
-            return Err(DropReason::TargetGone);
+    let targets_exist = match &entry.change {
+        CreateStore { .. } => state.store.is_none(),
+        AddMember { .. } => state.store.is_some(),
+        RemoveMember { member: id, .. } | ChangeRole { member: id, .. } => {
+            member(state, id).is_some()
         }
+        AddDevice { device: id, .. } => {
+            member(state, &entry.author).is_some() && device(state, *id).is_none()
+        }
+        RemoveDevice { device: id } => {
+            let StoreLogCheck::DeviceOwner(owner) = view else {
+                unreachable!("authorized removal has an observed owner")
+            };
+            device(state, *id).is_some_and(|device| device.member == *owner)
+        }
+        CreateCircle { circle: id, .. } => {
+            member(state, &entry.author).is_some() && circle(state, *id).is_none()
+        }
+        RenameCircle { circle: id, .. } | DeleteCircle { circle: id } => {
+            circle(state, *id).is_some()
+        }
+        AddCircleMember {
+            circle: id,
+            member: who,
+        } => circle(state, *id).is_some() && member(state, who).is_some(),
+        RemoveCircleMember {
+            circle: id,
+            member: who,
+            ..
+        } => circle(state, *id).is_some_and(|circle| circle.members.contains(who)),
+        RaiseSchema { snapshot, .. } | RaiseFormat { snapshot, .. } | Reset { snapshot } => {
+            match snapshot.audience {
+                Audience::Store => state.store.is_some(),
+                Audience::Circle(id) => circle(state, id).is_some(),
+            }
+        }
+    };
+    if !targets_exist {
+        return Err(DropReason::TargetGone);
     }
+    // Evaluate the resulting admin set before conflicts, without copying state
+    // for an effect that might lose or cause the scan to restart.
+    let removed_admin = match &entry.change {
+        CreateStore { .. }
+        | AddMember {
+            role: MemberRole::Admin,
+            ..
+        }
+        | ChangeRole {
+            role: MemberRole::Admin,
+            ..
+        } => return Ok(()),
+        RemoveMember { member, .. } | ChangeRole { member, .. } => Some(member),
+        AddMember { keys, .. } => Some(&keys.signing),
+        _ => None,
+    };
+    if state.store.is_some()
+        && !state.members.iter().any(|(id, member)| {
+            !member.removed && member.role == MemberRole::Admin && Some(id) != removed_admin
+        })
+    {
+        return Err(DropReason::NoAdminLeft);
+    }
+    Ok(())
+}
+
+/// Apply an effect only after its targets, remaining admin and conflicts pass.
+pub(crate) fn apply_effect(next: &mut StoreLogState, entry: &StoreLogEntry) {
+    use StoreChange::*;
     match &entry.change {
         CreateStore {
             store,
@@ -134,10 +218,7 @@ pub(crate) fn effect(
             key,
             device_name,
         } => {
-            if state.store.is_some() {
-                return Err(DropReason::TargetGone);
-            }
-            next = StoreLogState::default();
+            *next = StoreLogState::default();
             next.store = Some(StoreIdentity {
                 id: *store,
                 name: name.clone(),
@@ -161,9 +242,6 @@ pub(crate) fn effect(
             );
         }
         AddMember { keys, role } => {
-            if state.store.is_none() {
-                return Err(DropReason::TargetGone);
-            }
             next.members.insert(
                 keys.signing.clone(),
                 StoreMember {
@@ -178,9 +256,6 @@ pub(crate) fn effect(
             key,
             circle_keys,
         } => {
-            if member(state, id).is_none() {
-                return Err(DropReason::TargetGone);
-            }
             next.members.get_mut(id).expect("checked member").removed = true;
             next.store.as_mut().expect("members require creation").key = *key;
             for device in next.devices.values_mut().filter(|d| d.member == *id) {
@@ -197,15 +272,9 @@ pub(crate) fn effect(
             }
         }
         ChangeRole { member: id, role } => {
-            if member(state, id).is_none() {
-                return Err(DropReason::TargetGone);
-            }
             next.members.get_mut(id).expect("checked member").role = *role;
         }
         AddDevice { device: id, name } => {
-            if member(state, &entry.author).is_none() || device(state, *id).is_some() {
-                return Err(DropReason::TargetGone);
-            }
             next.devices.insert(
                 *id,
                 StoreDevice {
@@ -216,12 +285,6 @@ pub(crate) fn effect(
             );
         }
         RemoveDevice { device: id } => {
-            let owner = &device(view, *id)
-                .expect("authorized removal has an observed owner")
-                .member;
-            if device(state, *id).is_none_or(|d| d.member != *owner) {
-                return Err(DropReason::TargetGone);
-            }
             next.devices.get_mut(id).expect("checked device").removed = true;
         }
         CreateCircle {
@@ -229,9 +292,6 @@ pub(crate) fn effect(
             name,
             key,
         } => {
-            if member(state, &entry.author).is_none() || circle(state, *id).is_some() {
-                return Err(DropReason::TargetGone);
-            }
             next.circles.insert(
                 *id,
                 StoreCircle {
@@ -243,15 +303,9 @@ pub(crate) fn effect(
             );
         }
         RenameCircle { circle: id, name } => {
-            if circle(state, *id).is_none() {
-                return Err(DropReason::TargetGone);
-            }
             next.circles.get_mut(id).expect("checked circle").name = name.clone();
         }
         DeleteCircle { circle: id } => {
-            if circle(state, *id).is_none() {
-                return Err(DropReason::TargetGone);
-            }
             let circle = next.circles.get_mut(id).expect("checked circle");
             circle.deleted = true;
             circle.members.clear();
@@ -260,9 +314,6 @@ pub(crate) fn effect(
             circle: id,
             member: who,
         } => {
-            if circle(state, *id).is_none() || member(state, who).is_none() {
-                return Err(DropReason::TargetGone);
-            }
             next.circles
                 .get_mut(id)
                 .expect("checked circle")
@@ -274,9 +325,6 @@ pub(crate) fn effect(
             member: who,
             key,
         } => {
-            if !circle(state, *id).is_some_and(|c| c.members.contains(who)) {
-                return Err(DropReason::TargetGone);
-            }
             let circle = next.circles.get_mut(id).expect("checked circle");
             circle.members.remove(who);
             circle.key = *key;
@@ -307,15 +355,6 @@ pub(crate) fn effect(
                 .insert(snapshot.audience.clone(), snapshot.clone());
         }
     }
-    if next.store.is_some()
-        && !next
-            .members
-            .values()
-            .any(|member| !member.removed && member.role == MemberRole::Admin)
-    {
-        return Err(DropReason::NoAdminLeft);
-    }
-    Ok(next)
 }
 
 #[cfg(test)]

@@ -1,14 +1,22 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Instant,
+};
 
 use crate::effects::tests::snapshot;
 use coven_crypto::MemberId;
-use coven_database::{DropReason, EntryOutcome, StoreLogReplay};
+use coven_database::{
+    CovenMigrationPolicy, DatabaseBuilder, DropReason, EntryOutcome, StoreLog, StoreLogReplay,
+};
 use coven_format::{
     store_log::{CircleKeyId, MemberPublicKeys, MemberRole, StoreChange, StoreLogEntry},
     value::{EntryId, EntryPositions},
     Object,
 };
-use coven_foundation::id_source::{CircleId, DeviceId, KeyId, StoreId};
+use coven_foundation::{
+    files::StoreLayout,
+    id_source::{CircleId, DeviceId, KeyId, SequentialIds, StoreId},
+};
 use coven_merge::{Audience, Timestamp};
 
 use crate::replay;
@@ -143,6 +151,7 @@ impl History {
         self.arrive(
             &mut Vec::new(),
             &mut BTreeSet::new(),
+            &StoreLog::default(),
             &expected,
             &mut arrivals,
         );
@@ -154,6 +163,7 @@ impl History {
         &self,
         order: &mut Vec<StoreLogEntry>,
         present: &mut BTreeSet<usize>,
+        applied: &StoreLog,
         expected: &StoreLogReplay,
         arrivals: &mut usize,
     ) {
@@ -179,7 +189,12 @@ impl History {
             order.push(entry.clone());
             let prefix = replay(order);
             assert_eq!(prefix.entries.len(), order.len());
-            self.arrive(order, present, expected, arrivals);
+            let (checked, incremental) = crate::replay_entry(applied, entry.clone());
+            assert_eq!(incremental, prefix);
+            let mut next = applied.clone();
+            next.entries.push(checked);
+            next.replay = incremental;
+            self.arrive(order, present, &next, expected, arrivals);
             order.pop();
             present.remove(&index);
         }
@@ -815,4 +830,130 @@ fn concurrent_store_removals_keep_the_earlier_keys_and_only_its_removed_devices(
         assert!(r.state.members[&member(4)].removed);
         assert_eq!(h.drops(r), [13]);
     });
+}
+
+fn realistic_history() -> History {
+    let mut h = History::new();
+    for m in 1..20 {
+        h.all(
+            0,
+            0,
+            add(
+                m,
+                if m < 3 {
+                    MemberRole::Admin
+                } else {
+                    MemberRole::Member
+                },
+            ),
+        );
+        h.all(m, u64::from(m), device(u64::from(m)));
+        h.all(m, u64::from(m), device(100 + u64::from(m)));
+    }
+    for c in 0..10 {
+        h.all(c as u8, c, make(c, &format!("Circle {c}")));
+        h.all(c as u8, c, join(c, ((c + 1) % 10) as u8));
+        h.all(c as u8, c, join(c, (10 + c) as u8));
+    }
+    for m in 17..20 {
+        h.all(m, u64::from(m), make(u64::from(m), "Private notes"));
+    }
+    while h.entries.len() < 2_000 {
+        let n = h.entries.len();
+        let c = (n % 10) as u64;
+        match n {
+            600 | 1_200 | 1_800 => {
+                let m = 16 + (n / 600) as u8;
+                let past: Vec<_> = (0..n).collect();
+                h.push(
+                    m,
+                    u64::from(m),
+                    &past,
+                    rename(u64::from(m), "Offline rename"),
+                );
+                h.push(0, 0, &past, remove(m, &[u64::from(m - 10)]));
+            }
+            _ if n.is_multiple_of(50) && n + 1 < 2_000 => {
+                let past: Vec<_> = (0..n).collect();
+                h.push(c as u8, c, &past, rename(c, &format!("Plans {n}")));
+                let other = (c + 1) % 10;
+                h.push(other as u8, other, &past, rename(c, &format!("Trips {n}")));
+            }
+            _ if n % 100 == 25 => h.all(0, 0, device(1_000 + n as u64)),
+            _ if n % 100 == 75 => h.all(
+                0,
+                0,
+                StoreChange::RemoveDevice {
+                    device: DeviceId(1_000 + n as u64 - 50),
+                },
+            ),
+            _ if n % 80 == 40 => h.all(0, 0, join(0, 12)),
+            _ if n % 80 == 70 => h.all(0, 0, leave(0, 12)),
+            _ => h.all(c as u8, c, rename(c, &format!("Circle {c}, edit {n}"))),
+        }
+    }
+    h
+}
+
+#[tokio::test]
+#[ignore = "release timing, run by next/scripts/check.sh"]
+async fn replay_cost() {
+    let h = realistic_history();
+    let start = Instant::now();
+    let result = replay(&h.entries);
+    let elapsed = start.elapsed();
+    println!("2,000 entries: one full replay {elapsed:?}");
+    let temporary = tempfile::tempdir().unwrap();
+    let layout = StoreLayout::new(temporary.path().to_owned());
+    let directory = layout
+        .create_store_dir(
+            StoreId(uuid::Uuid::from_u128(1)),
+            "Replay cost",
+            &SequentialIds::new(),
+        )
+        .unwrap();
+    let database = DatabaseBuilder::new(directory)
+        .synced_tables(vec![])
+        .migrations(vec![])
+        .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
+        .open()
+        .await
+        .unwrap();
+    let mut applied = StoreLog::default();
+    let started = Instant::now();
+    let mut last_replay = std::time::Duration::ZERO;
+    let mut last_apply = std::time::Duration::ZERO;
+    for entry in &h.entries {
+        let start = Instant::now();
+        let (checked, replay) = crate::replay_entry(&applied, entry.clone());
+        last_replay = start.elapsed();
+        database
+            .apply_store_log(checked.clone(), replay.clone())
+            .await
+            .unwrap();
+        applied.entries.push(checked);
+        applied.replay = replay;
+        last_apply = start.elapsed();
+    }
+    println!("2,000 entries: sequential application including SQLite {:?}; last replay {last_replay:?}; last application {last_apply:?}", started.elapsed());
+    assert_eq!(applied.replay, result);
+    let mut expected = applied;
+    expected.entries.sort_by_key(|entry| entry.entry.timestamp);
+    assert_eq!(database.store_log().await.unwrap(), expected);
+    database.close().await.unwrap();
+    assert_eq!(h.entries.len(), 2_000);
+    assert_eq!(result.state.members.len(), 20);
+    assert_eq!(result.state.circles.len(), 13);
+    for m in 17..20 {
+        assert!(result.state.members[&member(m)].removed);
+        assert!(result.state.circles[&circle(u64::from(m))].deleted);
+    }
+    assert!(
+        result
+            .entries
+            .values()
+            .filter(|v| **v != EntryOutcome::Kept)
+            .count()
+            > 20
+    );
 }

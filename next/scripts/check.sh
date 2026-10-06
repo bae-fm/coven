@@ -104,5 +104,8 @@ if [ -f "$runner.exe" ]; then
 fi
 COVEN_STORELOG_LEAN="$runner" cargo test -p coven-sync --all-features lean_differential -- --ignored
 
+step "release store-log replay cost (2,000 entries)"
+cargo test -p coven-sync --release replay_cost -- --ignored --nocapture
+
 echo ""
 echo "✅ all checks passed"

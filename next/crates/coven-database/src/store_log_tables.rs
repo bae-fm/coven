@@ -20,7 +20,7 @@ use crate::{
     sqlite::DatabaseConnection,
     store_log::*,
     write_encoding::{audience, audience_text, counter, decoded},
-    DbError,
+    DbError, ReplayEntry, StoreLogCheck,
 };
 
 pub(crate) fn entry_id(row: &Row<'_>, start: usize) -> rusqlite::Result<EntryId> {
@@ -43,6 +43,21 @@ fn circle(text: String) -> rusqlite::Result<CircleId> {
     }
 }
 
+pub(crate) fn outcome(row: &Row<'_>, start: usize) -> rusqlite::Result<EntryOutcome> {
+    match row.get::<_, String>(start)?.as_str() {
+        "kept" => Ok(EntryOutcome::Kept),
+        "beaten" => Ok(EntryOutcome::Dropped(DropReason::BeatenBy(entry_id(
+            row,
+            start + 1,
+        )?))),
+        "target" => Ok(EntryOutcome::Dropped(DropReason::TargetGone)),
+        "admin" => Ok(EntryOutcome::Dropped(DropReason::NoAdminLeft)),
+        "authority" => Ok(EntryOutcome::Dropped(DropReason::NotAllowed)),
+        "keys" => Ok(EntryOutcome::Dropped(DropReason::WrongCircleKeys)),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
 pub(crate) fn deleted_circles(
     database: &DatabaseConnection,
 ) -> Result<BTreeSet<CircleId>, DbError> {
@@ -59,29 +74,24 @@ pub(crate) fn deleted_circles(
 pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
     let mut log = StoreLog::default();
     for (entry, outcome) in database.query(
-        "SELECT record,outcome,beaten_device,beaten_number FROM coven_store_log",
+        "SELECT record,outcome,beaten_device,beaten_number,author_view FROM coven_store_log",
         [],
         |row| {
             let Object::StoreLog(entry) = decoded(Object::decode(&row.get::<_, Vec<u8>>(0)?))?
             else {
                 return Err(rusqlite::Error::InvalidQuery);
             };
-            let outcome = match row.get::<_, String>(1)?.as_str() {
-                "kept" => EntryOutcome::Kept,
-                "beaten" => EntryOutcome::Dropped(DropReason::BeatenBy(entry_id(row, 2)?)),
-                "target" => EntryOutcome::Dropped(DropReason::TargetGone),
-                "admin" => EntryOutcome::Dropped(DropReason::NoAdminLeft),
-                "authority" => EntryOutcome::Dropped(DropReason::NotAllowed),
-                "keys" => EntryOutcome::Dropped(DropReason::WrongCircleKeys),
-                _ => return Err(rusqlite::Error::InvalidQuery),
-            };
-            Ok((entry, outcome))
+            let outcome = outcome(row, 1)?;
+            let check = StoreLogCheck::decode(&row.get::<_, Vec<u8>>(4)?).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(4, Type::Blob, Box::new(error))
+            })?;
+            Ok((ReplayEntry { entry, check }, outcome))
         },
     )? {
-        log.replay.entries.insert(entry.position, outcome);
+        log.replay.entries.insert(entry.entry.position, outcome);
         log.entries.push(entry);
     }
-    log.entries.sort_by_key(|entry| entry.timestamp);
+    log.entries.sort_by_key(|entry| entry.entry.timestamp);
     let state = &mut log.replay.state;
     state.members = database
         .query(
@@ -222,8 +232,13 @@ fn read_versions<N: FromSql>(
 pub(crate) fn replace(
     database: &DatabaseConnection,
     replay: &StoreLogReplay,
+    previous: &BTreeMap<EntryId, EntryOutcome>,
 ) -> Result<(), DbError> {
-    for (entry, outcome) in &replay.entries {
+    for (entry, outcome) in replay
+        .entries
+        .iter()
+        .filter(|(id, outcome)| previous.get(id) != Some(outcome))
+    {
         let (tag, beaten) = match outcome {
             EntryOutcome::Kept => ("kept", None),
             EntryOutcome::Dropped(reason) => match reason {

@@ -7,9 +7,15 @@ use std::{
 };
 
 use coven_crypto::MemberId;
-use coven_database::{EntryOutcome, StoreLogReplay, StoreLogState};
+use coven_database::{
+    CovenMigrationPolicy, DatabaseBuilder, EntryOutcome, StoreLog, StoreLogCheck, StoreLogReplay,
+    StoreLogState,
+};
 use coven_format::store_log::{CircleKeyId, MemberRole, StoreChange};
-use coven_foundation::id_source::{CircleId, DeviceId};
+use coven_foundation::{
+    files::{StoreDir, StoreLayout},
+    id_source::{CircleId, DeviceId, SequentialIds, StoreId},
+};
 use coven_merge::Audience;
 use serde_json::{json, Value};
 
@@ -17,6 +23,7 @@ use crate::{
     effects::tests::{raise, snapshot},
     replay,
     replay::tests::*,
+    replay_entry,
 };
 
 struct Generator(u64);
@@ -336,7 +343,115 @@ fn lean_differential() {
             index + 1,
             inputs[index]
         );
+        let mut incremental = StoreLog::default();
+        for entry in &history.entries {
+            let (checked, replay) = crate::replay_entry(&incremental, entry.clone());
+            incremental.entries.push(checked);
+            incremental.replay = replay;
+        }
+        assert_eq!(incremental.replay, result, "incremental seed {}", index + 1);
         let reversed: Vec<_> = history.entries.iter().rev().cloned().collect();
         assert_eq!(replay(&reversed), result, "seed {}", index + 1);
     }
+}
+
+async fn open(directory: StoreDir) -> coven_database::Database {
+    DatabaseBuilder::new(directory)
+        .synced_tables(vec![])
+        .migrations(vec![])
+        .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
+        .open()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn cached_author_views_survive_reopening_and_a_deletions_reversal() {
+    let mut h = gifts();
+    h.push(0, 0, &[0, 1, 2, 3, 4], leave(0, 1));
+    h.push(1, 1, &[0, 1, 2, 3, 4], delete(0));
+    let temporary = tempfile::tempdir().unwrap();
+    let layout = StoreLayout::new(temporary.path().to_owned());
+    let directory = layout
+        .create_store_dir(
+            StoreId(uuid::Uuid::from_u128(1)),
+            "Reversal",
+            &SequentialIds::new(),
+        )
+        .unwrap();
+    let mut log = StoreLog::default();
+    for i in [0, 1, 2, 3, 4, 6, 5] {
+        let database = open(directory.clone()).await;
+        assert_eq!(database.store_log().await.unwrap(), log);
+        let previous = log.entries.clone();
+        let (entry, result) = replay_entry(&log, h.entries[i].clone());
+        database
+            .apply_store_log(entry, result.clone())
+            .await
+            .unwrap();
+        log = database.store_log().await.unwrap();
+        assert_eq!(log.replay, result);
+        for old in previous {
+            assert!(
+                log.entries.contains(&old),
+                "an applied author view never changes"
+            );
+        }
+        if i == 6 {
+            assert!(log.replay.state.circles[&circle(0)].deleted);
+        }
+        database.close().await.unwrap();
+    }
+    assert_eq!(log.replay, replay(&h.entries));
+    assert!(!log.replay.state.circles[&circle(0)].deleted);
+}
+
+#[tokio::test]
+async fn every_author_view_check_is_durable_and_reused_after_reopening() {
+    let mut h = household(MemberRole::Admin, MemberRole::Member);
+    h.all(0, 0, make(0, "Shared"));
+    h.all(0, 0, join(0, 1));
+    h.all(1, 1, make(1, "Private"));
+    h.all(
+        0,
+        0,
+        StoreChange::RemoveDevice {
+            device: DeviceId(1),
+        },
+    );
+    h.all(0, 0, rename(1, "Outside admin"));
+    h.all(0, 0, remove(1, &[]));
+    h.all(0, 0, remove(1, &[0]));
+    let temporary = tempfile::tempdir().unwrap();
+    let layout = StoreLayout::new(temporary.path().to_owned());
+    let directory = layout
+        .create_store_dir(
+            StoreId(uuid::Uuid::from_u128(1)),
+            "Checks",
+            &SequentialIds::new(),
+        )
+        .unwrap();
+    let mut log = StoreLog::default();
+    for (index, entry) in h.entries.iter().enumerate() {
+        let database = open(directory.clone()).await;
+        assert_eq!(database.store_log().await.unwrap(), log);
+        let (checked, result) = replay_entry(&log, entry.clone());
+        assert_eq!(result, replay(&h.entries[..=index]));
+        database
+            .apply_store_log(checked.clone(), result.clone())
+            .await
+            .unwrap();
+        log.entries.push(checked);
+        log.entries.sort_by_key(|e| e.entry.timestamp);
+        log.replay = result;
+        assert_eq!(database.store_log().await.unwrap(), log);
+        database.close().await.unwrap();
+    }
+    assert_eq!(log.entries[8].check, StoreLogCheck::DeviceOwner(member(1)));
+    assert_eq!(log.entries[9].check, StoreLogCheck::NotAllowed);
+    assert_eq!(log.entries[10].check, StoreLogCheck::WrongCircleKeys);
+    assert_eq!(
+        log.entries[11].check,
+        StoreLogCheck::DeletedCircles([circle(1)].into())
+    );
 }

@@ -11,6 +11,9 @@ coven-format.workspace = true
 coven-database.workspace = true
 
 [dev-dependencies]
+coven-foundation = { workspace = true, features = ["test-utils"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tempfile.workspace = true
 uuid.workspace = true
 serde_json.workspace = true
 

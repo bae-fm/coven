@@ -3,18 +3,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use coven_crypto::{MemberId, SealingPublicKey};
-use coven_format::store_log::{MemberRole, SnapshotId, StoreLogEntry};
+use coven_format::store_log::{MemberRole, SnapshotId};
 use coven_format::{value::EntryId, Object};
 use coven_foundation::id_source::{CircleId, DeviceId, KeyId, StoreId};
 use coven_merge::Audience;
 
-use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError};
+use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError, ReplayEntry};
 
 /// Applied entries and their replay, read from one committed state (§9).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StoreLog {
-    /// Every applied, checked entry, in timestamp order, including dropped entries.
-    pub entries: Vec<StoreLogEntry>,
+    /// Every applied entry and its immutable author-view check, in timestamp order.
+    pub entries: Vec<ReplayEntry>,
     /// The result computed by sync for exactly these entries.
     pub replay: StoreLogReplay,
 }
@@ -131,10 +131,12 @@ pub enum DropReason {
 pub(crate) fn apply(
     database: &DatabaseConnection,
     schema: &WriteSchema,
-    entry: StoreLogEntry,
+    incoming: ReplayEntry,
     replay: StoreLogReplay,
     files: &crate::file_write::FileWrite<'_>,
 ) -> Result<(), DbError> {
+    let ReplayEntry { entry, check } = incoming;
+    let author_view = check.encode();
     let bytes = Object::StoreLog(entry.clone()).encode().map_err(|error| {
         DbError::InvalidStoreLogEntry {
             entry: entry.position,
@@ -142,39 +144,63 @@ pub(crate) fn apply(
         }
     })?;
     database.transaction(|database| {
-        let mut applied = BTreeSet::new();
-        for (position, record) in database.query(
-            "SELECT device,number,record FROM coven_store_log",
-            [],
-            |row| Ok((crate::store_log_tables::entry_id(row, 0)?, row.get::<_, Vec<u8>>(2)?)),
+        for (record, view) in database.query(
+            "SELECT record,author_view FROM coven_store_log WHERE device=?1 AND number=?2",
+            (
+                entry.position.device.0.to_be_bytes().as_slice(),
+                entry.position.number.to_be_bytes().as_slice(),
+            ),
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
         )? {
-            if position == entry.position && record != bytes {
-                return Err(DbError::StoreLogEntryChanged(position));
+            if record != bytes || view != author_view {
+                return Err(DbError::StoreLogEntryChanged(entry.position));
             }
-            applied.insert(position);
         }
+        let outcomes: BTreeMap<_, _> = database
+            .query(
+                "SELECT device,number,outcome,beaten_device,beaten_number FROM coven_store_log",
+                [],
+                |row| {
+                    Ok((
+                        crate::store_log_tables::entry_id(row, 0)?,
+                        crate::store_log_tables::outcome(row, 2)?,
+                    ))
+                },
+            )?
+            .into_iter()
+            .collect();
+        let mut applied: BTreeSet<_> = outcomes.keys().copied().collect();
         applied.insert(entry.position);
         if !applied.iter().eq(replay.entries.keys()) {
             return Err(DbError::StoreLogEntriesChanged);
         }
         database.internal_execute(
-            "INSERT INTO coven_store_log(device,number,record,outcome) VALUES(?1,?2,?3,'kept') ON CONFLICT(device,number) DO NOTHING",
-            (entry.position.device.0.to_be_bytes().as_slice(), entry.position.number.to_be_bytes().as_slice(), &bytes),
+            "INSERT INTO coven_store_log(device,number,record,author_view,outcome)
+             VALUES(?1,?2,?3,?4,'kept') ON CONFLICT(device,number) DO NOTHING",
+            (
+                entry.position.device.0.to_be_bytes().as_slice(),
+                entry.position.number.to_be_bytes().as_slice(),
+                &bytes,
+                &author_view,
+            ),
         )?;
         let previous = crate::store_log_tables::deleted_circles(database)?;
-        crate::store_log_tables::replace(database, &replay)?;
+        crate::store_log_tables::replace(database, &replay, &outcomes)?;
         let deleted = crate::store_log_tables::deleted_circles(database)?;
         let mut touched = BTreeSet::new();
         for circle in previous.symmetric_difference(&deleted) {
             touched.extend(database.query(
                 "SELECT DISTINCT table_name,key,audience FROM coven_rows WHERE audience=?1",
-                [circle.to_string()], crate::row_queries::read_identity,
+                [circle.to_string()],
+                crate::row_queries::read_identity,
             )?);
         }
         let visible = crate::write_rows::AppView::after(database, schema);
         let store = crate::merge_store::MergeStore::new(database, &visible);
-        let affected = crate::write_apply::WriteApply::new(database, schema, &store, &visible, &visible, &deleted)
-            .apply(None, touched)?;
+        let affected = crate::write_apply::WriteApply::new(
+            database, schema, &store, &visible, &visible, &deleted,
+        )
+        .apply(None, touched)?;
         files.retain_rows(affected, &deleted)?;
         files.before_commit()?;
         Ok(())

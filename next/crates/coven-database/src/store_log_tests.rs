@@ -2,16 +2,16 @@ use super::*;
 use crate::{
     tests::TestStore,
     write::tests::{count, records, sql},
-    Database, RowIdentity, SyncedTable,
+    Database, RowIdentity, StoreLogCheck, SyncedTable,
 };
 use coven_format::{
-    store_log::{MemberPublicKeys, StoreChange},
+    store_log::{MemberPublicKeys, StoreChange, StoreLogEntry},
     value::EntryPositions,
 };
 use coven_merge::Timestamp;
 use std::time::Duration;
 
-fn keys(seed: u8) -> MemberPublicKeys {
+pub(crate) fn keys(seed: u8) -> MemberPublicKeys {
     let mut bytes = b"CVMK\x01".to_vec();
     bytes.extend([seed; 64]);
     let keys = coven_crypto::MemberKeys::from_secret_bytes(&bytes).unwrap();
@@ -34,6 +34,16 @@ fn entry(number: u64, change: StoreChange) -> StoreLogEntry {
         had_read: EntryPositions(vec![]),
         change,
     }
+}
+
+fn checked(entry: StoreLogEntry) -> ReplayEntry {
+    let check = match &entry.change {
+        StoreChange::RemoveMember { .. } | StoreChange::RemoveCircleMember { .. } => {
+            StoreLogCheck::DeletedCircles(BTreeSet::new())
+        }
+        _ => StoreLogCheck::Allowed,
+    };
+    ReplayEntry { entry, check }
 }
 
 // Supplied replay results are fixtures for the database boundary, not computed here.
@@ -146,11 +156,13 @@ pub(crate) async fn delete_circle(db: &Database, circle: CircleId) -> Result<(),
     let history = circle_history(circle);
     for (entry, replay) in &history[..4] {
         if !present.replay.entries.contains_key(&entry.position) {
-            db.apply_store_log(entry.clone(), replay.clone()).await?;
+            db.apply_store_log(checked(entry.clone()), replay.clone())
+                .await?;
         }
     }
     let (entry, replay) = history.last().unwrap();
-    db.apply_store_log(entry.clone(), replay.clone()).await
+    db.apply_store_log(checked(entry.clone()), replay.clone())
+        .await
 }
 
 const NOTE: &str = "00000000-0000-4000-8000-000000000001";
@@ -183,7 +195,7 @@ async fn deletion_and_reversal_commit_marks_and_visible_rows_together() {
     let circle = CircleId(uuid::Uuid::from_u128(2));
     let history = circle_history(circle);
     for (entry, replay) in &history[..4] {
-        db.apply_store_log(entry.clone(), replay.clone())
+        db.apply_store_log(checked(entry.clone()), replay.clone())
             .await
             .unwrap();
     }
@@ -214,7 +226,7 @@ async fn deletion_and_reversal_commit_marks_and_visible_rows_together() {
     let before = db.store_log().await.unwrap();
     db.inspect_writer(|sql| sql.batch("CREATE TRIGGER refuse BEFORE DELETE ON notes BEGIN SELECT RAISE(ABORT,'keep circle'); END").unwrap());
     assert!(db
-        .apply_store_log(delete.clone(), deleted.clone())
+        .apply_store_log(checked(delete.clone()), deleted.clone())
         .await
         .is_err());
     assert_eq!(db.store_log().await.unwrap(), before);
@@ -224,7 +236,7 @@ async fn deletion_and_reversal_commit_marks_and_visible_rows_together() {
     assert!(!rows.is_marked_for_rerun());
     assert!(!losses.is_marked_for_rerun());
     db.inspect_writer(|sql| sql.batch("DROP TRIGGER refuse").unwrap());
-    db.apply_store_log(delete.clone(), deleted.clone())
+    db.apply_store_log(checked(delete.clone()), deleted.clone())
         .await
         .unwrap();
     assert_eq!(next(&mut rows).await, (0, 0));
@@ -253,7 +265,7 @@ async fn deletion_and_reversal_commit_marks_and_visible_rows_together() {
     let before = db.store_log().await.unwrap();
     db.inspect_writer(|sql| sql.batch("CREATE TRIGGER refuse BEFORE INSERT ON notes BEGIN SELECT RAISE(ABORT,'refuse restoration'); END").unwrap());
     assert!(db
-        .apply_store_log(remove.clone(), restored.clone())
+        .apply_store_log(checked(remove.clone()), restored.clone())
         .await
         .is_err());
     assert_eq!(db.store_log().await.unwrap(), before);
@@ -261,7 +273,7 @@ async fn deletion_and_reversal_commit_marks_and_visible_rows_together() {
     assert_eq!(count(&db, "notes"), 0);
     assert!(!rows.is_marked_for_rerun());
     db.inspect_writer(|sql| sql.batch("DROP TRIGGER refuse").unwrap());
-    db.apply_store_log(remove.clone(), restored.clone())
+    db.apply_store_log(checked(remove.clone()), restored.clone())
         .await
         .unwrap();
     assert_eq!(next(&mut rows).await, (1, 1));
@@ -270,8 +282,8 @@ async fn deletion_and_reversal_commit_marks_and_visible_rows_together() {
     assert_eq!(records(&db).len(), 1, "recomputation creates no app write");
     let committed = db.store_log().await.unwrap();
     assert_eq!(committed.replay, restored);
-    assert_eq!(committed.entries[4], remove);
-    assert_eq!(committed.entries[5], delete);
+    assert_eq!(committed.entries[4], checked(remove));
+    assert_eq!(committed.entries[5], checked(delete));
     db.close().await.unwrap();
     let db = open(&store).await;
     assert_eq!(db.store_log().await.unwrap(), committed);
@@ -304,7 +316,7 @@ async fn circle_deletion_commits_file_removal_with_the_entry_and_rolls_both_back
         .unwrap();
     let history = circle_history(circle);
     for (entry, replay) in &history[..4] {
-        db.apply_store_log(entry.clone(), replay.clone())
+        db.apply_store_log(checked(entry.clone()), replay.clone())
             .await
             .unwrap();
     }
@@ -329,7 +341,7 @@ async fn circle_deletion_commits_file_removal_with_the_entry_and_rolls_both_back
     let (entry, replay) = history[4].clone();
     db.inspect_writer(|sql| sql.batch("CREATE TRIGGER refuse_file AFTER DELETE ON coven_device_files BEGIN SELECT RAISE(ABORT,'keep file'); END").unwrap());
     assert!(db
-        .apply_store_log(entry.clone(), replay.clone())
+        .apply_store_log(checked(entry.clone()), replay.clone())
         .await
         .is_err());
     assert_eq!(db.store_log().await.unwrap(), before);
@@ -338,7 +350,9 @@ async fn circle_deletion_commits_file_removal_with_the_entry_and_rolls_both_back
     assert_eq!(owned_paths(&store), paths);
     assert_eq!(std::fs::read(&paths[0]).unwrap(), b"original");
     db.inspect_writer(|sql| sql.batch("DROP TRIGGER refuse_file").unwrap());
-    db.apply_store_log(entry, replay.clone()).await.unwrap();
+    db.apply_store_log(checked(entry), replay.clone())
+        .await
+        .unwrap();
     assert_eq!(db.store_log().await.unwrap().replay, replay);
     assert_eq!(count(&db, "files"), 0);
     assert_eq!(count(&db, "coven_device_files"), 0);
@@ -354,7 +368,7 @@ async fn a_failure_halfway_through_replacing_state_rolls_back_the_entry_too() {
     let circle = CircleId(uuid::Uuid::from_u128(2));
     let history = circle_history(circle);
     for (entry, replay) in &history[..2] {
-        db.apply_store_log(entry.clone(), replay.clone())
+        db.apply_store_log(checked(entry.clone()), replay.clone())
             .await
             .unwrap();
     }
@@ -362,15 +376,17 @@ async fn a_failure_halfway_through_replacing_state_rolls_back_the_entry_too() {
     db.inspect_writer(|sql| sql.batch("CREATE TRIGGER coven_refuse BEFORE INSERT ON coven_circles BEGIN SELECT RAISE(ABORT,'state failed'); END").unwrap());
     let (entry, replay) = history[2].clone();
     assert!(db
-        .apply_store_log(entry.clone(), replay.clone())
+        .apply_store_log(checked(entry.clone()), replay.clone())
         .await
         .is_err());
     assert_eq!(db.store_log().await.unwrap(), before);
     db.inspect_writer(|sql| sql.batch("DROP TRIGGER coven_refuse").unwrap());
-    db.apply_store_log(entry.clone(), replay.clone())
+    db.apply_store_log(checked(entry.clone()), replay.clone())
         .await
         .unwrap();
-    db.apply_store_log(entry, replay.clone()).await.unwrap();
+    db.apply_store_log(checked(entry), replay.clone())
+        .await
+        .unwrap();
     assert_eq!(db.store_log().await.unwrap().replay, replay);
     db.close().await.unwrap();
 }
@@ -381,24 +397,32 @@ async fn stale_results_and_changed_entry_bytes_cannot_replace_the_applied_set() 
     let db = open(&store).await;
     let history = circle_history(CircleId(uuid::Uuid::from_u128(2)));
     let (first, initial) = &history[0];
-    db.apply_store_log(first.clone(), initial.clone())
+    db.apply_store_log(checked(first.clone()), initial.clone())
         .await
         .unwrap();
     let mut changed = first.clone();
     changed.timestamp = Timestamp::new(2, 0, changed.position.device).unwrap();
     assert!(
-        matches!(db.apply_store_log(changed, initial.clone()).await, Err(DbError::StoreLogEntryChanged(id)) if id==first.position)
+        matches!(db.apply_store_log(checked(changed), initial.clone()).await, Err(DbError::StoreLogEntryChanged(id)) if id==first.position)
     );
+    let mut changed_view = checked(first.clone());
+    changed_view.check = StoreLogCheck::NotAllowed;
+    assert!(matches!(
+        db.apply_store_log(changed_view, initial.clone()).await,
+        Err(DbError::StoreLogEntryChanged(id)) if id == first.position
+    ));
     let (second, next) = &history[1];
     assert!(matches!(
-        db.apply_store_log(second.clone(), initial.clone()).await,
+        db.apply_store_log(checked(second.clone()), initial.clone())
+            .await,
         Err(DbError::StoreLogEntriesChanged)
     ));
-    db.apply_store_log(second.clone(), next.clone())
+    db.apply_store_log(checked(second.clone()), next.clone())
         .await
         .unwrap();
     assert!(matches!(
-        db.apply_store_log(first.clone(), initial.clone()).await,
+        db.apply_store_log(checked(first.clone()), initial.clone())
+            .await,
         Err(DbError::StoreLogEntriesChanged)
     ));
     assert_eq!(db.store_log().await.unwrap().replay, *next);
@@ -431,7 +455,7 @@ async fn removed_identities_keys_versions_resets_and_every_drop_reason_round_tri
         DropReason::NoAdminLeft,
         DropReason::NotAllowed,
         DropReason::WrongCircleKeys,
-        DropReason::BeatenBy(expected.entries[0].position),
+        DropReason::BeatenBy(expected.entries[0].entry.position),
     ]
     .into_iter()
     .enumerate()
@@ -446,8 +470,10 @@ async fn removed_identities_keys_versions_resets_and_every_drop_reason_round_tri
         replay
             .entries
             .insert(e.position, EntryOutcome::Dropped(reason));
-        db.apply_store_log(e.clone(), replay.clone()).await.unwrap();
-        expected.entries.push(e);
+        db.apply_store_log(checked(e.clone()), replay.clone())
+            .await
+            .unwrap();
+        expected.entries.push(checked(e));
     }
     let snapshot = SnapshotId {
         device: DeviceId(u64::MAX),
@@ -470,10 +496,10 @@ async fn removed_identities_keys_versions_resets_and_every_drop_reason_round_tri
         },
     );
     replay.entries.insert(schema.position, EntryOutcome::Kept);
-    db.apply_store_log(schema.clone(), replay.clone())
+    db.apply_store_log(checked(schema.clone()), replay.clone())
         .await
         .unwrap();
-    expected.entries.push(schema);
+    expected.entries.push(checked(schema));
     let format = entry(
         11,
         StoreChange::RaiseFormat {
@@ -490,10 +516,10 @@ async fn removed_identities_keys_versions_resets_and_every_drop_reason_round_tri
         },
     );
     replay.entries.insert(format.position, EntryOutcome::Kept);
-    db.apply_store_log(format.clone(), replay.clone())
+    db.apply_store_log(checked(format.clone()), replay.clone())
         .await
         .unwrap();
-    expected.entries.push(format);
+    expected.entries.push(checked(format));
     for (index, audience) in [Audience::Store, Audience::Circle(circle)]
         .into_iter()
         .enumerate()
@@ -511,12 +537,12 @@ async fn removed_identities_keys_versions_resets_and_every_drop_reason_round_tri
         );
         replay.state.resets.insert(audience, snapshot);
         replay.entries.insert(reset.position, EntryOutcome::Kept);
-        db.apply_store_log(reset.clone(), replay.clone())
+        db.apply_store_log(checked(reset.clone()), replay.clone())
             .await
             .unwrap();
-        expected.entries.push(reset);
+        expected.entries.push(checked(reset));
     }
-    expected.entries.sort_by_key(|e| e.timestamp);
+    expected.entries.sort_by_key(|e| e.entry.timestamp);
     expected.replay = replay;
     assert_eq!(db.store_log().await.unwrap(), expected);
     db.close().await.unwrap();
@@ -531,7 +557,7 @@ async fn entries_and_result_are_read_from_one_snapshot_during_an_apply() {
     let db = open(&store).await;
     let history = circle_history(CircleId(uuid::Uuid::from_u128(2)));
     let (first, initial) = history[0].clone();
-    db.apply_store_log(first, initial).await.unwrap();
+    db.apply_store_log(checked(first), initial).await.unwrap();
     let (ready, wait_ready) = std::sync::mpsc::channel();
     let (resume, wait_resume) = std::sync::mpsc::channel();
     let reader = db.clone();
@@ -549,7 +575,9 @@ async fn entries_and_result_are_read_from_one_snapshot_during_an_apply() {
     });
     wait_ready.recv_timeout(Duration::from_secs(5)).unwrap();
     let (second, next) = history[1].clone();
-    db.apply_store_log(second, next.clone()).await.unwrap();
+    db.apply_store_log(checked(second), next.clone())
+        .await
+        .unwrap();
     resume.send(()).unwrap();
     assert_eq!(read.await.unwrap().entries.len(), 1);
     assert_eq!(db.store_log().await.unwrap().replay, next);
@@ -563,7 +591,7 @@ async fn audience_versions_round_trip_and_a_failed_raise_keeps_every_audience() 
     let gifts = CircleId(uuid::Uuid::from_u128(2));
     let notes = CircleId(uuid::Uuid::from_u128(3));
     for (entry, replay) in &circle_history(gifts)[..4] {
-        db.apply_store_log(entry.clone(), replay.clone())
+        db.apply_store_log(checked(entry.clone()), replay.clone())
             .await
             .unwrap();
     }
@@ -586,7 +614,9 @@ async fn audience_versions_round_trip_and_a_failed_raise_keeps_every_audience() 
         },
     );
     replay.entries.insert(create.position, EntryOutcome::Kept);
-    db.apply_store_log(create, replay.clone()).await.unwrap();
+    db.apply_store_log(checked(create), replay.clone())
+        .await
+        .unwrap();
     let mut number = 6;
     for (audience, version) in [
         (Audience::Store, 8),
@@ -615,7 +645,9 @@ async fn audience_versions_round_trip_and_a_failed_raise_keeps_every_audience() 
             },
         );
         replay.entries.insert(schema.position, EntryOutcome::Kept);
-        db.apply_store_log(schema, replay.clone()).await.unwrap();
+        db.apply_store_log(checked(schema), replay.clone())
+            .await
+            .unwrap();
         let format = entry(
             number,
             StoreChange::RaiseFormat {
@@ -633,7 +665,9 @@ async fn audience_versions_round_trip_and_a_failed_raise_keeps_every_audience() 
             },
         );
         replay.entries.insert(format.position, EntryOutcome::Kept);
-        db.apply_store_log(format, replay.clone()).await.unwrap();
+        db.apply_store_log(checked(format), replay.clone())
+            .await
+            .unwrap();
         assert_eq!(db.store_log().await.unwrap().replay, replay);
     }
     let before = db.store_log().await.unwrap();
@@ -660,12 +694,14 @@ async fn audience_versions_round_trip_and_a_failed_raise_keeps_every_audience() 
     replay.entries.insert(raised.position, EntryOutcome::Kept);
     db.inspect_writer(|sql| sql.batch("CREATE TRIGGER coven_refuse BEFORE INSERT ON coven_versions WHEN NEW.version=13 BEGIN SELECT RAISE(ABORT,'refuse circle raise'); END").unwrap());
     assert!(db
-        .apply_store_log(raised.clone(), replay.clone())
+        .apply_store_log(checked(raised.clone()), replay.clone())
         .await
         .is_err());
     assert_eq!(db.store_log().await.unwrap(), before);
     db.inspect_writer(|sql| sql.batch("DROP TRIGGER coven_refuse").unwrap());
-    db.apply_store_log(raised, replay.clone()).await.unwrap();
+    db.apply_store_log(checked(raised), replay.clone())
+        .await
+        .unwrap();
     assert_eq!(db.store_log().await.unwrap().replay, replay);
     db.close().await.unwrap();
     let db = open(&store).await;
@@ -678,7 +714,7 @@ async fn store_facts_have_one_row_and_versions_and_resets_require_snapshots() {
     let store = TestStore::new();
     let db = open(&store).await;
     let (entry, replay) = circle_history(CircleId(uuid::Uuid::from_u128(2)))[0].clone();
-    db.apply_store_log(entry, replay).await.unwrap();
+    db.apply_store_log(checked(entry), replay).await.unwrap();
     let before = db.store_log().await.unwrap();
     db.inspect_writer(|sql| {
         assert!(

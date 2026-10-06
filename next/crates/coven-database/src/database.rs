@@ -454,13 +454,13 @@ impl Database {
         )
     }
 
-    /// Commit one checked entry and sync's complete replay result atomically (§9).
+    /// Commit one entry, its immutable author-view check, and sync's replay atomically (§9).
     /// The database stores this result without replaying. Circle deletions and
     /// reversals recompute row visibility in the same transaction.
     /// A result for a stale or different applied-entry set is refused.
     pub async fn apply_store_log(
         &self,
-        entry: coven_format::store_log::StoreLogEntry,
+        entry: crate::ReplayEntry,
         replay: crate::StoreLogReplay,
     ) -> Result<(), DbError> {
         let database = self.clone();

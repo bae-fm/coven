@@ -354,3 +354,12 @@
   and circles. The comparison includes each audience's selected versions and
   snapshots; generated histories also cover different versions of one audience,
   equal versions of different audiences, and circle deletions against raises.
+- Rust retains each applied entry's author-view check, observed device owner,
+  and derived circle deletions with its immutable bytes. The recorded past is
+  closed before application and never changes, so reusing these facts is the
+  same check as rebuilding that view. The complete received set still settles
+  with fresh dropped marks on every arrival; a previous result is reused as
+  the new entry's author view only when that entry has read the entire set.
+  The differential test compares both batch and incremental Rust replay with
+  Lean, and the Rust examples compare every causal arrival order through both
+  paths. This optimization is not a separate Lean theorem.

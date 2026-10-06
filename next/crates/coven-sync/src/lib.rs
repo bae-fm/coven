@@ -4,7 +4,7 @@ mod conflicts;
 mod effects;
 mod replay;
 
-pub use replay::replay;
+pub use replay::{replay, replay_entry};
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]

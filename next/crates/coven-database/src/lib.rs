@@ -46,6 +46,7 @@ mod sql;
 mod sql_value;
 mod sqlite;
 mod store_log;
+mod store_log_check;
 mod store_log_tables;
 mod user_file;
 mod write;
@@ -84,6 +85,7 @@ pub use store_log::{
     DropReason, EntryOutcome, StoreCircle, StoreDevice, StoreIdentity, StoreLog, StoreLogReplay,
     StoreLogState, StoreMember, StoreVersion,
 };
+pub use store_log_check::{ReplayEntry, StoreLogCheck};
 pub use user_file::{prepare_user_file, PreparedUserFile, UserFile};
 pub use write::SqlContext;
 pub use write_batch::{FileSource, WriteBatch};

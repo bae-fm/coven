@@ -399,8 +399,8 @@ pub enum DbError {
     /// Replaying a stale or different set cannot replace the committed result.
     #[error("store-log replay must cover exactly the applied entries and the incoming entry")]
     StoreLogEntriesChanged,
-    /// An applied entry's immutable bytes differ from those supplied again.
-    #[error("store-log entry {0:?} has different bytes")]
+    /// An applied entry's immutable bytes or author-view check differ on repetition.
+    #[error("store-log entry {0:?} has different bytes or author-view check")]
     StoreLogEntryChanged(crate::EntryId),
     /// Closing failed for these connections, after every one was tried (§20.1).
     #[error("closing database connections failed: {failures:?}")]

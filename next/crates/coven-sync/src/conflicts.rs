@@ -1,12 +1,12 @@
 //! Appendix C's conflict predicates and total preference order.
 
 use coven_crypto::MemberId;
-use coven_database::StoreLogState;
+use coven_database::StoreLogCheck;
 use coven_format::store_log::{MemberRole, StoreChange, StoreLogEntry};
 use coven_foundation::id_source::{CircleId, DeviceId};
 use coven_merge::Audience;
 
-use crate::{effects, replay::had_read};
+use crate::replay::had_read;
 
 fn priority(change: &StoreChange) -> u8 {
     use StoreChange::*;
@@ -31,7 +31,7 @@ pub(crate) fn before(a: &StoreLogEntry, b: &StoreLogEntry) -> bool {
     (priority(&a.change), a.timestamp) < (priority(&b.change), b.timestamp)
 }
 
-fn member_target<'a>(entry: &'a StoreLogEntry, view: &'a StoreLogState) -> Option<&'a MemberId> {
+fn member_target<'a>(entry: &'a StoreLogEntry, view: &'a StoreLogCheck) -> Option<&'a MemberId> {
     use StoreChange::*;
     match &entry.change {
         AddMember { keys, .. } => Some(&keys.signing),
@@ -40,7 +40,10 @@ fn member_target<'a>(entry: &'a StoreLogEntry, view: &'a StoreLogState) -> Optio
         | AddCircleMember { member, .. }
         | RemoveCircleMember { member, .. } => Some(member),
         AddDevice { .. } => Some(&entry.author),
-        RemoveDevice { device } => effects::device(view, *device).map(|device| &device.member),
+        RemoveDevice { .. } => match view {
+            StoreLogCheck::DeviceOwner(owner) => Some(owner),
+            _ => unreachable!("authorized device removal has an observed owner"),
+        },
         _ => None,
     }
 }
@@ -81,9 +84,9 @@ fn same_target<T: PartialEq>(a: Option<T>, b: Option<T>) -> bool {
 // already-in-place rule keeps repeated additions without replacing their data.
 fn same_meaning(
     a: &StoreLogEntry,
-    va: &StoreLogState,
+    va: &StoreLogCheck,
     b: &StoreLogEntry,
-    vb: &StoreLogState,
+    vb: &StoreLogCheck,
 ) -> bool {
     use StoreChange::*;
     match (&a.change, &b.change) {
@@ -183,18 +186,14 @@ fn replaces_key(change: &StoreChange, circle: CircleId) -> bool {
     }
 }
 
-fn deletes_circle(view: &StoreLogState, change: &StoreChange, circle: CircleId) -> bool {
+fn deletes_circle(view: &StoreLogCheck, change: &StoreChange, circle: CircleId) -> bool {
     use StoreChange::*;
-    let alone = |member| {
-        effects::circle(view, circle)
-            .is_some_and(|c| c.members.len() == 1 && c.members.contains(member))
-    };
     match change {
         DeleteCircle { circle: id } => *id == circle,
-        RemoveMember { member, .. } => alone(member),
-        RemoveCircleMember {
-            circle: id, member, ..
-        } => *id == circle && alone(member),
+        RemoveMember { .. } | RemoveCircleMember { .. } => match view {
+            StoreLogCheck::DeletedCircles(circles) => circles.contains(&circle),
+            _ => unreachable!("authorized member removal records circle deletions"),
+        },
         _ => false,
     }
 }
@@ -207,7 +206,7 @@ fn circle_name(change: &StoreChange) -> Option<(CircleId, &str)> {
     }
 }
 
-fn special(va: &StoreLogState, a: &StoreChange, vb: &StoreLogState, b: &StoreChange) -> bool {
+fn special(va: &StoreLogCheck, a: &StoreChange, vb: &StoreLogCheck, b: &StoreChange) -> bool {
     use StoreChange::*;
     let keys_and_snapshots = match (a, b) {
         (AddMember { .. }, RemoveMember { .. }) | (RemoveMember { .. }, AddMember { .. }) => true,
@@ -255,9 +254,9 @@ fn special(va: &StoreLogState, a: &StoreChange, vb: &StoreLogState, b: &StoreCha
 
 pub(crate) fn conflict(
     a: &StoreLogEntry,
-    va: &StoreLogState,
+    va: &StoreLogCheck,
     b: &StoreLogEntry,
-    vb: &StoreLogState,
+    vb: &StoreLogCheck,
 ) -> bool {
     a.position != b.position
         && !had_read(a, b)
