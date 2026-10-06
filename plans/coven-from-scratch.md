@@ -2390,7 +2390,7 @@ pub enum SchemaError {
     LocalChildAction { table: String, column: String },
     /// SQLite chooses the primary key itself (§8.5).
     GeneratedPrimaryKey { table: String },
-    /// An independent key does not contain a UUID (§8.5).
+    /// An independent key has no text column to hold its UUID (§8.5).
     IndependentKeyNotUuid { table: String },
     /// Declared key columns do not match the table's primary key (§20.2).
     KeyColumns { table: String },
