@@ -1924,6 +1924,8 @@ Carol's tablet:
   - A user-provided file is written to a path the user picks, which must
     not already exist; an app-provided one goes into coven's own folder.
   - The uploaded copy is then deleted like any unused file.
+- A device copy that its row no longer names, because another device's
+  later write moved the file, is deleted once that write applies here.
 - A row with no file has NULL in its hash and where-columns, so both
   must allow NULL; the app never writes them, and coven fills them in the
   write that attaches a file.
@@ -2250,7 +2252,9 @@ Carol's tablet:
   longer needs ([§15](#15-snapshots), [§16.5](#165-uploads-and-deletion)).
 - Changing where a file is ([§16.1](#161-kinds-and-where-files-are)):
   1. upload it, or download it to the device keeping it;
-  2. write its row's where-column.
+  2. write its row's file columns, checking the row still has that file;
+     if it doesn't, the operation stops for good, and what step 1 made is
+     deleted like any unused copy.
 - Inviting a person ([§12.2](#122-adding-a-person)):
   1. share the storage with their account, or make their access key, and
      record the invite;
@@ -3275,7 +3279,10 @@ impl CovenHandle {
 impl WriteBatch {
     /// Hands coven an app-provided file's bytes, kept under `namespace` and
     /// `id`. `bytes` is a byte buffer, or a stream read once, so a large file
-    /// never has to fit in memory.
+    /// never has to fit in memory. The write must give a row of a table
+    /// declared under `namespace` this id in its id column; a staged file
+    /// no row names, or a row naming an id neither staged nor kept, fails
+    /// the write. Coven fills that row's size, hash and where-columns.
     pub fn put_file(
         &mut self,
         namespace: impl Into<String>,
@@ -4376,7 +4383,7 @@ impl CovenHandle {
     pub async fn evict_file(&self, file: &FileRef) -> Result<(), FileReadError>;
 
     /// The cache budget for one namespace, in bytes; each namespace evicts
-    /// on its own.
+    /// on its own. A namespace with no budget set evicts nothing.
     pub async fn set_cache_budget(&self, namespace: &str, max_bytes: u64) -> Result<(), DbError>;
     pub async fn get_cache_budget(&self, namespace: &str) -> Result<Option<u64>, DbError>;
 
