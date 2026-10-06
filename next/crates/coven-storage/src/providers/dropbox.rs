@@ -329,7 +329,7 @@ impl Storage for DropboxStorage {
             path: path.clone(),
             total,
             confirmed: 0,
-            part_size: 8 * 1024 * 1024,
+            part_size: crate::session::DROPBOX_PART_SIZE,
             state: SessionState::Dropbox {
                 id: SecretText::new(http::string(&value, "session_id")?.into()),
             },

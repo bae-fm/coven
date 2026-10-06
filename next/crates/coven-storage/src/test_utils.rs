@@ -92,7 +92,7 @@ impl MemoryStorage {
     fn session_id(&self, session: &UploadSession) -> Result<u64, StorageError> {
         session.check(&self.config)?;
         match session.state {
-            SessionState::Memory { id } => Ok(id),
+            SessionState::Memory { id, .. } => Ok(id),
             _ => Err(StorageError::SessionMismatch),
         }
     }
@@ -217,7 +217,10 @@ impl Storage for MemoryStorage {
             total,
             confirmed: 0,
             part_size: 4,
-            state: SessionState::Memory { id },
+            state: SessionState::Memory {
+                id,
+                complete: false,
+            },
         })
     }
     async fn resume_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
@@ -281,7 +284,7 @@ impl Storage for MemoryStorage {
             let bytes = pending.bytes.clone();
             state.objects.insert(session.path.clone(), bytes);
         }
-        session.state = SessionState::Complete;
+        session.state = SessionState::Memory { id, complete: true };
         Ok(())
     }
     async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError> {

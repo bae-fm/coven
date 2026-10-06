@@ -1,7 +1,11 @@
-use crate::{ObjectPath, StorageConfig, StorageError};
+use crate::{CloudProvider, ObjectPath, StorageConfig, StorageError};
 use coven_crypto::SecretBytes;
 use coven_crypto::SecretText;
 use serde::{Deserialize, Serialize};
+
+pub(crate) const GOOGLE_DRIVE_PART_SIZE: usize = 8 * 1024 * 1024;
+pub(crate) const DROPBOX_PART_SIZE: usize = 8 * 1024 * 1024;
+pub(crate) const ONEDRIVE_PART_SIZE: usize = 24 * 320 * 1024;
 
 /// A create-once provider upload recorded by the caller's operation (§16.5, §18).
 /// Posted positions cannot have recorded upload sessions.
@@ -15,7 +19,7 @@ use serde::{Deserialize, Serialize};
 /// bytes through `upload_part` again: they are compared to the published object,
 /// without uploading them. Only a complete match confirms publication.
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "RecordedUploadSession")]
 pub struct UploadSession {
     pub(crate) location: StorageConfig,
     pub(crate) path: ObjectPath,
@@ -25,7 +29,37 @@ pub struct UploadSession {
     pub(crate) state: SessionState,
 }
 
+// The wire boundary must construct an unchecked recording before validation.
+// Keeping this private makes both Serde and `decode` return validated sessions.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordedUploadSession {
+    location: StorageConfig,
+    path: ObjectPath,
+    total: u64,
+    confirmed: u64,
+    part_size: usize,
+    state: SessionState,
+}
+
+impl TryFrom<RecordedUploadSession> for UploadSession {
+    type Error = StorageError;
+    fn try_from(recorded: RecordedUploadSession) -> Result<Self, Self::Error> {
+        let session = Self {
+            location: recorded.location,
+            path: recorded.path,
+            total: recorded.total,
+            confirmed: recorded.confirmed,
+            part_size: recorded.part_size,
+            state: recorded.state,
+        };
+        session.validate()?;
+        Ok(session)
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) enum SessionState {
     S3 {
         id: SecretText,
@@ -50,10 +84,12 @@ pub(crate) enum SessionState {
     #[cfg(any(test, feature = "test-utils"))]
     Memory {
         id: u64,
+        complete: bool,
     },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct S3Part {
     pub(crate) number: i32,
     pub(crate) size: u64,
@@ -80,33 +116,106 @@ impl UploadSession {
     }
     /// Whether the destination object has been published.
     pub fn is_complete(&self) -> bool {
-        matches!(self.state, SessionState::Complete)
+        match self.state {
+            SessionState::Complete => true,
+            #[cfg(any(test, feature = "test-utils"))]
+            SessionState::Memory { complete, .. } => complete,
+            _ => false,
+        }
     }
     /// Encode the complete recorded state without printing upload credentials.
     pub fn encode(&self) -> Result<SecretBytes, StorageError> {
+        self.validate()?;
         crate::secret_json::encode(self)
     }
-    /// Read a recorded session; the provider checks its location before using it.
+    /// Read a recording only if its provider, destination, state and progress agree.
+    /// The adapter also checks that it names the adapter's location before any request.
     pub fn decode(bytes: &[u8]) -> Result<Self, StorageError> {
-        let value: Self = serde_json::from_slice(bytes)
+        let value: RecordedUploadSession = serde_json::from_slice(bytes)
             .map_err(|error| StorageError::Encoding(Box::new(error)))?;
-        value.location.validate()?;
-        if value.path.is_replaceable() {
-            return Err(StorageError::InvalidPath);
-        }
-        if value.part_size == 0
-            || value.total == 0
-            || value.confirmed > value.total
-            || (value.is_complete() && value.confirmed != value.total)
-        {
-            return Err(StorageError::InvalidPart);
-        }
-        Ok(value)
+        value.try_into()
     }
-    pub(crate) fn check(&self, location: &StorageConfig) -> Result<(), StorageError> {
+    fn validate(&self) -> Result<(), StorageError> {
+        self.location.validate()?;
         if self.path.is_replaceable() {
             return Err(StorageError::InvalidPath);
         }
+        if self.part_size == 0
+            || self.total == 0
+            || self.confirmed > self.total
+            || (self.is_complete() && self.confirmed != self.total)
+        {
+            return Err(StorageError::InvalidPart);
+        }
+        let provider = self.location.provider();
+        match &self.state {
+            SessionState::S3 { id, token, parts } if provider == CloudProvider::S3 => {
+                nonempty(id)?;
+                nonempty(token)?;
+                if parts.len() > 10_000 {
+                    return Err(StorageError::InvalidPart);
+                }
+                let mut confirmed = 0u64;
+                for (index, part) in parts.iter().enumerate() {
+                    confirmed = confirmed
+                        .checked_add(part.size)
+                        .ok_or(StorageError::InvalidPart)?;
+                    if part.number != index as i32 + 1
+                        || part.etag.is_empty()
+                        || part.size == 0
+                        || part.size > self.part_size as u64
+                        || (part.size != self.part_size as u64 && confirmed != self.total)
+                    {
+                        return Err(StorageError::InvalidPart);
+                    }
+                }
+                if confirmed != self.confirmed {
+                    return Err(StorageError::InvalidPart);
+                }
+            }
+            SessionState::GoogleDrive { url, file_id }
+                if provider == CloudProvider::GoogleDrive =>
+            {
+                transfer_url(url)?;
+                nonempty(file_id)?;
+            }
+            SessionState::Dropbox { id } if provider == CloudProvider::Dropbox => nonempty(id)?,
+            SessionState::OneDrive { url } if provider == CloudProvider::OneDrive => {
+                transfer_url(url)?
+            }
+            SessionState::CloudKit { id } if provider == CloudProvider::CloudKit => nonempty(id)?,
+            SessionState::VerifyPublished
+                if matches!(provider, CloudProvider::Dropbox | CloudProvider::OneDrive) =>
+            {
+                if self.confirmed == self.total {
+                    return Err(StorageError::InvalidPart);
+                }
+            }
+            SessionState::Complete => {}
+            #[cfg(any(test, feature = "test-utils"))]
+            SessionState::Memory { id, .. } => {
+                return if *id != 0 && self.part_size == 4 {
+                    Ok(())
+                } else {
+                    Err(StorageError::InvalidPart)
+                };
+            }
+            _ => return Err(StorageError::SessionMismatch),
+        }
+        let valid_size = match provider {
+            CloudProvider::S3 => self.part_size == s3_part_size(self.total)?,
+            CloudProvider::GoogleDrive => self.part_size == GOOGLE_DRIVE_PART_SIZE,
+            CloudProvider::Dropbox => self.part_size == DROPBOX_PART_SIZE,
+            CloudProvider::OneDrive => self.part_size == ONEDRIVE_PART_SIZE,
+            CloudProvider::CloudKit => true,
+        };
+        if !valid_size {
+            return Err(StorageError::InvalidPart);
+        }
+        Ok(())
+    }
+    pub(crate) fn check(&self, location: &StorageConfig) -> Result<(), StorageError> {
+        self.validate()?;
         if &self.location != location {
             return Err(StorageError::SessionMismatch);
         }
@@ -127,6 +236,33 @@ impl UploadSession {
         }
         Ok(end)
     }
+}
+
+pub(crate) fn s3_part_size(total: u64) -> Result<usize, StorageError> {
+    let unit = 8 * 1024 * 1024;
+    if total == 0 || total > 10_000 * 5 * 1024u64.pow(3) {
+        return Err(StorageError::InvalidPart);
+    }
+    usize::try_from(total.div_ceil(10_000).div_ceil(unit) * unit)
+        .map_err(|_| StorageError::InvalidPart)
+}
+fn nonempty(id: &SecretText) -> Result<(), StorageError> {
+    if id.as_str().is_empty() {
+        return Err(StorageError::SessionMismatch);
+    }
+    Ok(())
+}
+fn transfer_url(value: &SecretText) -> Result<(), StorageError> {
+    let url = url::Url::parse(value.as_str()).map_err(|_| StorageError::SessionMismatch)?;
+    if !matches!(url.scheme(), "https" | "http")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(StorageError::SessionMismatch);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

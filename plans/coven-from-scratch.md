@@ -3874,6 +3874,9 @@ while let Ok(values) = lost.next().await {
   `begin_upload` and recorded-session decoding refuse posted positions; their
   replacement sends the complete bytes in one request. Completion recovery can
   therefore compare immutable object ranges without mixing replacements.
+  - Decoding a recorded session validates its provider and location, state
+    variant, identifiers, part sizes and counts, and confirmed byte offset.
+    Adapters refuse a session naming another location before making a request.
 - Storage exposes `delete`, not a deletion-rights query. Sync chooses the
   deleting device by §15; Drive deletes an object the account owns and
   otherwise removes it from the store's folder. Provider refusals keep

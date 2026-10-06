@@ -414,7 +414,7 @@ impl Storage for OneDriveStorage {
             path: path.clone(),
             total,
             confirmed: 0,
-            part_size: 24 * 320 * 1024,
+            part_size: crate::session::ONEDRIVE_PART_SIZE,
             state: SessionState::OneDrive {
                 url: SecretText::new(url.into()),
             },

@@ -292,12 +292,7 @@ impl Storage for S3Storage {
         if path.is_replaceable() {
             return Err(StorageError::InvalidPath);
         }
-        let unit = 8 * 1024 * 1024;
-        if total == 0 || total > 10_000 * 5 * 1024u64.pow(3) {
-            return Err(StorageError::InvalidPart);
-        }
-        let part_size = usize::try_from(total.div_ceil(10_000).div_ceil(unit) * unit)
-            .map_err(|_| StorageError::InvalidPart)?;
+        let part_size = crate::session::s3_part_size(total)?;
         let token = SecretText::new(self.ids.new_id().to_string());
         let response = self
             .client

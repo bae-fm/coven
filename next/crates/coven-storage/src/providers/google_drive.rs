@@ -610,7 +610,7 @@ impl Storage for GoogleDriveStorage {
             path: path.clone(),
             total,
             confirmed: 0,
-            part_size: 8 * 1024 * 1024,
+            part_size: crate::session::GOOGLE_DRIVE_PART_SIZE,
             state: SessionState::GoogleDrive {
                 url: SecretText::new(url),
                 file_id: SecretText::new(file_id),
