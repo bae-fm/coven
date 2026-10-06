@@ -1041,13 +1041,25 @@ Carol's tablet:
 - Each device keeps, in coven's local tables:
   - `coven_store_log`: every entry it has applied, as downloaded and
     checked, and whether the replay kept or dropped it;
-  - the replay's result: `coven_members` (members, their roles and public
-    keys), `coven_devices` (devices, their members and names),
-    `coven_circles` (circles, their names and current keys),
+  - the replay's result: `coven_members` (every member a kept entry
+    added, their public keys and role, and whether they were removed),
+    `coven_devices` (every device a kept entry added, its member and name,
+    and whether it was removed), `coven_circles` (every circle a kept
+    entry made, its name and current key, and whether it was deleted),
     `coven_circle_members`, and `coven_store_state` (the current store
     key, the schema and format versions, and each audience's reset).
+  - Removed members and devices stay, since their writes that reached
+    storage still count, checked with their keys
+    ([§10](#10-device-identity)).
   - An entry and the replay it causes commit in one transaction, so the
     tables always hold the replay of exactly the entries kept.
+- What depends on the replay follows its latest result, both ways: an
+  arriving entry can drop one kept before.
+  - E.g. Ben deletes Gifts, and Carol's device applies it. Then Ana's
+    removal of Ben from Gifts arrives, made concurrently with an earlier
+    stamp: it beats the deletion, which is dropped. On Carol's device
+    Gifts is back, with Ana in it, and its rows return, since the rule
+    that took them out no longer holds ([§14.7](#147-deleting-a-circle)).
   - Entries waiting on ones they had read stay in storage until those
     arrive.
 - The member list is what you get by replaying the applied entries in
