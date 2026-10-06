@@ -23,7 +23,7 @@ pub(crate) fn convert(
     conversion: Option<&WriteConversion>,
 ) -> Result<(), DbError> {
     let waiting = database.query(
-        "SELECT device,number,record FROM coven_uploads WHERE sealed_bytes IS NULL ORDER BY device,number", [],
+        "SELECT device,number,record FROM coven_uploads WHERE NOT EXISTS(SELECT 1 FROM coven_upload_seals s WHERE s.device=coven_uploads.device AND s.number=coven_uploads.number) ORDER BY device,number", [],
         |row| Ok((WriteId { device: DeviceId(counter(row.get(0)?)), number: counter(row.get(1)?) }, row.get::<_,Vec<u8>>(2)?)),
     )?;
     for (id, bytes) in waiting {
@@ -56,7 +56,7 @@ pub(crate) fn convert(
         }
         let bytes = crate::write_commit::plaintext(database, WriteEncoder::new(&record)?)?;
         let updated = database.internal_execute(
-            "UPDATE coven_uploads SET record=?1 WHERE device=?2 AND number=?3 AND sealed_bytes IS NULL",
+            "UPDATE coven_uploads SET record=?1 WHERE device=?2 AND number=?3 AND NOT EXISTS(SELECT 1 FROM coven_upload_seals s WHERE s.device=coven_uploads.device AND s.number=coven_uploads.number)",
             params![bytes,id.device.0.to_be_bytes().as_slice(),id.number.to_be_bytes().as_slice()],
         )?;
         if updated != 1 {

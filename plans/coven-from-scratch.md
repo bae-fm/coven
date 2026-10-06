@@ -2922,8 +2922,8 @@ pub enum DbError {
     /// The wall clock reads past the last time a timestamp holds, or no
     /// later timestamp is left (§7.2).
     ClockOutOfRange,
-    /// A value or a row is larger than the format holds (§5), or a write's record
-    /// is larger than SQLite's largest value (§6).
+    /// A value or row exceeds the format (§5), or a write's plaintext or sealed
+    /// bytes cannot fit in a SQLite value and its queue row (§6).
     TooLarge { field: &'static str, actual: u64, maximum: u64 },
     /// A local trigger wrote a synced table or a shared trigger a local one (§8.7).
     TriggerTarget { trigger: String, table: String },

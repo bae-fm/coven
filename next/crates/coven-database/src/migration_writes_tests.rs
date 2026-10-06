@@ -23,6 +23,24 @@ fn queued_bytes(db: &Database) -> Vec<Vec<u8>> {
     })
 }
 
+async fn seal(db: &Database, byte: u8) -> Vec<u8> {
+    let write = records(db).remove(0);
+    let encoder = coven_format::write_stream::WriteEncoder::new(&write).unwrap();
+    let length = coven_format::sealed_write::sealed_length(
+        encoder.header_frame().len(),
+        &encoder
+            .header()
+            .parts
+            .iter()
+            .map(|part| part.plaintext_length)
+            .collect::<Vec<_>>(),
+    )
+    .unwrap() as usize;
+    db.keep_upload_sealed(write.header.position, vec![byte; length])
+        .await
+        .unwrap()
+}
+
 fn initial() -> Migration {
     Migration::sql(1, "notes", NOTES)
 }
@@ -128,10 +146,7 @@ async fn no_converter_marks_waiting_records_lost_without_changing_local_losses()
     sql(&db, "INSERT INTO notes VALUES('sealed','fixed','body')")
         .await
         .unwrap();
-    db.inspect_writer(|db| {
-        db.internal_execute("UPDATE coven_uploads SET sealed_bytes=x'010203'", [])
-            .unwrap()
-    });
+    let sealed = seal(&db, 1).await;
     sql(
         &db,
         "INSERT INTO notes VALUES('42','one','body'),('43','other','')",
@@ -173,12 +188,12 @@ async fn no_converter_marks_waiting_records_lost_without_changing_local_losses()
     db.inspect_writer(|db| {
         assert_eq!(
             db.query_row(
-                "SELECT sealed_bytes FROM coven_uploads WHERE number=?1",
+                "SELECT sealed_bytes FROM coven_upload_seals WHERE number=?1",
                 [1u64.to_be_bytes().as_slice()],
                 |r| r.get::<_, Vec<u8>>(0)
             )
             .unwrap(),
-            [1, 2, 3]
+            sealed
         )
     });
     db.close().await.unwrap();
@@ -293,10 +308,7 @@ async fn a_sealed_prefix_stays_fixed_while_its_later_update_converts() {
     sql(&db, "INSERT INTO notes VALUES('42','one','body')")
         .await
         .unwrap();
-    db.inspect_writer(|db| {
-        db.internal_execute("UPDATE coven_uploads SET sealed_bytes=x'ff00'", [])
-            .unwrap()
-    });
+    let sealed = seal(&db, 255).await;
     sql(&db, "UPDATE notes SET title='two'").await.unwrap();
     let original = records(&db);
     let bytes = queued_bytes(&db);
@@ -330,13 +342,10 @@ async fn a_sealed_prefix_stays_fixed_while_its_later_update_converts() {
     assert!(!current.cells().contains_key("title"));
     db.inspect_writer(|db| {
         assert_eq!(
-            db.query_row(
-                "SELECT sealed_bytes FROM coven_uploads WHERE sealed_bytes IS NOT NULL",
-                [],
-                |r| r.get::<_, Vec<u8>>(0)
-            )
-            .unwrap(),
-            [255, 0]
+            db.query_row("SELECT sealed_bytes FROM coven_upload_seals", [], |r| r
+                .get::<_, Vec<u8>>(0))
+                .unwrap(),
+            sealed
         )
     });
     db.close().await.unwrap();
@@ -435,10 +444,7 @@ async fn an_untouched_sealed_column_can_be_dropped() {
     sql(&db, "INSERT INTO notes VALUES('42','one','body')")
         .await
         .unwrap();
-    db.inspect_writer(|db| {
-        db.internal_execute("UPDATE coven_uploads SET sealed_bytes=x'01'", [])
-            .unwrap()
-    });
+    seal(&db, 1).await;
     sql(&db, "UPDATE notes SET title='two'").await.unwrap();
     db.close().await.unwrap();
     let db = store
@@ -603,10 +609,7 @@ async fn parent_renames_override_a_dropped_namesake_in_waiting_references() {
         .unwrap();
     sql(&db,"INSERT INTO a VALUES('p'); INSERT INTO b VALUES('p'); INSERT INTO children VALUES('c','p')").await.unwrap();
     // The old b's insert stays in a fixed upload. Only the child update converts.
-    db.inspect_writer(|db| {
-        db.internal_execute("UPDATE coven_uploads SET sealed_bytes=x'01'", [])
-            .unwrap()
-    });
+    seal(&db, 1).await;
     sql(&db, "UPDATE children SET parent=NULL").await.unwrap();
     sql(&db, "UPDATE children SET parent='p'").await.unwrap();
     db.close().await.unwrap();

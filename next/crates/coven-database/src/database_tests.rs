@@ -85,16 +85,7 @@ async fn read_connections_are_read_only_and_run_concurrently() {
         .unwrap();
     {
         let slot = database.inner.read().unwrap();
-        for reader in &slot.as_ref().unwrap().readers.readers {
-            let error = reader
-                .lock()
-                .unwrap()
-                .internal_execute("INSERT INTO notes VALUES ('x', 'y', '')", [])
-                .unwrap_err();
-            assert!(
-                matches!(error, DbError::Sqlite(rusqlite::Error::SqliteFailure(code, _)) if code.code == rusqlite::ErrorCode::ReadOnly)
-            );
-        }
+        slot.as_ref().unwrap().readers.assert_read_only();
     }
     let hold_reader = |database: Database| {
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
@@ -301,25 +292,11 @@ async fn opening_checks_integrity_once_for_all_its_connections() {
     {
         let slot = database.inner.read().unwrap();
         let inner = slot.as_ref().unwrap();
-        let checks = inner
-            .readers
-            .readers
-            .iter()
-            .map(|r| r.lock().unwrap().integrity_checks())
-            .sum::<usize>()
-            + inner.writer.lock().unwrap().integrity_checks();
+        let checks =
+            inner.readers.integrity_checks() + inner.writer.lock().unwrap().integrity_checks();
         assert_eq!(checks, 1);
         let slot = reader.inner.read().unwrap();
-        assert_eq!(
-            slot.as_ref()
-                .unwrap()
-                .readers
-                .readers
-                .iter()
-                .map(|r| r.lock().unwrap().integrity_checks())
-                .sum::<usize>(),
-            1
-        );
+        assert_eq!(slot.as_ref().unwrap().readers.integrity_checks(), 1);
     }
     reader.close().await.unwrap();
     database.close().await.unwrap();

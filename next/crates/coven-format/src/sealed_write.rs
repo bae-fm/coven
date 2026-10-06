@@ -7,6 +7,50 @@ use crate::wire::{Decoder, Encoder, Wire, MAX_ITEMS, MAX_OBJECT};
 use coven_crypto::{Signature, SEALED_OBJECT_CHUNK_OVERHEAD};
 use coven_foundation::id_source::KeyId;
 
+const PREFIX_LENGTH: usize = 23;
+
+/// The exact stored size, independent of key identities, nonces and signature
+/// contents. Header and part lengths come from the validated plaintext codec.
+pub fn sealed_length(header_length: usize, part_lengths: &[u64]) -> Result<u64, Error> {
+    validate_lengths(header_length, part_lengths)?;
+    let overhead = (4 + SEALED_OBJECT_CHUNK_OVERHEAD) as u64;
+    let mut length = PREFIX_LENGTH as u64
+        + 16 * part_lengths.len() as u64
+        + header_length as u64
+        + overhead
+        + 64;
+    for part in part_lengths {
+        length = part
+            .div_ceil(CHUNK_SIZE as u64)
+            .checked_mul(overhead)
+            .and_then(|n| n.checked_add(*part))
+            .and_then(|n| n.checked_add(length))
+            .ok_or(Error::Invalid {
+                field: "sealed write length",
+                rule: Rule::StreamLength,
+            })?;
+    }
+    Ok(length)
+}
+
+fn validate_lengths(header_length: usize, part_lengths: &[u64]) -> Result<(), Error> {
+    bound(header_length, MAX_OBJECT, "write header")?;
+    require(
+        header_length >= crate::FRAME_PREFIX_LEN,
+        "write header",
+        Rule::StreamLength,
+    )?;
+    bound(part_lengths.len(), MAX_ITEMS, "write parts")?;
+    for length in part_lengths {
+        require(
+            *length >= crate::FRAME_PREFIX_LEN as u64,
+            "write part length",
+            Rule::StreamLength,
+        )?;
+    }
+    Ok(())
+}
+
 /// Cleartext key identities, authenticated by the object's final signature.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WriteObjectPrefix {
@@ -33,7 +77,7 @@ impl WriteObjectPrefix {
         let count = bytes.get(19..23).ok_or(Error::Truncated)?;
         let count = u32::from_be_bytes(count.try_into().expect("four bytes")) as usize;
         bound(count, MAX_ITEMS, "write section keys")?;
-        Ok(23 + count * 16)
+        Ok(PREFIX_LENGTH + count * 16)
     }
 
     /// Decode exactly the complete prefix, refusing trailing bytes.
@@ -125,20 +169,7 @@ impl WriteObjectLayout {
         part_lengths: Vec<u64>,
     ) -> Result<Self, Error> {
         let header_length = header.len();
-        bound(header_length, MAX_OBJECT, "write header")?;
-        require(
-            header_length >= crate::FRAME_PREFIX_LEN,
-            "write header",
-            Rule::StreamLength,
-        )?;
-        bound(part_lengths.len(), MAX_ITEMS, "write parts")?;
-        for length in &part_lengths {
-            require(
-                *length >= crate::FRAME_PREFIX_LEN as u64,
-                "write part length",
-                Rule::StreamLength,
-            )?;
-        }
+        validate_lengths(header_length, &part_lengths)?;
         require(
             prefix.part_keys.len() == part_lengths.len(),
             "write section key count",

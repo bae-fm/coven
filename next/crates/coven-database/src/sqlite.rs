@@ -247,6 +247,22 @@ impl DatabaseConnection {
         Ok(length as usize)
     }
 
+    pub(crate) fn upload_value(
+        &self,
+        value: crate::upload::UploadValue,
+        rowid: i64,
+    ) -> Result<crate::UploadBytes<'_>, DbError> {
+        let _scope = self.authorization.internal();
+        let (table, column) = value.column();
+        Ok(crate::UploadBytes::new(self.connection.blob_open(
+            rusqlite::MAIN_DB,
+            table,
+            column,
+            rowid,
+            true,
+        )?))
+    }
+
     pub(crate) fn local_write<F, R, E>(
         &self,
         schema: &crate::write_schema::WriteSchema,

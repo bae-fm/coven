@@ -176,6 +176,32 @@ async fn queued_value_errors_preserve_full_width_lengths() {
 }
 
 #[tokio::test]
+async fn a_plaintext_that_fits_but_cannot_be_sealed_rolls_back_at_commit() {
+    let source = TestStore::new();
+    let source = source.schema(notes(), NOTES).await.unwrap();
+    const INSERT: &str = "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<100) INSERT INTO notes SELECT 'import-'||i,'Imported note','' FROM n";
+    sql(&source, INSERT).await.unwrap();
+    let record = records(&source).remove(0);
+    let plaintext = coven_format::write_stream::WriteEncoder::new(&record)
+        .unwrap()
+        .plaintext_length();
+    let target = TestStore::new();
+    let db = target.schema(notes(), NOTES).await.unwrap();
+    let old = db.inspect_writer(|db| db.set_value_limit(plaintext as i32 + 24));
+    let result = sql(&db, INSERT).await;
+    db.inspect_writer(|db| db.set_value_limit(old));
+    assert!(
+        matches!(result, Err(crate::DbError::TooLarge { .. })),
+        "{result:?}"
+    );
+    for table in ["notes", "coven_writes", "coven_uploads", "coven_positions"] {
+        assert_eq!(count(&db, table), 0, "{table}");
+    }
+    db.close().await.unwrap();
+    source.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn seventy_thousand_rows_commit_as_one_queued_write_and_decode_after_reopen() {
     use coven_format::write_stream::{decode_plaintext, WriteEncoder};
     use coven_merge::{Audience, Operation};
@@ -191,7 +217,7 @@ async fn seventy_thousand_rows_commit_as_one_queued_write_and_decode_after_reope
     let database = store.schema(notes(), NOTES).await.unwrap();
     let bytes = database.inspect_writer(|db| {
         db.query_row(
-            "SELECT record FROM coven_uploads WHERE sealed_bytes IS NULL",
+            "SELECT record FROM coven_uploads WHERE NOT EXISTS(SELECT 1 FROM coven_upload_seals)",
             [],
             |r| r.get::<_, Vec<u8>>(0),
         )

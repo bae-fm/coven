@@ -2,10 +2,13 @@
 //! the writer lock. Blocking calls keep that owner alive until they finish.
 
 use std::collections::BTreeSet;
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 #[path = "file_staging.rs"]
 mod file_staging;
+#[path = "read_pool.rs"]
+mod read_pool;
+use read_pool::ReadPool;
 
 use coven_foundation::clock::{ClockRef, SystemClock};
 use coven_foundation::files::{StoreDir, StoreLock};
@@ -400,6 +403,72 @@ impl Database {
                     Ok(result) => result,
                     Err(panic) => std::panic::resume_unwind(panic),
                 }
+            })
+            .await,
+        )
+    }
+
+    /// Read only the oldest waiting write, streaming plaintext parts or its
+    /// already fixed sealed bytes. The callback runs in a committed reader
+    /// transaction; its result is `None` when the queue is empty.
+    pub async fn read_oldest_upload<F, R, E>(
+        &self,
+        consume: F,
+    ) -> Result<Option<R>, crate::UploadReadError<E>>
+    where
+        F: FnOnce(crate::WaitingUpload<'_>) -> Result<R, E> + Send + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        let database = self.clone();
+        finish_blocking(
+            tokio::task::spawn_blocking(move || {
+                let slot = database.inner.read().expect("database lock poisoned");
+                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+                let reader = inner.readers.acquire_reader();
+                reader.with_reader(|reader| {
+                    reader.read_transaction(|| crate::upload::read(reader, consume))
+                })
+            })
+            .await,
+        )
+    }
+
+    /// Fix the oldest waiting write's first sealed attempt before sending it.
+    /// Repeating the call returns the kept bytes, ignoring the new candidate.
+    pub async fn keep_upload_sealed(
+        &self,
+        write: coven_merge::WriteId,
+        bytes: Vec<u8>,
+    ) -> Result<Vec<u8>, DbError> {
+        let database = self.clone();
+        finish_blocking(
+            tokio::task::spawn_blocking(move || {
+                let slot = database.inner.read().expect("database lock poisoned");
+                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+                let writer = inner
+                    .writer
+                    .lock()
+                    .expect("writer connection lock poisoned");
+                crate::upload::keep(&writer, write, bytes)
+            })
+            .await,
+        )
+    }
+
+    /// Report a successful upload and remove its plaintext and sealed bytes
+    /// together. A repeated report returns false; attempts must stay in order.
+    pub async fn upload_succeeded(&self, write: coven_merge::WriteId) -> Result<bool, DbError> {
+        let database = self.clone();
+        finish_blocking(
+            tokio::task::spawn_blocking(move || {
+                let slot = database.inner.read().expect("database lock poisoned");
+                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+                let writer = inner
+                    .writer
+                    .lock()
+                    .expect("writer connection lock poisoned");
+                crate::upload::succeeded(&writer, write)
             })
             .await,
         )
@@ -873,113 +942,6 @@ impl DatabaseReadHandle {
             })
             .await,
         )
-    }
-}
-
-struct ReadPool {
-    readers: Vec<Mutex<DatabaseConnection>>,
-    idle_readers: Mutex<Vec<usize>>,
-    reader_ready: Condvar,
-}
-
-impl ReadPool {
-    fn new(readers: Vec<Mutex<DatabaseConnection>>) -> Self {
-        Self {
-            idle_readers: Mutex::new((0..readers.len()).collect()),
-            readers,
-            reader_ready: Condvar::new(),
-        }
-    }
-
-    fn close(self) -> Vec<DbError> {
-        let mut failures = Vec::new();
-        for reader in self.readers {
-            if let Err(error) = reader
-                .into_inner()
-                .expect("reader connection lock poisoned")
-                .close()
-            {
-                failures.push(error);
-            }
-        }
-        failures
-    }
-
-    fn acquire_reader(&self) -> ReaderLease<'_> {
-        let mut idle = self.idle_readers.lock().expect("reader pool poisoned");
-        loop {
-            if let Some(index) = idle.pop() {
-                return ReaderLease {
-                    database: self,
-                    index,
-                };
-            }
-            idle = self.reader_ready.wait(idle).expect("reader pool poisoned");
-        }
-    }
-}
-
-// A call reserves one available reader while borrowing the database owner.
-// Dropping the reservation wakes a caller even when the call panics.
-struct ReaderLease<'a> {
-    database: &'a ReadPool,
-    index: usize,
-}
-
-impl ReaderLease<'_> {
-    fn local_file(
-        &self,
-        schema: &crate::write_schema::WriteSchema,
-        directory: &StoreDir,
-        device: DeviceId,
-        reference: &crate::FileRef,
-    ) -> Result<crate::LocalFileStream, crate::LocalFileError> {
-        let reader = self.database.readers[self.index]
-            .lock()
-            .expect("read connection lock poisoned");
-        reader
-            .read_snapshot(|sql| sql.open_local_file(schema, directory, device, reference))
-            .0
-    }
-
-    fn read_snapshot<F, R, E>(&self, read: F) -> (Result<R, E>, ReadSet)
-    where
-        F: FnOnce(SqlReadContext<'_>) -> Result<R, E>,
-        E: From<DbError>,
-    {
-        self.with_reader(|reader| reader.read_snapshot(read))
-    }
-
-    fn with_reader<R>(&self, read: impl FnOnce(&DatabaseConnection) -> R) -> R {
-        let reader = self.database.readers[self.index]
-            .lock()
-            .expect("read connection lock poisoned");
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read(&reader)));
-        // The read transaction rolls back while unwinding. Release the mutex
-        // before propagating the app panic so the pool can reuse this reader.
-        drop(reader);
-        match result {
-            Ok(result) => result,
-            Err(panic) => std::panic::resume_unwind(panic),
-        }
-    }
-
-    fn schema_version(&self) -> Result<u32, DbError> {
-        self.database.readers[self.index]
-            .lock()
-            .expect("read connection lock poisoned")
-            .schema_version()
-    }
-}
-
-impl Drop for ReaderLease<'_> {
-    fn drop(&mut self) {
-        self.database
-            .idle_readers
-            .lock()
-            .expect("reader pool poisoned")
-            .push(self.index);
-        self.database.reader_ready.notify_one();
     }
 }
 

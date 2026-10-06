@@ -71,6 +71,19 @@ fn object() -> Vec<Vec<u8>> {
     let signature = test_utils::member_keys().sign_object("devices/1/3", &hash.finish());
     pieces.push(layout.signature(&signature).unwrap().to_vec());
     layout.finish(&[]).unwrap();
+    assert_eq!(
+        sealed_length(
+            encoder.header_frame().len(),
+            &encoder
+                .header()
+                .parts
+                .iter()
+                .map(|p| p.plaintext_length)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap(),
+        pieces.iter().map(|piece| piece.len() as u64).sum::<u64>(),
+    );
     pieces
 }
 
@@ -274,6 +287,10 @@ fn migration_object_authenticates_a_header_followed_directly_by_its_signature() 
     let signature = test_utils::member_keys().sign_object("devices/1/3", &digest);
     let signature = layout.signature(&signature).unwrap();
     layout.finish(&[]).unwrap();
+    assert_eq!(
+        sealed_length(encoder.header_frame().len(), &[]).unwrap(),
+        (prefix.len() + chunk.len() + signature.len()) as u64,
+    );
     let opened = key(1)
         .derive()
         .open_object_chunk(
@@ -315,4 +332,12 @@ fn stored_kind_and_chunk_length_match_the_storage_format() {
         let length = u32::from_be_bytes(piece[..4].try_into().unwrap()) as usize;
         assert_eq!(piece.len(), length + 44);
     }
+}
+
+#[test]
+fn stored_length_refuses_invalid_boundaries_and_overflow_without_allocating() {
+    assert!(sealed_length(crate::FRAME_PREFIX_LEN - 1, &[]).is_err());
+    assert!(sealed_length(MAX_OBJECT + 1, &[]).is_err());
+    assert!(sealed_length(crate::FRAME_PREFIX_LEN, &[0]).is_err());
+    assert!(sealed_length(crate::FRAME_PREFIX_LEN, &[u64::MAX]).is_err());
 }

@@ -171,6 +171,11 @@ pub(crate) fn plaintext(
     encoder: WriteEncoder<'_>,
 ) -> Result<Vec<u8>, DbError> {
     let length = database.check_value_length("write plaintext", encoder.plaintext_length())?;
+    crate::upload::check_length(
+        database,
+        encoder.header_frame().len(),
+        &encoder.header().parts,
+    )?;
     let mut bytes = vec![0; length];
     encoded(encoder.encode_plaintext(&mut bytes))?;
     Ok(bytes)

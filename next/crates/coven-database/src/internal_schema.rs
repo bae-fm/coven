@@ -9,8 +9,8 @@
 //! Loss targets name their row directly: a write excluded by a schema change
 //! or reset need not have an accepted generation in `coven_rows`.
 //! An upload's `record` is one plaintext value: the write header frame followed
-//! by its audience parts' row-frame streams. Its `sealed_bytes` is NULL until
-//! its first attempt fixes its bytes.
+//! by its audience parts' row-frame streams. Its first attempt fixes
+//! `sealed_bytes` in a separate `coven_upload_seals` row, so both values fit.
 
 pub(crate) const VERSION: u32 = 1;
 
@@ -317,8 +317,16 @@ macro_rules! coven_tables {
                 device BLOB NOT NULL CHECK(length(device) = 8),
                 number BLOB NOT NULL CHECK(length(number) = 8 AND number > x'0000000000000000'),
                 record BLOB NOT NULL,
-                sealed_bytes BLOB,
                 PRIMARY KEY(device, number)
+            ) STRICT;
+        ");
+        $visit!(coven_upload_seals, "
+            CREATE TABLE coven_upload_seals (
+                device BLOB NOT NULL CHECK(length(device) = 8),
+                number BLOB NOT NULL CHECK(length(number) = 8),
+                sealed_bytes BLOB NOT NULL,
+                PRIMARY KEY(device, number),
+                FOREIGN KEY(device,number) REFERENCES coven_uploads(device,number) ON DELETE CASCADE
             ) STRICT;
         ");
         $visit!(coven_user_files, "
