@@ -327,7 +327,7 @@ fn repeated_additions_keep_both_identities() {
 }
 
 #[test]
-fn three_admins_remove_in_their_author_views_but_one_must_remain() {
+fn three_admins_removing_one_another_keep_only_the_earliest_removal() {
     let mut h = household(Admin, Admin);
     h.push(0, 0, &[0, 1, 2, 3, 4], remove(1, &[]));
     h.push(1, 1, &[0, 1, 2, 3, 4], remove(2, &[]));
@@ -338,12 +338,32 @@ fn three_admins_remove_in_their_author_views_but_one_must_remain() {
                 .members
                 .iter()
                 .filter_map(|(id, m)| (!m.removed).then_some(id.clone()))
-                .collect::<Vec<_>>(),
-            [member(0)]
+                .collect::<BTreeSet<_>>(),
+            [member(0), member(2)].into()
         );
-        assert_eq!(h.drops(r), [7]);
-        assert_eq!(r.state.store.as_ref().unwrap().key, key(102));
+        assert_eq!(h.drops(r), [6, 7]);
+        assert_eq!(h.reports(r, 1), [6]);
+        assert_eq!(h.reports(r, 2), [7]);
+        for index in [6, 7] {
+            assert_eq!(
+                r.entries[&h.entries[index].position],
+                EntryOutcome::Dropped(DropReason::BeatenBy(h.entries[5].position))
+            );
+        }
+        assert_eq!(r.state.store.as_ref().unwrap().key, key(101));
         assert_eq!(r.state.members[&member(1)].sealing, keys(1).sealing);
+    });
+}
+
+#[test]
+fn removed_author_keeps_authority_for_a_concurrent_role_change() {
+    let mut h = household(Admin, Admin);
+    h.push(0, 0, &[0, 1, 2, 3, 4], remove(1, &[]));
+    h.push(1, 1, &[0, 1, 2, 3, 4], role(2, Member));
+    h.every_order(|r| {
+        assert!(r.state.members[&member(1)].removed);
+        assert_eq!(r.state.members[&member(2)].role, Member);
+        assert!(h.drops(r).is_empty());
     });
 }
 
@@ -646,17 +666,19 @@ fn gifts_key_list_does_not_grow_as_concurrent_additions_arrive() {
 }
 
 #[test]
-fn two_removals_can_empty_gifts_without_conflicting_in_their_author_views() {
+fn circle_and_store_removals_conflict_when_both_replace_gifts_key() {
     let mut h = household(Admin, Member).prefix(3);
     h.all(0, 0, make(0, "Gifts"));
     h.all(0, 0, join(0, 1));
     h.push(0, 0, &[0, 1, 2, 3, 4], leave(0, 1));
     h.push(0, 4, &[0, 1, 2, 3, 4], remove(0, &[0]));
     h.every_order(|r| {
-        assert!(r.state.members[&member(0)].removed);
+        assert!(!r.state.members[&member(0)].removed);
         assert_eq!(r.state.members[&member(1)].role, Admin);
-        assert!(r.state.circles[&circle(0)].deleted);
-        assert!(h.drops(r).is_empty());
+        assert!(!r.state.circles[&circle(0)].deleted);
+        assert_eq!(r.state.circles[&circle(0)].members, [member(0)].into());
+        assert_eq!(r.state.circles[&circle(0)].key, key(20));
+        assert_eq!(h.drops(r), [6]);
     });
 }
 
@@ -742,7 +764,7 @@ fn a_new_arrival_reconsiders_entries_dropped_by_the_previous_replay() {
 }
 
 #[test]
-fn concurrent_removals_select_the_last_keys_and_retain_the_removed_devices() {
+fn concurrent_store_removals_keep_the_earlier_keys_and_only_its_removed_devices() {
     let mut h = household(Admin, Member);
     h.all(0, 0, add(3, Member));
     h.all(3, 3, device(3));
@@ -768,16 +790,29 @@ fn concurrent_removals_select_the_last_keys_and_retain_the_removed_devices() {
         );
     }
     h.every_order(|r| {
-        assert_eq!(r.state.store.as_ref().unwrap().key, key(0));
-        assert_eq!(r.state.circles[&circle(0)].key, key(0));
-        assert_eq!(r.state.circles[&circle(0)].members, [member(0)].into());
+        assert_eq!(r.state.store.as_ref().unwrap().key, key(u64::MAX));
+        assert_eq!(r.state.circles[&circle(0)].key, key(u64::MAX));
+        assert_eq!(
+            r.state.circles[&circle(0)].members,
+            [member(0), member(4)].into()
+        );
         for m in [3, 4] {
-            assert!(r.state.members[&member(m)].removed);
+            assert_eq!(r.state.members[&member(m)].removed, m == 3);
             let device = &r.state.devices[&DeviceId(u64::from(m))];
-            assert!(device.removed);
+            assert_eq!(device.removed, m == 3);
             assert_eq!(device.member, member(m));
             assert_eq!(device.name, format!("Device {m}"));
         }
-        assert!(h.drops(r).is_empty());
+        assert_eq!(h.drops(r), [13]);
+    });
+    // A later explicit entry can remove Erin after reading the winning rotation.
+    h.all(1, 1, h.entries[13].change.clone());
+    h.every_order(|r| {
+        assert_eq!(r.state.store.as_ref().unwrap().key, key(0));
+        assert_eq!(r.state.circles[&circle(0)].key, key(0));
+        assert_eq!(r.state.circles[&circle(0)].members, [member(0)].into());
+        assert!(r.state.members[&member(3)].removed);
+        assert!(r.state.members[&member(4)].removed);
+        assert_eq!(h.drops(r), [13]);
     });
 }

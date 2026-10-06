@@ -87,10 +87,14 @@ def circleName : Action → Option (Nat × String)
 def specialConflict (va vb : State) (a b : Action) : Bool :=
   (match a, b with
     | .addMember _ _, .removeMember _ _ | .removeMember _ _, .addMember _ _ => true
+    | .removeMember _ _, .removeMember _ _ => true
     | .addToCircle c _, _ => removesCircleKey b c
     | _, .addToCircle c _ => removesCircleKey a c
+    | .removeFromCircle c _, _ => removesCircleKey b c
+    | _, .removeFromCircle c _ => removesCircleKey a c
     | .raiseVersion k v s, .raiseVersion l w t => k == l && v == w && s != t
     | .reset c s, .reset d t => c == d && s != t
+    | .reset .store _, .raiseVersion _ _ _ | .raiseVersion _ _ _, .reset .store _ => true
     | _, _ => false) ||
   (match circleTarget b with | some c => deletesCircle va a c | none => false) ||
   (match circleTarget a with | some c => deletesCircle vb b c | none => false) ||

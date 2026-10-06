@@ -1290,10 +1290,10 @@ Carol's tablet:
   author had read: removing the circle's only member there deletes it.
   - E.g. Ana and Ben are admins and share Gifts. Concurrently, Ana's phone
     removes Ben from Gifts, and her tablet removes Ana from the store.
-  - Each had read Gifts with two members, so neither deletes it, and they
-    are about different members: both apply.
-  - Ana leaves the store, Ben stays as its admin, and Gifts, left with no
-    members, is deleted.
+  - Each had read Gifts with two members, so neither deletes it. They
+    still conflict, since both replace Gifts' key.
+  - If the phone's entry has the earlier stamp, it applies and the
+    tablet's is dropped: both remain admins, and Gifts keeps Ana.
 - Of two conflicting entries, the one that beats the other is:
   - removing a member, a device or someone from a circle, or deleting a
     circle, over anything else;

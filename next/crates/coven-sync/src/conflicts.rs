@@ -209,8 +209,11 @@ fn special(va: &StoreLogState, a: &StoreChange, vb: &StoreLogState, b: &StoreCha
     use StoreChange::*;
     let keys_and_snapshots = match (a, b) {
         (AddMember { .. }, RemoveMember { .. }) | (RemoveMember { .. }, AddMember { .. }) => true,
+        (RemoveMember { .. }, RemoveMember { .. }) => true,
         (AddCircleMember { circle, .. }, _) => replaces_key(b, *circle),
         (_, AddCircleMember { circle, .. }) => replaces_key(a, *circle),
+        (RemoveCircleMember { circle, .. }, _) => replaces_key(b, *circle),
+        (_, RemoveCircleMember { circle, .. }) => replaces_key(a, *circle),
         (
             RaiseSchema {
                 version: v,
@@ -232,6 +235,14 @@ fn special(va: &StoreLogState, a: &StoreChange, vb: &StoreLogState, b: &StoreCha
             },
         ) => v == w && s != t,
         (Reset { snapshot: s }, Reset { snapshot: t }) => s.audience == t.audience && s != t,
+        (
+            Reset { snapshot: s },
+            RaiseSchema { snapshot: t, .. } | RaiseFormat { snapshot: t, .. },
+        )
+        | (
+            RaiseSchema { snapshot: t, .. } | RaiseFormat { snapshot: t, .. },
+            Reset { snapshot: s },
+        ) => s.audience == t.audience,
         _ => false,
     };
     keys_and_snapshots
@@ -254,3 +265,7 @@ pub(crate) fn conflict(
             || same_target(device_target(&a.change), device_target(&b.change))
             || special(va, &a.change, vb, &b.change))
 }
+
+#[cfg(test)]
+#[path = "conflicts_tests.rs"]
+mod tests;

@@ -15,7 +15,7 @@ pub(crate) fn snapshot(number: u64, audience: Audience) -> SnapshotId {
     }
 }
 
-fn raise(format: bool, version: u16, number: u64) -> StoreChange {
+pub(crate) fn raise(format: bool, version: u16, number: u64) -> StoreChange {
     let snapshot = snapshot(number, Audience::Store);
     if format {
         StoreChange::RaiseFormat { version, snapshot }

@@ -52,6 +52,10 @@ def threeRemovals : Log
   | 7 => entry 2 2 [0, 1, 2, 3, 4] (.removeMember 0 [])
   | w => household .admin .admin w
 
+def removedAuthor : Log
+  | 6 => entry 1 1 [0, 1, 2, 3, 4] (.changeRole 2 .member)
+  | w => threeRemovals w
+
 def removalAndPhone : Log
   | 4 => entry 1 1 [0, 1, 2, 3] (.removeMember 0 [])
   | 5 => entry 0 0 [0, 1, 2, 3] (.removeMember 1 [])
@@ -71,7 +75,8 @@ theorem member_examples_valid :
     validCheck both 6 = true ∧ validCheck phoneAndRemoval 5 = true ∧ validCheck roles 7 = true ∧
     validCheck mutualRemovals 5 = true ∧ validCheck carol 7 = true ∧
     validCheck equalAdds 5 = true ∧ validCheck threeRemovals 8 = true ∧
-    validCheck removalAndPhone 7 = true ∧ validCheck openingLog 4 = true := by decide
+    validCheck removalAndPhone 7 = true ∧ validCheck openingLog 4 = true ∧
+    validCheck removedAuthor 7 = true := by decide
 
 /-- Both changes concern Ben; the admin grant loses to the device addition. -/
 theorem opening_log : EveryOrder openingLog 4 (List.range 4) (fun r =>
@@ -130,13 +135,16 @@ theorem equal_adds_combine : EveryOrder equalAdds 5 (List.range 5) (fun r =>
   apply every_order; decide
 
 theorem three_admins : EveryOrder threeRemovals 8 (List.range 8) (fun r =>
-    r.state.members = [(0, .admin)] ∧ r.state.devices = [(0, 0)] ∧ r.dropped = [7]) := by
+    r.state.members = [(2, .admin), (0, .admin)] ∧
+    r.state.devices = [(2, 2), (0, 0)] ∧ 5 ∈ r.kept ∧ r.dropped = [7, 6] ∧
+    reports threeRemovals r 1 = [6] ∧ reports threeRemovals r 2 = [7]) := by
   apply every_order; decide
 
-/-- Ben's removed-author entry still has authority in its recorded view. -/
+/-- Ben's concurrent role change still has authority after Ana removes him. -/
 theorem removed_author_view :
-    admin (authorView threeRemovals 6) 1 = true ∧
-    EveryOrder threeRemovals 8 (List.range 8) (fun r => member r.state 1 = false ∧ 6 ∈ r.kept) := by
+    admin (authorView removedAuthor 6) 1 = true ∧
+    EveryOrder removedAuthor 7 (List.range 7) (fun r => member r.state 1 = false ∧
+      lookup r.state.members 2 = some .member ∧ 6 ∈ r.kept ∧ r.dropped = []) := by
   constructor
   · decide
   · apply every_order; decide

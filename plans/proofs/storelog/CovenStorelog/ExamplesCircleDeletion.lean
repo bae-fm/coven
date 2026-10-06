@@ -23,21 +23,20 @@ theorem causal_arrivals : CausalOrder history [0, 1, 2, 3, 4, 5, 6] ∧
     CausalOrder history [0, 1, 2, 3, 4, 6, 5] := by
   constructor <;> apply causalCheck_sound _ .nil <;> decide
 
-/-- Neither entry deletes Gifts in its author's view, and they are about
-different members, so they don't conflict. -/
-theorem no_conflict :
+/-- Neither entry deletes Gifts in its author's view, but both replace its key. -/
+theorem shared_key_conflict :
     lookup (authorView history 5).circles 0 = some ⟨"Gifts", [1, 0]⟩ ∧
     lookup (authorView history 6).circles 0 = some ⟨"Gifts", [1, 0]⟩ ∧
     deletesCircle (authorView history 5) (history 5).action 0 = false ∧
     deletesCircle (authorView history 6) (history 6).action 0 = false ∧
     concurrent history 5 6 = true ∧
-    pairConflict history (authorViews history 7) 5 6 = false := by decide
+    pairConflict history (authorViews history 7) 5 6 = true := by decide
 
-/-- Both apply: Ana leaves the store, Ben stays its admin, and Gifts, left
-with no members, is deleted. -/
-theorem both_apply : EveryOrder history 7 (List.range 7) (fun r =>
-    member r.state 0 = false ∧ admin r.state 1 = true ∧
-    lookup r.state.circles 0 = none ∧ r.dropped = []) := by
+/-- The earlier circle removal wins; Ana's store removal drops and Gifts stays. -/
+theorem earlier_rotation_applies : EveryOrder history 7 (List.range 7) (fun r =>
+    admin r.state 0 = true ∧ admin r.state 1 = true ∧
+    lookup r.state.circles 0 = some ⟨"Gifts", [0]⟩ ∧ r.dropped = [6] ∧
+    reports history r 0 = [6]) := by
   apply every_order; decide
 
 /-- Ben is alone in his circle. He renames it while Ana, concurrently,

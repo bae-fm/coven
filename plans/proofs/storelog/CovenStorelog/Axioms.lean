@@ -2,8 +2,8 @@ import CovenStorelog
 
 #print axioms CovenStorelog.Examples.CircleDeletion.valid_history
 #print axioms CovenStorelog.Examples.CircleDeletion.causal_arrivals
-#print axioms CovenStorelog.Examples.CircleDeletion.no_conflict
-#print axioms CovenStorelog.Examples.CircleDeletion.both_apply
+#print axioms CovenStorelog.Examples.CircleDeletion.shared_key_conflict
+#print axioms CovenStorelog.Examples.CircleDeletion.earlier_rotation_applies
 #print axioms CovenStorelog.Examples.CircleDeletion.alone_valid
 #print axioms CovenStorelog.Examples.CircleDeletion.alone_conflict
 #print axioms CovenStorelog.Examples.CircleDeletion.removal_beats_rename
@@ -75,6 +75,13 @@ import CovenStorelog
 #print axioms CovenStorelog.Examples.member_removal_updates_circles
 #print axioms CovenStorelog.Examples.store_removal_beats_circle_add
 
+#print axioms CovenStorelog.Examples.rotation_examples_valid
+#print axioms CovenStorelog.Examples.same_circle_rotations_conflict
+#print axioms CovenStorelog.Examples.different_circle_rotations_both_apply
+#print axioms CovenStorelog.Examples.store_rotation_beats_later_circle_rotation
+#print axioms CovenStorelog.Examples.repeated_store_removals_keep_both
+#print axioms CovenStorelog.Examples.repeated_circle_removals_keep_both
+
 #print axioms CovenStorelog.Examples.member_examples_valid
 #print axioms CovenStorelog.Examples.opening_log
 #print axioms CovenStorelog.Examples.example_add_and_promote
@@ -113,6 +120,10 @@ import CovenStorelog
 #print axioms CovenStorelog.Examples.circle_reset_tie
 #print axioms CovenStorelog.Examples.equal_resets_combine
 #print axioms CovenStorelog.Examples.later_reset
+#print axioms CovenStorelog.Examples.reset_raise_examples_valid
+#print axioms CovenStorelog.Examples.concurrent_reset_and_raise
+#print axioms CovenStorelog.Examples.causal_reset_and_raise
+#print axioms CovenStorelog.Examples.circle_reset_and_store_raise
 
 #print axioms CovenStorelog.checkedEffect_sound
 #print axioms CovenStorelog.scan_state

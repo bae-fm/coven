@@ -63,4 +63,43 @@ theorem later_reset : EveryOrder (resets .store) 8 (List.range 8) (fun r =>
     lookup r.state.resets .store = some 70 ∧ r.dropped = [6]) := by
   apply every_order; decide
 
+def resetAndRaise (kind : VersionKind) (resetFirst : Bool) (audience : Audience)
+    (causal : Bool) (same : Bool := false) : Log
+  | 5 => entry 0 0 (List.range 5)
+      (if resetFirst then .reset audience (if same then 30 else 50)
+        else .raiseVersion kind 2 30)
+  | 6 => entry 1 1 (List.range (if causal then 6 else 5))
+      (if resetFirst then .raiseVersion kind 2 30
+        else .reset audience (if same then 30 else 50))
+  | w => if audience == .store then household .admin .member w else gifts w
+
+theorem reset_raise_examples_valid (kind : VersionKind) (resetFirst causal same : Bool) :
+    validCheck (resetAndRaise kind resetFirst .store causal same) 7 = true ∧
+    validCheck (resetAndRaise kind resetFirst (.circle 0) causal same) 7 = true := by
+  cases kind <;> cases resetFirst <;> cases causal <;> cases same <;> decide
+
+/-- A reset and version raise compete even when they name the same snapshot. -/
+theorem concurrent_reset_and_raise (kind : VersionKind) (resetFirst same : Bool) :
+    EveryOrder (resetAndRaise kind resetFirst .store false same) 7 (List.range 7) (fun r =>
+      lookup r.state.versions kind = (if resetFirst then none else some ⟨2, 30, 5⟩) ∧
+      lookup r.state.resets .store =
+        (if resetFirst then some (if same then 30 else 50) else none) ∧
+      r.dropped = [6] ∧ reports (resetAndRaise kind resetFirst .store false same) r 1 = [6]) := by
+  apply every_order
+  cases kind <;> cases resetFirst <;> cases same <;> decide
+
+theorem causal_reset_and_raise (kind : VersionKind) (resetFirst : Bool) :
+    EveryOrder (resetAndRaise kind resetFirst .store true) 7 (List.range 7) (fun r =>
+      lookup r.state.versions kind = some ⟨2, 30, if resetFirst then 6 else 5⟩ ∧
+      lookup r.state.resets .store = some 50 ∧ r.dropped = []) := by
+  apply every_order
+  cases kind <;> cases resetFirst <;> decide
+
+theorem circle_reset_and_store_raise (kind : VersionKind) (resetFirst : Bool) :
+    EveryOrder (resetAndRaise kind resetFirst (.circle 0) false) 7 (List.range 7) (fun r =>
+      lookup r.state.versions kind = some ⟨2, 30, if resetFirst then 6 else 5⟩ ∧
+      lookup r.state.resets (.circle 0) = some 50 ∧ r.dropped = []) := by
+  apply every_order
+  cases kind <;> cases resetFirst <;> decide
+
 end CovenStorelog.Examples

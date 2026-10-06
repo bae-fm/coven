@@ -21,11 +21,11 @@
   second stamp   Ana's tablet   remove Ana from the store
   ```
 
-- Neither author saw Gifts with one member, so neither entry deletes it,
-  and they are about different members: they don't conflict. Both apply:
-  Ana leaves the store, Ben stays its admin, and Gifts, left with no
-  members, is deleted. This holds in every causal arrival order. Lean:
-  `Examples.CircleDeletion.no_conflict`, `both_apply`.
+- Neither author saw Gifts with one member, so neither entry deletes it.
+  They still conflict: both replace Gifts' key. The earlier circle removal
+  applies, the store removal drops, and Gifts keeps Ana. Both remain store
+  admins. This holds in every causal arrival order. Lean:
+  `Examples.CircleDeletion.shared_key_conflict`, `earlier_rotation_applies`.
 - E.g. Ben is alone in his circle and renames it while Ana removes him
   from the store. In Ana's view the removal takes the circle's only
   member, so it deletes the circle and beats the rename, which is dropped
@@ -90,7 +90,9 @@
   - different names for one circle;
   - deleting a circle against changing or resetting it;
   - a circle addition against replacement of that circle's key;
-  - different snapshots for the same version raise or audience reset.
+  - two replacements of the same store or circle key;
+  - different snapshots for the same version raise or audience reset;
+  - a reset against a version raise for that audience.
   - Lean: `memberTarget`, `deviceTarget`, `specialConflict`, `pairConflict`.
 - Whether an entry deletes a circle is judged in its author's view
   ([C1](#c1-which-entries-delete-a-circle)).
@@ -128,6 +130,14 @@
   from the store while Ben adds Dan to Gifts. Ana's removal names Gifts,
   so Dan's circle addition drops; Dan remains a store member. Lean:
   `Examples.store_removal_beats_circle_add`.
+- Two store removals compete for the store key; two removals from one
+  circle compete for its key. A store removal also competes with a circle
+  removal when its recorded key list names that circle. The earlier
+  removal wins. Removals of different people from different circles can
+  both apply. Repeated removals keep both identities under the already-in-place
+  rule, without replacing a key again. Lean: `Examples.same_circle_rotations_conflict`,
+  `different_circle_rotations_both_apply`, `store_rotation_beats_later_circle_rotation`,
+  `repeated_store_removals_keep_both`, `repeated_circle_removals_keep_both`.
 
 ### C5 Restarts terminate
 
@@ -181,8 +191,8 @@
   identity is reported. Each author receives exactly their dropped
   identities. Lean: `resolve_partition`, `reported_to_author`,
   `report_only_author`, `report_exactly_dropped`.
-- E.g. Ana removes Ben while Ben removes Carol. Ben's entry is judged in
-  the view where he was still an admin, whatever the arrival order.
+- E.g. Ana removes Ben while Ben makes Carol a member. Ben's role change
+  is judged in the view where he was still an admin, whatever the arrival order.
   Lean: `Examples.removed_author_view`.
 
 ### C7 Invariants
@@ -191,8 +201,10 @@
   Creation cannot be defeated, since every later entry has read it.
   Each changing entry preserves an admin; unchanged entries preserve
   the state. Lean: `resolve_created`, `admin_invariant`, `closed_has_admin`.
-  - E.g. Ana, Ben and Carol concurrently remove one another. Ana's and
-    Ben's removals apply; Carol's would remove the last admin and drops.
+  - E.g. Ana, Ben and Carol concurrently remove one another. Every pair
+    replaces the store key, so Ana's earliest removal applies and Ben's
+    and Carol's removals drop. Ana and Carol remain admins. Retrying a
+    dropped removal requires a new entry; replay does not produce one.
     Lean: `Examples.three_admins`.
 - **Device owners and circle members exist.** Creation and additions
   establish these references. Member removal removes the member's
@@ -241,11 +253,11 @@
     Lean: `Examples.example_mutual_removal`.
   - Ana adds Carol while Ben removes Dan: Carol's addition drops.
     Lean: `Examples.example_carol`.
-- §9's other examples: the opening log, equal additions, Gifts, the two
-  removals that both apply and delete Gifts, three removals, a dropped
+- §9's other examples: the opening log, equal additions, Gifts, the circle
+  and store removals competing for Gifts' key, three removals, a dropped
   removal that leaves Ben's phone free to join, and Carol's addition that
   stays dropped when its opponent drops. Lean: `Examples.opening_log`,
-  `equal_adds_combine`, `Gifts.carol_stays`, `CircleDeletion.both_apply`,
+  `equal_adds_combine`, `Gifts.carol_stays`, `CircleDeletion.earlier_rotation_applies`,
   `three_admins`, `dropped_removal_allows_phone`, `losing_removal_discards_add`.
 - [§12.2](coven-from-scratch.md#122-adding-a-person): Ana approves Carol's
   join request, seals the key to her, then publishes the addition.
@@ -280,6 +292,11 @@
   identical resets keep both identities; a later causal reset supersedes
   them. Lean: `Examples.store_reset_tie`, `circle_reset_tie`,
   `equal_resets_combine`, `later_reset`.
+- A concurrent store reset and schema or format raise use the earlier
+  entry, even if they name the same snapshot. Both can apply if one has
+  read the other. A circle reset and store raise affect different audiences
+  and can both apply concurrently. Lean: `Examples.concurrent_reset_and_raise`,
+  `causal_reset_and_raise`, `circle_reset_and_store_raise`.
 
 ### C9 What Lean checks, and what is prose
 
@@ -306,3 +323,7 @@
   This appendix proves the store-log part of §14's examples. It does not
   prove encryption or the coupling between the two models.
 - Correspondence between these Lean functions and Rust is not proved.
+  `next/scripts/check.sh` builds `storelogRunner` and runs Rust's generated
+  differential test against its `resolve`, comparing state, kept entries,
+  and dropped entries. The histories include concurrent key replacements
+  and resets against version raises, in both timestamp orders.

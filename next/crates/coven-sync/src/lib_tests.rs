@@ -13,7 +13,11 @@ use coven_foundation::id_source::{CircleId, DeviceId};
 use coven_merge::Audience;
 use serde_json::{json, Value};
 
-use crate::{effects::tests::snapshot, replay, replay::tests::*};
+use crate::{
+    effects::tests::{raise, snapshot},
+    replay,
+    replay::tests::*,
+};
 
 struct Generator(u64);
 
@@ -29,7 +33,18 @@ impl Generator {
         let mut h = household(MemberRole::Admin, MemberRole::Admin);
         h.all(0, 0, make(0, "Gifts"));
         h.all(0, 0, join(0, 1));
-        let size = 8 + self.pick(9);
+        h.all(0, 0, join(0, 2));
+        if self.pick(2) == 0 {
+            let mut changes = self.concurrent_changes();
+            if self.pick(2) == 0 {
+                changes.swap(0, 1);
+            }
+            let past: Vec<_> = (0..h.entries.len()).collect();
+            for (author, change) in [0, 2].into_iter().zip(changes) {
+                h.push(author, u64::from(author), &past, change);
+            }
+        }
+        let size = 12 + self.pick(7);
         while h.entries.len() < size {
             let author = self.pick(5) as u8;
             let device = self.pick(8) as u64;
@@ -64,6 +79,32 @@ impl Generator {
             );
         }
         h
+    }
+
+    fn concurrent_changes(&mut self) -> [StoreChange; 2] {
+        let reset = |audience| StoreChange::Reset {
+            snapshot: snapshot(30, audience),
+        };
+        match self.pick(8) {
+            0 => [remove(1, &[0]), remove(2, &[0])],
+            1 => [leave(0, 1), leave(0, 2)],
+            2 => [remove(1, &[0]), leave(0, 2)],
+            3 => [leave(0, 1), remove(2, &[0])],
+            4 => [
+                reset(Audience::Store),
+                raise(false, 2, 30 + self.pick(2) as u64),
+            ],
+            5 => [
+                reset(Audience::Store),
+                raise(true, 2, 30 + self.pick(2) as u64),
+            ],
+            6 => [
+                reset(Audience::Circle(circle(0))),
+                raise(self.pick(2) == 0, 2, 30),
+            ],
+            7 => [reset(Audience::Store), reset(Audience::Circle(circle(0)))],
+            _ => unreachable!(),
+        }
     }
 
     fn action(&mut self, view: &StoreLogState) -> StoreChange {
