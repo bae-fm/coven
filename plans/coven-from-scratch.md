@@ -1700,6 +1700,10 @@ Carol's tablet:
     and is skipped.
   - E.g. the store's snapshot reaches ana-phone 40 and Gifts' reaches 38:
     the device applies ana-phone 39 and 40, but only their Gifts parts.
+- Loading an audience's snapshot replaces that audience's rows and merge
+  records; other audiences keep theirs, and the removal rules run again on
+  rows that point at changed ones, as after any write
+  ([§8.4](#84-foreign-keys)).
 - Each device posts its positions only after uploading its own earlier
   writes.
 - A log object is deleted once snapshots cover every part of it, and either
