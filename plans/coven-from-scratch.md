@@ -1421,6 +1421,9 @@ Carol's tablet:
   member key ([§9](#9-members-and-roles)).
 - The person writes the code down when they create or join a store, as
   part of setup.
+- On Apple platforms, coven writes the code to iCloud Keychain whenever it
+  changes: when the person creates or joins a store, and when their S3
+  key or credentials change ([§20.9](#209-members-and-devices)).
 
 ### 12.2 Adding a person
 
@@ -1448,16 +1451,29 @@ Carol's tablet:
   - Ana's device holds the secret too, so it opens and checks the request.
   - The provider sees only an encrypted object under the invite's id.
 - The invite only lets a device ask; Ana's approval is what lets Carol in.
+- Only the device that made the invite holds its secret, so only it shows
+  and approves the invite's requests.
+- Carol's phone learns the outcome from storage:
+  - her store key sealed to her, then the store log entry adding her:
+    she's in;
+  - her request deleted with no key sealed to her: declined or expired.
+- The entry adding Carol records how she reaches storage, her provider
+  account or the id of the S3 key made for her, so any admin can take it
+  back later ([§13](#13-removing-members-and-devices)).
 - Once the request is approved or declined, or the invite expires, Ana's
   device deletes the request object.
 - Declining the request, or letting the invite expire after a day, takes
   back the storage access it granted; on S3, coven tells the admin to
   delete the key in the provider's console.
+  - A day is by the inviting device's clock, and the invite expires when
+    that device is next online after it.
 
 ### 12.3 Losing everything
 
 - An admin re-invites a person who lost every device and their restore
   code.
+  - They join with new member keys; their old identity stays a member
+    until an admin removes it, like any member.
 - Losing every member's devices and restore codes loses the store for good,
   since everything is encrypted.
 
@@ -1490,6 +1506,17 @@ Carol's tablet:
     folder is unshared from their account, or on S3 coven tells the admin
     to delete their key in the provider's console
     ([§12.2](#122-adding-a-person)).
+- What the entry names is fixed when the removal starts, from the member
+  list the device has then; if the replay drops the entry, the removal
+  starts over against the new list ([§18](#18-operations)).
+- Access taken back stays taken back, even if a later entry drops the
+  removal: the member is told, and an admin shares the storage again.
+- The member whose provider account holds the store can't be removed:
+  the store would go with their account. Removing them fails with
+  `SyncError::StoreOwner`.
+- On S3, a key the admin must delete is shown in the sync status until
+  the admin confirms it's gone ([§20.5](#205-storage-and-sync)), however
+  the removal or expiry that needs it came about.
 - So a removed member's copies of the old store and circle keys read
   nothing written after the removal, even if they regain read access.
 - The removing device makes a new key for a circle its member isn't in,
@@ -1661,6 +1688,11 @@ Carol's tablet:
   - A circle's row may point at rows in the same circle, or the store's.
   - A store row may point only at store rows.
 - Coven refuses a write that breaks this, on the device making it.
+  - That includes a move: moving note 42 into Gifts while store link 5
+    still points at it is refused with `DbError::ReferenceAudience`, since
+    link 5 would point at a row Ben can't read.
+- Coven also refuses, with `DbError::NotInCircle`, a write that puts a row
+  in a circle this member isn't in, or in no circle the store log has.
 
   ```
   store          notes  row 42   "Groceries"
@@ -1690,14 +1722,19 @@ Carol's tablet:
     with the old circle key.
   - Only trust keeps him from claiming he hadn't read his removal, and
     members are trusted not to be hostile ([§2](#2-threat-model)).
+- Once Ben's device reads his removal, it keeps the circle's rows it has,
+  refuses new writes into the circle with `DbError::NotInCircle`, and no
+  longer snapshots or fingerprints it.
 
 ### 14.7 Deleting a circle
 
 - Any member of a circle can delete it.
-- Deleting a circle is two things, made together:
+- Deleting a circle is two things, made together, as an operation
+  ([§18.1](#181-operations)):
   - a write deleting each of the circle's rows the device has, like any
     delete, encrypted with the circle's key;
-  - a store log entry removing the circle ([§9](#9-members-and-roles)).
+  - a store log entry removing the circle ([§9](#9-members-and-roles)),
+    uploaded after the write.
 - A row added to the circle concurrently, which the write doesn't name, is
   taken out by a removal rule when it arrives, and recorded as lost.
 - A device that has applied the deletion refuses a write into the circle,
