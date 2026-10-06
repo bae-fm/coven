@@ -123,10 +123,11 @@ pub(crate) const POLICY: Policy = Policy {
         "DatabaseConnection",
     ],
     non_owner_types: &["KeyCustody", "IdentityCustody"],
-    // A write borrows the database's retained connection and StoreDir; app SQL
-    // uses that write as its capability and never receives either dependency.
+    // Writes and pending deletions borrow the database's retained connection,
+    // StoreDir and id source; app SQL receives none of those dependencies.
     borrowed_facade_types: &[
         "FileWrite",
+        "FileRemovals",
         "SqlReadContext",
         "Read",
         "ReadOwner",
@@ -144,6 +145,7 @@ pub(crate) const POLICY: Policy = Policy {
     root_owner_types: &["Database", "CovenReadHandle"],
     task_types: &[
         "FileWrite",
+        "FileRemovals",
         "SqlReadContext",
         "Read",
         "ReadOwner",
@@ -162,6 +164,7 @@ pub(crate) const POLICY: Policy = Policy {
     always_forbidden_returns: &[],
     closed_session_types: &[
         "FileWrite",
+        "FileRemovals",
         "SqlReadContext",
         "MigrationContext",
         "SqlContext",

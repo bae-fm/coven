@@ -67,6 +67,31 @@ impl DatabaseConnection {
         self.authorization.integrity_checks()
     }
 
+    pub(crate) fn crash_after_next_commit(&self) {
+        self.connection
+            .wal_hook(Some(|_, _| std::process::exit(86)));
+    }
+
+    pub(crate) fn refuse_transaction_end(&self, refuse: bool) {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+        let mut authorize = self.authorization.callback();
+        self.connection
+            .authorizer(Some(move |context: AuthContext<'_>| {
+                if refuse
+                    && matches!(
+                        context.action,
+                        AuthAction::Transaction { operation }
+                            if !matches!(operation, TransactionOperation::Begin)
+                    )
+                {
+                    Authorization::Deny
+                } else {
+                    authorize(context)
+                }
+            }))
+            .unwrap();
+    }
+
     pub(crate) fn crash_after(&self, table: &str, action: &str) {
         self.connection
             .create_scalar_function(

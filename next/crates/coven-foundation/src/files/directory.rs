@@ -142,15 +142,6 @@ impl StoreDir {
         };
         AtomicFile::new(self.path.join(area).join(&name.0))
     }
-
-    /// Stream a new app-provided file into this store and sync it before returning
-    /// its unique name. A failed write removes its unpublished bytes.
-    pub fn write_file<T>(
-        &self,
-        write: impl FnOnce(&mut dyn std::io::Write) -> std::io::Result<T>,
-    ) -> Result<(FileName, T), crate::files::FileError> {
-        crate::files::atomic_file::write_owned(&self.path.join(APP_FILES), write)
-    }
 }
 
 pub(crate) fn initialize(

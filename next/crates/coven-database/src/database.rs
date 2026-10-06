@@ -5,7 +5,7 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 
 use coven_foundation::clock::{ClockRef, SystemClock};
 use coven_foundation::files::{StoreDir, StoreLock};
-use coven_foundation::id_source::{CircleId, DeviceId};
+use coven_foundation::id_source::{CircleId, DeviceId, IdSourceRef, UuidIds};
 
 use crate::authorization::SqlAuthorization;
 use crate::observation::{CommitObserver, CommitSubscription, ReadSet};
@@ -23,6 +23,7 @@ pub struct DatabaseBuilder {
     migrations: Option<Vec<Migration>>,
     policy: Option<CovenMigrationPolicy>,
     clock: Option<ClockRef>,
+    ids: Option<IdSourceRef>,
 }
 
 impl DatabaseBuilder {
@@ -34,6 +35,7 @@ impl DatabaseBuilder {
             migrations: None,
             policy: None,
             clock: None,
+            ids: None,
         }
     }
 
@@ -58,6 +60,12 @@ impl DatabaseBuilder {
     /// The clock used when stamping a local write (§7.2).
     pub fn clock(mut self, clock: ClockRef) -> Self {
         self.clock = Some(clock);
+        self
+    }
+
+    /// The source of fresh names for this store's owned file bytes (§16.6).
+    pub fn id_source(mut self, ids: IdSourceRef) -> Self {
+        self.ids = Some(ids);
         self
     }
 
@@ -88,6 +96,10 @@ impl DatabaseBuilder {
             Some(clock) => clock,
             None => Arc::new(SystemClock),
         };
+        let ids = match self.ids {
+            Some(ids) => ids,
+            None => Arc::new(UuidIds),
+        };
         let lock = self.directory.lock_exclusive()?;
         let path = self.directory.database_path();
         let mut writer = DatabaseConnection::open(&path, false, SqlAuthorization::new(&tables))?;
@@ -101,6 +113,7 @@ impl DatabaseBuilder {
             policy,
             Some((settings.device_id, clock.now())),
         )?;
+        crate::file_removals::FileRemovals::new(&writer, &self.directory).finish(Ok(()))?;
         let write_schema = crate::write_schema::WriteSchema::read(&writer, tables.clone())?;
         writer.prepare_file_triggers()?;
         let observer = CommitObserver::new();
@@ -126,6 +139,7 @@ impl DatabaseBuilder {
                 directory: self.directory,
                 device: settings.device_id,
                 clock,
+                ids,
             }))),
         })
     }
@@ -181,6 +195,7 @@ struct DatabaseInner {
     directory: StoreDir,
     device: DeviceId,
     clock: ClockRef,
+    ids: IdSourceRef,
 }
 
 impl Database {
@@ -349,6 +364,7 @@ impl Database {
                     &inner.directory,
                     &inner.write_schema,
                     inner.device,
+                    inner.ids.as_ref(),
                 );
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let mut batch = crate::WriteBatch::new();
@@ -400,6 +416,7 @@ impl Database {
                     &inner.directory,
                     &inner.write_schema,
                     inner.device,
+                    inner.ids.as_ref(),
                 );
                 files.finish(crate::download::apply(
                     &writer,
@@ -478,6 +495,7 @@ impl Database {
                     &inner.directory,
                     &inner.write_schema,
                     inner.device,
+                    inner.ids.as_ref(),
                 );
                 files.finish(crate::download::delete_circle(
                     &writer,

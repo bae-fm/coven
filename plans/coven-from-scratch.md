@@ -2851,9 +2851,9 @@ pub enum DbError {
     FileAttachment { reason: String },
     /// Reading or keeping file bytes failed (§20.3).
     Disk(DiskError),
-    /// Removing owned bytes failed. A committed write stays committed; an
-    /// unsuccessful write retains its original error (§16.6).
-    FileCleanup { write: Result<(), Box<DbError>>, failures: Vec<DiskError> },
+    /// Removing owned bytes or their pending records failed. A committed write
+    /// stays committed; an unsuccessful write retains its original error (§16.6).
+    FileCleanup { write: Result<(), Box<DbError>>, failures: Vec<DbError> },
     /// A transaction failed and rolling it back failed too.
     Rollback { operation: Box<DbError>, rollback: rusqlite::Error },
     /// Closing failed for these connections, after every one was tried (§20.1).

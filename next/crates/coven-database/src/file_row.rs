@@ -55,17 +55,29 @@ pub(crate) fn set(
     database: &DatabaseConnection,
     schema: &WriteSchema,
     key: &AppKey,
-    hash: Option<ContentHash>,
+    contents: Option<(ContentHash, u64)>,
     device: DeviceId,
 ) -> Result<(), DbError> {
     let (table, file) = declaration(schema, &key.0)?;
-    let mut parameters = match hash {
-        Some(hash) => vec![
+    let mut columns = vec![&file.hash, &file.location];
+    let mut parameters = match contents {
+        Some((hash, _)) => vec![
             rusqlite::types::Value::Blob(hash.as_bytes().to_vec()),
             device.0.to_string().into(),
         ],
         None => vec![rusqlite::types::Value::Null; 2],
     };
+    if file.provenance == crate::Provenance::AppProvided {
+        if let Some((_, size)) = contents {
+            let count = i64::try_from(size).map_err(|_| DbError::TooLarge {
+                field: "file size",
+                actual: size,
+                maximum: i64::MAX as u64,
+            })?;
+            columns.push(&file.size);
+            parameters.push(count.into());
+        }
+    }
     parameters.extend(
         crate::write_encoding::decoded(coven_format::key::decode_key(&key.1))?
             .iter()
@@ -73,10 +85,13 @@ pub(crate) fn set(
     );
     let count = database.file_execute(
         &format!(
-            "UPDATE main.{} SET {}=?,{}=? WHERE {}",
+            "UPDATE main.{} SET {} WHERE {}",
             crate::sql::identifier(&table.name),
-            crate::sql::identifier(&file.hash),
-            crate::sql::identifier(&file.location),
+            columns
+                .iter()
+                .map(|c| format!("{}=?", crate::sql::identifier(c)))
+                .collect::<Vec<_>>()
+                .join(","),
             key_columns(table)
                 .iter()
                 .map(|c| format!("{}=?", crate::sql::identifier(&c.name)))

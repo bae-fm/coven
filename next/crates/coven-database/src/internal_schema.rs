@@ -180,6 +180,11 @@ macro_rules! coven_tables {
                 PRIMARY KEY(table_name,key,column_name)
             ) STRICT, WITHOUT ROWID;
         ");
+        $visit!(coven_file_removals, "
+            CREATE TABLE coven_file_removals (
+                path TEXT PRIMARY KEY NOT NULL
+            ) STRICT, WITHOUT ROWID;
+        ");
         $visit!(coven_device_files, "
             CREATE TABLE coven_device_files (
                 table_name TEXT NOT NULL,

@@ -14,7 +14,8 @@ impl WriteBatch {
     }
 
     /// Hand over bytes under the declared namespace and file id. Streams are
-    /// consumed once and never buffered as a whole file.
+    /// consumed once and never buffered as a whole file. Coven fills each
+    /// attached row's size from those bytes, together with its hash and location.
     pub fn put_file(
         &mut self,
         namespace: impl Into<String>,

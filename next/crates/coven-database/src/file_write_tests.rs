@@ -5,9 +5,9 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
-const SCHEMA: &str = "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT,title TEXT)";
+pub(crate) const SCHEMA: &str = "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT,title TEXT)";
 
-fn tables(kind: Provenance) -> Vec<SyncedTable> {
+pub(crate) fn tables(kind: Provenance) -> Vec<SyncedTable> {
     vec![
         SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
             "files",
@@ -18,7 +18,7 @@ fn tables(kind: Provenance) -> Vec<SyncedTable> {
     ]
 }
 
-async fn attach(db: &Database, bytes: Vec<u8>, insert: bool) -> Result<(), DbError> {
+pub(crate) async fn attach(db: &Database, bytes: Vec<u8>, insert: bool) -> Result<(), DbError> {
     let size = bytes.len() as i64;
     db.write_with_files(
         move |batch| {
@@ -132,14 +132,14 @@ async fn size_ten_concurrent_replacements_keep_all_four_columns_from_the_later_w
     b.close().await.unwrap();
 }
 
-fn owned_paths(store: &TestStore) -> Vec<std::path::PathBuf> {
+pub(crate) fn owned_paths(store: &TestStore) -> Vec<std::path::PathBuf> {
     std::fs::read_dir(store.database_path().parent().unwrap().join("files"))
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .collect()
 }
 
-fn local_count(db: &Database, table: &str) -> i64 {
+pub(crate) fn local_count(db: &Database, table: &str) -> i64 {
     db.inspect_writer(|sql| {
         sql.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
             .unwrap()
@@ -233,7 +233,7 @@ async fn failed_sql_stream_and_commit_discard_new_bytes_and_preserve_old_bytes()
         .unwrap();
     attach(&db, b"original".to_vec(), true).await.unwrap();
     let original = owned_paths(&store);
-    for failure in ["sql", "commit", "stream", "size"] {
+    for failure in ["sql", "commit", "stream", "unused"] {
         let error = db
             .write_with_files(
                 move |batch| {
@@ -242,14 +242,19 @@ async fn failed_sql_stream_and_commit_discard_new_bytes_and_preserve_old_bytes()
                     } else {
                         b"replacement".to_vec().into()
                     };
-                    batch.put_file("files", "7", source);
+                    batch.put_file(
+                        "files",
+                        if failure == "unused" {
+                            "unattached"
+                        } else {
+                            "7"
+                        },
+                        source,
+                    );
                     Ok(())
                 },
                 move |sql| {
-                    sql.execute(
-                        "UPDATE files SET size=?1",
-                        [if failure == "size" { 1 } else { 11 }],
-                    )?;
+                    sql.execute("UPDATE files SET size=11", [])?;
                     if failure == "sql" {
                         return Err(DbError::StoreClosed);
                     }
@@ -264,16 +269,11 @@ async fn failed_sql_stream_and_commit_discard_new_bytes_and_preserve_old_bytes()
         match failure {
             "sql" => assert!(matches!(error, DbError::StoreClosed)),
             "stream" => assert!(matches!(error, DbError::Disk(_))),
-            "size" => assert!(matches!(
-                error,
-                DbError::FileSizeMismatch {
-                    expected: 1,
-                    actual: 11
-                }
-            )),
+            "unused" => assert!(matches!(error, DbError::FileAttachment { .. })),
             "commit" => assert!(matches!(error, DbError::Sqlite(_)), "{error:?}"),
             _ => unreachable!(),
         }
+        assert_eq!(local_count(&db, "coven_file_removals"), 0);
         assert_eq!(owned_paths(&store), original);
         assert_eq!(std::fs::read(&original[0]).unwrap(), b"original");
         assert_eq!(local_count(&db, "coven_device_files"), 1);
@@ -787,4 +787,63 @@ async fn constraint_removal_preserves_bytes_until_the_row_is_restored() {
     assert_eq!(owned_paths(&a_store).len(), 1);
     a.close().await.unwrap();
     b.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn staged_bytes_supply_the_app_files_size() {
+    let store = TestStore::new();
+    let db = store
+        .schema(tables(Provenance::AppProvided), SCHEMA)
+        .await
+        .unwrap();
+    for (insert, bytes) in [
+        (true, b"original".to_vec()),
+        (false, b"replacement".to_vec()),
+    ] {
+        let size = bytes.len() as u64;
+        db.write_with_files(
+            move |batch| {
+                batch.put_file("files", "7", bytes);
+                Ok(())
+            },
+            move |sql| {
+                sql.execute(
+                    if insert {
+                        "INSERT INTO files(id) VALUES('7')"
+                    } else {
+                        "UPDATE files SET size=999"
+                    },
+                    [],
+                )?;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            db.file_ref("files", "7").await.unwrap().plaintext_size(),
+            size
+        );
+    }
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_trigger_cannot_leave_a_new_owned_file_without_its_row() {
+    let store = TestStore::new();
+    let mut declarations = tables(Provenance::AppProvided);
+    declarations[0] = declarations[0].clone().shared_trigger("cancel_file");
+    let db = store.builder(declarations, vec![Migration::run(1, "files", |sql| {
+        sql.execute_batch(&format!("{SCHEMA}; CREATE TRIGGER cancel_file AFTER UPDATE OF hash ON files WHEN NOT coven_applying() BEGIN DELETE FROM files; END"))?;
+        Ok(())
+    })]).open().await.unwrap();
+    assert!(matches!(
+        attach(&db, b"original".to_vec(), true).await,
+        Err(DbError::FileAttachment { .. })
+    ));
+    assert_eq!(local_count(&db, "files"), 0);
+    assert_eq!(local_count(&db, "coven_device_files"), 0);
+    assert_eq!(local_count(&db, "coven_file_removals"), 0);
+    assert!(owned_paths(&store).is_empty());
+    db.close().await.unwrap();
 }

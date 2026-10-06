@@ -199,8 +199,8 @@ pub enum DbError {
     FileCleanup {
         /// Ok if the transaction committed; otherwise its original error.
         write: Result<(), Box<DbError>>,
-        /// Each failed removal.
-        failures: Vec<coven_foundation::files::FileError>,
+        /// Each failed byte removal or pending-record update.
+        failures: Vec<DbError>,
     },
     /// Closing failed for these connections, after every one was tried (§20.1).
     #[error("closing database connections failed: {failures:?}")]

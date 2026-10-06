@@ -15,6 +15,7 @@ mod error;
 mod file_authorization;
 mod file_location;
 mod file_ref;
+mod file_removals;
 mod file_row;
 mod file_write;
 mod fingerprint;

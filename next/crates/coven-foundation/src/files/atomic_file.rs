@@ -1,4 +1,4 @@
-//! Install complete bytes using a synced temporary sibling and an atomic rename.
+//! Durable file creation, atomic replacement and removal.
 
 use std::fs;
 use std::io::{self, Read, Write};
@@ -62,8 +62,8 @@ impl FileError {
     }
 }
 
-/// One named file capability. It reads bytes and replaces them atomically,
-/// without exposing a path for callers to perform filesystem operations.
+/// One named file capability. It reads, creates, replaces and removes bytes
+/// without exposing a path. Replacement atomically installs a complete version.
 #[derive(Clone, Debug)]
 pub struct AtomicFile {
     path: PathBuf,
@@ -91,6 +91,33 @@ impl AtomicFile {
     /// back to a rename that can fail while readers hold old versions open.
     pub fn replace(&self, bytes: &[u8]) -> Result<(), FileError> {
         replace(&self.path, bytes)
+    }
+
+    /// Create a named file without replacing anything, streaming and syncing
+    /// its bytes before returning. The caller records the name before this call
+    /// and owns removal of partial bytes on failure or panic (§16.6).
+    pub fn create<T>(
+        &self,
+        write: impl FnOnce(&mut dyn Write) -> io::Result<T>,
+    ) -> Result<T, FileError> {
+        let directory = fs::canonicalize(parent(&self.path))
+            .map_err(|source| FileError::at("resolve parent directory", &self.path, source))?;
+        let name = self.path.file_name().ok_or_else(|| {
+            FileError::at(
+                "create owned file",
+                &self.path,
+                io::Error::new(io::ErrorKind::InvalidInput, "file name required"),
+            )
+        })?;
+        let mut file = create_new(&directory.join(name))
+            .map_err(|source| FileError::at("create owned file", &self.path, source))?;
+        let written = write(&mut file).and_then(|written| {
+            file.sync_all()?;
+            #[cfg(unix)]
+            sync_directory(&directory)?;
+            Ok(written)
+        });
+        written.map_err(|source| FileError::at("write and sync owned file", &self.path, source))
     }
 
     /// Remove the owned file; an absent file is success. On Unix, sync the
@@ -199,56 +226,6 @@ fn prepare(path: &Path, bytes: &[u8]) -> Result<tempfile::NamedTempFile, FileErr
     Ok(temp)
 }
 
-pub(crate) fn write_owned<T>(
-    directory: &Path,
-    write: impl FnOnce(&mut dyn Write) -> io::Result<T>,
-) -> Result<(super::FileName, T), FileError> {
-    let mut temp = temporary(&directory.join("file"), "file-")?;
-    let path = temp.path().to_owned();
-    let written = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| write(&mut temp)));
-    let written = match written {
-        Ok(result) => result,
-        Err(panic) => {
-            if let Err(cleanup) = temp.close() {
-                panic!("removing owned file after source panic failed: {cleanup}");
-            }
-            std::panic::resume_unwind(panic)
-        }
-    };
-    let result = written.and_then(|result| {
-        temp.as_file().sync_all()?;
-        #[cfg(unix)]
-        sync_directory(parent(&path))?;
-        Ok(result)
-    });
-    let result = match result {
-        Ok(result) => result,
-        Err(source) => {
-            return Err(cleanup(
-                temp,
-                FileError::at("write owned file", &path, source),
-            ))
-        }
-    };
-    let name = super::FileName::new(
-        path.file_name()
-            .expect("temporary filename")
-            .to_str()
-            .expect("ASCII temporary filename"),
-    )
-    .expect("portable temporary filename");
-    match temp.keep() {
-        Ok((file, _)) => drop(file),
-        Err(error) => {
-            return Err(cleanup(
-                error.file,
-                FileError::at("keep owned file", &path, error.error),
-            ))
-        }
-    }
-    Ok((name, result))
-}
-
 fn temporary(path: &Path, prefix: &str) -> Result<tempfile::NamedTempFile, FileError> {
     // Canonicalization also supplies Windows' extended-length prefix. The
     // directory already exists, so there is no guess about a relative parent.
@@ -259,29 +236,29 @@ fn temporary(path: &Path, prefix: &str) -> Result<tempfile::NamedTempFile, FileE
     #[cfg(unix)]
     let temp = builder.tempfile_in(directory);
     #[cfg(windows)]
-    let temp = builder.make_in(directory, |path| {
+    let temp = builder.make_in(directory, create_new);
+    temp.map_err(|source| FileError::at("create temporary file", path, source))
+}
+
+fn create_new(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(windows)]
+    {
         use std::os::windows::fs::OpenOptionsExt;
         use windows_sys::Win32::Storage::FileSystem::{
             DELETE, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_WRITE_THROUGH, FILE_GENERIC_READ,
             FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
         };
-
-        // Create the actual rename handle with DELETE access and write-through
-        // semantics. Unlike tempfile_in, make_in does not mark it TEMPORARY:
-        // these bytes are destined for durable storage. Share delete so another
-        // writer can replace this version before this handle is closed.
-        // CreateFileW documents that WRITE_THROUGH flushes NTFS rename metadata:
-        // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew#caching-behavior
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
+        // Write-through also flushes creation and rename metadata on NTFS.
+        // Do not mark bytes destined for durable storage as TEMPORARY.
+        options
             .access_mode(DELETE | FILE_GENERIC_READ | FILE_GENERIC_WRITE)
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
             .attributes(FILE_ATTRIBUTE_NORMAL)
-            .custom_flags(FILE_FLAG_WRITE_THROUGH)
-            .open(path)
-    });
-    temp.map_err(|source| FileError::at("create temporary file", path, source))
+            .custom_flags(FILE_FLAG_WRITE_THROUGH);
+    }
+    options.open(path)
 }
 
 fn cleanup(temp: tempfile::NamedTempFile, operation: FileError) -> FileError {

@@ -30,7 +30,7 @@ struct StagedFile {
 
 #[cfg(test)]
 #[path = "file_write_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 struct AttachedFile {
     id: Value,
@@ -43,6 +43,7 @@ pub(crate) struct FileWrite<'a> {
     directory: &'a StoreDir,
     schema: &'a WriteSchema,
     device: DeviceId,
+    ids: &'a dyn coven_foundation::id_source::IdSource,
     staged: Vec<StagedFile>,
     originals: RefCell<Vec<PreparedUserFile>>,
     attached: RefCell<BTreeMap<AppKey, AttachedFile>>,
@@ -56,12 +57,14 @@ impl<'a> FileWrite<'a> {
         directory: &'a StoreDir,
         schema: &'a WriteSchema,
         device: DeviceId,
+        ids: &'a dyn coven_foundation::id_source::IdSource,
     ) -> Self {
         Self {
             database,
             directory,
             schema,
             device,
+            ids,
             staged: Vec::new(),
             originals: RefCell::new(Vec::new()),
             attached: RefCell::new(BTreeMap::new()),
@@ -119,33 +122,45 @@ impl<'a> FileWrite<'a> {
                     "{namespace} is not an app-provided file namespace"
                 )));
             }
-            let (name, (size, hash)) = self.directory.write_file(|out| {
-                let mut hash = ContentHasher::new();
-                let mut size = 0;
-                match source {
-                    FileSource::Bytes(bytes) => {
-                        for bytes in bytes.chunks(64 * 1024) {
-                            out.write_all(bytes)?;
-                            hash.update(bytes);
-                            size += bytes.len() as u64;
-                        }
-                    }
-                    FileSource::Stream(mut reader) => runtime.block_on(async {
-                        let mut buffer = [0; 64 * 1024];
-                        loop {
-                            let read = reader.read(&mut buffer).await?;
-                            if read == 0 {
-                                break;
+            let name =
+                FileName::new(self.ids.new_id().to_string()).expect("UUID is a portable filename");
+            let recorded = self.database.internal_execute(
+                "INSERT INTO coven_file_removals(path) SELECT ?1 WHERE NOT EXISTS(SELECT 1 FROM coven_device_files WHERE path=?1)",
+                [name.as_str()],
+            )?;
+            if recorded != 1 {
+                return Err(file_row::invalid("the id source reused a kept file's name"));
+            }
+            let (size, hash) = self
+                .directory
+                .file(FileArea::AppProvided, &name)
+                .create(|out| {
+                    let mut hash = ContentHasher::new();
+                    let mut size = 0;
+                    match source {
+                        FileSource::Bytes(bytes) => {
+                            for bytes in bytes.chunks(64 * 1024) {
+                                out.write_all(bytes)?;
+                                hash.update(bytes);
+                                size += bytes.len() as u64;
                             }
-                            out.write_all(&buffer[..read])?;
-                            hash.update(&buffer[..read]);
-                            size += read as u64;
                         }
-                        Ok::<_, std::io::Error>(())
-                    })?,
-                }
-                Ok((size, hash.finish()))
-            })?;
+                        FileSource::Stream(mut reader) => runtime.block_on(async {
+                            let mut buffer = [0; 64 * 1024];
+                            loop {
+                                let read = reader.read(&mut buffer).await?;
+                                if read == 0 {
+                                    break;
+                                }
+                                out.write_all(&buffer[..read])?;
+                                hash.update(&buffer[..read]);
+                                size += read as u64;
+                            }
+                            Ok::<_, std::io::Error>(())
+                        })?,
+                    }
+                    Ok((size, hash.finish()))
+                })?;
             self.staged.push(StagedFile {
                 namespace,
                 id,
@@ -180,18 +195,22 @@ impl<'a> FileWrite<'a> {
                     |r| crate::write_rows::read_row(table, r),
                 )?;
                 for values in rows {
-                    file_row::check_size(&values, file, staged.size)?;
                     let key = (
                         table.name.clone(),
                         crate::write_rows::row_key(table, &values)?,
                     );
                     self.forget_owned(&key, &file.id)?;
-                    file_row::set(db, self.schema, &key, Some(staged.hash), self.device)?;
-                    let mut attached_values = values.clone();
-                    attached_values.insert(
-                        file.hash.clone(),
-                        Value::Blob(staged.hash.as_bytes().to_vec()),
-                    );
+                    file_row::set(
+                        db,
+                        self.schema,
+                        &key,
+                        Some((staged.hash, staged.size)),
+                        self.device,
+                    )?;
+                    let attached_values = crate::write_rows::read_values(db, table, &key.1)?
+                        .ok_or_else(|| {
+                            file_row::invalid("the row was removed while attaching its file")
+                        })?;
                     db.internal_execute("INSERT INTO coven_device_files(table_name,key,column_name,identity,path) VALUES(?1,?2,?3,?4,?5)", (&key.0, &key.1, &file.id, file_row::identity(file, &attached_values)?, staged.name.as_str()))?;
                     self.attached.borrow_mut().insert(
                         key,
@@ -230,7 +249,13 @@ impl<'a> FileWrite<'a> {
         prepared.observed.validate()?;
         let (key, values) = file_row::lookup(db, self.schema, table, &key)?;
         file_row::check_size(&values, file, prepared.observed.size())?;
-        file_row::set(db, self.schema, &key, Some(prepared.hash), self.device)?;
+        file_row::set(
+            db,
+            self.schema,
+            &key,
+            Some((prepared.hash, prepared.observed.size())),
+            self.device,
+        )?;
         let mut attached_values = values.clone();
         attached_values.insert(
             file.hash.clone(),
@@ -377,7 +402,15 @@ impl<'a> FileWrite<'a> {
                 if generation % 2 == 0 || matches!(&audience, coven_merge::Audience::Circle(id) if deleted.contains(id)) { continue; }
                 let row = store.row(&coven_merge::RowId { table:key.0.clone(), key:key.1.clone(), audience })?;
                 let values = row.state.cells().iter().map(|(column,cell)| (column.clone(),cell.value.value.clone())).collect();
-                retained.extend(file_row::identity(file, &values)?);
+                if let Some(identity) = file_row::identity(file, &values)? {
+                    if file.provenance == Provenance::AppProvided
+                        && crate::file_location::StoredLocation::decode(&values[&file.location])?.public()
+                            != crate::FileLocation::OnDevice(self.device)
+                    {
+                        continue;
+                    }
+                    retained.insert(identity);
+                }
             }
             if identities
                 .iter()
@@ -416,19 +449,23 @@ impl<'a> FileWrite<'a> {
         for file in &self.staged {
             self.obsolete.borrow_mut().insert(file.name.clone());
         }
-        let mut kept = BTreeSet::new();
         for name in self.obsolete.borrow().iter() {
             if db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM coven_device_files WHERE path=?1)",
                 [name.as_str()],
                 |r| r.get::<_, bool>(0),
             )? {
-                kept.insert(name.clone());
+                db.internal_execute(
+                    "DELETE FROM coven_file_removals WHERE path=?1",
+                    [name.as_str()],
+                )?;
+            } else {
+                db.internal_execute(
+                    "INSERT INTO coven_file_removals(path) VALUES(?1) ON CONFLICT DO NOTHING",
+                    [name.as_str()],
+                )?;
             }
         }
-        self.obsolete
-            .borrow_mut()
-            .retain(|name| !kept.contains(name));
         Ok(())
     }
 
@@ -444,39 +481,16 @@ impl<'a> FileWrite<'a> {
     }
 
     pub(crate) fn finish<R>(&self, result: Result<R, DbError>) -> Result<R, DbError> {
-        let committed = result.is_ok();
-        let failures = self.cleanup(committed);
-        if failures.is_empty() {
-            result
-        } else {
-            Err(DbError::FileCleanup {
-                write: result.map(|_| ()).map_err(Box::new),
-                failures,
-            })
-        }
+        crate::file_removals::FileRemovals::new(self.database, self.directory).finish(result)
     }
 
-    pub(crate) fn rollback(&self) -> Result<(), Vec<coven_foundation::files::FileError>> {
-        let failures = self.cleanup(false);
+    pub(crate) fn rollback(&self) -> Result<(), Vec<DbError>> {
+        let failures =
+            crate::file_removals::FileRemovals::new(self.database, self.directory).remove_unused();
         if failures.is_empty() {
             Ok(())
         } else {
             Err(failures)
         }
-    }
-
-    fn cleanup(&self, committed: bool) -> Vec<coven_foundation::files::FileError> {
-        let names: BTreeSet<_> = if committed {
-            self.obsolete.borrow().clone()
-        } else {
-            self.staged.iter().map(|f| f.name.clone()).collect()
-        };
-        let mut failures = Vec::new();
-        for name in names {
-            if let Err(error) = self.directory.file(FileArea::AppProvided, &name).remove() {
-                failures.push(error);
-            }
-        }
-        failures
     }
 }
