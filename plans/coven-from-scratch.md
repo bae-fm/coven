@@ -2357,6 +2357,11 @@ Carol's tablet:
 - An object that fails its check when read: it won't decrypt, its
   signature doesn't match, it doesn't parse, or its write breaks the
   merge's rules, such as a timestamp no later than a write it had read.
+  - A damaged write or entry holds back what had read it, like a missing
+    one; the device reads it again on every sync, in case the failure was
+    passing.
+  - A damaged snapshot is passed over for the next latest, or the logs.
+  - A damaged positions object counts as not posted.
 - A damaged local database, found by SQLite's integrity check when the
   database opens.
 - Devices that disagree:
@@ -2377,12 +2382,16 @@ Carol's tablet:
   - each device posts its fingerprints with its positions ([§6](#6-syncing-writes));
   - two devices that have applied exactly the same writes must have the
     same fingerprints;
-  - so whenever two devices are at the same positions and on the same
-    schema version, as they usually are once a store is quiet, each
-    compares, and a mismatch means a bug made one of them wrong;
+  - so whenever two devices are at the same positions, in the device logs
+    and the store log, and on the same schema version, as they usually are
+    once a store is quiet, each compares, and a mismatch means a bug made
+    one of them wrong;
   - on different versions they can't compare: an added column exists on
     one device only.
-- The app sees each of these, and which devices are involved.
+- The app sees each of these, and which devices are involved; nothing
+  reloads on its own after a mismatch, since neither device can tell which
+  is wrong. The person picks, as in [§19.3](#193-resetting-a-store), or
+  reloads one device ([§19.2](#192-recovering-one-device)).
 
 ### 19.2 Recovering one device
 
@@ -2401,12 +2410,17 @@ Carol's tablet:
 - E.g. "Ana's phone and Ben's laptop disagree about the store; reset it
   from this device?"
 - An admin's device resets the store's rows; a member of a circle resets
-  that circle's rows, one reset per key.
+  that circle's rows, one reset per audience.
 - A reset is an operation ([§18](#18-operations)):
   1. write a snapshot of what this device has ([§15](#15-snapshots));
   2. record in the store log that the store, or the circle, is reset to
      that snapshot ([§9](#9-members-and-roles)).
-- Every other device reloads from that snapshot when it sees the entry.
+- Every device reloads from that snapshot when it applies the entry, the
+  resetting device too, so writes it applied after writing the snapshot
+  are judged like everyone else's.
+- A device reloads whenever the replay changes an audience's reset or
+  schema version, from the snapshot the kept entry names, so a reset
+  dropped by a later entry is followed by the winner's.
 - A write that had read everything the snapshot includes came after the
   reset, and applies like any write.
 - Any other write the reset snapshot doesn't cover is judged by what it had
