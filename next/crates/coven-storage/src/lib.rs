@@ -12,6 +12,7 @@ mod secret_json;
 mod session;
 mod settings;
 mod storage;
+mod transfer;
 
 pub use config::*;
 pub use credentials::*;

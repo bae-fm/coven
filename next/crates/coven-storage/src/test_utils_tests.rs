@@ -149,3 +149,26 @@ async fn expired_upload_restarts_with_a_new_recording_at_the_same_destination() 
         Err(StorageError::SessionMismatch)
     ));
 }
+
+#[tokio::test]
+async fn failed_automatic_upload_is_aborted_without_publishing() {
+    let storage = MemoryStorage::new(config()).unwrap();
+    storage
+        .set_faults(Faults {
+            lose_part_reply: true,
+            ..Faults::none()
+        })
+        .await;
+    let path = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    assert_eq!(
+        storage.create(&path, &[1; 17]).await.unwrap_err().failure(),
+        StorageFailure::Network
+    );
+    assert!(storage.list(&ObjectPrefix::all()).await.unwrap().is_empty());
+    assert!(storage.state.lock().await.uploads.is_empty());
+    storage.create(&path, &[1; 17]).await.unwrap();
+    assert_eq!(storage.read(&path).await.unwrap(), [1; 17]);
+}

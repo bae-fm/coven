@@ -34,6 +34,9 @@ pub enum CloudKitUploadStatus {
 /// classification. None of these calls starts unowned background work.
 #[async_trait]
 pub trait CloudKitOps: Send + Sync {
+    /// Largest encrypted object this bridge saves in one native call. Must be
+    /// nonzero; larger objects use the bridge's durable bounded-asset upload.
+    fn single_request_limit(&self) -> u64;
     /// Save complete encrypted bytes using the server's create-only policy.
     async fn create(
         &self,
@@ -120,6 +123,11 @@ impl CloudKitStorage {
         if !matches!(config, StorageConfig::CloudKit { .. }) {
             return Err(StorageError::InvalidConfiguration("expected CloudKit zone"));
         }
+        if ops.single_request_limit() == 0 {
+            return Err(StorageError::InvalidConfiguration(
+                "zero CloudKit request limit",
+            ));
+        }
         Ok(Self { config, ops })
     }
     fn id<'a>(&self, session: &'a UploadSession) -> Result<&'a SecretText, StorageError> {
@@ -135,13 +143,23 @@ impl Storage for CloudKitStorage {
     fn config(&self) -> StorageConfig {
         self.config.clone()
     }
+    fn single_request_limit(&self) -> u64 {
+        self.ops.single_request_limit()
+    }
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        self.ops.create(&self.config, path, bytes).await
+        crate::transfer::upload_bytes(
+            self,
+            path,
+            bytes,
+            self.ops.create(&self.config, path, bytes),
+        )
+        .await
     }
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         if !path.is_replaceable() {
             return Err(StorageError::InvalidPath);
         }
+        crate::transfer::check_single_request(bytes.len() as u64, self.single_request_limit())?;
         self.ops.replace(&self.config, path, bytes).await
     }
     async fn read(&self, path: &ObjectPath) -> Result<Vec<u8>, StorageError> {

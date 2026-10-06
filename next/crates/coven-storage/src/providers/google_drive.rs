@@ -58,6 +58,29 @@ impl GoogleDriveStorage {
         query.push(("supportsAllDrives", "true"));
         http::endpoint(&self.api, segments, &query)
     }
+    async fn create_request(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
+        let metadata = json!({"name": path.as_str(), "parents": [&self.folder], "properties": {"covenDevice": self.device.0.to_string()}});
+        let (content_type, body) = multipart_content(&metadata, bytes)?;
+        let url = http::endpoint(
+            &self.upload_api,
+            &["files"],
+            &[("uploadType", "multipart"), ("supportsAllDrives", "true")],
+        )?;
+        let item = http::json(
+            PROVIDER,
+            self.session
+                .send(
+                    Method::POST,
+                    &url,
+                    &[("Content-Type", content_type)],
+                    Body::Bytes(body),
+                    true,
+                )
+                .await?,
+        )
+        .await?;
+        self.ensure_unique(path, http::string(&item, "id")?).await
+    }
     async fn copies(&self, path: &ObjectPath) -> Result<Vec<Value>, StorageError> {
         let query = format!(
             "'{}' in parents and name = '{}' and trashed = false",
@@ -344,53 +367,27 @@ impl Storage for GoogleDriveStorage {
         self.session.set_tokens(tokens).await;
         Ok(())
     }
+    fn single_request_limit(&self) -> u64 {
+        5 * 1024 * 1024
+    }
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         let _guard = self.create_lock.lock().await;
-        if bytes.is_empty() {
+        crate::transfer::upload_bytes(self, path, bytes, async {
             if self.remove_own_duplicates(path).await?.is_some() {
                 return Err(StorageError::AlreadyExists);
             }
-            let body = json!({"name": path.as_str(), "parents": [&self.folder], "mimeType": "application/octet-stream", "properties": {"covenDevice": self.device.0.to_string()}});
-            let item = http::json(
-                PROVIDER,
-                self.send(Method::POST, &self.url(&["files"], &[])?, Body::Json(body))
-                    .await?,
-            )
-            .await?;
-            return self.ensure_unique(path, http::string(&item, "id")?).await;
-        }
-        let mut session = self.begin_upload(path, bytes.len() as u64).await?;
-        for part in bytes.chunks(session.part_size()) {
-            self.upload_part(&mut session, part).await?;
-        }
-        self.finish_upload(&mut session).await
+            self.create_request(path, bytes).await
+        })
+        .await
     }
+
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         if !path.is_replaceable() {
             return Err(StorageError::InvalidPath);
         }
+        crate::transfer::check_single_request(bytes.len() as u64, self.single_request_limit())?;
         let Some(item) = self.remove_own_duplicates(path).await? else {
-            let metadata = json!({"name": path.as_str(), "parents": [&self.folder], "properties": {"covenDevice": self.device.0.to_string()}});
-            let (content_type, body) = multipart_content(&metadata, bytes)?;
-            let url = http::endpoint(
-                &self.upload_api,
-                &["files"],
-                &[("uploadType", "multipart"), ("supportsAllDrives", "true")],
-            )?;
-            let item = http::json(
-                PROVIDER,
-                self.session
-                    .send(
-                        Method::POST,
-                        &url,
-                        &[("Content-Type", content_type)],
-                        Body::Bytes(body),
-                        true,
-                    )
-                    .await?,
-            )
-            .await?;
-            return self.ensure_unique(path, http::string(&item, "id")?).await;
+            return self.create_request(path, bytes).await;
         };
         let url = http::endpoint(
             &self.upload_api,

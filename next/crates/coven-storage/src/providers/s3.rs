@@ -192,13 +192,17 @@ impl Storage for S3Storage {
     fn config(&self) -> StorageConfig {
         self.config.clone()
     }
+    fn single_request_limit(&self) -> u64 {
+        5 * 1024 * 1024 * 1024
+    }
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        self.put(path, bytes, true).await
+        crate::transfer::upload_bytes(self, path, bytes, self.put(path, bytes, true)).await
     }
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         if !path.is_replaceable() {
             return Err(StorageError::InvalidPath);
         }
+        crate::transfer::check_single_request(bytes.len() as u64, self.single_request_limit())?;
         self.put(path, bytes, false).await
     }
     async fn read(&self, path: &ObjectPath) -> Result<Vec<u8>, StorageError> {

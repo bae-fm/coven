@@ -47,6 +47,9 @@ async fn endpoint(
     };
     match uri.path() {
         "/2/files/upload" => {
+            if body.len() > 150 * 1024 * 1024 {
+                return response(413, "single request limit exceeded");
+            }
             if arg["mode"] == "add" && state.objects.contains_key(&path) {
                 return error("path/conflict/file/...");
             }
@@ -367,4 +370,24 @@ async fn abort_does_not_remove_an_upload_published_before_a_lost_reply() {
     assert!(storage.finish_upload(&mut upload).await.is_err());
     storage.abort_upload(&upload).await.unwrap();
     assert_eq!(storage.read(&path).await.unwrap(), b"data");
+}
+
+#[tokio::test]
+async fn create_uploads_an_oversized_write_in_parts() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let path = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    assert_eq!(storage.single_request_limit(), 150 * 1024 * 1024);
+    let mut bytes = vec![0x7b; storage.single_request_limit() as usize];
+    storage.create(&path, &bytes).await.unwrap();
+    assert!(state.lock().unwrap().upload.is_empty());
+    storage.delete(&path).await.unwrap();
+    bytes.push(8);
+    storage.create(&path, &bytes).await.unwrap();
+    assert_eq!(state.lock().unwrap().objects[&path.absolute()], bytes);
+    assert!(state.lock().unwrap().closed);
 }

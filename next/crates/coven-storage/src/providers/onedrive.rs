@@ -55,7 +55,12 @@ impl OneDriveStorage {
         url: &str,
         body: Body,
     ) -> Result<reqwest::Response, StorageError> {
-        self.session.send(method, url, &[], body, true).await
+        let headers = if matches!(body, Body::Bytes(_)) {
+            vec![("Content-Type", "application/octet-stream".into())]
+        } else {
+            Vec::new()
+        };
+        self.session.send(method, url, &headers, body, true).await
     }
     async fn metadata(&self, path: &ObjectPath) -> Result<Value, StorageError> {
         http::json(
@@ -246,8 +251,11 @@ impl Storage for OneDriveStorage {
         self.session.set_tokens(tokens).await;
         Ok(())
     }
+    fn single_request_limit(&self) -> u64 {
+        250 * 1024 * 1024
+    }
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        if bytes.is_empty() {
+        crate::transfer::upload_bytes(self, path, bytes, async {
             self.parents(path).await?;
             let url = format!(
                 "{}?@microsoft.graph.conflictBehavior=fail",
@@ -259,25 +267,26 @@ impl Storage for OneDriveStorage {
                     .send(
                         Method::PUT,
                         &url,
-                        &[("If-None-Match", "*".into())],
-                        Body::Bytes(Vec::new()),
+                        &[
+                            ("If-None-Match", "*".into()),
+                            ("Content-Type", "application/octet-stream".into()),
+                        ],
+                        Body::Bytes(bytes.to_vec()),
                         true,
                     )
                     .await?,
             )
             .await?;
-            return Ok(());
-        }
-        let mut session = self.begin_upload(path, bytes.len() as u64).await?;
-        for part in bytes.chunks(session.part_size()) {
-            self.upload_part(&mut session, part).await?;
-        }
-        self.finish_upload(&mut session).await
+            Ok(())
+        })
+        .await
     }
+
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         if !path.is_replaceable() {
             return Err(StorageError::InvalidPath);
         }
+        crate::transfer::check_single_request(bytes.len() as u64, self.single_request_limit())?;
         self.parents(path).await?;
         http::checked(
             PROVIDER,

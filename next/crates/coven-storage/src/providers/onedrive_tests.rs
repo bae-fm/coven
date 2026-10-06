@@ -16,6 +16,8 @@ struct Remote {
     files: BTreeMap<String, Vec<u8>>,
     uploads: BTreeMap<String, (String, Vec<u8>)>,
     next: u64,
+    single_uploads: usize,
+    session_starts: usize,
     fail_reply: bool,
     expected_ranges: Option<Value>,
     members: BTreeSet<String>,
@@ -119,6 +121,7 @@ async fn endpoint(
             format!("{base}/{relative}")
         };
         if suffix == "/createUploadSession" {
+            state.session_starts += 1;
             assert_eq!(value["item"]["@microsoft.graph.conflictBehavior"], "fail");
             state.next += 1;
             let id = state.next.to_string();
@@ -130,6 +133,20 @@ async fn endpoint(
             return response(204, Vec::new());
         }
         if method == Method::PUT {
+            assert_eq!(headers["content-type"], "application/octet-stream");
+            state.single_uploads += 1;
+            if q.get("@microsoft.graph.conflictBehavior")
+                .map(String::as_str)
+                == Some("fail")
+            {
+                assert_eq!(headers["if-none-match"], "*");
+                if state.files.contains_key(&path) {
+                    return response(
+                        409,
+                        json!({"error":{"code":"nameAlreadyExists"}}).to_string(),
+                    );
+                }
+            }
             state.files.insert(path.clone(), body.to_vec());
             return reply(file(&path, &body, host));
         }
@@ -418,4 +435,26 @@ async fn abort_retries_after_cancellation_and_preserves_published_objects() {
     storage.abort_upload(&unconfirmed).await.unwrap();
     storage.abort_upload(&unconfirmed).await.unwrap();
     assert_eq!(storage.read(&path).await.unwrap(), b"data");
+}
+
+#[tokio::test]
+async fn create_switches_to_a_session_above_the_content_limit() {
+    let state = remote();
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    assert_eq!(storage.single_request_limit(), 250 * 1024 * 1024);
+    let path = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    let mut bytes = vec![7; storage.single_request_limit() as usize];
+    storage.create(&path, &bytes).await.unwrap();
+    assert_eq!(state.lock().unwrap().single_uploads, 1);
+    assert_eq!(state.lock().unwrap().session_starts, 0);
+    storage.delete(&path).await.unwrap();
+    bytes.push(8);
+    storage.create(&path, &bytes).await.unwrap();
+    assert_eq!(state.lock().unwrap().single_uploads, 1);
+    assert_eq!(state.lock().unwrap().session_starts, 1);
+    assert_eq!(state.lock().unwrap().files[path.as_str()], bytes);
 }

@@ -54,7 +54,8 @@ pub struct MemoryStorage {
     state: Arc<Mutex<State>>,
 }
 impl MemoryStorage {
-    /// A store at the supplied location, using four-byte parts for crash tests.
+    /// A store at the supplied location, with a sixteen-byte single-request limit
+    /// and four-byte parts for transfer and crash tests.
     pub fn new(config: StorageConfig) -> Result<Self, StorageError> {
         config.validate()?;
         Ok(Self {
@@ -103,19 +104,27 @@ impl Storage for MemoryStorage {
     fn config(&self) -> StorageConfig {
         self.config.clone()
     }
-    async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        self.before().await?;
-        let mut state = self.state.lock().await;
-        if state.objects.contains_key(path) {
-            return Err(StorageError::AlreadyExists);
-        }
-        state.objects.insert(path.clone(), bytes.to_vec());
-        Ok(())
+    fn single_request_limit(&self) -> u64 {
+        16
     }
+    async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
+        crate::transfer::upload_bytes(self, path, bytes, async {
+            self.before().await?;
+            let mut state = self.state.lock().await;
+            if state.objects.contains_key(path) {
+                return Err(StorageError::AlreadyExists);
+            }
+            state.objects.insert(path.clone(), bytes.to_vec());
+            Ok(())
+        })
+        .await
+    }
+
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         if !path.is_replaceable() {
             return Err(StorageError::InvalidPath);
         }
+        crate::transfer::check_single_request(bytes.len() as u64, self.single_request_limit())?;
         self.before().await?;
         self.state
             .lock()

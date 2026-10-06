@@ -2776,6 +2776,8 @@ pub enum CloudKitUploadStatus {
 /// Native CloudKit calls implemented by the app (§4, §20.1).
 #[async_trait]
 pub trait CloudKitOps: Send + Sync {
+    /// Maximum encrypted body in one native call; nonzero, set by the asset representation.
+    fn single_request_limit(&self) -> u64;
     /// Creates complete encrypted bytes using the server's create-only policy.
     async fn create(&self, location: &StorageConfig, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError>;
     /// Replaces a complete posted-positions object atomically (§6).
@@ -3870,6 +3872,14 @@ while let Ok(values) = lost.next().await {
     `LocationOccupied`.
   - Creating uploads the store's first entry and its key sealed to this
     member; waiting writes then go up through sync like any others.
+- `Storage::single_request_limit() -> u64` exposes the maximum encrypted body
+  sent in one request: S3 5 GiB, Drive 5 MiB, Dropbox 150 MiB, OneDrive
+  250 MiB, and CloudKit's nonzero `CloudKitOps::single_request_limit()`.
+  `create` sends larger bodies through resumable or multipart uploads for any
+  object path, including writes and snapshots. On failure it aborts the
+  unfinished session and retains both operation and cleanup failures.
+  Callers needing crash continuation use the recorded-session calls directly.
+  Posted-positions replacement above the limit returns `SingleRequestTooLarge`.
 - Recorded `UploadSession`s only target create-once paths. Every provider's
   `begin_upload` and recorded-session decoding refuse posted positions; their
   replacement sends the complete bytes in one request. Completion recovery can
@@ -4005,6 +4015,8 @@ pub enum StorageError {
     SessionExpired,
     /// A part disagrees with the session's offset, size or alignment.
     InvalidPart,
+    /// A posted-positions replacement exceeds the provider's single-request limit.
+    SingleRequestTooLarge { size: u64, limit: u64 },
     /// A response violates the provider's protocol.
     Protocol(&'static str),
     /// Parsing recorded data failed.

@@ -183,6 +183,7 @@ async fn multipart_recovers_lost_part_and_completion_replies() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
+    assert_eq!(storage.single_request_limit(), 5 * 1024 * 1024 * 1024);
     let path = ObjectPath::file(coven_foundation::id_source::FileId(uuid::Uuid::from_bytes(
         [0xaa; 16],
     )));

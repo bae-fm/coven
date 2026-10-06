@@ -540,3 +540,23 @@ async fn abort_retries_after_cancellation_and_preserves_published_objects() {
     storage.abort_upload(&unconfirmed).await.unwrap();
     assert_eq!(storage.read(&path).await.unwrap(), b"data");
 }
+
+#[tokio::test]
+async fn create_switches_to_a_session_above_the_multipart_request_limit() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    assert_eq!(storage.single_request_limit(), 5 * 1024 * 1024);
+    let path = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    let mut bytes = vec![7; storage.single_request_limit() as usize];
+    storage.create(&path, &bytes).await.unwrap();
+    assert_eq!(state.lock().unwrap().single_uploads, 1);
+    storage.delete(&path).await.unwrap();
+    bytes.push(8);
+    storage.create(&path, &bytes).await.unwrap();
+    assert_eq!(state.lock().unwrap().single_uploads, 1);
+    assert_eq!(storage.read(&path).await.unwrap(), bytes);
+}

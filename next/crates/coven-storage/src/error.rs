@@ -68,6 +68,14 @@ pub enum StorageError {
     /// A part disagrees with the session's offset, size or alignment.
     #[error("invalid upload part")]
     InvalidPart,
+    /// A posted-positions replacement exceeds this provider's single-request limit.
+    #[error("object of {size} bytes exceeds the single-request limit of {limit}")]
+    SingleRequestTooLarge {
+        /// Encrypted body length in bytes.
+        size: u64,
+        /// The adapter's single-request limit in bytes.
+        limit: u64,
+    },
     /// A response violates the provider's protocol.
     #[error("invalid provider response: {0}")]
     Protocol(&'static str),
@@ -100,7 +108,8 @@ impl StorageError {
             Self::InvalidConfiguration(_)
             | Self::InvalidPath
             | Self::InvalidRange
-            | Self::InvalidPart => StorageFailure::InvalidConfiguration,
+            | Self::InvalidPart
+            | Self::SingleRequestTooLarge { .. } => StorageFailure::InvalidConfiguration,
             Self::NotFound | Self::SessionExpired => StorageFailure::NotFound,
             Self::AlreadyExists => StorageFailure::AlreadyExists,
             Self::SessionMismatch | Self::Protocol(_) | Self::Encoding(_) | Self::File(_) => {

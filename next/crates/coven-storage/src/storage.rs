@@ -102,6 +102,10 @@ pub enum MemberRemoval {
 pub trait Storage: Send + Sync {
     /// This provider's nonsecret location settings.
     fn config(&self) -> StorageConfig;
+    /// Largest complete encrypted body sent in one request, in bytes. Larger
+    /// create-once objects use resumable or multipart uploads, for every path kind.
+    /// Callers retaining sessions across crashes use `begin_upload` and record them.
+    fn single_request_limit(&self) -> u64;
     /// Install replacement OAuth tokens after the owner commits them to key custody.
     /// S3 and CloudKit refuse OAuth tokens; they use different account credentials.
     async fn set_oauth_tokens(&self, _tokens: crate::OAuthTokens) -> Result<(), StorageError> {

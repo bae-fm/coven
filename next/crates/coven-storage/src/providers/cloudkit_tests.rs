@@ -4,6 +4,7 @@ use coven_crypto::SecretText;
 use std::collections::BTreeMap;
 struct Bridge {
     memory: MemoryStorage,
+    abort_failure: Option<StorageFailure>,
     uploads: tokio::sync::Mutex<BTreeMap<String, UploadSession>>,
 }
 fn config() -> StorageConfig {
@@ -17,12 +18,16 @@ impl Bridge {
     fn new() -> Self {
         Self {
             memory: MemoryStorage::new(config()).unwrap(),
+            abort_failure: None,
             uploads: tokio::sync::Mutex::new(BTreeMap::new()),
         }
     }
 }
 #[async_trait]
 impl CloudKitOps for Bridge {
+    fn single_request_limit(&self) -> u64 {
+        16
+    }
     async fn create(
         &self,
         location: &StorageConfig,
@@ -30,6 +35,7 @@ impl CloudKitOps for Bridge {
         bytes: &[u8],
     ) -> Result<(), StorageError> {
         assert_eq!(location, &config());
+        assert!(bytes.len() <= 16);
         self.memory.create(path, bytes).await
     }
     async fn replace(
@@ -158,6 +164,9 @@ impl CloudKitOps for Bridge {
         id: &SecretText,
     ) -> Result<(), StorageError> {
         assert_eq!(location, &config());
+        if let Some(failure) = self.abort_failure {
+            return Err(StorageError::Injected(failure));
+        }
         self.memory
             .abort_upload(
                 self.uploads
@@ -259,4 +268,56 @@ async fn abort_accepts_a_forgotten_session_and_keeps_published_objects() {
     bridge.uploads.lock().await.clear();
     storage.abort_upload(&unconfirmed).await.unwrap();
     assert_eq!(storage.read(&path).await.unwrap(), b"data");
+}
+
+#[tokio::test]
+async fn create_respects_the_bridges_single_request_limit() {
+    let bridge = Arc::new(Bridge::new());
+    let storage = CloudKitStorage::new(config(), bridge.clone()).unwrap();
+    assert_eq!(storage.single_request_limit(), 16);
+    let path = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    storage.create(&path, &[1; 16]).await.unwrap();
+    assert!(bridge.uploads.lock().await.is_empty());
+    storage.delete(&path).await.unwrap();
+    storage.create(&path, &[2; 17]).await.unwrap();
+    assert_eq!(bridge.uploads.lock().await.len(), 1);
+    assert_eq!(storage.read(&path).await.unwrap(), [2; 17]);
+    let positions = ObjectPath::positions(coven_foundation::id_source::DeviceId(31));
+    assert!(matches!(
+        storage.replace(&positions, &[3; 17]).await,
+        Err(StorageError::SingleRequestTooLarge {
+            size: 17,
+            limit: 16
+        })
+    ));
+    assert_eq!(bridge.uploads.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn automatic_upload_keeps_both_transfer_and_abort_failures() {
+    let mut bridge = Bridge::new();
+    bridge.abort_failure = Some(StorageFailure::PermissionDenied);
+    bridge
+        .memory
+        .set_faults(Faults {
+            lose_part_reply: true,
+            ..Faults::none()
+        })
+        .await;
+    let bridge = Arc::new(bridge);
+    let storage = CloudKitStorage::new(config(), bridge.clone()).unwrap();
+    let path = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    let error = storage.create(&path, &[1; 17]).await.unwrap_err();
+    let StorageError::Cleanup { operation, cleanup } = error else {
+        panic!("lost one of the failures");
+    };
+    assert_eq!(operation.failure(), StorageFailure::Network);
+    assert_eq!(cleanup.failure(), StorageFailure::PermissionDenied);
+    assert!(storage.list(&ObjectPrefix::all()).await.unwrap().is_empty());
 }

@@ -229,13 +229,17 @@ impl Storage for DropboxStorage {
         self.session.set_tokens(tokens).await;
         Ok(())
     }
+    fn single_request_limit(&self) -> u64 {
+        150 * 1024 * 1024
+    }
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        self.write(path, bytes, "add").await
+        crate::transfer::upload_bytes(self, path, bytes, self.write(path, bytes, "add")).await
     }
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         if !path.is_replaceable() {
             return Err(StorageError::InvalidPath);
         }
+        crate::transfer::check_single_request(bytes.len() as u64, self.single_request_limit())?;
         self.write(path, bytes, "overwrite").await
     }
     async fn read(&self, path: &ObjectPath) -> Result<Vec<u8>, StorageError> {
