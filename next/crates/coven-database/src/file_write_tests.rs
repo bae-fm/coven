@@ -176,8 +176,10 @@ async fn a_stream_exceeds_its_memory_budget_and_is_read_once() {
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap();
             assert_eq!(paths.len(), 1);
+            // A directory entry's cached size lags an open file on Windows;
+            // the path's own metadata reads the file.
             assert_eq!(
-                paths[0].metadata().unwrap().len(),
+                std::fs::metadata(paths[0].path()).unwrap().len(),
                 read as u64,
                 "bytes must reach disk before the next buffer is requested"
             );
