@@ -23,7 +23,7 @@ pub use coven_foundation::id_source::CircleId;
 pub use derivation::{DerivedKeys, EncryptionKey};
 pub use error::{CryptoError, MaterialError, SealError};
 pub use file_key::FileKey;
-pub use hashing::{ContentHash, ContentHasher, Fingerprint, FingerprintHasher, StoredFileName};
+pub use hashing::{ContentHash, ContentHasher, Fingerprint, FingerprintHasher};
 pub use keys::{CircleKey, InviteSecret, StoreKey, StoreKeyring};
 pub use member::{
     seal_circle_key, seal_store_key, MemberId, MemberKeys, SealedKey, SealingPublicKey, Signature,

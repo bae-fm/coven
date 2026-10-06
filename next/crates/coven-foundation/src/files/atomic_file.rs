@@ -80,6 +80,11 @@ impl AtomicFile {
         read_optional(&self.path)
     }
 
+    /// Open this owned file for checked scans and positioned reads.
+    pub fn open_reader(&self) -> Result<super::FileReader, super::ObservationError> {
+        super::FileReader::open(&self.path)
+    }
+
     /// Write and sync a temporary sibling, replace the target, then sync its
     /// directory. The parent must already exist. Concurrent writers each
     /// install one complete version; a failed pre-rename write leaves it alone.

@@ -13,6 +13,11 @@ use coven_crypto::ContentHash;
 use coven_format::value::Value;
 use coven_merge::{Audience, RowId, WriteId};
 
+#[path = "local_file.rs"]
+mod local_file;
+pub(crate) use local_file::open as open_local;
+pub use local_file::{LocalFileError, LocalFileStream};
+
 #[derive(Clone, Debug, PartialEq)]
 struct FileVersion {
     generation: u64,

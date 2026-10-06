@@ -149,7 +149,9 @@ async fn lost_completion_requires_byte_verification() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::file(&coven_crypto::StoredFileName::from_bytes([0xcc; 32]));
+    let path = ObjectPath::file(coven_foundation::id_source::FileId(uuid::Uuid::from_bytes(
+        [0xcc; 16],
+    )));
     let mut upload = storage.begin_upload(&path, 4).await.unwrap();
     storage.upload_part(&mut upload, b"data").await.unwrap();
     let recorded = upload.encode().unwrap();
@@ -189,7 +191,9 @@ async fn missing_session_and_destination_is_expired() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::file(&coven_crypto::StoredFileName::from_bytes([0xff; 32]));
+    let path = ObjectPath::file(coven_foundation::id_source::FileId(uuid::Uuid::from_bytes(
+        [0xff; 16],
+    )));
     let mut upload = storage.begin_upload(&path, 4).await.unwrap();
     state.lock().unwrap().closed = true;
     assert!(matches!(
@@ -227,7 +231,9 @@ async fn resume_queries_the_stored_offset_after_lost_part_reply() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::file(&coven_crypto::StoredFileName::from_bytes([0xbb; 32]));
+    let path = ObjectPath::file(coven_foundation::id_source::FileId(uuid::Uuid::from_bytes(
+        [0xbb; 16],
+    )));
     let mut upload = storage
         .begin_upload(&path, 8 * 1024 * 1024 + 1)
         .await

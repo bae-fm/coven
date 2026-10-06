@@ -57,3 +57,71 @@ fn dropping_the_guard_unlocks_even_while_an_inherited_handle_survives() {
     drop(next);
     store.lock_exclusive().unwrap();
 }
+
+#[test]
+fn only_the_matching_lock_can_authorize_open_and_change_the_device() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = StoreLayout::new(root.path().to_owned());
+    let first = layout
+        .create_store_dir(StoreId(Uuid::from_u128(1)), "first", &UuidIds)
+        .unwrap();
+    let second = layout
+        .create_store_dir(StoreId(Uuid::from_u128(2)), "second", &UuidIds)
+        .unwrap();
+    let lock = first.lock_exclusive().unwrap();
+    first.verify_lock(&lock).unwrap();
+    assert!(matches!(
+        second.verify_lock(&lock),
+        Err(StoreLockError::WrongDirectory(_))
+    ));
+    lock.set_device_id(crate::id_source::DeviceId(42)).unwrap();
+    assert_eq!(
+        first.settings().unwrap().device_id,
+        crate::id_source::DeviceId(42)
+    );
+}
+
+#[test]
+fn deletion_requires_the_lock_and_retries_an_unpublished_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = StoreLayout::new(root.path().to_owned());
+    let id = StoreId(Uuid::from_u128(1));
+    let store = layout.create_store_dir(id, "first", &UuidIds).unwrap();
+    let lock = store.lock_exclusive().unwrap();
+    assert!(matches!(
+        store.lock_for_deletion(),
+        Err(StoreLockError::AlreadyOpen(_))
+    ));
+    // An interrupted removal has already unpublished its directory.
+    let destination = deletion_path(&lock.directory, id);
+    std::fs::rename(&lock.directory, &destination).unwrap();
+    drop(lock);
+    store
+        .lock_for_deletion()
+        .unwrap()
+        .unwrap()
+        .remove_directory()
+        .unwrap();
+    assert!(store.lock_for_deletion().unwrap().is_none());
+    assert!(!destination.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn deleting_a_store_link_never_removes_its_target() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let layout = StoreLayout::new(root.path().to_owned());
+    let id = StoreId(Uuid::from_u128(1));
+    let stores = root.path().join("stores");
+    std::fs::create_dir(&stores).unwrap();
+    let path = stores.join(id.to_string());
+    std::os::unix::fs::symlink(outside.path(), &path).unwrap();
+    let store = layout.store_dir(&id);
+    assert!(matches!(
+        store.lock_for_deletion(),
+        Err(StoreLockError::File(_))
+    ));
+    assert!(outside.path().exists());
+    assert!(!outside.path().join(".coven-lock").exists());
+}

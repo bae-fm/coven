@@ -41,7 +41,16 @@ impl StoreLayout {
     /// The stores on this device, by id and name, ordered by id (§20.1).
     /// Only directories with a canonical UUID name and matching valid settings
     /// are stores. Invalid entries are logged; filesystem failures are errors.
-    pub fn stores(&self) -> Result<Vec<StoreInfo>, StoreLayoutError> {
+    pub async fn stores(&self) -> Result<Vec<StoreInfo>, StoreLayoutError> {
+        let layout = self.clone();
+        match tokio::task::spawn_blocking(move || layout.list_stores()).await {
+            Ok(result) => result,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(error) => panic!("store listing task cancelled: {error}"),
+        }
+    }
+
+    fn list_stores(&self) -> Result<Vec<StoreInfo>, StoreLayoutError> {
         let root = self.app_dir.join("stores");
         let entries = match fs::read_dir(&root) {
             Ok(entries) => entries,
@@ -108,7 +117,19 @@ impl StoreLayout {
         name: &str,
         ids: &dyn IdSource,
     ) -> Result<StoreDir, StoreCreationError> {
-        crate::files::creation::create(&self.app_dir.join("stores"), id, name, ids)
+        self.create_store_dir_with(id, name, ids, |_| Ok(()))
+    }
+    /// Prepare outside-directory state before publishing the store. The
+    /// initializer sees its final settings, and any failure removes the
+    /// unpublished directory. Used for a non-restored device identity (§10).
+    pub fn create_store_dir_with<E: std::error::Error + Send + Sync + 'static>(
+        &self,
+        id: StoreId,
+        name: &str,
+        ids: &dyn IdSource,
+        initialize: impl FnOnce(&crate::files::StoreSettings) -> Result<(), E>,
+    ) -> Result<StoreDir, StoreCreationError<E>> {
+        crate::files::creation::create(&self.app_dir.join("stores"), id, name, ids, initialize)
     }
 }
 

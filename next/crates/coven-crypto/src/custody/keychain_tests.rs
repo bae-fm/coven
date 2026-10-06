@@ -291,3 +291,46 @@ fn native_errors_erase_malformed_secret_bytes_before_debugging() {
     };
     assert!(!format!("{:?}", std::error::Error::source(&cause).unwrap()).contains("115, 101, 99"));
 }
+
+#[test]
+fn deletion_checks_all_names_then_removes_only_this_stores_entries() {
+    let fake = Keychain::in_memory("delete").unwrap();
+    let first = StoreKeychain::new(fake.clone(), StoreId(Uuid::from_u128(1)));
+    let second = StoreKeychain::new(fake.clone(), StoreId(Uuid::from_u128(2)));
+    for store in [&first, &second] {
+        store.set_device_id(DeviceId(42)).unwrap();
+        store.write(STORE_KEYS_ENTRY, b"store keys").unwrap();
+        store.write(MEMBER_KEYS_ENTRY, b"member keys").unwrap();
+        store.set_host_secret("token", "token").unwrap();
+        store
+            .set_synced_restore_code(&SecretBytes::new(b"restore".to_vec()))
+            .unwrap();
+    }
+    assert!(matches!(
+        first.delete_store_entries(&["token", "device-id"]),
+        Err(KeyError::SecretName(SecretNameError::Reserved))
+    ));
+    assert_eq!(
+        first.host_secret("token").unwrap().as_deref(),
+        Some("token")
+    );
+    first.delete_store_entries(&["token"]).unwrap();
+    first.delete_store_entries(&["token"]).unwrap();
+    for name in [
+        DEVICE_ID_ENTRY,
+        STORE_KEYS_ENTRY,
+        MEMBER_KEYS_ENTRY,
+        "token",
+    ] {
+        assert!(first.read(name).unwrap().is_none());
+        assert!(second.read(name).unwrap().is_some());
+    }
+    assert!(first.synced_restore_code().unwrap().is_none());
+    assert!(second.synced_restore_code().unwrap().is_some());
+    assert_eq!(second.device_id().unwrap(), Some(DeviceId(42)));
+    second.write(DEVICE_ID_ENTRY, &[1]).unwrap();
+    assert!(matches!(
+        second.device_id(),
+        Err(KeyError::DeviceIdEncoding)
+    ));
+}

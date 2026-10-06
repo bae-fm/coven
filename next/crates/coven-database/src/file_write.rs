@@ -493,7 +493,7 @@ impl<'a> FileWrite<'a> {
         Ok(())
     }
 
-    pub(crate) fn finish<R>(&self, result: Result<R, DbError>) -> Result<R, DbError> {
+    pub(crate) fn finish<R, E: crate::WriteFailure>(&self, result: Result<R, E>) -> Result<R, E> {
         crate::file_removals::FileRemovals::new(
             self.database,
             self.directory,

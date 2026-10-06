@@ -1,4 +1,4 @@
-//! Incremental content and fingerprint hashing, and opaque file names (§16, §19.1).
+//! Incremental content and fingerprint hashing (§16, §19.1).
 
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -39,27 +39,6 @@ impl ContentHasher {
 impl std::fmt::Debug for ContentHasher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ContentHasher(..)")
-    }
-}
-
-/// HMAC-SHA256 of the content hash with an audience's naming key (§16.2).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct StoredFileName([u8; 32]);
-
-impl StoredFileName {
-    /// Decode a keyed name recorded in a file reference.
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(bytes)
-    }
-    /// The keyed name's bytes, safe for the provider to see.
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for StoredFileName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&hex::encode(self.0))
     }
 }
 

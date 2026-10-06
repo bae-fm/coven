@@ -2538,7 +2538,8 @@ use uuid::Uuid;
 pub struct RowKey(/* private */);
 
 impl From<&str> for RowKey { /* a one-column text key */ }
-impl<A: ToSql, B: ToSql> From<(A, B)> for RowKey { /* a two-column key */ }
+impl<A: Into<rusqlite::types::Value>, B: Into<rusqlite::types::Value>> From<(A, B)> for RowKey { /* a two-column key */ }
+impl From<Vec<rusqlite::types::Value>> for RowKey { /* any key width */ }
 
 /// One install of the app, by its 64-bit device id (§10).
 pub struct DeviceId(/* private */);
@@ -2804,6 +2805,14 @@ pub type CovenResult<T> = Result<T, CovenError>;
 
 /// Failures of opening, reading and writing a store (§5, §20.1, §20.3).
 pub enum CovenError {
+    /// App data could not be sealed with the selected store key.
+    Seal(SealError),
+    /// Reading device identity or an app callback's custody operation failed.
+    Key(KeyError),
+    /// An app callback failed and SQLite also failed to roll it back.
+    Rollback { operation: Box<CovenError>, rollback: rusqlite::Error },
+    /// Cleanup also failed after an app callback failed.
+    FileCleanup { write: Result<(), Box<CovenError>>, failures: Vec<DbError> },
     /// The database or a write's validation failed.
     Database(DbError),
     /// An app migration failed or cannot run on this schema.
@@ -3031,6 +3040,8 @@ pub enum SettingsError {
 pub enum StoreLockError {
     /// Another handle or process holds the lock.
     AlreadyOpen(StoreId),
+    /// A supplied lock protects a different directory.
+    WrongDirectory(StoreId),
     /// Opening or locking the lock file failed.
     File(FileError),
 }
@@ -3043,6 +3054,10 @@ pub enum StoreLayoutError {
 
 /// Creating a store failed, with publication and rollback made explicit (§20.1).
 pub enum StoreCreationError {
+    /// Keeping the device-only identity failed before publication.
+    Initialization { id: StoreId, source: KeyError },
+    /// Removing that identity after an unpublished failure also failed.
+    InitializationCleanup { operation: Box<StoreCreationError>, cleanup: KeyError },
     /// A directory or file already occupies this store id.
     AlreadyExists(StoreId),
     /// A file operation failed before publication.
@@ -3050,9 +3065,9 @@ pub enum StoreCreationError {
     /// Writing the store's settings failed before publication.
     Settings(SettingsError),
     /// The store is visible, but syncing its parent directory failed.
-    Published { id: StoreId, source: Box<dyn std::error::Error + Send + Sync> },
+    Published { id: StoreId, source: std::io::Error },
     /// Removing the unpublished directory failed too.
-    Rollback { operation: Box<StoreCreationError>, cleanup: Box<dyn std::error::Error + Send + Sync> },
+    Rollback { operation: Box<StoreCreationError>, cleanup: std::io::Error },
 }
 
 /// Deleting the local store stopped at a step the caller may retry (§20.1).
@@ -3067,6 +3082,10 @@ pub enum StoreDeletionError {
 
 /// Unlocking, keeping or forgetting keys or host secrets failed (§20.1, §20.11).
 pub enum KeyError {
+    /// The device-only installation id is malformed.
+    DeviceIdEncoding,
+    /// This handle's custody has closed.
+    StoreClosed,
     /// The custody file operation failed.
     File(FileError),
     /// A cryptographic service was unavailable or stored bytes failed validation.
@@ -3297,9 +3316,10 @@ pub enum CovenMigrationPolicy {
 
 impl CovenHandle {
     /// Closes the store: stops syncing, closes every database connection and
-    /// releases the lock. Any later call on this handle or a clone of it
-    /// fails with `DbError::StoreClosed`.
-    pub async fn close(&self);
+    /// releases the lock. Later database calls on any clone fail with
+    /// `DbError::StoreClosed`; custody calls fail with `KeyError::StoreClosed`.
+    /// Reports connection-close failures; cancellation does not stop closing.
+    pub async fn close(&self) -> Result<(), DbError>;
 }
 ```
 
@@ -3653,6 +3673,10 @@ pub struct FileStream { /* private fields */ }
 
 /// App data could not be sealed or opened with its store key (§11, §20.11).
 pub enum SealError {
+    /// No applied store-log entry identifies the key for new app data (§11).
+    NoCurrentStoreKey,
+    /// This device has no store keys in custody.
+    NoStoreKeys,
     /// The keyring lacks the named key or the encoded material is invalid.
     Key(MaterialError),
     /// The cipher refused the bytes or their associated data.
@@ -3791,6 +3815,10 @@ pub enum RemovalRule {
 
 /// A handle that only reads, opened with `open_read_only`.
 impl CovenReadHandle {
+    /// Closes every connection and drops unlocked key material on all clones.
+    /// Reports connection-close failures; cancellation does not stop closing.
+    pub async fn close(&self) -> Result<(), DbError>;
+
     pub fn read<F, R>(&self, read: F) -> Read<'_, F>;
     pub async fn file_ref(&self, table: &str, key: impl Into<RowKey>) -> Result<FileRef, DbError>;
     pub async fn user_file(&self, table: &str, key: impl Into<RowKey>) -> Result<Option<UserFile>, DbError>;
@@ -5215,7 +5243,7 @@ impl CovenHandle {
     /// Removes the store keys from key custody and drops any connection that
     /// holds them unlocked. If custody can't remove them, the connection
     /// stays.
-    pub async fn forget_store_keys(&self) -> Result<(), SyncError>;
+    pub async fn forget_store_keys(&self) -> Result<(), KeyError>;
 
     /// Keeps an app secret, such as an API token, in the same keychain and
     /// under the same access policy as coven's keys. Names can't be empty,
@@ -5230,8 +5258,11 @@ impl CovenHandle {
 
     /// Encrypts the app's own data with the current store key, for the app to
     /// keep in its rows, since the local database is not encrypted. `aad`
-    /// binds it to its place, such as the row's key.
-    pub fn seal_app_data(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, SealError>;
+    /// binds it to its place, such as the row's key. Reads the key id from the
+    /// committed store log, then unlocks its bytes from custody. Without a
+    /// selected key, returns `CovenError::Seal(SealError::NoCurrentStoreKey)`.
+    /// Database reads and custody work run off the async executor.
+    pub async fn seal_app_data(&self, plaintext: &[u8], aad: &[u8]) -> CovenResult<Vec<u8>>;
 
     /// Decrypts what `seal_app_data` made, with the store key it names, so it
     /// still opens after the key is replaced. Fails with a different `aad`.

@@ -24,18 +24,18 @@ pub(super) struct FileStaging {
 }
 
 impl FileStaging {
-    pub(super) fn new(
+    pub(super) fn new<E: crate::WriteFailure>(
         database: Database,
         lease: OwnedRwLockReadGuard<()>,
-        build: impl FnOnce(&mut WriteBatch) -> Result<(), DbError>,
-    ) -> Result<Self, DbError> {
+        build: impl FnOnce(&mut WriteBatch) -> Result<(), E>,
+    ) -> Result<Self, E> {
         let sources = {
             let slot = database.inner.read().expect("database lock poisoned");
             let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
             let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mut batch = WriteBatch::new();
                 build(&mut batch)?;
-                Ok(batch)
+                Ok::<_, E>(batch)
             }));
             let writer = inner
                 .writer
@@ -60,39 +60,42 @@ impl FileStaging {
                 if batch.files.is_empty() {
                     return Ok(VecDeque::new());
                 }
-                writer.transaction(|db| {
-                    let mut identities = BTreeSet::new();
-                    let mut sources = VecDeque::new();
-                    for (namespace, id, source) in batch.files {
-                        if !identities.insert((namespace.clone(), id.clone())) {
-                            return Err(DbError::FileBatchDuplicate { namespace, id });
-                        }
-                        if !inner.write_schema.declarations.iter().any(|d| {
-                            d.files.as_ref().is_some_and(|f| {
-                                f.namespace == namespace && f.provenance == Provenance::AppProvided
-                            })
-                        }) {
-                            return Err(DbError::FileNamespaceNotAppProvided { namespace });
-                        }
-                        let name = FileName::new(inner.ids.new_id().to_string())
-                            .expect("UUID is a portable filename");
-                        let recorded = db.internal_execute(
-                            "INSERT INTO coven_file_removals(path) SELECT ?1
+                writer
+                    .transaction(|db| {
+                        let mut identities = BTreeSet::new();
+                        let mut sources = VecDeque::new();
+                        for (namespace, id, source) in batch.files {
+                            if !identities.insert((namespace.clone(), id.clone())) {
+                                return Err(DbError::FileBatchDuplicate { namespace, id });
+                            }
+                            if !inner.write_schema.declarations.iter().any(|d| {
+                                d.files.as_ref().is_some_and(|f| {
+                                    f.namespace == namespace
+                                        && f.provenance == Provenance::AppProvided
+                                })
+                            }) {
+                                return Err(DbError::FileNamespaceNotAppProvided { namespace });
+                            }
+                            let name = FileName::new(inner.ids.new_id().to_string())
+                                .expect("UUID is a portable filename");
+                            let recorded = db.internal_execute(
+                                "INSERT INTO coven_file_removals(path) SELECT ?1
                          WHERE NOT EXISTS(SELECT 1 FROM coven_device_files WHERE path=?1)",
-                            [name.as_str()],
-                        )?;
-                        if recorded != 1 {
-                            return Err(DbError::FileNameReused { name });
+                                [name.as_str()],
+                            )?;
+                            if recorded != 1 {
+                                return Err(DbError::FileNameReused { name });
+                            }
+                            sources.push_back(StagingSource {
+                                namespace,
+                                id,
+                                name,
+                                source,
+                            });
                         }
-                        sources.push_back(StagingSource {
-                            namespace,
-                            id,
-                            name,
-                            source,
-                        });
-                    }
-                    Ok(sources)
-                })
+                        Ok(sources)
+                    })
+                    .map_err(E::from)
             });
             let sources = match prepared {
                 Ok(sources) => sources,
@@ -176,13 +179,13 @@ impl FileStaging {
         (self, Ok(()))
     }
 
-    pub(super) fn finish<S, R>(
+    pub(super) fn finish<S, R, E: crate::WriteFailure>(
         mut self,
         prepared: Result<(), DbError>,
         sql: S,
-    ) -> Result<R, DbError>
+    ) -> Result<R, E>
     where
-        S: FnOnce(crate::SqlContext<'_, '_>) -> Result<R, DbError>,
+        S: FnOnce(crate::SqlContext<'_, '_>) -> Result<R, E>,
     {
         let database = self.database.clone();
         let slot = database.inner.read().expect("database lock poisoned");
@@ -251,7 +254,7 @@ impl Drop for FileStaging {
             }
             let result =
                 crate::file_removals::FileRemovals::new(&writer, &inner.directory, &active)
-                    .finish(Ok(()));
+                    .finish(Ok::<_, DbError>(()));
             drop(active);
             drop(writer);
             if let Err(error) = result {

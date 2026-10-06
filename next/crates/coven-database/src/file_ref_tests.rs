@@ -107,6 +107,14 @@ async fn uploaded_locations_retain_the_key_identity_and_refuse_malformed_encodin
     });
     let uploaded = db.file_ref("files", "7").await.unwrap();
     assert_eq!(uploaded.location(), FileLocation::Uploaded);
+    assert!(matches!(
+        db.open_local_file(&uploaded).await,
+        Err(LocalFileError::Unavailable {
+            location: FileLocation::Uploaded,
+            ..
+        })
+    ));
+
     assert!(!format!("{uploaded:?}").contains(&"ab".repeat(32)));
     let error = db
         .write(move |sql| sql.validate_file_ref(&device_ref))

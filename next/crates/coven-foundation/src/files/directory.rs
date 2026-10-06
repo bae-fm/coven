@@ -119,7 +119,18 @@ impl StoreDir {
     /// Take the exclusive OS lock for a writable open. Read-only opens skip
     /// this method. The returned guard must outlive every writable owner.
     pub fn lock_exclusive(&self) -> Result<StoreLock, StoreLockError> {
-        lock::acquire(&self.path.join(".coven-lock"), self.id)
+        lock::acquire(&self.path, self.id)
+    }
+
+    /// Lock an existing store or a directory left by an interrupted deletion.
+    /// An absent store needs no guard. No directory is created by this call.
+    pub fn lock_for_deletion(&self) -> Result<Option<StoreLock>, StoreLockError> {
+        lock::for_deletion(&self.path, self.id)
+    }
+
+    /// Check that a supplied lock protects this exact store directory.
+    pub fn verify_lock(&self, lock: &StoreLock) -> Result<(), StoreLockError> {
+        lock.verify(&self.path, self.id)
     }
 
     /// Give a crate the capability for its reserved file, without exposing

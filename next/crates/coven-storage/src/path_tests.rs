@@ -9,12 +9,14 @@ fn every_layout_round_trips_without_aliases() {
     for path in [
         ObjectPath::device_log(device, number),
         ObjectPath::store_log(device, number),
-        ObjectPath::snapshot(device, number),
+        ObjectPath::snapshot(Audience::Store, device, number),
         ObjectPath::positions(device),
         ObjectPath::store_key(key, &member),
         ObjectPath::circle_key(CircleId(id), key, &member),
         ObjectPath::join_request(InviteId(id)),
-        ObjectPath::file(&StoredFileName::from_bytes([0xab; 32])),
+        ObjectPath::file(coven_foundation::id_source::FileId(uuid::Uuid::from_bytes(
+            [0xab; 16],
+        ))),
     ] {
         assert_eq!(ObjectPath::parse(path.as_str()).unwrap(), path);
         let json = serde_json::to_vec(&path).unwrap();
@@ -29,8 +31,8 @@ fn every_layout_round_trips_without_aliases() {
         "store-log/42/3"
     );
     assert_eq!(
-        ObjectPath::snapshot(device, number).as_str(),
-        "snapshots/42/3"
+        ObjectPath::snapshot(Audience::Store, device, number).as_str(),
+        "snapshots/store/42/3"
     );
     assert_eq!(
         ObjectPath::store_key(key, &member).as_str(),
@@ -78,5 +80,16 @@ fn every_layout_round_trips_without_aliases() {
         format!("keys/circles/{id}/{}/{member}", "a".repeat(33)),
     ] {
         assert!(ObjectPath::parse(&path).is_err(), "{path}");
+    }
+}
+
+#[test]
+fn appendix_d_paths_include_snapshot_audience_and_random_file_id() {
+    for path in [
+        "snapshots/store/42/3",
+        "snapshots/abababab-abab-abab-abab-abababababab/42/3",
+        "files/abababab-abab-abab-abab-abababababab",
+    ] {
+        assert!(ObjectPath::parse(path).is_ok(), "{path}");
     }
 }

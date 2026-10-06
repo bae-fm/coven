@@ -17,6 +17,7 @@ pub(crate) const POLICY: Policy = Policy {
         "coven-database",
         "coven-storage",
         "coven-sync",
+        "coven",
     ],
     separated_crates: &[("coven-database", "coven-storage")],
     capabilities: CAPABILITIES,
@@ -26,19 +27,54 @@ pub(crate) const POLICY: Policy = Policy {
     )),
     composition_roots: &[
         (
+            "crates/coven-database/src/database_builder.rs",
+            "DatabaseBuilder",
+            "open_locked",
+        ),
+        (
             "crates/coven-storage/src/providers/s3.rs",
             "S3Storage",
             "new",
         ),
         (
-            "crates/coven-database/src/database.rs",
+            "crates/coven-database/src/database_builder.rs",
             "DatabaseBuilder",
             "open_graph",
         ),
         (
-            "crates/coven-database/src/database.rs",
+            "crates/coven-database/src/database_builder.rs",
             "DatabaseBuilder",
             "open_read_graph",
+        ),
+        ("crates/coven/src/builder.rs", "CovenBuilder", "new"),
+        ("crates/coven/src/builder.rs", "CovenBuilder", "open"),
+        ("crates/coven/src/builder.rs", "CovenBuilder", "open_graph"),
+        ("crates/coven/src/builder.rs", "CovenBuilder", "read_graph"),
+        (
+            "crates/coven/src/builder.rs",
+            "CovenBuilder",
+            "open_read_only",
+        ),
+        ("crates/coven/src/builder.rs", "CovenBuilder", "make_keys"),
+        ("crates/coven/src/coven.rs", "Coven", "builder"),
+        ("crates/coven/src/coven.rs", "Coven", "create_store"),
+        ("crates/coven/src/coven.rs", "Coven", "delete_store"),
+        ("crates/coven/src/test_utils.rs", "TestCoven", "new"),
+        (
+            "crates/coven/src/test_utils.rs",
+            "TestCoven",
+            "keep_store_keys",
+        ),
+        ("crates/coven/src/test_utils.rs", "TestCoven", "builder"),
+        (
+            "crates/coven/src/test_utils.rs",
+            "TestCoven",
+            "create_store",
+        ),
+        (
+            "crates/coven/src/test_utils.rs",
+            "TestCoven",
+            "delete_store",
         ),
     ],
     lifetime_authorities: &[
@@ -48,6 +84,18 @@ pub(crate) const POLICY: Policy = Policy {
     // These methods derive a scoped capability from their injected directory.
     // They do not acquire an unrelated directory or file for another owner.
     capability_factories: &[
+        (
+            "crates/coven-foundation/src/files/directory.rs",
+            "StoreDir",
+            "lock_for_deletion",
+            "StoreLock",
+        ),
+        (
+            "crates/coven-foundation/src/files/layout.rs",
+            "StoreLayout",
+            "create_store_dir_with",
+            "StoreDir",
+        ),
         (
             "crates/coven-foundation/src/files/atomic_file.rs",
             "AtomicFile",
@@ -98,6 +146,7 @@ pub(crate) const POLICY: Policy = Policy {
         "StoreDir",
         "AtomicFile",
         "FileWriter",
+        "FileReader",
         "StoreLock",
         "Keychain",
         "StoreKeychain",
@@ -151,8 +200,15 @@ pub(crate) const POLICY: Policy = Policy {
         "DatabaseRemovalView",
         "WriteApply",
     ],
-    root_owner_types: &["Database", "CovenReadHandle"],
+    root_owner_types: &[
+        "Database",
+        "DatabaseReadHandle",
+        "CovenHandle",
+        "CovenReadHandle",
+    ],
     task_types: &[
+        "LocalFileStream",
+        "FileStream",
         "FileStaging",
         "FileWrite",
         "FileRemovals",
@@ -369,6 +425,12 @@ const CAPABILITIES: Capabilities = Capabilities {
         homes: &[
             "crates/coven-database/src/database.rs",
             "crates/coven-database/src/file_staging.rs",
+            "crates/coven-database/src/database_builder.rs",
+            "crates/coven-database/src/local_file.rs",
+            "crates/coven-foundation/src/files/layout.rs",
+            "crates/coven/src/coven.rs",
+            "crates/coven/src/handle.rs",
+            "crates/coven/src/read_handle.rs",
         ],
         gates: &[
             Gate {

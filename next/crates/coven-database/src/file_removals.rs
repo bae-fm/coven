@@ -24,15 +24,12 @@ impl<'a> FileRemovals<'a> {
         }
     }
 
-    pub(crate) fn finish<R>(&self, result: Result<R, DbError>) -> Result<R, DbError> {
+    pub(crate) fn finish<R, E: crate::WriteFailure>(&self, result: Result<R, E>) -> Result<R, E> {
         let failures = self.remove_unused();
         if failures.is_empty() {
             result
         } else {
-            Err(DbError::FileCleanup {
-                write: result.map(|_| ()).map_err(Box::new),
-                failures,
-            })
+            Err(E::with_cleanup(result.map(|_| ()), failures))
         }
     }
 

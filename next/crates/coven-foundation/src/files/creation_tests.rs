@@ -97,7 +97,15 @@ fn concurrent_creation_of_the_same_id_publishes_exactly_one_store() {
             .count(),
         1
     );
-    assert_eq!(layout.stores().unwrap().len(), 1);
+    assert_eq!(
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(layout.stores())
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(
         fs::read_dir(directory.path().join("stores"))
             .unwrap()

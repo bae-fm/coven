@@ -934,6 +934,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
+name = "coven"
+version = "0.1.0"
+dependencies = [
+ "coven-crypto",
+ "coven-database",
+ "coven-format",
+ "coven-foundation",
+ "coven-merge",
+ "coven-storage",
+ "coven-sync",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "coven-crypto"
 version = "0.1.0"
 dependencies = [
@@ -1025,6 +1042,7 @@ dependencies = [
  "axum",
  "coven-crypto",
  "coven-foundation",
+ "coven-merge",
  "oauth2",
  "open",
  "reqwest",

@@ -16,3 +16,15 @@ impl From<&str> for RowKey {
         Self(vec![rusqlite::types::Value::Text(value.into())])
     }
 }
+
+impl<A: Into<rusqlite::types::Value>, B: Into<rusqlite::types::Value>> From<(A, B)> for RowKey {
+    fn from((first, second): (A, B)) -> Self {
+        Self(vec![first.into(), second.into()])
+    }
+}
+
+impl From<Vec<rusqlite::types::Value>> for RowKey {
+    fn from(values: Vec<rusqlite::types::Value>) -> Self {
+        Self(values)
+    }
+}

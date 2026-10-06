@@ -174,7 +174,9 @@ async fn bridge_conforms_and_retains_parts_across_adapter_restart() {
     let bridge = Arc::new(Bridge::new());
     let storage = Arc::new(CloudKitStorage::new(config(), bridge.clone()).unwrap());
     Conformance::new(storage.clone()).run().await.unwrap();
-    let path = ObjectPath::file(&coven_crypto::StoredFileName::from_bytes([0xff; 32]));
+    let path = ObjectPath::file(coven_foundation::id_source::FileId(uuid::Uuid::from_bytes(
+        [0xff; 16],
+    )));
     let mut session = storage.begin_upload(&path, 5).await.unwrap();
     let recorded = session.encode().unwrap();
     bridge

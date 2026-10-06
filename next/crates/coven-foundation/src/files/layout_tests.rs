@@ -2,16 +2,16 @@ use super::*;
 use crate::files::StoreSettings;
 use crate::id_source::UuidIds;
 
-#[test]
-fn an_absent_layout_lists_no_stores_without_creating_it() {
+#[tokio::test]
+async fn an_absent_layout_lists_no_stores_without_creating_it() {
     let directory = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(directory.path().join("not-created"));
-    assert!(layout.stores().unwrap().is_empty());
+    assert!(layout.stores().await.unwrap().is_empty());
     assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
 }
 
-#[test]
-fn discovery_lists_only_valid_store_directories_in_id_order() {
+#[tokio::test]
+async fn discovery_lists_only_valid_store_directories_in_id_order() {
     let directory = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(directory.path().to_owned());
     for (n, name) in [(2, "Second"), (1, "First")] {
@@ -56,7 +56,7 @@ fn discovery_lists_only_valid_store_directories_in_id_order() {
     )
     .unwrap();
     assert_eq!(
-        layout.stores().unwrap(),
+        layout.stores().await.unwrap(),
         vec![
             StoreInfo {
                 id: StoreId(Uuid::from_u128(1)),
@@ -70,12 +70,15 @@ fn discovery_lists_only_valid_store_directories_in_id_order() {
     );
 }
 
-#[test]
-fn directory_listing_errors_are_not_hidden_as_an_empty_layout() {
+#[tokio::test]
+async fn directory_listing_errors_are_not_hidden_as_an_empty_layout() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join("stores"), b"not a directory").unwrap();
     let layout = StoreLayout::new(directory.path().to_owned());
-    assert!(matches!(layout.stores(), Err(StoreLayoutError::File(_))));
+    assert!(matches!(
+        layout.stores().await,
+        Err(StoreLayoutError::File(_))
+    ));
     assert!(matches!(
         layout.create_store_dir(StoreId(Uuid::nil()), "Store", &UuidIds),
         Err(StoreCreationError::File(_))
@@ -83,8 +86,8 @@ fn directory_listing_errors_are_not_hidden_as_an_empty_layout() {
 }
 
 #[cfg(unix)]
-#[test]
-fn discovery_does_not_follow_directory_or_settings_symlinks() {
+#[tokio::test]
+async fn discovery_does_not_follow_directory_or_settings_symlinks() {
     let directory = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(directory.path().to_owned());
     let id = StoreId(Uuid::from_u128(1));
@@ -103,7 +106,7 @@ fn discovery_does_not_follow_directory_or_settings_symlinks() {
     )
     .unwrap();
     assert_eq!(
-        layout.stores().unwrap(),
+        layout.stores().await.unwrap(),
         vec![StoreInfo {
             id,
             name: "Original".into()

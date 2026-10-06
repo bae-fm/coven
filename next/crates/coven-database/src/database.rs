@@ -20,170 +20,9 @@ use crate::{
 };
 use crate::{LiveQuery, LostValue, Read, ReconfigurableLiveQuery, SqlReadContext};
 
-/// Choices needed to open the database part of a store.
-pub struct DatabaseBuilder {
-    directory: StoreDir,
-    tables: Option<Vec<SyncedTable>>,
-    migrations: Option<Vec<Migration>>,
-    policy: Option<CovenMigrationPolicy>,
-    clock: Option<ClockRef>,
-    ids: Option<IdSourceRef>,
-}
-
-impl DatabaseBuilder {
-    /// Begin an open using a directory supplied by the store layout.
-    pub fn new(directory: StoreDir) -> Self {
-        Self {
-            directory,
-            tables: None,
-            migrations: None,
-            policy: None,
-            clock: None,
-            ids: None,
-        }
-    }
-
-    /// The tables that sync, described at the newest app schema version.
-    pub fn synced_tables(mut self, tables: Vec<SyncedTable>) -> Self {
-        self.tables = Some(tables);
-        self
-    }
-
-    /// The complete app migration sequence, numbered from one.
-    pub fn migrations(mut self, migrations: Vec<Migration>) -> Self {
-        self.migrations = Some(migrations);
-        self
-    }
-
-    /// Required for a writable open; read-only opens always refuse migration.
-    pub fn coven_migration_policy(mut self, policy: CovenMigrationPolicy) -> Self {
-        self.policy = Some(policy);
-        self
-    }
-
-    /// The clock used when stamping a local write (§7.2).
-    pub fn clock(mut self, clock: ClockRef) -> Self {
-        self.clock = Some(clock);
-        self
-    }
-
-    /// The source of fresh names for this store's owned file bytes (§16.6).
-    pub fn id_source(mut self, ids: IdSourceRef) -> Self {
-        self.ids = Some(ids);
-        self
-    }
-
-    /// Open one writer under the store lock and four read-only connections.
-    pub async fn open(self) -> CovenResult<Database> {
-        finish_blocking(tokio::task::spawn_blocking(move || self.open_graph()).await)
-    }
-
-    /// Open read-only connections without locking or migrating, including from
-    /// a second process while the store's writer is open.
-    pub async fn open_read_only(self) -> CovenResult<CovenReadHandle> {
-        finish_blocking(tokio::task::spawn_blocking(move || self.open_read_graph()).await)
-    }
-
-    fn open_graph(self) -> CovenResult<Database> {
-        let tables = self.tables.ok_or(CovenError::MissingConfiguration {
-            field: "synced_tables",
-        })?;
-        let migrations = self.migrations.ok_or(CovenError::MissingConfiguration {
-            field: "migrations",
-        })?;
-        let policy = self.policy.ok_or(CovenError::MissingConfiguration {
-            field: "coven_migration_policy",
-        })?;
-        // Refuse a directory that is not a store before creating its database.
-        let settings = self.directory.settings()?;
-        let clock = match self.clock {
-            Some(clock) => clock,
-            None => Arc::new(SystemClock),
-        };
-        let ids = match self.ids {
-            Some(ids) => ids,
-            None => Arc::new(UuidIds),
-        };
-        let lock = self.directory.lock_exclusive()?;
-        let path = self.directory.database_path();
-        let mut writer = DatabaseConnection::open(&path, false, SqlAuthorization::new(&tables))?;
-        #[cfg(test)]
-        let profile = writer.profile_statements();
-        writer.check_integrity()?;
-        writer.enable_wal()?;
-        let migrations = writer.prepare_schema(
-            &tables,
-            &migrations,
-            policy,
-            Some((settings.device_id, clock.now())),
-        )?;
-        crate::file_removals::FileRemovals::new(&writer, &self.directory, &BTreeSet::new())
-            .finish(Ok(()))?;
-        let write_schema = crate::write_schema::WriteSchema::read(&writer, tables.clone())?;
-        writer.prepare_file_triggers()?;
-        let observer = CommitObserver::new();
-        #[cfg(test)]
-        drop(profile);
-        writer.observe_commits(observer.clone())?;
-        let mut readers = Vec::new();
-        for _ in 0..4 {
-            readers.push(Mutex::new(DatabaseConnection::open(
-                &path,
-                true,
-                SqlAuthorization::new(&tables),
-            )?));
-        }
-        Ok(Database {
-            file_tasks: Arc::new(tokio::sync::RwLock::new(())),
-            inner: Arc::new(RwLock::new(Some(DatabaseInner {
-                observer,
-                writer: Mutex::new(writer),
-                readers: ReadPool::new(readers),
-                migrations,
-                lock,
-                write_schema,
-                directory: self.directory,
-                device: settings.device_id,
-                clock,
-                ids,
-                staging: Mutex::new(BTreeSet::new()),
-            }))),
-        })
-    }
-    fn open_read_graph(self) -> CovenResult<CovenReadHandle> {
-        let tables = self.tables.ok_or(CovenError::MissingConfiguration {
-            field: "synced_tables",
-        })?;
-        let migrations = self.migrations.ok_or(CovenError::MissingConfiguration {
-            field: "migrations",
-        })?;
-        self.directory.settings()?;
-        let path = self.directory.database_path();
-        let first = DatabaseConnection::open(&path, true, SqlAuthorization::new(&tables))?;
-        first.check_integrity()?;
-        first.prepare_schema(
-            &tables,
-            &migrations,
-            CovenMigrationPolicy::RefusePending,
-            None,
-        )?;
-        let schema = crate::write_schema::WriteSchema::read(&first, tables.clone())?;
-        let mut readers = vec![Mutex::new(first)];
-        for _ in 1..4 {
-            readers.push(Mutex::new(DatabaseConnection::open(
-                &path,
-                true,
-                SqlAuthorization::new(&tables),
-            )?));
-        }
-        Ok(CovenReadHandle {
-            inner: Arc::new(RwLock::new(Some(ReadOnlyInner {
-                readers: ReadPool::new(readers),
-                schema,
-            }))),
-        })
-    }
-}
+#[path = "database_builder.rs"]
+mod builder;
+pub use builder::DatabaseBuilder;
 
 /// Shared ownership of the database. Closing any clone closes them all.
 #[derive(Clone)]
@@ -208,6 +47,30 @@ struct DatabaseInner {
 }
 
 impl Database {
+    /// Open the source selected by a file reference, after checking its row.
+    /// No storage operation occurs; nonlocal sources return their location.
+    pub async fn open_local_file(
+        &self,
+        reference: &crate::FileRef,
+    ) -> Result<crate::LocalFileStream, crate::LocalFileError> {
+        let owner = self.clone();
+        let reference = reference.clone();
+        finish_blocking(
+            tokio::task::spawn_blocking(move || {
+                let slot = owner.inner.read().expect("database lock poisoned");
+                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+                let reader = inner.readers.acquire_reader();
+                reader.local_file(
+                    &inner.write_schema,
+                    &inner.directory,
+                    inner.device,
+                    &reference,
+                )
+            })
+            .await,
+        )
+    }
+
     /// The row's file, audience and version from one committed state.
     pub async fn file_ref(
         &self,
@@ -394,6 +257,18 @@ impl Database {
         S: FnOnce(crate::SqlContext<'_, '_>) -> Result<R, DbError> + Send + 'static,
         R: Send + 'static,
     {
+        self.write_with_files_result(build, sql).await
+    }
+
+    /// Run a write whose callbacks use the facade's error type, preserving that
+    /// type alongside any rollback or byte-cleanup failure.
+    pub async fn write_with_files_result<F, S, R, E>(&self, build: F, sql: S) -> Result<R, E>
+    where
+        F: FnOnce(&mut crate::WriteBatch) -> Result<(), E> + Send + 'static,
+        S: FnOnce(crate::SqlContext<'_, '_>) -> Result<R, E> + Send + 'static,
+        R: Send + 'static,
+        E: crate::WriteFailure + Send + 'static,
+    {
         let lease = self.file_tasks.clone().read_owned().await;
         let database = self.clone();
         let staging = finish_blocking(
@@ -537,6 +412,14 @@ impl Database {
         self.read(|sql| sql.store_log()).await
     }
 
+    /// The current store key selected by the committed replay (§11), or `None`
+    /// before creation. Reads only the selected id, without loading entry history.
+    pub async fn current_store_key(
+        &self,
+    ) -> CovenResult<Option<coven_foundation::id_source::KeyId>> {
+        self.read(|sql| sql.current_store_key()).await
+    }
+
     /// Read the schema version, positions and fingerprints from one committed state.
     /// Supply fresh hashers derived from the store or circle keys. Audiences whose
     /// keys are unavailable can be omitted without interrupting sum maintenance.
@@ -638,36 +521,56 @@ impl Database {
 /// A database open that cannot write or migrate. It owns no writer or store lock.
 ///
 /// ```compile_fail
-/// async fn cannot_write(handle: &coven_database::CovenReadHandle) {
+/// async fn cannot_write(handle: &coven_database::DatabaseReadHandle) {
 ///     handle.write(|_| Ok(())).await;
 /// }
 /// ```
 /// ```compile_fail
-/// fn cannot_subscribe(handle: &coven_database::CovenReadHandle) {
+/// fn cannot_subscribe(handle: &coven_database::DatabaseReadHandle) {
 ///     handle.subscribe(|_| Ok(()));
 /// }
 /// ```
 /// ```compile_fail
-/// fn cannot_reconfigure(handle: &coven_database::CovenReadHandle) {
+/// fn cannot_reconfigure(handle: &coven_database::DatabaseReadHandle) {
 ///     handle.subscribe_reconfigurable((), |_, _| Ok(()));
 /// }
 /// ```
 /// ```compile_fail
-/// fn cannot_subscribe_losses(handle: &coven_database::CovenReadHandle) {
+/// fn cannot_subscribe_losses(handle: &coven_database::DatabaseReadHandle) {
 ///     handle.subscribe_lost_values();
 /// }
 /// ```
 #[derive(Clone)]
-pub struct CovenReadHandle {
+pub struct DatabaseReadHandle {
     inner: Arc<RwLock<Option<ReadOnlyInner>>>,
 }
 
 struct ReadOnlyInner {
+    directory: StoreDir,
+    device: DeviceId,
     readers: ReadPool,
     schema: crate::write_schema::WriteSchema,
 }
 
-impl CovenReadHandle {
+impl DatabaseReadHandle {
+    /// Open local bytes selected by the reference while checking its current row.
+    pub async fn open_local_file(
+        &self,
+        reference: &crate::FileRef,
+    ) -> Result<crate::LocalFileStream, crate::LocalFileError> {
+        let owner = self.clone();
+        let reference = reference.clone();
+        finish_blocking(
+            tokio::task::spawn_blocking(move || {
+                let slot = owner.inner.read().expect("database lock poisoned");
+                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+                let reader = inner.readers.acquire_reader();
+                reader.local_file(&inner.schema, &inner.directory, inner.device, &reference)
+            })
+            .await,
+        )
+    }
+
     /// The row's file, audience and version from one committed state.
     pub async fn file_ref(
         &self,
@@ -830,6 +733,21 @@ struct ReaderLease<'a> {
 }
 
 impl ReaderLease<'_> {
+    fn local_file(
+        &self,
+        schema: &crate::write_schema::WriteSchema,
+        directory: &StoreDir,
+        device: DeviceId,
+        reference: &crate::FileRef,
+    ) -> Result<crate::LocalFileStream, crate::LocalFileError> {
+        let reader = self.database.readers[self.index]
+            .lock()
+            .expect("read connection lock poisoned");
+        reader
+            .read_snapshot(|sql| sql.open_local_file(schema, directory, device, reference))
+            .0
+    }
+
     fn read_snapshot<F, R, E>(&self, read: F) -> (Result<R, E>, ReadSet)
     where
         F: FnOnce(SqlReadContext<'_>) -> Result<R, E>,

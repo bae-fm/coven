@@ -17,7 +17,9 @@ async fn memory_conforms() {
 #[tokio::test]
 async fn crash_after_accepted_part_and_dropped_part_resumes() {
     let provider = MemoryStorage::new(config()).unwrap();
-    let path = ObjectPath::file(&coven_crypto::StoredFileName::from_bytes([0xaa; 32]));
+    let path = ObjectPath::file(coven_foundation::id_source::FileId(uuid::Uuid::from_bytes(
+        [0xaa; 16],
+    )));
     let mut session = provider.begin_upload(&path, 10).await.unwrap();
     provider.upload_part(&mut session, b"abcd").await.unwrap();
     let recorded = session.encode().unwrap();

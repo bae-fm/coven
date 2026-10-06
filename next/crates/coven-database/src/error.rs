@@ -8,6 +8,29 @@ pub type CovenResult<T> = Result<T, CovenError>;
 /// Failures of opening, reading and writing a store (§5, §20.1, §20.3).
 #[derive(Debug, thiserror::Error)]
 pub enum CovenError {
+    /// App data could not be sealed with the selected store key.
+    #[error(transparent)]
+    Seal(#[from] coven_crypto::SealError),
+    /// Reading device identity or an app callback's custody operation failed.
+    #[error(transparent)]
+    Key(#[from] coven_crypto::custody::KeyError),
+    /// An app callback failed and SQLite also failed to roll it back.
+    #[error("{operation}; rollback failed: {rollback}")]
+    Rollback {
+        /// The callback or database failure.
+        operation: Box<CovenError>,
+        /// SQLite's rollback failure.
+        #[source]
+        rollback: rusqlite::Error,
+    },
+    /// File cleanup failed, retaining the callback's outcome and every failure.
+    #[error("file cleanup failed: {failures:?}; write outcome: {write:?}")]
+    FileCleanup {
+        /// Ok if the transaction committed; otherwise its original error.
+        write: Result<(), Box<CovenError>>,
+        /// Each failed byte removal or pending-record update.
+        failures: Vec<DbError>,
+    },
     /// The database or a write's validation failed.
     #[error(transparent)]
     Database(#[from] DbError),

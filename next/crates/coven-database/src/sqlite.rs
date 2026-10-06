@@ -228,20 +228,21 @@ impl DatabaseConnection {
         Ok(length as usize)
     }
 
-    pub(crate) fn local_write<F, R>(
+    pub(crate) fn local_write<F, R, E>(
         &self,
         schema: &crate::write_schema::WriteSchema,
         device: DeviceId,
         now: SystemTime,
         files: &crate::file_write::FileWrite<'_>,
         sql: F,
-    ) -> Result<R, DbError>
+    ) -> Result<R, E>
     where
-        F: FnOnce(crate::SqlContext<'_, '_>) -> Result<R, DbError>,
+        E: crate::WriteFailure,
+        F: FnOnce(crate::SqlContext<'_, '_>) -> Result<R, E>,
     {
         #[cfg(test)]
         let _profile = self.profile_statements();
-        self.transaction(|database| {
+        self.transaction_with_error(|database| {
             let deleted_circles = crate::store_log_tables::deleted_circles(database)?;
             let mut session = rusqlite::session::Session::new(&database.connection)?;
             for table in &schema.declarations {
@@ -665,6 +666,13 @@ impl DatabaseConnection {
         &self,
         run: impl FnOnce(&Self) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
+        self.transaction_with_error(run)
+    }
+
+    fn transaction_with_error<T, E: crate::WriteFailure>(
+        &self,
+        run: impl FnOnce(&Self) -> Result<T, E>,
+    ) -> Result<T, E> {
         self.batch("BEGIN IMMEDIATE")?;
         let mut guard = SqlTransaction {
             database: self,
@@ -695,10 +703,7 @@ impl DatabaseConnection {
             Err(operation) if self.connection.is_autocommit() => Err(operation),
             Err(operation) => match self.batch("ROLLBACK") {
                 Ok(()) => Err(operation),
-                Err(DbError::Sqlite(rollback)) => Err(DbError::Rollback {
-                    operation: Box::new(operation),
-                    rollback,
-                }),
+                Err(DbError::Sqlite(rollback)) => Err(operation.with_rollback(rollback)),
                 Err(error) => panic!("internal rollback returned a non-SQLite error: {error}"),
             },
         }

@@ -9,7 +9,26 @@ use crate::id_source::{IdSource, StoreId};
 
 /// A store creation failure, with publication and rollback failures explicit.
 #[derive(Debug, thiserror::Error)]
-pub enum StoreCreationError {
+pub enum StoreCreationError<E = std::convert::Infallible> {
+    /// Keeping state outside the directory failed before publication. The id
+    /// lets the caller remove any externally retained state before retrying.
+    #[error("initializing store {id} failed: {source}")]
+    Initialization {
+        /// The unpublished store.
+        id: StoreId,
+        /// The initializer's typed failure.
+        #[source]
+        source: E,
+    },
+    /// Removing externally initialized state after an unpublished failure also failed.
+    #[error("{operation}; removing external initialization failed: {cleanup}")]
+    InitializationCleanup {
+        /// The original creation failure.
+        operation: Box<StoreCreationError<E>>,
+        /// The external cleanup failure.
+        #[source]
+        cleanup: E,
+    },
     /// A directory or file already occupies this store's id. It is untouched.
     #[error("store {0} already exists on this device")]
     AlreadyExists(StoreId),
@@ -34,23 +53,31 @@ pub enum StoreCreationError {
     Rollback {
         /// The original creation failure.
         #[source]
-        operation: Box<StoreCreationError>,
+        operation: Box<StoreCreationError<E>>,
         /// The error removing the directory.
         cleanup: io::Error,
     },
 }
 
-pub(crate) fn create(
+pub(crate) fn create<E: std::error::Error + Send + Sync + 'static>(
     root: &Path,
     id: StoreId,
     name: &str,
     ids: &dyn IdSource,
-) -> Result<StoreDir, StoreCreationError> {
+    initialize: impl FnOnce(&StoreSettings) -> Result<(), E>,
+) -> Result<StoreDir, StoreCreationError<E>> {
     create_directory_tree(root)
         .map_err(|source| FileError::at("create stores directory", root, source))?;
     let root = fs::canonicalize(root)
         .map_err(|source| FileError::at("resolve stores directory", root, source))?;
     let destination = root.join(id.to_string());
+    match fs::symlink_metadata(&destination) {
+        Ok(_) => return Err(StoreCreationError::AlreadyExists(id)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(FileError::at("inspect store destination", &destination, source).into())
+        }
+    }
     let stage = tempfile::Builder::new()
         .prefix(".coven-create-")
         .tempdir_in(&root)
@@ -62,6 +89,10 @@ pub(crate) fn create(
     };
     let prepare = directory::initialize(stage.path(), &settings)
         .map_err(StoreCreationError::from)
+        .and_then(|()| {
+            initialize(&settings)
+                .map_err(|source| StoreCreationError::Initialization { id, source })
+        })
         .and_then(|()| {
             rename_new_directory(stage.path(), &destination).map_err(|source| {
                 if source.kind() == io::ErrorKind::AlreadyExists {
@@ -121,13 +152,13 @@ fn create_directory_tree_with_sync(
 }
 
 #[cfg(unix)]
-fn rename_new_directory(from: &Path, to: &Path) -> io::Result<()> {
+pub(crate) fn rename_new_directory(from: &Path, to: &Path) -> io::Result<()> {
     use rustix::fs::{renameat_with, RenameFlags, CWD};
     renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE).map_err(Into::into)
 }
 
 #[cfg(windows)]
-fn rename_new_directory(from: &Path, to: &Path) -> io::Result<()> {
+pub(crate) fn rename_new_directory(from: &Path, to: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
 

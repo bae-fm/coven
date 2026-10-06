@@ -1,7 +1,7 @@
 //! Borrowed reads and their connection-scoped SQL capability.
 
 use crate::{
-    database, sqlite::DatabaseConnection, CovenReadHandle, CovenResult, Database, LostValue,
+    database, sqlite::DatabaseConnection, CovenResult, Database, DatabaseReadHandle, LostValue,
 };
 use rusqlite::{Params, Row};
 use std::{
@@ -40,6 +40,16 @@ impl<'connection> SqlReadContext<'connection> {
         self.database.app_query(sql, params, map)
     }
 
+    pub(crate) fn open_local_file(
+        &self,
+        schema: &crate::write_schema::WriteSchema,
+        directory: &coven_foundation::files::StoreDir,
+        device: coven_foundation::id_source::DeviceId,
+        reference: &crate::FileRef,
+    ) -> Result<crate::LocalFileStream, crate::LocalFileError> {
+        crate::file_ref::open_local(self.database, schema, directory, device, reference)
+    }
+
     pub(crate) fn file_ref(
         &self,
         schema: &crate::write_schema::WriteSchema,
@@ -65,6 +75,12 @@ impl<'connection> SqlReadContext<'connection> {
     pub(crate) fn store_log(&self) -> CovenResult<crate::StoreLog> {
         Ok(crate::store_log_tables::read(self.database)?)
     }
+
+    pub(crate) fn current_store_key(
+        &self,
+    ) -> CovenResult<Option<coven_foundation::id_source::KeyId>> {
+        Ok(crate::store_log_tables::current_store_key(self.database)?)
+    }
 }
 
 /// A read that starts when polled and retains its store borrow until it ends.
@@ -76,7 +92,7 @@ pub struct Read<'a, F> {
 
 pub(crate) enum ReadOwner<'a> {
     Writer(&'a Database),
-    Reader(&'a CovenReadHandle),
+    Reader(&'a DatabaseReadHandle),
 }
 
 // The public type names the closure, rather than its result. Only poll creates

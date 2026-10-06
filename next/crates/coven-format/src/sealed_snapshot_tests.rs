@@ -49,7 +49,7 @@ fn a_snapshot_is_sealed_opened_and_applied_a_chunk_at_a_time() {
         let plain = plain.unwrap();
         let sealed = keys
             .seal_object_chunk(
-                "snapshots/1/1",
+                "snapshots/store/1/1",
                 &prefix.encode().unwrap(),
                 0,
                 writer.index(),
@@ -61,7 +61,13 @@ fn a_snapshot_is_sealed_opened_and_applied_a_chunk_at_a_time() {
         let index = reader.index();
         let sealed = reader.decode_chunk(&piece).unwrap();
         let opened = keys
-            .open_object_chunk("snapshots/1/1", &prefix.encode().unwrap(), 0, index, sealed)
+            .open_object_chunk(
+                "snapshots/store/1/1",
+                &prefix.encode().unwrap(),
+                0,
+                index,
+                sealed,
+            )
             .unwrap();
         let mut bytes = opened.as_slice();
         while let Some(record) = snapshot.next_record(&mut bytes, &oracle).unwrap() {
@@ -111,7 +117,7 @@ fn prefix_and_chunk_lengths_are_bounded_and_have_no_aliases() {
         .unwrap()
         .derive();
     let sealed = key
-        .seal_object_chunk("snapshots/1/1", b"prefix", 0, 0, b"bytes")
+        .seal_object_chunk("snapshots/store/1/1", b"prefix", 0, 0, b"bytes")
         .unwrap();
     let mut piece = sealed::encode_chunk(&sealed).unwrap();
     for end in 0..piece.len() {

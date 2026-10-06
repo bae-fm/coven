@@ -22,6 +22,12 @@ pub enum SecretNameError {
 /// A failure unlocking, keeping or forgetting keys or host secrets (§20.11).
 #[derive(Debug, thiserror::Error)]
 pub enum KeyError {
+    /// The device-only installation id is malformed.
+    #[error("invalid device identity entry")]
+    DeviceIdEncoding,
+    /// The handle that owns this custody has closed.
+    #[error("store is closed")]
+    StoreClosed,
     /// A filesystem operation failed; the cause says whether bytes changed.
     #[error("custody file failed: {0}")]
     File(#[from] coven_foundation::files::FileError),

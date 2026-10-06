@@ -57,20 +57,21 @@ mod write_boundary;
 mod write_capture;
 mod write_commit;
 mod write_encoding;
+mod write_failure;
 mod write_record;
 mod write_rows;
 mod write_schema;
 
 pub use coven_format::value::EntryId;
 pub use coven_merge::WriteId;
-pub use database::{CovenReadHandle, Database, DatabaseBuilder};
+pub use database::{Database, DatabaseBuilder, DatabaseReadHandle};
 pub use declaration::{CacheFill, FileDecl, Provenance, RowIdentity, SyncedTable, Uploads};
 pub use download::{ApplyOutcome, DownloadedPart, DownloadedWrite, SyncState, WriteWait};
 pub use error::{
     CovenError, CovenMigrationError, CovenResult, DbError, MigrationError, SchemaError,
 };
 pub use file_location::FileLocation;
-pub use file_ref::FileRef;
+pub use file_ref::{FileRef, LocalFileError, LocalFileStream};
 pub use live_query::{
     LiveQuery, LiveQueryCause, LiveQueryClosed, LiveQueryRequests, LiveQueryRevision,
     ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent,
@@ -90,6 +91,7 @@ pub use store_log_check::{ReplayEntry, StoreLogCheck};
 pub use user_file::{prepare_user_file, PreparedUserFile, UserFile};
 pub use write::SqlContext;
 pub use write_batch::{FileSource, WriteBatch};
+pub use write_failure::WriteFailure;
 
 // SQL values and parameters are part of the API. Connections remain private.
 pub use rusqlite::{named_params, params, types, Params, Row, ToSql};

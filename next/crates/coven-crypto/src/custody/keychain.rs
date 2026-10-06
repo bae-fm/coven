@@ -5,7 +5,7 @@ use super::platform::NativeKeychain;
 use super::KeychainError;
 use super::{KeyError, SecretNameError, MEMBER_KEYS_ENTRY, STORE_KEYS_ENTRY};
 use crate::SecretBytes;
-use coven_foundation::id_source::StoreId;
+use coven_foundation::id_source::{DeviceId, StoreId};
 use std::{
     marker::PhantomData,
     sync::{Arc, Mutex},
@@ -47,6 +47,7 @@ fn validate_service(name: &str) -> Result<(), KeyError> {
 }
 
 const RESTORE_CODE_ENTRY: &str = "restore-code";
+const DEVICE_ID_ENTRY: &str = "device-id";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) enum EntryScope {
@@ -257,6 +258,53 @@ impl StoreKeychain {
             .delete(EntryScope::DeviceOnly, &self.account(name))
     }
 
+    /// The installation id kept outside device backups (§10). Reading it does
+    /// not unlock any member or store key.
+    pub fn device_id(&self) -> Result<Option<DeviceId>, KeyError> {
+        self.read(DEVICE_ID_ENTRY)?
+            .map(|bytes| {
+                let bytes: [u8; 8] = bytes
+                    .as_bytes()
+                    .try_into()
+                    .map_err(|_| KeyError::DeviceIdEncoding)?;
+                Ok(DeviceId(u64::from_be_bytes(bytes)))
+            })
+            .transpose()
+    }
+
+    /// Keep the installation id in this device's non-restored keychain scope.
+    pub fn set_device_id(&self, device: DeviceId) -> Result<(), KeyError> {
+        self.write(DEVICE_ID_ENTRY, &device.0.to_be_bytes())
+    }
+
+    /// Remove an unpublished installation's entry after creation failed.
+    pub fn delete_device_id(&self) -> Result<(), KeyError> {
+        self.remove(DEVICE_ID_ENTRY)
+    }
+
+    /// Remove every coven entry and each named app secret. Validate all names
+    /// before deleting anything. Repeating after a failure is safe.
+    pub fn delete_store_entries(&self, host_secret_names: &[&str]) -> Result<(), KeyError> {
+        for name in host_secret_names {
+            validate_host_name(name)?;
+        }
+        for name in host_secret_names.iter().copied().chain([
+            STORE_KEYS_ENTRY,
+            MEMBER_KEYS_ENTRY,
+            DEVICE_ID_ENTRY,
+        ]) {
+            self.remove(name)?;
+        }
+        match &self.keychain.backend {
+            #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+            Backend::Native(_) => Ok(()),
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            Backend::Native(_) => self.delete_synced_restore_code(),
+            #[cfg(any(test, feature = "test-utils"))]
+            Backend::Memory(_) => self.delete_synced_restore_code(),
+        }
+    }
+
     /// Keep exactly the restore-code bytes in iCloud Keychain (§12.1).
     /// The caller supplies the encoded member keys, store identity and storage
     /// credentials; the crypto crate does not define the restore-code format.
@@ -338,7 +386,14 @@ fn validate_host_name(name: &str) -> Result<(), SecretNameError> {
     if name.contains('\0') {
         return Err(SecretNameError::Nul);
     }
-    if [STORE_KEYS_ENTRY, MEMBER_KEYS_ENTRY, RESTORE_CODE_ENTRY].contains(&name) {
+    if [
+        STORE_KEYS_ENTRY,
+        MEMBER_KEYS_ENTRY,
+        RESTORE_CODE_ENTRY,
+        DEVICE_ID_ENTRY,
+    ]
+    .contains(&name)
+    {
         return Err(SecretNameError::Reserved);
     }
     Ok(())

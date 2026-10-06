@@ -71,6 +71,15 @@ pub(crate) fn deleted_circles(
         .collect())
 }
 
+pub(crate) fn current_store_key(database: &DatabaseConnection) -> Result<Option<KeyId>, DbError> {
+    Ok(database
+        .query("SELECT key FROM coven_store", [], |row| {
+            Ok(KeyId(uuid::Uuid::from_bytes(row.get(0)?)))
+        })?
+        .into_iter()
+        .next())
+}
+
 pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
     let mut log = StoreLog::default();
     for (entry, outcome) in database.query(

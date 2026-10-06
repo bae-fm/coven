@@ -14,14 +14,15 @@ cd "$(dirname "$0")/.."
 
 step() { echo ""; echo "── $1"; }
 
+# Build the structural checker before the crates whose graph it validates (§21.4).
+step "owner-construction-check: §21.1 dependencies, §21.2 capabilities and owners, §21.3 conventions"
+cargo run --quiet -p owner-construction-check -- .
+
 step "cargo fmt --check"
 cargo fmt --all --check
 
 step "cargo clippy --all-targets --all-features"
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-
-step "owner-construction-check: §21.1 dependencies, §21.2 capabilities and owners, §21.3 conventions"
-cargo run --quiet -p owner-construction-check -- .
 
 step "cargo doc (broken links denied)"
 RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D warnings" \

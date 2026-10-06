@@ -1,6 +1,7 @@
 use crate::StorageError;
-use coven_crypto::{MemberId, StoredFileName};
-use coven_foundation::id_source::{CircleId, DeviceId, InviteId, KeyId};
+use coven_crypto::MemberId;
+use coven_foundation::id_source::{CircleId, DeviceId, FileId, InviteId, KeyId};
+use coven_merge::Audience;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 
@@ -19,8 +20,12 @@ impl ObjectPath {
         Self(format!("store-log/{}/{number}", device.0))
     }
     /// A snapshot written by a device (§15).
-    pub fn snapshot(device: DeviceId, number: NonZeroU64) -> Self {
-        Self(format!("snapshots/{}/{number}", device.0))
+    pub fn snapshot(audience: Audience, device: DeviceId, number: NonZeroU64) -> Self {
+        let audience = match audience {
+            Audience::Store => "store".to_owned(),
+            Audience::Circle(circle) => circle.to_string(),
+        };
+        Self(format!("snapshots/{audience}/{}/{number}", device.0))
     }
     /// The positions posted by one device (§6).
     pub fn positions(device: DeviceId) -> Self {
@@ -34,8 +39,8 @@ impl ObjectPath {
     pub fn circle_key(circle: CircleId, key: KeyId, member: &MemberId) -> Self {
         Self(format!("keys/circles/{circle}/{key}/{member}"))
     }
-    /// Encrypted file bytes named by the lower-case hexadecimal keyed hash (§16.2).
-    pub fn file(name: &StoredFileName) -> Self {
+    /// Encrypted file bytes named by a random UUID (§16.2).
+    pub fn file(name: FileId) -> Self {
         Self(format!("files/{name}"))
     }
     /// An encrypted join request under its invite id (§12.2).
@@ -59,14 +64,17 @@ impl ObjectPath {
     }
     /// The device named by log, snapshot or position paths.
     pub fn device(&self) -> Option<DeviceId> {
-        let mut parts = self.0.split('/');
-        match parts.next()? {
-            "devices" | "store-log" | "snapshots" | "positions" => {
-                parts.next()?.parse().ok().map(DeviceId)
+        let parts: Vec<_> = self.0.split('/').collect();
+        match parts.as_slice() {
+            ["devices" | "store-log", device, _]
+            | ["positions", device]
+            | ["snapshots", _, device, _] => {
+                Some(DeviceId(device.parse().expect("validated device id")))
             }
             _ => None,
         }
     }
+
     pub(crate) fn components(&self) -> Vec<&str> {
         self.0.split('/').collect()
     }
@@ -94,8 +102,11 @@ impl TryFrom<String> for ObjectPath {
     fn try_from(value: String) -> Result<Self, Self::Error> {
         let parts: Vec<_> = value.split('/').collect();
         let valid = match parts.as_slice() {
-            ["devices" | "store-log" | "snapshots", device, n] => {
-                decimal(device, false) && decimal(n, true)
+            ["devices" | "store-log", device, n] => decimal(device, false) && decimal(n, true),
+            ["snapshots", audience, device, n] => {
+                (*audience == "store" || canonical_uuid(audience))
+                    && decimal(device, false)
+                    && decimal(n, true)
             }
             ["positions", device] => decimal(device, false),
             ["keys", "store", key, member] => {
@@ -104,7 +115,7 @@ impl TryFrom<String> for ObjectPath {
             ["keys", "circles", circle, key, member] => {
                 canonical_uuid(circle) && canonical_uuid(key) && member.parse::<MemberId>().is_ok()
             }
-            ["files", name] => hex_name(name).is_ok(),
+            ["files", name] => canonical_uuid(name),
             ["join-requests", invite] => canonical_uuid(invite),
             _ => false,
         };
@@ -127,6 +138,14 @@ impl ObjectPrefix {
     /// All objects in this store's location.
     pub fn all() -> Self {
         Self(String::new())
+    }
+    /// Every device's write log.
+    pub fn device_logs() -> Self {
+        Self("devices/".into())
+    }
+    /// Every device's store log.
+    pub fn store_logs() -> Self {
+        Self("store-log/".into())
     }
     /// All writes of a device.
     pub fn device_log(device: DeviceId) -> Self {
@@ -183,16 +202,6 @@ fn segment(part: &str) -> Result<(), StorageError> {
         || !part
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b))
-    {
-        return Err(StorageError::InvalidPath);
-    }
-    Ok(())
-}
-fn hex_name(name: &str) -> Result<(), StorageError> {
-    if name.len() != 64
-        || !name
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     {
         return Err(StorageError::InvalidPath);
     }

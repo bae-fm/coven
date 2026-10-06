@@ -1,0 +1,29 @@
+[package]
+name = "coven"
+version.workspace = true
+edition.workspace = true
+
+[features]
+test-utils = ["coven-foundation/test-utils", "coven-crypto/test-utils", "coven-database/test-utils"]
+
+[dependencies]
+coven-foundation.workspace = true
+coven-crypto.workspace = true
+coven-merge.workspace = true
+coven-format.workspace = true
+coven-database.workspace = true
+coven-storage.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
+
+[dev-dependencies]
+coven-sync.workspace = true
+coven-foundation = { workspace = true, features = ["test-utils"] }
+coven-crypto = { workspace = true, features = ["test-utils"] }
+coven-database = { workspace = true, features = ["test-utils"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tempfile.workspace = true
+uuid = { workspace = true, features = ["v7"] }
+
+[lints]
+workspace = true
