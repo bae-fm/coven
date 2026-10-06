@@ -1338,19 +1338,18 @@ Carol's tablet:
 - A write's signature covers its path and a SHA-256 hash of every byte
   before it, so a device checks it as the object streams in.
 - Nonces:
-  - for a file's chunks, derived from the key and the file's name, combined
-    with the chunk's index, so the same file under the same key encrypts to
-    the same bytes;
+  - for a file's chunks, derived from the file's own key and the chunk's
+    index, so retrying an upload sends the same bytes;
   - for everything else, random.
 - A key is sealed to a member with an anonymous sealed box: X25519 with
   XChaCha20-Poly1305.
 - Keys for each purpose are derived from the store key, or a circle's key,
-  with HKDF-SHA256 and a label per purpose: encryption, naming, file
-  nonces, fingerprints ([§19.1](#191-noticing)).
+  with HKDF-SHA256 and a label per purpose: encryption and fingerprints
+  ([§19.1](#191-noticing)).
 - A join request's key is derived from its invite secret
   ([§12.2](#122-adding-a-person)) the same way, with its own label.
-- A file's storage name is HMAC-SHA256 of its content hash, with the naming
-  key.
+- An uploaded file's storage name is a random id, and it is encrypted with
+  a random key of its own ([§16.2](#162-storage-and-naming)).
 
 ## 12. Joining and restore
 
@@ -1534,8 +1533,8 @@ Carol's tablet:
   - Moving them back later is a re-add ([§8.3](#83-deletes)).
 - A move is an ordinary write, such as `UPDATE notes SET audience = …`.
   - It commits at once on the moving device.
-  - Its moved rows' uploaded files go up again under the new audience's
-    key, and the write uploads after them ([§16.5](#165-uploads-and-deletion)).
+  - Its moved rows' uploaded files stay where they are: each file's key
+    travels in its row ([§16.1](#161-kinds-and-where-files-are)).
 - E.g. Ana moves note 42 and its attachments from the store into her
   circle: Ben's devices delete them, and Ana's insert them in the circle.
 - A row's generations ([§8.3](#83-deletes)) are counted per audience, so
@@ -1775,8 +1774,8 @@ Carol's tablet:
   - *uploaded*: stored encrypted, and read the same way on every device;
   - *on one device*: only on the device that has it, as the user's
     original or coven's own copy, and never uploaded.
-- The row's where-column says which: `uploaded`, with the id of the key
-  that names and encrypts the file, or the id of the device that has it.
+- The row's where-column says which: `uploaded`, with the file's id and
+  key, or the id of the device that has it.
   - So every device knows where each file is, and can say so.
   - Reading a file that is on another device fails with an error of its
     own, naming that device.
@@ -1813,35 +1812,24 @@ Carol's tablet:
   - An uploaded copy stays while any write still refers to it as uploaded
     ([§16.5](#165-uploads-and-deletion)), so the winner always finds the
     file where its row says.
-- An uploaded file is encrypted with its row's audience's key
-  ([§14](#14-audiences)).
-  - Moving a row between the store and a circle uploads its file again
-    under the new audience's key, before the move's write uploads.
-  - A file on one device stays where it is.
+- An uploaded file is encrypted with a key of its own, which travels in
+  its row's where-column, inside the row's encrypted writes, so only the
+  row's readers can read it ([§16.2](#162-storage-and-naming)).
+  - Moving a row between the store and a circle changes nothing about
+    its file: the new audience's devices get the key with the row.
 
 ### 16.2 Storage and naming
 
 - The content hash is a column of the row, and syncs inside encrypted
   writes like any other.
 - Every device checks a downloaded file against it.
-- Each uploaded file is stored encrypted at `files/<name>`, where the name is
-  a keyed hash of its content hash.
-  - A keyed hash, such as HMAC-SHA256, can't be computed without a secret
-    key, so the provider can't hash a file it knows and look for its name.
-  - The key is a *naming key* derived from the store key, separate from the
-    key that encrypts.
-  - So identical files in the store share one copy.
-- A plain hash of content is never part of anything the provider can see:
-  not a path, a name, or metadata.
-- A file attached to a circle's row is encrypted with the circle's key, and
-  named with a naming key derived from it.
-  - Only the circle's members can read it.
-  - The same file in the store and in a circle gets two different names.
-- A file is named and encrypted with its audience's current key when it
-  is uploaded, and its where-column names that key, so every device finds
-  and opens it after the key is replaced.
-- After a key is replaced, a file added again gets a new name, and is
-  stored again.
+- Uploading a file picks a random id and a random key for it, stores it
+  encrypted at `files/<id>`, and writes both into its row's where-column.
+  - The provider sees only a random name, never a hash of the content.
+  - Each upload is a copy of its own: identical files attached to two
+    rows are stored twice, and deleting one never touches the other.
+  - The key never reaches storage outside the row's encrypted writes, so
+    a member who can't read the row can't read the file.
 - A file is encrypted in chunks, 64 KiB by default, recorded in its
   header.
   - Each chunk is encrypted and authenticated on its own, with its index
@@ -1896,8 +1884,9 @@ Carol's tablet:
     request.
   - The upload session is recorded, so after a crash the upload continues
     from the last part stored, instead of starting over.
-- A write that marks a file uploaded is uploaded only after the file is
-  stored, so no device ever sees a row whose uploaded file isn't there yet.
+- The write that marks a file uploaded is made only once the file is
+  stored, so no device ever sees a row whose uploaded file isn't there
+  yet, and no write ever waits for a file.
 - An uploaded file is deleted once nothing in the latest snapshot or the
   writes after it refers to it as uploaded.
 - Uploaded files are deleted by the same devices as logs
@@ -1915,8 +1904,6 @@ Carol's tablet:
     where in coven's own folder;
   - `coven_file_uploads`: the upload queue, each file's attempts, last
     failure, and its provider upload session while one is in progress;
-  - `coven_upload_waits`: which waiting writes wait for which files
-    ([§16.5](#165-uploads-and-deletion));
   - `coven_cache`: each cached file or chunk, its namespace, size, when it
     was last read, and whether it is pinned;
   - `coven_cache_budgets`: each namespace's budget.
@@ -2266,7 +2253,6 @@ Carol's tablet:
 use std::{collections::HashMap, future::Future, num::{NonZeroU64, NonZeroUsize},
           path::{Path, PathBuf}, pin::Pin, sync::Arc, time::SystemTime};
 use async_trait::async_trait;
-use coven_crypto::StoredFileName;
 use rusqlite::{Params, ToSql};
 use tokio::{io::AsyncRead, sync::watch};
 use url::Url;
@@ -2432,8 +2418,8 @@ impl ObjectPath {
     pub fn store_key(key: KeyId, member: &MemberId) -> Self;
     /// A sealed circle key for a member (§14.3).
     pub fn circle_key(circle: CircleId, key: KeyId, member: &MemberId) -> Self;
-    /// Encrypted file bytes named by their keyed hash (§16.2).
-    pub fn file(name: &StoredFileName) -> Self;
+    /// An uploaded file's encrypted bytes, under its random id (§16.2).
+    pub fn file(id: FileId) -> Self;
     /// An encrypted join request under its invite id (§12.2).
     pub fn join_request(invite: InviteId) -> Self;
     /// Parses a listed or recorded path, refusing paths outside the store's layout.
@@ -3071,8 +3057,8 @@ impl FileDecl {
     pub fn with_hash_column(self, column: impl Into<String>) -> Self;
 
     /// The column holding where the file is, which coven fills in:
-    /// `uploaded` with the id of the key naming the file, or the id of the
-    /// device that has it (§16.1, §16.2). Read it through `FileRef::location`.
+    /// `uploaded` with the file's id and key, or the id of the device that
+    /// has it (§16.1, §16.2). Read it through `FileRef::location`.
     /// Defaults to `location`.
     pub fn with_location_column(self, column: impl Into<String>) -> Self;
 
@@ -4053,8 +4039,7 @@ pub struct BlockedOperation {
   root's audience column, or points a descendant at a parent in another
   audience ([§14.2](#142-moving-rows)).
   - The write commits at once on this device; its moved rows' uploaded
-    files go up again under the new audience's key, and the write uploads
-    after them ([§16.5](#165-uploads-and-deletion)).
+    files stay where they are ([§16.1](#161-kinds-and-where-files-are)).
 - Uploading a file, and keeping an uploaded file on one device, change
   where it is ([§16.1](#161-kinds-and-where-files-are)); each is an
   operation ([§18.1](#181-operations)), so the call records it and
@@ -4094,8 +4079,7 @@ impl CovenHandle {
     ) -> Result<(), OperationError>;
 
     /// A live query over the upload queue: every file waiting to upload, with
-    /// its progress, and every write waiting on files. The first result is
-    /// the current state.
+    /// its progress. The first result is the current state.
     pub fn subscribe_uploads(&self) -> UploadsLiveQuery;
 
     /// Retries every waiting upload now, instead of after its retry delay.
@@ -4115,8 +4099,6 @@ pub struct UploadQueue {
     pub paused: bool,
     /// Oldest first.
     pub files: Vec<QueuedUpload>,
-    /// Writes waiting for their files to be stored, oldest first.
-    pub writes: Vec<WaitingUpload>,
 }
 
 pub struct QueuedUpload {
@@ -4127,13 +4109,6 @@ pub struct QueuedUpload {
     pub last_failure: Option<UploadFailure>,
     pub queued_at: SystemTime,
     pub last_attempt_at: Option<SystemTime>,
-}
-
-/// A write of this device's waiting in `coven_uploads` for files.
-pub struct WaitingUpload {
-    pub write: WriteId,
-    /// The files it waits for.
-    pub files: Vec<FileRef>,
 }
 
 pub enum UploadPhase {
@@ -4162,16 +4137,6 @@ Example:
 let attachment = handle.file_ref("attachments", attachment_id.as_str()).await?;
 handle.upload_files(&[attachment]).await?;
 
-// Move the note into Ana's circle, with an ordinary write. Its uploaded
-// files go up again under the circle's key before the write uploads.
-let circle = anas_circle.to_string();
-handle
-    .write(move |sql| {
-        sql.execute("UPDATE notes SET audience = ?1 WHERE id = ?2", (&circle, &note_id))?;
-        Ok(())
-    })
-    .await?;
-
 let mut uploads = handle.subscribe_uploads();
 loop {
     let state = uploads.next().await?;
@@ -4180,8 +4145,8 @@ loop {
             show_progress(upload.file.key(), bytes_sent, bytes_total);
         }
     }
-    if state.writes.is_empty() {
-        break; // the move has reached storage
+    if state.files.is_empty() {
+        break; // every queued file is stored
     }
 }
 ```
@@ -4454,6 +4419,9 @@ pub enum ProviderSignOut {
 ```rust
 /// A one-time invite's UUID, also naming its join-request object (§12.2).
 pub struct InviteId(pub Uuid);
+
+/// An uploaded file's random id, its name in storage (§16.2).
+pub struct FileId(pub Uuid);
 
 /// What the app may show before using a scanned or typed code (§20.10).
 pub struct CodeInfo {
