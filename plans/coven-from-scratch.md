@@ -141,7 +141,9 @@
       covers;
     - uploading a file, then marking it stored.
 - **Revocation:** an ex-member can't read anything written after they left.
-- **Bounded storage:** cloud history doesn't grow forever.
+- **Bounded storage:** cloud history doesn't grow forever: device logs and
+  old snapshots are deleted once newer snapshots cover them; only the
+  store log and sealed keys stay, growing with membership changes alone.
 
 ## 4. Storage providers and access
 
@@ -1783,20 +1785,29 @@ Carol's tablet:
   every log they reach.
   - A device's own `coven_uploads` and `coven_operations` aren't in it, so
     a device that loads one keeps its own.
-  - Snapshots live at `snapshots/<device>/<n>`.
+  - Snapshots live at `snapshots/<audience>/<device>/<n>`, where the
+    audience is `store` or a circle's id.
+  - Its prefix, outside its encryption, names its audience, its key and
+    its positions, so any device can choose one and decide what it
+    covers without opening it.
   - A snapshot is one object, encrypted in chunks like a write
     ([§6](#6-syncing-writes)), and written and loaded a chunk at a time.
   - A snapshot *covers* a write when the write is within its positions:
-    `snapshots/ana-phone/3` covers ana-phone's writes 1 to 40.
-- A device writes one once the writes after the latest snapshot it knows of
-  add up to more bytes than that snapshot.
+    `snapshots/store/ana-phone/3` covers ana-phone's writes 1 to 40.
+- A device writes one for an audience once that audience's parts after
+  its latest snapshot add up to more bytes than that snapshot, or than
+  1 MiB while the audience has none.
+- The *latest* snapshot of an audience is the one covering the most writes,
+  counted over every log; a tie goes to the smaller path.
+- Until an audience has a snapshot, a new device reads every log from the
+  start; no log object is deleted before a snapshot covers it.
 - So loading a snapshot and the writes after it costs at most about twice
   the snapshot.
 - Two devices can write one at the same time, and both are correct:
 
   ```
-  snapshots/ana-phone/3     ana-phone up to 40, ben-laptop up to 22
-  snapshots/ben-laptop/1    ana-phone up to 38, ben-laptop up to 25
+  snapshots/store/ana-phone/3     ana-phone up to 40, ben-laptop up to 22
+  snapshots/store/ben-laptop/1    ana-phone up to 38, ben-laptop up to 25
   ```
 
 - A new device loads either, then fetches every write after its positions,
@@ -1822,6 +1833,10 @@ Carol's tablet:
 - A log object is deleted once snapshots cover every part of it, and either
   every device's posted position has passed it or storage has held it for
   30 days.
+  - Every device means every device the store log has and hasn't removed;
+    one that has never posted counts as having read nothing.
+- A device deletes a snapshot of its own once a newer one of the same
+  audience covers everything it covers.
   - Each device deletes its own log objects.
   - A removed device's are deleted by another device of the same member,
     since they were uploaded with that member's account.
@@ -1833,6 +1848,8 @@ Carol's tablet:
     is removed.
 - A device that needs writes already deleted loads the latest snapshot
   instead, like a new device.
+  - A missing write that a snapshot covers counts as deleted, not late
+    ([§19.1](#191-noticing)).
   - Its own writes still waiting in `coven_uploads` keep their numbers, and
     it uploads them after.
   - Every device then applies them like any late write: they had read only
@@ -2172,7 +2189,7 @@ Carol's tablet:
   ```
   id   kind                   last_step   data                                started_by
   1    remove member          2           member: ben, new store key: …       remove_member call
-  2    reload from snapshot   1           snapshot: snapshots/ana-phone/7,    coven
+  2    reload from snapshot   1           snapshot: snapshots/store/ana-phone/7,    coven
                                           temporary file: …
   ```
 
@@ -2529,7 +2546,7 @@ impl ObjectPath {
     /// A device's create-once store log entry (§9).
     pub fn store_log(device: DeviceId, number: NonZeroU64) -> Self;
     /// A snapshot written by a device (§15).
-    pub fn snapshot(device: DeviceId, number: NonZeroU64) -> Self;
+    pub fn snapshot(audience: Audience, device: DeviceId, number: NonZeroU64) -> Self;
     /// A device's posted positions (§6).
     pub fn positions(device: DeviceId) -> Self;
     /// A sealed store key for a member (§11).
