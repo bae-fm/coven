@@ -112,6 +112,9 @@
 - The app can subscribe to a query; it reruns only when rows it read change.
 - Coven keeps its own internal tables in the same database. The app can't
   read or write them.
+- In a table whose rowid isn't its primary key, the app can read the rowid
+  but not set it: it is SQLite's private address for the row, which coven
+  doesn't sync or watch, and which VACUUM can renumber.
 
 ## 6. Syncing writes
 
