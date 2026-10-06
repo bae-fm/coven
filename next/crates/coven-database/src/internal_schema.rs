@@ -3,8 +3,9 @@
 //!
 //! Unsigned merge counters are big-endian eight-byte blobs. SQLite's signed
 //! integer range must not truncate device ids, generations or write numbers.
-//! Present values live only in app tables. Metadata and lost values use
-//! coven-format's snapshot field encodings inside blobs.
+//! Present displayed values live in app tables; differing written references
+//! are kept by cell. Metadata and lost values use coven-format's snapshot
+//! field encodings inside blobs.
 //! Loss targets name their row directly: a write excluded by a schema change
 //! or reset need not have an accepted generation in `coven_rows`.
 //! An upload's `record` is one plaintext value: the write header frame followed
@@ -123,6 +124,26 @@ macro_rules! coven_tables {
                 audience TEXT,
                 included BLOB NOT NULL
             ) STRICT;
+        ");
+        $visit!(coven_excluded_writes, "
+            CREATE TABLE coven_excluded_writes (
+                id INTEGER PRIMARY KEY,
+                audience TEXT NOT NULL,
+                device BLOB NOT NULL CHECK(length(device)=8),
+                number BLOB NOT NULL CHECK(length(number)=8),
+                header BLOB NOT NULL,
+                cause BLOB NOT NULL,
+                UNIQUE(audience,device,number)
+            ) STRICT;
+        ");
+        $visit!(coven_excluded_rows, "
+            CREATE TABLE coven_excluded_rows (
+                write_id INTEGER NOT NULL REFERENCES coven_excluded_writes(id) ON DELETE CASCADE,
+                table_name TEXT NOT NULL,
+                key BLOB NOT NULL,
+                record BLOB NOT NULL,
+                PRIMARY KEY(write_id,table_name,key)
+            ) STRICT, WITHOUT ROWID;
         ");
         $visit!(coven_fingerprint_leaves, "
             CREATE TABLE coven_fingerprint_leaves (

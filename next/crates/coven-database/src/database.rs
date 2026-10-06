@@ -316,6 +316,34 @@ impl Database {
         )
     }
 
+    /// Stream an audience's plaintext snapshot frames from one committed reader
+    /// transaction. The consumer can seal and upload each frame as it arrives;
+    /// commits on the writer connection continue throughout this call.
+    pub async fn write_snapshot<F, E>(
+        &self,
+        id: coven_format::store_log::SnapshotId,
+        emit: F,
+    ) -> Result<(), crate::SnapshotWriteError<E>>
+    where
+        F: FnMut(Vec<u8>) -> Result<(), E> + Send + 'static,
+        E: Send + 'static,
+    {
+        let database = self.clone();
+        finish_blocking(
+            tokio::task::spawn_blocking(move || {
+                let slot = database.inner.read().expect("database lock poisoned");
+                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+                let reader = inner.readers.acquire_reader();
+                reader.with_reader(|reader| {
+                    reader.read_transaction(|| {
+                        crate::snapshot_write::write(reader, &inner.write_schema, id, emit)
+                    })
+                })
+            })
+            .await,
+        )
+    }
+
     /// Record an applied breaking change's snapshot coverage. Returns false on repetition.
     /// Loading the snapshot's rows is a separate operation.
     pub async fn apply_breaking_change(
@@ -858,11 +886,14 @@ impl ReaderLease<'_> {
         F: FnOnce(SqlReadContext<'_>) -> Result<R, E>,
         E: From<DbError>,
     {
+        self.with_reader(|reader| reader.read_snapshot(read))
+    }
+
+    fn with_reader<R>(&self, read: impl FnOnce(&DatabaseConnection) -> R) -> R {
         let reader = self.database.readers[self.index]
             .lock()
             .expect("read connection lock poisoned");
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reader.read_snapshot(read)));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read(&reader)));
         // The read transaction rolls back while unwinding. Release the mutex
         // before propagating the app panic so the pool can reuse this reader.
         drop(reader);

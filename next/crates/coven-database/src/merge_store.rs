@@ -94,16 +94,34 @@ pub(crate) struct StoredRow {
 
 pub(crate) struct MergeStore<'a> {
     database: &'a DatabaseConnection,
-    values: &'a AppView<'a>,
+    values: RowValues<'a>,
     metadata: WriteMetadata<'a>,
     rows: RefCell<BTreeMap<RowId, StoredRow>>,
+}
+
+enum RowValues<'a> {
+    App(&'a AppView<'a>),
+    Schema(&'a crate::schema::Schema),
 }
 
 impl<'a> MergeStore<'a> {
     pub(crate) fn new(database: &'a DatabaseConnection, app: &'a AppView<'a>) -> Self {
         Self {
             database,
-            values: app,
+            values: RowValues::App(app),
+            metadata: WriteMetadata::new(database),
+            rows: RefCell::new(BTreeMap::new()),
+        }
+    }
+
+    /// Read values and stored references without resolving app references.
+    pub(crate) fn from_schema(
+        database: &'a DatabaseConnection,
+        schema: &'a crate::schema::Schema,
+    ) -> Self {
+        Self {
+            database,
+            values: RowValues::Schema(schema),
             metadata: WriteMetadata::new(database),
             rows: RefCell::new(BTreeMap::new()),
         }
@@ -139,15 +157,23 @@ impl<'a> MergeStore<'a> {
                 loss = Some(ordinal);
                 columns.into_iter().map(|(n, v)| (n, v.value)).collect()
             } else {
-                let app = self
-                    .values
-                    .row(&(id.table.clone(), id.key.clone()))?
-                    .expect("present row must be in app or coven_lost");
-                assert_eq!(
-                    app.audience, id.audience,
-                    "visible row audience differs from merge state"
-                );
-                app.values
+                match self.values {
+                    RowValues::App(app) => {
+                        let app = app
+                            .row(&(id.table.clone(), id.key.clone()))?
+                            .ok_or(DbError::DamagedDatabase)?;
+                        if app.audience != id.audience {
+                            return Err(DbError::DamagedDatabase);
+                        }
+                        app.values
+                    }
+                    RowValues::Schema(schema) => crate::write_rows::read_values(
+                        self.database,
+                        &schema.tables[&id.table.to_ascii_lowercase()],
+                        &id.key,
+                    )?
+                    .ok_or(DbError::DamagedDatabase)?,
+                }
             };
             values.extend(crate::reference_values::load(self.database, ordinal)?);
             let mut references = BTreeMap::<String, BTreeMap<_, _>>::new();

@@ -196,6 +196,17 @@ fn exclude(
     part: &WritePart,
     cause: LostWriteCause,
 ) -> Result<(), DbError> {
+    if !part.rows.is_empty() {
+        let record = WriteRecord {
+            header: header.clone(),
+            parts: vec![WritePart {
+                audience: part.audience.clone(),
+                rows: part.rows.clone(),
+                dismissals: Vec::new(),
+            }],
+        };
+        crate::excluded_write::retain(database, &record, cause)?;
+    }
     let cause = encoded(merge_fields::encode_lost_write_cause(&cause))?;
     let setter = encoded(merge_fields::encode_write_id(&header.position))?;
     for change in &part.rows {

@@ -215,7 +215,9 @@
 
   - A lost write is followed at once by `rows` records of tag `6`, each a
     row change (D5) of its write, in increasing `RowId` order; the count
-    in the header counts lost writes, not their rows.
+    in the header counts lost writes, not their rows. Dismissed cells are
+    absent from these changes (including an update's or delete's old values);
+    rows and lost-write headers emptied by dismissal are omitted.
   - `cause` is `0 | version:u32`, lost to a schema change, or
     `1 | entry:EntryId`, lost to a reset.
   - A kept loss is a removed row's loss whose merge records a breaking
@@ -370,30 +372,53 @@
   - The plaintext is `key:uuid | key bytes:32` for a store key, and
     `circle:uuid | key:uuid | key bytes:32` for a circle key.
 - A fingerprint ([§19.1](coven-from-scratch.md#191-noticing)) is
-  HMAC-SHA256, under the audience's fingerprint key, of the label
-  `coven/agreement/root/v1`, the audience (`store` or the circle id as
-  text), and the sum, modulo 2^256 as a big-endian number, of one *leaf*
-  per row that has generations, and one per write part lost without being
-  applied.
-  - A row's leaf is SHA-256 over the context of
-    `coven/agreement/leaf/v1`, the row's identity hash, and the row's hash;
-    the identity hash is SHA-256 over the context of `row`, the table and
-    the key.
-  - The row's hash is SHA-256 over the context of: `coven/agreement/row/v1`;
-    the table; the key; the number of generations and each generation with
-    the write that started it; its cells' setters as `map<name, WriteId>`;
-    its written reference cells as `map<name, ColumnValue>`;
-    the values the app sees as `map<name, ColumnValue>`, empty if the row
-    isn't shown; if a rule removed it, its values and its rules, otherwise
-    two empty strings; then the number of lost values and, for each, its
-    column, write, incarnation, written value, displayed value and replacing
-    write.
-  - A lost write's row has a leaf of its own, in place of a row's: its
-    identity hash is over `excluded`, the table, the key and the write;
-    its hash is over the row change's generation, its values as
-    `map<name, ColumnValue>` (a delete's old values), its setters as
-    `map<name, WriteId>`, and its cause.
-  - Rows are counted as if a key in two audiences were shown in both
+  HMAC-SHA256, under the audience's fingerprint key, of the raw concatenation
+  `coven/agreement/root/v1 | audience | sum`. This outer concatenation has no
+  context length fields. `audience` is UTF-8 `store` or the lowercase hyphenated
+  circle UUID; `sum` is exactly 32 bytes, a big-endian sum modulo 2^256.
+  The empty set has sum zero.
+  - Each leaf is SHA-256 over the context of `coven/agreement/leaf/v1`, an
+    identity hash, and a value hash. Every hash below is SHA-256 over a
+    context, with each listed field separately length-prefixed as above.
+    Labels, table names and column names used as context fields are raw UTF-8,
+    without D2's `text` length prefix. Keys are raw D3 bytes. Typed values,
+    maps, sets and write ids use D2/D7 encodings without frame envelopes;
+    counts, generations and incarnations used as context fields are `u64`.
+  - There is one leaf per row with generations. Its identity hash has fields
+    `row`, table, key. Its value hash has these fields, in this order:
+    1. `coven/agreement/row/v1`, table, key, generation count;
+    2. for each generation in increasing order, the generation and the
+       `WriteId` that started it, as two separate fields;
+    3. the cells' setters as `map<name, WriteId>`;
+    4. only the cells with nonempty parent maps, as
+       `map<name, ColumnValue>`, retaining their values and references as written;
+    5. the app-visible values as `map<name, ColumnValue>`, with empty parent
+       maps; an encoded empty map if the row is deleted or removed;
+    6. if a rule removed the row, its cells as `map<name, ColumnValue>` with
+       displayed scalar values and written parent maps, then its `set<Rule>`;
+       otherwise two zero-length context fields, not encoded empty collections;
+    7. the lost-cell count, then, in `LostKey` order, each loss's column,
+       setting `WriteId`, incarnation, written `ColumnValue`, displayed
+       `ColumnValue`, and replacing `WriteId`, each a separate field. The
+       displayed value retains the written parent map.
+  - Each row of an excluded write part has its own leaf. Its identity hash
+    has fields `excluded`, table, key, and the write's `WriteId`. Its value
+    hash has fields generation, values as `map<name, ColumnValue>`, setters
+    as `map<name, WriteId>`, and cause (`0 | version:u32` or `1 | EntryId`).
+    A delete uses its old scalar values with empty parent maps; every setter
+    names the excluded write. Values and setters omit dismissed cells.
+  - Each kept loss from D7 section 5 has its own leaf. Its identity hash has
+    fields `retired`, table, key, incarnation, column, setter. A cell uses
+    its column and setting `WriteId`; a removed row uses an empty column
+    field and its `map<name, WriteId>` of setters. Its value hash has fields
+    value, setter, replacement kind, replacement. For a cell these are its
+    frozen `ColumnValue`, setting `WriteId`, raw UTF-8 `write`, and replacing
+    `WriteId`. For a removed row they are its frozen
+    `map<name, ColumnValue>`, setters map, raw UTF-8 `rules`, and `set<Rule>`.
+    All these frozen values have empty parent maps, as in D7.
+  - Replacing a leaf subtracts its previous hash and adds its new hash in the
+    same transaction as the state change. Rows are counted as if a key in
+    two audiences were shown in both
     ([§14.2](coven-from-scratch.md#142-moving-rows)).
 
 ### D12 Files

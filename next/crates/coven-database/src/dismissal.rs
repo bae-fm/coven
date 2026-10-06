@@ -148,6 +148,9 @@ pub(crate) fn apply(
                 }
                 columns.remove(&dismissal.column);
                 writes.remove(&dismissal.column);
+                if !retired && kind == "excluded" {
+                    crate::excluded_write::dismiss(database, dismissal)?;
+                }
                 if columns.is_empty() {
                     database.internal_execute("DELETE FROM coven_lost WHERE id=?1", [id])?;
                 } else {

@@ -62,6 +62,14 @@ impl DatabaseConnection {
             authorization.applying_function(),
         )?;
         connection.create_scalar_function(
+            "coven_loss_order",
+            2,
+            FunctionFlags::SQLITE_UTF8
+                | FunctionFlags::SQLITE_DETERMINISTIC
+                | FunctionFlags::SQLITE_DIRECTONLY,
+            |ctx| crate::snapshot_loss::sort_key(ctx.get(0)?, &ctx.get::<Vec<u8>>(1)?),
+        )?;
+        connection.create_scalar_function(
             "coven_fingerprint_replace",
             3,
             FunctionFlags::SQLITE_UTF8
@@ -364,20 +372,14 @@ impl DatabaseConnection {
         &self,
         sql: &str,
         params: P,
-        map: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
+        mut map: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
     ) -> Result<Vec<T>, DbError> {
-        let _scope = self.authorization.internal();
-        self.authorization.begin_read_statement();
-        let result = (|| {
-            let mut statement = self.connection.prepare(sql)?;
-            let rows = statement
-                .query_map(params, map)?
-                .collect::<rusqlite::Result<Vec<T>>>();
-            rows
-        })();
-        self.authorization
-            .record_statement(&self.connection, None)?;
-        result.map_err(Into::into)
+        let mut values = Vec::new();
+        self.visit(sql, params, |row| {
+            values.push(map(row)?);
+            Ok(())
+        })?;
+        Ok(values)
     }
 
     /// Visit rows while SQLite owns the cursor; no result-sized allocation.
@@ -385,20 +387,31 @@ impl DatabaseConnection {
         &self,
         sql: &str,
         params: P,
-        mut visit: impl FnMut(&Row<'_>) -> Result<(), DbError>,
+        visit: impl FnMut(&Row<'_>) -> Result<(), DbError>,
     ) -> Result<(), DbError> {
+        self.for_each(sql, params, visit)
+    }
+
+    /// Stream rows to a consumer with its own error type.
+    pub(crate) fn for_each<P: Params, E: From<DbError>>(
+        &self,
+        sql: &str,
+        params: P,
+        mut visit: impl FnMut(&Row<'_>) -> Result<(), E>,
+    ) -> Result<(), E> {
         let _scope = self.authorization.internal();
         self.authorization.begin_read_statement();
         let result = (|| {
-            let mut statement = self.connection.prepare(sql)?;
-            let mut rows = statement.query(params)?;
-            while let Some(row) = rows.next()? {
+            let mut statement = self.connection.prepare(sql).map_err(DbError::from)?;
+            let mut rows = statement.query(params).map_err(DbError::from)?;
+            while let Some(row) = rows.next().map_err(DbError::from)? {
                 visit(row)?;
             }
             Ok(())
         })();
         self.authorization
-            .record_statement(&self.connection, None)?;
+            .record_statement(&self.connection, None)
+            .map_err(DbError::from)?;
         result
     }
 
@@ -606,29 +619,36 @@ impl DatabaseConnection {
         E: From<DbError>,
     {
         let mut reads = ReadSet::new();
-        let result = (|| {
-            self.batch("BEGIN DEFERRED")?;
-            let mut guard = SqlTransaction {
-                database: self,
-                active: true,
-            };
-            // BEGIN alone does not fix a WAL snapshot. Pin it before invoking
-            // app code, including a closure whose first action waits on a writer.
-            let result = (|| {
-                self.query_row("SELECT count(*) FROM main.sqlite_schema", [], |r| {
-                    r.get::<_, i64>(0)
-                })?;
-                let _reading = self.authorization.reading();
-                let result = read(SqlReadContext::new(self));
-                reads = self.authorization.reads();
-                result
-            })();
-            guard.active = false;
-            self.batch("ROLLBACK")
-                .expect("ending read snapshot with ROLLBACK failed");
+        let result = self.read_transaction(|| {
+            let _reading = self.authorization.reading();
+            let result = read(SqlReadContext::new(self));
+            reads = self.authorization.reads();
             result
-        })();
+        });
         (result, reads)
+    }
+
+    pub(crate) fn read_transaction<R, E: From<DbError>>(
+        &self,
+        read: impl FnOnce() -> Result<R, E>,
+    ) -> Result<R, E> {
+        self.batch("BEGIN DEFERRED")?;
+        let mut guard = SqlTransaction {
+            database: self,
+            active: true,
+        };
+        // BEGIN alone does not fix a WAL snapshot. Pin it before invoking a
+        // consumer that can wait while a writer commits.
+        let result = (|| {
+            self.query_row("SELECT count(*) FROM main.sqlite_schema", [], |r| {
+                r.get::<_, i64>(0)
+            })?;
+            read()
+        })();
+        guard.active = false;
+        self.batch("ROLLBACK")
+            .expect("ending read snapshot with ROLLBACK failed");
+        result
     }
 
     pub(crate) fn lost_values(&self) -> CovenResult<Vec<crate::LostValue>> {

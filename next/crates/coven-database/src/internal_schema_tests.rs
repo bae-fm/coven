@@ -525,6 +525,8 @@ async fn only_the_spec_tables_are_created() {
                 "coven_constraints",
                 "coven_device_files",
                 "coven_devices",
+                "coven_excluded_rows",
+                "coven_excluded_writes",
                 "coven_file_removals",
                 "coven_fingerprint_leaves",
                 "coven_fingerprint_sums",

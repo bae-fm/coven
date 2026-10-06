@@ -182,7 +182,9 @@ audience's rows. These rows belong to the preceding lost-write header by their
 position, without repeating its WriteId, and have its audience in strictly
 increasing RowId order. No other record or end marker can interrupt them; an
 extra row after the count is refused. The snapshot header's fifth count counts
-lost-write headers, not their rows.
+lost-write headers, not their rows. Dismissed cells are absent from the row
+changes and their old values; rows and lost-write headers emptied by dismissal
+are omitted.
 No frame grows with the number of rows in a lost write.
 
 These writes were never applied; nothing in the merged state replaced them.
