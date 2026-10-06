@@ -13,7 +13,8 @@ use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError, Repl
 /// Applied entries and their replay, read from one committed state (§9).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StoreLog {
-    /// Every applied entry and its immutable author-view check, in timestamp order.
+    /// Every applied entry, including dropped entries, and its immutable author-view
+    /// check, in timestamp order.
     pub entries: Vec<ReplayEntry>,
     /// The result computed by sync for exactly these entries.
     pub replay: StoreLogReplay,
@@ -29,6 +30,11 @@ pub struct StoreLogReplay {
 }
 
 /// Store-log state, including removed identities needed to check older writes (§10).
+///
+/// Schema and format versions belong to each audience: the store's versions are
+/// under [`Audience::Store`], and each circle has its own. A version is absent
+/// until a kept raise selects it, as in Appendix C. These are independent of the
+/// local app migration version returned by [`crate::Database::schema_version`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StoreLogState {
     /// Absent before the first entry creates the store.

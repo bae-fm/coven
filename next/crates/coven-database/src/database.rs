@@ -454,10 +454,14 @@ impl Database {
         )
     }
 
-    /// Commit one entry, its immutable author-view check, and sync's replay atomically (§9).
-    /// The database stores this result without replaying. Circle deletions and
-    /// reversals recompute row visibility in the same transaction.
-    /// A result for a stale or different applied-entry set is refused.
+    /// Commit one entry, its immutable author-view check, every kept/dropped mark,
+    /// and sync's whole replay result in one transaction (§9).
+    ///
+    /// The database stores the supplied result without replaying. Circle deletions
+    /// and reversals recompute row visibility in the same transaction. A result for
+    /// a stale or different applied-entry set is refused with
+    /// [`DbError::StoreLogEntriesChanged`]; changing an applied entry's bytes or
+    /// author-view check is refused with [`DbError::StoreLogEntryChanged`].
     pub async fn apply_store_log(
         &self,
         entry: crate::ReplayEntry,

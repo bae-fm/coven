@@ -12,6 +12,8 @@ use crate::{conflicts, effects};
 
 /// Replay the applied, checked entries, independently of their arrival order (§9).
 ///
+/// This is a pure function of the entry set, with no clock, storage or database reads.
+///
 /// The input is a set: positions and timestamps are unique, creation is first,
 /// and every entry's recorded past (including its device's own earlier entries)
 /// is present and causally closed. These are Appendix C's `Valid` assumptions.
@@ -36,8 +38,9 @@ pub fn replay(entries: &[StoreLogEntry]) -> StoreLogReplay {
 ///
 /// `log` must be a committed result (or the equivalent pure result), and `entry`
 /// must be new and have its entire recorded past in that log. The returned entry
-/// and result are passed together to [`coven_database::Database::apply_store_log`].
-/// Past checks never change; kept and dropped marks are recomputed from scratch.
+/// and the whole result for the previous entries plus this entry are passed
+/// together to [`coven_database::Database::apply_store_log`]. This function is pure;
+/// past checks never change, and kept/dropped marks are recomputed from scratch.
 pub fn replay_entry(log: &StoreLog, entry: StoreLogEntry) -> (ReplayEntry, StoreLogReplay) {
     let mut prior: Vec<_> = log.entries.iter().collect();
     prior.sort_by_key(|applied| applied.entry.timestamp);
