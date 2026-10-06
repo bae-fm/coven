@@ -184,7 +184,8 @@
   - Taking access back removes only what grants that one account; a share
     that also grants others is left, and reported to the owner, who
     changes it in the provider.
-- Setting up a store refuses a location that already holds one.
+- Setting up a store refuses a location that already holds another store,
+  or anything that isn't a coven store.
   - Two devices setting up different stores in one empty location at the
     same moment can both succeed; whichever store's first entry has the
     larger timestamp finds the other's when it next syncs, stops syncing,
@@ -3697,7 +3698,8 @@ while let Ok(values) = lost.next().await {
   first time it connects, and connects this device to it.
   - At a location that already holds this store, such as after
     `disconnect_storage`, setup reconnects to it; one that holds another
-    store fails with `LocationOccupied`.
+    store, or anything that isn't a coven store, fails with
+    `LocationOccupied`.
   - Creating uploads the store's first entry and its key sealed to this
     member; waiting writes then go up through sync like any others.
 - Setup commits the storage credentials and keys only once the connection
