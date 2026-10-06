@@ -106,7 +106,9 @@ macro_rules! coven_tables {
                 column_id INTEGER REFERENCES coven_columns(id),
                 value BLOB NOT NULL,
                 set_by BLOB NOT NULL,
-                replaced_by BLOB NOT NULL
+                replacement_kind TEXT NOT NULL CHECK(replacement_kind IN ('write', 'rules', 'excluded')),
+                replaced_by BLOB NOT NULL,
+                CHECK((replacement_kind != 'write' OR column_id IS NOT NULL) AND (replacement_kind != 'rules' OR column_id IS NULL))
             ) STRICT;
             CREATE INDEX coven_lost_row ON coven_lost(table_name,key,audience,generation,column_id);
             CREATE INDEX coven_lost_column ON coven_lost(column_id);

@@ -29,7 +29,7 @@ pub(crate) fn remove(
         let mut columns: BTreeMap<_,_> = state.cells().iter().map(|(name,cell)| (name.clone(),cell.value.clone())).collect();
         for (name, value) in changes { columns.get_mut(*name).unwrap().value = value.clone(); }
         let setters = state.cells().iter().map(|(name,cell)| (name.clone(),cell.write)).collect();
-        db.internal_execute("INSERT INTO coven_lost(table_name,key,audience,generation,column_id,value,set_by,replaced_by) VALUES(?1,?2,?3,?4,NULL,?5,?6,?7)", crate::params![table, identity.key, audience, generation, merge_fields::encode_columns(&columns).unwrap(), merge_fields::encode_setters(&setters).unwrap(), merge_fields::encode_rules(&rules).unwrap()]).unwrap();
+        db.internal_execute("INSERT INTO coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,NULL,?5,?6,'rules',?7)", crate::params![table, identity.key, audience, generation, merge_fields::encode_columns(&columns).unwrap(), merge_fields::encode_setters(&setters).unwrap(), merge_fields::encode_rules(&rules).unwrap()]).unwrap();
         let values = columns.into_iter().map(|(n,c)| (n,c.value)).collect();
         let claims = crate::removal_sql::constraints(db,schema.table(table),&schema.rules[table],&state,&values,|id| store.stamp(id)).unwrap().unique;
         for (constraint,claim) in claims {

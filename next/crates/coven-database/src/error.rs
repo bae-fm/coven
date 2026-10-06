@@ -31,6 +31,12 @@ pub enum CovenError {
     },
 }
 
+impl From<rusqlite::Error> for CovenError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Database(error.into())
+    }
+}
+
 /// A failed database call or a write the database refuses (§5, §8, §14, §16).
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
@@ -64,7 +70,8 @@ pub enum DbError {
     #[error("SQLite ended the owned transaction")]
     TransactionEnded,
     /// App SQL tried transaction control, a PRAGMA, ATTACH, loading an
-    /// extension, or changing the schema outside a migration (§5, §20.13).
+    /// extension, changing a hidden rowid, or changing the schema outside a
+    /// migration (§5, §20.13).
     #[error("app SQL cannot perform {operation}")]
     StatementForbidden {
         /// The refused operation.

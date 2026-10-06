@@ -1,7 +1,8 @@
 //! The leaf SQLite capability. Its connection is never returned or borrowed out.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use coven_foundation::id_source::{CircleId, DeviceId};
@@ -14,7 +15,9 @@ use rusqlite::{
 use crate::authorization::SqlAuthorization;
 use crate::internal_schema;
 use crate::migration::{validate_versions, MigrationContext};
+use crate::observation::{CommitObserver, ReadSet, RowChange};
 use crate::schema::Schema;
+use crate::SqlReadContext;
 use crate::{
     CovenMigrationError, CovenMigrationPolicy, CovenResult, DbError, Migration, MigrationError,
     MigrationOutcome, SyncedTable,
@@ -23,8 +26,14 @@ use crate::{
 pub(crate) struct DatabaseConnection {
     connection: Connection,
     authorization: SqlAuthorization,
+    observation: Option<WriterObservation>,
     #[cfg(test)]
     scans: std::sync::Mutex<Vec<(String, i32)>>,
+}
+
+struct WriterObservation {
+    observer: CommitObserver,
+    supplemental: Arc<BTreeMap<String, Option<String>>>,
 }
 
 impl DatabaseConnection {
@@ -54,10 +63,12 @@ impl DatabaseConnection {
         let db = Self {
             connection,
             authorization,
+            observation: None,
             #[cfg(test)]
             scans: std::sync::Mutex::new(Vec::new()),
         };
         db.batch("PRAGMA foreign_keys = ON; PRAGMA recursive_triggers = ON; PRAGMA trusted_schema = OFF;")?;
+        db.refresh_hidden_rowids().map_err(opening_error)?;
         Ok(db)
     }
 
@@ -118,6 +129,9 @@ impl DatabaseConnection {
         }
         if read_only || current == supported {
             Schema::read(self)?.validate(self, tables)?;
+            if self.authorization.tables_changed() {
+                self.refresh_hidden_rowids()?;
+            }
             return Ok(Vec::new());
         }
         let mut at = migrations
@@ -140,6 +154,7 @@ impl DatabaseConnection {
                 before = after;
             }
             before.validate(db, tables)?;
+            db.refresh_hidden_rowids()?;
             db.batch(&format!("PRAGMA user_version = {}", supported as i32))?;
             Ok(outcomes)
         });
@@ -287,9 +302,11 @@ impl DatabaseConnection {
         map: impl FnOnce(&Row<'_>) -> rusqlite::Result<T>,
     ) -> Result<T, DbError> {
         let _scope = self.authorization.internal();
-        self.connection
-            .query_row(sql, params, map)
-            .map_err(Into::into)
+        self.authorization.begin_read_statement();
+        let result = self.connection.query_row(sql, params, map);
+        self.authorization
+            .record_statement(&self.connection, None)?;
+        result.map_err(Into::into)
     }
 
     pub(crate) fn query<T, P: Params>(
@@ -299,11 +316,17 @@ impl DatabaseConnection {
         map: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
     ) -> Result<Vec<T>, DbError> {
         let _scope = self.authorization.internal();
-        let mut statement = self.connection.prepare(sql)?;
-        let rows = statement
-            .query_map(params, map)?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(rows)
+        self.authorization.begin_read_statement();
+        let result = (|| {
+            let mut statement = self.connection.prepare(sql)?;
+            let rows = statement
+                .query_map(params, map)?
+                .collect::<rusqlite::Result<Vec<T>>>();
+            rows
+        })();
+        self.authorization
+            .record_statement(&self.connection, None)?;
+        result.map_err(Into::into)
     }
 
     pub(crate) fn scan<P: Params>(
@@ -313,12 +336,18 @@ impl DatabaseConnection {
         mut visit: impl FnMut(&Row<'_>) -> rusqlite::Result<()>,
     ) -> Result<(), DbError> {
         let _scope = self.authorization.internal();
-        let mut statement = self.connection.prepare(sql)?;
-        let mut rows = statement.query(params)?;
-        while let Some(row) = rows.next()? {
-            visit(row)?;
-        }
-        Ok(())
+        self.authorization.begin_read_statement();
+        let result: rusqlite::Result<()> = (|| {
+            let mut statement = self.connection.prepare(sql)?;
+            let mut rows = statement.query(params)?;
+            while let Some(row) = rows.next()? {
+                visit(row)?;
+            }
+            Ok(())
+        })();
+        self.authorization
+            .record_statement(&self.connection, None)?;
+        result.map_err(Into::into)
     }
 
     pub(crate) fn app_execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
@@ -358,41 +387,126 @@ impl DatabaseConnection {
     ) -> rusqlite::Result<T> {
         self.authorization.check_sql(sql)?;
         self.begin_app_statement()?;
-        let mut statement = self
-            .authorization
-            .app_result(self.connection.prepare(sql))?;
-        let mut rows = statement.query(params)?;
-        let row = {
-            let _scope = self.authorization.step();
-            self.authorization.app_result(rows.next())?
-        };
-        map(row.ok_or(rusqlite::Error::QueryReturnedNoRows)?)
+        self.authorization.begin_read_statement();
+        let result = (|| {
+            let mut statement = self.connection.prepare(sql)?;
+            let parameters = crate::sql_value::parameters(&self.connection, &statement, params)?;
+            let result = (|| {
+                let mut rows = statement.query(rusqlite::params_from_iter(&parameters))?;
+                let row = {
+                    let _scope = self.authorization.step();
+                    self.authorization.app_result(rows.next())?
+                };
+                map(row.ok_or(rusqlite::Error::QueryReturnedNoRows)?)
+            })();
+            self.authorization
+                .record_statement(&self.connection, Some((sql, &statement, &parameters)))?;
+            result
+        })();
+        self.authorization.app_result(result)
     }
 
     pub(crate) fn app_query<T, P: Params>(
         &self,
         sql: &str,
         params: P,
-        map: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
+        mut map: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
     ) -> rusqlite::Result<Vec<T>> {
         self.authorization.check_sql(sql)?;
         self.begin_app_statement()?;
+        self.authorization.begin_read_statement();
         let result = (|| {
             let mut statement = self.connection.prepare(sql)?;
-            let mut rows = statement.query(params)?;
-            let mut values = Vec::new();
-            let mut map = map;
-            loop {
-                let row = {
-                    let _scope = self.authorization.step();
-                    self.authorization.app_result(rows.next())?
-                };
-                let Some(row) = row else { break };
-                values.push(map(row)?);
-            }
-            Ok(values)
+            let parameters = crate::sql_value::parameters(&self.connection, &statement, params)?;
+            let result = (|| {
+                let mut rows = statement.query(rusqlite::params_from_iter(&parameters))?;
+                let mut values = Vec::new();
+                loop {
+                    let row = {
+                        let _scope = self.authorization.step();
+                        self.authorization.app_result(rows.next())?
+                    };
+                    let Some(row) = row else { break };
+                    values.push(map(row)?);
+                }
+                Ok(values)
+            })();
+            self.authorization
+                .record_statement(&self.connection, Some((sql, &statement, &parameters)))?;
+            result
         })();
         self.authorization.app_result(result)
+    }
+
+    pub(crate) fn observe_commits(&mut self, observer: CommitObserver) -> Result<(), DbError> {
+        assert!(
+            self.observation.is_none(),
+            "commit observation installed once"
+        );
+        self.observation = Some(WriterObservation {
+            observer,
+            supplemental: Arc::new(crate::change_capture::supplemental_tables(self)?),
+        });
+        Ok(())
+    }
+
+    fn refresh_hidden_rowids(&self) -> rusqlite::Result<()> {
+        let _scope = self.authorization.internal();
+        // A rowid table's declared primary key has its own index unless it is
+        // an INTEGER PRIMARY KEY alias. Declared alias names make SQLITE_UPDATE
+        // of ROWID ambiguous, so these tables are excluded from this policy.
+        let mut statement = self.connection.prepare(
+            "SELECT lower(schema),lower(name) FROM pragma_table_list AS t
+             WHERE schema IN ('main','temp') AND type IN ('table','shadow') AND wr=0
+             AND name NOT GLOB 'sqlite_*'
+             AND NOT EXISTS (SELECT 1 FROM pragma_table_xinfo(t.name,t.schema)
+                             WHERE lower(name) IN ('rowid','_rowid_','oid'))
+             AND (NOT EXISTS (SELECT 1 FROM pragma_table_xinfo(t.name,t.schema) WHERE pk>0)
+                  OR EXISTS (SELECT 1 FROM pragma_index_list(t.name,t.schema) WHERE origin='pk'))",
+        )?;
+        let tables = statement
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+        self.authorization.set_hidden_rowids(tables);
+        Ok(())
+    }
+
+    pub(crate) fn read_snapshot<F, R>(&self, read: F) -> (CovenResult<R>, ReadSet)
+    where
+        F: FnOnce(SqlReadContext<'_>) -> CovenResult<R>,
+    {
+        let mut reads = ReadSet::new();
+        let result = (|| {
+            self.batch("BEGIN DEFERRED")?;
+            let mut guard = SqlTransaction {
+                database: self,
+                active: true,
+            };
+            // BEGIN alone does not fix a WAL snapshot. Pin it before invoking
+            // app code, including a closure whose first action waits on a writer.
+            let result = (|| {
+                self.query_row("SELECT count(*) FROM main.sqlite_schema", [], |r| {
+                    r.get::<_, i64>(0)
+                })?;
+                let _reading = self.authorization.reading();
+                let result = read(SqlReadContext::new(self));
+                reads = self.authorization.reads();
+                result
+            })();
+            guard.active = false;
+            self.batch("ROLLBACK")
+                .expect("ending read snapshot with ROLLBACK failed");
+            result
+        })();
+        (result, reads)
+    }
+
+    pub(crate) fn lost_values(&self) -> CovenResult<Vec<crate::LostValue>> {
+        let records = self.query(
+            "SELECT l.table_name,l.key,l.column_id,c.table_name,c.column_name,l.value,l.set_by,l.replacement_kind,l.replaced_by FROM coven_lost l LEFT JOIN coven_columns c ON c.id=l.column_id ORDER BY l.id",
+            [], crate::lost::LostRecord::read,
+        )?;
+        records.into_iter().map(|record| record.decode()).collect()
     }
 
     fn require_transaction(&self) -> Result<(), DbError> {
@@ -406,6 +520,11 @@ impl DatabaseConnection {
     fn begin_app_statement(&self) -> rusqlite::Result<()> {
         self.require_transaction()
             .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))?;
+        // Migrations may create, rename or rebuild tables between app statements.
+        // Ordinary writes reuse the set without querying SQLite's schema.
+        if self.authorization.tables_changed() {
+            self.refresh_hidden_rowids()?;
+        }
         self.authorization.begin_app_call();
         Ok(())
     }
@@ -419,11 +538,25 @@ impl DatabaseConnection {
             database: self,
             active: true,
         };
-        let result = run(self).and_then(|result| {
+        let result = (|| {
+            // The write-record session ends before materialization; this session
+            // covers app SQL, merge metadata, materialization and local tables.
+            let mut capture = match &self.observation {
+                Some(observation) => Some(ChangeCapture::begin(self, observation)?),
+                None => None,
+            };
+            let result = run(self)?;
             self.require_transaction()?;
+            let changes = match &mut capture {
+                Some(capture) => capture.take_changes()?,
+                None => Vec::new(),
+            };
             self.batch("COMMIT")?;
+            if let Some(observation) = &self.observation {
+                observation.observer.commit(changes);
+            }
             Ok(result)
-        });
+        })();
         guard.active = false;
         match result {
             Ok(result) => Ok(result),
@@ -443,6 +576,130 @@ impl DatabaseConnection {
         self.connection
             .close()
             .map_err(|(_connection, error)| error.into())
+    }
+}
+
+// rusqlite does not expose the session ROWID option. Keep raw handles here,
+// inside the SQLite owner; the borrow prevents the connection outliving capture.
+struct ChangeCapture<'a> {
+    session: *mut rusqlite::ffi::sqlite3_session,
+    database: &'a DatabaseConnection,
+    supplemental: &'a BTreeMap<String, Option<String>>,
+    hook_changes: Arc<Mutex<BTreeSet<String>>>,
+}
+
+impl<'a> ChangeCapture<'a> {
+    fn begin(
+        database: &'a DatabaseConnection,
+        observation: &'a WriterObservation,
+    ) -> Result<Self, DbError> {
+        let mut session = std::ptr::null_mut();
+        // SAFETY: the borrowed owner retains its connection until this guard drops.
+        sqlite_ok(unsafe {
+            rusqlite::ffi::sqlite3session_create(
+                database.connection.handle(),
+                c"main".as_ptr(),
+                &mut session,
+            )
+        })?;
+        let capture = Self {
+            session,
+            database,
+            supplemental: &observation.supplemental,
+            hook_changes: Arc::new(Mutex::new(BTreeSet::new())),
+        };
+        let mut rowid: std::ffi::c_int = 1;
+        // SAFETY: the live session has no attached tables yet and rowid is an int.
+        sqlite_ok(unsafe {
+            rusqlite::ffi::sqlite3session_object_config(
+                session,
+                rusqlite::ffi::SQLITE_SESSION_OBJCONFIG_ROWID,
+                (&mut rowid as *mut std::ffi::c_int).cast(),
+            )
+        })?;
+        // SAFETY: null attaches every current and subsequently created main table.
+        sqlite_ok(unsafe { rusqlite::ffi::sqlite3session_attach(session, std::ptr::null()) })?;
+        if !observation.supplemental.is_empty() {
+            // A session's pre-update hook disables SQLite's truncate-delete
+            // optimization, so even DELETE without WHERE reaches this hook.
+            let tables = Arc::clone(&observation.supplemental);
+            let changes = Arc::clone(&capture.hook_changes);
+            database
+                .connection
+                .update_hook(Some(move |_, schema: &str, table: &str, _| {
+                    if schema == "main" {
+                        let table = table.to_ascii_lowercase();
+                        if tables.contains_key(&table) {
+                            changes
+                                .lock()
+                                .expect("update hook capture lock poisoned")
+                                .insert(table);
+                        }
+                    }
+                }))?;
+        }
+        Ok(capture)
+    }
+
+    fn take_changes(&mut self) -> Result<Vec<RowChange>, DbError> {
+        self.database.require_transaction()?;
+        let _scope = self.database.authorization.internal();
+        let mut length = 0;
+        let mut bytes = std::ptr::null_mut();
+        // SAFETY: this guard exclusively owns the live session; SQLite allocates
+        // the result, which we copy then free even when reporting a failure.
+        let result = unsafe {
+            rusqlite::ffi::sqlite3session_changeset(self.session, &mut length, &mut bytes)
+        };
+        let copied = if result == rusqlite::ffi::SQLITE_OK && length > 0 {
+            // SAFETY: successful changeset generation returned length initialized bytes.
+            unsafe { std::slice::from_raw_parts(bytes.cast::<u8>(), length as usize) }.to_vec()
+        } else {
+            Vec::new()
+        };
+        // SAFETY: SQLite allocated this buffer and sqlite3_free accepts null.
+        unsafe { rusqlite::ffi::sqlite3_free(bytes) };
+        sqlite_ok(result)?;
+        let mut changes = crate::change_capture::changes(self.database, &copied)?;
+        for table in std::mem::take(
+            &mut *self
+                .hook_changes
+                .lock()
+                .expect("update hook capture lock poisoned"),
+        ) {
+            if let Some(parent) = &self.supplemental[&table] {
+                changes.push(RowChange {
+                    table: parent.clone(),
+                    column: String::new(),
+                    keys: None,
+                });
+            }
+            changes.push(RowChange {
+                table,
+                column: String::new(),
+                keys: None,
+            });
+        }
+        Ok(changes)
+    }
+}
+
+impl Drop for ChangeCapture<'_> {
+    fn drop(&mut self) {
+        self.database
+            .connection
+            .update_hook(None::<fn(rusqlite::hooks::Action, &str, &str, i64)>)
+            .expect("remove transaction update hook");
+        // SAFETY: the guard owns this session and still borrows its live connection.
+        unsafe { rusqlite::ffi::sqlite3session_delete(self.session) };
+    }
+}
+
+fn sqlite_ok(code: std::ffi::c_int) -> Result<(), DbError> {
+    if code == rusqlite::ffi::SQLITE_OK {
+        Ok(())
+    } else {
+        Err(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None).into())
     }
 }
 

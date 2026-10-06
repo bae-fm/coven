@@ -4,6 +4,10 @@ use crate::tests::TestStore;
 use coven_foundation::files::{SettingsError, StoreLockError};
 
 impl Database {
+    pub(crate) fn commit_writer<T>(&self, run: impl FnOnce(&DatabaseConnection) -> T) -> T {
+        self.inspect_writer(|writer| writer.transaction(|writer| Ok(run(writer))).unwrap())
+    }
+
     pub(crate) fn inspect_writer_schema<T>(
         &self,
         inspect: impl FnOnce(&DatabaseConnection, &crate::write_schema::WriteSchema) -> T,

@@ -9,11 +9,13 @@ use coven_foundation::id_source::{CircleId, DeviceId};
 use std::collections::BTreeSet;
 
 use crate::authorization::SqlAuthorization;
+use crate::observation::{CommitObserver, CommitSubscription, ReadSet};
 use crate::sqlite::DatabaseConnection;
 use crate::{
     CovenError, CovenMigrationPolicy, CovenResult, DbError, Migration, MigrationOutcome,
     SyncedTable,
 };
+use crate::{LiveQuery, LostValue, Read, ReconfigurableLiveQuery, SqlReadContext};
 
 /// Choices needed to open the database part of a store.
 pub struct DatabaseBuilder {
@@ -89,11 +91,13 @@ impl DatabaseBuilder {
         };
         let lock = self.directory.lock_exclusive()?;
         let path = self.directory.database_path();
-        let writer = DatabaseConnection::open(&path, false, SqlAuthorization::new(&tables))?;
+        let mut writer = DatabaseConnection::open(&path, false, SqlAuthorization::new(&tables))?;
         writer.check_integrity()?;
         writer.enable_wal()?;
         let migrations = writer.prepare_schema(&tables, &migrations, policy, false)?;
         let write_schema = crate::write_schema::WriteSchema::read(&writer, tables.clone())?;
+        let observer = CommitObserver::new();
+        writer.observe_commits(observer.clone())?;
         let mut readers = Vec::new();
         for _ in 0..4 {
             readers.push(Mutex::new(DatabaseConnection::open(
@@ -104,6 +108,7 @@ impl DatabaseBuilder {
         }
         Ok(Database {
             inner: Arc::new(RwLock::new(Some(DatabaseInner {
+                observer,
                 writer: Mutex::new(writer),
                 readers: ReadPool::new(readers),
                 migrations,
@@ -152,6 +157,7 @@ pub struct Database {
 }
 
 struct DatabaseInner {
+    observer: CommitObserver,
     // Drop every SQLite connection before releasing the writer lock.
     writer: Mutex<DatabaseConnection>,
     readers: ReadPool,
@@ -163,6 +169,94 @@ struct DatabaseInner {
 }
 
 impl Database {
+    /// Run ordinary SQL against one consistent snapshot when awaited.
+    pub fn read<F, R>(&self, read: F) -> Read<'_, F>
+    where
+        F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        Read::new(crate::read::ReadOwner::Writer(self), read)
+    }
+
+    /// Observe the tables, columns and key ranges read by a query.
+    pub fn subscribe<F, R>(&self, query: F) -> LiveQuery<R>
+    where
+        F: Fn(SqlReadContext<'_>) -> CovenResult<R> + Send + Sync + 'static,
+        R: Send + 'static,
+    {
+        LiveQuery::new(self.subscribe_reconfigurable((), move |(), sql| query(sql)))
+    }
+
+    /// Observe a query whose request can be replaced through a shared handle.
+    pub fn subscribe_reconfigurable<Q, F, R>(
+        &self,
+        initial_request: Q,
+        query: F,
+    ) -> ReconfigurableLiveQuery<Q, R>
+    where
+        Q: Clone + PartialEq + Send + Sync + 'static,
+        F: Fn(&Q, SqlReadContext<'_>) -> CovenResult<R> + Send + Sync + 'static,
+        R: Send + 'static,
+    {
+        let inner = self.inner.read().expect("database lock poisoned");
+        let commits = match inner.as_ref() {
+            Some(inner) => inner.observer.subscribe(),
+            None => CommitSubscription::closed(),
+        };
+        ReconfigurableLiveQuery::new(self.clone(), initial_request, query, commits)
+    }
+
+    /// Decode every lost cell and removed row in one snapshot.
+    pub async fn lost_values(&self) -> CovenResult<Vec<LostValue>> {
+        self.read(|sql| sql.lost_values()).await
+    }
+
+    /// Observe the decoded lost cells and removed rows.
+    pub fn subscribe_lost_values(&self) -> LiveQuery<Vec<LostValue>> {
+        self.subscribe(|sql| sql.lost_values())
+    }
+
+    pub(crate) fn start_read<F, R>(&self, read: F) -> tokio::task::JoinHandle<CovenResult<R>>
+    where
+        F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        let database = self.clone();
+        tokio::task::spawn_blocking(move || database.run_read(read).0)
+    }
+
+    pub(crate) async fn observed_read<F, R>(
+        &self,
+        read: F,
+        commits: CommitSubscription,
+    ) -> CovenResult<R>
+    where
+        F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        let database = self.clone();
+        finish_blocking(
+            tokio::task::spawn_blocking(move || {
+                let (result, reads) = database.run_read(read);
+                commits.finish(reads);
+                result
+            })
+            .await,
+        )
+    }
+
+    fn run_read<F, R>(&self, read: F) -> (CovenResult<R>, ReadSet)
+    where
+        F: FnOnce(SqlReadContext<'_>) -> CovenResult<R>,
+    {
+        let inner = self.inner.read().expect("database lock poisoned");
+        let Some(inner) = inner.as_ref() else {
+            return (Err(DbError::StoreClosed.into()), ReadSet::new());
+        };
+        let reader = inner.readers.acquire_reader();
+        reader.read_snapshot(read)
+    }
+
     /// Run app SQL and commit its unsigned write record and merge metadata in
     /// one IMMEDIATE transaction (§5). The caller supplies the circles deleted
     /// by the applied store log. The closure's result is returned after commit.
@@ -239,6 +333,7 @@ impl Database {
                 let Some(inner) = slot.take() else {
                     return Err(DbError::StoreClosed);
                 };
+                inner.observer.close();
                 let DatabaseInner {
                     writer,
                     readers,
@@ -272,12 +367,54 @@ impl Database {
 ///     handle.write(Default::default(), |_| Ok(())).await;
 /// }
 /// ```
+/// ```compile_fail
+/// fn cannot_subscribe(handle: &coven_database::CovenReadHandle) {
+///     handle.subscribe(|_| Ok(()));
+/// }
+/// ```
+/// ```compile_fail
+/// fn cannot_reconfigure(handle: &coven_database::CovenReadHandle) {
+///     handle.subscribe_reconfigurable((), |_, _| Ok(()));
+/// }
+/// ```
+/// ```compile_fail
+/// fn cannot_subscribe_losses(handle: &coven_database::CovenReadHandle) {
+///     handle.subscribe_lost_values();
+/// }
+/// ```
 #[derive(Clone)]
 pub struct CovenReadHandle {
     inner: Arc<RwLock<Option<ReadPool>>>,
 }
 
 impl CovenReadHandle {
+    /// Read one consistent snapshot when awaited.
+    pub fn read<F, R>(&self, read: F) -> Read<'_, F>
+    where
+        F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        Read::new(crate::read::ReadOwner::Reader(self), read)
+    }
+
+    /// Decode every lost cell and removed row in one snapshot.
+    pub async fn lost_values(&self) -> CovenResult<Vec<LostValue>> {
+        self.read(|sql| sql.lost_values()).await
+    }
+
+    pub(crate) fn start_read<F, R>(&self, read: F) -> tokio::task::JoinHandle<CovenResult<R>>
+    where
+        F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        let handle = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let inner = handle.inner.read().expect("database lock poisoned");
+            let reader = inner.as_ref().ok_or(DbError::StoreClosed)?.acquire_reader();
+            reader.read_snapshot(read).0
+        })
+    }
+
     /// The committed app schema version.
     pub async fn schema_version(&self) -> Result<u32, DbError> {
         let handle = self.clone();
@@ -361,6 +498,24 @@ struct ReaderLease<'a> {
 }
 
 impl ReaderLease<'_> {
+    fn read_snapshot<F, R>(&self, read: F) -> (CovenResult<R>, ReadSet)
+    where
+        F: FnOnce(SqlReadContext<'_>) -> CovenResult<R>,
+    {
+        let reader = self.database.readers[self.index]
+            .lock()
+            .expect("read connection lock poisoned");
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reader.read_snapshot(read)));
+        // The read transaction rolls back while unwinding. Release the mutex
+        // before propagating the app panic so the pool can reuse this reader.
+        drop(reader);
+        match result {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
     fn schema_version(&self) -> Result<u32, DbError> {
         self.database.readers[self.index]
             .lock()
@@ -380,12 +535,20 @@ impl Drop for ReaderLease<'_> {
     }
 }
 
-fn finish_blocking<T>(result: Result<T, tokio::task::JoinError>) -> T {
+pub(crate) fn finish_blocking<T>(result: Result<T, tokio::task::JoinError>) -> T {
     match result {
         Ok(result) => result,
         Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
         Err(error) => panic!("blocking database task was cancelled: {error}"),
     }
+}
+
+pub(crate) async fn process<F, T>(process: F) -> CovenResult<T>
+where
+    F: FnOnce() -> CovenResult<T> + Send + 'static,
+    T: Send + 'static,
+{
+    finish_blocking(tokio::task::spawn_blocking(process).await)
 }
 
 #[cfg(test)]

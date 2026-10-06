@@ -10,3 +10,9 @@ impl RowKey {
         &self.0
     }
 }
+
+impl From<&str> for RowKey {
+    fn from(value: &str) -> Self {
+        Self(vec![rusqlite::types::Value::Text(value.into())])
+    }
+}

@@ -225,7 +225,7 @@ fn put_state(
         }
     }
     for (key, lost) in state.lost() {
-        db.internal_execute("INSERT INTO coven_lost(table_name,key,audience,generation,column_id,value,set_by,replaced_by) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        db.internal_execute("INSERT INTO coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES (?1,?2,?3,?4,?5,?6,?7,'write',?8)",
             (&state.row().table, &state.row().key, audience(&state.row().audience), lost.incarnation.to_be_bytes().to_vec(), columns[&key.column],
              encode_column_value(&lost.value).unwrap(), encode_write_id(&key.write).unwrap(), encode_write_id(&lost.replaced_by).unwrap())).unwrap();
     }
@@ -253,7 +253,7 @@ fn put_state(
             .iter()
             .map(|(name, cell)| (name.clone(), cell.write))
             .collect();
-        db.internal_execute("INSERT INTO coven_lost(table_name,key,audience,generation,column_id,value,set_by,replaced_by) VALUES (?1,?2,?3,?4,NULL,?5,?6,?7)",
+        db.internal_execute("INSERT INTO coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES (?1,?2,?3,?4,NULL,?5,?6,'rules',?7)",
             (&state.row().table, &state.row().key, audience(&state.row().audience), state.generation().to_be_bytes().to_vec(),
              encode_columns(&values).unwrap(), encode_setters(&setters).unwrap(), encode_rules(removed).unwrap())).unwrap();
     }
@@ -524,7 +524,7 @@ async fn a_lost_row_does_not_require_an_accepted_generation() {
         LostWriteCause::Reset(entry),
     ] {
         db.inspect_writer(|sql| {
-            sql.internal_execute("INSERT INTO coven_lost(table_name,key,audience,generation,value,set_by,replaced_by) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            sql.internal_execute("INSERT INTO coven_lost(table_name,key,audience,generation,value,set_by,replacement_kind,replaced_by) VALUES (?1,?2,?3,?4,?5,?6,'excluded',?7)",
                 (&state.row().table, &state.row().key, audience(&state.row().audience), 0u64.to_be_bytes().to_vec(), encode_columns(&values).unwrap(), encode_setters(&setters).unwrap(), encode_lost_write_cause(&cause).unwrap())).unwrap();
             let stored = sql.query_row("SELECT replaced_by FROM coven_lost WHERE id=last_insert_rowid()", [], |r| r.get::<_, Vec<u8>>(0)).unwrap();
             assert_eq!(decode_lost_write_cause(&stored).unwrap(), cause);

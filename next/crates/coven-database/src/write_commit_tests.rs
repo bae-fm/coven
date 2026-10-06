@@ -88,7 +88,7 @@ async fn seed(database: &Database) {
         ]).unwrap();
         db.internal_execute("UPDATE coven_rows SET write_id=last_insert_rowid() WHERE table_name='notes'",[]).unwrap();
         db.internal_execute("INSERT INTO coven_positions(device,number) VALUES(?1,?2)",crate::params![loser.device.0.to_be_bytes().as_slice(),loser.number.to_be_bytes().as_slice()]).unwrap();
-        db.internal_execute("INSERT INTO coven_lost(table_name,key,audience,generation,column_id,value,set_by,replaced_by) VALUES('notes',?1,'store',?2,(SELECT id FROM coven_columns WHERE table_name='notes' AND column_name='title'),?3,?4,?5)", crate::params![
+        db.internal_execute("INSERT INTO coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES('notes',?1,'store',?2,(SELECT id FROM coven_columns WHERE table_name='notes' AND column_name='title'),?3,?4,'write',?5)", crate::params![
             coven_format::key::encode_key(&[Value::Text("42".into())]).unwrap(), 1u64.to_be_bytes().as_slice(),
             merge_fields::encode_column_value(&ColumnValue { value: Value::Text("Shopping".into()), parents: Default::default() }).unwrap(),
             merge_fields::encode_write_id(&loser).unwrap(), merge_fields::encode_write_id(&original.position).unwrap(),

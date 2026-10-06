@@ -40,7 +40,10 @@ pub(crate) const POLICY: Policy = Policy {
             "open_read_graph",
         ),
     ],
-    lifetime_authorities: &[],
+    lifetime_authorities: &[
+        ("ReconfigurableLiveQuery", "Database"),
+        ("LiveQuery", "Database"),
+    ],
     // These methods derive a scoped capability from their injected directory.
     // They do not acquire an unrelated directory or file for another owner.
     capability_factories: &[
@@ -121,6 +124,10 @@ pub(crate) const POLICY: Policy = Policy {
     ],
     non_owner_types: &["KeyCustody", "IdentityCustody"],
     borrowed_facade_types: &[
+        "SqlReadContext",
+        "Read",
+        "ReadOwner",
+        "ChangeCapture",
         "MigrationContext",
         "SqlContext",
         "SqlTransaction",
@@ -132,6 +139,12 @@ pub(crate) const POLICY: Policy = Policy {
     ],
     root_owner_types: &["Database", "CovenReadHandle"],
     task_types: &[
+        "SqlReadContext",
+        "Read",
+        "ReadOwner",
+        "ChangeCapture",
+        "LiveQuery",
+        "ReconfigurableLiveQuery",
         "SqlTransaction",
         "ReaderLease",
         "AppView",
@@ -142,6 +155,7 @@ pub(crate) const POLICY: Policy = Policy {
     internal_dependency_types: &["DatabaseConnection"],
     always_forbidden_returns: &[],
     closed_session_types: &[
+        "SqlReadContext",
         "MigrationContext",
         "SqlContext",
         "AppView",

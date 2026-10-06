@@ -103,7 +103,7 @@ pub(crate) fn materialize(
                         // do not produce metadata writes or local trigger effects.
                         database.internal_execute("UPDATE coven_lost SET value=?1,set_by=?2,replaced_by=?3 WHERE id=?4 AND (value<>?1 OR set_by<>?2 OR replaced_by<>?3)",params![values,setters,rules,loss])?;
                     }
-                    None=> { database.internal_execute("INSERT INTO coven_lost(table_name,key,audience,generation,column_id,value,set_by,replaced_by) VALUES(?1,?2,?3,?4,NULL,?5,?6,?7)",params![id.table,id.key,audience_text(&id.audience),state.generation().to_be_bytes().as_slice(),values,setters,rules])?; }
+                    None=> { database.internal_execute("INSERT INTO coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,NULL,?5,?6,'rules',?7)",params![id.table,id.key,audience_text(&id.audience),state.generation().to_be_bytes().as_slice(),values,setters,rules])?; }
                 }
             } else {
                 if let Some(loss)=loss { database.internal_execute("DELETE FROM coven_lost WHERE id=?1",[loss])?; }

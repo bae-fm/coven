@@ -7,12 +7,18 @@
 //! together on the writer connection.
 
 mod authorization;
+mod change_capture;
 mod database;
 mod declaration;
 mod error;
 mod internal_schema;
+mod key_scope;
+mod live_query;
+mod lost;
 mod merge_store;
 mod migration;
+mod observation;
+mod read;
 mod removal;
 mod removal_schema;
 mod removal_sql;
@@ -22,6 +28,7 @@ mod row_queries;
 mod schema;
 mod schema_source;
 mod sql;
+mod sql_value;
 mod sqlite;
 mod write;
 mod write_capture;
@@ -31,14 +38,22 @@ mod write_record;
 mod write_rows;
 mod write_schema;
 
+pub use coven_format::value::EntryId;
+pub use coven_merge::WriteId;
 pub use database::{CovenReadHandle, Database, DatabaseBuilder};
 pub use declaration::{CacheFill, FileDecl, Provenance, RowIdentity, SyncedTable, Uploads};
 pub use error::{
     CovenError, CovenMigrationError, CovenResult, DbError, MigrationError, SchemaError,
 };
+pub use live_query::{
+    LiveQuery, LiveQueryCause, LiveQueryClosed, LiveQueryRequests, LiveQueryRevision,
+    ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent,
+};
+pub use lost::{Lost, LostCell, LostValue, RemovalRule, Replacement};
 pub use migration::{
     CovenMigrationPolicy, Migration, MigrationChange, MigrationContext, MigrationOutcome,
 };
+pub use read::{Read, SqlReadContext};
 pub use row_key::RowKey;
 pub use write::SqlContext;
 

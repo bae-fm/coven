@@ -110,7 +110,7 @@ pub(crate) fn commit(
                         )?;
                     } else {
                         let column = column(database, &row.table, &key.column)?;
-                        database.internal_execute("INSERT INTO coven_lost(table_name,key,audience,generation,column_id,value,set_by,replaced_by) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![row.table,row.key,audience,value.incarnation.to_be_bytes().as_slice(),column,bytes,setter,replaced_by])?;
+                        database.internal_execute("INSERT INTO coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,?5,?6,?7,'write',?8)",params![row.table,row.key,audience,value.incarnation.to_be_bytes().as_slice(),column,bytes,setter,replaced_by])?;
                     }
                 }
             }
