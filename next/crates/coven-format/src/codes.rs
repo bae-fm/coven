@@ -29,7 +29,7 @@ impl RestoreCode {
     pub fn to_bytes(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
         let keys = self.member_keys.to_secret_bytes();
         encode_code(
-            8,
+            10,
             self.store,
             &self.name,
             &[
@@ -43,7 +43,7 @@ impl RestoreCode {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         bound(bytes.len() + 4, MAX_CODE_BYTES, "code bytes")?;
         let (kind, mut input) = decode_frame(bytes)?;
-        require(kind == 8, "restore code kind", Rule::Kind)?;
+        require(kind == 10, "restore code kind", Rule::Kind)?;
         let store = Wire::get(&mut input)?;
         let label = String::get(&mut input)?;
         name(&label)?;
@@ -88,7 +88,7 @@ impl InviteCode {
     pub fn to_bytes(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
         let secret = self.secret.to_secret_bytes();
         encode_code(
-            9,
+            11,
             self.store,
             &self.name,
             &[self.invite.0.as_bytes(), secret.as_bytes()],
@@ -99,7 +99,7 @@ impl InviteCode {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         bound(bytes.len() + 4, MAX_CODE_BYTES, "code bytes")?;
         let (kind, mut input) = decode_frame(bytes)?;
-        require(kind == 9, "invite code kind", Rule::Kind)?;
+        require(kind == 11, "invite code kind", Rule::Kind)?;
         let store = Wire::get(&mut input)?;
         let label = String::get(&mut input)?;
         name(&label)?;

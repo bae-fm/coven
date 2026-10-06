@@ -117,7 +117,7 @@ empty strings/blobs and prefixes, without a length field affecting comparison.
 
 ## Object kinds
 
-Fields appear in exactly the order shown. All enum tags are u8. Kinds 1–5 and 7–13
+Fields appear in exactly the order shown. All enum tags are u8. Kinds 1–5, 7 and 10–13
 identify plaintext frames; kinds 14 and 15 identify sealed layouts with their
 own prefixes, not frame envelopes. No sealed layout shares a frame kind.
 
@@ -129,8 +129,6 @@ own prefixes, not frame envelopes. No sealed layout shares a frame kind.
 | 4 | Snapshot record | `section:u8, record` |
 | 5 | Snapshot end | Empty |
 | 7 | File header | `chunk_size:u32, total_size:u64` |
-| 8 | Restore code | `store_uuid:16, name:text, member_keys:bytes, storage:bytes` |
-| 9 | Invite code | `store_uuid:16, name:text, invite_uuid:16, secret:32, storage:bytes` |
 | 10 | Join request | `invite_uuid:16, keys:MemberPublicKeys, device_name:text` |
 | 11 | Posted positions | `device:u64, writes:WritePositions, store_log:EntryPositions, fingerprints:[Fingerprint]` |
 | 12 | File chunk | `index:u64, plaintext:bytes` |
@@ -138,12 +136,10 @@ own prefixes, not frame envelopes. No sealed layout shares a frame kind.
 | 14 | Sealed write layout | Key prefix, sealed header, sealed part chunks, signature (below) |
 | 15 | Sealed snapshot layout | Audience/key prefix, sealed chunks (below) |
 
-Kind 6 is not defined.
+Kinds 6, 8 and 9 are not defined by these plaintext codecs.
 
 `Object` encodes and decodes kinds 2, 7, 10, 11 and 12. Writes and snapshots use their
-streaming encoder/decoder, with merge's oracle supplied on decode. Restore and
-invite codes use their own zeroizing binary and text APIs; they cannot be
-encoded through the ordinary `Vec<u8>` object API.
+streaming encoder/decoder, with merge's oracle supplied on decode.
 
 A file's chunk size is 1–8 MiB in bytes (65,536 is the product default).
 Total size may be zero, meaning no chunks. Chunk data is nonempty.
@@ -383,56 +379,26 @@ values and removed rows; lost cells keep their written parents in their value.
 The database round-trip tests use these codecs with the actual tables. Local
 writes load only touched rows’ merge state and persist `coven-merge::apply` updates.
 
-### Restore and invite codes
-
-Restore codes hold crypto's `MemberKeys`. Their bytes come only from
-`MemberKeys::to_secret_bytes` and are restored by `from_secret_bytes`; format
-treats this blob as crypto's encoding. Invite codes hold `InviteSecret`.
-Both store storage settings, including credentials, as `SecretBytes`, at most
-16 KiB. Debug redacts keys, invite secrets and storage settings. These code
-types do not implement Clone.
-
-Binary frames and text results use `Zeroizing<Vec<u8>>` and
-`Zeroizing<String>`. Every buffer receiving secret data is allocated to its
-complete capacity before copying any secrets and is never grown. Parsing
-borrows the caller's input; owned frame, key-material, credential and base32
-buffers erase on drop, including error paths. The caller owns erasure of its
-input and of any copies it chooses to retain.
-
-Text is `CVR1-` (restore) or `CVI1-` (invite), followed by uppercase unpadded
-base32 of `complete_frame | checksum:u32`. The alphabet is
-`ABCDEFGHIJKLMNOPQRSTUVWXYZ234567`. Unused trailing bits must be zero.
-CRC-32C covers the complete frame: reflected polynomial 0x82F63B78, initial and
-final XOR 0xFFFFFFFF, checksum big-endian. The check value for `123456789` is
-E3069283. CRC input is borrowed from the zeroizing frame, without another copy.
-
-Binary contents plus checksum are capped at 18 KiB; text length is bounded
-before allocation. There are no whitespace, case or spelling aliases.
-The checksum detects typing mistakes, not hostile changes. Text may be typed
-or supplied to a QR encoder; QR capacity limits what fits in one symbol.
-
 ## Verification and boundaries
 
 `fixtures/v1.hex` pins ordinary object kinds, including a member removal with
-replacement circle keys and deleted circles, a complete snapshot of all five
-sections and both secret frame kinds. It also pins a sealed-write prefix,
+replacement circle keys and deleted circles, and a complete snapshot of all five
+sections. It also pins a sealed-write prefix,
 a two-part plaintext write whose first part spans three chunks, and a
 sealed-snapshot prefix with its plaintext stream cut into chunks. Random
 sealed bytes and their signature are exercised with crypto in integration
 tests. `fixtures/migration.hex` pins a migration write with no parts.
-`fixtures/codes.txt` pins both text codes. Seeds and credentials in these fixtures are public test data.
+Seeds in these fixtures are public test data.
 Tests exercise every store change and removal rule, merge invariant rejection,
 schema/reset lost writes, SQLite numeric/text/blob/composite key ordering and
 streaming snapshots exceeding the frame bound. A decoded RowState is fed back
 into merge's actual `apply` function.
 
 Deterministic generated inputs exercise 25,000 binary inputs, all bounded-frame fixture
-truncations and bit flips, generated write/part/snapshot streams and prefixes, 10,000 real keys and 5,000 code strings. Every
-successful decode must re-encode identically. Both codes reject single ASCII
-substitutions, alphabet insertions and deletions at every position. Tests also
-check maximum credentials, crypto-owned key restoration and weak public-key
-rejection. A compile-fail example checks that write and store-log positions
-cannot be interchanged.
+truncations and bit flips, generated write/part/snapshot streams and prefixes,
+and 10,000 real keys. Every successful decode must re-encode identically.
+A compile-fail example checks that write and store-log positions cannot be
+interchanged.
 
 Authentication, signatures, key sealing, path/index binding, nonces, fingerprint
 computation and custody belong to crypto and its callers. A changed plaintext

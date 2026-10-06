@@ -423,8 +423,6 @@ pub fn frame_examples() -> Vec<Zeroizing<Vec<u8>>> {
     frames.push(Zeroizing::new(encoder.header_frame().to_vec()));
     frames.push(Zeroizing::new(record.parts[0].rows[0].encode().unwrap()));
     frames.extend(snapshot_frames().into_iter().map(Zeroizing::new));
-    frames.push(restore().to_bytes().unwrap());
-    frames.push(invite().to_bytes().unwrap());
     frames
 }
 /// Pinned plaintext frames, then a write prefix/header/part chunks and a

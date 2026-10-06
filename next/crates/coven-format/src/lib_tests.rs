@@ -3,11 +3,10 @@ use coven_foundation::id_source::{CircleId, KeyId};
 use uuid::Uuid;
 
 use super::*;
-use crate::codes::{InviteCode, RestoreCode};
 use crate::error::Rule;
 use zeroize::Zeroizing;
 
-fn hex(text: &str) -> Vec<u8> {
+pub(super) fn hex(text: &str) -> Vec<u8> {
     let bytes = text.trim().as_bytes();
     assert_eq!(bytes.len() % 2, 0);
     bytes
@@ -128,8 +127,6 @@ fn reencode(bytes: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
             crate::wire::decode_frame(bytes)?.1.finish()?;
             Ok(Zeroizing::new(encode_frame_with(5, |_| Ok(()))?))
         }
-        8 => RestoreCode::from_bytes(bytes)?.to_bytes(),
-        9 => InviteCode::from_bytes(bytes)?.to_bytes(),
         _ => Ok(Zeroizing::new(Object::decode(bytes)?.encode()?)),
     }
 }

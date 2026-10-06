@@ -2,6 +2,59 @@ use super::*;
 use crate::test_utils;
 
 #[test]
+fn codes_use_their_assigned_frame_kinds() {
+    assert_eq!(test_utils::restore().to_bytes().unwrap()[0], 10);
+    assert_eq!(test_utils::invite().to_bytes().unwrap()[0], 11);
+}
+
+#[test]
+fn binary_code_fixtures_are_canonical_under_every_truncation_and_bit_change() {
+    for (restore, text) in [
+        (true, include_str!("../fixtures/restore-code.hex")),
+        (false, include_str!("../fixtures/invite-code.hex")),
+    ] {
+        let bytes = crate::tests::hex(text);
+        let reencode = |bytes: &[u8]| {
+            if restore {
+                RestoreCode::from_bytes(bytes)?.to_bytes()
+            } else {
+                InviteCode::from_bytes(bytes)?.to_bytes()
+            }
+        };
+        let expected = if restore {
+            test_utils::restore().to_bytes().unwrap()
+        } else {
+            test_utils::invite().to_bytes().unwrap()
+        };
+        assert_eq!(bytes, expected.as_slice());
+        assert_eq!(reencode(&bytes).unwrap().as_slice(), bytes);
+        for end in 0..bytes.len() {
+            assert!(reencode(&bytes[..end]).is_err());
+        }
+        let mut changed = bytes.clone();
+        for index in 0..bytes.len() {
+            for bit in 0..8 {
+                changed[index] ^= 1 << bit;
+                if let Ok(encoded) = reencode(&changed) {
+                    assert_eq!(encoded.as_slice(), changed);
+                }
+                changed[index] ^= 1 << bit;
+            }
+        }
+        changed.push(0);
+        assert_eq!(reencode(&changed), Err(Error::TrailingBytes));
+        changed = bytes;
+        changed[2] = 2;
+        assert_eq!(reencode(&changed), Err(Error::UnsupportedVersion(2)));
+        changed[2] = 1;
+        for kind in [8, 9, if restore { 11 } else { 10 }] {
+            changed[0] = kind;
+            assert!(reencode(&changed).is_err());
+        }
+    }
+}
+
+#[test]
 fn crc_uses_the_published_castagnoli_check_value() {
     assert_eq!(checksum(b"123456789"), 0xe306_9283);
     assert_eq!(checksum(b""), 0);

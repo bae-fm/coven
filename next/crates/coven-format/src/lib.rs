@@ -2,7 +2,8 @@
 //!
 //! No I/O, clock, randomness, sealing or signing occurs here. Plaintext frames
 //! are bounded; writes and snapshots stream without an object-size bound.
-//! See `FORMAT.md` for every layout, bound and ordering rule.
+//! Appendix D of `plans/coven-format.md` specifies stored bytes.
+//! `FORMAT.md` describes the plaintext frame codecs.
 
 pub mod chunks;
 pub mod codes;
@@ -105,7 +106,7 @@ impl Object {
 /// are ignored here; [`Object::decode`] requires exactly one complete frame.
 pub fn frame_length(prefix: &[u8]) -> Result<usize, Error> {
     let bytes = prefix.get(..FRAME_PREFIX_LEN).ok_or(Error::Truncated)?;
-    if !matches!(bytes[0], 1..=5 | 7..=13) {
+    if !matches!(bytes[0], 1..=5 | 7 | 10..=13) {
         return Err(Error::UnknownTag {
             field: "object kind",
             tag: bytes[0],
