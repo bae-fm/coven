@@ -81,7 +81,7 @@
   - [A.5 CHECK constraints](#a5-check-constraints)
   - [A.6 Triggers that write synced tables](#a6-triggers-that-write-synced-tables)
   - [A.7 Schema changes](#a7-schema-changes)
-- [Appendix B. Proof of the merge](coven-merge-proof.md), in its own file
+- [Appendix B. Proof of convergence](coven-merge-proof.md), in its own file
 - [Appendix C. Proof of the store log](coven-storelog-proof.md), in its own file
 
 ## 1. What coven is
