@@ -125,7 +125,7 @@ pub(crate) fn materialize(
             for (key, lost) in view.state(id)?.lost() {
                 let value = view.lost_value(id, key, lost)?;
                 let displayed = if value != lost.value { Some(encoded(merge_fields::encode_column_value(&value))?) } else { None };
-                database.internal_execute("UPDATE coven_lost SET read_value=?1 WHERE table_name=?2 AND key=?3 AND audience=?4 AND column_id=(SELECT id FROM coven_columns WHERE table_name=?2 AND column_name=?5) AND set_by=?6 AND replacement_kind='write' AND retired=0 AND read_value IS NOT ?1", params![displayed,id.table,id.key,audience_text(&id.audience),key.column,encoded(merge_fields::encode_write_id(&key.write))?])?;
+                database.internal_execute("UPDATE _coven_lost SET read_value=?1 WHERE table_name=?2 AND key=?3 AND audience=?4 AND column_id=(SELECT id FROM _coven_columns WHERE table_name=?2 AND column_name=?5) AND set_by=?6 AND replacement_kind='write' AND retired=0 AND read_value IS NOT ?1", params![displayed,id.table,id.key,audience_text(&id.audience),key.column,encoded(merge_fields::encode_write_id(&key.write))?])?;
             }
             if !row.facts.present() { continue; }
             let state = view.state(id)?;
@@ -135,9 +135,9 @@ pub(crate) fn materialize(
             let displayed:BTreeMap<_,_> = columns.iter().map(|(name,written)| {
                 let mut value=written.clone();value.value=row.values[name].clone();(name.clone(),value)
             }).collect();
-            let row_ordinal: i64 = database.query_row("SELECT id FROM coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4", params![id.table,id.key,audience_text(&id.audience),state.generation().to_be_bytes().as_slice()], |r| r.get(0))?;
+            let row_ordinal: i64 = database.query_row("SELECT id FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4", params![id.table,id.key,audience_text(&id.audience),state.generation().to_be_bytes().as_slice()], |r| r.get(0))?;
             crate::reference_values::store(database,row_ordinal,&state,(!result.removed.contains_key(id)).then_some(&row.values))?;
-            let previous_claims: BTreeMap<i64,Vec<u8>> = database.query("SELECT constraint_id,value FROM coven_claims WHERE row_id=?1", [row_ordinal], |r| Ok((r.get(0)?,r.get(1)?)))?.into_iter().collect();
+            let previous_claims: BTreeMap<i64,Vec<u8>> = database.query("SELECT constraint_id,value FROM _coven_claims WHERE row_id=?1", [row_ordinal], |r| Ok((r.get(0)?,r.get(1)?)))?.into_iter().collect();
             let mut claims = BTreeMap::new();
             if result.removed.contains_key(id) {
                 for (constraint, claim) in &row.constraints.unique {
@@ -146,11 +146,11 @@ pub(crate) fn materialize(
                 }
             }
             for constraint in previous_claims.keys().filter(|c| !claims.contains_key(c)) {
-                database.internal_execute("DELETE FROM coven_claims WHERE row_id=?1 AND constraint_id=?2", params![row_ordinal,constraint])?;
+                database.internal_execute("DELETE FROM _coven_claims WHERE row_id=?1 AND constraint_id=?2", params![row_ordinal,constraint])?;
             }
             for (constraint, value) in &claims {
                 if previous_claims.get(constraint) != Some(value) {
-                    database.internal_execute("INSERT INTO coven_claims(row_id,constraint_id,audience,value) VALUES(?1,?2,?3,?4) ON CONFLICT(row_id,constraint_id) DO UPDATE SET value=excluded.value", params![row_ordinal,constraint,audience_text(&id.audience),value])?;
+                    database.internal_execute("INSERT INTO _coven_claims(row_id,constraint_id,audience,value) VALUES(?1,?2,?3,?4) ON CONFLICT(row_id,constraint_id) DO UPDATE SET value=excluded.value", params![row_ordinal,constraint,audience_text(&id.audience),value])?;
                 }
             }
             if let Some(rules) = result.removed.get(id) {
@@ -163,12 +163,12 @@ pub(crate) fn materialize(
                     Some(loss)=> {
                         // Compare the stored fields so unchanged region neighbors
                         // do not produce metadata writes or local trigger effects.
-                        database.internal_execute("UPDATE coven_lost SET value=?1,set_by=?2,replaced_by=?3,read_value=?5 WHERE id=?4 AND (value<>?1 OR set_by<>?2 OR replaced_by<>?3 OR read_value IS NOT ?5)",params![values,setters,rules,loss,read_value])?;
+                        database.internal_execute("UPDATE _coven_lost SET value=?1,set_by=?2,replaced_by=?3,read_value=?5 WHERE id=?4 AND (value<>?1 OR set_by<>?2 OR replaced_by<>?3 OR read_value IS NOT ?5)",params![values,setters,rules,loss,read_value])?;
                     }
-                    None=> { database.internal_execute("INSERT INTO coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by,read_value) VALUES(?1,?2,?3,?4,NULL,?5,?6,'rules',?7,?8)",params![id.table,id.key,audience_text(&id.audience),state.generation().to_be_bytes().as_slice(),values,setters,rules,read_value])?; }
+                    None=> { database.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by,read_value) VALUES(?1,?2,?3,?4,NULL,?5,?6,'rules',?7,?8)",params![id.table,id.key,audience_text(&id.audience),state.generation().to_be_bytes().as_slice(),values,setters,rules,read_value])?; }
                 }
             } else {
-                if let Some(loss)=loss { database.internal_execute("DELETE FROM coven_lost WHERE id=?1",[loss])?; }
+                if let Some(loss)=loss { database.internal_execute("DELETE FROM _coven_lost WHERE id=?1",[loss])?; }
             }
         }
         Ok(())

@@ -228,7 +228,7 @@ impl DatabaseConnection {
                 .max()
             {
                 db.internal_execute(
-                    "UPDATE coven_snapshot_schema SET minimum=?1,publication=?2 WHERE singleton=1",
+                    "UPDATE _coven_snapshot_schema SET minimum=?1,publication=?2 WHERE singleton=1",
                     (minimum, supported),
                 )?;
                 if let Some(operation) = operation.filter(|_| publishes) {
@@ -307,7 +307,7 @@ impl DatabaseConnection {
         let _scope = self.authorization.internal();
         let mut blob = self.connection.blob_open(
             rusqlite::MAIN_DB,
-            "coven_upload_seals",
+            "_coven_upload_seals",
             "sealed_bytes",
             rowid,
             false,
@@ -744,7 +744,7 @@ impl DatabaseConnection {
 
     pub(crate) fn lost_values(&self) -> CovenResult<Vec<crate::LostValue>> {
         let records = self.query(
-            "SELECT l.table_name,l.key,l.column_id,c.table_name,c.column_name,COALESCE(l.read_value,l.value),l.set_by,l.replacement_kind,l.replaced_by,l.audience,l.generation,l.retired FROM coven_lost l LEFT JOIN coven_columns c ON c.id=l.column_id ORDER BY l.id",
+            "SELECT l.table_name,l.key,l.column_id,c.table_name,c.column_name,COALESCE(l.read_value,l.value),l.set_by,l.replacement_kind,l.replaced_by,l.audience,l.generation,l.retired FROM _coven_lost l LEFT JOIN _coven_columns c ON c.id=l.column_id ORDER BY l.id",
             [], crate::lost::LostRecord::read,
         )?;
         records

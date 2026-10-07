@@ -6,19 +6,19 @@ use crate::{
 #[tokio::test]
 async fn app_statements_cannot_read_or_mutate_internal_objects() {
     for attack in [
-        "SELECT * FROM coven_rows",
-        "SELECT count(*) FROM COVEN_ROWS",
-        "INSERT INTO coven_operations(kind,last_step,data,started_by) VALUES ('x',0,x'','x')",
-        "UPDATE coven_rows SET audience = 'store'",
-        "DELETE FROM coven_uploads",
-        "DROP TABLE coven_columns",
-        "ALTER TABLE coven_rows ADD COLUMN bad INTEGER",
-        "CREATE INDEX bad ON coven_rows(audience)",
-        "CREATE TRIGGER bad AFTER INSERT ON coven_rows BEGIN SELECT 1; END",
-        "CREATE TABLE coven_fake (x)",
-        "CREATE TABLE local(x); ALTER TABLE local RENAME TO coven_fake",
-        "CREATE TEMP TABLE coven_cells(x)",
-        "CREATE VIEW hidden AS SELECT * FROM coven_rows; SELECT * FROM hidden",
+        "SELECT * FROM _coven_rows",
+        "SELECT count(*) FROM _COVEN_ROWS",
+        "INSERT INTO _coven_operations(kind,last_step,data,started_by) VALUES ('x',0,x'','x')",
+        "UPDATE _coven_rows SET audience = 'store'",
+        "DELETE FROM _coven_uploads",
+        "DROP TABLE _coven_columns",
+        "ALTER TABLE _coven_rows ADD COLUMN bad INTEGER",
+        "CREATE INDEX bad ON _coven_rows(audience)",
+        "CREATE TRIGGER bad AFTER INSERT ON _coven_rows BEGIN SELECT 1; END",
+        "CREATE TABLE _coven_fake (x)",
+        "CREATE TABLE local(x); ALTER TABLE local RENAME TO _coven_fake",
+        "CREATE TEMP TABLE _coven_cells(x)",
+        "CREATE VIEW hidden AS SELECT * FROM _coven_rows; SELECT * FROM hidden",
     ] {
         let store = TestStore::new();
         let error = store
@@ -35,6 +35,112 @@ async fn app_statements_cannot_read_or_mutate_internal_objects() {
 }
 
 #[tokio::test]
+async fn reserved_prefixes_cover_every_app_object_and_rename_destination() {
+    for prefix in ["_coven_", "_CoVeN_", "coven_", "CoVeN_"] {
+        for statement in [
+            "CREATE TABLE {name}(x)",
+            "CREATE TEMP TABLE {name}(x)",
+            "CREATE VIRTUAL TABLE {name} USING fts5(x)",
+            "CREATE INDEX {name} ON local(x)",
+            "CREATE TEMP TABLE scratch(x); CREATE INDEX {name} ON scratch(x)",
+            "CREATE TRIGGER {name} AFTER INSERT ON local BEGIN SELECT 1; END",
+            "CREATE TEMP TRIGGER {name} AFTER INSERT ON local BEGIN SELECT 1; END",
+            "CREATE VIEW {name} AS SELECT x FROM local",
+            "CREATE TEMP VIEW {name} AS SELECT x FROM local",
+            "ALTER TABLE local RENAME TO {name}",
+            "ALTER TABLE local RENAME TO \"{name}\"",
+            "ALTER TABLE local RENAME TO [{name}]",
+            "ALTER TABLE local RENAME TO `{name}`",
+            "ALTER TABLE local RENAME TO '{name}'",
+        ] {
+            let name = format!("{prefix}private");
+            let operation = statement.replace("{name}", &name);
+            let store = TestStore::new();
+            let error = store
+                .builder(
+                    vec![],
+                    vec![Migration::run(1, "reserved name", move |sql| {
+                        sql.execute_batch("CREATE TABLE local(x)")?;
+                        sql.execute_batch(&operation)?;
+                        Ok(())
+                    })],
+                )
+                .open()
+                .await
+                .err()
+                .expect("reserved object must be refused");
+            let error = database_error(error);
+            assert!(
+                matches!(&error, DbError::InternalTable { table } if table.eq_ignore_ascii_case(&name)),
+                "{prefix}: {statement}: {error:?}",
+                statement = statement.replace("{name}", &name)
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn reserved_prefixes_are_refused_in_synced_declarations() {
+    for name in [
+        "_coven_private",
+        "_CoVeN_private",
+        "coven_private",
+        "CoVeN_private",
+    ] {
+        let store = TestStore::new();
+        let error = store
+            .builder(vec![SyncedTable::new(name, RowIdentity::SharedKey)], vec![])
+            .open()
+            .await
+            .err()
+            .expect("reserved declaration must be refused");
+        assert!(matches!(database_error(error), DbError::InternalTable { table } if table == name));
+    }
+}
+
+#[tokio::test]
+async fn names_resembling_reserved_prefixes_remain_app_tables() {
+    for name in [
+        "coven",
+        "_coven",
+        "xcoven_private",
+        "_covenant",
+        "app_coven_rows",
+    ] {
+        let store = TestStore::new();
+        let db = store
+            .builder(
+                vec![SyncedTable::new(name, RowIdentity::SharedKey)],
+                vec![Migration::run(1, "app table", move |sql| {
+                    sql.execute_batch(&format!(
+                        "CREATE TABLE {name}(id TEXT NOT NULL PRIMARY KEY)"
+                    ))?;
+                    sql.execute_batch(&format!("REINDEX {name}"))?;
+                    Ok(())
+                })],
+            )
+            .open()
+            .await
+            .unwrap();
+        db.write(move |sql| {
+            sql.execute(&format!("INSERT INTO {name} VALUES('app')"), [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            db.read(move |sql| Ok(sql
+                .query_row(&format!("SELECT id FROM {name}"), [], |r| r
+                    .get::<_, String>(0))?))
+                .await
+                .unwrap(),
+            "app"
+        );
+        db.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn app_sql_cannot_escape_its_transaction_or_change_connection_settings() {
     for attack in [
         "COMMIT",
@@ -44,9 +150,9 @@ async fn app_sql_cannot_escape_its_transaction_or_change_connection_settings() {
         "PRAGMA foreign_keys = OFF",
         "PRAGMA user_version = 8",
         "ATTACH ':memory:' AS other",
-        "SELECT * FROM pragma_table_info('coven_rows')",
-        "CREATE TABLE local(x); ALTER TABLE local ADD COLUMN y INTEGER CHECK(y>0); SELECT * FROM pragma_quick_check('coven_rows')",
-        "CREATE TABLE local(x); ALTER TABLE local ADD COLUMN y INTEGER CHECK(y>0); PRAGMA quick_check(coven_rows)",
+        "SELECT * FROM pragma_table_info('_coven_rows')",
+        "CREATE TABLE local(x); ALTER TABLE local ADD COLUMN y INTEGER CHECK(y>0); SELECT * FROM pragma_quick_check('_coven_rows')",
+        "CREATE TABLE local(x); ALTER TABLE local ADD COLUMN y INTEGER CHECK(y>0); PRAGMA quick_check(_coven_rows)",
     ] {
         let store = TestStore::new();
         let error = store
@@ -103,7 +209,7 @@ async fn permitted_local_and_shared_triggers_run_with_applying_false() {
 
 #[tokio::test]
 async fn app_reindex_cannot_write_an_internal_index() {
-    for name in ["coven_write_position", "sqlite_autoindex_coven_columns_1"] {
+    for name in ["_coven_write_position", "sqlite_autoindex__coven_columns_1"] {
         let store = TestStore::new();
         let error = store
             .builder(

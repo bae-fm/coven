@@ -47,12 +47,12 @@ impl Database {
             let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
             let reader = inner.readers.acquire_reader();
             reader.with_reader(|reader| reader.read_transaction(|| {
-                let waiting = reader.query("SELECT device,number FROM coven_uploads ORDER BY device,number", [], |r| Ok(coven_merge::WriteId {
+                let waiting = reader.query("SELECT device,number FROM _coven_uploads ORDER BY device,number", [], |r| Ok(coven_merge::WriteId {
                     device: coven_foundation::id_source::DeviceId(crate::write_encoding::counter(r.get(0)?)),
                     number: crate::write_encoding::counter(r.get(1)?),
                 }))?;
                 let mut required = std::collections::BTreeMap::<_, u64>::new();
-                reader.for_each("SELECT number,had_read FROM coven_writes WHERE substr(timestamp,9,8)=?1 ORDER BY number DESC LIMIT 1", [inner.device.0.to_be_bytes().as_slice()], |r| {
+                reader.for_each("SELECT number,had_read FROM _coven_writes WHERE substr(timestamp,9,8)=?1 ORDER BY number DESC LIMIT 1", [inner.device.0.to_be_bytes().as_slice()], |r| {
                     let number = crate::write_encoding::counter(r.get(0)?);
                     required.insert(inner.device, number);
                     let past = crate::write_encoding::decoded(coven_format::merge_fields::decode_write_positions(&r.get::<_, Vec<u8>>(1)?))?;

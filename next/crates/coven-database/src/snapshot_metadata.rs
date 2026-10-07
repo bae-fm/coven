@@ -26,7 +26,7 @@ impl<'a> SnapshotMetadata<'a> {
     }
 
     pub(crate) fn put(&self, write: &AppliedWrite) -> Result<(), DbError> {
-        self.database.internal_execute("INSERT INTO temp.coven_snapshot_writes(device,number,timestamp,had_read) VALUES(?1,?2,?3,?4)", params![write.id.device.0.to_be_bytes().as_slice(),write.id.number.to_be_bytes().as_slice(),encoded(merge_fields::encode_timestamp(&write.timestamp))?,encoded(merge_fields::encode_write_positions(&write.had_read))?])?;
+        self.database.internal_execute("INSERT INTO temp._coven_snapshot_writes(device,number,timestamp,had_read) VALUES(?1,?2,?3,?4)", params![write.id.device.0.to_be_bytes().as_slice(),write.id.number.to_be_bytes().as_slice(),encoded(merge_fields::encode_timestamp(&write.timestamp))?,encoded(merge_fields::encode_write_positions(&write.had_read))?])?;
         crate::write_commit::retain_metadata(self.database, write)?;
         Ok(())
     }
@@ -54,7 +54,7 @@ impl<'a> SnapshotMetadata<'a> {
     }
 
     fn read(&self, id: WriteId) -> Result<Option<AppliedWrite>, DbError> {
-        let row = self.database.query("SELECT timestamp,had_read FROM temp.coven_snapshot_writes WHERE device=?1 AND number=?2", params![id.device.0.to_be_bytes().as_slice(),id.number.to_be_bytes().as_slice()], |r| Ok(AppliedWrite { id, timestamp: decoded(merge_fields::decode_timestamp(&r.get::<_,Vec<u8>>(0)?))?, had_read: decoded(merge_fields::decode_write_positions(&r.get::<_,Vec<u8>>(1)?))? }))?;
+        let row = self.database.query("SELECT timestamp,had_read FROM temp._coven_snapshot_writes WHERE device=?1 AND number=?2", params![id.device.0.to_be_bytes().as_slice(),id.number.to_be_bytes().as_slice()], |r| Ok(AppliedWrite { id, timestamp: decoded(merge_fields::decode_timestamp(&r.get::<_,Vec<u8>>(0)?))?, had_read: decoded(merge_fields::decode_write_positions(&r.get::<_,Vec<u8>>(1)?))? }))?;
         Ok(row.into_iter().next())
     }
 
@@ -71,7 +71,7 @@ impl<'a> SnapshotMetadata<'a> {
     pub(crate) fn validate(&self, positions: &WritePositions) -> Result<(), DbError> {
         let mut reached = WritePositions(Vec::new());
         self.database.for_each(
-            "SELECT device,number FROM temp.coven_snapshot_writes ORDER BY device,number",
+            "SELECT device,number FROM temp._coven_snapshot_writes ORDER BY device,number",
             [],
             |r| {
                 let id = WriteId {

@@ -39,7 +39,7 @@ impl<'a> FileRemovals<'a> {
         let mut failures = Vec::new();
         let result = self.database.transaction(|database| {
             let names = database.query(
-                "SELECT path,area,destination,reference FROM coven_file_removals WHERE operation IS NULL ORDER BY area,path",
+                "SELECT path,area,destination,reference FROM _coven_file_removals WHERE operation IS NULL ORDER BY area,path",
                 [],
                 |r| Ok((r.get::<_, String>(0)?,r.get::<_, String>(1)?,r.get::<_, Option<Vec<u8>>>(2)?,r.get::<_, Option<Vec<u8>>>(3)?)),
             )?;
@@ -50,7 +50,7 @@ impl<'a> FileRemovals<'a> {
                         return Ok(());
                     }
                     if database.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM coven_device_files WHERE path=?1 UNION ALL SELECT 1 FROM coven_file_uploads WHERE path=?1 UNION ALL SELECT 1 FROM coven_cache WHERE path=?1)",
+                        "SELECT EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1 UNION ALL SELECT 1 FROM _coven_file_uploads WHERE path=?1 UNION ALL SELECT 1 FROM _coven_cache WHERE path=?1)",
                         [name.as_str()],
                         |r| r.get::<_, bool>(0),
                     )? {
@@ -71,7 +71,7 @@ impl<'a> FileRemovals<'a> {
                         _ => return Err(DbError::DamagedDatabase),
                     }
                     database.internal_execute(
-                        "DELETE FROM coven_file_removals WHERE path=?1 AND area=?2",
+                        "DELETE FROM _coven_file_removals WHERE path=?1 AND area=?2",
                         (name.as_str(), &area),
                     )?;
                     Ok(())

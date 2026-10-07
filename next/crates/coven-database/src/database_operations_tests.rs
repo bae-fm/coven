@@ -16,7 +16,7 @@ impl Database {
             let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
             let writer = inner.writer.lock().expect("writer lock poisoned");
             writer.transaction(|db| {
-                db.internal_execute("INSERT INTO coven_fingerprint_sums(audience,sum) VALUES(?1,?2) ON CONFLICT(audience) DO UPDATE SET sum=excluded.sum",
+                db.internal_execute("INSERT INTO _coven_fingerprint_sums(audience,sum) VALUES(?1,?2) ON CONFLICT(audience) DO UPDATE SET sum=excluded.sum",
                     (crate::write_encoding::audience_text(&audience), [37u8;32].as_slice()))?;
                 Ok(())
             })
@@ -35,7 +35,7 @@ impl Database {
                 let writer = inner.writer.lock().expect("writer lock poisoned");
                 writer
                     .query(
-                        "SELECT record FROM coven_uploads ORDER BY device,number",
+                        "SELECT record FROM _coven_uploads ORDER BY device,number",
                         [],
                         |r| r.get::<_, Vec<u8>>(0),
                     )?
@@ -59,7 +59,7 @@ impl Database {
                 let writer = inner.writer.lock().expect("writer lock poisoned");
                 writer.transaction(|db| {
                     db.internal_execute(
-                        "DELETE FROM coven_uploads WHERE device=?1 AND number=?2",
+                        "DELETE FROM _coven_uploads WHERE device=?1 AND number=?2",
                         (
                             write.device.0.to_be_bytes().as_slice(),
                             write.number.to_be_bytes().as_slice(),

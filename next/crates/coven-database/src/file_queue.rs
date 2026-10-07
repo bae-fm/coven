@@ -44,7 +44,7 @@ pub(crate) fn enqueue(
     file: &FileRef,
     now: SystemTime,
 ) -> Result<(), DbError> {
-    db.internal_execute("INSERT INTO coven_file_uploads(reference,queued_at) VALUES(?1,?2) ON CONFLICT(reference) DO NOTHING", (file.encode()?, crate::user_file::encode_time(now)))?;
+    db.internal_execute("INSERT INTO _coven_file_uploads(reference,queued_at) VALUES(?1,?2) ON CONFLICT(reference) DO NOTHING", (file.encode()?, crate::user_file::encode_time(now)))?;
     Ok(())
 }
 
@@ -76,7 +76,7 @@ pub(crate) fn attached(
 }
 
 pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> {
-    let rows = db.query("SELECT id,reference,queued_at,attempts,last_attempt_at,failure,path,fixed,session,stored,unused FROM coven_file_uploads ORDER BY id",[],|r| Ok((r.get::<_,i64>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,Vec<u8>>(2)?,r.get::<_,i64>(3)?,r.get::<_,Option<Vec<u8>>>(4)?,r.get::<_,Option<Vec<u8>>>(5)?,r.get::<_,Option<String>>(6)?,r.get::<_,Option<Vec<u8>>>(7)?,r.get::<_,Option<Vec<u8>>>(8)?,r.get::<_,bool>(9)?,r.get::<_,bool>(10)?)))?;
+    let rows = db.query("SELECT id,reference,queued_at,attempts,last_attempt_at,failure,path,fixed,session,stored,unused FROM _coven_file_uploads ORDER BY id",[],|r| Ok((r.get::<_,i64>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,Vec<u8>>(2)?,r.get::<_,i64>(3)?,r.get::<_,Option<Vec<u8>>>(4)?,r.get::<_,Option<Vec<u8>>>(5)?,r.get::<_,Option<String>>(6)?,r.get::<_,Option<Vec<u8>>>(7)?,r.get::<_,Option<Vec<u8>>>(8)?,r.get::<_,bool>(9)?,r.get::<_,bool>(10)?)))?;
     rows.into_iter()
         .map(
             |(

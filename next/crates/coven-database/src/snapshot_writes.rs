@@ -53,8 +53,8 @@ pub(crate) fn apply<R: Read>(
     }
     let mut queued = BTreeSet::new();
     database.for_each(
-        "SELECT u.rowid,u.device,u.number,w.timestamp,w.had_read FROM coven_uploads u
-         LEFT JOIN coven_writes w ON substr(w.timestamp,9,8)=u.device AND w.number=u.number
+        "SELECT u.rowid,u.device,u.number,w.timestamp,w.had_read FROM _coven_uploads u
+         LEFT JOIN _coven_writes w ON substr(w.timestamp,9,8)=u.device AND w.number=u.number
          ORDER BY u.device,u.number",
         [],
         |r| {
@@ -85,7 +85,7 @@ pub(crate) fn apply<R: Read>(
         if !coverage.covered_by_snapshot(id) {
             return Err(invalid("absent write is not covered by a loaded snapshot"));
         }
-        let write = database.query_row("SELECT timestamp,had_read FROM coven_writes WHERE substr(timestamp,9,8)=?1 AND number=?2",
+        let write = database.query_row("SELECT timestamp,had_read FROM _coven_writes WHERE substr(timestamp,9,8)=?1 AND number=?2",
             (id.device.0.to_be_bytes().as_slice(), id.number.to_be_bytes().as_slice()), |r| Ok(AppliedWrite {
                 id, timestamp: decoded(merge_fields::decode_timestamp(&r.get::<_, Vec<u8>>(0)?))?,
                 had_read: decoded(merge_fields::decode_write_positions(&r.get::<_, Vec<u8>>(1)?))?,
@@ -119,13 +119,13 @@ pub(crate) fn apply<R: Read>(
                     if !missing.is_empty() {
                         return Err(SnapshotError::MissingWrites { missing }.into());
                     }
-                    database.internal_execute("INSERT INTO coven_positions(device,number) VALUES(?1,?2) ON CONFLICT(device) DO UPDATE SET number=excluded.number", (write.id.device.0.to_be_bytes().as_slice(), write.id.number.to_be_bytes().as_slice()))?;
+                    database.internal_execute("INSERT INTO _coven_positions(device,number) VALUES(?1,?2) ON CONFLICT(device) DO UPDATE SET number=excluded.number", (write.id.device.0.to_be_bytes().as_slice(), write.id.number.to_be_bytes().as_slice()))?;
                 }
                 continue;
             }
             Source::Queue(rowid) => database
                 .query_row(
-                    "SELECT record FROM coven_uploads WHERE rowid=?1",
+                    "SELECT record FROM _coven_uploads WHERE rowid=?1",
                     [rowid],
                     |r| {
                         decoded(coven_format::write_stream::decode_plaintext(

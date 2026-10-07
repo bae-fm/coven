@@ -61,12 +61,12 @@ async fn dismissed_cell_is_removed_on_both_devices_and_after_reopen() {
     assert_eq!(live.next().await.unwrap(), loss);
     a.dismiss_lost_values(&loss).await.unwrap();
     assert!(live.next().await.unwrap().is_empty());
-    assert_eq!(count(&a, "coven_lost"), 0);
+    assert_eq!(count(&a, "_coven_lost"), 0);
     assert_ne!(fingerprint(&a).await, before);
     let dismissal = records(&a).last().unwrap().clone();
     b.apply_downloaded(dismissal.clone().into()).await.unwrap();
     b.apply_downloaded(dismissal.into()).await.unwrap();
-    assert_eq!(count(&b, "coven_lost"), 0);
+    assert_eq!(count(&b, "_coven_lost"), 0);
     assert_eq!(fingerprint(&a).await, fingerprint(&b).await);
     let queued = records(&a).len();
     a.dismiss_lost_values(&loss).await.unwrap();
@@ -102,7 +102,7 @@ async fn dismissed_removed_row_stays_deleted_and_concurrent_edit_is_lost() {
     let loss = a.lost_values().await.unwrap();
     assert_eq!(loss.len(), 1);
     a.dismiss_lost_values(&loss).await.unwrap();
-    assert_eq!(count(&a, "coven_lost"), 0);
+    assert_eq!(count(&a, "_coven_lost"), 0);
     sql(
         &b,
         "INSERT INTO notes VALUES('b','changed','concurrent body')",
@@ -244,7 +244,7 @@ async fn a_failed_dismissal_rolls_back_its_delete_losses_position_and_queue() {
         .unwrap();
     let losses = a.lost_values().await.unwrap();
     let before = fingerprint(&a).await;
-    a.inspect_writer(|sql| sql.batch("CREATE TRIGGER refuse BEFORE INSERT ON coven_uploads BEGIN SELECT RAISE(ABORT,'refuse'); END").unwrap());
+    a.inspect_writer(|sql| sql.batch("CREATE TRIGGER refuse BEFORE INSERT ON _coven_uploads BEGIN SELECT RAISE(ABORT,'refuse'); END").unwrap());
     assert!(a.dismiss_lost_values(&losses).await.is_err());
     assert_eq!(a.lost_values().await.unwrap(), losses);
     assert_eq!(fingerprint(&a).await, before);

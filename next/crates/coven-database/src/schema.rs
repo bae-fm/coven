@@ -55,7 +55,7 @@ pub(crate) struct SchemaForeignKey {
 impl Schema {
     pub(crate) fn read(db: &DatabaseConnection) -> Result<Self, DbError> {
         let objects = db.query(
-            "SELECT type, name, tbl_name, sql FROM main.sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND substr(lower(name),1,6) != 'coven_' ORDER BY type, name",
+            "SELECT type, name, tbl_name, sql FROM main.sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND substr(lower(name),1,7) != '_coven_' ORDER BY type, name",
             [], |row| Ok(((row.get::<_, String>(0)?, row.get::<_, String>(1)?), SchemaObject { table: row.get(2)?, sql: row.get(3)? })),
         )?.into_iter().collect::<BTreeMap<_, _>>();
         let mut tables = BTreeMap::new();
@@ -122,7 +122,7 @@ impl Schema {
     ) -> Result<(), DbError> {
         let mut declared = BTreeSet::new();
         for declaration in declarations {
-            if declaration.name.to_ascii_lowercase().starts_with("coven_") {
+            if crate::internal_schema::reserved_name(&declaration.name) {
                 return Err(DbError::InternalTable {
                     table: declaration.name.clone(),
                 });

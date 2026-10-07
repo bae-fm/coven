@@ -34,13 +34,13 @@ async fn retained_lost_references_also_read_null_after_parent_deletion() {
     };
     db.inspect_writer(|db| {
         let stamp = coven_merge::Timestamp::new(first.header.timestamp.milliseconds(), first.header.timestamp.counter(), concurrent.device).unwrap();
-        db.internal_execute("INSERT INTO coven_writes(timestamp,number,had_read) VALUES(?1,?2,?3)", crate::params![merge_fields::encode_timestamp(&stamp).unwrap(), concurrent.number.to_be_bytes().as_slice(), merge_fields::encode_write_positions(&coven_format::value::WritePositions(vec![first.header.position])).unwrap()]).unwrap();
-        db.internal_execute("INSERT INTO coven_positions(device,number) VALUES(?1,?2)",crate::params![concurrent.device.0.to_be_bytes().as_slice(),concurrent.number.to_be_bytes().as_slice()]).unwrap();
-        db.internal_execute("INSERT INTO coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES('links',?1,'store',?2,(SELECT id FROM coven_columns WHERE table_name='links' AND column_name='note_id'),?3,?4,'write',?5)", crate::params![coven_format::key::encode_key(&[Value::Text("6".into())]).unwrap(), 1u64.to_be_bytes().as_slice(), merge_fields::encode_column_value(&reference).unwrap(), merge_fields::encode_write_id(&concurrent).unwrap(), merge_fields::encode_write_id(&second).unwrap()]).unwrap();
+        db.internal_execute("INSERT INTO _coven_writes(timestamp,number,had_read) VALUES(?1,?2,?3)", crate::params![merge_fields::encode_timestamp(&stamp).unwrap(), concurrent.number.to_be_bytes().as_slice(), merge_fields::encode_write_positions(&coven_format::value::WritePositions(vec![first.header.position])).unwrap()]).unwrap();
+        db.internal_execute("INSERT INTO _coven_positions(device,number) VALUES(?1,?2)",crate::params![concurrent.device.0.to_be_bytes().as_slice(),concurrent.number.to_be_bytes().as_slice()]).unwrap();
+        db.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES('links',?1,'store',?2,(SELECT id FROM _coven_columns WHERE table_name='links' AND column_name='note_id'),?3,?4,'write',?5)", crate::params![coven_format::key::encode_key(&[Value::Text("6".into())]).unwrap(), 1u64.to_be_bytes().as_slice(), merge_fields::encode_column_value(&reference).unwrap(), merge_fields::encode_write_id(&concurrent).unwrap(), merge_fields::encode_write_id(&second).unwrap()]).unwrap();
     });
     sql(&db, "DELETE FROM notes WHERE id='43'").await.unwrap();
     let retained = db.inspect_writer(|db| {
-        db.query_row("SELECT value,set_by FROM coven_lost", [], |r| {
+        db.query_row("SELECT value,set_by FROM _coven_lost", [], |r| {
             Ok((
                 merge_fields::decode_column_value(&r.get::<_, Vec<u8>>(0)?).unwrap(),
                 merge_fields::decode_write_id(&r.get::<_, Vec<u8>>(1)?).unwrap(),
@@ -118,7 +118,7 @@ async fn a_lost_composite_key_cell_keeps_the_parent_its_own_write_named() {
             db.internal_execute("UPDATE children SET a='c'",[])?;
             Ok(())
         }).unwrap();
-        let value = db.query_row("SELECT value FROM coven_lost WHERE table_name='children' AND column_id=(SELECT id FROM coven_columns WHERE table_name='children' AND column_name='a')",[],|r| Ok(merge_fields::decode_column_value(&r.get::<_,Vec<u8>>(0)?).unwrap())).unwrap();
+        let value = db.query_row("SELECT value FROM _coven_lost WHERE table_name='children' AND column_id=(SELECT id FROM _coven_columns WHERE table_name='children' AND column_name='a')",[],|r| Ok(merge_fields::decode_column_value(&r.get::<_,Vec<u8>>(0)?).unwrap())).unwrap();
         assert_eq!(value.value,Value::Text("a".into()));
         assert_eq!(value.parents,expected);
         let parent = RowId { table:"parents".into(),key:coven_format::key::encode_key(&[Value::Text("c".into()),Value::Text("0".into())]).unwrap(),audience:Audience::Store };

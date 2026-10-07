@@ -20,16 +20,16 @@ pub(crate) fn record(
         .collect();
     database.transaction(|database| {
         let selected: BTreeSet<_> = writes.into_iter().collect();
-        let old = database.query("SELECT device,number FROM coven_waiting_writes", [], |r| Ok(WriteId {
+        let old = database.query("SELECT device,number FROM _coven_waiting_writes", [], |r| Ok(WriteId {
             device: coven_foundation::id_source::DeviceId(crate::write_encoding::counter(r.get(0)?)),
             number: crate::write_encoding::counter(r.get(1)?),
         }))?;
         for write in old.into_iter().filter(|w| !selected.contains(w)) {
-            database.internal_execute("DELETE FROM coven_waiting_writes WHERE device=?1 AND number=?2", (write.device.0.to_be_bytes().as_slice(), write.number.to_be_bytes().as_slice()))?;
+            database.internal_execute("DELETE FROM _coven_waiting_writes WHERE device=?1 AND number=?2", (write.device.0.to_be_bytes().as_slice(), write.number.to_be_bytes().as_slice()))?;
         }
         selected.into_iter().map(|write| {
-            database.internal_execute("INSERT INTO coven_waiting_writes(device,number,since) VALUES(?1,?2,?3) ON CONFLICT DO NOTHING", (write.device.0.to_be_bytes().as_slice(), write.number.to_be_bytes().as_slice(), &bytes))?;
-            let time: Vec<u8> = database.query_row("SELECT since FROM coven_waiting_writes WHERE device=?1 AND number=?2", (write.device.0.to_be_bytes().as_slice(), write.number.to_be_bytes().as_slice()), |r| r.get(0))?;
+            database.internal_execute("INSERT INTO _coven_waiting_writes(device,number,since) VALUES(?1,?2,?3) ON CONFLICT DO NOTHING", (write.device.0.to_be_bytes().as_slice(), write.number.to_be_bytes().as_slice(), &bytes))?;
+            let time: Vec<u8> = database.query_row("SELECT since FROM _coven_waiting_writes WHERE device=?1 AND number=?2", (write.device.0.to_be_bytes().as_slice(), write.number.to_be_bytes().as_slice()), |r| r.get(0))?;
             let seconds = u64::from_be_bytes(time[..8].try_into().expect("stored seconds"));
             let nanos = u32::from_be_bytes(time[8..].try_into().expect("stored nanoseconds"));
             if nanos >= 1_000_000_000 { return Err(DbError::DamagedDatabase); }

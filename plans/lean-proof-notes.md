@@ -158,10 +158,10 @@ redone against the new text, and found:
   bugs.
 - **Simpler is easier to prove, and the hard-to-prove parts were the
   over-designed ones.** Key-change following, "readings" for set null,
-  and a separate table of held rows (`coven_held`) all went away. Each was
+  and a separate table of held rows all went away. Each was
   a place the proof needed extra rules to state.
 - **Lean on losing.** Where a concurrent change can't be merged, it loses
-  and is recorded in `coven_lost`, so the app can offer it back.
+  and is recorded in `_coven_lost`, so the app can offer it back.
 
 ## Facts and figures
 

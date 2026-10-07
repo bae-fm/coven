@@ -100,7 +100,7 @@ pub(crate) fn dismiss(
 
 fn contains(database: &DatabaseConnection, dismissal: &Dismissal) -> Result<bool, DbError> {
     let row = &dismissal.row;
-    let records = database.query("SELECT l.table_name,l.key,l.column_id,c.table_name,c.column_name,l.value,l.set_by,l.replacement_kind,l.replaced_by,l.audience,l.generation,l.retired FROM coven_lost l LEFT JOIN coven_columns c ON c.id=l.column_id WHERE l.table_name=?1 AND l.key=?2 AND l.audience=?3", params![row.table,row.key,audience_text(&row.audience)], crate::lost::LostRecord::read)?;
+    let records = database.query("SELECT l.table_name,l.key,l.column_id,c.table_name,c.column_name,l.value,l.set_by,l.replacement_kind,l.replaced_by,l.audience,l.generation,l.retired FROM _coven_lost l LEFT JOIN _coven_columns c ON c.id=l.column_id WHERE l.table_name=?1 AND l.key=?2 AND l.audience=?3", params![row.table,row.key,audience_text(&row.audience)], crate::lost::LostRecord::read)?;
     let losses = records
         .into_iter()
         .map(|record| record.decode())
@@ -119,7 +119,7 @@ pub(crate) fn apply(
     for dismissal in record.parts.iter().flat_map(|part| &part.dismissals) {
         let row = &dismissal.row;
         let setter = encoded(merge_fields::encode_write_id(&dismissal.write))?;
-        let matches = database.query("SELECT l.id,l.generation,c.column_name,l.value,l.set_by,l.replacement_kind,l.replaced_by,l.retired FROM coven_lost l LEFT JOIN coven_columns c ON c.id=l.column_id WHERE l.table_name=?1 AND l.key=?2 AND l.audience=?3 AND (c.column_name=?4 OR l.column_id IS NULL)", params![row.table,row.key,audience_text(&row.audience),dismissal.column], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,Vec<u8>>(3)?,r.get::<_,Vec<u8>>(4)?,r.get::<_,String>(5)?,r.get::<_,Vec<u8>>(6)?,r.get::<_,bool>(7)?)))?;
+        let matches = database.query("SELECT l.id,l.generation,c.column_name,l.value,l.set_by,l.replacement_kind,l.replaced_by,l.retired FROM _coven_lost l LEFT JOIN _coven_columns c ON c.id=l.column_id WHERE l.table_name=?1 AND l.key=?2 AND l.audience=?3 AND (c.column_name=?4 OR l.column_id IS NULL)", params![row.table,row.key,audience_text(&row.audience),dismissal.column], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,Vec<u8>>(3)?,r.get::<_,Vec<u8>>(4)?,r.get::<_,String>(5)?,r.get::<_,Vec<u8>>(6)?,r.get::<_,bool>(7)?)))?;
         for (id, generation, column, value, setters, kind, cause, retired) in matches {
             if column.is_some() {
                 if setters != setter {
@@ -134,7 +134,7 @@ pub(crate) fn apply(
                         &setters,
                     )?;
                 }
-                database.internal_execute("DELETE FROM coven_lost WHERE id=?1", [id])?;
+                database.internal_execute("DELETE FROM _coven_lost WHERE id=?1", [id])?;
             } else if retired || kind == "excluded" {
                 let mut columns = decoded(merge_fields::decode_columns(&value))?;
                 let mut writes = decoded(merge_fields::decode_setters(&setters))?;
@@ -152,12 +152,12 @@ pub(crate) fn apply(
                     crate::excluded_write::dismiss(database, dismissal)?;
                 }
                 if columns.is_empty() {
-                    database.internal_execute("DELETE FROM coven_lost WHERE id=?1", [id])?;
+                    database.internal_execute("DELETE FROM _coven_lost WHERE id=?1", [id])?;
                 } else {
                     let value = encoded(merge_fields::encode_columns(&columns))?;
                     let setters = encoded(merge_fields::encode_setters(&writes))?;
                     database.internal_execute(
-                        "UPDATE coven_lost SET value=?1,set_by=?2 WHERE id=?3",
+                        "UPDATE _coven_lost SET value=?1,set_by=?2 WHERE id=?3",
                         params![value, setters, id],
                     )?;
                     if retired {

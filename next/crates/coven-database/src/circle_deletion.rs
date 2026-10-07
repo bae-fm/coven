@@ -18,7 +18,7 @@ pub(crate) fn write(
     files: &crate::file_write::FileWrite<'_>,
 ) -> Result<Option<WriteId>, DbError> {
     let rows = db.query(
-        "SELECT DISTINCT table_name,key,audience FROM coven_rows WHERE audience=?1",
+        "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE audience=?1",
         [circle.to_string()],
         crate::row_queries::read_identity,
     )?;

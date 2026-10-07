@@ -13,14 +13,14 @@
 - Two devices that read the same audiences and applied the same writes and
   store log entries, each in an order that respects causality, hold the same
   database:
-  - the same `coven_rows` and `coven_cells`;
+  - the same `_coven_rows` and `_coven_cells`;
   - the same rows in the app's tables, with the same values;
-  - the same `coven_lost` rows, for lost values and removed rows alike.
+  - the same `_coven_lost` rows, for lost values and removed rows alike.
 - This holds whatever order each device ran the removal rules in.
 - Two devices that read different circles agree on every row both read,
   except which row shows for a key present in two audiences, and the rows
   taken out with it ([B9](#b9-audiences)).
-- `coven_writes` holds the same writes on both, under row ids of each
+- `_coven_writes` holds the same writes on both, under row ids of each
   device's own ([§8.1](coven-from-scratch.md#81-example)).
 
 ### B2 Terms
@@ -44,7 +44,7 @@
   write.
 - *Replacer* of a value: a write that sets the same cell of the same
   incarnation with a larger timestamp, or deletes that incarnation.
-- *Merged state*: each row's generation, the write `coven_rows` names for
+- *Merged state*: each row's generation, the write `_coven_rows` names for
   each generation, each cell's winning write and value, and the lost values
   ([§8](coven-from-scratch.md#8-merge)).
 - *Removed row*: a row present in the merged state that a removal rule takes
@@ -69,10 +69,10 @@
     delete at an odd one.
 - What a device stores for the merged state:
   - each row's current generation;
-  - per generation, the write `coven_rows` names: of the writes that moved
+  - per generation, the write `_coven_rows` names: of the writes that moved
     the row there, the one with the smallest timestamp;
   - per cell, the write whose value won;
-  - per value, its `coven_lost` row: the incarnation it was set in, and the
+  - per value, its `_coven_lost` row: the incarnation it was set in, and the
     write recorded as replacing it.
 - In Lean: `Writes`, `Valid`, `St`, in `Model.lean`.
 
@@ -91,7 +91,7 @@ For a closed set `S` of writes, each part of the merged state is defined from
 - **Lost**: a value is lost when some write in `S` replaced it and no write
   in `S` that replaced it had read it ([§8](coven-from-scratch.md#8-merge)).
 - **Replaced by**, for a lost value of incarnation `k`:
-  - if `k` was deleted: its earliest delete, which is the write `coven_rows`
+  - if `k` was deleted: its earliest delete, which is the write `_coven_rows`
     names for generation `k + 1`;
   - otherwise: the cell's current winning write.
 - E.g. the writes of [§8.1](coven-from-scratch.md#81-example) on note 42's title:
@@ -122,7 +122,7 @@ at.
 - **Generation**: an insert or delete with `g = G` moves the row to `G + 1`.
   Any other change leaves it.
 - **Write per generation**: an insert or delete made at `g` competes for
-  generation `g + 1`'s `coven_rows` row: the smaller timestamp stays.
+  generation `g + 1`'s `_coven_rows` row: the smaller timestamp stays.
 - **Cells**:
   - a delete with `g = G` empties the row's cells;
   - an insert with `g = G` starts a new incarnation with its values;
@@ -130,10 +130,10 @@ at.
     started the current incarnation, competes per cell with the cell's
     winning write: the larger timestamp stays ([§8.2](coven-from-scratch.md#82-concurrent-writes-to-one-row), [§8.3](coven-from-scratch.md#83-deletes));
   - a change made at an older incarnation changes no cell.
-- **`coven_lost`**, for each value `a` of each cell of `r`:
+- **`_coven_lost`**, for each value `a` of each cell of `r`:
   - `w`'s own value:
     - made at an incarnation already deleted: lost, replaced by the write
-      `coven_rows` names for that incarnation's delete ([§8.3](coven-from-scratch.md#83-deletes));
+      `_coven_rows` names for that incarnation's delete ([§8.3](coven-from-scratch.md#83-deletes));
     - made at the current incarnation with a smaller stamp than the cell's
       value: lost, replaced by the cell's winning write;
     - otherwise not lost;
@@ -179,13 +179,13 @@ at.
 - E.g. Lean runs the step on the writes of [§8.1](coven-from-scratch.md#81-example), [§8.2](coven-from-scratch.md#82-concurrent-writes-to-one-row) and [§8.3](coven-from-scratch.md#83-deletes), in the
   arrival orders they describe:
   - Ben's phone and Carol's tablet both end with "Shopping" and one
-    `coven_lost` row, "Weekly groceries" replaced by Carol's write 2. Lean:
+    `_coven_lost` row, "Weekly groceries" replaced by Carol's write 2. Lean:
     `example_8_1`.
   - On Carol's tablet, "Groceries" is lost after Ana's write 4 arrives, and
     no longer lost after Ben's write 9. Lean: `example_8_2`.
   - Ben's edit of note 43 is lost, replaced by Ana's write 7, whether it
     arrives before Ana's delete or after her re-add, and generation 2's
-    `coven_rows` row names write 7. Lean: `example_8_3`.
+    `_coven_rows` row names write 7. Lean: `example_8_3`.
 
 ### B7 The removal rules
 
@@ -237,7 +237,7 @@ at.
   2. judge unique values and keys in two audiences among the rows still
      present;
   3. apply the other rules again until none fires.
-- A removed row's `coven_lost` row names every rule that holds for it once
+- A removed row's `_coven_lost` row names every rule that holds for it once
   the steps end, and the unique or other-audience rule from step 2.
 - In Lean: `Inputs`, `fires`, `rivalBefore`, `removal`, `view`, in
   `Removal.lean`.
@@ -303,18 +303,18 @@ at.
   rules still meets a rule once the run ends, and a step 2 loser counts its
   rule from that step. Lean: `star_fires`, `removed_has_rule`.
 - E.g. todos need `start <= end`, and todo 7 is in list 3. Ana deletes
-  list 3 while Ben moves todo 7's start past its end. Todo 7's `coven_lost`
+  list 3 while Ben moves todo 7's start past its end. Todo 7's `_coven_lost`
   row names the foreign key and the CHECK, on every device, whichever rule a
   device ran first. Lean: `example_8`.
 - **End to end**: the merged state converges ([B6](#b6-proof-for-the-merged-state)), and the rules, and
-  therefore the app's tables and the removed rows' `coven_lost` rows, are
+  therefore the app's tables and the removed rows' `_coven_lost` rows, are
   functions of it and the store log. Lean: `device_converges`,
   `rule_order_converges`.
 - E.g. Lean runs the writes of [§8.4](coven-from-scratch.md#84-foreign-keys), [§8.5](coven-from-scratch.md#85-keys-and-uniqueness), [§8.6](coven-from-scratch.md#86-check-constraints) and [§14.7](coven-from-scratch.md#147-deleting-a-circle), with the
   rules reading the merged state it computes, in more than one arrival
   order:
   - [§8.4](coven-from-scratch.md#84-foreign-keys): Carol's tablet applies Ana's delete of note 43, then Ben's
-    attachment 9 on it: attachment 9 is taken out, and its `coven_lost` row
+    attachment 9 on it: attachment 9 is taken out, and its `_coven_lost` row
     names the foreign key.
   - Ben's move of attachment 9 to note 44 then arrives: attachment 9 is
     back. Ben's phone, which gets Ana's delete last, never takes it out.
@@ -335,7 +335,7 @@ at.
     `example_8_6`.
   - [§14.7](coven-from-scratch.md#147-deleting-a-circle): Ben deletes the circle "Gifts" and its notes 7 and 8, while Ana
     adds note 9 to it. Notes 7 and 8 are deleted, and note 9 is taken out
-    with its title in `coven_lost`, naming the deleted circle. Lean:
+    with its title in `_coven_lost`, naming the deleted circle. Lean:
     `example_14_7`.
 
 ### B9 Audiences

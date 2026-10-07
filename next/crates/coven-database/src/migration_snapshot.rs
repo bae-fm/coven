@@ -35,7 +35,7 @@ impl MigrationCapture {
         // even when the app declares only the renamed, final schema.
         let mut synced: BTreeSet<String> = db
             .query(
-                "SELECT DISTINCT lower(table_name) FROM coven_columns",
+                "SELECT DISTINCT lower(table_name) FROM _coven_columns",
                 [],
                 |r| r.get(0),
             )?
@@ -160,7 +160,7 @@ impl MigrationSnapshot {
             {
                 continue;
             }
-            let temporary = format!("coven_migration_before_{}", tables.len());
+            let temporary = format!("_coven_migration_before_{}", tables.len());
             let columns: BTreeMap<_, _> = table
                 .columns
                 .iter()
@@ -239,7 +239,7 @@ impl MigrationSnapshot {
         let Some(values) = rows.pop() else {
             return Ok(None);
         };
-        let owners = db.query("SELECT r.audience,r.generation FROM coven_rows r WHERE r.table_name=?1 AND r.key=?2 AND NOT EXISTS(SELECT 1 FROM coven_rows newer WHERE newer.table_name=r.table_name AND newer.key=r.key AND newer.audience=r.audience AND newer.generation>r.generation) AND NOT EXISTS(SELECT 1 FROM coven_lost l WHERE l.table_name=r.table_name AND l.key=r.key AND l.audience=r.audience AND l.generation=r.generation AND l.retired=0 AND l.replacement_kind='rules')",params![key.0,key.1],|r|Ok((r.get::<_,String>(0)?,crate::write_encoding::counter(r.get(1)?))))?;
+        let owners = db.query("SELECT r.audience,r.generation FROM _coven_rows r WHERE r.table_name=?1 AND r.key=?2 AND NOT EXISTS(SELECT 1 FROM _coven_rows newer WHERE newer.table_name=r.table_name AND newer.key=r.key AND newer.audience=r.audience AND newer.generation>r.generation) AND NOT EXISTS(SELECT 1 FROM _coven_lost l WHERE l.table_name=r.table_name AND l.key=r.key AND l.audience=r.audience AND l.generation=r.generation AND l.retired=0 AND l.replacement_kind='rules')",params![key.0,key.1],|r|Ok((r.get::<_,String>(0)?,crate::write_encoding::counter(r.get(1)?))))?;
         let mut owners = owners
             .into_iter()
             .filter(|(_, generation)| generation % 2 == 1);
@@ -400,9 +400,9 @@ impl MigrationSnapshot {
                 Ok(())
             })?;
             if let Some(snapshot) = snapshot {
-                db.batch(&format!("CREATE TEMP TABLE coven_migration_keys(coven_key BLOB PRIMARY KEY) WITHOUT ROWID; INSERT INTO coven_migration_keys SELECT {key} FROM main.{} a",identifier(&table.name)))?;
-                db.visit(&format!("SELECT b.coven_key FROM temp.{} b LEFT JOIN temp.coven_migration_keys a USING(coven_key) WHERE a.coven_key IS NULL",identifier(&snapshot.temporary)),[],|r| { changed.insert((table.name.clone(),r.get(0)?),BTreeSet::new()); Ok(()) })?;
-                db.batch("DROP TABLE temp.coven_migration_keys")?;
+                db.batch(&format!("CREATE TEMP TABLE _coven_migration_keys(coven_key BLOB PRIMARY KEY) WITHOUT ROWID; INSERT INTO _coven_migration_keys SELECT {key} FROM main.{} a",identifier(&table.name)))?;
+                db.visit(&format!("SELECT b.coven_key FROM temp.{} b LEFT JOIN temp._coven_migration_keys a USING(coven_key) WHERE a.coven_key IS NULL",identifier(&snapshot.temporary)),[],|r| { changed.insert((table.name.clone(),r.get(0)?),BTreeSet::new()); Ok(()) })?;
+                db.batch("DROP TABLE temp._coven_migration_keys")?;
             }
         }
         Ok(changed)

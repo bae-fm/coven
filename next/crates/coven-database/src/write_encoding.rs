@@ -33,13 +33,13 @@ pub(crate) fn decoded<T>(result: Result<T, coven_format::Error>) -> rusqlite::Re
 pub(crate) fn latest_timestamp(
     database: &crate::sqlite::DatabaseConnection,
 ) -> Result<Option<Timestamp>, DbError> {
-    let mut latest = database.query_row("SELECT max(timestamp) FROM coven_writes", [], |row| {
+    let mut latest = database.query_row("SELECT max(timestamp) FROM _coven_writes", [], |row| {
         row.get::<_, Option<Vec<u8>>>(0)?
             .map(|bytes| decoded(coven_format::merge_fields::decode_timestamp(&bytes)))
             .transpose()
     })?;
     for timestamp in database.query(
-        "SELECT record FROM coven_store_log UNION ALL SELECT record FROM coven_store_log_uploads",
+        "SELECT record FROM _coven_store_log UNION ALL SELECT record FROM _coven_store_log_uploads",
         [],
         |row| {
             let coven_format::Object::StoreLog(entry) =

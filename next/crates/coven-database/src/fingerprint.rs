@@ -184,9 +184,9 @@ fn forget(
     key: [u8; 32],
 ) -> Result<(), DbError> {
     let audience = audience_text(audience);
-    database.internal_execute("UPDATE coven_fingerprint_sums SET sum=coven_fingerprint_replace(sum,(SELECT hash FROM coven_fingerprint_leaves WHERE audience=?1 AND key=?2),zeroblob(32)) WHERE audience=?1", params![audience,key.as_slice()])?;
+    database.internal_execute("UPDATE _coven_fingerprint_sums SET sum=coven_fingerprint_replace(sum,(SELECT hash FROM _coven_fingerprint_leaves WHERE audience=?1 AND key=?2),zeroblob(32)) WHERE audience=?1", params![audience,key.as_slice()])?;
     database.internal_execute(
-        "DELETE FROM coven_fingerprint_leaves WHERE audience=?1 AND key=?2",
+        "DELETE FROM _coven_fingerprint_leaves WHERE audience=?1 AND key=?2",
         params![audience, key.as_slice()],
     )?;
     Ok(())
@@ -207,11 +207,11 @@ pub(crate) fn retire_losses(
     database: &DatabaseConnection,
     row: &coven_merge::RowId,
 ) -> Result<(), DbError> {
-    database.visit("SELECT id FROM coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND retired=0 AND replacement_kind IN ('rules','write')", params![row.table,row.key,audience_text(&row.audience)], |r| retained(database,r.get(0)?))
+    database.visit("SELECT id FROM _coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND retired=0 AND replacement_kind IN ('rules','write')", params![row.table,row.key,audience_text(&row.audience)], |r| retained(database,r.get(0)?))
 }
 
 pub(crate) fn retained(database: &DatabaseConnection, ordinal: i64) -> Result<(), DbError> {
-    let (row,generation,column,value,setter,kind,cause)=database.query_row("SELECT l.table_name,l.key,l.audience,l.generation,c.column_name,l.value,l.set_by,l.replacement_kind,l.replaced_by FROM coven_lost l LEFT JOIN coven_columns c ON c.id=l.column_id WHERE l.id=?1",[ordinal],|r|Ok((crate::row_queries::read_identity(r)?,r.get::<_,Vec<u8>>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,Vec<u8>>(5)?,r.get::<_,Vec<u8>>(6)?,r.get::<_,String>(7)?,r.get::<_,Vec<u8>>(8)?)))?;
+    let (row,generation,column,value,setter,kind,cause)=database.query_row("SELECT l.table_name,l.key,l.audience,l.generation,c.column_name,l.value,l.set_by,l.replacement_kind,l.replaced_by FROM _coven_lost l LEFT JOIN _coven_columns c ON c.id=l.column_id WHERE l.id=?1",[ordinal],|r|Ok((crate::row_queries::read_identity(r)?,r.get::<_,Vec<u8>>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,Vec<u8>>(5)?,r.get::<_,Vec<u8>>(6)?,r.get::<_,String>(7)?,r.get::<_,Vec<u8>>(8)?)))?;
     let column = column.unwrap_or_default();
     retired(
         database,
@@ -231,7 +231,7 @@ pub(crate) fn read(
     key.update(b"coven/agreement/root/v1");
     key.update(audience_text(audience).as_bytes());
     let sum: Option<[u8; 32]> = database.query_row(
-        "SELECT (SELECT sum FROM coven_fingerprint_sums WHERE audience=?1)",
+        "SELECT (SELECT sum FROM _coven_fingerprint_sums WHERE audience=?1)",
         [audience_text(audience)],
         |row| row.get(0),
     )?;
@@ -264,13 +264,13 @@ fn put(
     // The old leaf is read by primary key inside the sum update. Both statements
     // share the enclosing writer transaction, including rollback on either error.
     database.internal_execute(
-        "INSERT INTO coven_fingerprint_sums(audience,sum) VALUES(?1,?3)
+        "INSERT INTO _coven_fingerprint_sums(audience,sum) VALUES(?1,?3)
          ON CONFLICT(audience) DO UPDATE SET sum=coven_fingerprint_replace(sum,
-             (SELECT hash FROM coven_fingerprint_leaves WHERE audience=?1 AND key=?2),excluded.sum)",
+             (SELECT hash FROM _coven_fingerprint_leaves WHERE audience=?1 AND key=?2),excluded.sum)",
         params![audience, key.as_slice(), leaf.as_slice()],
     )?;
     database.internal_execute(
-        "INSERT INTO coven_fingerprint_leaves(audience,key,hash) VALUES(?1,?2,?3)
+        "INSERT INTO _coven_fingerprint_leaves(audience,key,hash) VALUES(?1,?2,?3)
          ON CONFLICT(audience,key) DO UPDATE SET hash=excluded.hash",
         params![audience, key.as_slice(), leaf.as_slice()],
     )?;

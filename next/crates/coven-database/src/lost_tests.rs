@@ -36,7 +36,7 @@ fn insert(
     replacement: Vec<u8>,
 ) {
     db.commit_writer(|sql| {
-        sql.internal_execute("INSERT INTO coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES ('notes',?1,'store',?2,?3,?4,?5,?6,?7)",
+        sql.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES ('notes',?1,'store',?2,?3,?4,?5,?6,?7)",
             (key(), 0u64.to_be_bytes().to_vec(), column, value, setters, kind, replacement)).unwrap();
     });
 }
@@ -46,8 +46,10 @@ async fn losses_preserve_storage_classes_each_setter_and_every_replacement() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     db.commit_writer(|sql| {
-        sql.batch("INSERT INTO coven_columns(id,table_name,column_name) VALUES (1,'notes','title')")
-            .unwrap()
+        sql.batch(
+            "INSERT INTO _coven_columns(id,table_name,column_name) VALUES (1,'notes','title')",
+        )
+        .unwrap()
     });
     insert(
         &db,
@@ -239,7 +241,7 @@ async fn corrupt_values_fail_typed_and_live_losses_recover_after_repair() {
     ));
     db.commit_writer(|sql| {
         sql.internal_execute(
-            "UPDATE coven_lost SET set_by=?1",
+            "UPDATE _coven_lost SET set_by=?1",
             [encode_setters(&setters).unwrap()],
         )
         .unwrap()
@@ -252,12 +254,12 @@ async fn corrupt_values_fail_typed_and_live_losses_recover_after_repair() {
             .len(),
         1
     );
-    db.commit_writer(|sql| sql.batch("UPDATE coven_lost SET value=x'ff'").unwrap());
+    db.commit_writer(|sql| sql.batch("UPDATE _coven_lost SET value=x'ff'").unwrap());
     assert!(matches!(
         query.next().await,
         Err(CovenError::Database(DbError::DamagedDatabase))
     ));
-    db.commit_writer(|sql| sql.batch("DELETE FROM coven_lost").unwrap());
+    db.commit_writer(|sql| sql.batch("DELETE FROM _coven_lost").unwrap());
     assert!(query.next().await.unwrap().is_empty());
     db.close().await.unwrap();
 }
@@ -270,7 +272,7 @@ async fn wrong_column_table_is_a_damaged_database() {
         .await
         .unwrap();
     db.commit_writer(|sql| {
-        sql.batch("INSERT INTO coven_columns VALUES (1,'other_table','title')")
+        sql.batch("INSERT INTO _coven_columns VALUES (1,'other_table','title')")
             .unwrap()
     });
     insert(

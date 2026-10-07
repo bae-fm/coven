@@ -166,7 +166,7 @@ fn put_state(
     let mut writes = BTreeMap::new();
     for write in oracle.writes().values() {
         db.internal_execute(
-            "INSERT INTO coven_writes(timestamp,number,had_read) VALUES (?1,?2,?3)",
+            "INSERT INTO _coven_writes(timestamp,number,had_read) VALUES (?1,?2,?3)",
             (
                 encode_timestamp(&write.timestamp).unwrap(),
                 write.id.number.to_be_bytes().to_vec(),
@@ -183,7 +183,7 @@ fn put_state(
     }
     let mut rows = BTreeMap::new();
     for (generation, write) in state.generations() {
-        db.internal_execute("INSERT INTO coven_rows(table_name,key,audience,generation,write_id) VALUES (?1,?2,?3,?4,?5)",
+        db.internal_execute("INSERT INTO _coven_rows(table_name,key,audience,generation,write_id) VALUES (?1,?2,?3,?4,?5)",
             (&state.row().table, &state.row().key, audience(&state.row().audience), generation.to_be_bytes().to_vec(), writes[write])).unwrap();
         rows.insert(
             *generation,
@@ -199,7 +199,7 @@ fn put_state(
         .collect();
     for name in names {
         db.internal_execute(
-            "INSERT INTO coven_columns(table_name,column_name) VALUES (?1,?2)",
+            "INSERT INTO _coven_columns(table_name,column_name) VALUES (?1,?2)",
             (&state.row().table, name),
         )
         .unwrap();
@@ -211,7 +211,7 @@ fn put_state(
     }
     for (name, cell) in state.cells() {
         db.internal_execute(
-            "INSERT INTO coven_cells(column_id,row_id,write_id) VALUES (?1,?2,?3)",
+            "INSERT INTO _coven_cells(column_id,row_id,write_id) VALUES (?1,?2,?3)",
             (
                 columns[name],
                 rows[&state.generation()],
@@ -221,11 +221,11 @@ fn put_state(
         .unwrap();
         for (key, parent) in &cell.value.parents {
             let key = crate::row_queries::foreign_key(db, &state.row().table, key).unwrap();
-            db.internal_execute("INSERT INTO coven_references(row_id,column_id,foreign_key_id,parent_table,parent_key,parent_audience,parent_generation) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT DO NOTHING", (rows[&state.generation()],columns[name],key,&parent.row.table,&parent.row.key,audience(&parent.row.audience),parent.generation.to_be_bytes().as_slice())).unwrap();
+            db.internal_execute("INSERT INTO _coven_references(row_id,column_id,foreign_key_id,parent_table,parent_key,parent_audience,parent_generation) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT DO NOTHING", (rows[&state.generation()],columns[name],key,&parent.row.table,&parent.row.key,audience(&parent.row.audience),parent.generation.to_be_bytes().as_slice())).unwrap();
         }
     }
     for (key, lost) in state.lost() {
-        db.internal_execute("INSERT INTO coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES (?1,?2,?3,?4,?5,?6,?7,'write',?8)",
+        db.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES (?1,?2,?3,?4,?5,?6,?7,'write',?8)",
             (&state.row().table, &state.row().key, audience(&state.row().audience), lost.incarnation.to_be_bytes().to_vec(), columns[&key.column],
              encode_column_value(&lost.value).unwrap(), encode_write_id(&key.write).unwrap(), encode_write_id(&lost.replaced_by).unwrap())).unwrap();
     }
@@ -253,7 +253,7 @@ fn put_state(
             .iter()
             .map(|(name, cell)| (name.clone(), cell.write))
             .collect();
-        db.internal_execute("INSERT INTO coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES (?1,?2,?3,?4,NULL,?5,?6,'rules',?7)",
+        db.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES (?1,?2,?3,?4,NULL,?5,?6,'rules',?7)",
             (&state.row().table, &state.row().key, audience(&state.row().audience), state.generation().to_be_bytes().to_vec(),
              encode_columns(&values).unwrap(), encode_setters(&setters).unwrap(), encode_rules(removed).unwrap())).unwrap();
     }
@@ -262,7 +262,7 @@ fn put_state(
 fn get_state(db: &DatabaseConnection) -> (RowState<Value>, BTreeSet<Rule>) {
     let writes = db
         .query(
-            "SELECT id,timestamp,number,had_read FROM coven_writes ORDER BY id",
+            "SELECT id,timestamp,number,had_read FROM _coven_writes ORDER BY id",
             [],
             |r| {
                 Ok((
@@ -297,7 +297,7 @@ fn get_state(db: &DatabaseConnection) -> (RowState<Value>, BTreeSet<Rule>) {
     let oracle = History::new(history).unwrap();
     let row = db
         .query_row(
-            "SELECT table_name,key,audience FROM coven_rows ORDER BY generation LIMIT 1",
+            "SELECT table_name,key,audience FROM _coven_rows ORDER BY generation LIMIT 1",
             [],
             |r| {
                 Ok(RowId {
@@ -310,7 +310,7 @@ fn get_state(db: &DatabaseConnection) -> (RowState<Value>, BTreeSet<Rule>) {
         .unwrap();
     let generations = db
         .query(
-            "SELECT generation,write_id FROM coven_rows ORDER BY generation",
+            "SELECT generation,write_id FROM _coven_rows ORDER BY generation",
             [],
             |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)),
         )
@@ -321,7 +321,7 @@ fn get_state(db: &DatabaseConnection) -> (RowState<Value>, BTreeSet<Rule>) {
     let mut lost = BTreeMap::new();
     let mut removed_row = None;
     for (generation, name, value, setters, replacement) in db.query(
-        "SELECT l.generation,c.column_name,l.value,l.set_by,l.replaced_by FROM coven_lost l LEFT JOIN coven_columns c ON c.id=l.column_id", [], |r| {
+        "SELECT l.generation,c.column_name,l.value,l.set_by,l.replaced_by FROM _coven_lost l LEFT JOIN _coven_columns c ON c.id=l.column_id", [], |r| {
             Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Vec<u8>>(2)?, r.get::<_, Vec<u8>>(3)?, r.get::<_, Vec<u8>>(4)?))
         }).unwrap() {
         match name {
@@ -358,8 +358,8 @@ fn get_state(db: &DatabaseConnection) -> (RowState<Value>, BTreeSet<Rule>) {
                 )
                 .unwrap();
             let mut references = BTreeMap::<String, BTreeMap<_, _>>::new();
-            for (column,key,parent) in db.query("SELECT c.column_name,f.identity,v.parent_table,v.parent_key,v.parent_audience,v.parent_generation FROM coven_references v JOIN coven_foreign_keys f ON f.id=v.foreign_key_id JOIN coven_columns c ON c.id=v.column_id", [], |r| Ok((r.get::<_,String>(0)?,decode_foreign_key(&r.get::<_,Vec<u8>>(1)?).unwrap(),Parent { row: RowId { table:r.get(2)?,key:r.get(3)?,audience:read_audience(r.get(4)?) },generation:crate::write_encoding::counter(r.get(5)?) }))).unwrap() { references.entry(column).or_default().insert(key,parent); }
-            let cells = db.query("SELECT c.column_name,v.write_id FROM coven_cells v JOIN coven_columns c ON c.id=v.column_id", [], |r| Ok((r.get::<_,String>(0)?, r.get::<_,i64>(1)?))).unwrap().into_iter().map(|(name,write)| {
+            for (column,key,parent) in db.query("SELECT c.column_name,f.identity,v.parent_table,v.parent_key,v.parent_audience,v.parent_generation FROM _coven_references v JOIN _coven_foreign_keys f ON f.id=v.foreign_key_id JOIN _coven_columns c ON c.id=v.column_id", [], |r| Ok((r.get::<_,String>(0)?,decode_foreign_key(&r.get::<_,Vec<u8>>(1)?).unwrap(),Parent { row: RowId { table:r.get(2)?,key:r.get(3)?,audience:read_audience(r.get(4)?) },generation:crate::write_encoding::counter(r.get(5)?) }))).unwrap() { references.entry(column).or_default().insert(key,parent); }
+            let cells = db.query("SELECT c.column_name,v.write_id FROM _coven_cells v JOIN _coven_columns c ON c.id=v.column_id", [], |r| Ok((r.get::<_,String>(0)?, r.get::<_,i64>(1)?))).unwrap().into_iter().map(|(name,write)| {
                 let parents = references.remove(&name).unwrap_or_default();
                 let value = ColumnValue { value:values[&name].clone(), parents };
                 (name,Cell { write:write_ids[&write],value })
@@ -447,7 +447,7 @@ async fn migrations_change_present_values_without_a_second_copy() {
         assert!(state.lost().is_empty());
         let cells = sql
             .query(
-                "SELECT name FROM pragma_table_info('coven_cells') ORDER BY cid",
+                "SELECT name FROM pragma_table_info('_coven_cells') ORDER BY cid",
                 [],
                 |r| r.get::<_, String>(0),
             )
@@ -461,6 +461,16 @@ async fn only_the_spec_tables_are_created() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     db.inspect_writer(|sql| {
+        let objects = sql
+            .query(
+                "SELECT type,name FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY type,name",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .unwrap();
+        for (kind, name) in objects {
+            assert!(name.starts_with("_coven_"), "{kind} {name}");
+        }
         let tables = sql
             .query(
                 "SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name",
@@ -471,54 +481,54 @@ async fn only_the_spec_tables_are_created() {
         assert_eq!(
             tables,
             [
-                "coven_access_keys_to_delete",
-                "coven_applied_boundaries",
-                "coven_cache",
-                "coven_cache_budgets",
-                "coven_cells",
-                "coven_circle_members",
-                "coven_circles",
-                "coven_claims",
-                "coven_columns",
-                "coven_constraints",
-                "coven_device_files",
-                "coven_devices",
-                "coven_excluded_rows",
-                "coven_excluded_writes",
-                "coven_file_removals",
-                "coven_file_uploads",
-                "coven_fingerprint_leaves",
-                "coven_fingerprint_sums",
-                "coven_foreign_keys",
-                "coven_key_uploads",
-                "coven_loaded_audiences",
-                "coven_lost",
-                "coven_lost_references",
-                "coven_members",
-                "coven_operations",
-                "coven_positions",
-                "coven_reference_values",
-                "coven_references",
-                "coven_resets",
-                "coven_rows",
-                "coven_snapshot_schema",
-                "coven_store",
-                "coven_store_log",
-                "coven_store_log_key_uploads",
-                "coven_store_log_uploads",
-                "coven_upload_seals",
-                "coven_uploads",
-                "coven_user_files",
-                "coven_versions",
-                "coven_waiting_writes",
-                "coven_write_upload_sessions",
-                "coven_writes",
+                "_coven_access_keys_to_delete",
+                "_coven_applied_boundaries",
+                "_coven_cache",
+                "_coven_cache_budgets",
+                "_coven_cells",
+                "_coven_circle_members",
+                "_coven_circles",
+                "_coven_claims",
+                "_coven_columns",
+                "_coven_constraints",
+                "_coven_device_files",
+                "_coven_devices",
+                "_coven_excluded_rows",
+                "_coven_excluded_writes",
+                "_coven_file_removals",
+                "_coven_file_uploads",
+                "_coven_fingerprint_leaves",
+                "_coven_fingerprint_sums",
+                "_coven_foreign_keys",
+                "_coven_key_uploads",
+                "_coven_loaded_audiences",
+                "_coven_lost",
+                "_coven_lost_references",
+                "_coven_members",
+                "_coven_operations",
+                "_coven_positions",
+                "_coven_reference_values",
+                "_coven_references",
+                "_coven_resets",
+                "_coven_rows",
+                "_coven_snapshot_schema",
+                "_coven_store",
+                "_coven_store_log",
+                "_coven_store_log_key_uploads",
+                "_coven_store_log_uploads",
+                "_coven_upload_seals",
+                "_coven_uploads",
+                "_coven_user_files",
+                "_coven_versions",
+                "_coven_waiting_writes",
+                "_coven_write_upload_sessions",
+                "_coven_writes",
                 "sqlite_sequence"
             ]
         );
         let cells = sql
             .query(
-                "SELECT name FROM pragma_table_info('coven_cells') ORDER BY cid",
+                "SELECT name FROM pragma_table_info('_coven_cells') ORDER BY cid",
                 [],
                 |r| r.get::<_, String>(0),
             )
@@ -526,7 +536,7 @@ async fn only_the_spec_tables_are_created() {
         assert_eq!(cells, ["column_id", "row_id", "write_id"]);
         let fields = sql
             .query(
-                "SELECT name FROM pragma_table_info('coven_operations') ORDER BY cid",
+                "SELECT name FROM pragma_table_info('_coven_operations') ORDER BY cid",
                 [],
                 |r| r.get::<_, String>(0),
             )
@@ -563,11 +573,11 @@ async fn a_lost_row_does_not_require_an_accepted_generation() {
         LostWriteCause::Reset(entry),
     ] {
         db.inspect_writer(|sql| {
-            sql.internal_execute("INSERT INTO coven_lost(table_name,key,audience,generation,value,set_by,replacement_kind,replaced_by) VALUES (?1,?2,?3,?4,?5,?6,'excluded',?7)",
+            sql.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,value,set_by,replacement_kind,replaced_by) VALUES (?1,?2,?3,?4,?5,?6,'excluded',?7)",
                 (&state.row().table, &state.row().key, audience(&state.row().audience), 0u64.to_be_bytes().to_vec(), encode_columns(&values).unwrap(), encode_setters(&setters).unwrap(), encode_lost_write_cause(&cause).unwrap())).unwrap();
-            let stored = sql.query_row("SELECT replaced_by FROM coven_lost WHERE id=last_insert_rowid()", [], |r| r.get::<_, Vec<u8>>(0)).unwrap();
+            let stored = sql.query_row("SELECT replaced_by FROM _coven_lost WHERE id=last_insert_rowid()", [], |r| r.get::<_, Vec<u8>>(0)).unwrap();
             assert_eq!(decode_lost_write_cause(&stored).unwrap(), cause);
-            assert_eq!(sql.query_row("SELECT count(*) FROM coven_rows", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+            assert_eq!(sql.query_row("SELECT count(*) FROM _coven_rows", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
         });
     }
     db.close().await.unwrap();

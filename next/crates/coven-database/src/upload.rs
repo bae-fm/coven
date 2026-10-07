@@ -133,8 +133,8 @@ pub(crate) enum UploadValue {
 impl UploadValue {
     pub(crate) fn column(&self) -> (&'static str, &'static str) {
         match self {
-            Self::Plaintext => ("coven_uploads", "record"),
-            Self::Sealed => ("coven_upload_seals", "sealed_bytes"),
+            Self::Plaintext => ("_coven_uploads", "record"),
+            Self::Sealed => ("_coven_upload_seals", "sealed_bytes"),
         }
     }
 }
@@ -148,8 +148,8 @@ struct Oldest {
 fn oldest(database: &DatabaseConnection) -> Result<Option<Oldest>, DbError> {
     Ok(database
         .query(
-            "SELECT u.rowid,u.device,u.number,s.rowid FROM coven_uploads u
-         LEFT JOIN coven_upload_seals s USING(device,number) ORDER BY u.rowid LIMIT 1",
+            "SELECT u.rowid,u.device,u.number,s.rowid FROM _coven_uploads u
+         LEFT JOIN _coven_upload_seals s USING(device,number) ORDER BY u.rowid LIMIT 1",
             [],
             |r| {
                 Ok(Oldest {
@@ -220,7 +220,7 @@ pub(crate) fn each_plaintext(
     mut consume: impl FnMut(WriteHeaderFrame, UploadParts<'_>) -> Result<(), DbError>,
 ) -> Result<(), DbError> {
     let entries = database.query(
-        "SELECT rowid,device,number FROM coven_uploads ORDER BY rowid",
+        "SELECT rowid,device,number FROM _coven_uploads ORDER BY rowid",
         [],
         |row| {
             Ok(Oldest {
@@ -259,7 +259,7 @@ pub(crate) fn prepare(
         let (header, frame, _) = plaintext(database, &entry)?;
         let expected = check_length(database, frame.len(), &header.parts)?;
         let rowid = database.query_row(
-            "INSERT INTO coven_upload_seals(device,number,sealed_bytes) VALUES(?1,?2,zeroblob(?3)) RETURNING rowid",
+            "INSERT INTO _coven_upload_seals(device,number,sealed_bytes) VALUES(?1,?2,zeroblob(?3)) RETURNING rowid",
             params![entry.write.device.0.to_be_bytes().as_slice(), entry.write.number.to_be_bytes().as_slice(), expected as i64],
             |row| row.get(0),
         )?;
@@ -297,7 +297,7 @@ pub(crate) fn check_length(
 pub(crate) fn succeeded(database: &DatabaseConnection, write: WriteId) -> Result<bool, DbError> {
     database.stream_transaction(|database| {
         let exists = database.query_row(
-            "SELECT EXISTS(SELECT 1 FROM coven_uploads WHERE device=?1 AND number=?2)",
+            "SELECT EXISTS(SELECT 1 FROM _coven_uploads WHERE device=?1 AND number=?2)",
             params![
                 write.device.0.to_be_bytes().as_slice(),
                 write.number.to_be_bytes().as_slice()
@@ -313,7 +313,7 @@ pub(crate) fn succeeded(database: &DatabaseConnection, write: WriteId) -> Result
         if entry.sealed.is_none() {
             return Err(DbError::UploadNotSealed { write });
         }
-        database.internal_execute("DELETE FROM coven_uploads WHERE rowid=?1", [entry.rowid])?;
+        database.internal_execute("DELETE FROM _coven_uploads WHERE rowid=?1", [entry.rowid])?;
         Ok(true)
     })
 }
@@ -323,7 +323,7 @@ pub(crate) fn session(
     write: WriteId,
 ) -> Result<Option<Vec<u8>>, DbError> {
     database.query_row(
-        "SELECT (SELECT session FROM coven_write_upload_sessions WHERE device=?1 AND number=?2)",
+        "SELECT (SELECT session FROM _coven_write_upload_sessions WHERE device=?1 AND number=?2)",
         params![
             write.device.0.to_be_bytes().as_slice(),
             write.number.to_be_bytes().as_slice()
@@ -342,7 +342,7 @@ pub(crate) fn keep_session(
             return Err(DbError::UploadNotOldest { write });
         }
         database.internal_execute(
-            "INSERT INTO coven_write_upload_sessions(device,number,session) VALUES(?1,?2,?3) ON CONFLICT(device,number) DO UPDATE SET session=excluded.session",
+            "INSERT INTO _coven_write_upload_sessions(device,number,session) VALUES(?1,?2,?3) ON CONFLICT(device,number) DO UPDATE SET session=excluded.session",
             params![
                 write.device.0.to_be_bytes().as_slice(),
                 write.number.to_be_bytes().as_slice(),

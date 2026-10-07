@@ -75,7 +75,7 @@ impl Database {
     pub fn sync_changes(&self) -> crate::DatabaseChanges {
         let slot = self.inner.read().expect("database lock poisoned");
         let reads = vec![crate::observation::TableRead {
-            table: "coven_uploads".into(),
+            table: "_coven_uploads".into(),
             columns: BTreeSet::new(),
             keys: crate::key_scope::KeyScope::All,
         }];
@@ -231,7 +231,7 @@ impl Database {
     }
 
     /// Dismisses lost values in a write so every device drops them from
-    /// `coven_lost`; a removed row is deleted for good (§8, §20.4).
+    /// `_coven_lost`; a removed row is deleted for good (§8, §20.4).
     pub async fn dismiss_lost_values(&self, values: &[LostValue]) -> CovenResult<()> {
         let database = self.clone();
         let values = values.to_vec();

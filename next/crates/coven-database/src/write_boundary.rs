@@ -60,14 +60,14 @@ impl WriteBoundary {
             ),
         };
         Ok(database.internal_execute(
-                "INSERT INTO coven_applied_boundaries(cause,audience,included) VALUES(?1,?2,?3) ON CONFLICT(cause,audience) DO NOTHING",
+                "INSERT INTO _coven_applied_boundaries(cause,audience,included) VALUES(?1,?2,?3) ON CONFLICT(cause,audience) DO NOTHING",
                 params![encoded(merge_fields::encode_lost_write_cause(&cause))?, audience, encoded(merge_fields::encode_write_positions(included))?],
             )? != 0)
     }
 
     pub(crate) fn load(database: &DatabaseConnection) -> Result<Vec<Self>, DbError> {
         database.query(
-            "SELECT cause,audience,included FROM coven_applied_boundaries ORDER BY id",
+            "SELECT cause,audience,included FROM _coven_applied_boundaries ORDER BY id",
             [],
             |row| {
                 let cause = decoded(merge_fields::decode_lost_write_cause(

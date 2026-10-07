@@ -75,7 +75,7 @@ async fn a_socket_stream_leaves_the_writer_available_and_keeps_its_pending_bytes
         db.file_ref("files", "7").await.unwrap().plaintext_size(),
         12
     );
-    assert_eq!(local_count(&db, "coven_file_removals"), 0);
+    assert_eq!(local_count(&db, "_coven_file_removals"), 0);
     assert_eq!(
         std::fs::read(owned_paths(&store).remove(0)).unwrap(),
         b"socket bytes"
@@ -139,7 +139,7 @@ async fn close_waits_for_staging_and_cancelled_staging_removes_its_bytes() {
         assert_eq!(owned_paths(&store).len(), usize::from(!cancel));
         let sql = rusqlite::Connection::open(store.database_path()).unwrap();
         assert_eq!(
-            sql.query_row("SELECT count(*) FROM coven_file_removals", [], |r| r
+            sql.query_row("SELECT count(*) FROM _coven_file_removals", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
             0

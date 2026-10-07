@@ -30,7 +30,7 @@ def M : Writes Nat Nat Nat where
 def bensPhone : St Nat Nat Nat := [1, 4, 9, 2].foldl (step M) St.init
 def carolsTablet : St Nat Nat Nat := [1, 2, 4, 9].foldl (step M) St.init
 
-/-- Both orders end with Carol's title and one `coven_lost` row: Ben's
+/-- Both orders end with Carol's title and one `_coven_lost` row: Ben's
 "Weekly groceries", replaced by Carol's write 2. -/
 theorem example_8_1 :
     bensPhone.cell 42 0 = some 2 ∧ carolsTablet.cell 42 0 = some 2 ∧
@@ -93,7 +93,7 @@ def I : Inputs Nat Nat where
   claims _ := []
   rank x := x
 
-/-- Todo 7's `coven_lost` row names both rules. -/
+/-- Todo 7's `_coven_lost` row names both rules. -/
 theorem example_8 : (view I).removed 7 = true ∧
     (view I).rules 7 = [Rule.foreignKey, Rule.check] := by decide
 
@@ -197,7 +197,7 @@ def inputs (st : St Nat Nat Nat) : Inputs Nat Nat where
   rank r := r
 
 /-- Every order ends with note 42 tagged "important", and Ben's (44,
-"urgent") removed and recorded in `coven_lost`. -/
+"urgent") removed and recorded in `_coven_lost`. -/
 theorem example_8_5_key :
     (device M inputs [1, 2, 3]).view.shown 21 = true ∧
     (device M inputs [1, 3, 2]).view.shown 21 = true ∧
@@ -428,7 +428,7 @@ def inputs (st : St Nat Nat Nat) : Inputs Nat Nat where
   rank r := r
 
 /-- Notes 7 and 8 are deleted; note 9 is taken out, naming the deleted
-circle, with its title in `coven_lost`, in either arrival order. -/
+circle, with its title in `_coven_lost`, in either arrival order. -/
 theorem example_14_7 :
     (device M inputs [1, 31, 5]).merged.gen 7 = 2 ∧
     (device M inputs [1, 5, 31]).merged.gen 8 = 2 ∧

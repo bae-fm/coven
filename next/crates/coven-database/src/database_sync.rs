@@ -454,12 +454,12 @@ impl Database {
                     device: inner.device,
                     store_log: crate::store_log::positions(&writer)?,
                     uploads_pending: writer.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM coven_uploads)",
+                        "SELECT EXISTS(SELECT 1 FROM _coven_uploads)",
                         [],
                         |r| r.get(0),
                     )?,
                     breaking_version: writer.query_row(
-                        "SELECT publication FROM coven_snapshot_schema WHERE singleton=1",
+                        "SELECT publication FROM _coven_snapshot_schema WHERE singleton=1",
                         [],
                         |r| r.get(0),
                     )?,

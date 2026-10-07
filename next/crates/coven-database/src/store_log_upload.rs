@@ -57,7 +57,7 @@ pub struct LocalStoreLog {
 pub(crate) fn read(database: &DatabaseConnection) -> Result<Option<StoreLogUpload>, DbError> {
     let mut upload = database
         .query(
-            "SELECT record,sealed_bytes FROM coven_store_log_uploads",
+            "SELECT record,sealed_bytes FROM _coven_store_log_uploads",
             [],
             |row| {
                 let Object::StoreLog(entry) = decoded(Object::decode(&row.get::<_, Vec<u8>>(0)?))?
@@ -77,7 +77,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<Option<StoreLogUploa
         .next();
     if let Some(upload) = &mut upload {
         upload.sealed.keys = database.query(
-            "SELECT path,bytes FROM coven_store_log_key_uploads WHERE device=?1 AND number=?2 ORDER BY path",
+            "SELECT path,bytes FROM _coven_store_log_key_uploads WHERE device=?1 AND number=?2 ORDER BY path",
             (upload.entry.position.device.0.to_be_bytes().as_slice(), upload.entry.position.number.to_be_bytes().as_slice()),
             |row| Ok(StoreLogKeyUpload { path: row.get(0)?, bytes: row.get(1)? }),
         )?;
@@ -142,12 +142,12 @@ where
     let (sealed, operation) = seal(&log, &entry)?;
     database.transaction(|database| {
         database.internal_execute(
-            "INSERT INTO coven_store_log_uploads(device,number,record,sealed_bytes) VALUES(?1,?2,?3,?4)",
+            "INSERT INTO _coven_store_log_uploads(device,number,record,sealed_bytes) VALUES(?1,?2,?3,?4)",
             (device.0.to_be_bytes().as_slice(), number.to_be_bytes().as_slice(), &record, &sealed.bytes),
         )?;
         for key in &sealed.keys {
             database.internal_execute(
-                "INSERT INTO coven_store_log_key_uploads(device,number,path,bytes) VALUES(?1,?2,?3,?4)",
+                "INSERT INTO _coven_store_log_key_uploads(device,number,path,bytes) VALUES(?1,?2,?3,?4)",
                 (device.0.to_be_bytes().as_slice(), number.to_be_bytes().as_slice(), &key.path, &key.bytes),
             )?;
         }
@@ -165,7 +165,7 @@ pub(crate) fn retire(
     record: &[u8],
 ) -> Result<(), DbError> {
     for stored in database.query(
-        "SELECT record FROM coven_store_log_uploads WHERE device=?1 AND number=?2",
+        "SELECT record FROM _coven_store_log_uploads WHERE device=?1 AND number=?2",
         (
             id.device.0.to_be_bytes().as_slice(),
             id.number.to_be_bytes().as_slice(),
@@ -177,7 +177,7 @@ pub(crate) fn retire(
         }
     }
     database.internal_execute(
-        "DELETE FROM coven_store_log_uploads WHERE device=?1 AND number=?2",
+        "DELETE FROM _coven_store_log_uploads WHERE device=?1 AND number=?2",
         (
             id.device.0.to_be_bytes().as_slice(),
             id.number.to_be_bytes().as_slice(),

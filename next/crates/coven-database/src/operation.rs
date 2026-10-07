@@ -76,13 +76,13 @@ pub struct OperationUpdate {
 }
 
 pub(crate) fn insert(db: &DatabaseConnection, new: &NewOperation) -> Result<OperationId, DbError> {
-    db.query_row("INSERT INTO coven_operations(kind,last_step,data,started_by) VALUES(?1,0,?2,?3) RETURNING id",
+    db.query_row("INSERT INTO _coven_operations(kind,last_step,data,started_by) VALUES(?1,0,?2,?3) RETURNING id",
         (&new.kind, &new.data, &new.started_by), |r| Ok(OperationId(r.get(0)?)))
 }
 
 pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<OperationRecord>, DbError> {
     db.query(
-        "SELECT id,kind,last_step,data,started_by,failure FROM coven_operations ORDER BY id",
+        "SELECT id,kind,last_step,data,started_by,failure FROM _coven_operations ORDER BY id",
         [],
         |r| {
             Ok(OperationRecord {
@@ -98,7 +98,7 @@ pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<OperationRecord>, DbEr
 }
 
 pub(crate) fn advance(db: &DatabaseConnection, update: &OperationUpdate) -> Result<(), DbError> {
-    let changed = db.internal_execute("UPDATE coven_operations SET last_step=?1,data=?2,failure=NULL WHERE id=?3 AND last_step=?4",
+    let changed = db.internal_execute("UPDATE _coven_operations SET last_step=?1,data=?2,failure=NULL WHERE id=?3 AND last_step=?4",
         (&update.last_step, &update.data, update.id.0, update.previous))?;
     if changed != 1 {
         return Err(DbError::OperationChanged(update.id));

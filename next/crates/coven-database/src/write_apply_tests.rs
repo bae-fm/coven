@@ -32,7 +32,7 @@ async fn download_suppresses_shared_triggers_and_runs_local_triggers_with_applyi
         .await
         .unwrap();
     assert_eq!(result, (1, 1));
-    assert_eq!(count(&b, "coven_uploads"), 0);
+    assert_eq!(count(&b, "_coven_uploads"), 0);
     for db in [a, b] {
         db.close().await.unwrap();
     }
@@ -49,19 +49,19 @@ async fn a_fingerprint_storage_failure_rolls_back_the_download_and_allows_retry(
         .await
         .unwrap();
     let record = records(&a).remove(0);
-    b.inspect_writer(|sql| sql.batch("CREATE TRIGGER fail_hash AFTER INSERT ON coven_fingerprint_leaves BEGIN SELECT RAISE(ABORT,'fingerprint failure'); END").unwrap());
+    b.inspect_writer(|sql| sql.batch("CREATE TRIGGER fail_hash AFTER INSERT ON _coven_fingerprint_leaves BEGIN SELECT RAISE(ABORT,'fingerprint failure'); END").unwrap());
     assert!(
         matches!(b.apply_downloaded(record.clone().into()).await,Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(_,Some(message)))) if message=="fingerprint failure")
     );
     for table in [
         "notes",
-        "coven_rows",
-        "coven_cells",
-        "coven_writes",
-        "coven_positions",
-        "coven_lost",
-        "coven_fingerprint_leaves",
-        "coven_fingerprint_sums",
+        "_coven_rows",
+        "_coven_cells",
+        "_coven_writes",
+        "_coven_positions",
+        "_coven_lost",
+        "_coven_fingerprint_leaves",
+        "_coven_fingerprint_sums",
     ] {
         assert_eq!(count(&b, table), 0, "{table}");
     }
@@ -108,13 +108,13 @@ async fn a_trigger_ending_the_transaction_returns_its_original_sqlite_error() {
     );
     for table in [
         "notes",
-        "coven_rows",
-        "coven_cells",
-        "coven_writes",
-        "coven_positions",
-        "coven_lost",
-        "coven_fingerprint_leaves",
-        "coven_fingerprint_sums",
+        "_coven_rows",
+        "_coven_cells",
+        "_coven_writes",
+        "_coven_positions",
+        "_coven_lost",
+        "_coven_fingerprint_leaves",
+        "_coven_fingerprint_sums",
     ] {
         assert_eq!(count(&b, table), 0, "{table}");
     }
@@ -317,7 +317,7 @@ async fn a_locally_built_invalid_write_still_panics_and_rolls_back() {
     // Simulate broken local numbering: the next authored position repeats an
     // already-applied write, which must remain an internal invariant failure.
     db.inspect_writer(|db| {
-        db.internal_execute("DELETE FROM coven_positions", [])
+        db.internal_execute("DELETE FROM _coven_positions", [])
             .unwrap()
     });
     let before = stored_tables(&db);

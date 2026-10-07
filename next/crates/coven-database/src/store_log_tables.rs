@@ -63,7 +63,7 @@ pub(crate) fn deleted_circles(
 ) -> Result<BTreeSet<CircleId>, DbError> {
     Ok(database
         .query(
-            "SELECT circle FROM coven_circles WHERE deleted=1",
+            "SELECT circle FROM _coven_circles WHERE deleted=1",
             [],
             |row| circle(row.get(0)?),
         )?
@@ -73,7 +73,7 @@ pub(crate) fn deleted_circles(
 
 pub(crate) fn current_store_key(database: &DatabaseConnection) -> Result<Option<KeyId>, DbError> {
     Ok(database
-        .query("SELECT key FROM coven_store", [], |row| {
+        .query("SELECT key FROM _coven_store", [], |row| {
             Ok(KeyId(uuid::Uuid::from_bytes(row.get(0)?)))
         })?
         .into_iter()
@@ -83,7 +83,7 @@ pub(crate) fn current_store_key(database: &DatabaseConnection) -> Result<Option<
 pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
     let mut log = StoreLog::default();
     for (entry, outcome) in database.query(
-        "SELECT record,outcome,beaten_device,beaten_number,author_view FROM coven_store_log",
+        "SELECT record,outcome,beaten_device,beaten_number,author_view FROM _coven_store_log",
         [],
         |row| {
             let Object::StoreLog(entry) = decoded(Object::decode(&row.get::<_, Vec<u8>>(0)?))?
@@ -104,7 +104,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
     let state = &mut log.replay.state;
     state.members = database
         .query(
-            "SELECT member,sealing,role,removed,access FROM coven_members",
+            "SELECT member,sealing,role,removed,access FROM _coven_members",
             [],
             |row| {
                 let role = match row.get::<_, String>(2)?.as_str() {
@@ -135,7 +135,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
         .collect();
     state.devices = database
         .query(
-            "SELECT device,member,name,removed FROM coven_devices",
+            "SELECT device,member,name,removed FROM _coven_devices",
             [],
             |row| {
                 Ok((
@@ -152,7 +152,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
         .collect();
     state.circles = database
         .query(
-            "SELECT circle,name,key,deleted FROM coven_circles",
+            "SELECT circle,name,key,deleted FROM _coven_circles",
             [],
             |row| {
                 Ok((
@@ -169,7 +169,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
         .into_iter()
         .collect();
     for (circle, member) in database.query(
-        "SELECT circle,member FROM coven_circle_members",
+        "SELECT circle,member FROM _coven_circle_members",
         [],
         |row| Ok((circle(row.get(0)?)?, member(row, 1)?)),
     )? {
@@ -181,7 +181,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
             .insert(member);
     }
     state.store = database
-        .query("SELECT id,name,key FROM coven_store", [], |row| {
+        .query("SELECT id,name,key FROM _coven_store", [], |row| {
             let text: String = row.get(0)?;
             let id = uuid::Uuid::parse_str(&text).map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
@@ -199,7 +199,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
     state.resets = database
         .query(
             "SELECT audience,snapshot_device,snapshot_number
-             FROM coven_resets",
+             FROM _coven_resets",
             [],
             |row| {
                 let audience = audience(&row.get::<_, String>(0)?)?;
@@ -225,7 +225,7 @@ fn read_versions<N: FromSql>(
     Ok(database
         .query(
             "SELECT version,snapshot_device,snapshot_number,entry_device,entry_number,audience
-             FROM coven_versions WHERE kind=?1",
+             FROM _coven_versions WHERE kind=?1",
             [kind],
             |row| {
                 let audience = audience(&row.get::<_, String>(5)?)?;
@@ -268,7 +268,7 @@ pub(crate) fn replace(
             },
         };
         database.internal_execute(
-            "UPDATE coven_store_log SET outcome=?1,beaten_device=?2,beaten_number=?3
+            "UPDATE _coven_store_log SET outcome=?1,beaten_device=?2,beaten_number=?3
              WHERE device=?4 AND number=?5",
             params![
                 tag,
@@ -280,13 +280,13 @@ pub(crate) fn replace(
         )?;
     }
     for table in [
-        "coven_circle_members",
-        "coven_devices",
-        "coven_circles",
-        "coven_members",
-        "coven_store",
-        "coven_versions",
-        "coven_resets",
+        "_coven_circle_members",
+        "_coven_devices",
+        "_coven_circles",
+        "_coven_members",
+        "_coven_store",
+        "_coven_versions",
+        "_coven_resets",
     ] {
         database.internal_execute(&format!("DELETE FROM {table}"), [])?;
     }
@@ -297,7 +297,7 @@ pub(crate) fn replace(
             MemberRole::Member => "member",
         };
         database.internal_execute(
-            "INSERT INTO coven_members(member,sealing,role,removed,access) VALUES(?1,?2,?3,?4,?5)",
+            "INSERT INTO _coven_members(member,sealing,role,removed,access) VALUES(?1,?2,?3,?4,?5)",
             params![
                 id.to_bytes().as_slice(),
                 member.sealing.as_bytes().as_slice(),
@@ -309,7 +309,7 @@ pub(crate) fn replace(
     }
     for (id, device) in &state.devices {
         database.internal_execute(
-            "INSERT INTO coven_devices(device,member,name,removed) VALUES(?1,?2,?3,?4)",
+            "INSERT INTO _coven_devices(device,member,name,removed) VALUES(?1,?2,?3,?4)",
             params![
                 id.0.to_be_bytes().as_slice(),
                 device.member.to_bytes().as_slice(),
@@ -320,7 +320,7 @@ pub(crate) fn replace(
     }
     for (id, circle) in &state.circles {
         database.internal_execute(
-            "INSERT INTO coven_circles(circle,name,key,deleted) VALUES(?1,?2,?3,?4)",
+            "INSERT INTO _coven_circles(circle,name,key,deleted) VALUES(?1,?2,?3,?4)",
             params![
                 id.to_string(),
                 circle.name,
@@ -330,14 +330,14 @@ pub(crate) fn replace(
         )?;
         for member in &circle.members {
             database.internal_execute(
-                "INSERT INTO coven_circle_members(circle,member) VALUES(?1,?2)",
+                "INSERT INTO _coven_circle_members(circle,member) VALUES(?1,?2)",
                 (id.to_string(), member.to_bytes().as_slice()),
             )?;
         }
     }
     if let Some(store) = &state.store {
         database.internal_execute(
-            "INSERT INTO coven_store(id,name,key) VALUES(?1,?2,?3)",
+            "INSERT INTO _coven_store(id,name,key) VALUES(?1,?2,?3)",
             (
                 store.id.to_string(),
                 &store.name,
@@ -353,7 +353,7 @@ pub(crate) fn replace(
     }
     for (audience, snapshot) in &state.resets {
         database.internal_execute(
-            "INSERT INTO coven_resets(audience,snapshot_device,snapshot_number)
+            "INSERT INTO _coven_resets(audience,snapshot_device,snapshot_number)
              VALUES(?1,?2,?3)",
             (
                 audience_text(audience),
@@ -372,7 +372,7 @@ fn put_version<N: ToSql>(
     version: &StoreVersion<N>,
 ) -> Result<(), DbError> {
     database.internal_execute(
-        "INSERT INTO coven_versions(kind,audience,version,snapshot_device,snapshot_number,
+        "INSERT INTO _coven_versions(kind,audience,version,snapshot_device,snapshot_number,
                                     entry_device,entry_number)
          VALUES(?1,?2,?3,?4,?5,?6,?7)",
         params![

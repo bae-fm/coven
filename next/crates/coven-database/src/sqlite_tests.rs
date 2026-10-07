@@ -103,7 +103,7 @@ impl DatabaseConnection {
             )
             .unwrap();
         self.batch(&format!(
-            "CREATE TRIGGER coven_crash AFTER {action} ON {table} BEGIN SELECT test_crash(); END"
+            "CREATE TRIGGER _coven_crash AFTER {action} ON {table} BEGIN SELECT test_crash(); END"
         ))
         .unwrap();
     }
@@ -186,7 +186,7 @@ async fn internal_schema_migrations_obey_policy_and_roll_back_on_failure() {
         crate::CovenError::CovenMigration(CovenMigrationError::Pending)
     ));
     let raw = Connection::open(store.database_path()).unwrap();
-    raw.execute_batch("CREATE TABLE coven_columns(sentinel TEXT)")
+    raw.execute_batch("CREATE TABLE _coven_columns(sentinel TEXT)")
         .unwrap();
     drop(raw);
     let error = store.builder(vec![], vec![]).open().await.err().unwrap();
@@ -202,7 +202,7 @@ async fn internal_schema_migrations_obey_policy_and_roll_back_on_failure() {
     );
     assert_eq!(
         raw.query_row(
-            "SELECT count(*) FROM sqlite_schema WHERE name = 'coven_writes'",
+            "SELECT count(*) FROM sqlite_schema WHERE name = '_coven_writes'",
             [],
             |r| r.get::<_, i64>(0)
         )
@@ -436,7 +436,7 @@ async fn materialization_takes_out_synced_cycles_with_foreign_keys_on() {
                 1,
                 "{action} {timing}"
             );
-            assert_eq!(crate::write::tests::count(&db, "coven_lost"), 2);
+            assert_eq!(crate::write::tests::count(&db, "_coven_lost"), 2);
             assert_eq!(crate::write::tests::records(&db).len(), 1);
             db.inspect_writer(|db| {
                 assert!(db
@@ -556,7 +556,7 @@ async fn audience_validation_looks_up_children_only_when_the_parent_moves() {
             let profile=writer.profile_statements();
             let changes=crate::write_record::changes(writer,schema,&before,&after,&stored,&before.changes(&after, captured.keys().cloned()).unwrap(),&BTreeSet::new());
             drop(profile);
-            let lookups=writer.fullscan_statements().into_iter().filter(|(sql,_)| sql.starts_with("SELECT DISTINCT r.table_name,r.key,r.audience FROM coven_references v")).count();
+            let lookups=writer.fullscan_statements().into_iter().filter(|(sql,_)| sql.starts_with("SELECT DISTINCT r.table_name,r.key,r.audience FROM _coven_references v")).count();
             if moving {
                 assert!(matches!(changes,Err(DbError::ReferenceAudience{..})));
                 assert_eq!(lookups,1);

@@ -17,10 +17,10 @@ use coven_format::write_stream::WriteHeaderFrame;
 use coven_foundation::id_source::DeviceId;
 use coven_merge::{Audience, ColumnValue, WriteId};
 
-const COLUMNS: &str = "SELECT c.table_name,c.column_name FROM coven_columns c
-    WHERE EXISTS (SELECT 1 FROM coven_cells v JOIN coven_rows r ON r.id=v.row_id
+const COLUMNS: &str = "SELECT c.table_name,c.column_name FROM _coven_columns c
+    WHERE EXISTS (SELECT 1 FROM _coven_cells v JOIN _coven_rows r ON r.id=v.row_id
                   WHERE v.column_id=c.id AND r.audience=?1)
-       OR EXISTS (SELECT 1 FROM coven_lost l WHERE l.column_id=c.id AND l.audience=?1)";
+       OR EXISTS (SELECT 1 FROM _coven_lost l WHERE l.column_id=c.id AND l.audience=?1)";
 
 /// A snapshot failed to read, encode or reach its plaintext consumer.
 #[derive(Debug, thiserror::Error)]
@@ -55,7 +55,7 @@ pub(crate) fn write<E>(
     })?;
     let writes = crate::download::positions(database)?;
     database.for_each(
-        "SELECT substr(timestamp,9,8),number FROM coven_writes",
+        "SELECT substr(timestamp,9,8),number FROM _coven_writes",
         [],
         |r| {
             let id = WriteId {
@@ -74,7 +74,7 @@ pub(crate) fn write<E>(
         |r| r.get::<_, i64>(0).map(|n| n as u64),
     )?;
     counts[4] = database.query_row(
-        "SELECT count(*) FROM coven_excluded_writes WHERE audience=?1",
+        "SELECT count(*) FROM _coven_excluded_writes WHERE audience=?1",
         [&audience],
         |r| r.get::<_, i64>(0).map(|n| n as u64),
     )?;
@@ -84,7 +84,7 @@ pub(crate) fn write<E>(
         schema_version: database.schema_version()?,
         writes: writes.clone(),
         store_log: EntryPositions(database.query(
-            "SELECT device,max(number) FROM coven_store_log GROUP BY device ORDER BY device",
+            "SELECT device,max(number) FROM _coven_store_log GROUP BY device ORDER BY device",
             [],
             |r| {
                 Ok(EntryId {
@@ -128,7 +128,7 @@ pub(crate) fn write<E>(
         Ok::<_, SnapshotWriteError<E>>(())
     })?;
     database.for_each(
-        "SELECT timestamp,number,had_read FROM coven_writes ORDER BY substr(timestamp,9,8),number",
+        "SELECT timestamp,number,had_read FROM _coven_writes ORDER BY substr(timestamp,9,8),number",
         [],
         |r| {
             let write = read_write(r).map_err(DbError::from)?;
@@ -155,7 +155,7 @@ pub(crate) fn write<E>(
     visit_rows(database, schema, &selected, |stored| {
         let removed = match stored.loss {
             Some(loss) => database.query_row(
-                "SELECT replaced_by FROM coven_lost WHERE id=?1",
+                "SELECT replaced_by FROM _coven_lost WHERE id=?1",
                 [loss],
                 |r| decoded(merge_fields::decode_rules(&r.get::<_, Vec<u8>>(0)?)),
             )?,
@@ -166,7 +166,7 @@ pub(crate) fn write<E>(
             removed,
         }))
     })?;
-    database.for_each("SELECT id,header,cause FROM coven_excluded_writes WHERE audience=?1 ORDER BY device,number", [&audience], |r| {
+    database.for_each("SELECT id,header,cause FROM _coven_excluded_writes WHERE audience=?1 ORDER BY device,number", [&audience], |r| {
         let (ordinal, frame, cause) = (|| Ok::<_, rusqlite::Error>((
             r.get::<_, i64>(0)?,
             decoded(WriteHeaderFrame::decode(&r.get::<_, Vec<u8>>(1)?))?,
@@ -174,7 +174,7 @@ pub(crate) fn write<E>(
         )))().map_err(DbError::from)?;
         let part = &frame.parts[0];
         record(SnapshotRecord::LostWrite(LostWrite { header: frame.header, audience: part.audience.clone(), row_count: part.record_count, cause }))?;
-        database.for_each("SELECT record FROM coven_excluded_rows WHERE write_id=?1 ORDER BY table_name,key", [ordinal], |r| {
+        database.for_each("SELECT record FROM _coven_excluded_rows WHERE write_id=?1 ORDER BY table_name,key", [ordinal], |r| {
             let change = (|| decoded(RowChange::decode(&r.get::<_, Vec<u8>>(0)?)))().map_err(DbError::from)?;
             record(SnapshotRecord::LostWriteRow(LostWriteRow { change }))
         })
@@ -192,7 +192,7 @@ fn visit_rows<E: From<DbError>>(
     mut visit: impl FnMut(crate::merge_store::StoredRow) -> Result<(), E>,
 ) -> Result<(), E> {
     database.for_each(
-        "SELECT DISTINCT table_name,key,audience FROM coven_rows WHERE audience=?1 ORDER BY table_name,key",
+        "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE audience=?1 ORDER BY table_name,key",
         [audience_text(audience)],
         |r| {
             let row = crate::row_queries::read_identity(r).map_err(DbError::from)?;

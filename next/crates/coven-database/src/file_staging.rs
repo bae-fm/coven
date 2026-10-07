@@ -79,8 +79,8 @@ impl FileStaging {
                             let name = FileName::new(inner.ids.new_id().to_string())
                                 .expect("UUID is a portable filename");
                             let recorded = db.internal_execute(
-                                "INSERT INTO coven_file_removals(path) SELECT ?1
-                         WHERE NOT EXISTS(SELECT 1 FROM coven_device_files WHERE path=?1)",
+                                "INSERT INTO _coven_file_removals(path) SELECT ?1
+                         WHERE NOT EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1)",
                                 [name.as_str()],
                             )?;
                             if recorded != 1 {

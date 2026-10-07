@@ -38,7 +38,7 @@ async fn schema_boundaries_are_independent_for_each_audience() {
         .apply_breaking_change(Audience::Store, 2, WritePositions(Vec::new()))
         .await
         .unwrap());
-    assert_eq!(count(&db, "coven_applied_boundaries"), 2);
+    assert_eq!(count(&db, "_coven_applied_boundaries"), 2);
     db.close().await.unwrap();
 }
 
@@ -167,7 +167,7 @@ async fn repeated_boundaries_keep_their_original_coverage_and_application_order(
             .await
             .unwrap());
         db.apply_downloaded(writes[1].clone().into()).await.unwrap();
-        assert_eq!(count(&db, "coven_applied_boundaries"), 2);
+        assert_eq!(count(&db, "_coven_applied_boundaries"), 2);
         assert_eq!(count(&db, "notes"), 0);
         let losses = db.lost_values().await.unwrap();
         assert_eq!(losses.len(), 1);

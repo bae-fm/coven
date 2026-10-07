@@ -155,7 +155,7 @@ impl Database {
                 let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
                 let writer = inner.writer.lock().expect("writer lock poisoned");
                 writer.query_row(
-                    "SELECT NOT EXISTS(SELECT 1 FROM coven_uploads WHERE device=?1 AND number=?2)",
+                    "SELECT NOT EXISTS(SELECT 1 FROM _coven_uploads WHERE device=?1 AND number=?2)",
                     (
                         write.device.0.to_be_bytes().as_slice(),
                         write.number.to_be_bytes().as_slice(),
@@ -223,7 +223,7 @@ impl Database {
                 let writer = inner.writer.lock().expect("writer lock poisoned");
                 writer.transaction(|db| {
                     if db.internal_execute(
-                        "UPDATE coven_operations SET failure=?1 WHERE id=?2",
+                        "UPDATE _coven_operations SET failure=?1 WHERE id=?2",
                         (failure, id.0),
                     )? != 1
                     {
@@ -246,7 +246,7 @@ impl Database {
                 let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
                 let writer = inner.writer.lock().expect("writer lock poisoned");
                 writer.transaction(|db| {
-                    db.internal_execute("DELETE FROM coven_operations WHERE id=?1", [id.0])?;
+                    db.internal_execute("DELETE FROM _coven_operations WHERE id=?1", [id.0])?;
                     Ok(())
                 })
             })
@@ -268,7 +268,7 @@ impl Database {
             let writer = inner.writer.lock().expect("writer lock poisoned");
             writer.transaction(|db| {
                 for key in keys {
-                    db.internal_execute("INSERT INTO coven_access_keys_to_delete(access_key_id,member) VALUES(?1,?2) ON CONFLICT(access_key_id) DO UPDATE SET member=excluded.member WHERE excluded.member IS NOT NULL", (key.access_key_id, key.member.map(|m| m.to_bytes().to_vec())))?;
+                    db.internal_execute("INSERT INTO _coven_access_keys_to_delete(access_key_id,member) VALUES(?1,?2) ON CONFLICT(access_key_id) DO UPDATE SET member=excluded.member WHERE excluded.member IS NOT NULL", (key.access_key_id, key.member.map(|m| m.to_bytes().to_vec())))?;
                 }
                 crate::operation::advance(db, &update)
             })
@@ -284,7 +284,7 @@ impl Database {
                 let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
                 let writer = inner.writer.lock().expect("writer lock poisoned");
                 writer.query(
-                    "SELECT access_key_id,member FROM coven_access_keys_to_delete WHERE confirmed=0 ORDER BY access_key_id",
+                    "SELECT access_key_id,member FROM _coven_access_keys_to_delete WHERE confirmed=0 ORDER BY access_key_id",
                     [],
                     |r| Ok(crate::AccessKeyToDelete {
                         access_key_id: r.get(0)?,
@@ -307,7 +307,7 @@ impl Database {
                 let writer = inner.writer.lock().expect("writer lock poisoned");
                 writer.transaction(|db| {
                     db.internal_execute(
-                        "INSERT INTO coven_access_keys_to_delete(access_key_id,confirmed) VALUES(?1,1) ON CONFLICT(access_key_id) DO UPDATE SET confirmed=1",
+                        "INSERT INTO _coven_access_keys_to_delete(access_key_id,confirmed) VALUES(?1,1) ON CONFLICT(access_key_id) DO UPDATE SET confirmed=1",
                         [key],
                     )?;
                     Ok(())

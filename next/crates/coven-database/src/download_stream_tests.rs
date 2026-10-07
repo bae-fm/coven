@@ -88,8 +88,8 @@ async fn authentication_failure_rolls_back_rows_positions_losses_and_observation
         .await
         .is_err());
     assert_eq!(count(&b, "notes"), 0);
-    assert_eq!(count(&b, "coven_writes"), 0);
-    assert_eq!(count(&b, "coven_positions"), 0);
+    assert_eq!(count(&b, "_coven_writes"), 0);
+    assert_eq!(count(&b, "_coven_positions"), 0);
     assert_eq!(fingerprint(&b, Audience::Store).await, before);
     assert!(
         tokio::time::timeout(Duration::from_millis(20), observed.next())
@@ -129,10 +129,12 @@ async fn streamed_excluded_rows_accumulate_under_one_snapshot_header() {
     .await
     .unwrap();
     assert_eq!(count(&b, "notes"), 0);
-    assert_eq!(count(&b, "coven_lost"), 2);
+    assert_eq!(count(&b, "_coven_lost"), 2);
     b.inspect_writer(|sql| {
         let bytes: Vec<u8> = sql
-            .query_row("SELECT header FROM coven_excluded_writes", [], |r| r.get(0))
+            .query_row("SELECT header FROM _coven_excluded_writes", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         let header = coven_format::write_stream::WriteHeaderFrame::decode(&bytes).unwrap();
         assert_eq!(header.parts[0].record_count, 2);
@@ -444,7 +446,7 @@ async fn retargeting_a_reference_replaces_its_retained_pre_null_value() {
         .await
         .unwrap();
         if statement == "DELETE FROM parents WHERE id='old'" {
-            assert_eq!(count(&b, "coven_reference_values"), 1);
+            assert_eq!(count(&b, "_coven_reference_values"), 1);
         }
     }
     assert_eq!(

@@ -22,26 +22,26 @@ pub(crate) fn begin(
     let audience = audience_text(audience);
     let touched = database
         .query(
-            "SELECT DISTINCT table_name,key,audience FROM coven_rows WHERE audience=?1",
+            "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE audience=?1",
             [&audience],
             crate::row_queries::read_identity,
         )?
         .into_iter()
         .collect();
-    for table in ["coven_references", "coven_cells", "coven_claims"] {
+    for table in ["_coven_references", "_coven_cells", "_coven_claims"] {
         database.internal_execute(
             &format!(
-                "DELETE FROM {table} WHERE row_id IN (SELECT id FROM coven_rows WHERE audience=?1)"
+                "DELETE FROM {table} WHERE row_id IN (SELECT id FROM _coven_rows WHERE audience=?1)"
             ),
             [&audience],
         )?;
     }
     for table in [
-        "coven_rows",
-        "coven_lost",
-        "coven_excluded_writes",
-        "coven_fingerprint_leaves",
-        "coven_fingerprint_sums",
+        "_coven_rows",
+        "_coven_lost",
+        "_coven_excluded_writes",
+        "_coven_fingerprint_leaves",
+        "_coven_fingerprint_sums",
     ] {
         database.internal_execute(
             &format!("DELETE FROM {table} WHERE audience=?1"),
@@ -53,9 +53,9 @@ pub(crate) fn begin(
 }
 
 pub(crate) fn create_tables(database: &DatabaseConnection) -> Result<(), DbError> {
-    database.batch("CREATE TEMP TABLE coven_snapshot_values(audience TEXT NOT NULL,table_name TEXT NOT NULL,key BLOB NOT NULL,columns BLOB NOT NULL,matched INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(audience,table_name,key)) WITHOUT ROWID;
-        CREATE TEMP TABLE coven_snapshot_writes(device BLOB NOT NULL,number BLOB NOT NULL,timestamp BLOB NOT NULL,had_read BLOB NOT NULL,PRIMARY KEY(device,number)) WITHOUT ROWID;
-        CREATE TEMP TABLE coven_snapshot_columns(table_name TEXT NOT NULL,column_name TEXT NOT NULL,PRIMARY KEY(table_name,column_name)) WITHOUT ROWID;")?;
+    database.batch("CREATE TEMP TABLE _coven_snapshot_values(audience TEXT NOT NULL,table_name TEXT NOT NULL,key BLOB NOT NULL,columns BLOB NOT NULL,matched INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(audience,table_name,key)) WITHOUT ROWID;
+        CREATE TEMP TABLE _coven_snapshot_writes(device BLOB NOT NULL,number BLOB NOT NULL,timestamp BLOB NOT NULL,had_read BLOB NOT NULL,PRIMARY KEY(device,number)) WITHOUT ROWID;
+        CREATE TEMP TABLE _coven_snapshot_columns(table_name TEXT NOT NULL,column_name TEXT NOT NULL,PRIMARY KEY(table_name,column_name)) WITHOUT ROWID;")?;
     Ok(())
 }
 
@@ -94,7 +94,7 @@ pub(crate) fn synced(
         });
     }
     database.internal_execute(
-        "INSERT INTO temp.coven_snapshot_values(table_name,key,columns,audience) VALUES(?1,?2,?3,?4)",
+        "INSERT INTO temp._coven_snapshot_values(table_name,key,columns,audience) VALUES(?1,?2,?3,?4)",
         params![
             row.row.table,
             row.row.key,
@@ -145,7 +145,7 @@ pub(crate) fn merged(
         if !table.columns.iter().any(|column| column.name == *name) {
             return Err(invalid("merge record names an unknown column"));
         }
-        let declared: bool=database.query_row("SELECT EXISTS(SELECT 1 FROM temp.coven_snapshot_columns WHERE table_name=?1 AND column_name=?2)",params![row.table,name],|r| r.get(0))?;
+        let declared: bool=database.query_row("SELECT EXISTS(SELECT 1 FROM temp._coven_snapshot_columns WHERE table_name=?1 AND column_name=?2)",params![row.table,name],|r| r.get(0))?;
         if !declared {
             return Err(invalid("merge cell has no column record"));
         }
@@ -218,7 +218,7 @@ pub(crate) fn merged(
     }
     let synced = database
         .query(
-            "SELECT columns FROM temp.coven_snapshot_values WHERE table_name=?1 AND key=?2 AND audience=?3",
+            "SELECT columns FROM temp._coven_snapshot_values WHERE table_name=?1 AND key=?2 AND audience=?3",
             params![row.table, row.key, audience_text(&row.audience)],
             |r| decoded(merge_fields::decode_columns(&r.get::<_, Vec<u8>>(0)?)),
         )?
@@ -246,7 +246,7 @@ pub(crate) fn merged(
             return Err(invalid("synced values disagree with merge defaults"));
         }
         database.internal_execute(
-            "UPDATE temp.coven_snapshot_values SET matched=1 WHERE table_name=?1 AND key=?2 AND audience=?3",
+            "UPDATE temp._coven_snapshot_values SET matched=1 WHERE table_name=?1 AND key=?2 AND audience=?3",
             params![row.table, row.key, audience_text(&row.audience)],
         )?;
     } else if synced.is_some() {
@@ -296,12 +296,12 @@ pub(crate) fn merged(
         |write| ordinal(database, write),
     )?;
     if let Some((generation, columns, setters, rules)) = removed {
-        database.internal_execute("INSERT INTO coven_lost(table_name,key,audience,generation,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,?5,?6,'rules',?7)",params![row.table,row.key,audience_text(&row.audience),generation.to_be_bytes().as_slice(),columns,setters,rules])?;
+        database.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,?5,?6,'rules',?7)",params![row.table,row.key,audience_text(&row.audience),generation.to_be_bytes().as_slice(),columns,setters,rules])?;
     }
     Ok(row)
 }
 
-/// Retain frozen losses in `coven_lost` and the fingerprint without restoring
+/// Retain frozen losses in `_coven_lost` and the fingerprint without restoring
 /// discarded merge records or recomputing their original replacement reasons.
 pub(crate) fn retained(
     database: &DatabaseConnection,
@@ -345,13 +345,13 @@ pub(crate) fn retained(
             )
         }
     };
-    let ordinal=database.query_row("INSERT INTO coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by,retired) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,1) RETURNING id",params![row.table,row.key,audience_text(&row.audience),generation.to_be_bytes().as_slice(),column,value,setter,kind,cause],|r|r.get(0))?;
+    let ordinal=database.query_row("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by,retired) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,1) RETURNING id",params![row.table,row.key,audience_text(&row.audience),generation.to_be_bytes().as_slice(),column,value,setter,kind,cause],|r|r.get(0))?;
     crate::fingerprint::retained(database, ordinal)
 }
 
 pub(crate) fn ordinal(database: &DatabaseConnection, id: WriteId) -> Result<i64, DbError> {
     database.query_row(
-        "SELECT id FROM coven_writes WHERE substr(timestamp,9,8)=?1 AND number=?2",
+        "SELECT id FROM _coven_writes WHERE substr(timestamp,9,8)=?1 AND number=?2",
         params![
             id.device.0.to_be_bytes().as_slice(),
             id.number.to_be_bytes().as_slice()
@@ -362,7 +362,7 @@ pub(crate) fn ordinal(database: &DatabaseConnection, id: WriteId) -> Result<i64,
 
 pub(crate) fn finish(database: &DatabaseConnection) -> Result<(), DbError> {
     let unmatched: bool = database.query_row(
-        "SELECT EXISTS(SELECT 1 FROM temp.coven_snapshot_values WHERE matched=0)",
+        "SELECT EXISTS(SELECT 1 FROM temp._coven_snapshot_values WHERE matched=0)",
         [],
         |r| r.get(0),
     )?;
@@ -377,7 +377,7 @@ pub(crate) fn values(
     row: &RowId,
 ) -> Result<crate::write_rows::AppValues, DbError> {
     database.query_row(
-        "SELECT columns FROM temp.coven_snapshot_values WHERE table_name=?1 AND key=?2 AND audience=?3",
+        "SELECT columns FROM temp._coven_snapshot_values WHERE table_name=?1 AND key=?2 AND audience=?3",
         params![row.table, row.key, audience_text(&row.audience)],
         |r| {
             Ok(
@@ -391,5 +391,5 @@ pub(crate) fn values(
 }
 
 pub(crate) fn drop_tables(database: &DatabaseConnection) -> Result<(), DbError> {
-    database.batch("DROP TABLE temp.coven_snapshot_values; DROP TABLE temp.coven_snapshot_writes; DROP TABLE temp.coven_snapshot_columns")
+    database.batch("DROP TABLE temp._coven_snapshot_values; DROP TABLE temp._coven_snapshot_writes; DROP TABLE temp._coven_snapshot_columns")
 }

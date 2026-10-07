@@ -113,10 +113,10 @@ impl WriteSchema {
 }
 
 pub(crate) fn evaluation_name(table: &TableSchema) -> String {
-    format!("coven_eval_{}", table.name)
+    format!("_coven_eval_{}", table.name)
 }
 pub(crate) fn affinity_name(table: &TableSchema) -> String {
-    format!("coven_affinity_{}", table.name)
+    format!("_coven_affinity_{}", table.name)
 }
 pub(crate) fn ordinal(table: &TableSchema) -> String {
     let mut name = "coven_ordinal".to_owned();

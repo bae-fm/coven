@@ -79,8 +79,8 @@ async fn downloaded_writes_share_merge_and_observation_without_uploading() {
             .unwrap(),
         ApplyOutcome::AlreadyApplied
     );
-    assert_eq!(count(&receiver, "coven_uploads"), 0);
-    assert_eq!(count(&receiver, "coven_writes"), 2);
+    assert_eq!(count(&receiver, "_coven_uploads"), 0);
+    assert_eq!(count(&receiver, "_coven_writes"), 2);
     assert_eq!(
         fingerprint(&source, Audience::Store).await,
         fingerprint(&receiver, Audience::Store).await
@@ -173,7 +173,7 @@ async fn waiting_downloads_do_not_advance_local_timestamps_even_after_reopen() {
             .unwrap(),
         ApplyOutcome::Waiting(WriteWait::Clock(write.header.timestamp))
     );
-    assert_eq!(count(&receiver, "coven_writes"), 0);
+    assert_eq!(count(&receiver, "_coven_writes"), 0);
     receiver.close().await.unwrap();
     let receiver = open(&receiver_store).await;
     sql(&receiver, "INSERT INTO notes VALUES('r','local','')")
@@ -230,7 +230,7 @@ async fn older_schema_inserts_use_new_defaults_without_inventing_cell_setters() 
             .unwrap(),
         ("second".into(), "blue".into())
     );
-    assert_eq!(count(&receiver, "coven_cells"), 3);
+    assert_eq!(count(&receiver, "_coven_cells"), 3);
     assert_eq!(receiver.sync_state(vec![]).await.unwrap().schema_version, 2);
     assert_eq!(source.sync_state(vec![]).await.unwrap().schema_version, 1);
     receiver.close().await.unwrap();
@@ -260,9 +260,9 @@ async fn author_marked_loss_keeps_values_and_cause_without_needing_the_old_table
             .unwrap(),
         ApplyOutcome::Applied
     );
-    assert_eq!(count(&receiver, "coven_rows"), 0);
-    assert_eq!(count(&receiver, "coven_cells"), 0);
-    assert_eq!(count(&receiver, "coven_writes"), 1);
+    assert_eq!(count(&receiver, "_coven_rows"), 0);
+    assert_eq!(count(&receiver, "_coven_cells"), 0);
+    assert_eq!(count(&receiver, "_coven_writes"), 1);
     let losses = receiver.lost_values().await.unwrap();
     assert_eq!(losses.len(), 1);
     assert_eq!(
@@ -276,7 +276,7 @@ async fn author_marked_loss_keeps_values_and_cause_without_needing_the_old_table
         receiver.apply_downloaded(record.into()).await.unwrap(),
         ApplyOutcome::AlreadyApplied
     );
-    assert_eq!(count(&receiver, "coven_lost"), 1);
+    assert_eq!(count(&receiver, "_coven_lost"), 1);
     receiver.close().await.unwrap();
     source.close().await.unwrap();
 }
@@ -308,9 +308,9 @@ async fn local_delete_trigger_refuses_only_that_device_and_rolls_back_apply() {
     assert_eq!(count(&source, "notes"), 0);
     assert_eq!(count(&receiver, "notes"), 1);
     assert_eq!(count(&receiver, "pins"), 1);
-    assert_eq!(count(&receiver, "coven_writes"), 1);
-    assert_eq!(count(&receiver, "coven_lost"), 0);
-    assert_eq!(count(&receiver, "coven_uploads"), 0);
+    assert_eq!(count(&receiver, "_coven_writes"), 1);
+    assert_eq!(count(&receiver, "_coven_lost"), 0);
+    assert_eq!(count(&receiver, "_coven_uploads"), 0);
     assert_eq!(fingerprint(&receiver, Audience::Store).await, before);
     receiver.close().await.unwrap();
     source.close().await.unwrap();
@@ -515,7 +515,7 @@ async fn fingerprints_ignore_other_audience_removal_and_its_descendants() {
         }
         assert_eq!(count(db, "notes"), 1);
         assert_eq!(count(db, "children"), 1);
-        assert_eq!(count(db, "coven_lost"), 2);
+        assert_eq!(count(db, "_coven_lost"), 2);
         for (audience, source) in [(Audience::Circle(ca), &a), (Audience::Circle(cb), &b)] {
             assert_eq!(
                 fingerprint(db, audience.clone()).await,
@@ -568,7 +568,7 @@ async fn deleted_circle_takes_out_late_downloads_and_deletion_rolls_back_on_trig
     );
     assert_eq!(count(&receiver, "notes"), 0);
     assert_eq!(count(&receiver, "children"), 0);
-    assert_eq!(count(&receiver, "coven_lost"), 2);
+    assert_eq!(count(&receiver, "_coven_lost"), 2);
     source.inspect_writer(|sql| sql.batch("CREATE TRIGGER refuse BEFORE DELETE ON notes BEGIN SELECT RAISE(ABORT,'keep circle'); END").unwrap());
     assert!(
         matches!(crate::store_log::tests::delete_circle(&source, circle).await,Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(_,Some(message)))) if message=="keep circle")
@@ -576,7 +576,7 @@ async fn deleted_circle_takes_out_late_downloads_and_deletion_rolls_back_on_trig
     assert_eq!(count(&source, "notes"), 1);
     assert_eq!(count(&source, "children"), 1);
     assert!(!source.store_log().await.unwrap().replay.state.circles[&circle].deleted);
-    assert_eq!(count(&source, "coven_lost"), 0);
+    assert_eq!(count(&source, "_coven_lost"), 0);
     source.inspect_writer(|sql| sql.batch("DROP TRIGGER refuse").unwrap());
     crate::store_log::tests::delete_circle(&source, circle)
         .await
@@ -654,7 +654,7 @@ async fn applied_schema_boundaries_exclude_only_uncovered_older_writes() {
             ApplyOutcome::Applied
         );
         assert_eq!(count(&db, "notes"), i64::from(!lost));
-        assert_eq!(count(&db, "coven_lost"), i64::from(lost));
+        assert_eq!(count(&db, "_coven_lost"), i64::from(lost));
         if lost {
             assert_eq!(
                 db.lost_values().await.unwrap()[0].replaced_by,
@@ -811,7 +811,7 @@ async fn excluded_values_do_not_replace_a_removed_rows_merge_values() {
     let mut excluded = records(&b).remove(1);
     excluded.header.disposition = WriteDisposition::Lost(1);
     receiver.apply_downloaded(excluded.into()).await.unwrap();
-    assert_eq!(count(&receiver, "coven_lost"), 2);
+    assert_eq!(count(&receiver, "_coven_lost"), 2);
     sql(&receiver, "INSERT INTO notes VALUES('b','restored','')")
         .await
         .unwrap();
@@ -913,10 +913,10 @@ async fn migration_download_advances_position_without_rows_or_losses() {
     );
     for table in [
         "notes",
-        "coven_rows",
-        "coven_cells",
-        "coven_lost",
-        "coven_uploads",
+        "_coven_rows",
+        "_coven_cells",
+        "_coven_lost",
+        "_coven_uploads",
     ] {
         assert_eq!(count(&db, table), 0);
     }

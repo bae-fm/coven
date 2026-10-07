@@ -98,7 +98,7 @@ pub(crate) fn read(
         Err(DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows)) => return Ok(None),
         Err(error) => return Err(error),
     };
-    let records = db.query("SELECT path,size,modified_at FROM coven_user_files WHERE table_name=?1 AND key=?2 AND column_name=?3 AND identity=?4", (&key.0,&key.1,&file.id,crate::file_row::identity(file,&values)?), |row| Ok((row.get::<_,Vec<u8>>(0)?,row.get::<_,Vec<u8>>(1)?,row.get::<_,Vec<u8>>(2)?)))?;
+    let records = db.query("SELECT path,size,modified_at FROM _coven_user_files WHERE table_name=?1 AND key=?2 AND column_name=?3 AND identity=?4", (&key.0,&key.1,&file.id,crate::file_row::identity(file,&values)?), |row| Ok((row.get::<_,Vec<u8>>(0)?,row.get::<_,Vec<u8>>(1)?,row.get::<_,Vec<u8>>(2)?)))?;
     records
         .into_iter()
         .next()

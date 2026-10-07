@@ -11,7 +11,7 @@ const RETAINED: &str = "l.retired=1";
 
 pub(crate) fn count(database: &DatabaseConnection, audience: &Audience) -> Result<u64, DbError> {
     database.query_row(
-        &format!("SELECT count(*) FROM coven_lost l WHERE l.audience=?1 AND {RETAINED}"),
+        &format!("SELECT count(*) FROM _coven_lost l WHERE l.audience=?1 AND {RETAINED}"),
         [audience_text(audience)],
         |r| r.get::<_, i64>(0).map(|n| n as u64),
     )
@@ -24,7 +24,7 @@ pub(crate) fn visit<E: From<DbError>>(
 ) -> Result<(), E> {
     database.for_each(
         &format!("SELECT l.table_name,l.key,l.audience,l.generation,c.column_name,l.value,l.set_by,l.replaced_by
-         FROM coven_lost l LEFT JOIN coven_columns c ON c.id=l.column_id
+         FROM _coven_lost l LEFT JOIN _coven_columns c ON c.id=l.column_id
          WHERE l.audience=?1 AND {RETAINED}
          ORDER BY l.table_name,l.key,l.generation,coven_loss_order(c.column_name,l.set_by)"),
         [audience_text(audience)],

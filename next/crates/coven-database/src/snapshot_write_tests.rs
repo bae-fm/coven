@@ -229,8 +229,8 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
         })
         .unwrap();
     assert_eq!(lost_row.change, excluded.parts[0].rows[0]);
-    assert_eq!(count(&source, "coven_uploads"), 5);
-    assert_eq!(count(&receiver, "coven_uploads"), 0);
+    assert_eq!(count(&source, "_coven_uploads"), 5);
+    assert_eq!(count(&receiver, "_coven_uploads"), 0);
     assert_loaded_losses(&receiver, &source).await;
     source.close().await.unwrap();
     receiver.close().await.unwrap();
@@ -695,8 +695,8 @@ async fn excluded_snapshots_keep_only_undismissed_cells_and_rows() {
             record,
             SnapshotRecord::LostWrite(_) | SnapshotRecord::LostWriteRow(_)
         )));
-        assert_eq!(count(&receiver, "coven_excluded_writes"), 0);
-        assert_eq!(count(&receiver, "coven_excluded_rows"), 0);
+        assert_eq!(count(&receiver, "_coven_excluded_writes"), 0);
+        assert_eq!(count(&receiver, "_coven_excluded_rows"), 0);
         assert_loaded_losses(&receiver, &target).await;
         target.close().await.unwrap();
         source.close().await.unwrap();

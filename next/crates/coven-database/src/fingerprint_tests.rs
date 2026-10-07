@@ -22,7 +22,7 @@ async fn changing_one_row_changes_only_one_leaf_and_its_audience_sum() {
     .await
     .unwrap();
     let changed_key = db.inspect_writer(|db| {
-        db.query_row("SELECT key FROM coven_fingerprint_leaves", [], |r| {
+        db.query_row("SELECT key FROM _coven_fingerprint_leaves", [], |r| {
             r.get::<_, Vec<u8>>(0)
         })
         .unwrap()
@@ -35,9 +35,9 @@ async fn changing_one_row_changes_only_one_leaf_and_its_audience_sum() {
     .unwrap();
     db.inspect_writer(|db| {
         db.batch("CREATE TABLE fingerprint_changes(table_name TEXT,audience TEXT,key BLOB)").unwrap();
-        let tables = db.query("SELECT name FROM sqlite_schema WHERE type='table' AND name GLOB 'coven_fingerprint_*'", [], |r| r.get::<_, String>(0)).unwrap();
+        let tables = db.query("SELECT name FROM sqlite_schema WHERE type='table' AND name GLOB '_coven_fingerprint_*'", [], |r| r.get::<_, String>(0)).unwrap();
         for table in tables {
-            let key = if table == "coven_fingerprint_leaves" { "new.key" } else { "NULL" };
+            let key = if table == "_coven_fingerprint_leaves" { "new.key" } else { "NULL" };
             for action in ["INSERT", "UPDATE"] {
                 db.batch(&format!("CREATE TRIGGER audit_{table}_{action} AFTER {action} ON {table} BEGIN INSERT INTO fingerprint_changes VALUES('{table}',new.audience,{key}); END")).unwrap();
             }
@@ -65,14 +65,14 @@ async fn changing_one_row_changes_only_one_leaf_and_its_audience_sum() {
     assert_eq!(
         changes,
         [
-            ("coven_fingerprint_leaves".into(), "store".into()),
-            ("coven_fingerprint_sums".into(), "store".into())
+            ("_coven_fingerprint_leaves".into(), "store".into()),
+            ("_coven_fingerprint_sums".into(), "store".into())
         ]
     );
     db.inspect_writer(|db| {
         let key: Vec<u8> = db
             .query_row(
-                "SELECT key FROM fingerprint_changes WHERE table_name='coven_fingerprint_leaves'",
+                "SELECT key FROM fingerprint_changes WHERE table_name='_coven_fingerprint_leaves'",
                 [],
                 |r| r.get(0),
             )
@@ -81,7 +81,7 @@ async fn changing_one_row_changes_only_one_leaf_and_its_audience_sum() {
         let statements: Vec<_> = db
             .fullscan_statements()
             .into_iter()
-            .filter(|(sql, _)| sql.starts_with("INSERT INTO coven_fingerprint_"))
+            .filter(|(sql, _)| sql.starts_with("INSERT INTO _coven_fingerprint_"))
             .collect();
         assert_eq!(statements.len(), 2, "{statements:?}");
         assert!(
@@ -188,7 +188,7 @@ async fn sums_agree_in_every_order_of_concurrent_and_excluded_writes() {
         // Read the persisted sum itself, as well as the keyed value sync posts.
         let sum = db.inspect_writer(|db| {
             db.query_row(
-                "SELECT sum FROM coven_fingerprint_sums WHERE audience='store'",
+                "SELECT sum FROM _coven_fingerprint_sums WHERE audience='store'",
                 [],
                 |r| r.get::<_, [u8; 32]>(0),
             )

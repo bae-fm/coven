@@ -146,7 +146,7 @@ impl<'a> FileWrite<'a> {
                         });
                     };
                     db.internal_execute(
-                        "INSERT INTO coven_device_files
+                        "INSERT INTO _coven_device_files
                              (table_name,key,column_name,identity,path)
                          VALUES(?1,?2,?3,?4,?5)",
                         (
@@ -207,7 +207,7 @@ impl<'a> FileWrite<'a> {
             Value::Blob(prepared.hash.as_bytes().to_vec()),
         );
         db.internal_execute(
-            "INSERT INTO coven_user_files
+            "INSERT INTO _coven_user_files
                  (table_name,key,column_name,identity,path,size,modified_at)
              VALUES(?1,?2,?3,?4,?5,?6,?7)
              ON CONFLICT(table_name,key,column_name) DO UPDATE SET
@@ -246,7 +246,7 @@ impl<'a> FileWrite<'a> {
         let (key, _) = file_row::lookup(db, self.schema, table, &key)?;
         file_row::set(db, self.schema, &key, None, self.device)?;
         db.internal_execute(
-            "DELETE FROM coven_user_files
+            "DELETE FROM _coven_user_files
              WHERE table_name=?1 AND key=?2 AND column_name=?3",
             (&key.0, &key.1, &file.id),
         )?;
@@ -338,7 +338,7 @@ impl<'a> FileWrite<'a> {
             if new.as_ref().is_none_or(|r| !has_file(r)) {
                 self.forget_owned(key, &file.id)?;
                 db.internal_execute(
-                    "DELETE FROM coven_user_files
+                    "DELETE FROM _coven_user_files
                      WHERE table_name=?1 AND key=?2 AND column_name=?3",
                     (&key.0, &key.1, &file.id),
                 )?;
@@ -366,8 +366,8 @@ impl<'a> FileWrite<'a> {
                 continue;
             };
             let local_table = match file.provenance {
-                Provenance::AppProvided => "coven_device_files",
-                Provenance::UserProvided => "coven_user_files",
+                Provenance::AppProvided => "_coven_device_files",
+                Provenance::UserProvided => "_coven_user_files",
             };
             let identities = db.query(
                 &format!(
@@ -382,7 +382,7 @@ impl<'a> FileWrite<'a> {
             }
             let mut retained = BTreeSet::new();
             for (audience, generation) in db.query(
-                "SELECT audience,max(generation) FROM coven_rows
+                "SELECT audience,max(generation) FROM _coven_rows
                  WHERE table_name=?1 AND key=?2 GROUP BY audience",
                 (&key.0, &key.1),
                 |r| {
@@ -427,7 +427,7 @@ impl<'a> FileWrite<'a> {
                     Provenance::AppProvided => self.forget_owned(&key, &file.id)?,
                     Provenance::UserProvided => {
                         db.internal_execute(
-                            "DELETE FROM coven_user_files
+                            "DELETE FROM _coven_user_files
                              WHERE table_name=?1 AND key=?2 AND column_name=?3",
                             (&key.0, &key.1, &file.id),
                         )?;
@@ -481,7 +481,7 @@ impl<'a> FileWrite<'a> {
             (Provenance::AppProvided, None) => {
                 self.forget_owned(&key, &file.id)?;
                 self.database.internal_execute(
-                    "INSERT INTO coven_device_files(table_name,key,column_name,identity,path) VALUES(?1,?2,?3,?4,?5)",
+                    "INSERT INTO _coven_device_files(table_name,key,column_name,identity,path) VALUES(?1,?2,?3,?4,?5)",
                     (&key.0, &key.1, &file.id, file_row::identity(file, &values)?, name.as_str()),
                 )?;
             }
@@ -495,7 +495,7 @@ impl<'a> FileWrite<'a> {
                     });
                 }
                 self.database.internal_execute(
-                    "INSERT INTO coven_user_files(table_name,key,column_name,identity,path,size,modified_at) VALUES(?1,?2,?3,?4,?5,?6,?7)
+                    "INSERT INTO _coven_user_files(table_name,key,column_name,identity,path,size,modified_at) VALUES(?1,?2,?3,?4,?5,?6,?7)
                      ON CONFLICT(table_name,key,column_name) DO UPDATE SET identity=excluded.identity,path=excluded.path,size=excluded.size,modified_at=excluded.modified_at",
                     rusqlite::params![&key.0, &key.1, &file.id, file_row::identity(file, &values)?, crate::user_file::encode_path(prepared.observed.path()), prepared.observed.size().to_be_bytes().as_slice(), crate::user_file::encode_time(prepared.observed.modified_at())],
                 )?;
@@ -567,17 +567,17 @@ impl<'a> FileWrite<'a> {
         }
         for name in self.obsolete.borrow().iter() {
             if db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM coven_device_files WHERE path=?1)",
+                "SELECT EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1)",
                 [name.as_str()],
                 |r| r.get::<_, bool>(0),
             )? {
                 db.internal_execute(
-                    "DELETE FROM coven_file_removals WHERE path=?1",
+                    "DELETE FROM _coven_file_removals WHERE path=?1",
                     [name.as_str()],
                 )?;
             } else {
                 db.internal_execute(
-                    "INSERT INTO coven_file_removals(path) VALUES(?1) ON CONFLICT DO NOTHING",
+                    "INSERT INTO _coven_file_removals(path) VALUES(?1) ON CONFLICT DO NOTHING",
                     [name.as_str()],
                 )?;
             }
@@ -588,7 +588,7 @@ impl<'a> FileWrite<'a> {
     fn forget_owned(&self, key: &AppKey, column: &str) -> Result<(), DbError> {
         let db = self.database;
         let paths = db.query(
-            "DELETE FROM coven_device_files
+            "DELETE FROM _coven_device_files
              WHERE table_name=?1 AND key=?2 AND column_name=?3 RETURNING path",
             (&key.0, &key.1, column),
             |r| r.get::<_, String>(0),

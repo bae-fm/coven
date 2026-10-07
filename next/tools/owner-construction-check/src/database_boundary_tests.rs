@@ -115,12 +115,12 @@ fn coven_owned_sql_is_rejected_outside_the_database_crate() {
             r#"
             macro_rules! coven_tables {
                 ($visit:ident) => {
-                    $visit!(coven_writes, "key TEXT PRIMARY KEY");
+                    $visit!(_coven_writes, "key TEXT PRIMARY KEY");
                 };
             }
             macro_rules! coven_audience_tables {
                 ($visit:ident) => {
-                    $visit!(coven_row_audiences, "table_name TEXT NOT NULL");
+                    $visit!(_coven_row_audiences, "table_name TEXT NOT NULL");
                 };
             }
             "#,
@@ -129,8 +129,8 @@ fn coven_owned_sql_is_rejected_outside_the_database_crate() {
             "crates/coven-sync/src/leak.rs",
             r#"
             fn leak(database: DatabaseTestSql<'_>) {
-                database.execute("DELETE FROM coven_writes", []).unwrap();
-                database.query("SELECT * FROM coven_row_audiences", [], |_| Ok(())).unwrap();
+                database.execute("DELETE FROM _coven_writes", []).unwrap();
+                database.query("SELECT * FROM _coven_row_audiences", [], |_| Ok(())).unwrap();
             }
             "#,
         ),
@@ -143,8 +143,8 @@ fn coven_owned_sql_is_rejected_outside_the_database_crate() {
     assert_eq!(
         kinds,
         BTreeSet::from([
-            "coven-owned SQL for table coven_row_audiences".to_string(),
-            "coven-owned SQL for table coven_writes".to_string(),
+            "coven-owned SQL for table _coven_row_audiences".to_string(),
+            "coven-owned SQL for table _coven_writes".to_string(),
         ]),
     );
 }
@@ -157,7 +157,7 @@ fn raw_handles_and_coven_sql_inside_macro_calls_are_rejected() {
             r#"
             macro_rules! coven_tables {
                 ($visit:ident) => {
-                    $visit!(coven_writes, "key TEXT PRIMARY KEY");
+                    $visit!(_coven_writes, "key TEXT PRIMARY KEY");
                 };
             }
             "#,
@@ -166,11 +166,11 @@ fn raw_handles_and_coven_sql_inside_macro_calls_are_rejected() {
             "crates/coven-sync/src/leak.rs",
             r#"
             fn leak(sql: SqlWrite<'_>, id: &str) {
-                sql.execute(&format!("DELETE FROM coven_writes WHERE id = '{id}'"), []).unwrap();
+                sql.execute(&format!("DELETE FROM _coven_writes WHERE id = '{id}'"), []).unwrap();
                 let connections = vec![rusqlite::Connection::open_in_memory()];
             }
             macro_rules! wipe {
-                ($sql:expr) => { $sql.execute("DELETE FROM coven_writes", []) };
+                ($sql:expr) => { $sql.execute("DELETE FROM _coven_writes", []) };
             }
             "#,
         ),
@@ -183,9 +183,9 @@ fn raw_handles_and_coven_sql_inside_macro_calls_are_rejected() {
     assert_eq!(
         violations,
         vec![
-            (3, "coven-owned SQL for table coven_writes".to_string()),
+            (3, "coven-owned SQL for table _coven_writes".to_string()),
             (4, "raw SQLite connection".to_string()),
-            (7, "coven-owned SQL for table coven_writes".to_string()),
+            (7, "coven-owned SQL for table _coven_writes".to_string()),
         ],
     );
 }

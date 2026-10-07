@@ -82,7 +82,7 @@ async fn restored_parent_generation_restores_the_written_reference_after_reopen(
             key: coven_format::key::encode_key(&[Value::Text("parent".into())]).unwrap(),
             audience: Audience::Store,
         };
-        let cells = b.inspect_writer(|db| db.query("SELECT c.column_id,c.row_id,c.write_id FROM coven_cells c JOIN coven_rows r ON r.id=c.row_id WHERE r.table_name='parents' AND r.key=?1", [&parent.key], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?))).unwrap());
+        let cells = b.inspect_writer(|db| db.query("SELECT c.column_id,c.row_id,c.write_id FROM _coven_cells c JOIN _coven_rows r ON r.id=c.row_id WHERE r.table_name='parents' AND r.key=?1", [&parent.key], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?))).unwrap());
         sql(&a, "DELETE FROM parents WHERE id='parent'")
             .await
             .unwrap();
@@ -124,10 +124,10 @@ async fn restored_parent_generation_restores_the_written_reference_after_reopen(
         let b = open(&b_store, action, 2).await;
         b.inspect_writer_schema(|db, schema| {
             db.transaction(|db| {
-                db.internal_execute("DELETE FROM coven_rows WHERE table_name='parents' AND key=?1 AND generation=?2", crate::params![parent.key, 2u64.to_be_bytes().as_slice()])?;
+                db.internal_execute("DELETE FROM _coven_rows WHERE table_name='parents' AND key=?1 AND generation=?2", crate::params![parent.key, 2u64.to_be_bytes().as_slice()])?;
                 db.materialize(|db| { db.internal_execute("INSERT INTO parents VALUES('parent')", [])?; Ok(()) })?;
                 for (column,row,write) in cells {
-                    db.internal_execute("INSERT INTO coven_cells(column_id,row_id,write_id) VALUES(?1,?2,?3)", crate::params![column,row,write])?;
+                    db.internal_execute("INSERT INTO _coven_cells(column_id,row_id,write_id) VALUES(?1,?2,?3)", crate::params![column,row,write])?;
                 }
                 let app = crate::write_rows::AppView::after(db,schema);
                 let store = crate::merge_store::MergeStore::new(db,&app);
@@ -139,7 +139,7 @@ async fn restored_parent_generation_restores_the_written_reference_after_reopen(
             Some("PaReNt".into()),
             "{action}, lost={lost}"
         );
-        assert_eq!(crate::write::tests::count(&b, "coven_reference_values"), 0);
+        assert_eq!(crate::write::tests::count(&b, "_coven_reference_values"), 0);
         for db in [a, b] {
             db.close().await.unwrap();
         }
@@ -243,7 +243,7 @@ async fn migrations_freeze_retired_losses_and_preserve_surviving_written_referen
         }
         a.inspect_writer_schema(|db, schema| {
             db.visit(
-                "SELECT replacement_kind,value,read_value FROM coven_lost WHERE retired=1",
+                "SELECT replacement_kind,value,read_value FROM _coven_lost WHERE retired=1",
                 [],
                 |r| {
                     assert!(r.get::<_, Option<Vec<u8>>>(2)?.is_none());
@@ -334,7 +334,7 @@ async fn dropping_a_lost_reference_keeps_its_displayed_value_as_plain_data() {
         ]).open().await.unwrap();
         assert_eq!(reference(&b, true).await, displayed);
         b.inspect_writer(|db| {
-            let bytes: Vec<u8> = db.query_row("SELECT l.value FROM coven_lost l JOIN coven_columns c ON c.id=l.column_id WHERE c.column_name='parent'", [], |r| r.get(0)).unwrap();
+            let bytes: Vec<u8> = db.query_row("SELECT l.value FROM _coven_lost l JOIN _coven_columns c ON c.id=l.column_id WHERE c.column_name='parent'", [], |r| r.get(0)).unwrap();
             let lost = coven_format::merge_fields::decode_column_value(&bytes).unwrap();
             assert!(lost.parents.is_empty());
             assert_eq!(lost.value, displayed.map(Value::Text).unwrap_or(Value::Null));

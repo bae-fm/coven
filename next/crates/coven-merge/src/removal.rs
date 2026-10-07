@@ -118,7 +118,7 @@ pub enum RemovalRow {
     Present {
         /// The row's current odd generation.
         generation: u64,
-        /// The timestamp recorded for this generation in `coven_rows`.
+        /// The timestamp recorded for this generation in `_coven_rows`.
         started: Timestamp,
         /// Foreign-key names and their merged references.
         references: BTreeMap<crate::ForeignKey, Reference>,
@@ -239,7 +239,7 @@ pub struct RemovalResult {
     pub region: BTreeSet<RowId>,
     /// Removed rows with every final rule, plus the once-judged losers' rules.
     pub removed: BTreeMap<RowId, BTreeSet<Rule>>,
-    /// References as they read in both the app's table and `coven_lost`.
+    /// References as they read in both the app's table and `_coven_lost`.
     /// The original cell setters and timestamps are retained in `RowState`.
     pub references: BTreeMap<RowId, BTreeMap<crate::ForeignKey, ReferenceValue>>,
 }

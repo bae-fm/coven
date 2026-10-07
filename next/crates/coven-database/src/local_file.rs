@@ -158,7 +158,7 @@ pub(crate) fn open(
                 coven_format::value::Value::Integer(i64::try_from(reference.version.size).map_err(|_| DbError::DamagedDatabase)?),
                 coven_format::value::Value::Blob(reference.version.hash.as_bytes().to_vec()),
             ]).map_err(DbError::from)?;
-            let names = db.query("SELECT path FROM coven_device_files WHERE table_name=?1 AND key=?2 AND column_name=?3 AND identity=?4", (&reference.row.table, &reference.row.key, &reference.column, identity), |row| row.get::<_, String>(0))?;
+            let names = db.query("SELECT path FROM _coven_device_files WHERE table_name=?1 AND key=?2 AND column_name=?3 AND identity=?4", (&reference.row.table, &reference.row.key, &reference.column, identity), |row| row.get::<_, String>(0))?;
             let name = names.into_iter().next().ok_or(DbError::DamagedDatabase)?;
             let name = FileName::new(name).map_err(|_| DbError::DamagedDatabase)?;
             directory.file(FileArea::AppProvided, &name).open_reader()

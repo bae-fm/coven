@@ -21,7 +21,7 @@ async fn fixed_copy_survives_reopen_without_resealing() {
     db.complete_key_upload("key path".into()).await.unwrap();
     db.inspect_writer(|sql| {
         assert_eq!(
-            sql.query_row("SELECT count(*) FROM coven_key_uploads", [], |r| r
+            sql.query_row("SELECT count(*) FROM _coven_key_uploads", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
             0
@@ -39,14 +39,14 @@ async fn failed_sealing_or_insertion_publishes_no_fixed_copy() {
         ))
         .await
         .is_err());
-    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER reject_copy BEFORE INSERT ON coven_key_uploads BEGIN SELECT RAISE(ABORT,'copy failed'); END;").unwrap());
+    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER reject_copy BEFORE INSERT ON _coven_key_uploads BEGIN SELECT RAISE(ABORT,'copy failed'); END;").unwrap());
     assert!(db
         .prepare_key_upload("key path".into(), || Ok::<_, DbError>(vec![1]))
         .await
         .is_err());
     db.inspect_writer(|sql| {
         assert_eq!(
-            sql.query_row("SELECT count(*) FROM coven_key_uploads", [], |r| r
+            sql.query_row("SELECT count(*) FROM _coven_key_uploads", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
             0
@@ -68,7 +68,7 @@ async fn failed_retirement_keeps_the_original_copy() {
     db.prepare_key_upload("key path".into(), || Ok::<_, DbError>(vec![1]))
         .await
         .unwrap();
-    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER reject_retirement BEFORE DELETE ON coven_key_uploads BEGIN SELECT RAISE(ABORT,'retirement failed'); END;").unwrap());
+    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER reject_retirement BEFORE DELETE ON _coven_key_uploads BEGIN SELECT RAISE(ABORT,'retirement failed'); END;").unwrap());
     assert!(db.complete_key_upload("key path".into()).await.is_err());
     assert_eq!(
         db.prepare_key_upload("key path".into(), || -> Result<Vec<u8>, DbError> {

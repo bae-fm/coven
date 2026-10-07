@@ -13,15 +13,15 @@ use rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) fn begin(database: &DatabaseConnection) -> Result<(), DbError> {
-    database.batch("CREATE TEMP TABLE coven_download_rows(table_name TEXT NOT NULL,key BLOB NOT NULL,audience TEXT NOT NULL,columns BLOB,PRIMARY KEY(table_name,key,audience)) WITHOUT ROWID;
-        CREATE TEMP TABLE coven_download_dismissals(id INTEGER PRIMARY KEY,record BLOB NOT NULL);")
+    database.batch("CREATE TEMP TABLE _coven_download_rows(table_name TEXT NOT NULL,key BLOB NOT NULL,audience TEXT NOT NULL,columns BLOB,PRIMARY KEY(table_name,key,audience)) WITHOUT ROWID;
+        CREATE TEMP TABLE _coven_download_dismissals(id INTEGER PRIMARY KEY,record BLOB NOT NULL);")
 }
 
 pub(crate) fn values(
     database: &DatabaseConnection,
     row: &RowId,
 ) -> Result<Option<crate::write_rows::AppValues>, DbError> {
-    let bytes: Option<Vec<u8>> = database.query_row("SELECT (SELECT columns FROM temp.coven_download_rows WHERE table_name=?1 AND key=?2 AND audience=?3)",params![row.table,row.key,audience_text(&row.audience)],|row|row.get(0))?;
+    let bytes: Option<Vec<u8>> = database.query_row("SELECT (SELECT columns FROM temp._coven_download_rows WHERE table_name=?1 AND key=?2 AND audience=?3)",params![row.table,row.key,audience_text(&row.audience)],|row|row.get(0))?;
     bytes
         .map(|bytes| {
             Ok(merge_fields::decode_columns(&bytes)?
@@ -49,7 +49,7 @@ pub(crate) fn frame(
         WriteFrame::Dismissal(dismissal) => {
             dismissal.validate_past(header)?;
             database.internal_execute(
-                "INSERT INTO temp.coven_download_dismissals(record) VALUES(?1)",
+                "INSERT INTO temp._coven_download_dismissals(record) VALUES(?1)",
                 [encoded(dismissal.encode())?],
             )?;
             return Ok(());
@@ -90,7 +90,7 @@ pub(crate) fn retain_values(
     } else {
         None
     };
-    database.internal_execute("INSERT INTO temp.coven_download_rows(table_name,key,audience,columns) VALUES(?1,?2,?3,?4) ON CONFLICT DO NOTHING",params![row.table,row.key,audience_text(&row.audience),columns])?;
+    database.internal_execute("INSERT INTO temp._coven_download_rows(table_name,key,audience,columns) VALUES(?1,?2,?3,?4) ON CONFLICT DO NOTHING",params![row.table,row.key,audience_text(&row.audience),columns])?;
     Ok(())
 }
 
@@ -102,7 +102,7 @@ pub(crate) fn finish(
     deleted: &BTreeSet<coven_foundation::id_source::CircleId>,
     files: &crate::file_write::FileWrite<'_>,
 ) -> Result<(), DbError> {
-    let touched = database.query("SELECT table_name,key,audience FROM temp.coven_download_rows ORDER BY table_name,key,audience",[],crate::row_queries::read_identity)?.into_iter().collect::<BTreeSet<_>>();
+    let touched = database.query("SELECT table_name,key,audience FROM temp._coven_download_rows ORDER BY table_name,key,audience",[],crate::row_queries::read_identity)?.into_iter().collect::<BTreeSet<_>>();
     if !touched.is_empty() {
         let prior = AppView::after(before, schema).without_row_cache();
         let old_store = MergeStore::from_schema(before, &schema.schema).without_row_cache();
@@ -118,7 +118,7 @@ pub(crate) fn finish(
         files.retain_rows(affected, deleted)?;
     }
     database.visit(
-        "SELECT record FROM temp.coven_download_dismissals ORDER BY id",
+        "SELECT record FROM temp._coven_download_dismissals ORDER BY id",
         [],
         |row| {
             let dismissal = decoded(coven_format::dismissal::Dismissal::decode(
@@ -149,5 +149,6 @@ pub(crate) fn finish(
     };
     let updates = store.apply(&record)?;
     crate::write_commit::commit(database, &record, &store, &updates)?;
-    database.batch("DROP TABLE temp.coven_download_rows; DROP TABLE temp.coven_download_dismissals")
+    database
+        .batch("DROP TABLE temp._coven_download_rows; DROP TABLE temp._coven_download_dismissals")
 }

@@ -6,7 +6,7 @@ use crate::wire::{wire_struct, Decoder, Encoder, Wire};
 use coven_merge::{Cell, ColumnValue, LostKey, LostValue, RowId, Rule, WriteId};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// One `coven_lost` record whose merge history was discarded (§17.1).
+/// One `_coven_lost` record whose merge history was discarded (§17.1).
 /// These values remain losses; loading them never restores a merged row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RetainedLoss {
@@ -29,7 +29,7 @@ pub enum RetainedValues {
     },
     /// A removed row, with each cell's own setter and every removal reason.
     Row {
-        /// The incarnation recorded by `coven_lost`.
+        /// The incarnation recorded by `_coven_lost`.
         generation: u64,
         /// Column names, frozen values and setters; every parent map is empty.
         cells: BTreeMap<String, Cell<Value>>,

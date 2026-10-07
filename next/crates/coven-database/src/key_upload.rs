@@ -14,7 +14,7 @@ where
     // The owner holds its writer lock through lookup, sealing and insertion.
     if let Some(bytes) = database
         .query(
-            "SELECT bytes FROM coven_key_uploads WHERE path=?1",
+            "SELECT bytes FROM _coven_key_uploads WHERE path=?1",
             [path],
             |row| row.get(0),
         )?
@@ -25,14 +25,14 @@ where
     }
     let bytes = seal()?;
     database.internal_execute(
-        "INSERT INTO coven_key_uploads(path,bytes) VALUES(?1,?2)",
+        "INSERT INTO _coven_key_uploads(path,bytes) VALUES(?1,?2)",
         (path, &bytes),
     )?;
     Ok(bytes)
 }
 
 pub(crate) fn complete(database: &DatabaseConnection, path: &str) -> Result<(), DbError> {
-    database.internal_execute("DELETE FROM coven_key_uploads WHERE path=?1", [path])?;
+    database.internal_execute("DELETE FROM _coven_key_uploads WHERE path=?1", [path])?;
     Ok(())
 }
 

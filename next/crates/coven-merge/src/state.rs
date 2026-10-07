@@ -1,7 +1,7 @@
 use crate::{ColumnValue, MergeError, Operation, RowId, Timestamp, Write, WriteId, WriteOracle};
 use std::collections::BTreeMap;
 
-/// The winning write and its value in one column (`coven_cells`).
+/// The winning write and its value in one column (`_coven_cells`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cell<V> {
     /// The write whose timestamp won.
@@ -19,7 +19,7 @@ pub struct LostKey {
     pub write: WriteId,
 }
 
-/// A value replaced only by writes that had not read it (`coven_lost`).
+/// A value replaced only by writes that had not read it (`_coven_lost`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LostValue<V> {
     /// The incarnation in which the value was set.
@@ -190,7 +190,7 @@ pub enum LostChange<V> {
 pub struct RowUpdate<V> {
     /// Commit this state with the write's other row changes.
     pub state: RowState<V>,
-    /// Changes to `coven_lost` for this row only.
+    /// Changes to `_coven_lost` for this row only.
     pub lost_changes: Vec<LostChange<V>>,
 }
 

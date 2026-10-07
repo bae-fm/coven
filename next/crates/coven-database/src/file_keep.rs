@@ -48,7 +48,7 @@ impl FileDatabase {
                         return Err(DbError::DamagedDatabase);
                     }
                     let name = FileName::new(inner.ids.new_id().to_string()).expect("UUID download name");
-                    if db.query_row("SELECT EXISTS(SELECT 1 FROM coven_device_files WHERE path=?1 UNION ALL SELECT 1 FROM coven_file_uploads WHERE path=?1 UNION ALL SELECT 1 FROM coven_cache WHERE path=?1 UNION ALL SELECT 1 FROM coven_file_removals WHERE path=?1)", [name.as_str()], |r| r.get::<_, bool>(0))? {
+                    if db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1 UNION ALL SELECT 1 FROM _coven_file_uploads WHERE path=?1 UNION ALL SELECT 1 FROM _coven_cache WHERE path=?1 UNION ALL SELECT 1 FROM _coven_file_removals WHERE path=?1)", [name.as_str()], |r| r.get::<_, bool>(0))? {
                         return Err(DbError::FileNameReused { name });
                     }
                     let operation = crate::operation::insert(db, &operation)?;
@@ -56,7 +56,7 @@ impl FileDatabase {
                     // Retain the captured content facts even after abandonment releases
                     // the operation; cleanup must recognize an unrecorded rename.
                     let reference = destination.as_ref().map(|_| file.encode()).transpose()?;
-                    db.internal_execute("INSERT INTO coven_file_removals(path,area,destination,reference,operation) VALUES(?1,?2,?3,?4,?5)",
+                    db.internal_execute("INSERT INTO _coven_file_removals(path,area,destination,reference,operation) VALUES(?1,?2,?3,?4,?5)",
                         (name.as_str(), area, destination.as_deref().map(crate::user_file::encode_path), reference, operation.0))?;
                 }
                 Ok(())
@@ -68,7 +68,7 @@ impl FileDatabase {
     pub async fn keep_location(&self, operation: OperationId) -> Result<DownloadLocation, DbError> {
         self.run(move |db, _, _, _| {
             let (name, area, destination) = db.query_row(
-                "SELECT path,area,destination FROM coven_file_removals WHERE operation=?1",
+                "SELECT path,area,destination FROM _coven_file_removals WHERE operation=?1",
                 [operation.0],
                 |r| {
                     Ok((
@@ -143,7 +143,7 @@ impl FileDatabase {
                     |_| {
                         file_ref::validate(&writer, &inner.write_schema, &file)?;
                         let name: String = writer.query_row(
-                            "SELECT path FROM coven_file_removals WHERE operation=?1",
+                            "SELECT path FROM _coven_file_removals WHERE operation=?1",
                             [update.id.0],
                             |r| r.get(0),
                         )?;
@@ -152,7 +152,7 @@ impl FileDatabase {
                         // Publication consumed the user file's temporary sibling. The
                         // accepted original, like an attached owned copy, needs no removal.
                         writer.internal_execute(
-                            "DELETE FROM coven_file_removals WHERE operation=?1",
+                            "DELETE FROM _coven_file_removals WHERE operation=?1",
                             [update.id.0],
                         )?;
                         crate::operation::advance(&writer, &update)
@@ -173,7 +173,7 @@ impl FileDatabase {
             db.transaction(|db| {
                 crate::operation::advance(db, &update)?;
                 db.internal_execute(
-                    "UPDATE coven_file_removals SET operation=NULL WHERE operation=?1",
+                    "UPDATE _coven_file_removals SET operation=NULL WHERE operation=?1",
                     [update.id.0],
                 )?;
                 Ok::<_, DbError>(())

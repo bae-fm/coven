@@ -34,7 +34,7 @@ impl<'a> WriteMetadata<'a> {
         if self.writes.borrow().contains_key(&id) {
             return Ok(());
         }
-        let applied=self.database.query_row("SELECT id,timestamp,had_read FROM coven_writes WHERE substr(timestamp,9,8)=?1 AND number=?2",params![id.device.0.to_be_bytes().as_slice(),id.number.to_be_bytes().as_slice()],|r| Ok(StoredWrite { ordinal:r.get(0)?, record:AppliedWrite { id,timestamp:decoded(merge_fields::decode_timestamp(&r.get::<_,Vec<u8>>(1)?))?,had_read:decoded(merge_fields::decode_write_positions(&r.get::<_,Vec<u8>>(2)?))? } }))?;
+        let applied=self.database.query_row("SELECT id,timestamp,had_read FROM _coven_writes WHERE substr(timestamp,9,8)=?1 AND number=?2",params![id.device.0.to_be_bytes().as_slice(),id.number.to_be_bytes().as_slice()],|r| Ok(StoredWrite { ordinal:r.get(0)?, record:AppliedWrite { id,timestamp:decoded(merge_fields::decode_timestamp(&r.get::<_,Vec<u8>>(1)?))?,had_read:decoded(merge_fields::decode_write_positions(&r.get::<_,Vec<u8>>(2)?))? } }))?;
         self.writes.borrow_mut().insert(id, applied);
         Ok(())
     }
@@ -194,14 +194,14 @@ impl<'a> MergeStore<'a> {
         #[cfg(test)]
         self.database.record_merge_load(&id.table);
         let audience = audience_text(&id.audience);
-        let generations = self.database.query("SELECT r.id,r.generation,w.id,w.timestamp,w.number,w.had_read FROM coven_rows r JOIN coven_writes w ON w.id=r.write_id WHERE r.table_name=?1 AND r.key=?2 AND r.audience=?3 ORDER BY r.generation", params![id.table, id.key, audience], |r| Ok((r.get::<_,i64>(0)?, counter(r.get(1)?), self.metadata.retain(r,2)?)))?;
+        let generations = self.database.query("SELECT r.id,r.generation,w.id,w.timestamp,w.number,w.had_read FROM _coven_rows r JOIN _coven_writes w ON w.id=r.write_id WHERE r.table_name=?1 AND r.key=?2 AND r.audience=?3 ORDER BY r.generation", params![id.table, id.key, audience], |r| Ok((r.get::<_,i64>(0)?, counter(r.get(1)?), self.metadata.retain(r,2)?)))?;
         let current = generations
             .last()
             .map(|(ordinal, generation, _)| (*ordinal, *generation));
         let mut cells = BTreeMap::new();
         let mut loss = None;
         if let Some((ordinal, generation)) = current.filter(|(_, g)| g % 2 == 1) {
-            let retained = self.database.query("SELECT id,value FROM coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4 AND column_id IS NULL AND replacement_kind='rules' AND retired=0", params![id.table,id.key,audience,generation.to_be_bytes().as_slice()], |r| Ok((r.get::<_,i64>(0)?, decoded(merge_fields::decode_columns(&r.get::<_,Vec<u8>>(1)?))?)))?;
+            let retained = self.database.query("SELECT id,value FROM _coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4 AND column_id IS NULL AND replacement_kind='rules' AND retired=0", params![id.table,id.key,audience,generation.to_be_bytes().as_slice()], |r| Ok((r.get::<_,i64>(0)?, decoded(merge_fields::decode_columns(&r.get::<_,Vec<u8>>(1)?))?)))?;
             assert!(
                 retained.len() <= 1,
                 "present row has more than one removal record: {id:?}"
@@ -248,10 +248,10 @@ impl<'a> MergeStore<'a> {
                 values.extend(crate::reference_values::load(self.database, ordinal)?);
             }
             let mut references = BTreeMap::<String, BTreeMap<_, _>>::new();
-            for (column,key,parent) in self.database.query("SELECT c.column_name,f.identity,v.parent_table,v.parent_key,v.parent_audience,v.parent_generation FROM coven_references v JOIN coven_foreign_keys f ON f.id=v.foreign_key_id JOIN coven_columns c ON c.id=v.column_id WHERE v.row_id=?1", [ordinal], |r| Ok((r.get::<_,String>(0)?,decoded(merge_fields::decode_foreign_key(&r.get::<_,Vec<u8>>(1)?))?, coven_merge::Parent { row: RowId { table:r.get(2)?,key:r.get(3)?,audience:crate::write_encoding::audience(&r.get::<_,String>(4)?)? }, generation:counter(r.get(5)?) })))? {
+            for (column,key,parent) in self.database.query("SELECT c.column_name,f.identity,v.parent_table,v.parent_key,v.parent_audience,v.parent_generation FROM _coven_references v JOIN _coven_foreign_keys f ON f.id=v.foreign_key_id JOIN _coven_columns c ON c.id=v.column_id WHERE v.row_id=?1", [ordinal], |r| Ok((r.get::<_,String>(0)?,decoded(merge_fields::decode_foreign_key(&r.get::<_,Vec<u8>>(1)?))?, coven_merge::Parent { row: RowId { table:r.get(2)?,key:r.get(3)?,audience:crate::write_encoding::audience(&r.get::<_,String>(4)?)? }, generation:counter(r.get(5)?) })))? {
                 references.entry(column).or_default().insert(key,parent);
             }
-            for (name, write) in self.database.query("SELECT c.column_name,w.id,w.timestamp,w.number,w.had_read FROM coven_cells v JOIN coven_columns c ON c.id=v.column_id JOIN coven_writes w ON w.id=v.write_id WHERE v.row_id=?1", [ordinal], |r| Ok((r.get::<_,String>(0)?,self.metadata.retain(r,1)?)))? {
+            for (name, write) in self.database.query("SELECT c.column_name,w.id,w.timestamp,w.number,w.had_read FROM _coven_cells v JOIN _coven_columns c ON c.id=v.column_id JOIN _coven_writes w ON w.id=v.write_id WHERE v.row_id=?1", [ordinal], |r| Ok((r.get::<_,String>(0)?,self.metadata.retain(r,1)?)))? {
                 let parents = references.remove(&name).unwrap_or_default();
                 cells.insert(name.clone(), Cell { write, value: ColumnValue { value: values[&name].clone(), parents } });
             }
@@ -259,7 +259,7 @@ impl<'a> MergeStore<'a> {
         }
         let mut lost = BTreeMap::new();
         let mut lost_ids = BTreeMap::new();
-        for (ordinal, generation, column, value, set_by, replaced_by) in self.database.query("SELECT l.id,l.generation,c.column_name,l.value,l.set_by,l.replaced_by FROM coven_lost l JOIN coven_columns c ON c.id=l.column_id WHERE l.table_name=?1 AND l.key=?2 AND l.audience=?3 AND l.column_id IS NOT NULL AND l.replacement_kind='write' AND l.retired=0", params![id.table,id.key,audience], |r| Ok((r.get::<_,i64>(0)?, counter(r.get(1)?),r.get::<_,String>(2)?,decoded(merge_fields::decode_column_value(&r.get::<_,Vec<u8>>(3)?))?,decoded(merge_fields::decode_write_id(&r.get::<_,Vec<u8>>(4)?))?,decoded(merge_fields::decode_write_id(&r.get::<_,Vec<u8>>(5)?))?)))? {
+        for (ordinal, generation, column, value, set_by, replaced_by) in self.database.query("SELECT l.id,l.generation,c.column_name,l.value,l.set_by,l.replaced_by FROM _coven_lost l JOIN _coven_columns c ON c.id=l.column_id WHERE l.table_name=?1 AND l.key=?2 AND l.audience=?3 AND l.column_id IS NOT NULL AND l.replacement_kind='write' AND l.retired=0", params![id.table,id.key,audience], |r| Ok((r.get::<_,i64>(0)?, counter(r.get(1)?),r.get::<_,String>(2)?,decoded(merge_fields::decode_column_value(&r.get::<_,Vec<u8>>(3)?))?,decoded(merge_fields::decode_write_id(&r.get::<_,Vec<u8>>(4)?))?,decoded(merge_fields::decode_write_id(&r.get::<_,Vec<u8>>(5)?))?)))? {
             self.metadata.load(set_by)?;
             self.metadata.load(replaced_by)?;
             let key = LostKey { column, write:set_by };

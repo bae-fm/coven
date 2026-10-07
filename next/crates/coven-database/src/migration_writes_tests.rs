@@ -15,7 +15,7 @@ use std::sync::{
 fn queued_bytes(db: &Database) -> Vec<Vec<u8>> {
     db.inspect_writer(|db| {
         db.query(
-            "SELECT record FROM coven_uploads ORDER BY number",
+            "SELECT record FROM _coven_uploads ORDER BY number",
             [],
             |r| r.get(0),
         )
@@ -189,7 +189,7 @@ async fn no_converter_marks_waiting_records_lost_without_changing_local_losses()
     db.inspect_writer(|db| {
         assert_eq!(
             db.query_row(
-                "SELECT sealed_bytes FROM coven_upload_seals WHERE number=?1",
+                "SELECT sealed_bytes FROM _coven_upload_seals WHERE number=?1",
                 [1u64.to_be_bytes().as_slice()],
                 |r| r.get::<_, Vec<u8>>(0)
             )
@@ -343,7 +343,7 @@ async fn a_sealed_prefix_stays_fixed_while_its_later_update_converts() {
     assert!(!current.cells().contains_key("title"));
     db.inspect_writer(|db| {
         assert_eq!(
-            db.query_row("SELECT sealed_bytes FROM coven_upload_seals", [], |r| r
+            db.query_row("SELECT sealed_bytes FROM _coven_upload_seals", [], |r| r
                 .get::<_, Vec<u8>>(0))
                 .unwrap(),
             sealed

@@ -220,7 +220,7 @@
 - SQLite's session extension records the row changes each write makes.
 - Each write commits, together:
   - its rows, as they now stand;
-  - its *write record*, waiting to be uploaded in coven's `coven_uploads`
+  - its *write record*, waiting to be uploaded in coven's `_coven_uploads`
     table:
     - its row changes: which rows, which columns, old and new values;
     - which device wrote it, its number, its timestamp, and what it had
@@ -263,7 +263,7 @@
     its size.
   - A device downloads and checks it a chunk at a time, and applies it in
     one transaction once every chunk and the signature check out.
-  - Its record waits in `coven_uploads` as one value, and its sealed
+  - Its record waits in `_coven_uploads` as one value, and its sealed
     bytes, once fixed, as one value in a row of their own, so a write's
     limit is SQLite's largest value, 1 GB: a write whose sealed bytes
     would be bigger, which its plaintext's size decides, fails at commit
@@ -283,7 +283,7 @@
 - The first attempt to upload a write encrypts each part with the newest
   key of its audience this device holds, signs the object with the
   device's member key ([§14.4](#144-writes)), and keeps those bytes in
-  `coven_uploads` before sending them; every retry sends the kept bytes.
+  `_coven_uploads` before sending them; every retry sends the kept bytes.
   - E.g. Ana's phone commits a Gifts pin offline, then reads her removal
     from Gifts before uploading it: the pin's part is sealed with the
     Gifts key she held, and counts like any write made before she read
@@ -292,9 +292,9 @@
   before its first attempt, and kept until it is stored: store log
   entries, sealed keys, snapshots and files
   ([§18](#18-operations)).
-- A write record leaves `coven_uploads` ([§5](#5-local-database)) once its upload succeeds.
+- A write record leaves `_coven_uploads` ([§5](#5-local-database)) once its upload succeeds.
 - Each device remembers how far it has applied every device's log, in
-  coven's `coven_positions` table: one row per device, naming its last
+  coven's `_coven_positions` table: one row per device, naming its last
   applied write's number.
 - It also posts those positions to storage at `positions/<device>`,
   replacing its own object when the positions advance.
@@ -467,7 +467,7 @@ Two mechanisms order writes:
   - keys in two audiences: of two present rows with one key, the store's
     row wins over a circle's ([§14.2](#142-moving-rows)).
 - A removal is never stored as a delete.
-  - A removed row is recorded as lost while it is out, and its `coven_lost`
+  - A removed row is recorded as lost while it is out, and its `_coven_lost`
     row keeps its values, which later edits to it update.
   - Coven puts it back from there when the reason goes away, e.g. when the
     reference that made it a parent's child is pointed elsewhere.
@@ -475,8 +475,8 @@ Two mechanisms order writes:
     dismissal write records a delete of the row, so it never comes back,
     and its children follow its foreign keys' delete actions
     ([§8.4](#84-foreign-keys)). A dismissed lost value is dropped from
-    `coven_lost`.
-- A removed row's `coven_lost` row names every rule that holds for it once
+    `_coven_lost`.
+- A removed row's `_coven_lost` row names every rule that holds for it once
   the rules have run, and it comes back only when none holds.
   - E.g. todos need `start <= end`, and todo 7 is in list 3.
   - Ana deletes list 3, while Ben moves todo 7's start past its end.
@@ -522,14 +522,14 @@ Two mechanisms order writes:
 - When a write changes which rows are removed, coven makes the change in
   the app's table with ordinary SQL, which triggers see like any other.
 - Merging uses these internal tables:
-  - `coven_writes`, one row per write the device has applied, naming:
+  - `_coven_writes`, one row per write the device has applied, naming:
     - the write's timestamp, which includes its device;
     - the write's number;
     - the writes it had read.
-  - `coven_columns`, one row per synced column, naming:
+  - `_coven_columns`, one row per synced column, naming:
     - its table;
     - its column.
-  - `coven_rows`, one row per generation of each synced row, naming:
+  - `_coven_rows`, one row per generation of each synced row, naming:
     - its table;
     - its primary key;
     - its audience;
@@ -537,28 +537,28 @@ Two mechanisms order writes:
       re-added;
     - the write that moved it there, or of several concurrent ones, the one
       with the smallest timestamp.
-  - `coven_cells`, one row per synced cell, naming:
-    - its `coven_columns` row;
-    - its `coven_rows` row;
+  - `_coven_cells`, one row per synced cell, naming:
+    - its `_coven_columns` row;
+    - its `_coven_rows` row;
     - the write that set it.
-  - `coven_references`, one row per reference a synced cell holds, naming:
-    - the cell's `coven_rows` and `coven_columns` rows;
-    - its `coven_foreign_keys` row;
+  - `_coven_references`, one row per reference a synced cell holds, naming:
+    - the cell's `_coven_rows` and `_coven_columns` rows;
+    - its `_coven_foreign_keys` row;
     - the parent's table, key, audience, and the generation it points at
       ([§8.4](#84-foreign-keys)).
-  - `coven_foreign_keys`, one row per foreign key of a synced table, naming
+  - `_coven_foreign_keys`, one row per foreign key of a synced table, naming
     it as below.
-  - `coven_claims`, one row per unique value a removed row claims, naming:
-    - the row's `coven_rows` row;
-    - its `coven_constraints` row, which names the unique constraint as
+  - `_coven_claims`, one row per unique value a removed row claims, naming:
+    - the row's `_coven_rows` row;
+    - its `_coven_constraints` row, which names the unique constraint as
       below;
     - the row's audience and the value it claims
       ([§8.5](#85-keys-and-uniqueness)).
   - A present row's displayed values are in the app's table. When a
     reference reads differently from what was written (§8.4),
-    `coven_reference_values` keeps the written value by cell until the
+    `_coven_reference_values` keeps the written value by cell until the
     two agree again.
-  - `coven_lost`, one row per lost value or removed row, naming:
+  - `_coven_lost`, one row per lost value or removed row, naming:
     - the cell, or the row;
     - the value that lost, or every value of the removed row;
     - the write that set each value;
@@ -566,35 +566,35 @@ Two mechanisms order writes:
       the row, or a breaking change or reset its write hadn't read;
     - whether a breaking migration has retired its row from the merge
       ([§17.1](#171-host-application)), keeping the loss as history.
-  - `coven_lost_references`, one row per reference a lost value holds,
-    naming its `coven_lost` row, its `coven_foreign_keys` row and the
+  - `_coven_lost_references`, one row per reference a lost value holds,
+    naming its `_coven_lost` row, its `_coven_foreign_keys` row and the
     parent, so a lost reference reads as null or the default when its
     parent goes ([§8.4](#84-foreign-keys)).
-  - A lost reference keeps its written value too; `coven_lost.read_value`
+  - A lost reference keeps its written value too; `_coven_lost.read_value`
     holds its derived reading while that differs, so displaying a loss
     does not change its merge record.
-- Store-log publication uses `coven_store_log_uploads`: the next local entry's
+- Store-log publication uses `_coven_store_log_uploads`: the next local entry's
   number, canonical plaintext record and complete fixed encrypted, signed bytes.
-  `coven_store_log_key_uploads` holds its prerequisite sealed-key paths and fixed
+  `_coven_store_log_key_uploads` holds its prerequisite sealed-key paths and fixed
   bytes. These contain no unsealed keys. Both commit before the first storage
   attempt; applying the published entry and its replay removes them atomically
   ([§9](#9-members-and-roles), [§18](#18-operations)).
-- `coven_key_uploads` holds the paths and fixed sealed bytes of copies shared
+- `_coven_key_uploads` holds the paths and fixed sealed bytes of copies shared
   after a removal is dropped ([§11](#11-keys)). These copies have no pending
   local entry; their bytes commit before their first attempt and are removed
   after storage accepts a copy or the path is found occupied. No unsealed keys
   are kept here.
 - The store log's effects that the database applies are kept with it:
-  - `coven_circles.deleted` records whether each circle is deleted; local
+  - `_coven_circles.deleted` records whether each circle is deleted; local
     writes, downloaded writes and row recomputation all read that same fact
     ([§9](#9-members-and-roles), [§14.7](#147-deleting-a-circle));
-  - `coven_applied_boundaries` names each breaking change and reset it has
+  - `_coven_applied_boundaries` names each breaking change and reset it has
     applied, with the writes its snapshot included, so a later write is
     judged against it ([§17.1](#171-host-application),
     [§19.3](#193-resetting-a-store)).
 - Fingerprints ([§19.1](#191-noticing)) are kept incrementally:
-  `coven_fingerprint_leaves` holds one hash per row and per lost write in
-  each audience, and `coven_fingerprint_sums` their sum per audience, so
+  `_coven_fingerprint_leaves` holds one hash per row and per lost write in
+  each audience, and `_coven_fingerprint_sums` their sum per audience, so
   a write updates only the hashes of the rows it changed.
 - Note 42 on Ben's phone, after Ana's write 4 and its own write 9:
 
@@ -603,31 +603,31 @@ Two mechanisms order writes:
     id   title               body
     42   "Weekly groceries"  "milk, eggs"
 
-  coven_columns
+  _coven_columns
     id   table   column
     1    notes   title
     2    notes   body
 
-  coven_rows
+  _coven_rows
     id   table   key   audience   generation   write
     3    notes   42    store      1            1
 
-  coven_cells
+  _coven_cells
     column   row   write
     1        3     7
     2        3     1
 
-  coven_writes
+  _coven_writes
     id   timestamp                                number
     1    2026-10-01 09:12:40.511 #0  ana-phone    1
     7    2026-10-02 13:01:00.000 #1  ben-phone    9
   ```
 
 - To find which write set note 42's title:
-  - in `coven_columns`, notes' title is column 1;
-  - in `coven_rows`, notes row 42 is row 3;
-  - in `coven_cells`, column 1 of row 3 points to write row 7;
-  - in `coven_writes`, write row 7 is Ben's phone's write 9, stamped
+  - in `_coven_columns`, notes' title is column 1;
+  - in `_coven_rows`, notes row 42 is row 3;
+  - in `_coven_cells`, column 1 of row 3 points to write row 7;
+  - in `_coven_writes`, write row 7 is Ben's phone's write 9, stamped
     13:01:00.000 #1.
 
 ### 8.1 Example
@@ -652,11 +652,11 @@ Two mechanisms order writes:
   Carol's write 2. The two writes are concurrent, so only their
   timestamps can order them.
 - When a device applies one of these writes to the title, it:
-  - adds the write's row to `coven_writes`;
+  - adds the write's row to `_coven_writes`;
   - compares the write's stamp with the stamp of the title's current write;
   - if the new stamp is larger, sets the title in `notes` and points the
-    title's `coven_cells` row at the new write.
-- Each device has its own `coven_writes`, so one write gets a different row
+    title's `_coven_cells` row at the new write.
+- Each device has its own `_coven_writes`, so one write gets a different row
   on each device.
 - Ana's write 4, for example, is row 6 on Ben's phone and row 14 on Carol's
   tablet.
@@ -665,7 +665,7 @@ Two mechanisms order writes:
 Ben's phone:
 
 <table>
-  <tr><th>Time</th><th>Applies → <code>coven_writes</code> row</th><th>New stamp</th><th>Current stamp</th><th>Wins</th><th>Title</th><th>Title's <code>coven_cells</code> row → <code>coven_writes</code> row</th></tr>
+  <tr><th>Time</th><th>Applies → <code>_coven_writes</code> row</th><th>New stamp</th><th>Current stamp</th><th>Wins</th><th>Title</th><th>Title's <code>_coven_cells</code> row → <code>_coven_writes</code> row</th></tr>
   <tr><td>13:00</td><td>Ana's write 4 → 6</td><td>13:01:00 #0</td><td>12:00:00 #0</td><td>yes</td><td>"Groceries"</td><td>6</td></tr>
   <tr><td>13:00</td><td>its write 9 → 7</td><td>13:01:00 #1</td><td>13:01:00 #0</td><td>yes</td><td>"Weekly groceries"</td><td>7</td></tr>
   <tr><td>14:30</td><td>Carol's write 2 → 8</td><td>14:00:00 #0</td><td>13:01:00 #1</td><td>yes</td><td>"Shopping"</td><td>8</td></tr>
@@ -674,7 +674,7 @@ Ben's phone:
 Carol's tablet:
 
 <table>
-  <tr><th>Time</th><th>Applies → <code>coven_writes</code> row</th><th>New stamp</th><th>Current stamp</th><th>Wins</th><th>Title</th><th>Title's <code>coven_cells</code> row → <code>coven_writes</code> row</th></tr>
+  <tr><th>Time</th><th>Applies → <code>_coven_writes</code> row</th><th>New stamp</th><th>Current stamp</th><th>Wins</th><th>Title</th><th>Title's <code>_coven_cells</code> row → <code>_coven_writes</code> row</th></tr>
   <tr><td colspan="7"><em>12:30 · goes offline</em></td></tr>
   <tr><td>14:00</td><td>its write 2 → 13</td><td>14:00:00 #0</td><td>12:00:00 #0</td><td>yes</td><td>"Shopping"</td><td>13</td></tr>
   <tr><td colspan="7"><em>14:30 · comes back online and uploads its write 2</em></td></tr>
@@ -723,18 +723,18 @@ Carol's tablet:
 
   - On Carol's tablet, Ana's write 4 arrives after Carol's write 2, so
     "Groceries" is lost at first; Ben's write 9, which had read it, then
-    removes its `coven_lost` row.
+    removes its `_coven_lost` row.
   - Every device ends with one row:
 
     ```
-    coven_lost
+    _coven_lost
       cell            lost value          set by          replaced by
       note 42 title   "Weekly groceries"  Ben's write 9   Carol's write 2
     ```
 
 - The app reads lost values through `lost_values`
   ([§20.4](#204-reading)) and can offer to restore one.
-- Every device holds the same `coven_lost` rows, because they follow from
+- Every device holds the same `_coven_lost` rows, because they follow from
   the writes alone.
 
 ### 8.3 Deletes
@@ -742,7 +742,7 @@ Carol's tablet:
 - A row's *generation* counts how many times it has been created, deleted
   or re-added.
   - It is odd while the row exists and even while it is deleted.
-  - Each generation has its own `coven_rows` row, naming the write that
+  - Each generation has its own `_coven_rows` row, naming the write that
     moved the row there.
 - Each row change in a write record carries the generation the row had on
   the device that wrote it:
@@ -754,15 +754,15 @@ Carol's tablet:
   signed with Ben's key
   ```
 
-- Edits to a row's columns change only its `coven_cells` rows, never its
+- Edits to a row's columns change only its `_coven_cells` rows, never its
   generation.
 - Deleting a row removes it from the app's table and moves its generation
   on to the next even number.
 - Re-adding it moves its generation on to the next odd number.
-- Its `coven_cells` rows go with it, but its `coven_rows` rows stay, so
+- Its `_coven_cells` rows go with it, but its `_coven_rows` rows stay, so
   later writes to it still have a generation to lose to.
 - A row change concurrent with a delete of its row loses, and its cells go
-  to `coven_lost`, replaced by the delete.
+  to `_coven_lost`, replaced by the delete.
   - If the change arrives after the delete, coven sees it was made at an
     older generation.
   - If it arrives first, the delete records the cells set by writes it
@@ -773,20 +773,20 @@ Carol's tablet:
   if neither had read it, by the rule of [§8](#8-merge).
   - The first delete to arrive records what it hadn't read.
   - If the second had read one of those values, it removes that value's
-    `coven_lost` row, which needs nothing from the deleted row.
-  - The generation's `coven_rows` row names the delete with the smaller
+    `_coven_lost` row, which needs nothing from the deleted row.
+  - The generation's `_coven_rows` row names the delete with the smaller
     timestamp, whichever arrived first.
   - E.g. Carol retitles note 43, and Ana and Ben, both offline, delete it;
     Ben had read Carol's edit and Ana hadn't.
   - A device that gets Ana's delete first records Carol's title as lost,
-    and removes that `coven_lost` row when Ben's delete arrives.
+    and removes that `_coven_lost` row when Ben's delete arrives.
   - Every device ends with note 43 deleted and Carol's title not lost.
 - E.g. at 16:00 Ana deletes note 43, "Hardware store", while Ben, offline,
   edits its title, and at 17:00 Ana re-adds it.
   - Note 43 on Carol's tablet:
 
     ```
-    coven_rows
+    _coven_rows
       time    id   table   key   audience   generation   write
       14:45   4    notes   43    store      1            16      Ana's write 5 creates it
       16:00   5    notes   43    store      2            19      Ana's write 7 deletes it
@@ -805,7 +805,7 @@ Carol's tablet:
   - Every device records:
 
     ```
-    coven_lost
+    _coven_lost
       cell           lost value                  set by          replaced by
       note 43 title  "Hardware store, Saturday"  Ben's write 11  Ana's write 7
     ```
@@ -875,7 +875,7 @@ Carol's tablet:
   - under set null or set default, it stays, and its reference is null or
     the default, as SQLite would have made it.
   - The reference is null or the default wherever coven keeps it, in the
-    app's table and in `coven_lost`, so every device stores the same value
+    app's table and in `_coven_lost`, so every device stores the same value
     whichever write arrived first.
   - The cell still names the write whose reference won; it only reads as
     null or the default, and later writes to it compete with that write's
@@ -934,7 +934,7 @@ Carol's tablet:
     16:00  Ana deletes "Work"; Ben, offline, puts note 50 in "Work"
     16:10  Carol deletes "Inbox"
     16:30  every device: note 50's folder would be "Inbox", but there is
-           none, so note 50 is taken out and recorded in coven_lost
+           none, so note 50 is taken out and recorded in _coven_lost
     17:00  Carol re-adds "Inbox"; note 50 comes back, in Inbox
     ```
 
@@ -967,7 +967,7 @@ Carol's tablet:
 
   - Both devices end with attachment 9 on note 44, and nothing lost.
   - Had Ben not moved it, both would end with attachment 9 taken out, and
-    the same `coven_lost` row, so the app can offer to put it on another
+    the same `_coven_lost` row, so the app can offer to put it on another
     note.
 - Re-adding a deleted parent doesn't bring back the rows taken out with it
   under cascade, restrict or no action, since they point at its old
@@ -1008,7 +1008,7 @@ Carol's tablet:
     received it, adds "urgent".
   - Ben's insert, made at generation 0, would start generation 1, which
     Ana's delete has ended, so it loses ([§8.3](#83-deletes)), and his
-    cells go to `coven_lost`.
+    cells go to `_coven_lost`.
 
 #### Key changes
 
@@ -1041,7 +1041,7 @@ Carol's tablet:
   ```
 
 - Every device ends with note 42 tagged "important", and note 44's
-  "urgent" tag taken out and recorded in `coven_lost`, so the app can offer
+  "urgent" tag taken out and recorded in `_coven_lost`, so the app can offer
   to tag it again.
 - Two devices changing one key concurrently are two concurrent deletes of
   its generation ([§8.3](#83-deletes)), and both new rows exist after the
@@ -1064,7 +1064,7 @@ Carol's tablet:
   note titled "Groceries".
   - Ana's insert of note 45 is stamped 16:00, and Ben's of note 46 is
     stamped 16:05.
-  - Every device keeps note 45, and records Ben's note 46 in `coven_lost`.
+  - Every device keeps note 45, and records Ben's note 46 in `_coven_lost`.
 - A row's claim dates from the latest write that set any of the
   constraint's columns in it, since that is when the row first held the
   whole value.
@@ -1098,7 +1098,7 @@ Carol's tablet:
   - Note 2's parent is taken out, so note 2 goes too, by cascade.
   - Note 1 doesn't come back: if it did, note 2 would come back with it
     and take it out again.
-  - Both are recorded in `coven_lost`, so the app can offer them back.
+  - Both are recorded in `_coven_lost`, so the app can offer them back.
 
 ### 8.6 CHECK constraints
 
@@ -1122,7 +1122,7 @@ Carol's tablet:
   20.
 - Until the second write arrives, each device's row passes, since it has
   seen only one of them.
-- Every device ends with the row taken out, and the same `coven_lost` row.
+- Every device ends with the row taken out, and the same `_coven_lost` row.
 
 ### 8.7 Triggers
 
@@ -1245,32 +1245,32 @@ Carol's tablet:
     checked by machine.
 - A device applies an entry once it has every entry that entry had read.
 - Each device keeps, in coven's local tables:
-  - `coven_store_log`: every entry it has applied, as downloaded and
+  - `_coven_store_log`: every entry it has applied, as downloaded and
     checked, its immutable author-view checks, and whether the replay kept
     or dropped it;
-  - `coven_store_log_uploads`: locally authored entries with their numbers,
+  - `_coven_store_log_uploads`: locally authored entries with their numbers,
     timestamps, recorded past, and encrypted, signed bytes fixed before upload;
-    `coven_store_log_key_uploads`: their sealed-key objects, uploaded first.
+    `_coven_store_log_key_uploads`: their sealed-key objects, uploaded first.
     An entry receives its number when these rows commit. A pending entry is
     published before another is made, so numbering remains contiguous. Once
     stored, it is applied through the same replay boundary as a download, and
     that transaction deletes its queue rows. If publication or its reply fails,
     the next store-log step sends exactly the recorded bytes;
-  - `coven_key_uploads`: sealed copies for dropped removals, fixed before their
+  - `_coven_key_uploads`: sealed copies for dropped removals, fixed before their
     first attempt independently of the entry queue. Each attempt chooses
     recipients from the latest replay; a queued copy for a member outside that
     audience waits without being sent or resealed. A stored copy, including one
     another device stored first, retires its local queue row. Failure reaches
     the caller, and the next store-log call retries before publishing entries;
-  - the replay's result: `coven_members` (every member a kept entry
+  - the replay's result: `_coven_members` (every member a kept entry
     added, their public keys and role, and whether they were removed),
-    `coven_devices` (every device a kept entry added, its member and name,
-    and whether it was removed), `coven_circles` (every circle a kept
+    `_coven_devices` (every device a kept entry added, its member and name,
+    and whether it was removed), `_coven_circles` (every circle a kept
     entry made, its name and current key's id, and whether it was deleted),
-    `coven_circle_members`, `coven_store` (one row: the store's id, name,
-    and current key's id), `coven_versions` (one row per audience and
+    `_coven_circle_members`, `_coven_store` (one row: the store's id, name,
+    and current key's id), `_coven_versions` (one row per audience and
     schema or format kind: its version, snapshot, and raise entry), and
-    `coven_resets` (each audience's reset snapshot).
+    `_coven_resets` (each audience's reset snapshot).
   - Keys themselves are only ever in key custody
     ([§11](#11-keys)); these tables hold their ids.
   - Removed members and devices stay, since their writes that reached
@@ -1775,7 +1775,7 @@ Carol's tablet:
 - E.g. Ana moves note 42 and its attachments from the store into her
   circle: Ben's devices delete them, and Ana's insert them in the circle.
 - A row's generations ([§8.3](#83-deletes)) are counted per audience, so
-  `coven_rows` has one row per table, key, audience and generation.
+  `_coven_rows` has one row per table, key, audience and generation.
   - A move ends the row in one audience and starts it in the other.
   - E.g. Ana moves note 1 into her circle; Ben, outside it, sees it deleted
     and re-adds note 1 in the store.
@@ -1787,7 +1787,7 @@ Carol's tablet:
   ([§8](#8-merge)):
   - the store's row wins over a circle's;
   - of two circles' rows, the one whose current generation started with
-    the smaller timestamp wins, the write `coven_rows` records for it.
+    the smaller timestamp wins, the write `_coven_rows` records for it.
   - A device in both circles can show a different row for that key than a
     device in one, since each reads different rows.
   - E.g. Ana moves note 1 into her circle; Ben, outside it, sees it deleted
@@ -1916,7 +1916,7 @@ Carol's tablet:
 
   - Notes 7 and 8 are deleted on both devices.
   - Note 9 arrives in a deleted circle, so it is taken out and recorded in
-    `coven_lost`, and Ana's app can offer to put it somewhere else.
+    `_coven_lost`, and Ana's app can offer to put it somewhere else.
 - Devices outside the circle see only the store log entry.
 - The circle's files and log objects go like those of any deleted row
   ([§15](#15-snapshots), [§16.5](#165-uploads-and-deletion)).
@@ -1926,7 +1926,7 @@ Carol's tablet:
 - A snapshot is the synced tables and coven's merge tables
   ([§8](#8-merge)) as one device has them, encrypted, with how far into
   every log they reach.
-  - A device's own `coven_uploads` and `coven_operations` aren't in it, so
+  - A device's own `_coven_uploads` and `_coven_operations` aren't in it, so
     a device that loads one keeps its own.
   - Snapshots live at `snapshots/<audience>/<device>/<n>`, where the
     audience is `store` or a circle's id.
@@ -1995,7 +1995,7 @@ Carol's tablet:
 - Losses kept after their row's merge records are discarded (§17.1) have
   their own snapshot records, ordered by row, retaining each cell's frozen
   value, setter and replacement. Loading preserves those losses in
-  `coven_lost`, and they count in its audience's fingerprint (§19.1).
+  `_coven_lost`, and they count in its audience's fingerprint (§19.1).
 - Each device posts its positions only after uploading its own earlier
   writes.
 - A log object is deleted once snapshots cover every part of it, and either
@@ -2023,7 +2023,7 @@ Carol's tablet:
   instead, like a new device.
   - A missing write that a snapshot covers counts as deleted, not late
     ([§19.1](#191-noticing)).
-  - Its own writes still waiting in `coven_uploads` keep their numbers, and
+  - Its own writes still waiting in `_coven_uploads` keep their numbers, and
     it uploads them after.
   - Every device then applies them like any late write, after their prior
     reads are covered by the snapshot or applied from the logs.
@@ -2033,13 +2033,13 @@ Carol's tablet:
     ```
     1. it loads the latest snapshot, which reaches ana-old-phone up to 30
     2. it downloads the writes after the snapshot
-    3. it uploads 31 to 33 from coven_uploads
+    3. it uploads 31 to 33 from _coven_uploads
     4. every device applies 31 to 33 under the rules of §8
     ```
 
   - An edit to a cell changed since loses on its stamp, and an edit to a
     row deleted since loses on its generation.
-- A deleted row's `coven_rows` row stays for good, at one small row each,
+- A deleted row's `_coven_rows` row stays for good, at one small row each,
   so a write made at its old generation loses however late it arrives.
 
 ## 16. Files
@@ -2232,11 +2232,11 @@ Carol's tablet:
 
 - Coven keeps, in its local tables, what only this device knows about
   files; none of it syncs:
-  - `coven_user_files`: each user-provided file's path, size and
+  - `_coven_user_files`: each user-provided file's path, size and
     modification time, by its row and column;
-  - `coven_device_files`: each app-provided file this device keeps, and
+  - `_coven_device_files`: each app-provided file this device keeps, and
     where in coven's own folder;
-  - `coven_file_uploads`: the upload queue, each file's attempts, last
+  - `_coven_file_uploads`: the upload queue, each file's attempts, last
     failure category, its fixed encrypted file and independent id and key,
     and its provider upload session while one is in progress;
     - Provider sessions belong to this queue; file upload operations do not
@@ -2246,10 +2246,10 @@ Carol's tablet:
       operating-system or provider error from text.
     - A stored upload whose row changed remains recorded as unused until
       the uploaded-file deletion rules permit removing it;
-  - `coven_cache`: each cached file or chunk, its namespace, size, when it
+  - `_coven_cache`: each cached file or chunk, its namespace, size, when it
     was last read, and whether it is pinned;
-  - `coven_cache_budgets`: each namespace's budget;
-  - `coven_file_removals`: unused local copies waiting to be deleted, and
+  - `_coven_cache_budgets`: each namespace's budget;
+  - `_coven_file_removals`: unused local copies waiting to be deleted, and
     names reserved by unfinished downloads. A download records its operation
     id and, for a user-provided file, its destination, temporary sibling and
     captured file reference. Publication consumes the sibling; the write
@@ -2263,10 +2263,10 @@ Carol's tablet:
   so a crash never leaves a table naming bytes that aren't there.
 - Nor bytes that no table names:
   - before writing new bytes, coven records their name in
-    `coven_file_removals`, and the write that attaches them takes it out;
+    `_coven_file_removals`, and the write that attaches them takes it out;
   - the write that lets bytes go records them there in its transaction;
   - after a write commits or fails, and when the database opens, coven
-    deletes the unused bytes `coven_file_removals` names, then their records.
+    deletes the unused bytes `_coven_file_removals` names, then their records.
     Names still owned by unfinished operations are retained. A stale or
     discarded download releases its names for deletion in the transaction
     recording that decision.
@@ -2361,15 +2361,15 @@ Carol's tablet:
 - An update that runs several breaking migrations makes one migration
   write, and raises the store once, to the newest version.
 - Rows a removal rule had taken out before a breaking change stay out for
-  good: they stay in `coven_lost`, and coven forgets their other merge
+  good: they stay in `_coven_lost`, and coven forgets their other merge
   records.
   - Their values stay as they read at the migration: a reference whose
     foreign key the migration drops keeps the null or default it showed
     then, as a plain value ([§8.4](#84-foreign-keys)).
 - A device that updates runs the migration's second part on its own
-  writes still waiting in `coven_uploads`, then uploads them.
+  writes still waiting in `_coven_uploads`, then uploads them.
   - Without a second part, it uploads them marked lost, and every device
-    records them in `coven_lost` without applying them.
+    records them in `_coven_lost` without applying them.
   - A lost write names the breaking change by the schema version it raised
     the store to, which the device knows when it migrates, before any
     store log entry for it exists.
@@ -2379,7 +2379,7 @@ Carol's tablet:
     edits a title; when Ben updates, his edit becomes a `name` edit, and
     reaches every device.
 - Writes already uploaded in the old version that the breaking change
-  hadn't read are lost: every device records them in `coven_lost`, and
+  hadn't read are lost: every device records them in `_coven_lost`, and
   none applies them.
 - This happens only to a write whose upload was tried before its device
   updated: one uploaded just as another device made the breaking change,
@@ -2391,7 +2391,15 @@ Carol's tablet:
 
 ### 17.2 Coven's schema
 
-- Coven's own tables in the local database, such as `coven_rows`, are
+- Coven's own tables, indexes, triggers and views, including temporary
+  objects, use the `_coven_` prefix. SQLite-generated constraint indexes
+  keep SQLite's `sqlite_autoindex_` prefix before the table name.
+- App SQL objects and synced-table declarations may not use `_coven_` or
+  `coven_`, compared without regard to ASCII case. Reserving both prefixes
+  keeps app access restricted to app objects; coven creates its own objects
+  only under `_coven_`. SQL functions such as `coven_applying()` keep their
+  names.
+- Coven's own tables in the local database, such as `_coven_rows`, are
   local only, and a newer coven migrates them in place when the app starts.
 - What coven writes to storage has a *format*: write records, store log
   entries, snapshots, paths, every byte of it given in
@@ -2419,7 +2427,7 @@ Carol's tablet:
 - Coven keeps every unfinished operation in one local table:
 
   ```sql
-  CREATE TABLE coven_operations (
+  CREATE TABLE _coven_operations (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     kind        TEXT NOT NULL,     -- 'remove member', 'reload from snapshot', …
     last_step   INTEGER NOT NULL,  -- 0 before the first step completes
@@ -2447,7 +2455,7 @@ Carol's tablet:
   ```
   BEGIN
     ALTER TABLE notes RENAME COLUMN title TO name
-    UPDATE coven_operations SET last_step = 1 WHERE id = 3
+    UPDATE _coven_operations SET last_step = 1 WHERE id = 3
   COMMIT
   ```
 
@@ -2511,7 +2519,7 @@ Carol's tablet:
   2. replace the synced tables and coven's merge tables
      ([§8](#8-merge)) with the snapshots, apply those writes, and re-apply
      the waiting writes, in one transaction;
-  3. migrate the writes waiting in `coven_uploads`, if the snapshot's
+  3. migrate the writes waiting in `_coven_uploads`, if the snapshot's
      version is newer ([§17](#17-schema-changes)).
 - Writing a snapshot ([§15](#15-snapshots)):
   1. write it, sealed, to a temporary file, and record the file;
@@ -2550,7 +2558,7 @@ Carol's tablet:
 - Ana removes Ben, and her phone crashes after uploading the sealed keys:
 
   ```
-  coven_operations
+  _coven_operations
     kind            last step   data              started by
     remove member   2           new store key     Ana's "remove Ben"
 
@@ -2608,12 +2616,12 @@ Carol's tablet:
     - the rows the app sees;
     - each row's generations;
     - which write set each cell, named by device and number;
-    - its `coven_lost` rows;
+    - its `_coven_lost` rows;
   - all computed as if the rule for a key present in two audiences didn't
     exist, since which row it shows depends on which circles a device
     reads ([§14.2](#142-moving-rows));
   - and nothing else that differs between devices by design, such as
-    `coven_uploads`, `coven_operations`, or local row ids;
+    `_coven_uploads`, `_coven_operations`, or local row ids;
   - it is keyed with a key derived from the store's or circle's key, so the
     provider learns nothing from it;
   - each device posts its fingerprints with its positions ([§6](#6-syncing-writes));
@@ -2643,7 +2651,7 @@ Carol's tablet:
     numbers were already used. Readable waiting writes keep their original
     identities. Reloading in place keeps the device id.
   - A device that opens but disagrees with the others reloads in place.
-- Its own writes still waiting in `coven_uploads`, those it can still
+- Its own writes still waiting in `_coven_uploads`, those it can still
   read, are uploaded after, and merge like any late write.
   - If recovering also updates the app schema, their unattempted writes
     are converted or marked lost by the migration's second part, just as
@@ -3926,11 +3934,11 @@ impl CovenHandle {
         F: Fn(&Q, SqlReadContext<'_>) -> CovenResult<R> + Send + Sync + 'static,
         R: Send + 'static;
 
-    /// Every lost value and removed row, as `coven_lost` holds them (§8).
+    /// Every lost value and removed row, as `_coven_lost` holds them (§8).
     pub async fn lost_values(&self) -> CovenResult<Vec<LostValue>>;
 
     /// Dismisses lost values the app has dealt with, in a write, so every
-    /// device drops them from `coven_lost`; a removed row is deleted for
+    /// device drops them from `_coven_lost`; a removed row is deleted for
     /// good, and never comes back (§8).
     pub async fn dismiss_lost_values(&self, values: &[LostValue]) -> CovenResult<()>;
 
@@ -3979,7 +3987,7 @@ impl<Q: Clone + PartialEq> LiveQueryRequests<Q> {
     pub fn set(&self, request: Q) -> Result<LiveQueryRevision, LiveQueryClosed>;
 }
 
-/// One `coven_lost` row (§8).
+/// One `_coven_lost` row (§8).
 pub struct LostValue {
     pub table: String,
     pub key: RowKey,
@@ -4107,7 +4115,7 @@ while let Ok(values) = lost.next().await {
     failures remain visible through their file status and operation reports.
   - A fingerprint disagreement is reported without an automatic reload (§19.1).
 - A device that isn't connected still reads and writes
-  ([§3](#3-guarantees)); its writes wait in `coven_uploads`.
+  ([§3](#3-guarantees)); its writes wait in `_coven_uploads`.
 
 ```rust
 /// The provider holding a store (§4).
@@ -4612,7 +4620,7 @@ pub struct AccessKeyToDelete {
     pub member: Option<MemberId>,
 }
 
-// These notices live in the device-local coven_access_keys_to_delete table,
+// These notices live in the device-local _coven_access_keys_to_delete table,
 // outside the operation journal. confirm_access_key_deleted marks the key as
 // confirmed; reports omit it, and later records cannot make it pending again.
 
@@ -4676,7 +4684,7 @@ loop {
 
 ### 20.6 Operations and recovery
 
-- Every unfinished operation is a row in `coven_operations`
+- Every unfinished operation is a row in `_coven_operations`
   ([§18](#18-operations)).
 - A failed step goes to the app call that started its operation while
   that call waits; otherwise it is reported in the sync status.
@@ -4717,7 +4725,7 @@ pub enum OperationKind {
 
 /// Who initiated an operation (§18).
 pub enum StartedBy {
-    /// The app call, named as in coven_operations.started_by.
+    /// The app call, named as in _coven_operations.started_by.
     AppCall(String),
     /// Coven's own running work.
     Coven,
@@ -4747,7 +4755,7 @@ impl CovenHandle {
     pub async fn reset_store(&self) -> Result<(), SyncError>;
 }
 
-/// One `coven_operations` row whose step failed for good.
+/// One `_coven_operations` row whose step failed for good.
 pub struct BlockedOperation {
     pub id: OperationId,
     /// Such as removing a member, or reloading from a snapshot.
@@ -5755,7 +5763,7 @@ pub struct CircleMemberInfo {
   transaction, so a failure leaves the schema as it was.
 - A migration has two parts ([§17.1](#171-host-application)): the first
   changes the database, and the optional second changes writes made in the
-  older version that still wait in `coven_uploads`.
+  older version that still wait in `_coven_uploads`.
   - Each breaking migration converts them in version order, keeping the
     device, write number, timestamp and causal positions. Tried uploads keep
     their exact bytes. Additions run no conversion.
@@ -6022,21 +6030,21 @@ merge later.
 - Problem: two offline devices can each insert a row with the same value.
 - Status: the row whose write has the smaller timestamp keeps the value;
   the other row is taken out while it conflicts, and recorded in
-  `coven_lost` ([§8.5](#85-keys-and-uniqueness)).
+  `_coven_lost` ([§8.5](#85-keys-and-uniqueness)).
 
 ### A.4 Restrict and no-action foreign keys
 
 - Problem: a device can delete a parent while another adds a child it
   hasn't seen.
 - Status: the child is taken out while its parent is gone, and recorded in
-  `coven_lost` ([§8.4](#84-foreign-keys)).
+  `_coven_lost` ([§8.4](#84-foreign-keys)).
 
 ### A.5 CHECK constraints
 
 - Problem: two concurrent edits that each pass can merge into a row that
   fails, such as one device setting `start` and another `end`.
 - Status: a row that fails after a merge is taken out until it passes, and
-  recorded in `coven_lost` ([§8.6](#86-check-constraints)).
+  recorded in `_coven_lost` ([§8.6](#86-check-constraints)).
 
 ### A.6 Triggers that write synced tables
 

@@ -178,7 +178,7 @@ impl FileDatabase {
         self.run(move |db, _, _, _| {
             db.transaction(|db| {
                 changed(db.internal_execute(
-                    "UPDATE coven_file_uploads SET last_attempt_at=?2 WHERE id=?1",
+                    "UPDATE _coven_file_uploads SET last_attempt_at=?2 WHERE id=?1",
                     (id, crate::user_file::encode_time(now)),
                 )?)
             })
@@ -191,7 +191,7 @@ impl FileDatabase {
         self.run(move |db, _, _, _| {
             db.transaction(|db| {
                 changed(db.internal_execute(
-                    "UPDATE coven_file_uploads SET attempts=attempts+1,failure=?2 WHERE id=?1",
+                    "UPDATE _coven_file_uploads SET attempts=attempts+1,failure=?2 WHERE id=?1",
                     (id, failure.as_bytes()),
                 )?)
             })
@@ -204,7 +204,7 @@ impl FileDatabase {
         self.run(move |db, _, _, _| {
             db.transaction(|db| {
                 changed(db.internal_execute(
-                    "UPDATE coven_file_uploads SET session=?2 WHERE id=?1 AND fixed IS NOT NULL",
+                    "UPDATE _coven_file_uploads SET session=?2 WHERE id=?1 AND fixed IS NOT NULL",
                     (id, session.as_bytes()),
                 )?)
             })
@@ -217,7 +217,7 @@ impl FileDatabase {
         self.run(move |db, _, _, _| {
             db.transaction(|db| {
                 changed(db.internal_execute(
-                    "UPDATE coven_file_uploads SET stored=1,session=NULL WHERE id=?1 AND fixed IS NOT NULL",
+                    "UPDATE _coven_file_uploads SET stored=1,session=NULL WHERE id=?1 AND fixed IS NOT NULL",
                     [id],
                 )?)
             })
@@ -260,7 +260,7 @@ impl FileDatabase {
                     &files,
                     |sql| {
                         if !writer.query_row(
-                            "SELECT stored FROM coven_file_uploads WHERE id=?1",
+                            "SELECT stored FROM _coven_file_uploads WHERE id=?1",
                             [id],
                             |r| r.get::<_, bool>(0),
                         )? {
@@ -269,7 +269,7 @@ impl FileDatabase {
                         match file_ref::validate(&writer, &inner.write_schema, &file) {
                             Err(DbError::FileRefChanged { .. }) => {
                                 writer.internal_execute(
-                                    "UPDATE coven_file_uploads SET unused=1 WHERE id=?1",
+                                    "UPDATE _coven_file_uploads SET unused=1 WHERE id=?1",
                                     [id],
                                 )?;
                                 Ok(false)
@@ -278,12 +278,12 @@ impl FileDatabase {
                             Ok(()) => {
                                 sql.mark_uploaded(&file, &location)?;
                                 writer.internal_execute(
-                                    "INSERT INTO coven_file_removals(path)
-                                     SELECT path FROM coven_file_uploads WHERE id=?1",
+                                    "INSERT INTO _coven_file_removals(path)
+                                     SELECT path FROM _coven_file_uploads WHERE id=?1",
                                     [id],
                                 )?;
                                 writer.internal_execute(
-                                    "DELETE FROM coven_file_uploads WHERE id=?1",
+                                    "DELETE FROM _coven_file_uploads WHERE id=?1",
                                     [id],
                                 )?;
                                 Ok(true)
@@ -328,9 +328,9 @@ impl FileDatabase {
                     writer.transaction(|db| {
                         if db.query_row(
                             "SELECT EXISTS(
-                                SELECT 1 FROM coven_device_files WHERE path=?1 UNION ALL
-                                SELECT 1 FROM coven_file_uploads WHERE path=?1 UNION ALL
-                                SELECT 1 FROM coven_cache WHERE path=?1)",
+                                SELECT 1 FROM _coven_device_files WHERE path=?1 UNION ALL
+                                SELECT 1 FROM _coven_file_uploads WHERE path=?1 UNION ALL
+                                SELECT 1 FROM _coven_cache WHERE path=?1)",
                             [name.as_str()],
                             |r| r.get::<_, bool>(0),
                         )? {
@@ -341,7 +341,7 @@ impl FileDatabase {
                             FileArea::Cache => "cache",
                         };
                         db.internal_execute(
-                            "INSERT INTO coven_file_removals(area,path) VALUES(?1,?2)",
+                            "INSERT INTO _coven_file_removals(area,path) VALUES(?1,?2)",
                             (area, name.as_str()),
                         )?;
                         Ok(())
@@ -395,7 +395,7 @@ impl FileDatabase {
                         })
                     })
                     .chain(std::iter::once(crate::observation::TableRead {
-                        table: "coven_file_uploads".into(),
+                        table: "_coven_file_uploads".into(),
                         columns: ["reference".into()].into(),
                         keys: crate::key_scope::KeyScope::All,
                     }))
@@ -491,7 +491,7 @@ impl FileDatabase {
         self.run(move |db, _, _, _| {
             db.transaction(|db| {
                 db.internal_execute(
-                    "INSERT INTO coven_cache_budgets(namespace,bytes) VALUES(?1,?2)
+                    "INSERT INTO _coven_cache_budgets(namespace,bytes) VALUES(?1,?2)
                      ON CONFLICT(namespace) DO UPDATE SET bytes=excluded.bytes",
                     (namespace, bytes.to_be_bytes().as_slice()),
                 )?;
@@ -510,7 +510,7 @@ impl FileDatabase {
             }
             let id = cache::id(&file)?;
             if db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM coven_cache
+                "SELECT EXISTS(SELECT 1 FROM _coven_cache
                  WHERE namespace=?1 AND file_id=?2 AND chunk=-2)",
                 (file.namespace(), &id),
                 |r| r.get::<_, bool>(0),
@@ -518,7 +518,7 @@ impl FileDatabase {
                 return Ok(0);
             }
             let cached = db.query_row(
-                "SELECT coalesce(sum(size-16),0) FROM coven_cache
+                "SELECT coalesce(sum(size-16),0) FROM _coven_cache
                  WHERE namespace=?1 AND file_id=?2 AND chunk>=0",
                 (file.namespace(), &id),
                 |r| r.get::<_, i64>(0),
@@ -569,12 +569,12 @@ impl FileReservation {
                         .expect("writer connection lock poisoned");
                     writer.transaction(|db| {
                         changed(db.internal_execute(
-                            "UPDATE coven_file_uploads SET path=?2,fixed=?3
+                            "UPDATE _coven_file_uploads SET path=?2,fixed=?3
                              WHERE id=?1 AND fixed IS NULL",
                             (id, pending.name.as_str(), identity.as_bytes()),
                         )?)?;
                         db.internal_execute(
-                            "DELETE FROM coven_file_removals WHERE path=?1 AND area='files'",
+                            "DELETE FROM _coven_file_removals WHERE path=?1 AND area='files'",
                             [pending.name.as_str()],
                         )?;
                         Ok(())

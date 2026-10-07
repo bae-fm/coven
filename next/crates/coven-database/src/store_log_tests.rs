@@ -351,14 +351,14 @@ async fn circle_deletion_commits_file_removal_with_the_entry_and_rolls_both_back
     assert_eq!(paths.len(), 1);
     let before = db.store_log().await.unwrap();
     let (entry, replay) = history[4].clone();
-    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER refuse_file AFTER DELETE ON coven_device_files BEGIN SELECT RAISE(ABORT,'keep file'); END").unwrap());
+    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER refuse_file AFTER DELETE ON _coven_device_files BEGIN SELECT RAISE(ABORT,'keep file'); END").unwrap());
     assert!(db
         .apply_store_log(checked(entry.clone()), replay.clone())
         .await
         .is_err());
     assert_eq!(db.store_log().await.unwrap(), before);
     assert_eq!(count(&db, "files"), 1);
-    assert_eq!(count(&db, "coven_device_files"), 1);
+    assert_eq!(count(&db, "_coven_device_files"), 1);
     assert_eq!(owned_paths(&store), paths);
     assert_eq!(std::fs::read(&paths[0]).unwrap(), b"original");
     db.inspect_writer(|sql| sql.batch("DROP TRIGGER refuse_file").unwrap());
@@ -367,8 +367,8 @@ async fn circle_deletion_commits_file_removal_with_the_entry_and_rolls_both_back
         .unwrap();
     assert_eq!(db.store_log().await.unwrap().replay, replay);
     assert_eq!(count(&db, "files"), 0);
-    assert_eq!(count(&db, "coven_device_files"), 0);
-    assert_eq!(count(&db, "coven_file_removals"), 0);
+    assert_eq!(count(&db, "_coven_device_files"), 0);
+    assert_eq!(count(&db, "_coven_file_removals"), 0);
     assert!(owned_paths(&store).is_empty());
     db.close().await.unwrap();
 }
@@ -385,14 +385,14 @@ async fn a_failure_halfway_through_replacing_state_rolls_back_the_entry_too() {
             .unwrap();
     }
     let before = db.store_log().await.unwrap();
-    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER coven_refuse BEFORE INSERT ON coven_circles BEGIN SELECT RAISE(ABORT,'state failed'); END").unwrap());
+    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER _coven_refuse BEFORE INSERT ON _coven_circles BEGIN SELECT RAISE(ABORT,'state failed'); END").unwrap());
     let (entry, replay) = history[2].clone();
     assert!(db
         .apply_store_log(checked(entry.clone()), replay.clone())
         .await
         .is_err());
     assert_eq!(db.store_log().await.unwrap(), before);
-    db.inspect_writer(|sql| sql.batch("DROP TRIGGER coven_refuse").unwrap());
+    db.inspect_writer(|sql| sql.batch("DROP TRIGGER _coven_refuse").unwrap());
     db.apply_store_log(checked(entry.clone()), replay.clone())
         .await
         .unwrap();
@@ -704,13 +704,13 @@ async fn audience_versions_round_trip_and_a_failed_raise_keeps_every_audience() 
         },
     );
     replay.entries.insert(raised.position, EntryOutcome::Kept);
-    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER coven_refuse BEFORE INSERT ON coven_versions WHEN NEW.version=13 BEGIN SELECT RAISE(ABORT,'refuse circle raise'); END").unwrap());
+    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER _coven_refuse BEFORE INSERT ON _coven_versions WHEN NEW.version=13 BEGIN SELECT RAISE(ABORT,'refuse circle raise'); END").unwrap());
     assert!(db
         .apply_store_log(checked(raised.clone()), replay.clone())
         .await
         .is_err());
     assert_eq!(db.store_log().await.unwrap(), before);
-    db.inspect_writer(|sql| sql.batch("DROP TRIGGER coven_refuse").unwrap());
+    db.inspect_writer(|sql| sql.batch("DROP TRIGGER _coven_refuse").unwrap());
     db.apply_store_log(checked(raised), replay.clone())
         .await
         .unwrap();
@@ -731,7 +731,7 @@ async fn store_facts_have_one_row_and_versions_and_resets_require_snapshots() {
     db.inspect_writer(|sql| {
         assert!(
             sql.internal_execute(
-                "INSERT INTO coven_store(id,name,key) VALUES(?1,'Another',?2)",
+                "INSERT INTO _coven_store(id,name,key) VALUES(?1,'Another',?2)",
                 (
                     StoreId(uuid::Uuid::from_u128(99)).to_string(),
                     key(99).0.as_bytes().as_slice()
@@ -742,14 +742,14 @@ async fn store_facts_have_one_row_and_versions_and_resets_require_snapshots() {
         );
         assert!(
             sql.internal_execute(
-                "INSERT INTO coven_versions(audience,kind,version) VALUES('store','schema',2)",
+                "INSERT INTO _coven_versions(audience,kind,version) VALUES('store','schema',2)",
                 [],
             )
             .is_err(),
             "a version must name its snapshot and raise entry"
         );
         assert!(
-            sql.internal_execute("INSERT INTO coven_resets(audience) VALUES('store')", [],)
+            sql.internal_execute("INSERT INTO _coven_resets(audience) VALUES('store')", [],)
                 .is_err(),
             "a reset must name its snapshot"
         );

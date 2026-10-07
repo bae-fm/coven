@@ -14,7 +14,7 @@ pub(crate) fn positions(
     database: &DatabaseConnection,
 ) -> Result<coven_format::value::EntryPositions, DbError> {
     Ok(coven_format::value::EntryPositions(database.query(
-        "SELECT device,max(number) FROM coven_store_log GROUP BY device ORDER BY device",
+        "SELECT device,max(number) FROM _coven_store_log GROUP BY device ORDER BY device",
         [],
         |row| crate::store_log_tables::entry_id(row, 0),
     )?))
@@ -186,7 +186,7 @@ pub(crate) fn apply(
     })?;
     database.transaction(|database| {
         for (record, view) in database.query(
-            "SELECT record,author_view FROM coven_store_log WHERE device=?1 AND number=?2",
+            "SELECT record,author_view FROM _coven_store_log WHERE device=?1 AND number=?2",
             (
                 entry.position.device.0.to_be_bytes().as_slice(),
                 entry.position.number.to_be_bytes().as_slice(),
@@ -199,7 +199,7 @@ pub(crate) fn apply(
         }
         let outcomes: BTreeMap<_, _> = database
             .query(
-                "SELECT device,number,outcome,beaten_device,beaten_number FROM coven_store_log",
+                "SELECT device,number,outcome,beaten_device,beaten_number FROM _coven_store_log",
                 [],
                 |row| {
                     Ok((
@@ -216,7 +216,7 @@ pub(crate) fn apply(
             return Err(DbError::StoreLogEntriesChanged);
         }
         database.internal_execute(
-            "INSERT INTO coven_store_log(device,number,record,author_view,outcome)
+            "INSERT INTO _coven_store_log(device,number,record,author_view,outcome)
              VALUES(?1,?2,?3,?4,'kept') ON CONFLICT(device,number) DO NOTHING",
             (
                 entry.position.device.0.to_be_bytes().as_slice(),
@@ -232,7 +232,7 @@ pub(crate) fn apply(
         let mut touched = BTreeSet::new();
         for circle in previous.symmetric_difference(&deleted) {
             touched.extend(database.query(
-                "SELECT DISTINCT table_name,key,audience FROM coven_rows WHERE audience=?1",
+                "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE audience=?1",
                 [circle.to_string()],
                 crate::row_queries::read_identity,
             )?);

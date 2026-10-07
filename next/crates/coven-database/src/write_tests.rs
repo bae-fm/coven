@@ -9,7 +9,7 @@ pub(crate) fn records(database: &Database) -> Vec<WriteRecord> {
     database
         .inspect_writer(|db| {
             db.query(
-                "SELECT record FROM coven_uploads ORDER BY number",
+                "SELECT record FROM _coven_uploads ORDER BY number",
                 [],
                 |r| r.get::<_, Vec<u8>>(0),
             )
@@ -91,7 +91,7 @@ async fn grocery_title_and_errands_tag_are_one_unsigned_write() {
     assert_eq!(rows[1].old["id"], Value::Text("errands".into()));
     assert_eq!(count(&database, "local_rows"), 1);
     database.inspect_writer(|db| {
-        let setters: Vec<(String, Vec<u8>)> = db.query("SELECT c.column_name,w.number FROM coven_cells x JOIN coven_columns c ON c.id=x.column_id JOIN coven_writes w ON w.id=x.write_id ORDER BY c.column_name", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        let setters: Vec<(String, Vec<u8>)> = db.query("SELECT c.column_name,w.number FROM _coven_cells x JOIN _coven_columns c ON c.id=x.column_id JOIN _coven_writes w ON w.id=x.write_id ORDER BY c.column_name", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         assert_eq!(setters, vec![("body".into(), 1u64.to_be_bytes().to_vec()), ("id".into(), 1u64.to_be_bytes().to_vec()), ("title".into(), 3u64.to_be_bytes().to_vec())]);
     });
     database.close().await.unwrap();
@@ -144,9 +144,9 @@ async fn hardware_store_note_delete_and_readd_advance_generations() {
         [0, 1, 2, 3]
     );
     database.inspect_writer(|db| {
-        let generations = db.query("SELECT generation FROM coven_rows ORDER BY generation", [], |r| r.get::<_, Vec<u8>>(0)).unwrap();
+        let generations = db.query("SELECT generation FROM _coven_rows ORDER BY generation", [], |r| r.get::<_, Vec<u8>>(0)).unwrap();
         assert_eq!(generations, [1u64,2,3].map(|g| g.to_be_bytes().to_vec()));
-        assert_eq!(db.query_row("SELECT count(*) FROM coven_cells c JOIN coven_rows r ON r.id=c.row_id WHERE r.generation=?1", [3u64.to_be_bytes().as_slice()], |r| r.get::<_, i64>(0)).unwrap(), 3);
+        assert_eq!(db.query_row("SELECT count(*) FROM _coven_cells c JOIN _coven_rows r ON r.id=c.row_id WHERE r.generation=?1", [3u64.to_be_bytes().as_slice()], |r| r.get::<_, i64>(0)).unwrap(), 3);
     });
     database.close().await.unwrap();
 }
@@ -175,10 +175,10 @@ async fn app_errors_and_panics_roll_back_and_leave_the_writer_usable() {
     for table in [
         "notes",
         "local_rows",
-        "coven_writes",
-        "coven_uploads",
-        "coven_rows",
-        "coven_cells",
+        "_coven_writes",
+        "_coven_uploads",
+        "_coven_rows",
+        "_coven_cells",
     ] {
         assert_eq!(count(&database, table), 0);
     }
@@ -311,8 +311,8 @@ async fn internal_tables_transaction_control_and_pragmas_remain_protected() {
     let store = TestStore::new();
     let database = store.schema(notes(), NOTES).await.unwrap();
     for statement in [
-        "SELECT * FROM coven_writes",
-        "INSERT INTO coven_uploads(device,number,record) VALUES(x'',x'',x'')",
+        "SELECT * FROM _coven_writes",
+        "INSERT INTO _coven_uploads(device,number,record) VALUES(x'',x'',x'')",
         "COMMIT",
         "ROLLBACK",
         "SAVEPOINT a",
@@ -725,7 +725,7 @@ async fn deleted_circles_remove_rows_and_remain_refused_after_reopening() {
     .await
     .unwrap();
     assert_eq!(count(&db, "notes"), 0);
-    assert_eq!(count(&db, "coven_lost"), 1);
+    assert_eq!(count(&db, "_coven_lost"), 1);
     assert_eq!(records(&db).len(), 3);
     db.close().await.unwrap();
 }

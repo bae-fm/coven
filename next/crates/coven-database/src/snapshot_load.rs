@@ -38,7 +38,7 @@ pub(crate) fn load<R: Read, W: Read>(
         } = reload;
         if let Some(expected) = expected_entries {
             let current = database.query(
-                "SELECT device,number FROM coven_store_log ORDER BY device,number",
+                "SELECT device,number FROM _coven_store_log ORDER BY device,number",
                 [],
                 |row| crate::store_log_tables::entry_id(row, 0),
             )?;
@@ -60,13 +60,13 @@ pub(crate) fn load<R: Read, W: Read>(
                 .max()
             {
                 let minimum = database.query_row(
-                    "SELECT minimum FROM coven_snapshot_schema WHERE singleton=1",
+                    "SELECT minimum FROM _coven_snapshot_schema WHERE singleton=1",
                     [],
                     |r| r.get(0),
                 )?;
                 crate::migration_writes::advance_version(database, minimum, version)?;
             }
-            database.internal_execute("DELETE FROM coven_applied_boundaries", [])?;
+            database.internal_execute("DELETE FROM _coven_applied_boundaries", [])?;
             for boundary in boundaries {
                 boundary.record_inside(database)?;
             }
@@ -175,7 +175,7 @@ pub(crate) fn read(
                 SnapshotRecord::Column(column) => {
                     crate::write_commit::column(database, &column.table, &column.column)?;
                     database.internal_execute(
-                            "INSERT INTO temp.coven_snapshot_columns(table_name,column_name) VALUES(?1,?2)",
+                            "INSERT INTO temp._coven_snapshot_columns(table_name,column_name) VALUES(?1,?2)",
                             params![column.table, column.column],
                         )?;
                 }
@@ -188,7 +188,7 @@ pub(crate) fn read(
                         finish_excluded(database, previous)?;
                     }
                     database.internal_execute(
-                        "INSERT INTO coven_excluded_writes(audience,device,number,header,cause)
+                        "INSERT INTO _coven_excluded_writes(audience,device,number,header,cause)
                              VALUES(?1,?2,?3,x'',?4)",
                         params![
                             audience_text(&write.audience),
@@ -211,8 +211,8 @@ pub(crate) fn read(
                         .checked_add(bytes.len() as u64)
                         .ok_or_else(|| invalid("excluded write length overflow"))?;
                     database.internal_execute(
-                        "INSERT INTO coven_excluded_rows(write_id,table_name,key,record)
-                             VALUES((SELECT id FROM coven_excluded_writes
+                        "INSERT INTO _coven_excluded_rows(write_id,table_name,key,record)
+                             VALUES((SELECT id FROM _coven_excluded_writes
                                      WHERE audience=?1 AND device=?2 AND number=?3),?4,?5,?6)",
                         params![
                             audience_text(&pending.write.audience),
@@ -259,8 +259,9 @@ pub(crate) fn read(
     }
     metadata.validate(&header.writes)?;
     crate::snapshot_state::finish(database)?;
-    database
-        .batch("DELETE FROM temp.coven_snapshot_writes; DELETE FROM temp.coven_snapshot_columns")?;
+    database.batch(
+        "DELETE FROM temp._coven_snapshot_writes; DELETE FROM temp._coven_snapshot_columns",
+    )?;
     Ok((header.clone(), touched))
 }
 
@@ -276,7 +277,7 @@ fn check_header(
     }
     let local = database.schema_version()?;
     let minimum: u32 = database.query_row(
-        "SELECT minimum FROM coven_snapshot_schema WHERE singleton=1",
+        "SELECT minimum FROM _coven_snapshot_schema WHERE singleton=1",
         [],
         |r| r.get(0),
     )?;
@@ -290,7 +291,7 @@ fn check_header(
     let mut missing = Vec::new();
     for entry in &header.store_log.0 {
         let number: Option<Vec<u8>> = database.query_row(
-            "SELECT max(number) FROM coven_store_log WHERE device=?1",
+            "SELECT max(number) FROM _coven_store_log WHERE device=?1",
             [entry.device.0.to_be_bytes().as_slice()],
             |r| r.get(0),
         )?;
@@ -319,7 +320,7 @@ fn finish_excluded(database: &DatabaseConnection, pending: PendingExcluded) -> R
         }],
     };
     database.internal_execute(
-        "UPDATE coven_excluded_writes SET header=?1 WHERE audience=?2 AND device=?3 AND number=?4",
+        "UPDATE _coven_excluded_writes SET header=?1 WHERE audience=?2 AND device=?3 AND number=?4",
         params![
             header.encode().map_err(SnapshotError::Format)?,
             audience_text(&pending.write.audience),

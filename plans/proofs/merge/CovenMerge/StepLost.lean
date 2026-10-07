@@ -1,10 +1,10 @@
 import CovenMerge.Step
 
 /-!
-# One step, `coven_lost`
+# One step, `_coven_lost`
 
 The arriving write `w` changes row `r` with change `ch`. For every value `a`
-of every cell of `r`, `lostStep` gives the `coven_lost` row the declarative
+of every cell of `r`, `lostStep` gives the `_coven_lost` row the declarative
 `Lost` predicate gives for `S ∪ {w}`.
 -/
 
@@ -492,7 +492,7 @@ theorem lostStep_other (hV : Valid M) (hcl : Closed M S) (hS : IsSpec M S st) (h
         rw [ite_pos' ⟨rfl, hr, hp⟩, hkG, hx]
       · exact absurd ⟨y, hyS⟩ hnoS
 
-/-! ### The `coven_lost` step -/
+/-! ### The `_coven_lost` step -/
 
 theorem step_lost (hV : Valid M) (hcl : Closed M S) (hS : IsSpec M S st) (hw : ¬ S w)
     (r : Row) (c : Col) (a : W) (k : Nat) (x : W) :

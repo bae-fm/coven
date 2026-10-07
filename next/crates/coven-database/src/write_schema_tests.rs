@@ -154,7 +154,7 @@ async fn removing_and_restoring_two_parents_keeps_each_foreign_key_reason() {
     assert_eq!(count(&db, "children"), 0);
     let rules = db.inspect_writer(|db| {
         db.query_row(
-            "SELECT replaced_by FROM coven_lost WHERE table_name='children' AND column_id IS NULL",
+            "SELECT replaced_by FROM _coven_lost WHERE table_name='children' AND column_id IS NULL",
             [],
             |r| Ok(coven_format::merge_fields::decode_rules(&r.get::<_, Vec<u8>>(0)?).unwrap()),
         )
@@ -163,7 +163,7 @@ async fn removing_and_restoring_two_parents_keeps_each_foreign_key_reason() {
     assert_eq!(rules, [right].into());
     sql(&db, "INSERT INTO rights VALUES('1',1)").await.unwrap();
     assert_eq!(count(&db, "children"), 1);
-    assert_eq!(count(&db, "coven_lost"), 0);
+    assert_eq!(count(&db, "_coven_lost"), 0);
     db.close().await.unwrap();
 }
 
@@ -186,7 +186,7 @@ async fn ordinary_sqlite_can_maintain_a_store_without_coven_functions() {
             .unwrap(),
         "ok"
     );
-    let created: i64 = raw.query_row("SELECT count(*) FROM sqlite_schema WHERE type='index' AND tbl_name IN ('notes','parents') AND name LIKE 'coven_%'", [], |r| r.get(0)).unwrap();
+    let created: i64 = raw.query_row("SELECT count(*) FROM sqlite_schema WHERE type='index' AND tbl_name IN ('notes','parents') AND substr(lower(name),1,7) = '_coven_'", [], |r| r.get(0)).unwrap();
     assert_eq!(created, 0);
 }
 
@@ -237,13 +237,13 @@ async fn column_expression_and_partial_unique_identities_keep_each_reason() {
             expected
         };
         db.inspect_writer(|db| {
-            let rules = db.query_row("SELECT replaced_by FROM coven_lost WHERE table_name='notes' AND column_id IS NULL",[],|r| Ok(coven_format::merge_fields::decode_rules(&r.get::<_,Vec<u8>>(0)?).unwrap())).unwrap();
+            let rules = db.query_row("SELECT replaced_by FROM _coven_lost WHERE table_name='notes' AND column_id IS NULL",[],|r| Ok(coven_format::merge_fields::decode_rules(&r.get::<_,Vec<u8>>(0)?).unwrap())).unwrap();
             assert_eq!(rules,expected);
-            let identities:BTreeSet<_> = db.query("SELECT c.identity FROM coven_claims v JOIN coven_constraints c ON c.id=v.constraint_id",[],|r| Ok(coven_format::merge_fields::decode_unique_constraint(&r.get::<_,Vec<u8>>(0)?).unwrap())).unwrap().into_iter().collect();
+            let identities:BTreeSet<_> = db.query("SELECT c.identity FROM _coven_claims v JOIN _coven_constraints c ON c.id=v.constraint_id",[],|r| Ok(coven_format::merge_fields::decode_unique_constraint(&r.get::<_,Vec<u8>>(0)?).unwrap())).unwrap().into_iter().collect();
             assert_eq!(identities,[UniqueConstraint::from(["title"]),other].into());
         });
         sql(&db, "DELETE FROM notes WHERE id='45'").await.unwrap();
-        assert_eq!(crate::write::tests::count(&db, "coven_claims"), 0);
+        assert_eq!(crate::write::tests::count(&db, "_coven_claims"), 0);
         assert_eq!(crate::write::tests::count(&db, "notes"), 1);
         db.close().await.unwrap();
     }
@@ -265,9 +265,9 @@ async fn explicit_collation_terms_do_not_merge_with_bare_column_constraints() {
         crate::removal::tests::remove(&db,"notes","46",&[("title",Value::Text("GROCERIES".into()))],[expected.clone()].into());
         sql(&db,"UPDATE notes SET edited=1 WHERE id='45'").await.unwrap();
         db.inspect_writer(|db| {
-            let rules = db.query_row("SELECT replaced_by FROM coven_lost WHERE column_id IS NULL",[],|r| Ok(coven_format::merge_fields::decode_rules(&r.get::<_,Vec<u8>>(0)?).unwrap())).unwrap();
+            let rules = db.query_row("SELECT replaced_by FROM _coven_lost WHERE column_id IS NULL",[],|r| Ok(coven_format::merge_fields::decode_rules(&r.get::<_,Vec<u8>>(0)?).unwrap())).unwrap();
             assert_eq!(rules,[expected].into());
-            assert_eq!(db.query_row("SELECT count(*) FROM coven_claims",[],|r| r.get::<_,u32>(0)).unwrap(),2);
+            assert_eq!(db.query_row("SELECT count(*) FROM _coven_claims",[],|r| r.get::<_,u32>(0)).unwrap(),2);
         });
         db.close().await.unwrap();
     }

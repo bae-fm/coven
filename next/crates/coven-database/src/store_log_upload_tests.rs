@@ -112,7 +112,7 @@ async fn applying_entry_and_retiring_fixed_bytes_roll_back_together() {
         entries: [(id, crate::EntryOutcome::Kept)].into(),
         ..Default::default()
     };
-    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER reject_retirement BEFORE DELETE ON coven_store_log_uploads BEGIN SELECT RAISE(ABORT,'retirement failed'); END;").unwrap());
+    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER reject_retirement BEFORE DELETE ON _coven_store_log_uploads BEGIN SELECT RAISE(ABORT,'retirement failed'); END;").unwrap());
     assert!(db
         .apply_store_log(checked.clone(), result.clone())
         .await
@@ -128,7 +128,7 @@ async fn applying_entry_and_retiring_fixed_bytes_roll_back_together() {
     db.inspect_writer(|sql| {
         assert_eq!(
             sql.query_row(
-                "SELECT count(*) FROM coven_store_log_key_uploads",
+                "SELECT count(*) FROM _coven_store_log_key_uploads",
                 [],
                 |row| row.get::<_, i64>(0)
             )

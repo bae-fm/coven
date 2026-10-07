@@ -338,12 +338,12 @@ pub(crate) fn record(
     let latest = crate::write_encoding::latest_timestamp(database)?;
     let timestamp = timestamp(latest, now, device)?;
     let mut positions: BTreeMap<DeviceId,u64> = database.query(
-        "SELECT device,number FROM coven_positions WHERE device>=x'0000000000000000' ORDER BY device", [],
+        "SELECT device,number FROM _coven_positions WHERE device>=x'0000000000000000' ORDER BY device", [],
         |r| Ok((DeviceId(counter(r.get(0)?)),counter(r.get(1)?))),
     )?.into_iter().collect();
     let own_position = positions.remove(&device).unwrap_or(0);
     let last: Option<Vec<u8>> = database.query_row(
-        "SELECT max(number) FROM coven_writes WHERE substr(timestamp,9,8)=?1",
+        "SELECT max(number) FROM _coven_writes WHERE substr(timestamp,9,8)=?1",
         [device.0.to_be_bytes().as_slice()],
         |r| r.get(0),
     )?;
@@ -390,7 +390,7 @@ pub(crate) fn record(
 
 pub(crate) fn generation(database: &DatabaseConnection, row: &RowId) -> Result<u64, DbError> {
     let generation: Option<Vec<u8>> = database.query_row(
-        "SELECT max(generation) FROM coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3",
+        "SELECT max(generation) FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3",
         params![row.table, row.key, audience_text(&row.audience)],
         |r| r.get(0),
     )?;
@@ -406,7 +406,7 @@ fn removed_values(
     generation: u64,
 ) -> Result<AppValues, DbError> {
     let rows = database.query(
-        "SELECT COALESCE(read_value,value) FROM coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4 AND column_id IS NULL AND replacement_kind='rules' AND retired=0",
+        "SELECT COALESCE(read_value,value) FROM _coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4 AND column_id IS NULL AND replacement_kind='rules' AND retired=0",
         params![row.table, row.key, audience_text(&row.audience), generation.to_be_bytes().as_slice()],
         |r| { let bytes: Vec<u8> = r.get(0)?; decoded(merge_fields::decode_columns(&bytes)) },
     )?;

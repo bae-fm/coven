@@ -8,9 +8,10 @@
 - It is format 1 ([§17.2](coven-from-scratch.md#172-covens-schema)). A
   change to any layout here is a new format version, and older versions'
   readers stay ([§17.2](coven-from-scratch.md#172-covens-schema)).
-- Coven's local tables keep their own encodings, versioned by the database's
-  schema; they reuse the primitives of D2, and appear here only where they
-  must agree across devices: the fingerprint (D11).
+- Coven's local `_coven_` tables keep their own encodings, versioned by the
+  database's schema; they reuse the primitives of D2, and appear here only
+  where they must agree across devices: the fingerprint (D11). Their SQL
+  names are local schema details, not part of this storage format.
 
 ### D1 Rules for every object
 

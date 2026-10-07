@@ -21,7 +21,7 @@ pub(crate) fn remove(
     rules: BTreeSet<Rule>,
 ) {
     database.inspect_writer_schema(|db,schema| {
-        let (row, generation, audience): (i64, Vec<u8>, String) = db.query_row("SELECT id,generation,audience FROM coven_rows WHERE table_name=?1 AND key=?2 ORDER BY generation DESC LIMIT 1", crate::params![table, coven_format::key::encode_key(&[Value::Text(id.into())]).unwrap()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+        let (row, generation, audience): (i64, Vec<u8>, String) = db.query_row("SELECT id,generation,audience FROM _coven_rows WHERE table_name=?1 AND key=?2 ORDER BY generation DESC LIMIT 1", crate::params![table, coven_format::key::encode_key(&[Value::Text(id.into())]).unwrap()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
         let identity = coven_merge::RowId { table: table.into(), key:coven_format::key::encode_key(&[Value::Text(id.into())]).unwrap(), audience:crate::write_encoding::audience(&audience).unwrap() };
         let app = crate::write_rows::AppView::after(db,schema);
         let store = crate::merge_store::MergeStore::new(db,&app);
@@ -29,12 +29,12 @@ pub(crate) fn remove(
         let mut columns: BTreeMap<_,_> = state.cells().iter().map(|(name,cell)| (name.clone(),cell.value.clone())).collect();
         for (name, value) in changes { columns.get_mut(*name).unwrap().value = value.clone(); }
         let setters = state.cells().iter().map(|(name,cell)| (name.clone(),cell.write)).collect();
-        db.internal_execute("INSERT INTO coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,NULL,?5,?6,'rules',?7)", crate::params![table, identity.key, audience, generation, merge_fields::encode_columns(&columns).unwrap(), merge_fields::encode_setters(&setters).unwrap(), merge_fields::encode_rules(&rules).unwrap()]).unwrap();
+        db.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,NULL,?5,?6,'rules',?7)", crate::params![table, identity.key, audience, generation, merge_fields::encode_columns(&columns).unwrap(), merge_fields::encode_setters(&setters).unwrap(), merge_fields::encode_rules(&rules).unwrap()]).unwrap();
         let values = columns.into_iter().map(|(n,c)| (n,c.value)).collect();
         let claims = crate::removal_sql::constraints(db,schema.table(table),&schema.rules[table],&state,&values,|id| store.stamp(id)).unwrap().unique;
         for (constraint,claim) in claims {
             let constraint = crate::row_queries::constraint(db,table,&constraint).unwrap();
-            db.internal_execute("INSERT INTO coven_claims(row_id,constraint_id,audience,value) VALUES(?1,?2,?3,?4)",crate::params![row,constraint,audience,claim.value]).unwrap();
+            db.internal_execute("INSERT INTO _coven_claims(row_id,constraint_id,audience,value) VALUES(?1,?2,?3,?4)",crate::params![row,constraint,audience,claim.value]).unwrap();
         }
         db.materialize(|db| { db.internal_execute(&format!("DELETE FROM {} WHERE id=?1", crate::sql::identifier(table)), [id])?; Ok(()) }).unwrap();
     });
@@ -43,7 +43,7 @@ pub(crate) fn remove(
 type RemovedRow = (String, BTreeMap<String, ColumnValue<Value>>, BTreeSet<Rule>);
 
 fn losses(database: &Database) -> Vec<RemovedRow> {
-    database.inspect_writer(|db| db.query("SELECT table_name,COALESCE(read_value,value),replaced_by FROM coven_lost WHERE column_id IS NULL ORDER BY table_name,key", [], |r| Ok((r.get(0)?, merge_fields::decode_columns(&r.get::<_, Vec<u8>>(1)?).unwrap(), merge_fields::decode_rules(&r.get::<_, Vec<u8>>(2)?).unwrap()))).unwrap())
+    database.inspect_writer(|db| db.query("SELECT table_name,COALESCE(read_value,value),replaced_by FROM _coven_lost WHERE column_id IS NULL ORDER BY table_name,key", [], |r| Ok((r.get(0)?, merge_fields::decode_columns(&r.get::<_, Vec<u8>>(1)?).unwrap(), merge_fields::decode_rules(&r.get::<_, Vec<u8>>(2)?).unwrap()))).unwrap())
 }
 
 #[tokio::test]
@@ -68,9 +68,9 @@ async fn readding_a_removed_shared_key_updates_every_column_and_clears_its_check
     assert_eq!(change.change.generation, 1);
     assert!(matches!(&change.change.operation, Operation::Update(columns) if columns.len() == 3));
     assert_eq!(change.old["end"], Value::Integer(8));
-    assert_eq!(count(&db, "coven_lost"), 0);
+    assert_eq!(count(&db, "_coven_lost"), 0);
     assert_eq!(count(&db, "ranges"), 1);
-    assert_eq!(count(&db, "coven_rows"), 1);
+    assert_eq!(count(&db, "_coven_rows"), 1);
     db.close().await.unwrap();
 }
 
@@ -155,7 +155,7 @@ async fn readding_inbox_returns_note_50_without_changing_its_reference_setter() 
         losses(&db)[0].1["folder"].value,
         Value::Text("Inbox".into())
     );
-    let setters: Vec<i64> = db.inspect_writer(|db| db.query("SELECT write_id FROM coven_cells WHERE row_id IN (SELECT id FROM coven_rows WHERE table_name='notes') ORDER BY column_id", [], |r| r.get(0)).unwrap());
+    let setters: Vec<i64> = db.inspect_writer(|db| db.query("SELECT write_id FROM _coven_cells WHERE row_id IN (SELECT id FROM _coven_rows WHERE table_name='notes') ORDER BY column_id", [], |r| r.get(0)).unwrap());
     sql(&db, "INSERT INTO folders VALUES('Inbox')")
         .await
         .unwrap();
@@ -166,7 +166,7 @@ async fn readding_inbox_returns_note_50_without_changing_its_reference_setter() 
             .unwrap()
     });
     assert_eq!(restored, "Inbox");
-    assert_eq!(setters, db.inspect_writer(|db| db.query("SELECT write_id FROM coven_cells WHERE row_id IN (SELECT id FROM coven_rows WHERE table_name='notes') ORDER BY column_id", [], |r| r.get::<_, i64>(0)).unwrap()));
+    assert_eq!(setters, db.inspect_writer(|db| db.query("SELECT write_id FROM _coven_cells WHERE row_id IN (SELECT id FROM _coven_rows WHERE table_name='notes') ORDER BY column_id", [], |r| r.get::<_, i64>(0)).unwrap()));
     db.close().await.unwrap();
 }
 
@@ -407,11 +407,11 @@ async fn materialization_and_loss_failures_roll_back_the_entire_write() {
             "DELETE FROM notes WHERE id='45'",
         ),
         (
-            "AFTER DELETE ON coven_lost",
+            "AFTER DELETE ON _coven_lost",
             "DELETE FROM notes WHERE id='45'",
         ),
         (
-            "AFTER UPDATE ON coven_lost",
+            "AFTER UPDATE ON _coven_lost",
             "UPDATE notes SET title='Changed' WHERE id='45'",
         ),
     ] {
@@ -419,7 +419,7 @@ async fn materialization_and_loss_failures_roll_back_the_entire_write() {
         let db = store
             .schema(
                 vec![table("notes")],
-                if point=="AFTER UPDATE ON coven_lost" {
+                if point=="AFTER UPDATE ON _coven_lost" {
                     "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT UNIQUE,CHECK(id<>'46' OR title<>'Groceries'))"
                 } else {
                     "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT UNIQUE)"
@@ -444,11 +444,11 @@ async fn materialization_and_loss_failures_roll_back_the_entire_write() {
             db.inspect_writer(|db| {
                 [
                     "notes",
-                    "coven_writes",
-                    "coven_uploads",
-                    "coven_rows",
-                    "coven_cells",
-                    "coven_lost",
+                    "_coven_writes",
+                    "_coven_uploads",
+                    "_coven_rows",
+                    "_coven_cells",
+                    "_coven_lost",
                 ]
                 .iter()
                 .map(|table| {
@@ -463,10 +463,10 @@ async fn materialization_and_loss_failures_roll_back_the_entire_write() {
             })
         };
         let before = snapshot();
-        db.inspect_writer(|db| db.batch(&format!("CREATE TRIGGER coven_fail {point} BEGIN SELECT RAISE(ABORT,'materialization failed'); END")).unwrap());
+        db.inspect_writer(|db| db.batch(&format!("CREATE TRIGGER _coven_fail {point} BEGIN SELECT RAISE(ABORT,'materialization failed'); END")).unwrap());
         assert!(sql(&db, statement).await.is_err(), "{point}");
         assert_eq!(snapshot(), before, "{point}");
-        db.inspect_writer(|db| db.batch("DROP TRIGGER coven_fail").unwrap());
+        db.inspect_writer(|db| db.batch("DROP TRIGGER _coven_fail").unwrap());
         db.close().await.unwrap();
     }
 }
@@ -562,7 +562,7 @@ async fn moving_note_42_also_moves_its_removed_attachments() {
         BTreeSet::from([Rule::Check("ordered".into())])
     );
     let audience: String = db.inspect_writer(|db| {
-        db.query_row("SELECT audience FROM coven_lost", [], |r| r.get(0))
+        db.query_row("SELECT audience FROM _coven_lost", [], |r| r.get(0))
             .unwrap()
     });
     assert_eq!(audience, "00000000-0000-4000-8000-00000000000a");

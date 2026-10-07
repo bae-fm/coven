@@ -62,11 +62,11 @@ async fn independent_key_insert_refuses_invalid_uuid_and_rolls_back() {
         for table in [
             "notes",
             "local_rows",
-            "coven_writes",
-            "coven_uploads",
-            "coven_rows",
-            "coven_cells",
-            "coven_positions",
+            "_coven_writes",
+            "_coven_uploads",
+            "_coven_rows",
+            "_coven_cells",
+            "_coven_positions",
         ] {
             assert_eq!(count(&db, table), 0, "{table}");
         }

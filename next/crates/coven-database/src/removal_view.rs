@@ -440,7 +440,7 @@ impl<'a> DatabaseRemovalView<'a> {
             .collect();
         let equality = equality_key(&ordered_values, &index.collations)?;
         if index.primary {
-            parents.extend(self.database.query("SELECT DISTINCT table_name,key,audience FROM coven_rows WHERE table_name=?1 AND key=?2", params![target.name,equality], crate::row_queries::read_identity)?);
+            parents.extend(self.database.query("SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE table_name=?1 AND key=?2", params![target.name,equality], crate::row_queries::read_identity)?);
         } else {
             let unique = self.schema.rules[&target.name]
                 .unique
@@ -555,7 +555,7 @@ impl<'a> DatabaseRemovalView<'a> {
         for lost in self.state(id)?.lost().values() {
             related.extend(lost.value.parents.values().map(|parent| parent.row.clone()));
         }
-        related.extend(self.database.query("SELECT DISTINCT l.table_name,l.key,l.audience FROM coven_lost_references v JOIN coven_lost l ON l.id=v.loss_id WHERE v.parent_table=?1 AND v.parent_key=?2 AND v.parent_audience=?3", params![id.table,id.key,crate::write_encoding::audience_text(&id.audience)], crate::row_queries::read_identity)?);
+        related.extend(self.database.query("SELECT DISTINCT l.table_name,l.key,l.audience FROM _coven_lost_references v JOIN _coven_lost l ON l.id=v.loss_id WHERE v.parent_table=?1 AND v.parent_key=?2 AND v.parent_audience=?3", params![id.table,id.key,crate::write_encoding::audience_text(&id.audience)], crate::row_queries::read_identity)?);
         if let Some(children) = self.edges.get(id) {
             related.extend(children.iter().cloned());
         }
@@ -581,7 +581,7 @@ impl<'a> DatabaseRemovalView<'a> {
                         == Some(id)
                     {
                         let name = self.schema.foreign_key(table, fk);
-                        related.extend(self.database.query("SELECT DISTINCT r.table_name,r.key,r.audience FROM coven_references v JOIN coven_rows r ON r.id=v.row_id WHERE v.foreign_key_id=(SELECT id FROM coven_foreign_keys WHERE table_name=?1 AND identity=?2)",params![table.name,encoded(coven_format::merge_fields::encode_foreign_key(&name))?],crate::row_queries::read_identity)?.into_iter().filter(|r| id.audience==Audience::Store || id.audience==r.audience));
+                        related.extend(self.database.query("SELECT DISTINCT r.table_name,r.key,r.audience FROM _coven_references v JOIN _coven_rows r ON r.id=v.row_id WHERE v.foreign_key_id=(SELECT id FROM _coven_foreign_keys WHERE table_name=?1 AND identity=?2)",params![table.name,encoded(coven_format::merge_fields::encode_foreign_key(&name))?],crate::row_queries::read_identity)?.into_iter().filter(|r| id.audience==Audience::Store || id.audience==r.audience));
                     }
                 }
             }
@@ -596,7 +596,7 @@ impl<'a> DatabaseRemovalView<'a> {
         };
         match group {
             Group::Key { table, key } => {
-                members.extend(self.database.query("SELECT DISTINCT table_name,key,audience FROM coven_rows WHERE table_name=?1 AND key=?2",params![table,key],crate::row_queries::read_identity)?);
+                members.extend(self.database.query("SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE table_name=?1 AND key=?2",params![table,key],crate::row_queries::read_identity)?);
             }
             Group::Claim {
                 table,
@@ -653,7 +653,7 @@ impl RemovalView for DatabaseRemovalView<'_> {
         let mut rows: BTreeSet<_> = self
             .database
             .query(
-                "SELECT DISTINCT table_name,key,audience FROM coven_rows WHERE table_name>=''",
+                "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE table_name>=''",
                 [],
                 crate::row_queries::read_identity,
             )?

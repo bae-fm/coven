@@ -84,7 +84,7 @@ async fn reads_only_the_oldest_write_as_header_and_audience_streams() {
     sql(&db, "INSERT INTO notes VALUES('later','title','body')")
         .await
         .unwrap();
-    db.inspect_writer(|db| db.internal_execute("UPDATE coven_uploads SET record=x'' WHERE rowid=(SELECT max(rowid) FROM coven_uploads)", []).unwrap());
+    db.inspect_writer(|db| db.internal_execute("UPDATE _coven_uploads SET record=x'' WHERE rowid=(SELECT max(rowid) FROM _coven_uploads)", []).unwrap());
     let streamed = db
         .read_oldest_upload(|upload| {
             let WaitingUpload::Plaintext {
@@ -125,7 +125,7 @@ async fn reads_only_the_oldest_write_as_header_and_audience_streams() {
         .unwrap()
         .unwrap();
     assert_eq!(streamed, original);
-    assert_eq!(count(&db, "coven_uploads"), 2);
+    assert_eq!(count(&db, "_coven_uploads"), 2);
     db.close().await.unwrap();
 }
 
@@ -150,23 +150,23 @@ async fn only_success_removes_a_write_and_its_seal_and_advances_the_queue() {
         attempt(&db, vec![1]).await,
         Err(DbError::UploadLength { .. })
     ));
-    assert_eq!(count(&db, "coven_upload_seals"), 0);
+    assert_eq!(count(&db, "_coven_upload_seals"), 0);
     assert_eq!(attempt(&db, bytes.clone()).await.unwrap(), Some(first));
     assert_eq!(attempt(&db, vec![88]).await.unwrap(), Some(first));
     assert_eq!(sealed(&db).await, (first, bytes.clone()));
-    assert_eq!(count(&db, "coven_uploads"), 2);
+    assert_eq!(count(&db, "_coven_uploads"), 2);
     assert!(matches!(
         db.upload_succeeded(ids[1]).await,
         Err(DbError::UploadNotOldest { .. })
     ));
-    db.inspect_writer(|db| db.batch("CREATE TRIGGER coven_fail AFTER DELETE ON coven_upload_seals BEGIN SELECT RAISE(ABORT,'failed removal'); END").unwrap());
+    db.inspect_writer(|db| db.batch("CREATE TRIGGER _coven_fail AFTER DELETE ON _coven_upload_seals BEGIN SELECT RAISE(ABORT,'failed removal'); END").unwrap());
     assert!(db.upload_succeeded(first).await.is_err());
     assert_eq!(sealed(&db).await, (first, bytes));
-    assert_eq!(count(&db, "coven_uploads"), 2);
-    db.inspect_writer(|db| db.batch("DROP TRIGGER coven_fail").unwrap());
+    assert_eq!(count(&db, "_coven_uploads"), 2);
+    db.inspect_writer(|db| db.batch("DROP TRIGGER _coven_fail").unwrap());
     assert!(db.upload_succeeded(first).await.unwrap());
     assert!(!db.upload_succeeded(first).await.unwrap());
-    assert_eq!(count(&db, "coven_upload_seals"), 0);
+    assert_eq!(count(&db, "_coven_upload_seals"), 0);
     assert_eq!(candidate(&db, 7).await.0, ids[1]);
     assert_eq!(count(&db, "notes"), 2);
     db.close().await.unwrap();
@@ -180,11 +180,11 @@ async fn seal_failure_rolls_back_and_competing_attempts_get_the_same_bytes() {
         .await
         .unwrap();
     let (id, bytes) = candidate(&db, 19).await;
-    db.inspect_writer(|db| db.batch("CREATE TRIGGER coven_fail AFTER INSERT ON coven_upload_seals BEGIN SELECT RAISE(ABORT,'failed seal'); END").unwrap());
+    db.inspect_writer(|db| db.batch("CREATE TRIGGER _coven_fail AFTER INSERT ON _coven_upload_seals BEGIN SELECT RAISE(ABORT,'failed seal'); END").unwrap());
     assert!(attempt(&db, bytes.clone()).await.is_err());
-    assert_eq!(count(&db, "coven_upload_seals"), 0);
+    assert_eq!(count(&db, "_coven_upload_seals"), 0);
     assert_eq!(candidate(&db, 19).await, (id, bytes.clone()));
-    db.inspect_writer(|db| db.batch("DROP TRIGGER coven_fail").unwrap());
+    db.inspect_writer(|db| db.batch("DROP TRIGGER _coven_fail").unwrap());
     let (a, b) = tokio::join!(
         attempt(&db, bytes.clone()),
         attempt(&db, vec![99; bytes.len()])
@@ -274,15 +274,15 @@ fn a_crash_after_keeping_the_seal_resends_identical_bytes() {
     );
     let db = runtime.block_on(store.schema(notes(), NOTES)).unwrap();
     assert_eq!(runtime.block_on(sealed(&db)), expected);
-    assert_eq!(count(&db, "coven_uploads"), 1);
+    assert_eq!(count(&db, "_coven_uploads"), 1);
     assert_eq!(
         runtime.block_on(attempt(&db, vec![42])).unwrap(),
         Some(expected.0)
     );
     assert_eq!(runtime.block_on(sealed(&db)), expected);
     assert!(runtime.block_on(db.upload_succeeded(expected.0)).unwrap());
-    assert_eq!(count(&db, "coven_uploads"), 0);
-    assert_eq!(count(&db, "coven_upload_seals"), 0);
+    assert_eq!(count(&db, "_coven_uploads"), 0);
+    assert_eq!(count(&db, "_coven_upload_seals"), 0);
     runtime.block_on(db.close()).unwrap();
 }
 
@@ -305,7 +305,7 @@ async fn a_panicking_sealer_rolls_back_without_poisoning_the_writer() {
     .await
     .unwrap_err()
     .is_panic());
-    assert_eq!(count(&db, "coven_upload_seals"), 0);
+    assert_eq!(count(&db, "_coven_upload_seals"), 0);
     let (id, bytes) = candidate(&db, 17).await;
     assert_eq!(attempt(&db, bytes.clone()).await.unwrap(), Some(id));
     assert_eq!(sealed(&db).await, (id, bytes));

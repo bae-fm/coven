@@ -13,7 +13,7 @@ pub(crate) fn past(database: &DatabaseConnection, header: &WriteHeader) -> Resul
     });
     for frontier in header.had_read.0.iter().copied().chain(own) {
         let bytes: Vec<u8> = database.query_row(
-            "SELECT had_read FROM coven_writes WHERE substr(timestamp,9,8)=?1 AND number=?2",
+            "SELECT had_read FROM _coven_writes WHERE substr(timestamp,9,8)=?1 AND number=?2",
             (
                 frontier.device.0.to_be_bytes().as_slice(),
                 frontier.number.to_be_bytes().as_slice(),

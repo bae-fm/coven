@@ -221,7 +221,7 @@ async fn a_stream_exceeds_its_memory_budget_and_is_read_once() {
         .await
         .unwrap();
     assert_eq!(hash, prepared.hash.as_bytes());
-    assert_eq!(local_count(&db, "coven_device_files"), 1);
+    assert_eq!(local_count(&db, "_coven_device_files"), 1);
     db.close().await.unwrap();
 }
 
@@ -277,10 +277,10 @@ async fn failed_sql_stream_and_commit_discard_new_bytes_and_preserve_old_bytes()
             "commit" => assert!(matches!(error, DbError::Sqlite(_)), "{error:?}"),
             _ => unreachable!(),
         }
-        assert_eq!(local_count(&db, "coven_file_removals"), 0);
+        assert_eq!(local_count(&db, "_coven_file_removals"), 0);
         assert_eq!(owned_paths(&store), original);
         assert_eq!(std::fs::read(&original[0]).unwrap(), b"original");
-        assert_eq!(local_count(&db, "coven_device_files"), 1);
+        assert_eq!(local_count(&db, "_coven_device_files"), 1);
         assert_eq!(records(&db).len(), 1);
     }
     attach(&db, b"replacement".to_vec(), false).await.unwrap();
@@ -293,7 +293,7 @@ async fn failed_sql_stream_and_commit_discard_new_bytes_and_preserve_old_bytes()
     .await
     .unwrap();
     assert!(owned_paths(&store).is_empty());
-    assert_eq!(local_count(&db, "coven_device_files"), 0);
+    assert_eq!(local_count(&db, "_coven_device_files"), 0);
     db.close().await.unwrap();
 }
 
@@ -360,7 +360,7 @@ async fn originals_are_checked_during_preparation_at_registration_and_before_com
             .unwrap_err();
         assert!(matches!(error, DbError::UserFileChanged { .. }));
         assert_eq!(local_count(&db, "files"), 0);
-        assert_eq!(local_count(&db, "coven_user_files"), 0);
+        assert_eq!(local_count(&db, "_coven_user_files"), 0);
     }
     assert!(owned_paths(&store).is_empty());
     db.close().await.unwrap();
@@ -412,11 +412,11 @@ async fn original_size_is_checked_against_the_final_row_and_clearing_keeps_the_o
     })
     .await
     .unwrap();
-    assert_eq!(local_count(&db, "coven_user_files"), 1);
+    assert_eq!(local_count(&db, "_coven_user_files"), 1);
     db.write(|sql| sql.clear_user_file("files", "7"))
         .await
         .unwrap();
-    assert_eq!(local_count(&db, "coven_user_files"), 0);
+    assert_eq!(local_count(&db, "_coven_user_files"), 0);
     let last = records(&db).pop().unwrap();
     let coven_merge::Operation::Update(columns) = &last.parts[0].rows[0].change.operation else {
         panic!("update");
@@ -434,7 +434,7 @@ async fn original_size_is_checked_against_the_final_row_and_clearing_keeps_the_o
     })
     .await
     .unwrap();
-    assert_eq!(local_count(&db, "coven_user_files"), 0);
+    assert_eq!(local_count(&db, "_coven_user_files"), 0);
     assert_eq!(std::fs::read(original.path()).unwrap(), b"original");
     assert!(owned_paths(&store).is_empty());
     db.close().await.unwrap();
@@ -558,7 +558,7 @@ async fn shared_triggers_cannot_write_managed_columns_and_allowed_inserts_can_at
     )
     .await
     .unwrap();
-    assert_eq!(local_count(&db, "coven_device_files"), 1);
+    assert_eq!(local_count(&db, "_coven_device_files"), 1);
     db.close().await.unwrap();
 }
 
@@ -592,7 +592,7 @@ async fn shared_bytes_last_until_the_final_row_deletion_commits() {
     .unwrap();
     let paths = owned_paths(&store);
     assert_eq!(paths.len(), 1);
-    assert_eq!(local_count(&db, "coven_device_files"), 2);
+    assert_eq!(local_count(&db, "_coven_device_files"), 2);
     db.write(|sql| {
         sql.execute("DELETE FROM files WHERE id='one'", [])?;
         Ok(())
@@ -663,7 +663,7 @@ async fn a_move_preserves_the_owned_copy_and_a_panicking_write_removes_new_bytes
     .await
     .unwrap();
     assert_eq!(owned_paths(&store), paths);
-    assert_eq!(local_count(&db, "coven_device_files"), 1);
+    assert_eq!(local_count(&db, "_coven_device_files"), 1);
     let other = db.clone();
     let failure = tokio::spawn(async move {
         other
@@ -709,16 +709,16 @@ async fn downloaded_deletion_removes_records_and_bytes_after_commit() {
     .await
     .unwrap();
     let deletion = records(&b).remove(0);
-    a.inspect_writer(|sql| sql.batch("CREATE TRIGGER fail_delete AFTER DELETE ON coven_device_files BEGIN SELECT RAISE(ABORT,'cannot forget file'); END").unwrap());
+    a.inspect_writer(|sql| sql.batch("CREATE TRIGGER fail_delete AFTER DELETE ON _coven_device_files BEGIN SELECT RAISE(ABORT,'cannot forget file'); END").unwrap());
     let paths = owned_paths(&a_store);
     assert!(a.apply_downloaded(deletion.clone().into()).await.is_err());
     assert_eq!(local_count(&a, "files"), 1);
-    assert_eq!(local_count(&a, "coven_device_files"), 1);
+    assert_eq!(local_count(&a, "_coven_device_files"), 1);
     assert_eq!(owned_paths(&a_store), paths);
     a.inspect_writer(|sql| sql.batch("DROP TRIGGER fail_delete").unwrap());
     a.apply_downloaded(deletion.into()).await.unwrap();
     assert_eq!(local_count(&a, "files"), 0);
-    assert_eq!(local_count(&a, "coven_device_files"), 0);
+    assert_eq!(local_count(&a, "_coven_device_files"), 0);
     assert!(owned_paths(&a_store).is_empty());
     a.close().await.unwrap();
     b.close().await.unwrap();
@@ -773,7 +773,7 @@ async fn constraint_removal_preserves_bytes_until_the_row_is_restored() {
         .unwrap();
     assert_eq!(present, "other");
     assert_eq!(owned_paths(&a_store).len(), 1);
-    assert_eq!(local_count(&a, "coven_device_files"), 1);
+    assert_eq!(local_count(&a, "_coven_device_files"), 1);
     b.write(|sql| {
         sql.execute("DELETE FROM files", [])?;
         Ok(())
@@ -846,8 +846,8 @@ async fn a_trigger_cannot_leave_a_new_owned_file_without_its_row() {
         Err(DbError::FileRowRemoved { table, key }) if table == "files" && key == RowKey::from("7")
     ));
     assert_eq!(local_count(&db, "files"), 0);
-    assert_eq!(local_count(&db, "coven_device_files"), 0);
-    assert_eq!(local_count(&db, "coven_file_removals"), 0);
+    assert_eq!(local_count(&db, "_coven_device_files"), 0);
+    assert_eq!(local_count(&db, "_coven_file_removals"), 0);
     assert!(owned_paths(&store).is_empty());
     db.close().await.unwrap();
 }

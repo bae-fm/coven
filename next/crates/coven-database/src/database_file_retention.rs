@@ -32,7 +32,7 @@ impl Database {
                     .expect("writer connection lock poisoned");
                 writer.transaction(|db| {
                     db.for_each(
-                        "SELECT unused,stored,path FROM coven_file_uploads WHERE id=?1",
+                        "SELECT unused,stored,path FROM _coven_file_uploads WHERE id=?1",
                         [id],
                         |r| {
                             if !r.get::<_, bool>(0)? || !r.get::<_, bool>(1)? {
@@ -48,7 +48,7 @@ impl Database {
                             Ok(())
                         },
                     )?;
-                    db.internal_execute("DELETE FROM coven_file_uploads WHERE id=?1", [id])?;
+                    db.internal_execute("DELETE FROM _coven_file_uploads WHERE id=?1", [id])?;
                     Ok::<_, DbError>(())
                 })
             })
@@ -152,7 +152,7 @@ pub(super) fn snapshot_references(
 ) -> Result<BTreeSet<(DeviceId, FileId)>, DbError> {
     let mut references = BTreeSet::new();
     db.for_each(
-        "SELECT table_name,columns FROM temp.coven_snapshot_values",
+        "SELECT table_name,columns FROM temp._coven_snapshot_values",
         [],
         |row| {
             let columns = coven_format::merge_fields::decode_columns(&row.get::<_, Vec<u8>>(1)?)?;

@@ -20,8 +20,8 @@ impl SnapshotCoverage {
         let positions = crate::download::positions(database)?;
         let audiences = database
             .query(
-                "SELECT audience FROM coven_loaded_audiences UNION SELECT audience FROM coven_rows
-             UNION SELECT audience FROM coven_lost UNION SELECT 'store'",
+                "SELECT audience FROM _coven_loaded_audiences UNION SELECT audience FROM _coven_rows
+             UNION SELECT audience FROM _coven_lost UNION SELECT 'store'",
                 [],
                 |r| audience(&r.get::<_, String>(0)?),
             )?
@@ -36,7 +36,7 @@ impl SnapshotCoverage {
         // A device's next write implicitly reads every earlier own write, even
         // when the upload queue is empty. Reload cannot rewind that causal past.
         let own = database.query(
-            "SELECT number,had_read FROM coven_writes WHERE substr(timestamp,9,8)=?1
+            "SELECT number,had_read FROM _coven_writes WHERE substr(timestamp,9,8)=?1
              ORDER BY number DESC LIMIT 1",
             [device.0.to_be_bytes().as_slice()],
             |r| {
@@ -89,7 +89,7 @@ impl SnapshotCoverage {
             .values()
             .flat_map(|p| p.0.iter().map(|p| p.device))
             .collect();
-        database.internal_execute("DELETE FROM coven_positions", [])?;
+        database.internal_execute("DELETE FROM _coven_positions", [])?;
         for device in devices {
             let minimum = self
                 .audiences
@@ -115,7 +115,7 @@ impl SnapshotCoverage {
             });
             if minimum > 0 {
                 database.internal_execute(
-                    "INSERT INTO coven_positions(device,number) VALUES(?1,?2)",
+                    "INSERT INTO _coven_positions(device,number) VALUES(?1,?2)",
                     (
                         device.0.to_be_bytes().as_slice(),
                         minimum.to_be_bytes().as_slice(),
@@ -125,7 +125,7 @@ impl SnapshotCoverage {
         }
         for audience in self.audiences.keys() {
             database.internal_execute(
-                "INSERT INTO coven_loaded_audiences(audience) VALUES(?1) ON CONFLICT DO NOTHING",
+                "INSERT INTO _coven_loaded_audiences(audience) VALUES(?1) ON CONFLICT DO NOTHING",
                 [audience_text(audience)],
             )?;
         }

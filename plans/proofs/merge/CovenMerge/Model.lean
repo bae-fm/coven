@@ -8,10 +8,10 @@
 * The result for a set `S` of writes, as predicates that mention only `S`
   and the writes' metadata: each row's generation, the writes recorded for
   each generation, each cell's winning write, and the lost values.
-* `St`: what a device stores for the merged state: `coven_rows` (one row per
-  generation), `coven_cells`, and `coven_lost`.
+* `St`: what a device stores for the merged state: `_coven_rows` (one row per
+  generation), `_coven_cells`, and `_coven_lost`.
 * `step`: how a device applies one arriving write. It reads only its state,
-  the timestamps of writes (`coven_writes`) and the arriving write's record.
+  the timestamps of writes (`_coven_writes`) and the arriving write's record.
 
 `Converge.lean` proves that `step`, applied in any causal order, lands in the
 state the predicates describe.
@@ -134,12 +134,12 @@ end Defs
 
 /-- A device's merged state.
 * `gen r`: row `r`'s current generation.
-* `genWrite r n`: generation `n`'s `coven_rows` row: the write that moved the
+* `genWrite r n`: generation `n`'s `_coven_rows` row: the write that moved the
   row there, or of several, the one with the smallest timestamp (§8.3).
-* `cell r c`: the write whose value cell `(r, c)` holds (`coven_cells`), or
+* `cell r c`: the write whose value cell `(r, c)` holds (`_coven_cells`), or
   `none` while the row is absent or the cell was never set. The app's value
   is that write's value for the cell.
-* `lost r c a`: `coven_lost`'s row for the value write `a` set in cell `(r, c)`:
+* `lost r c a`: `_coven_lost`'s row for the value write `a` set in cell `(r, c)`:
   the incarnation it was set in and the write recorded as replacing it. -/
 structure St (W Row Col : Type) where
   gen : Row → Nat
@@ -191,7 +191,7 @@ def cellStep (G : Nat) (old : Option W) (c : Col) (w : W) : Option (Change Col) 
       some (maxBy M.ts old w)
     else old
 
-/-- New `coven_lost` row for the value write `a` set in cell `(r, c)`.
+/-- New `_coven_lost` row for the value write `a` set in cell `(r, c)`.
 Arguments: the row's generation `G`, the generation records `gw`, the cell's
 current setter `cur`, the current lost row `old`, the arriving write `w` and
 its change `ch` to row `r`. -/

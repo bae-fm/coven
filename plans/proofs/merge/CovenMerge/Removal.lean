@@ -20,7 +20,7 @@ the rules remove.
   recorded for each removed row.
 * `removed_has_rule`: every removed row has a rule recorded.
 * `device_converges`: two devices that applied the same writes in causal
-  orders hold the same merged state, the same view, and the same `coven_lost`
+  orders hold the same merged state, the same view, and the same `_coven_lost`
   rows for removed rows.
 * `unique_with_others`: run as one more rule among the others, the unique
   rule can end two ways from one state; the reason it is judged once.
@@ -132,7 +132,7 @@ theorem any_order_removal {D : Row → Bool}
     (h : Stratified I.rows (FiresP (fires I)) (rivalBefore I) (start I) D) : D = removal I :=
   stratified_unique (fires_monotone I) h (removal_stratified I)
 
-/-- A rule a removed row's `coven_lost` row names (§8, §20.4). -/
+/-- A rule a removed row's `_coven_lost` row names (§8, §20.4). -/
 inductive Rule where
   | foreignKey
   | check
@@ -219,7 +219,7 @@ end
 /-! ## End to end -/
 
 /-- A device's whole state: the merged state, what the app sees, and the
-`coven_lost` rows for removed rows: each cell's value, the write that set it,
+`_coven_lost` rows for removed rows: each cell's value, the write that set it,
 and the rules that removed the row. -/
 structure Device (W Row Col : Type) where
   merged : St W Row Col
@@ -241,7 +241,7 @@ def device (M : Writes W Row Col) (inputs : St W Row Col → Inputs Row K) (L : 
 
 /-- **Convergence, end to end.** Two devices that applied the same writes,
 each in an order that respects causality, hold the same merged state, show
-the same rows, remove the same rows, and hold the same `coven_lost` rows,
+the same rows, remove the same rows, and hold the same `_coven_lost` rows,
 lost values and removed rows alike. -/
 theorem device_converges {M : Writes W Row Col} (hV : Valid M)
     (inputs : St W Row Col → Inputs Row K) {L₁ L₂ : List W}

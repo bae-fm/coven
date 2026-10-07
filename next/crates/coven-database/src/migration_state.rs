@@ -17,22 +17,22 @@ pub(crate) fn carry(
     after: &WriteSchema,
 ) -> Result<BTreeSet<String>, DbError> {
     // The cursor owns identities only, and never changes the table being visited.
-    db.batch("CREATE TEMP TABLE coven_migration_retired AS SELECT DISTINCT table_name,key,audience FROM coven_lost WHERE retired=0 AND replacement_kind='rules'")?;
-    db.visit("SELECT table_name,key,audience FROM temp.coven_migration_retired", [], |r| {
+    db.batch("CREATE TEMP TABLE _coven_migration_retired AS SELECT DISTINCT table_name,key,audience FROM _coven_lost WHERE retired=0 AND replacement_kind='rules'")?;
+    db.visit("SELECT table_name,key,audience FROM temp._coven_migration_retired", [], |r| {
         let id = crate::row_queries::read_identity(r)?;
         freeze_losses(db, &id)?;
         crate::fingerprint::retire_losses(db, &id)?;
         crate::fingerprint::forget_rows(db, std::iter::once(&id))?;
         let audience = audience_text(&id.audience);
-        db.internal_execute("DELETE FROM coven_lost_references WHERE loss_id IN (SELECT id FROM coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND retired=0 AND replacement_kind IN ('rules','write'))",params![id.table,id.key,audience])?;
-        db.internal_execute("UPDATE coven_lost SET retired=1 WHERE table_name=?1 AND key=?2 AND audience=?3 AND retired=0 AND replacement_kind IN ('rules','write')",params![id.table,id.key,audience])?;
-        for table in ["coven_references", "coven_cells", "coven_claims"] {
-            db.internal_execute(&format!("DELETE FROM {table} WHERE row_id IN (SELECT id FROM coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3)"),params![id.table,id.key,audience])?;
+        db.internal_execute("DELETE FROM _coven_lost_references WHERE loss_id IN (SELECT id FROM _coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND retired=0 AND replacement_kind IN ('rules','write'))",params![id.table,id.key,audience])?;
+        db.internal_execute("UPDATE _coven_lost SET retired=1 WHERE table_name=?1 AND key=?2 AND audience=?3 AND retired=0 AND replacement_kind IN ('rules','write')",params![id.table,id.key,audience])?;
+        for table in ["_coven_references", "_coven_cells", "_coven_claims"] {
+            db.internal_execute(&format!("DELETE FROM {table} WHERE row_id IN (SELECT id FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3)"),params![id.table,id.key,audience])?;
         }
-        db.internal_execute("DELETE FROM coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3",params![id.table,id.key,audience])?;
+        db.internal_execute("DELETE FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3",params![id.table,id.key,audience])?;
         Ok(())
     })?;
-    db.batch("DROP TABLE temp.coven_migration_retired")?;
+    db.batch("DROP TABLE temp._coven_migration_retired")?;
 
     let mut refresh = BTreeSet::new();
     let definitions = before.changed_tables(&after.schema);
@@ -48,7 +48,7 @@ pub(crate) fn carry(
             }
         }
         db.visit(
-            "SELECT DISTINCT table_name,key,audience FROM coven_rows WHERE table_name=?1",
+            "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE table_name=?1",
             [&table.name],
             |r| {
                 crate::fingerprint::forget_rows(
@@ -58,11 +58,11 @@ pub(crate) fn carry(
             },
         )?;
         if !names.tables.contains_key(&table.name) {
-            for child in ["coven_references", "coven_cells", "coven_claims"] {
-                db.internal_execute(&format!("DELETE FROM {child} WHERE row_id IN (SELECT id FROM coven_rows WHERE table_name=?1)"), [&table.name])?;
+            for child in ["_coven_references", "_coven_cells", "_coven_claims"] {
+                db.internal_execute(&format!("DELETE FROM {child} WHERE row_id IN (SELECT id FROM _coven_rows WHERE table_name=?1)"), [&table.name])?;
             }
-            db.internal_execute("DELETE FROM coven_rows WHERE table_name=?1", [&table.name])?;
-            db.internal_execute("DELETE FROM coven_lost WHERE table_name=?1 AND retired=0 AND replacement_kind IN ('rules','write')",[&table.name])?;
+            db.internal_execute("DELETE FROM _coven_rows WHERE table_name=?1", [&table.name])?;
+            db.internal_execute("DELETE FROM _coven_lost WHERE table_name=?1 AND retired=0 AND replacement_kind IN ('rules','write')",[&table.name])?;
         }
     }
     columns(db, names)?;
@@ -83,7 +83,7 @@ pub(crate) fn carry(
 /// Retired rows no longer participate in reference recomputation. Keep exactly
 /// their displayed values, without parent generations that could restore them.
 fn freeze_losses(db: &DatabaseConnection, row: &coven_merge::RowId) -> Result<(), DbError> {
-    db.visit("SELECT id,replacement_kind,COALESCE(read_value,value) FROM coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND retired=0 AND replacement_kind IN ('rules','write')", params![row.table,row.key,audience_text(&row.audience)], |r| {
+    db.visit("SELECT id,replacement_kind,COALESCE(read_value,value) FROM _coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND retired=0 AND replacement_kind IN ('rules','write')", params![row.table,row.key,audience_text(&row.audience)], |r| {
         let id: i64 = r.get(0)?;
         let bytes: Vec<u8> = r.get(2)?;
         let value = if r.get::<_,String>(1)? == "rules" {
@@ -95,23 +95,23 @@ fn freeze_losses(db: &DatabaseConnection, row: &coven_merge::RowId) -> Result<()
             value.parents.clear();
             encoded(merge_fields::encode_column_value(&value))?
         };
-        db.internal_execute("UPDATE coven_lost SET value=?2,read_value=NULL WHERE id=?1",params![id,value])?;
+        db.internal_execute("UPDATE _coven_lost SET value=?2,read_value=NULL WHERE id=?1",params![id,value])?;
         Ok(())
     })
 }
 
 fn rename_table(db: &DatabaseConnection, old: &str, new: &str) -> Result<(), DbError> {
     db.internal_execute(
-        "UPDATE coven_rows SET table_name=?2 WHERE table_name=?1",
+        "UPDATE _coven_rows SET table_name=?2 WHERE table_name=?1",
         params![old, new],
     )?;
-    db.internal_execute("UPDATE coven_lost SET table_name=?2 WHERE table_name=?1 AND retired=0 AND replacement_kind='write'",params![old,new])?;
+    db.internal_execute("UPDATE _coven_lost SET table_name=?2 WHERE table_name=?1 AND retired=0 AND replacement_kind='write'",params![old,new])?;
     Ok(())
 }
 
 fn columns(db: &DatabaseConnection, names: &MigrationMatch) -> Result<(), DbError> {
     let columns = db.query(
-        "SELECT id,table_name,column_name FROM coven_columns",
+        "SELECT id,table_name,column_name FROM _coven_columns",
         [],
         |r| {
             Ok((
@@ -131,21 +131,21 @@ fn columns(db: &DatabaseConnection, names: &MigrationMatch) -> Result<(), DbErro
             continue;
         }
         let Some((new_table, new_column)) = target else {
-            db.internal_execute("DELETE FROM coven_references WHERE column_id=?1", [id])?;
-            db.internal_execute("DELETE FROM coven_cells WHERE column_id=?1", [id])?;
-            db.internal_execute("DELETE FROM coven_lost WHERE column_id=?1 AND retired=0 AND replacement_kind='write'",[id])?;
-            db.internal_execute("DELETE FROM coven_columns WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM coven_lost WHERE column_id=?1)",[id])?;
+            db.internal_execute("DELETE FROM _coven_references WHERE column_id=?1", [id])?;
+            db.internal_execute("DELETE FROM _coven_cells WHERE column_id=?1", [id])?;
+            db.internal_execute("DELETE FROM _coven_lost WHERE column_id=?1 AND retired=0 AND replacement_kind='write'",[id])?;
+            db.internal_execute("DELETE FROM _coven_columns WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM _coven_lost WHERE column_id=?1)",[id])?;
             continue;
         };
-        let retained: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM coven_lost WHERE column_id=?1 AND (retired=1 OR replacement_kind='excluded'))",[id],|r|r.get(0))?;
+        let retained: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_lost WHERE column_id=?1 AND (retired=1 OR replacement_kind='excluded'))",[id],|r|r.get(0))?;
         let stage = format!("coven_migration_column_{id}");
         let active = if retained {
             db.internal_execute(
-                "INSERT INTO coven_columns(table_name,column_name) VALUES(?1,?2)",
+                "INSERT INTO _coven_columns(table_name,column_name) VALUES(?1,?2)",
                 params![stage, new_column],
             )?;
             let active = db.query_row(
-                "SELECT id FROM coven_columns WHERE table_name=?1 AND column_name=?2",
+                "SELECT id FROM _coven_columns WHERE table_name=?1 AND column_name=?2",
                 params![stage, new_column],
                 |r| r.get(0),
             )?;
@@ -153,7 +153,7 @@ fn columns(db: &DatabaseConnection, names: &MigrationMatch) -> Result<(), DbErro
             active
         } else {
             db.internal_execute(
-                "UPDATE coven_columns SET table_name=?2,column_name=?3 WHERE id=?1",
+                "UPDATE _coven_columns SET table_name=?2,column_name=?3 WHERE id=?1",
                 params![id, stage, new_column],
             )?;
             id
@@ -162,16 +162,16 @@ fn columns(db: &DatabaseConnection, names: &MigrationMatch) -> Result<(), DbErro
     }
     for (id, table, column) in renamed {
         let existing: Option<i64> = db.query_row(
-            "SELECT (SELECT id FROM coven_columns WHERE table_name=?1 AND column_name=?2)",
+            "SELECT (SELECT id FROM _coven_columns WHERE table_name=?1 AND column_name=?2)",
             params![table, column],
             |r| r.get(0),
         )?;
         if let Some(existing) = existing {
             move_column(db, id, existing)?;
-            db.internal_execute("DELETE FROM coven_columns WHERE id=?1", [id])?;
+            db.internal_execute("DELETE FROM _coven_columns WHERE id=?1", [id])?;
         } else {
             db.internal_execute(
-                "UPDATE coven_columns SET table_name=?2,column_name=?3 WHERE id=?1",
+                "UPDATE _coven_columns SET table_name=?2,column_name=?3 WHERE id=?1",
                 params![id, table, column],
             )?;
         }
@@ -180,13 +180,13 @@ fn columns(db: &DatabaseConnection, names: &MigrationMatch) -> Result<(), DbErro
 }
 
 fn move_column(db: &DatabaseConnection, old: i64, new: i64) -> Result<(), DbError> {
-    for table in ["coven_cells", "coven_references"] {
+    for table in ["_coven_cells", "_coven_references"] {
         db.internal_execute(
             &format!("UPDATE {table} SET column_id=?2 WHERE column_id=?1"),
             params![old, new],
         )?;
     }
-    db.internal_execute("UPDATE coven_lost SET column_id=?2 WHERE column_id=?1 AND retired=0 AND replacement_kind='write'",params![old,new])?;
+    db.internal_execute("UPDATE _coven_lost SET column_id=?2 WHERE column_id=?1 AND retired=0 AND replacement_kind='write'",params![old,new])?;
     Ok(())
 }
 
@@ -197,7 +197,7 @@ fn references(
     refresh: &mut BTreeSet<String>,
 ) -> Result<(), DbError> {
     let keys = db.query(
-        "SELECT id,table_name,identity FROM coven_foreign_keys",
+        "SELECT id,table_name,identity FROM _coven_foreign_keys",
         [],
         |r| {
             Ok((
@@ -229,30 +229,33 @@ fn references(
         if let Some((table, key)) = target {
             refresh.insert(table.clone());
             db.internal_execute(
-                "UPDATE coven_foreign_keys SET table_name=?2 WHERE id=?1",
+                "UPDATE _coven_foreign_keys SET table_name=?2 WHERE id=?1",
                 params![id, format!("coven_migration_fk_{id}")],
             )?;
             renamed.push((id, table, key));
         } else {
-            db.internal_execute("DELETE FROM coven_references WHERE foreign_key_id=?1", [id])?;
             db.internal_execute(
-                "DELETE FROM coven_lost_references WHERE foreign_key_id=?1",
+                "DELETE FROM _coven_references WHERE foreign_key_id=?1",
                 [id],
             )?;
-            db.internal_execute("DELETE FROM coven_foreign_keys WHERE id=?1", [id])?;
+            db.internal_execute(
+                "DELETE FROM _coven_lost_references WHERE foreign_key_id=?1",
+                [id],
+            )?;
+            db.internal_execute("DELETE FROM _coven_foreign_keys WHERE id=?1", [id])?;
         }
     }
     for (id, table, key) in renamed {
         db.internal_execute(
-            "UPDATE coven_foreign_keys SET table_name=?2,identity=?3 WHERE id=?1",
+            "UPDATE _coven_foreign_keys SET table_name=?2,identity=?3 WHERE id=?1",
             params![id, table, encoded(merge_fields::encode_foreign_key(&key))?],
         )?;
-        db.internal_execute("UPDATE coven_references SET parent_table=?2 WHERE foreign_key_id=?1 AND parent_table<>?2",params![id,key.parent])?;
-        db.internal_execute("UPDATE coven_lost_references SET parent_table=?2 WHERE foreign_key_id=?1 AND parent_table<>?2",params![id,key.parent])?;
+        db.internal_execute("UPDATE _coven_references SET parent_table=?2 WHERE foreign_key_id=?1 AND parent_table<>?2",params![id,key.parent])?;
+        db.internal_execute("UPDATE _coven_lost_references SET parent_table=?2 WHERE foreign_key_id=?1 AND parent_table<>?2",params![id,key.parent])?;
     }
     for table in losses {
         // Values of concurrent cell losses embed reference identities as well.
-        db.visit("SELECT id,value,read_value FROM coven_lost WHERE table_name=?1 AND retired=0 AND replacement_kind='write'",[&table],|r| {
+        db.visit("SELECT id,value,read_value FROM _coven_lost WHERE table_name=?1 AND retired=0 AND replacement_kind='write'",[&table],|r| {
             let id: i64 = r.get(0)?;
             let mut value = decoded(merge_fields::decode_column_value(&r.get::<_,Vec<u8>>(1)?))?;
             let old = value.clone();
@@ -269,7 +272,7 @@ fn references(
                         value.value = decoded(merge_fields::decode_column_value(&displayed))?.value;
                     }
                 }
-                db.internal_execute("UPDATE coven_lost SET value=?2,read_value=NULL WHERE id=?1",params![id,encoded(merge_fields::encode_column_value(&value))?])?;
+                db.internal_execute("UPDATE _coven_lost SET value=?2,read_value=NULL WHERE id=?1",params![id,encoded(merge_fields::encode_column_value(&value))?])?;
             }
             Ok(())
         })?;
@@ -284,7 +287,7 @@ fn constraints(
     after: &WriteSchema,
 ) -> Result<(), DbError> {
     let constraints = db.query(
-        "SELECT id,table_name,identity FROM coven_constraints",
+        "SELECT id,table_name,identity FROM _coven_constraints",
         [],
         |r| {
             Ok((
@@ -323,20 +326,20 @@ fn constraints(
         }
         if let Some((table, key)) = target {
             db.internal_execute(
-                "UPDATE coven_constraints SET table_name=?2 WHERE id=?1",
+                "UPDATE _coven_constraints SET table_name=?2 WHERE id=?1",
                 params![id, format!("coven_migration_constraint_{id}")],
             )?;
             renamed.push((id, table, key));
         } else {
             // Claims belong to removed rows, which were retired above. Definitions
             // that no longer exist must not be reused by a later incarnation.
-            db.internal_execute("DELETE FROM coven_claims WHERE constraint_id=?1", [id])?;
-            db.internal_execute("DELETE FROM coven_constraints WHERE id=?1", [id])?;
+            db.internal_execute("DELETE FROM _coven_claims WHERE constraint_id=?1", [id])?;
+            db.internal_execute("DELETE FROM _coven_constraints WHERE id=?1", [id])?;
         }
     }
     for (id, table, key) in renamed {
         db.internal_execute(
-            "UPDATE coven_constraints SET table_name=?2,identity=?3 WHERE id=?1",
+            "UPDATE _coven_constraints SET table_name=?2,identity=?3 WHERE id=?1",
             params![
                 id,
                 table,
@@ -355,7 +358,7 @@ pub(crate) fn refresh(
     let deleted = crate::store_log_tables::deleted_circles(db)?;
     for table in tables {
         db.visit(
-            "SELECT DISTINCT table_name,key,audience FROM coven_rows WHERE table_name=?1",
+            "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE table_name=?1",
             [table],
             |r| {
                 let row = crate::row_queries::read_identity(r)?;

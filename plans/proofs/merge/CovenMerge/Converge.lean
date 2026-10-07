@@ -151,7 +151,7 @@ theorem isSpec_unique {S : W → Prop} {st₁ st₂ : St W Row Col}
 
 /-- **Convergence.** Two devices that applied the same set of writes, each in
 an order that respects causality, hold the same state: the same row
-generations, generation records, cell values, and `coven_lost` rows. -/
+generations, generation records, cell values, and `_coven_lost` rows. -/
 theorem merge_converges (hV : Valid M) {L₁ L₂ : List W}
     (h₁ : CausalOrder M L₁) (h₂ : CausalOrder M L₂) (hset : ∀ x, x ∈ L₁ ↔ x ∈ L₂) :
     L₁.foldl (step M) St.init = L₂.foldl (step M) (St.init : St W Row Col) :=

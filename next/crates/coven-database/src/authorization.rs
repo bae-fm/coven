@@ -362,7 +362,7 @@ impl SqlAuthorization {
                     | crate::sql::Token::String(name) => name,
                     _ => continue,
                 };
-                if name.to_ascii_lowercase().starts_with("coven_") {
+                if crate::internal_schema::reserved_name(name) {
                     return Err(rusqlite::Error::UserFunctionError(Box::new(
                         DbError::InternalTable {
                             table: name.clone(),
@@ -513,8 +513,7 @@ impl AuthorizationState {
     fn refusal(&mut self, context: AuthContext<'_>) -> Option<DbError> {
         use AuthAction::*;
         let reserved = |name: &str| {
-            name.to_ascii_lowercase()
-                .starts_with("coven_")
+            crate::internal_schema::reserved_name(name)
                 .then(|| DbError::InternalTable { table: name.into() })
         };
         let object = match context.action {
@@ -574,10 +573,13 @@ impl AuthorizationState {
             }
             Reindex { index_name } => {
                 // SQLite names constraint indexes sqlite_autoindex_<table>_<n>.
-                // Those indexes belong to the reserved table too.
+                // Check the table without its ordinal: app tables named coven
+                // or _coven do not have a reserved prefix.
                 if index_name
                     .to_ascii_lowercase()
-                    .starts_with("sqlite_autoindex_coven_")
+                    .strip_prefix("sqlite_autoindex_")
+                    .and_then(|name| name.rsplit_once('_'))
+                    .is_some_and(|(table, _)| crate::internal_schema::reserved_name(table))
                 {
                     return Some(DbError::InternalTable {
                         table: index_name.into(),

@@ -11,8 +11,8 @@ use rusqlite::params;
 pub(crate) fn load(database: &DatabaseConnection, row: i64) -> Result<AppValues, DbError> {
     Ok(database
         .query(
-            "SELECT c.column_name,v.value FROM coven_reference_values v
-         JOIN coven_columns c ON c.id=v.column_id WHERE v.row_id=?1",
+            "SELECT c.column_name,v.value FROM _coven_reference_values v
+         JOIN _coven_columns c ON c.id=v.column_id WHERE v.row_id=?1",
             [row],
             |r| Ok((r.get(0)?, value(r.get_ref(1)?)?)),
         )?
@@ -28,7 +28,7 @@ pub(crate) fn store(
 ) -> Result<(), DbError> {
     for (name, cell) in state.cells() {
         let column: i64 = database.query_row(
-            "SELECT id FROM coven_columns WHERE table_name=?1 AND column_name=?2",
+            "SELECT id FROM _coven_columns WHERE table_name=?1 AND column_name=?2",
             params![state.row().table, name],
             |r| r.get(0),
         )?;
@@ -36,14 +36,14 @@ pub(crate) fn store(
             && displayed.is_some_and(|values| cell.value.value != values[name])
         {
             database.internal_execute(
-                "INSERT INTO coven_reference_values(column_id,row_id,value) VALUES(?1,?2,?3)
+                "INSERT INTO _coven_reference_values(column_id,row_id,value) VALUES(?1,?2,?3)
                  ON CONFLICT(column_id,row_id) DO UPDATE SET value=excluded.value
                  WHERE value IS NOT excluded.value OR typeof(value)<>typeof(excluded.value)",
                 params![column, row, sql_value(&cell.value.value)],
             )?;
         } else {
             database.internal_execute(
-                "DELETE FROM coven_reference_values WHERE column_id=?1 AND row_id=?2",
+                "DELETE FROM _coven_reference_values WHERE column_id=?1 AND row_id=?2",
                 params![column, row],
             )?;
         }

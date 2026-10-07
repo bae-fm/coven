@@ -12,7 +12,7 @@ use crate::{DbError, Migration};
 fn applied(database: &crate::Database, stamp: Timestamp, number: u64) {
     database.inspect_writer(|db| {
         db.internal_execute(
-            "INSERT INTO coven_writes(timestamp,number,had_read) VALUES(?1,?2,?3)",
+            "INSERT INTO _coven_writes(timestamp,number,had_read) VALUES(?1,?2,?3)",
             crate::params![
                 merge_fields::encode_timestamp(&stamp).unwrap(),
                 number.to_be_bytes().as_slice(),
@@ -20,7 +20,7 @@ fn applied(database: &crate::Database, stamp: Timestamp, number: u64) {
             ],
         )
         .unwrap();
-        db.internal_execute("INSERT INTO coven_positions(device,number) VALUES(?1,?2) ON CONFLICT(device) DO UPDATE SET number=excluded.number",crate::params![stamp.device().0.to_be_bytes().as_slice(),number.to_be_bytes().as_slice()]).unwrap();
+        db.internal_execute("INSERT INTO _coven_positions(device,number) VALUES(?1,?2) ON CONFLICT(device) DO UPDATE SET number=excluded.number",crate::params![stamp.device().0.to_be_bytes().as_slice(),number.to_be_bytes().as_slice()]).unwrap();
     });
 }
 
@@ -115,7 +115,7 @@ async fn clock_and_counter_limits_roll_back_without_using_a_number() {
         .await,
         Err(DbError::ClockOutOfRange)
     ));
-    for table in ["notes", "local_rows", "coven_writes", "coven_uploads"] {
+    for table in ["notes", "local_rows", "_coven_writes", "_coven_uploads"] {
         assert_eq!(count(&database, table), 0);
     }
     // A transaction changing only local rows has no timestamp to allocate.

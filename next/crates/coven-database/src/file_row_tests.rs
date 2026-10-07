@@ -39,7 +39,7 @@ async fn invalid_batches_report_the_namespace_and_file_without_leaving_bytes() {
         matches!(namespace, DbError::FileNamespaceNotAppProvided { namespace } if namespace == "unknown")
     );
     assert!(owned_paths(&store).is_empty());
-    assert_eq!(local_count(&db, "coven_file_removals"), 0);
+    assert_eq!(local_count(&db, "_coven_file_removals"), 0);
     let original = tempfile::NamedTempFile::new().unwrap();
     let prepared = prepare_user_file(original.path(), |_| {}).await.unwrap();
     let error = db
@@ -139,7 +139,7 @@ async fn invalid_original_rows_report_id_size_and_attachment_changes() {
             _ => unreachable!(),
         }
         assert_eq!(local_count(&db, "files"), 0);
-        assert_eq!(local_count(&db, "coven_user_files"), 0);
+        assert_eq!(local_count(&db, "_coven_user_files"), 0);
     }
     assert_eq!(std::fs::read(original.path()).unwrap(), [1]);
     db.close().await.unwrap();

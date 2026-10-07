@@ -76,7 +76,7 @@ pub enum WriteWait {
 
 pub(crate) fn positions(database: &DatabaseConnection) -> Result<WritePositions, DbError> {
     Ok(WritePositions(database.query(
-        "SELECT device,number FROM coven_positions ORDER BY device",
+        "SELECT device,number FROM _coven_positions ORDER BY device",
         [],
         |r| {
             Ok(WriteId {
@@ -166,7 +166,7 @@ pub(crate) fn prerequisite(
         return Ok(Some(WriteWait::SchemaVersion(header.schema_version)));
     }
     let publication: Option<u32> = database.query_row(
-        "SELECT (SELECT publication FROM coven_snapshot_schema WHERE EXISTS(SELECT 1 FROM coven_store))",
+        "SELECT (SELECT publication FROM _coven_snapshot_schema WHERE EXISTS(SELECT 1 FROM _coven_store))",
         [], |r| r.get(0),
     )?;
     if let Some(publication) = publication.filter(|version| *version > 0) {
@@ -299,7 +299,7 @@ pub(crate) fn exclude_row(
     let values = encoded(merge_fields::encode_columns(&values))?;
     let setters = encoded(merge_fields::encode_setters(&setters))?;
     let audience = audience_text(&change.row.audience);
-    database.internal_execute("INSERT INTO coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,NULL,?5,?6,'excluded',?7)", params![change.row.table,change.row.key,audience,change.change.generation.to_be_bytes().as_slice(),values,setters,cause])?;
+    database.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,NULL,?5,?6,'excluded',?7)", params![change.row.table,change.row.key,audience,change.change.generation.to_be_bytes().as_slice(),values,setters,cause])?;
     crate::fingerprint::excluded(
         database,
         &change.row,

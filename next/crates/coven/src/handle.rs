@@ -279,13 +279,13 @@ impl CovenHandle {
             .subscribe_reconfigurable(initial_request, query)
     }
 
-    /// Every lost value and removed row, as `coven_lost` holds them (§8).
+    /// Every lost value and removed row, as `_coven_lost` holds them (§8).
     pub async fn lost_values(&self) -> CovenResult<Vec<LostValue>> {
         self.database.lost_values().await
     }
 
     /// Dismisses lost values the app has dealt with, in a write, so every
-    /// device drops them from `coven_lost`; a removed row is deleted for
+    /// device drops them from `_coven_lost`; a removed row is deleted for
     /// good, and never comes back (§8).
     pub async fn dismiss_lost_values(&self, values: &[LostValue]) -> CovenResult<()> {
         self.database.dismiss_lost_values(values).await

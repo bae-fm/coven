@@ -127,9 +127,9 @@ async fn read_context_refuses_writes_and_internal_tables_with_typed_errors() {
         );
     }
     for statement in [
-        "SELECT * FROM coven_lost",
-        "SELECT * FROM CoVeN_rows",
-        "SELECT * FROM coven_columns",
+        "SELECT * FROM _coven_lost",
+        "SELECT * FROM _CoVeN_rows",
+        "SELECT * FROM _coven_columns",
     ] {
         let error = db
             .read(move |sql| Ok(sql.query(statement, [], |_| Ok(()))?))

@@ -167,7 +167,7 @@ async fn waiting_writes_keep_their_numbers_and_merge_as_late_writes_on_every_loa
         .await
         .unwrap();
     a.inspect_writer(|db| {
-        db.internal_execute("DELETE FROM coven_uploads", [])
+        db.internal_execute("DELETE FROM _coven_uploads", [])
             .unwrap()
     });
     sql(&a, "UPDATE notes SET title='offline'").await.unwrap();
@@ -290,7 +290,7 @@ async fn loading_twice_preserves_values_losses_and_fingerprint() {
     for _ in 0..2 {
         load(&b, Audience::Store, source.clone()).await;
         assert_eq!(frames(&b, Audience::Store).await, source);
-        assert_eq!(count(&b, "coven_uploads"), 0);
+        assert_eq!(count(&b, "_coven_uploads"), 0);
     }
     for db in [a, b] {
         db.close().await.unwrap();
@@ -347,7 +347,7 @@ async fn loading_a_parent_snapshot_recomputes_other_audiences_without_rewriting_
         let before = frames(&c, Audience::Store).await;
         sql(&b,"INSERT INTO children VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','PaReNt')").await.unwrap();
         let history = |db: &Database| {
-            db.inspect_writer(|db|db.query("SELECT generation,write_id FROM coven_rows WHERE table_name='children' ORDER BY generation",[],|r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,i64>(1)?))).unwrap())
+            db.inspect_writer(|db|db.query("SELECT generation,write_id FROM _coven_rows WHERE table_name='children' ORDER BY generation",[],|r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,i64>(1)?))).unwrap())
         };
         let child_history = history(&b);
         sql(&a, "INSERT INTO parents VALUES('unseen predecessor')")
@@ -682,7 +682,7 @@ async fn reloading_keeps_uploaded_own_history_before_authoring_another() {
     sql(&db, "UPDATE notes SET title='second'").await.unwrap();
     let uploaded = records(&db);
     db.inspect_writer(|db| {
-        db.internal_execute("DELETE FROM coven_uploads", [])
+        db.internal_execute("DELETE FROM _coven_uploads", [])
             .unwrap()
     });
     db.load_snapshots(crate::SnapshotReload::new(
@@ -792,10 +792,10 @@ async fn replaying_waiting_files_keeps_the_bytes_used_by_the_final_state() {
         )
         .await
         .unwrap();
-        assert_eq!(local_count(&db, "coven_device_files"), 1);
+        assert_eq!(local_count(&db, "_coven_device_files"), 1);
         assert_eq!(owned_paths(&store), paths);
         assert_eq!(std::fs::read(&paths[0]).unwrap(), b"second");
-        assert_eq!(contents(&db)["coven_uploads"], original["coven_uploads"]);
+        assert_eq!(contents(&db)["_coven_uploads"], original["_coven_uploads"]);
     }
     db.close().await.unwrap();
 }
@@ -825,7 +825,7 @@ async fn removing_a_file_in_a_snapshot_discards_bytes_only_after_a_successful_co
     let empty_prefix = empty.prefix.clone();
     let empty = empty.concat();
     db.inspect_writer(|sql| {
-        sql.internal_execute("DELETE FROM coven_uploads", [])
+        sql.internal_execute("DELETE FROM _coven_uploads", [])
             .unwrap()
     });
     let paths = owned_paths(&store);
@@ -841,7 +841,7 @@ async fn removing_a_file_in_a_snapshot_discards_bytes_only_after_a_successful_co
     .is_err());
     assert_eq!(contents(&db), before);
     assert_eq!(std::fs::read(&paths[0]).unwrap(), b"keep until commit");
-    db.inspect_writer(|sql| sql.batch("CREATE TEMP TRIGGER refuse_forgetting_file BEFORE DELETE ON coven_device_files BEGIN SELECT RAISE(ABORT,'keep bytes'); END").unwrap());
+    db.inspect_writer(|sql| sql.batch("CREATE TEMP TRIGGER refuse_forgetting_file BEFORE DELETE ON _coven_device_files BEGIN SELECT RAISE(ABORT,'keep bytes'); END").unwrap());
     assert!(matches!(
         load_one(
             &db,
@@ -863,8 +863,8 @@ async fn removing_a_file_in_a_snapshot_discards_bytes_only_after_a_successful_co
     )
     .await
     .unwrap();
-    assert_eq!(local_count(&db, "coven_device_files"), 0);
-    assert_eq!(local_count(&db, "coven_file_removals"), 0);
+    assert_eq!(local_count(&db, "_coven_device_files"), 0);
+    assert_eq!(local_count(&db, "_coven_file_removals"), 0);
     assert!(owned_paths(&store).is_empty());
     db.close().await.unwrap();
     source.close().await.unwrap();
@@ -896,7 +896,7 @@ async fn waiting_changes_replay_after_their_missing_own_predecessor() {
         let ready_prefix = ready.prefix.clone();
         let ready = ready.concat();
         db.inspect_writer(|db| {
-            db.internal_execute("DELETE FROM coven_uploads", [])
+            db.internal_execute("DELETE FROM _coven_uploads", [])
                 .unwrap()
         });
         sql(&db, waiting_sql).await.unwrap();

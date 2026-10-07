@@ -26,8 +26,8 @@ async fn failed_deletions_remain_recorded_until_a_write_or_open_retries_them() {
             .unwrap_err();
         assert!(matches!(error, DbError::FileCleanup { write: Ok(()), .. }));
         assert_eq!(local_count(&db, "files"), 0);
-        assert_eq!(local_count(&db, "coven_device_files"), 0);
-        assert_eq!(local_count(&db, "coven_file_removals"), 1);
+        assert_eq!(local_count(&db, "_coven_device_files"), 0);
+        assert_eq!(local_count(&db, "_coven_file_removals"), 1);
         if reopen {
             db.close().await.unwrap();
             let error = store
@@ -52,7 +52,7 @@ async fn failed_deletions_remain_recorded_until_a_write_or_open_retries_them() {
             db.write(|_| Ok(())).await.unwrap();
             db
         };
-        assert_eq!(local_count(&db, "coven_file_removals"), 0);
+        assert_eq!(local_count(&db, "_coven_file_removals"), 0);
         assert!(owned_paths(&store).is_empty());
         db.close().await.unwrap();
     }
@@ -66,7 +66,7 @@ async fn deleting_a_pending_record_can_fail_without_losing_the_retry() {
         .await
         .unwrap();
     attach(&db, b"original".to_vec(), true).await.unwrap();
-    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER coven_fail_cleanup BEFORE DELETE ON coven_file_removals BEGIN SELECT RAISE(ABORT,'record stays'); END").unwrap());
+    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER _coven_fail_cleanup BEFORE DELETE ON _coven_file_removals BEGIN SELECT RAISE(ABORT,'record stays'); END").unwrap());
     let error = db
         .write(|sql| {
             sql.execute("DELETE FROM files", [])?;
@@ -77,11 +77,11 @@ async fn deleting_a_pending_record_can_fail_without_losing_the_retry() {
     assert!(
         matches!(error, DbError::FileCleanup { write: Ok(()), failures } if failures.len() == 1)
     );
-    assert_eq!(local_count(&db, "coven_file_removals"), 1);
+    assert_eq!(local_count(&db, "_coven_file_removals"), 1);
     assert!(owned_paths(&store).is_empty());
-    db.inspect_writer(|sql| sql.batch("DROP TRIGGER coven_fail_cleanup").unwrap());
+    db.inspect_writer(|sql| sql.batch("DROP TRIGGER _coven_fail_cleanup").unwrap());
     db.write(|_| Ok(())).await.unwrap();
-    assert_eq!(local_count(&db, "coven_file_removals"), 0);
+    assert_eq!(local_count(&db, "_coven_file_removals"), 0);
     db.close().await.unwrap();
 }
 
@@ -118,7 +118,9 @@ fn process_crashes_keep_every_unclaimed_file_recorded_and_reopen_removes_it() {
         );
         let raw = rusqlite::Connection::open(store.database_path()).unwrap();
         let pending: i64 = raw
-            .query_row("SELECT count(*) FROM coven_file_removals", [], |r| r.get(0))
+            .query_row("SELECT count(*) FROM _coven_file_removals", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(pending, 1, "{phase}");
         let attached = matches!(phase, "stream" | "transaction");
@@ -130,13 +132,13 @@ fn process_crashes_keep_every_unclaimed_file_recorded_and_reopen_removes_it() {
         assert_eq!(original.exists(), phase != "removed");
         // This fault trigger intentionally survives the child; remove the test
         // fault before opening exercises the recorded deletion again.
-        raw.execute_batch("DROP TRIGGER IF EXISTS coven_crash")
+        raw.execute_batch("DROP TRIGGER IF EXISTS _coven_crash")
             .unwrap();
         drop(raw);
         let db = runtime
             .block_on(store.schema(tables(Provenance::AppProvided), SCHEMA))
             .unwrap();
-        assert_eq!(local_count(&db, "coven_file_removals"), 0);
+        assert_eq!(local_count(&db, "_coven_file_removals"), 0);
         assert_eq!(owned_paths(&store).len(), usize::from(attached));
         if attached {
             assert_eq!(std::fs::read(&original).unwrap(), b"original");
@@ -205,7 +207,7 @@ fn crashing_file_writer() {
             if phase == "committed" {
                 sql.crash_after_next_commit();
             } else {
-                sql.crash_after("coven_file_removals", "DELETE");
+                sql.crash_after("_coven_file_removals", "DELETE");
             }
         });
         runtime
@@ -278,8 +280,8 @@ async fn a_downloaded_location_change_releases_this_devices_owned_copy() {
         row.change.generation = 1;
         let reference = db.file_ref("files", "7").await.unwrap();
         db.apply_downloaded(record.into()).await.unwrap();
-        assert_eq!(local_count(&db, "coven_device_files"), 0);
-        assert_eq!(local_count(&db, "coven_file_removals"), 0);
+        assert_eq!(local_count(&db, "_coven_device_files"), 0);
+        assert_eq!(local_count(&db, "_coven_file_removals"), 0);
         assert!(owned_paths(&store).is_empty());
         assert!(matches!(
             db.write(move |sql| sql.validate_file_ref(&reference)).await,
@@ -321,7 +323,7 @@ async fn a_reused_id_cannot_claim_or_delete_a_kept_file() {
     ));
     assert_eq!(std::fs::read(original).unwrap(), b"original");
     assert_eq!(db.file_ref("files", "7").await.unwrap().plaintext_size(), 8);
-    assert_eq!(local_count(&db, "coven_file_removals"), 0);
+    assert_eq!(local_count(&db, "_coven_file_removals"), 0);
     db.close().await.unwrap();
 }
 
@@ -333,7 +335,7 @@ async fn a_failed_write_keeps_its_error_when_pending_deletion_also_fails() {
         .await
         .unwrap();
     let directory = store.database_path().parent().unwrap().join("files");
-    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER coven_fail_cleanup BEFORE DELETE ON coven_file_removals BEGIN SELECT RAISE(ABORT,'record stays'); END").unwrap());
+    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER _coven_fail_cleanup BEFORE DELETE ON _coven_file_removals BEGIN SELECT RAISE(ABORT,'record stays'); END").unwrap());
     let error = db
         .write_with_files(
             |batch| {
@@ -348,11 +350,11 @@ async fn a_failed_write_keeps_its_error_when_pending_deletion_also_fails() {
         matches!(error, DbError::FileCleanup {write: Err(error), failures} if matches!(*error, DbError::StoreClosed) && matches!(failures.as_slice(), [DbError::Sqlite(_)]))
     );
     assert_eq!(local_count(&db, "files"), 0);
-    assert_eq!(local_count(&db, "coven_file_removals"), 1);
+    assert_eq!(local_count(&db, "_coven_file_removals"), 1);
     assert!(std::fs::read_dir(directory).unwrap().next().is_none());
-    db.inspect_writer(|sql| sql.batch("DROP TRIGGER coven_fail_cleanup").unwrap());
+    db.inspect_writer(|sql| sql.batch("DROP TRIGGER _coven_fail_cleanup").unwrap());
     db.write(|_| Ok(())).await.unwrap();
-    assert_eq!(local_count(&db, "coven_file_removals"), 0);
+    assert_eq!(local_count(&db, "_coven_file_removals"), 0);
     db.close().await.unwrap();
 }
 
@@ -386,6 +388,6 @@ async fn a_failed_rollback_cannot_release_bytes_using_uncommitted_records() {
     });
     db.write(|_| Ok(())).await.unwrap();
     assert_eq!(db.file_ref("files", "7").await.unwrap().plaintext_size(), 8);
-    assert_eq!(local_count(&db, "coven_file_removals"), 0);
+    assert_eq!(local_count(&db, "_coven_file_removals"), 0);
     db.close().await.unwrap();
 }
