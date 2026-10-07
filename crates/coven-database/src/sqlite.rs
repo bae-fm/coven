@@ -283,42 +283,15 @@ impl DatabaseConnection {
         Ok(length as usize)
     }
 
-    pub(crate) fn upload_value(
-        &self,
-        value: crate::upload::UploadValue,
-        rowid: i64,
-    ) -> Result<crate::UploadBytes<'_>, DbError> {
+    pub(crate) fn upload_plaintext(&self, rowid: i64) -> Result<crate::UploadBytes<'_>, DbError> {
         let _scope = self.authorization.internal();
-        let (table, column) = value.column();
         Ok(crate::UploadBytes::new(self.connection.blob_open(
             rusqlite::MAIN_DB,
-            table,
-            column,
+            "_coven_uploads",
+            "record",
             rowid,
             true,
         )?))
-    }
-
-    pub(crate) fn write_upload_seal(
-        &self,
-        rowid: i64,
-        consume: impl FnOnce(&mut dyn FnMut(&[u8]) -> Result<(), DbError>) -> Result<(), DbError>,
-    ) -> Result<usize, DbError> {
-        let _scope = self.authorization.internal();
-        let mut blob = self.connection.blob_open(
-            rusqlite::MAIN_DB,
-            "_coven_upload_seals",
-            "sealed_bytes",
-            rowid,
-            false,
-        )?;
-        let mut offset = 0;
-        consume(&mut |bytes| {
-            blob.write_at(bytes, offset)?;
-            offset += bytes.len();
-            Ok(())
-        })?;
-        Ok(offset)
     }
 
     pub(crate) fn local_write<F, R, E>(

@@ -11,8 +11,8 @@ pub(crate) fn salvage(
 ) -> Result<(), DbError> {
     // Restore the queue before reconstructing the app schema. The migration
     // runner converts unattempted records across the source's pending versions;
-    // seals and upload sessions remain fixed just as on an ordinary update.
-    let result = source.for_each("SELECT record FROM _coven_uploads ORDER BY rowid", [], |row| {
+    // sealing keys and upload sessions remain fixed just as on an ordinary update.
+    let result = source.for_each("SELECT record,sealing_keys FROM _coven_uploads ORDER BY rowid", [], |row| {
         let bytes: Vec<u8> = row.get(0)?;
         let record = match coven_format::write_stream::decode_plaintext(&bytes) {
             Ok(record) => record,
@@ -30,9 +30,8 @@ pub(crate) fn salvage(
             crate::write_commit::queue(db, &record)?;
             let write = record.header.position;
             let args = (write.device.0.to_be_bytes(), write.number.to_be_bytes());
-            let sealed = source.query("SELECT sealed_bytes FROM _coven_upload_seals WHERE device=?1 AND number=?2", (&args.0[..], &args.1[..]), |r| r.get::<_,Vec<u8>>(0))?;
-            if let Some(sealed) = sealed.into_iter().next() {
-                db.internal_execute("INSERT INTO _coven_upload_seals(device,number,sealed_bytes) VALUES(?1,?2,?3)", (&args.0[..], &args.1[..], sealed))?;
+            if let Some(keys) = row.get::<_, Option<Vec<u8>>>(1)? {
+                db.internal_execute("UPDATE _coven_uploads SET sealing_keys=?1 WHERE device=?2 AND number=?3", (&keys, &args.0[..], &args.1[..]))?;
                 for session in source.query("SELECT session FROM _coven_write_upload_sessions WHERE device=?1 AND number=?2", (&args.0[..], &args.1[..]), |r| r.get::<_,Vec<u8>>(0))? {
                     db.internal_execute("INSERT INTO _coven_write_upload_sessions(device,number,session) VALUES(?1,?2,?3)", (&args.0[..], &args.1[..], session))?;
                 }

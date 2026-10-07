@@ -1,7 +1,7 @@
 //! HKDF labels are the durable separation between cryptographic purposes (§11.1).
 
 use hkdf::Hkdf;
-use hmac::{Hmac, KeyInit};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -103,6 +103,38 @@ impl DerivedKeys {
     ) -> Result<Vec<u8>, CryptoError> {
         self.encryption
             .seal_object_chunk(path, prefix, section, index, plaintext)
+    }
+
+    /// Re-seal a write or store-log chunk identically on every attempt (D9/D11).
+    /// The path must be used once: plaintext, prefix and key choices must never
+    /// change after the first attempt. Section and index identify one chunk.
+    /// Snapshots, positions and join requests use `seal_object_chunk` instead.
+    pub fn reseal_object_chunk(
+        &self,
+        path: &str,
+        prefix: &[u8],
+        section: u64,
+        index: u64,
+        plaintext: &[u8],
+    ) -> Vec<u8> {
+        let key = &self.encryption.0;
+        let mut nonce = mac(key);
+        nonce.update(&cipher::context(&[
+            b"coven/object-nonce/v1",
+            cipher::storage_path(path),
+            &section.to_be_bytes(),
+            &index.to_be_bytes(),
+        ]));
+        let nonce = nonce.finalize().into_bytes();
+        let nonce: &[u8; 24] = nonce[..24].try_into().expect("24-byte nonce");
+        let mut sealed = nonce.to_vec();
+        sealed.extend(cipher::seal(
+            key,
+            nonce,
+            &object_chunk_aad(path, prefix, section, index),
+            plaintext,
+        ));
+        sealed
     }
 
     /// Open a chunk only at its authenticated path, prefix, section and index.

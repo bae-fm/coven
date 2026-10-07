@@ -5,7 +5,7 @@ use coven_crypto::{
     seal_circle_key, seal_store_key, CircleKey, MemberId, MemberKeys, SealingPublicKey, StoreKey,
     StoreKeyring,
 };
-use coven_database::{EntryOutcome, SealedStoreLog, StoreLog, StoreLogKeyUpload};
+use coven_database::{EntryOutcome, StoreLog, StoreLogKeyUpload, StoreLogSealing};
 use coven_format::store_log::{StoreChange, StoreLogEntry};
 use coven_foundation::id_source::KeyId;
 use coven_merge::Audience;
@@ -148,7 +148,7 @@ pub(crate) fn seal(
     entry: &StoreLogEntry,
     ring: Option<&StoreKeyring>,
     member: &MemberKeys,
-) -> Result<SealedStoreLog, SyncError> {
+) -> Result<StoreLogSealing, SyncError> {
     if !crate::store_log_object::author_matches_device(log, entry) {
         return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed));
     }
@@ -258,8 +258,8 @@ pub(crate) fn seal(
         }
         _ => (),
     }
-    Ok(SealedStoreLog {
-        bytes: crate::store_log_object::seal(entry, encryption, member)?,
+    Ok(StoreLogSealing {
+        key: encryption.id(),
         keys,
     })
 }

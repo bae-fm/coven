@@ -365,9 +365,11 @@
   positions or fingerprints. An unknown device or missing or wrong signature
   is damaged and counts as not posted (§19.1).
 - A chunk is `length:u32 | nonce:24 bytes | ciphertext | tag:16 bytes`:
-  XChaCha20-Poly1305 with a random nonce, under the encryption key derived
-  from the named key (D11). `length` is the ciphertext's, which is the
-  plaintext's, so the chunk takes `length + 44` bytes. Empty chunks are
+  XChaCha20-Poly1305 under the encryption key derived from the named key.
+  Writes and store log entries derive the nonce with HMAC-SHA256 from that
+  encryption key, path, section and chunk index (D11); other objects use
+  random nonces. Readers use the nonce field as stored. `length` is the
+  ciphertext's, which is the plaintext's, so the chunk takes `length + 44` bytes. Empty chunks are
   refused. A chunk holding one frame has 7 bytes to 16 MiB of plaintext; a
   stream chunk has 1 byte to 64 KiB, and only its section's last may be shorter
   than 64 KiB.
@@ -430,13 +432,31 @@
 
 - A *context* encodes a list of byte strings as each one's
   `length:u64 | bytes`; it is used as associated data, as HKDF's info, and
-  for D9's `coven/object-signature/v1` and `coven/prefix-signature/v1` messages.
+  for nonce derivation and D9's `coven/object-signature/v1` and
+  `coven/prefix-signature/v1` messages.
   A number in a context, such as a section or a chunk's index, is one
   string of its 8 bytes, as a `u64`.
 - From a store or circle key, HKDF-SHA256 with no salt derives 32-byte keys
   by label: `coven/encryption/v1` for sealing objects,
   `coven/fingerprints/v1` for fingerprints, and `coven/app-data/v1` for the
   app's own data ([§11](coven.md#11-keys)).
+- For each write or store-log chunk, derive its 24-byte nonce as:
+
+  ```
+  HMAC-SHA256(encryption_key,
+    context(UTF8("coven/object-nonce/v1"), UTF8(path), u64(section), u64(index)))[0..24]
+  ```
+
+  Here `encryption_key` is the 32-byte key derived with `coven/encryption/v1`,
+  `path` is the exact D10 path, and the numbers are big-endian eight-byte
+  strings, each context field length-prefixed as above. Sections and indices
+  start at zero as in D9; an entry uses section 0, index 0. The label separates
+  nonce derivation from other contexts. Every path is used once, and its
+  plaintext, prefix and sealing key ids are immutable before the first nonce
+  is used. §17.1 converts only untried writes. Re-sealing and deterministic
+  Ed25519 signing therefore reproduce the complete object byte for byte.
+  This derivation does not apply to snapshots, sealed keys, positions or join
+  requests; snapshots and sealed keys retain their originally sealed bytes.
 - An invite's secret derives its join request's key with
   `coven/join-request/v1`.
 - A sealed key at `keys/…` is:

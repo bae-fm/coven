@@ -176,7 +176,7 @@ async fn queued_value_errors_preserve_full_width_lengths() {
 }
 
 #[tokio::test]
-async fn a_plaintext_that_fits_but_cannot_be_sealed_rolls_back_at_commit() {
+async fn the_queue_limit_reserves_key_ids_without_reserving_ciphertext() {
     let source = TestStore::new();
     let source = source.schema(notes(), NOTES).await.unwrap();
     const INSERT: &str = "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<100) INSERT INTO notes SELECT 'import-'||i,'Imported note','' FROM n";
@@ -202,6 +202,25 @@ async fn a_plaintext_that_fits_but_cannot_be_sealed_rolls_back_at_commit() {
     ] {
         assert_eq!(count(&db, table), 0, "{table}");
     }
+    let encoder = coven_format::write_stream::WriteEncoder::new(&record).unwrap();
+    let sealed = coven_format::sealed_write::sealed_length(
+        encoder.header_frame().len(),
+        &encoder
+            .header()
+            .parts
+            .iter()
+            .map(|p| p.plaintext_length)
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let limit = plaintext + 71; // One store key, one part key and the queue row overhead.
+    assert!(sealed > limit);
+    db.inspect_writer(|db| db.set_value_limit(limit as i32));
+    sql(&db, INSERT).await.unwrap();
+    crate::upload::tests::attempt(&db, 17).await.unwrap();
+    assert_eq!(records(&db)[0].parts, record.parts);
+    assert!(crate::upload::tests::selected(&db).await.1.is_some());
+    db.inspect_writer(|db| db.set_value_limit(old));
     db.close().await.unwrap();
     source.close().await.unwrap();
 }
@@ -222,7 +241,7 @@ async fn seventy_thousand_rows_commit_as_one_queued_write_and_decode_after_reope
     let database = store.schema(notes(), NOTES).await.unwrap();
     let bytes = database.inspect_writer(|db| {
         db.query_row(
-            "SELECT record FROM _coven_uploads WHERE NOT EXISTS(SELECT 1 FROM _coven_upload_seals)",
+            "SELECT record FROM _coven_uploads WHERE sealing_keys IS NULL",
             [],
             |r| r.get::<_, Vec<u8>>(0),
         )

@@ -128,7 +128,7 @@ impl Database {
     /// missing history, read errors and failed checks roll the whole load back.
     /// Supply each readable audience's parts, including those needed by waiting
     /// writes and the device's own earlier writes. Other audiences retain their
-    /// merge history. Upload records, numbers and sealed bytes stay unchanged.
+    /// merge history. Upload records, numbers and sealing key ids stay unchanged.
     pub async fn load_snapshots<R, W>(
         &self,
         reload: crate::SnapshotReload<R, W>,

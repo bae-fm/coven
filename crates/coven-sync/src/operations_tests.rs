@@ -235,6 +235,7 @@ async fn restart_after_each_step_uses_the_committed_entry_and_keys() {
             ));
         }
         let before = a.db.local_store_log().await.unwrap().upload;
+        let expected = before.as_ref().map(|upload| a.reseal(upload));
         let record = a.db.operations().await.unwrap().remove(0);
         a.restart(storage.clone()).await;
         let resumed = a.db.operations().await.unwrap().remove(0);
@@ -250,9 +251,9 @@ async fn restart_after_each_step_uses_the_committed_entry_and_keys() {
                     .read(&object::path(before.entry.position))
                     .await
                     .unwrap(),
-                before.sealed.bytes
+                expected.unwrap()
             );
-            for key in before.sealed.keys {
+            for key in before.sealing.keys {
                 assert_eq!(
                     storage
                         .read(&ObjectPath::parse(&key.path).unwrap())
@@ -422,6 +423,7 @@ async fn permanent_storage_failure_preserves_fixed_bytes_for_retry_and_discard()
         let id = begin(&mut a, Command::CreateCircle("Retained".into())).await;
         step(&mut a, id).await.unwrap();
         let fixed = a.db.local_store_log().await.unwrap().upload.unwrap();
+        let expected = a.reseal(&fixed);
         a.sync.storage = Some(Arc::new(
             MemoryStorage::for_recipient(&storage, "uninvited@example.com").unwrap(),
         ));
@@ -459,7 +461,7 @@ async fn permanent_storage_failure_preserves_fixed_bytes_for_retry_and_discard()
                 .read(&object::path(fixed.entry.position))
                 .await
                 .unwrap(),
-            fixed.sealed.bytes
+            expected
         );
         assert!(a.db.local_store_log().await.unwrap().upload.is_none());
         operations.close().await.unwrap();

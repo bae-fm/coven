@@ -253,11 +253,9 @@
     its size.
   - A device downloads and checks it a chunk at a time, and applies it in
     one transaction once every chunk and the signature check out.
-  - Its record waits in `_coven_uploads` as one value, and its sealed
-    bytes, once fixed, as one value in a row of their own, so a write's
-    limit is SQLite's largest value, 1 GB: a write whose sealed bytes
-    would be bigger, which its plaintext's size decides, fails at commit
-    with `DbError::TooLarge`.
+  - Its plaintext record waits in `_coven_uploads` as one value. The record,
+    sealing key ids and row overhead must fit SQLite's 1 GB value limit;
+    a write exceeding it fails at commit with `DbError::TooLarge`.
   - E.g. Ana imports 50,000 notes in one transaction: one write, in many
     chunks.
   - It is named `devices/<device>/<n>`, created once and never changed.
@@ -267,19 +265,28 @@
   - A retried upload writes the same name with the same bytes.
   - A retry that finds its path already holds an object counts it as
     stored: only this device writes that path, and every attempt sends the
-    same kept bytes.
+    same bytes.
 - A device uploads its writes in number order; a write never goes up
   before an earlier one.
-- The first attempt to upload a write encrypts each part with the newest
-  key of its audience this device holds, signs the object with the
-  device's member key ([§14.4](#144-writes)), and keeps those bytes in
-  `_coven_uploads` before sending them; every retry sends the kept bytes.
+- The first attempt records the header's and each part's sealing key ids
+  in `_coven_uploads`, in the transaction marking the attempt, choosing the
+  newest key of each audience this device holds ([§14.4](#144-writes)).
+  Every attempt re-seals the plaintext with those keys and signs with the
+  device's member key. Each chunk's nonce is derived from its encryption
+  key, path, section and index ([D11](format.md#d11-keys-contexts-and-fingerprints));
+  Ed25519 signatures are deterministic, so retries produce identical bytes.
+  The queue keeps no ciphertext.
+  - A path is used once, and the plaintext and key choices never change
+    after the first attempt. Migrations convert only untried writes,
+    before any nonce is used ([§17.1](#171-host-application)).
   - E.g. Ana's phone commits a Gifts pin offline, then reads her removal
     from Gifts before uploading it: the pin's part is sealed with the
     Gifts key she held, and counts like any write made before she read
     her removal ([§14.6](#146-leaving-a-circle)).
-- Store log entries, sealed keys and snapshots have their bytes fixed the
-  same way before their first attempt, and kept until stored
+- Store log entries likewise keep only their plaintext and sealing key id,
+  fixed before the first attempt, and re-seal identically on every retry.
+  Sealed keys keep their fixed bytes because sealing uses a fresh ephemeral
+  key pair; snapshots keep theirs because the database they describe changes
   ([§18](#18-operations)).
 - A write record leaves `_coven_uploads` ([§5](#5-local-database)) once its upload succeeds.
 - Each device remembers how far it has applied every device's log, in
@@ -561,7 +568,7 @@ Two mechanisms order writes:
     - whether a breaking migration has retired its row from the merge
       ([§17.1](#171-host-application)), keeping the loss as history.
 - Store-log publication uses `_coven_store_log_uploads`: the next local entry's
-  number, canonical plaintext record and complete fixed encrypted, signed bytes.
+  number, canonical plaintext record and sealing key id.
   `_coven_store_log_key_uploads` holds its prerequisite sealed-key paths and fixed
   bytes. These contain no unsealed keys. Both commit before the first storage
   attempt; applying the published entry and its replay removes them atomically
@@ -1220,13 +1227,14 @@ Carol's tablet:
     checked, its immutable author-view checks, and whether the replay kept
     or dropped it;
   - `_coven_store_log_uploads`: locally authored entries with their numbers,
-    timestamps, recorded past, and encrypted, signed bytes fixed before upload;
+    timestamps, recorded past, plaintext and sealing key id fixed before upload;
     `_coven_store_log_key_uploads`: their sealed-key objects, uploaded first.
     An entry receives its number when these rows commit. A pending entry is
     published before another is made, so numbering remains contiguous. Once
     stored, it is applied through the same replay boundary as a download, and
     that transaction deletes its queue rows. If publication or its reply fails,
-    the next store-log step sends exactly the recorded bytes;
+    the next store-log step re-seals that plaintext with the recorded key,
+    deriving its nonce as in §6, and sends identical bytes;
   - `_coven_key_uploads`: sealed copies for dropped removals, fixed before their
     first attempt independently of the entry queue. Each attempt chooses
     recipients from the latest replay; a queued copy for a member outside that
@@ -1484,6 +1492,11 @@ Carol's tablet:
 - Nonces:
   - for a file's chunks, the chunk's index, which never repeats under the
     file's own key, so retrying an upload sends the same bytes;
+  - for writes and store log entries, the first 24 bytes of HMAC-SHA256
+    under the encryption key, over a context binding the object's path,
+    section and chunk index ([D11](format.md#d11-keys-contexts-and-fingerprints));
+    paths are never reused, and plaintext and sealing keys are fixed before
+    using a nonce ([§6](#6-syncing-writes));
   - for everything else, random.
 - A key is sealed to a member with an anonymous sealed box: X25519 with
   XChaCha20-Poly1305.
@@ -2362,8 +2375,9 @@ Carol's tablet:
   - A lost write names the breaking change by the schema version it raised
     the store to, which the device knows when it migrates, before any
     store log entry for it exists.
-  - It converts or marks only writes no upload has tried yet; a tried
-    write's bytes are fixed ([§6](#6-syncing-writes)).
+  - It converts or marks only writes no upload has tried yet, before any
+    nonce is used; a tried write's plaintext and sealing key ids stay fixed
+    so retries reproduce its bytes ([§6](#6-syncing-writes)).
   - E.g. Ana's app renames `title` to `name`, while Ben's phone, offline,
     edits a title; when Ben updates, his edit becomes a `name` edit, and
     reaches every device.
@@ -2452,11 +2466,12 @@ Carol's tablet:
   - The migration can never be done while the row says it isn't, which
     would run it twice.
 - A step that changes storage is safe to run twice.
-  - Writing an object writes the same path with the same bytes: its bytes
-    are fixed and kept before the first attempt ([§6](#6-syncing-writes)).
+  - Writing an object writes the same path with the same bytes: writes and
+    entries regenerate them from fixed plaintext and key ids; sealed keys
+    and snapshots retain fixed bytes ([§6](#6-syncing-writes)).
   - Deleting an object that is already gone succeeds.
-- A store log entry takes its number when its bytes are fixed; from then on
-  it is always uploaded, even if the operation is abandoned, and the replay
+- A store log entry takes its number when its plaintext and key id commit.
+  It is always uploaded, even if the operation is abandoned, and the replay
   judges it like any entry, since a device's later entries had read it.
 - An operation that writes a store log entry finishes only once the replay
   keeps it; if the replay drops it, the operation starts over from its
@@ -2640,7 +2655,7 @@ Carol's tablet:
   - If recovering also updates the app schema, their unattempted writes
     are converted or marked lost by the migration's second part, just as
     on any updating device ([§17.1](#171-host-application)).
-    Already-attempted writes keep their fixed bytes.
+    Already-attempted writes keep their plaintext and sealing key ids unchanged.
 
 ### 19.3 Resetting a store
 

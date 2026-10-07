@@ -4,6 +4,7 @@ use crate::{SyncError, SyncFailure};
 use coven_crypto::{DerivedKeys, MemberId, MemberKeys, ObjectHasher, StoreKeyring};
 use coven_database::{DbError, EntryOutcome, StoreLog, WaitingUpload};
 use coven_format::sealed_write::{WriteObjectLayout, WriteObjectPrefix};
+use coven_format::write_stream::WriteHeaderFrame;
 use coven_foundation::id_source::KeyId;
 use coven_merge::{Audience, WriteId};
 use coven_storage::ObjectPath;
@@ -113,33 +114,41 @@ pub(crate) fn check_upload_version(log: &StoreLog, schema: u32) -> Result<(), Sy
     Ok(())
 }
 
-pub(crate) fn seal(
+pub(crate) fn select(
     log: &StoreLog,
     schema: u32,
-    upload: WaitingUpload<'_>,
+    header: &WriteHeaderFrame,
     ring: &StoreKeyring,
     member: &MemberKeys,
-    emit: &mut dyn FnMut(&[u8]) -> Result<(), DbError>,
-) -> Result<(), SyncError> {
-    let WaitingUpload::Plaintext {
-        header,
-        header_frame,
-        parts,
-    } = upload
-    else {
-        unreachable!("database seals only unattempted plaintext")
-    };
+) -> Result<WriteObjectPrefix, SyncError> {
     check_member(log, member, header.header.position.device)?;
     check_upload_version(log, schema)?;
     let store_key = current(log, ring, &Audience::Store, &member.member_id())?;
-    let prefix = WriteObjectPrefix {
+    Ok(WriteObjectPrefix {
         store_key,
         part_keys: header
             .parts
             .iter()
             .map(|part| current(log, ring, &part.audience, &member.member_id()))
             .collect::<Result<_, _>>()?,
-    };
+    })
+}
+
+pub(crate) fn seal(
+    upload: WaitingUpload<'_>,
+    ring: &StoreKeyring,
+    member: &MemberKeys,
+    emit: &mut dyn FnMut(&[u8]) -> Result<(), SyncError>,
+) -> Result<(), SyncError> {
+    let WaitingUpload {
+        header,
+        header_frame,
+        parts,
+        keys,
+    } = upload;
+    let prefix = keys.ok_or(DbError::UploadNotAttempted {
+        write: header.header.position,
+    })?;
     let mut layout = WriteObjectLayout::new(
         prefix,
         &header_frame,
@@ -155,13 +164,13 @@ pub(crate) fn seal(
                      plain: &[u8]|
      -> Result<(), SyncError> {
         let coordinate = layout.next_chunk().expect("declared plaintext chunk");
-        let sealed = derive(ring, audience, coordinate.key)?.seal_object_chunk(
+        let sealed = derive(ring, audience, coordinate.key)?.reseal_object_chunk(
             path.as_str(),
             &aad,
             coordinate.section,
             coordinate.index,
             plain,
-        )?;
+        );
         let piece = layout.encode_chunk(&sealed)?;
         hash.update(&piece);
         emit(&piece)?;

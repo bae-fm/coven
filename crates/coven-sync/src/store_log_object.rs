@@ -1,8 +1,8 @@
 //! Authentication and causal checks before the replay's valid-input boundary.
 
 use crate::{ObjectCheckFailure, SyncError};
-use coven_crypto::{MemberKeys, ObjectHasher, StoreKey};
-use coven_database::StoreLog;
+use coven_crypto::{MemberKeys, ObjectHasher, StoreKey, StoreKeyring};
+use coven_database::{DbError, StoreLog, StoreLogUpload};
 use coven_format::{
     sealed_single::{SingleChunkObject, SingleChunkPrefix, StoreOrigin},
     store_log::{StoreChange, StoreLogEntry},
@@ -32,6 +32,37 @@ pub(crate) fn origin(entry: &StoreLogEntry) -> Option<StoreOrigin> {
     }
 }
 
+/// Reproduce an entry using the key fixed with its plaintext queue record.
+pub(crate) fn seal_upload(
+    upload: &StoreLogUpload,
+    ring: Option<&StoreKeyring>,
+    member: &MemberKeys,
+) -> Result<Vec<u8>, SyncError> {
+    if upload.entry.author != member.member_id() {
+        return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed));
+    }
+    let id = upload.sealing.key;
+    let creation;
+    let key = if matches!(upload.entry.change, StoreChange::CreateStore { .. }) {
+        // Creation precedes custody: its queued sealed copy holds the key.
+        let path = ObjectPath::store_key(id, &upload.entry.author);
+        let copy = upload
+            .sealing
+            .keys
+            .iter()
+            .find(|key| key.path == path.as_str())
+            .ok_or(DbError::DamagedDatabase)?;
+        creation = member.open_store_key(path.as_str(), &copy.bytes)?;
+        if creation.id() != id {
+            return Err(DbError::DamagedDatabase.into());
+        }
+        &creation
+    } else {
+        ring.ok_or(SyncError::KeyUnavailable(id))?.store_key(id)?
+    };
+    seal(&upload.entry, key, member)
+}
+
 pub(crate) fn seal(
     entry: &StoreLogEntry,
     key: &StoreKey,
@@ -45,7 +76,7 @@ pub(crate) fn seal(
     let plain = Object::StoreLog(entry.clone()).encode()?;
     let chunk = key
         .derive()
-        .seal_object_chunk(path.as_str(), &prefix.encode()?, 0, 0, &plain)?;
+        .reseal_object_chunk(path.as_str(), &prefix.encode()?, 0, 0, &plain);
     let mut bytes = prefix.encode_chunk(&chunk)?;
     let mut hash = ObjectHasher::new();
     hash.update(&bytes);

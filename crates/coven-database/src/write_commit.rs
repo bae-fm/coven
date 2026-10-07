@@ -153,7 +153,7 @@ pub(crate) fn persist(
 
 /// Keep the header followed directly by its parts' plaintext frame streams in
 /// `_coven_uploads`. Queue readers use format's header and part decoders; sync
-/// seals the value when fixing the first upload attempt.
+/// records sealing keys before the first upload attempt.
 pub(crate) fn queue(database: &DatabaseConnection, record: &WriteRecord) -> Result<(), DbError> {
     let encoder = encoded(WriteEncoder::new(record))?;
     let bytes = plaintext(database, encoder)?;
@@ -169,17 +169,18 @@ pub(crate) fn queue(database: &DatabaseConnection, record: &WriteRecord) -> Resu
 }
 
 /// Check the encoder's exact plaintext length against SQLite's connection limit
-/// before allocating the queue buffer. Sealed upload overhead must fit too.
+/// before allocating the queue buffer, reserving room for its sealing keys.
 pub(crate) fn plaintext(
     database: &DatabaseConnection,
     encoder: WriteEncoder<'_>,
 ) -> Result<Vec<u8>, DbError> {
     let length = database.check_value_length("write plaintext", encoder.plaintext_length())?;
-    crate::upload::check_length(
-        database,
-        encoder.header_frame().len(),
-        &encoder.header().parts,
-    )?;
+    // D9's prefix records one store key and the counted part keys. SQLite's
+    // row header and the two eight-byte identity fields need at most 32 bytes.
+    let keys_length = coven_format::sealed_write::WriteObjectPrefix::encoded_length(
+        encoder.header().parts.len(),
+    )? as u64;
+    database.check_value_length("write queue row", length as u64 + keys_length + 32)?;
     let mut bytes = vec![0; length];
     encoded(encoder.encode_plaintext(&mut bytes))?;
     Ok(bytes)

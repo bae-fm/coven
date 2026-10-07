@@ -1,22 +1,35 @@
-//! Ordered immutable publication from the database's fixed byte stream.
+//! Ordered publication, re-sealing the waiting plaintext with its recorded keys.
 
 use super::DeviceLogSync;
 use crate::SyncError;
-use coven_database::{DbError, UploadReadError, WaitingUpload};
+use coven_database::{DbError, UploadReadError};
 use coven_format::chunks::CHUNK_SIZE;
 use coven_merge::WriteId;
 use coven_storage::{StorageError, StorageFailure, UploadSession};
 use tokio::sync::mpsc;
 
 impl DeviceLogSync {
-    pub(super) async fn send_write(&self, write: WriteId) -> Result<(), SyncError> {
+    pub(super) async fn send_write(
+        &self,
+        write: WriteId,
+        ring: coven_crypto::StoreKeyring,
+        member: coven_crypto::MemberKeys,
+    ) -> Result<(), SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let database = &self.database;
         let path = crate::write_seal::path(write);
         let total = database
-            .read_oldest_upload(|upload| match upload {
-                WaitingUpload::Sealed { bytes, .. } => Ok::<_, DbError>(bytes.remaining()),
-                WaitingUpload::Plaintext { .. } => Err(DbError::DamagedDatabase),
+            .read_oldest_upload(|upload| {
+                coven_format::sealed_write::sealed_length(
+                    upload.header_frame.len(),
+                    &upload
+                        .header
+                        .parts
+                        .iter()
+                        .map(|p| p.plaintext_length)
+                        .collect::<Vec<_>>(),
+                )
+                .map_err(SyncError::from)
             })
             .await
             .map_err(read_error)?
@@ -58,26 +71,24 @@ impl DeviceLogSync {
                 return Ok(());
             }
         }
-        let skip = session.as_ref().map_or(0, UploadSession::confirmed_bytes);
+        let mut skip = session.as_ref().map_or(0, UploadSession::confirmed_bytes);
         let (sender, mut receiver) = mpsc::channel::<Vec<u8>>(1);
         let producer = database.read_oldest_upload(move |upload| {
-            let WaitingUpload::Sealed {
-                write: actual,
-                mut bytes,
-            } = upload
-            else {
-                return Err(DbError::UploadNotSealed { write });
-            };
-            if actual != write {
-                return Err(DbError::UploadNotOldest { write });
+            if upload.header.header.position != write {
+                return Err(DbError::UploadNotOldest { write }.into());
             }
-            bytes.skip_bytes(skip)?;
-            for piece in bytes {
-                if sender.blocking_send(piece?).is_err() {
-                    break;
-                } // The awaited consumer retains the transport failure.
-            }
-            Ok::<_, DbError>(())
+            crate::write_seal::seal(upload, &ring, &member, &mut |piece| {
+                let skipped = skip.min(piece.len() as u64) as usize;
+                skip -= skipped as u64;
+                if skipped < piece.len() {
+                    sender
+                        .blocking_send(piece[skipped..].to_vec())
+                        .map_err(|error| {
+                            SyncError::Database(DbError::SyncStream(Box::new(error)))
+                        })?;
+                }
+                Ok(())
+            })
         });
         let consumer = async move {
             if let Some(session) = &mut session {
@@ -127,7 +138,14 @@ impl DeviceLogSync {
             Ok::<_, SyncError>(())
         };
         let (produced, sent) = tokio::join!(producer, consumer);
-        produced.map_err(read_error)?;
+        match produced {
+            // A dropped receiver means transport failed; return that cause below.
+            Err(UploadReadError::Consumer(SyncError::Database(DbError::SyncStream(error))))
+                if error.is::<mpsc::error::SendError<Vec<u8>>>() => {}
+            result => {
+                result.map_err(read_error)?;
+            }
+        }
         match sent {
             Err(SyncError::Storage(error)) if error.failure() == StorageFailure::AlreadyExists => {
                 Ok(())
@@ -137,8 +155,9 @@ impl DeviceLogSync {
     }
 }
 
-fn read_error(error: UploadReadError<DbError>) -> SyncError {
+fn read_error(error: UploadReadError<SyncError>) -> SyncError {
     match error {
-        UploadReadError::Database(e) | UploadReadError::Consumer(e) => e.into(),
+        UploadReadError::Database(e) => e.into(),
+        UploadReadError::Consumer(e) => e,
     }
 }

@@ -65,10 +65,10 @@ impl DeviceLogSync {
         self.storage = storage;
     }
 
-    /// Publish queued writes in number order, fixing the seal before the first
+    /// Publish queued writes in number order, fixing the sealing keys before the first
     /// request and retaining provider sessions across interruptions. Returns the
     /// positions confirmed stored. A newer store schema stops this step; a local
-    /// breaking migration waits for its store-log raise without attempting a seal.
+    /// breaking migration waits for its store-log raise without recording an attempt.
     pub async fn upload_writes(&mut self) -> Result<Vec<WriteId>, SyncError> {
         let mut uploaded = Vec::new();
         loop {
@@ -102,10 +102,12 @@ impl DeviceLogSync {
                 .store_keys
                 .unlock()?
                 .ok_or(SyncError::KeyUnavailable(store.key))?;
+            let selected_ring = ring.clone();
+            let signer = member.clone();
             let next = self
                 .database
-                .prepare_write_upload(move |log, schema, upload, emit| {
-                    crate::write_seal::seal(log, schema, upload, &ring, &member, emit)
+                .prepare_write_upload(move |log, schema, header| {
+                    crate::write_seal::select(log, schema, header, &selected_ring, &signer)
                         .map_err(|e| DbError::SyncStream(Box::new(e)))
                 })
                 .await
@@ -119,7 +121,7 @@ impl DeviceLogSync {
             let Some(write) = next else {
                 break;
             };
-            self.send_write(write).await?;
+            self.send_write(write, ring, member).await?;
             self.database.upload_succeeded(write).await?;
             uploaded.push(write);
         }

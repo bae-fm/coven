@@ -196,7 +196,7 @@ impl StoreLogSync {
             }
             match record.last_step {
                 n if n == data.entry_step_number(1) => {
-                    for key in &upload.sealed.keys {
+                    for key in &upload.sealing.keys {
                         self.storage
                             .as_deref()
                             .ok_or(SyncError::NoStorage)?
@@ -213,13 +213,15 @@ impl StoreLogSync {
                     return Ok(Progress::Advanced);
                 }
                 n if n == data.entry_step_number(2) => {
+                    let bytes = crate::store_log_object::seal_upload(
+                        upload,
+                        self.store_keys.unlock()?.as_ref(),
+                        &member,
+                    )?;
                     self.storage
                         .as_deref()
                         .ok_or(SyncError::NoStorage)?
-                        .create_once(
-                            &crate::store_log_object::path(entry.position),
-                            &upload.sealed.bytes,
-                        )
+                        .create_once(&crate::store_log_object::path(entry.position), &bytes)
                         .await?;
                     self.database
                         .advance_operation(data.update(record, data.entry_step_number(3))?)

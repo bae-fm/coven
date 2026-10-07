@@ -517,7 +517,6 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_store_log",
                 "_coven_store_log_key_uploads",
                 "_coven_store_log_uploads",
-                "_coven_upload_seals",
                 "_coven_uploads",
                 "_coven_user_files",
                 "_coven_versions",

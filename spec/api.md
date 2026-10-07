@@ -1415,8 +1415,8 @@ while let Ok(values) = lost.next().await {
 - Setup commits the storage credentials, keys, location and restore code only
   once the connection is ready. Failure preserves their previous values and
   the previous connection. The fixed first-entry or access-update attempt stays
-  reserved for an identical retry: its number, key ids and sealed bytes cannot
-  be reused for a different attempt (§6, §18).
+  reserved for an identical retry: its number, plaintext, sealing key ids and
+  prerequisite sealed-key bytes cannot change (§6, §18).
 - Setup takes the first device's name, as joining and restore do (§10, §12).
   Reconnecting an existing device keeps its registered name. Changed provider
   access is published as `Set access` before committing the new credentials.

@@ -1,4 +1,4 @@
-//! Fixed store-log bytes and their prerequisite sealed keys (§§6, 9, 18).
+//! Immutable store-log plaintext, its sealing key and their prerequisite sealed keys (§§6, 9, 18).
 
 use std::collections::BTreeMap;
 use std::time::SystemTime;
@@ -9,7 +9,7 @@ use coven_format::{
     value::EntryPositions,
     Object,
 };
-use coven_foundation::id_source::{DeviceId, StoreId};
+use coven_foundation::id_source::{DeviceId, KeyId, StoreId};
 
 use crate::{sqlite::DatabaseConnection, write_encoding::decoded, DbError, EntryId, StoreLog};
 
@@ -23,11 +23,11 @@ pub struct StoreLogKeyUpload {
     pub bytes: Vec<u8>,
 }
 
-/// Sealing output committed before any storage call.
+/// Sealing choices committed before any storage call.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SealedStoreLog {
-    /// The encrypted, signed store-log object.
-    pub bytes: Vec<u8>,
+pub struct StoreLogSealing {
+    /// The store key used to re-seal the entry on every attempt.
+    pub key: KeyId,
     /// Every sealed key that must be stored before this entry.
     pub keys: Vec<StoreLogKeyUpload>,
 }
@@ -37,8 +37,8 @@ pub struct SealedStoreLog {
 pub struct StoreLogUpload {
     /// The immutable entry whose number the queue reserves.
     pub entry: StoreLogEntry,
-    /// Bytes retained across crashes and lost replies.
-    pub sealed: SealedStoreLog,
+    /// Key choices retained across crashes and lost replies.
+    pub sealing: StoreLogSealing,
 }
 
 /// One committed view of the store-log state and its local publication queue.
@@ -57,7 +57,7 @@ pub struct LocalStoreLog {
 pub(crate) fn read(database: &DatabaseConnection) -> Result<Option<StoreLogUpload>, DbError> {
     let mut upload = database
         .query(
-            "SELECT record,sealed_bytes FROM _coven_store_log_uploads",
+            "SELECT record,sealing_key FROM _coven_store_log_uploads",
             [],
             |row| {
                 let Object::StoreLog(entry) = decoded(Object::decode(&row.get::<_, Vec<u8>>(0)?))?
@@ -66,8 +66,8 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<Option<StoreLogUploa
                 };
                 Ok(StoreLogUpload {
                     entry,
-                    sealed: SealedStoreLog {
-                        bytes: row.get(1)?,
+                    sealing: StoreLogSealing {
+                        key: KeyId(uuid::Uuid::from_bytes(row.get(1)?)),
                         keys: Vec::new(),
                     },
                 })
@@ -76,7 +76,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<Option<StoreLogUploa
         .into_iter()
         .next();
     if let Some(upload) = &mut upload {
-        upload.sealed.keys = database.query(
+        upload.sealing.keys = database.query(
             "SELECT path,bytes FROM _coven_store_log_key_uploads WHERE device=?1 AND number=?2 ORDER BY path",
             (upload.entry.position.device.0.to_be_bytes().as_slice(), upload.entry.position.number.to_be_bytes().as_slice()),
             |row| Ok(StoreLogKeyUpload { path: row.get(0)?, bytes: row.get(1)? }),
@@ -97,7 +97,7 @@ where
     F: FnOnce(
         &StoreLog,
         &StoreLogEntry,
-    ) -> Result<(SealedStoreLog, Option<crate::OperationUpdate>), E>,
+    ) -> Result<(StoreLogSealing, Option<crate::OperationUpdate>), E>,
     E: From<DbError>,
 {
     // The database owner holds its writer lock across construction and insertion.
@@ -142,8 +142,8 @@ where
     let (sealed, operation) = seal(&log, &entry)?;
     database.transaction(|database| {
         database.internal_execute(
-            "INSERT INTO _coven_store_log_uploads(device,number,record,sealed_bytes) VALUES(?1,?2,?3,?4)",
-            (device.0.to_be_bytes().as_slice(), number.to_be_bytes().as_slice(), &record, &sealed.bytes),
+            "INSERT INTO _coven_store_log_uploads(device,number,record,sealing_key) VALUES(?1,?2,?3,?4)",
+            (device.0.to_be_bytes().as_slice(), number.to_be_bytes().as_slice(), &record, sealed.key.0.as_bytes().as_slice()),
         )?;
         for key in &sealed.keys {
             database.internal_execute(

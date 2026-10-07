@@ -9,8 +9,8 @@
 //! Loss targets name their row directly: a write excluded by a schema change
 //! or reset need not have an accepted generation in `_coven_rows`.
 //! An upload's `record` is one plaintext value: the write header frame followed
-//! by its audience parts' row-frame streams. Its first attempt fixes
-//! `sealed_bytes` in a separate `_coven_upload_seals` row, so both values fit.
+//! by its audience parts' row-frame streams. Its first attempt fixes the key
+//! ids in `sealing_keys`, encoded as the D9 write prefix; no ciphertext is kept.
 
 pub(crate) const VERSION: u32 = 1;
 
@@ -43,7 +43,7 @@ macro_rules! coven_tables {
                 device BLOB NOT NULL CHECK(length(device)=8),
                 number BLOB NOT NULL CHECK(length(number)=8 AND number>x'0000000000000000'),
                 record BLOB NOT NULL,
-                sealed_bytes BLOB NOT NULL,
+                sealing_key BLOB NOT NULL CHECK(length(sealing_key)=16),
                 PRIMARY KEY(device,number)
             ) STRICT, WITHOUT ROWID;
             CREATE UNIQUE INDEX _coven_one_store_log_upload ON _coven_store_log_uploads ((1));
@@ -298,16 +298,8 @@ macro_rules! coven_tables {
                 device BLOB NOT NULL CHECK(length(device) = 8),
                 number BLOB NOT NULL CHECK(length(number) = 8 AND number > x'0000000000000000'),
                 record BLOB NOT NULL,
+                sealing_keys BLOB,
                 PRIMARY KEY(device, number)
-            ) STRICT;
-        ");
-        $visit!(_coven_upload_seals, "
-            CREATE TABLE _coven_upload_seals (
-                device BLOB NOT NULL CHECK(length(device) = 8),
-                number BLOB NOT NULL CHECK(length(number) = 8),
-                sealed_bytes BLOB NOT NULL,
-                PRIMARY KEY(device, number),
-                FOREIGN KEY(device,number) REFERENCES _coven_uploads(device,number) ON DELETE CASCADE
             ) STRICT;
         ");
         $visit!(_coven_write_upload_sessions, "
@@ -316,7 +308,7 @@ macro_rules! coven_tables {
                 number BLOB NOT NULL CHECK(length(number) = 8),
                 session BLOB NOT NULL,
                 PRIMARY KEY(device, number),
-                FOREIGN KEY(device,number) REFERENCES _coven_upload_seals(device,number) ON DELETE CASCADE
+                FOREIGN KEY(device,number) REFERENCES _coven_uploads(device,number) ON DELETE CASCADE
             ) STRICT, WITHOUT ROWID;
         ");
         $visit!(_coven_waiting_writes, "

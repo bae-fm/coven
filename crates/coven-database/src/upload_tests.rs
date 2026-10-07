@@ -4,58 +4,22 @@ use crate::write::tests::{count, notes, records, sql, NOTES};
 use crate::Database;
 use coven_format::dismissal::WriteFrame;
 use coven_format::write::{WritePart, WriteRecord};
-use coven_format::write_stream::{PartDecoder, WriteEncoder};
+use coven_format::write_stream::PartDecoder;
 
-async fn candidate(db: &Database, byte: u8) -> (WriteId, Vec<u8>) {
-    db.read_oldest_upload(move |upload| {
-        let WaitingUpload::Plaintext {
-            header,
-            header_frame,
-            ..
-        } = upload
-        else {
-            panic!("already sealed")
-        };
-        let length = coven_format::sealed_write::sealed_length(
-            header_frame.len(),
-            &header
-                .parts
-                .iter()
-                .map(|part| part.plaintext_length)
-                .collect::<Vec<_>>(),
-        )
-        .unwrap();
-        Ok::<_, DbError>((header.header.position, vec![byte; length as usize]))
-    })
-    .await
-    .unwrap()
-    .unwrap()
+pub(crate) async fn selected(db: &Database) -> (WriteId, Option<WriteObjectPrefix>) {
+    db.read_oldest_upload(|upload| Ok::<_, DbError>((upload.header.header.position, upload.keys)))
+        .await
+        .unwrap()
+        .unwrap()
 }
 
-pub(crate) async fn sealed(db: &Database) -> (WriteId, Vec<u8>) {
-    db.read_oldest_upload(|upload| {
-        let WaitingUpload::Sealed { write, bytes } = upload else {
-            panic!("not sealed")
-        };
-        let mut all = Vec::new();
-        for chunk in bytes {
-            let chunk = chunk?;
-            assert!(chunk.len() <= CHUNK_SIZE);
-            all.extend(chunk);
-        }
-        Ok::<_, DbError>((write, all))
-    })
-    .await
-    .unwrap()
-    .unwrap()
-}
-
-pub(crate) async fn attempt(db: &Database, bytes: Vec<u8>) -> Result<Option<WriteId>, DbError> {
-    db.prepare_write_upload(move |_, _, _, emit| {
-        for chunk in bytes.chunks(CHUNK_SIZE) {
-            emit(chunk)?;
-        }
-        Ok(())
+pub(crate) async fn attempt(db: &Database, byte: u8) -> Result<Option<WriteId>, DbError> {
+    db.prepare_write_upload(move |_, _, header| {
+        let key = coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([byte; 16]));
+        Ok(WriteObjectPrefix {
+            store_key: key,
+            part_keys: vec![key; header.parts.len()],
+        })
     })
     .await
 }
@@ -87,14 +51,13 @@ async fn reads_only_the_oldest_write_as_header_and_audience_streams() {
     db.inspect_writer(|db| db.internal_execute("UPDATE _coven_uploads SET record=x'' WHERE rowid=(SELECT max(rowid) FROM _coven_uploads)", []).unwrap());
     let streamed = db
         .read_oldest_upload(|upload| {
-            let WaitingUpload::Plaintext {
+            let WaitingUpload {
                 header,
                 header_frame,
                 parts,
-            } = upload
-            else {
-                panic!("already sealed")
-            };
+                keys,
+            } = upload;
+            assert!(keys.is_none());
             assert_eq!(WriteHeaderFrame::decode(&header_frame).unwrap(), header);
             let mut decoded = Vec::new();
             for (part, bytes) in parts {
@@ -130,7 +93,7 @@ async fn reads_only_the_oldest_write_as_header_and_audience_streams() {
 }
 
 #[tokio::test]
-async fn only_success_removes_a_write_and_its_seal_and_advances_the_queue() {
+async fn only_success_removes_a_write_and_its_session_and_advances_the_queue() {
     let store = TestStore::new();
     let db = store.schema(notes(), NOTES).await.unwrap();
     sql(&db, "INSERT INTO notes VALUES('1','title','body')")
@@ -140,82 +103,75 @@ async fn only_success_removes_a_write_and_its_seal_and_advances_the_queue() {
         .await
         .unwrap();
     let ids: Vec<_> = records(&db).iter().map(|r| r.header.position).collect();
-    let (first, bytes) = candidate(&db, 19).await;
-    assert_eq!(first, ids[0]);
+    let first = ids[0];
     assert!(matches!(
         db.upload_succeeded(first).await,
-        Err(DbError::UploadNotSealed { .. })
+        Err(DbError::UploadNotAttempted { .. })
     ));
-    assert!(matches!(
-        attempt(&db, vec![1]).await,
-        Err(DbError::UploadLength { .. })
-    ));
-    assert_eq!(count(&db, "_coven_upload_seals"), 0);
-    assert_eq!(attempt(&db, bytes.clone()).await.unwrap(), Some(first));
-    assert_eq!(attempt(&db, vec![88]).await.unwrap(), Some(first));
-    assert_eq!(sealed(&db).await, (first, bytes.clone()));
-    assert_eq!(count(&db, "_coven_uploads"), 2);
+    assert_eq!(attempt(&db, 19).await.unwrap(), Some(first));
+    let fixed = selected(&db).await;
+    db.keep_write_upload_session(first, vec![1, 2])
+        .await
+        .unwrap();
     assert!(matches!(
         db.upload_succeeded(ids[1]).await,
         Err(DbError::UploadNotOldest { .. })
     ));
-    db.inspect_writer(|db| db.batch("CREATE TRIGGER _coven_fail AFTER DELETE ON _coven_upload_seals BEGIN SELECT RAISE(ABORT,'failed removal'); END").unwrap());
+    db.inspect_writer(|db| db.batch("CREATE TRIGGER _coven_fail AFTER DELETE ON _coven_uploads BEGIN SELECT RAISE(ABORT,'failed removal'); END").unwrap());
     assert!(db.upload_succeeded(first).await.is_err());
-    assert_eq!(sealed(&db).await, (first, bytes));
+    assert_eq!(selected(&db).await, fixed);
+    assert_eq!(
+        db.write_upload_session(first).await.unwrap(),
+        Some(vec![1, 2])
+    );
     assert_eq!(count(&db, "_coven_uploads"), 2);
     db.inspect_writer(|db| db.batch("DROP TRIGGER _coven_fail").unwrap());
     assert!(db.upload_succeeded(first).await.unwrap());
     assert!(!db.upload_succeeded(first).await.unwrap());
-    assert_eq!(count(&db, "_coven_upload_seals"), 0);
-    assert_eq!(candidate(&db, 7).await.0, ids[1]);
+    assert!(db.write_upload_session(first).await.unwrap().is_none());
+    assert_eq!(selected(&db).await, (ids[1], None));
     assert_eq!(count(&db, "notes"), 2);
     db.close().await.unwrap();
 }
 
 #[tokio::test]
-async fn seal_failure_rolls_back_and_competing_attempts_get_the_same_bytes() {
+async fn key_selection_rolls_back_and_competing_attempts_keep_one_choice() {
     let store = TestStore::new();
     let db = store.schema(notes(), NOTES).await.unwrap();
     sql(&db, "INSERT INTO notes VALUES('1','title','body')")
         .await
         .unwrap();
-    let (id, bytes) = candidate(&db, 19).await;
-    db.inspect_writer(|db| db.batch("CREATE TRIGGER _coven_fail AFTER INSERT ON _coven_upload_seals BEGIN SELECT RAISE(ABORT,'failed seal'); END").unwrap());
-    assert!(attempt(&db, bytes.clone()).await.is_err());
-    assert_eq!(count(&db, "_coven_upload_seals"), 0);
-    assert_eq!(candidate(&db, 19).await, (id, bytes.clone()));
+    let original = records(&db);
+    let id = original[0].header.position;
+    db.inspect_writer(|db| db.batch("CREATE TRIGGER _coven_fail AFTER UPDATE OF sealing_keys ON _coven_uploads BEGIN SELECT RAISE(ABORT,'failed keys'); END").unwrap());
+    assert!(attempt(&db, 19).await.is_err());
+    assert_eq!(selected(&db).await, (id, None));
+    assert_eq!(records(&db), original);
     db.inspect_writer(|db| db.batch("DROP TRIGGER _coven_fail").unwrap());
-    let (a, b) = tokio::join!(
-        attempt(&db, bytes.clone()),
-        attempt(&db, vec![99; bytes.len()])
-    );
+    assert!(db
+        .prepare_write_upload(|_, _, _| Err(DbError::StoreClosed))
+        .await
+        .is_err());
+    assert_eq!(selected(&db).await, (id, None));
+    assert!(db
+        .prepare_write_upload(|_, _, _| Ok(WriteObjectPrefix {
+            store_key: coven_foundation::id_source::KeyId(uuid::Uuid::nil()),
+            part_keys: vec![],
+        }))
+        .await
+        .is_err());
+    assert_eq!(selected(&db).await, (id, None));
+    let (a, b) = tokio::join!(attempt(&db, 19), attempt(&db, 99));
     assert_eq!(a.unwrap(), Some(id));
     assert_eq!(b.unwrap(), Some(id));
-    let kept = sealed(&db).await;
-    assert_eq!(kept.0, id);
-    assert!(kept.1 == bytes || kept.1 == vec![99; bytes.len()]);
-    db.prepare_write_upload(|_, _, _, _| panic!("retry must keep the first seal"))
+    let kept = selected(&db).await;
+    let key = kept.1.as_ref().unwrap().store_key;
+    assert!([19, 99].iter().any(|byte| key.0.as_bytes() == &[*byte; 16]));
+    db.prepare_write_upload(|_, _, _| panic!("retry must keep the first keys"))
         .await
         .unwrap();
-    assert_eq!(sealed(&db).await, kept);
-    db.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn plaintext_and_sealed_values_fit_when_their_combined_size_exceeds_sqlites_limit() {
-    let store = TestStore::new();
-    let db = store.schema(notes(), NOTES).await.unwrap();
-    sql(&db,"WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<100) INSERT INTO notes SELECT 'import-'||i,'Imported note','' FROM n").await.unwrap();
-    let record = records(&db).remove(0);
-    let plaintext = WriteEncoder::new(&record).unwrap().plaintext_length();
-    let (id, bytes) = candidate(&db, 17).await;
-    let maximum = bytes.len() as i32 + 24;
-    assert!(plaintext + bytes.len() as u64 > maximum as u64);
-    let old = db.inspect_writer(|db| db.set_value_limit(maximum));
-    assert_eq!(attempt(&db, bytes.clone()).await.unwrap(), Some(id));
-    db.inspect_writer(|db| db.set_value_limit(old));
-    assert_eq!(sealed(&db).await, (id, bytes));
-    assert_eq!(records(&db), vec![record]);
+    assert_eq!(selected(&db).await, kept);
+    assert_eq!(records(&db), original);
     db.close().await.unwrap();
 }
 
@@ -241,19 +197,20 @@ async fn consumer_failure_and_panic_release_the_reader() {
         .unwrap_err();
         assert!(panic.is_panic());
     }
-    assert_eq!(candidate(&db, 17).await.0.number, 1);
+    assert_eq!(selected(&db).await.0.number, 1);
     db.close().await.unwrap();
 }
 
 #[test]
-fn a_crash_after_keeping_the_seal_resends_identical_bytes() {
+fn a_crash_after_recording_an_attempt_keeps_its_plaintext_and_keys() {
     let store = TestStore::new();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let db = runtime.block_on(store.schema(notes(), NOTES)).unwrap();
     runtime
         .block_on(sql(&db, "INSERT INTO notes VALUES('1','title','body')"))
         .unwrap();
-    let expected = runtime.block_on(candidate(&db, 71));
+    let original = records(&db);
+    let expected = original[0].header.position;
     runtime.block_on(db.close()).unwrap();
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
@@ -273,21 +230,20 @@ fn a_crash_after_keeping_the_seal_resends_identical_bytes() {
         String::from_utf8_lossy(&output.stderr)
     );
     let db = runtime.block_on(store.schema(notes(), NOTES)).unwrap();
-    assert_eq!(runtime.block_on(sealed(&db)), expected);
+    let kept = runtime.block_on(selected(&db));
+    assert_eq!(kept.0, expected);
+    assert_eq!(kept.1.as_ref().unwrap().store_key.0.as_bytes(), &[71; 16]);
+    assert_eq!(records(&db), original);
     assert_eq!(count(&db, "_coven_uploads"), 1);
-    assert_eq!(
-        runtime.block_on(attempt(&db, vec![42])).unwrap(),
-        Some(expected.0)
-    );
-    assert_eq!(runtime.block_on(sealed(&db)), expected);
-    assert!(runtime.block_on(db.upload_succeeded(expected.0)).unwrap());
+    assert_eq!(runtime.block_on(attempt(&db, 42)).unwrap(), Some(expected));
+    assert_eq!(runtime.block_on(selected(&db)), kept);
+    assert!(runtime.block_on(db.upload_succeeded(expected)).unwrap());
     assert_eq!(count(&db, "_coven_uploads"), 0);
-    assert_eq!(count(&db, "_coven_upload_seals"), 0);
     runtime.block_on(db.close()).unwrap();
 }
 
 #[tokio::test]
-async fn a_panicking_sealer_rolls_back_without_poisoning_the_writer() {
+async fn a_panicking_key_selector_releases_the_writer() {
     let store = TestStore::new();
     let db = store.schema(notes(), NOTES).await.unwrap();
     sql(&db, "INSERT INTO notes VALUES('1','title','body')")
@@ -296,19 +252,16 @@ async fn a_panicking_sealer_rolls_back_without_poisoning_the_writer() {
     let clone = db.clone();
     assert!(tokio::spawn(async move {
         clone
-            .prepare_write_upload(|_, _, _, emit| {
-                emit(&[1, 2, 3])?;
-                panic!("sealer panicked")
-            })
+            .prepare_write_upload(|_, _, _| panic!("selector panicked"))
             .await
     })
     .await
     .unwrap_err()
     .is_panic());
-    assert_eq!(count(&db, "_coven_upload_seals"), 0);
-    let (id, bytes) = candidate(&db, 17).await;
-    assert_eq!(attempt(&db, bytes.clone()).await.unwrap(), Some(id));
-    assert_eq!(sealed(&db).await, (id, bytes));
+    let (id, keys) = selected(&db).await;
+    assert!(keys.is_none());
+    assert_eq!(attempt(&db, 17).await.unwrap(), Some(id));
+    assert!(selected(&db).await.1.is_some());
     db.close().await.unwrap();
 }
 
@@ -340,8 +293,7 @@ fn crashing_upload_attempt() {
                 .open(),
         )
         .unwrap();
-    let (_, bytes) = runtime.block_on(candidate(&db, 71));
-    runtime.block_on(attempt(&db, bytes)).unwrap();
+    runtime.block_on(attempt(&db, 71)).unwrap();
     std::process::exit(86);
 }
 
@@ -387,31 +339,7 @@ fn upload_completion_does_not_retain_the_object_in_sqlite_observation() {
         })
         .await
         .unwrap();
-        let id = db
-            .prepare_write_upload(|_, _, upload, emit| {
-                let WaitingUpload::Plaintext {
-                    header,
-                    header_frame,
-                    ..
-                } = upload
-                else {
-                    panic!("plaintext")
-                };
-                let lengths: Vec<_> = header.parts.iter().map(|p| p.plaintext_length).collect();
-                let mut remaining =
-                    coven_format::sealed_write::sealed_length(header_frame.len(), &lengths)?
-                        as usize;
-                let chunk = vec![9; CHUNK_SIZE];
-                while remaining > 0 {
-                    let length = remaining.min(chunk.len());
-                    emit(&chunk[..length])?;
-                    remaining -= length;
-                }
-                Ok(())
-            })
-            .await
-            .unwrap()
-            .unwrap();
+        let id = attempt(&db, 9).await.unwrap().unwrap();
         // This subprocess runs one test, so SQLite's global high-water counter
         // measures only these queue operations and their connection caches.
         let baseline = unsafe {

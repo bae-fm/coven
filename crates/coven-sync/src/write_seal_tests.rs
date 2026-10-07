@@ -460,3 +460,71 @@ async fn retention_waits_for_key_copies_without_failing() {
         "waiting keys failed retention: {failed:?}"
     );
 }
+
+#[tokio::test]
+async fn retries_keep_each_parts_keys_across_store_and_circle_rotations() {
+    let storage = storage();
+    let mut devices = household(storage.clone()).await;
+    let [ana, ben, _carol] = devices.as_mut_slice() else {
+        panic!("three members")
+    };
+    ana.db.write(|sql| {
+        sql.execute("INSERT INTO notes VALUES('one','public',?1)", ["body".repeat(50_000)])?;
+        sql.execute("INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a',?1)", ["private".repeat(20_000)])?;
+        Ok(())
+    }).await.unwrap();
+    storage
+        .set_faults(Faults {
+            lose_part_reply: true,
+            ..Faults::none()
+        })
+        .await;
+    assert!(ana.sync.upload_writes().await.is_err());
+    let (write, first) = writes::resealed(ana).await;
+    sql(
+        &ana.db,
+        "UPDATE notes SET body='later'; UPDATE pins SET title='later'",
+    )
+    .await;
+    ben.log
+        .make_and_upload_entry(StoreChange::RemoveMember {
+            member: identity(5).member_id(),
+            key: KeyId(Uuid::from_u128(20)),
+            circle_keys: vec![],
+        })
+        .await
+        .unwrap();
+    ben.log
+        .make_and_upload_entry(StoreChange::RemoveCircleMember {
+            circle: CircleId(Uuid::from_u128(10)),
+            member: identity(4).member_id(),
+            key: KeyId(Uuid::from_u128(21)),
+        })
+        .await
+        .unwrap();
+    ana.log.sync_store_log().await.unwrap();
+    assert_eq!(writes::resealed(ana).await.1, first);
+    assert_eq!(ana.sync.upload_writes().await.unwrap().len(), 2);
+    assert_eq!(
+        storage.read(&crate::write_seal::path(write)).await.unwrap(),
+        first
+    );
+    let prefix = |bytes: &[u8]| {
+        use coven_format::sealed_write::WriteObjectPrefix;
+        WriteObjectPrefix::decode(&bytes[..WriteObjectPrefix::length(bytes).unwrap()]).unwrap()
+    };
+    assert_eq!(prefix(&first).store_key, KeyId(Uuid::from_u128(1)));
+    assert_eq!(
+        prefix(&first).part_keys,
+        [KeyId(Uuid::from_u128(1)), KeyId(Uuid::from_u128(10))]
+    );
+    let second = storage
+        .read(&ObjectPath::device_log(write.device, 2.try_into().unwrap()))
+        .await
+        .unwrap();
+    assert_eq!(prefix(&second).store_key, KeyId(Uuid::from_u128(20)));
+    assert_eq!(
+        prefix(&second).part_keys,
+        [KeyId(Uuid::from_u128(20)), KeyId(Uuid::from_u128(21))]
+    );
+}

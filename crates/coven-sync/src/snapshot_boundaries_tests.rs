@@ -245,6 +245,7 @@ async fn queued_entries_wait_for_reload_and_finishing_a_queued_reset_blocks_new_
         Err(SyncError::Storage(_))
     ));
     let queued = a.db.local_store_log().await.unwrap().upload.unwrap();
+    let expected = a.reseal(&queued);
     let reload = Data::Snapshots(SnapshotTask {
         job: SnapshotJob::Reload {
             scope: crate::snapshot_data::ReloadScope::All,
@@ -276,7 +277,7 @@ async fn queued_entries_wait_for_reload_and_finishing_a_queued_reset_blocks_new_
             .read(&object::path(queued.entry.position))
             .await
             .unwrap(),
-        queued.sealed.bytes
+        expected
     );
 }
 

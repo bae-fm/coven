@@ -168,17 +168,7 @@ async fn lost_part_replies_and_expired_sessions_preserve_order_and_bytes() {
             .await
             .unwrap()
             .is_empty());
-        let fixed = devices[0]
-            .db
-            .read_oldest_upload(|upload| {
-                let coven_database::WaitingUpload::Sealed { bytes, .. } = upload else {
-                    panic!("fixed")
-                };
-                Ok::<_, DbError>(bytes.collect::<Result<Vec<_>, _>>()?.concat())
-            })
-            .await
-            .unwrap()
-            .unwrap();
+        let fixed = writes::resealed(&devices[0]).await.1;
         let mut faults = Faults::none();
         faults.expire_uploads = expire;
         storage.set_faults(faults).await;
@@ -232,17 +222,7 @@ async fn classified_occupied_paths_count_as_stored_with_and_without_a_session() 
         }
         storage.set_faults(fault).await;
         assert!(devices[0].sync.upload_writes().await.is_err());
-        let fixed = devices[0]
-            .db
-            .read_oldest_upload(|upload| {
-                let coven_database::WaitingUpload::Sealed { write, bytes } = upload else {
-                    panic!("sealed")
-                };
-                Ok::<_, DbError>((write, bytes.collect::<Result<Vec<_>, _>>()?.concat()))
-            })
-            .await
-            .unwrap()
-            .unwrap();
+        let fixed = writes::resealed(&devices[0]).await;
         storage
             .create(&crate::write_seal::path(fixed.0), &fixed.1)
             .await

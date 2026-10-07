@@ -76,7 +76,7 @@ fn edit_waiting(
     mut edit: impl FnMut(&mut coven_format::write::WriteRecord) -> Result<bool, DbError>,
 ) -> Result<(), DbError> {
     let waiting = database.query(
-        "SELECT device,number,record FROM _coven_uploads WHERE NOT EXISTS(SELECT 1 FROM _coven_upload_seals s WHERE s.device=_coven_uploads.device AND s.number=_coven_uploads.number) ORDER BY device,number", [],
+        "SELECT device,number,record FROM _coven_uploads WHERE sealing_keys IS NULL ORDER BY device,number", [],
         |row| Ok((WriteId { device: DeviceId(counter(row.get(0)?)), number: counter(row.get(1)?) }, row.get::<_,Vec<u8>>(2)?)),
     )?;
     for (id, bytes) in waiting {
@@ -89,7 +89,7 @@ fn edit_waiting(
         }
         let bytes = crate::write_commit::plaintext(database, WriteEncoder::new(&record)?)?;
         let updated = database.internal_execute(
-            "UPDATE _coven_uploads SET record=?1 WHERE device=?2 AND number=?3 AND NOT EXISTS(SELECT 1 FROM _coven_upload_seals s WHERE s.device=_coven_uploads.device AND s.number=_coven_uploads.number)",
+            "UPDATE _coven_uploads SET record=?1 WHERE device=?2 AND number=?3 AND sealing_keys IS NULL",
             params![bytes,id.device.0.to_be_bytes().as_slice(),id.number.to_be_bytes().as_slice()],
         )?;
         if updated != 1 {

@@ -290,17 +290,7 @@ async fn fixed_bytes_survive_restart_and_a_lost_completion_reply() {
     faults.fail_next = 1;
     storage.set_faults(faults).await;
     assert!(device.sync.upload_writes().await.is_err());
-    let expected = device
-        .db
-        .read_oldest_upload(|upload| {
-            let coven_database::WaitingUpload::Sealed { bytes, .. } = upload else {
-                panic!("seal committed before send")
-            };
-            Ok::<_, DbError>(bytes.collect::<Result<Vec<_>, _>>()?.concat())
-        })
-        .await
-        .unwrap()
-        .unwrap();
+    let expected = writes::resealed(device).await.1;
     device.db.close().await.unwrap();
     device.db = open(device.directory.clone(), device.clock.clone()).await;
     device.sync = DeviceLogSync::new(

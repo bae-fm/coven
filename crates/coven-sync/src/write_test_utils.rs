@@ -6,14 +6,11 @@ use coven_format::write_stream::{decode_plaintext, WriteEncoder};
 
 pub(super) async fn queued(db: &Database) -> WriteRecord {
     db.read_oldest_upload(|upload| {
-        let coven_database::WaitingUpload::Plaintext {
+        let coven_database::WaitingUpload {
             header_frame,
             parts,
             ..
-        } = upload
-        else {
-            panic!("plaintext")
-        };
+        } = upload;
         let mut bytes = header_frame;
         for (_, part) in parts {
             for chunk in part {
@@ -25,6 +22,25 @@ pub(super) async fn queued(db: &Database) -> WriteRecord {
     .await
     .unwrap()
     .unwrap()
+}
+
+pub(super) async fn resealed(device: &Device) -> (WriteId, Vec<u8>) {
+    let ring = device.keys.unlock().unwrap().unwrap();
+    let member = device.identity.unlock().unwrap().unwrap();
+    device
+        .db
+        .read_oldest_upload(move |upload| {
+            let write = upload.header.header.position;
+            let mut bytes = Vec::new();
+            crate::write_seal::seal(upload, &ring, &member, &mut |piece| {
+                bytes.extend_from_slice(piece);
+                Ok(())
+            })?;
+            Ok::<_, SyncError>((write, bytes))
+        })
+        .await
+        .unwrap()
+        .unwrap()
 }
 
 pub(super) fn seal(

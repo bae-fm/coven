@@ -114,7 +114,7 @@ impl StoreLogSync {
                 matches!(upload.entry.change, StoreChange::CreateStore { .. })
                     && objects.iter().all(|object| {
                         upload
-                            .sealed
+                            .sealing
                             .keys
                             .iter()
                             .any(|key| key.path == object.path.as_str())
@@ -170,7 +170,8 @@ impl StoreLogSync {
                     ))))
                 }
             }
-            for key in &upload.sealed.keys {
+            let bytes = object::seal_upload(upload, previous.as_ref(), &member)?;
+            for key in &upload.sealing.keys {
                 storage
                     .create_once(
                         &ObjectPath::parse(&key.path).map_err(coven_storage::StorageError::from)?,
@@ -179,7 +180,7 @@ impl StoreLogSync {
                     .await?;
             }
             storage
-                .create_once(&object::path(upload.entry.position), &upload.sealed.bytes)
+                .create_once(&object::path(upload.entry.position), &bytes)
                 .await?;
             // Read what storage actually retained, including a lost-reply retry.
             let path = object::path(upload.entry.position);
@@ -271,8 +272,9 @@ impl StoreLogSync {
                 }
                 let upload = local.upload.as_ref().expect("reserved access entry");
                 let path = object::path(upload.entry.position);
-                storage.create_once(&path, &upload.sealed.bytes).await?;
-                if storage.read(&path).await? != upload.sealed.bytes {
+                let bytes = object::seal_upload(upload, ring.as_ref(), &member)?;
+                storage.create_once(&path, &bytes).await?;
+                if storage.read(&path).await? != bytes {
                     return Err(occupied());
                 }
                 creation = Some(upload.entry.clone());

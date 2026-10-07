@@ -102,7 +102,7 @@ impl StoreLogSync {
     }
 
     /// Reload all readable audiences from validated snapshots and authenticated
-    /// device writes, keeping queued local write numbers and sealed bytes (§15).
+    /// device writes, preserving queued plaintext, write numbers and key ids (§15).
     /// Joining, missing-history recovery and explicit recovery call this method.
     pub async fn reload_from_snapshots(&mut self) -> Result<SyncResults, SyncError> {
         let mut report = self.resume_snapshots().await?;

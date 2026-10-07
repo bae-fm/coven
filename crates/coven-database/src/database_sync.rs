@@ -54,7 +54,7 @@ impl Database {
         })
         .await
     }
-    /// The provider's opaque upload recording, retained with the fixed seal.
+    /// The provider's opaque upload recording, retained with the attempted write.
     pub async fn write_upload_session(
         &self,
         write: crate::WriteId,
@@ -74,22 +74,23 @@ impl Database {
         })
         .await
     }
-    /// Seal the oldest plaintext upload directly into a SQLite BLOB. The first
-    /// successful attempt commits all bytes before returning its position. The
-    /// callback is skipped on retry; an error or panic rolls back the whole seal.
-    /// The committed store-log view and app version select the sealing keys.
-    pub async fn prepare_write_upload<F>(&self, seal: F) -> Result<Option<crate::WriteId>, DbError>
+    /// Fix the oldest write's sealing keys and mark its first attempt atomically.
+    /// Selection runs against the committed store log and app version. A retry
+    /// keeps the original keys without calling `select`; errors reserve nothing.
+    pub async fn prepare_write_upload<F>(
+        &self,
+        select: F,
+    ) -> Result<Option<crate::WriteId>, DbError>
     where
         F: FnOnce(
                 &crate::StoreLog,
                 u32,
-                crate::WaitingUpload<'_>,
-                &mut dyn FnMut(&[u8]) -> Result<(), DbError>,
-            ) -> Result<(), DbError>
+                &coven_format::write_stream::WriteHeaderFrame,
+            ) -> Result<coven_format::sealed_write::WriteObjectPrefix, DbError>
             + Send
             + 'static,
     {
-        self.call(move |inner| inner.with_writer(|writer| crate::upload::prepare(writer, seal)))
+        self.call(move |inner| inner.with_writer(|writer| crate::upload::prepare(writer, select)))
             .await
     }
     /// Apply one authenticated download, or report the prerequisite it awaits.
@@ -106,9 +107,9 @@ impl Database {
         .await
     }
 
-    /// Read only the oldest waiting write, streaming plaintext parts or its
-    /// already fixed sealed bytes. The callback runs in a committed reader
-    /// transaction; its result is `None` when the queue is empty.
+    /// Read the oldest waiting plaintext and its recorded sealing keys.
+    /// The callback runs in a committed reader transaction; its result is `None`
+    /// when the queue is empty.
     pub async fn read_oldest_upload<F, R, E>(
         &self,
         consume: F,
@@ -127,8 +128,8 @@ impl Database {
         .await
     }
 
-    /// Report a successful upload and remove its plaintext and sealed bytes
-    /// together. A repeated report returns false; attempts must stay in order.
+    /// Report a successful upload and remove its queue row and session together.
+    /// A repeated report returns false; attempts must stay in order.
     pub async fn upload_succeeded(&self, write: coven_merge::WriteId) -> Result<bool, DbError> {
         self.call(move |inner| inner.with_writer(|writer| crate::upload::succeeded(writer, write)))
             .await
@@ -189,10 +190,10 @@ impl Database {
         .await
     }
 
-    /// Fix the next entry's number, stamp, causal past, sealed bytes and sealed-key
+    /// Fix the next entry's number, stamp, causal past, sealing key id and sealed-key
     /// prerequisites together. No storage attempt may precede this commit.
     /// The callback owns sealing values, receives no database capability, and
-    /// rejects a change or returns the bytes to retain. Failure reserves no number.
+    /// rejects a change or returns the keys to retain. Failure reserves no number.
     pub async fn prepare_store_log<F, E>(
         &self,
         author: coven_crypto::MemberId,
@@ -203,7 +204,7 @@ impl Database {
         F: FnOnce(
                 &crate::StoreLog,
                 &coven_format::store_log::StoreLogEntry,
-            ) -> Result<crate::SealedStoreLog, E>
+            ) -> Result<crate::StoreLogSealing, E>
             + Send
             + 'static,
         E: From<DbError> + Send + 'static,

@@ -23,23 +23,14 @@ fn queued_bytes(db: &Database) -> Vec<Vec<u8>> {
     })
 }
 
-async fn seal(db: &Database, byte: u8) -> Vec<u8> {
-    let write = records(db).remove(0);
-    let encoder = coven_format::write_stream::WriteEncoder::new(&write).unwrap();
-    let length = coven_format::sealed_write::sealed_length(
-        encoder.header_frame().len(),
-        &encoder
-            .header()
-            .parts
-            .iter()
-            .map(|part| part.plaintext_length)
-            .collect::<Vec<_>>(),
-    )
-    .unwrap() as usize;
-    crate::upload::tests::attempt(db, vec![byte; length])
+async fn attempt(db: &Database, byte: u8) -> Vec<u8> {
+    crate::upload::tests::attempt(db, byte).await.unwrap();
+    crate::upload::tests::selected(db)
         .await
-        .unwrap();
-    crate::upload::tests::sealed(db).await.1
+        .1
+        .unwrap()
+        .encode()
+        .unwrap()
 }
 
 fn initial() -> Migration {
@@ -144,10 +135,10 @@ async fn additions_leave_queue_bytes_and_callbacks_untouched() {
 async fn no_converter_marks_waiting_records_lost_without_changing_local_losses() {
     let store = TestStore::new();
     let db = store.schema(notes(), NOTES).await.unwrap();
-    sql(&db, "INSERT INTO notes VALUES('sealed','fixed','body')")
+    sql(&db, "INSERT INTO notes VALUES('attempted','fixed','body')")
         .await
         .unwrap();
-    let sealed = seal(&db, 1).await;
+    let keys = attempt(&db, 1).await;
     sql(
         &db,
         "INSERT INTO notes VALUES('42','one','body'),('43','other','')",
@@ -189,12 +180,12 @@ async fn no_converter_marks_waiting_records_lost_without_changing_local_losses()
     db.inspect_writer(|db| {
         assert_eq!(
             db.query_row(
-                "SELECT sealed_bytes FROM _coven_upload_seals WHERE number=?1",
+                "SELECT sealing_keys FROM _coven_uploads WHERE number=?1",
                 [1u64.to_be_bytes().as_slice()],
                 |r| r.get::<_, Vec<u8>>(0)
             )
             .unwrap(),
-            sealed
+            keys
         )
     });
     db.close().await.unwrap();
@@ -303,13 +294,13 @@ pub(crate) fn reference_migration() -> Migration {
 }
 
 #[tokio::test]
-async fn a_sealed_prefix_stays_fixed_while_its_later_update_converts() {
+async fn an_attempted_prefix_stays_fixed_while_its_later_update_converts() {
     let store = TestStore::new();
     let db = store.schema(notes(), NOTES).await.unwrap();
     sql(&db, "INSERT INTO notes VALUES('42','one','body')")
         .await
         .unwrap();
-    let sealed = seal(&db, 255).await;
+    let keys = attempt(&db, 255).await;
     sql(&db, "UPDATE notes SET title='two'").await.unwrap();
     let original = records(&db);
     let bytes = queued_bytes(&db);
@@ -343,10 +334,13 @@ async fn a_sealed_prefix_stays_fixed_while_its_later_update_converts() {
     assert!(!current.cells().contains_key("title"));
     db.inspect_writer(|db| {
         assert_eq!(
-            db.query_row("SELECT sealed_bytes FROM _coven_upload_seals", [], |r| r
-                .get::<_, Vec<u8>>(0))
-                .unwrap(),
-            sealed
+            db.query_row(
+                "SELECT sealing_keys FROM _coven_uploads WHERE sealing_keys IS NOT NULL",
+                [],
+                |r| r.get::<_, Vec<u8>>(0)
+            )
+            .unwrap(),
+            keys
         )
     });
     db.close().await.unwrap();
@@ -439,13 +433,13 @@ async fn removing_and_adding_columns_updates_metadata_without_reusing_column_pos
 }
 
 #[tokio::test]
-async fn an_untouched_sealed_column_can_be_dropped() {
+async fn a_column_used_only_by_attempted_writes_can_be_dropped() {
     let store = TestStore::new();
     let db = store.schema(notes(), NOTES).await.unwrap();
     sql(&db, "INSERT INTO notes VALUES('42','one','body')")
         .await
         .unwrap();
-    seal(&db, 1).await;
+    attempt(&db, 1).await;
     sql(&db, "UPDATE notes SET title='two'").await.unwrap();
     db.close().await.unwrap();
     let db = store
@@ -611,7 +605,7 @@ async fn parent_renames_override_a_dropped_namesake_in_waiting_references() {
         .unwrap();
     sql(&db,"INSERT INTO a VALUES('p'); INSERT INTO b VALUES('p'); INSERT INTO children VALUES('c','p')").await.unwrap();
     // The old b's insert stays in a fixed upload. Only the child update converts.
-    seal(&db, 1).await;
+    attempt(&db, 1).await;
     sql(&db, "UPDATE children SET parent=NULL").await.unwrap();
     sql(&db, "UPDATE children SET parent='p'").await.unwrap();
     db.close().await.unwrap();

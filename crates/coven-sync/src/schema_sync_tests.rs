@@ -317,6 +317,14 @@ async fn a_raise_resumes_after_reopening_at_every_publication_step() {
                 .unwrap();
         }
         let fixed = device.db.local_store_log().await.unwrap().upload;
+        let expected = fixed.as_ref().map(|upload| {
+            crate::store_log_object::seal_upload(
+                upload,
+                device.keys.unlock().unwrap().as_ref(),
+                &device.identity.unlock().unwrap().unwrap(),
+            )
+            .unwrap()
+        });
         update(device, storage.clone(), true, true).await;
         device.log.sync_store_log().await.unwrap();
         let raised =
@@ -328,7 +336,7 @@ async fn a_raise_resumes_after_reopening_at_every_publication_step() {
                     .read(&crate::store_log_object::path(fixed.entry.position))
                     .await
                     .unwrap(),
-                fixed.sealed.bytes
+                expected.unwrap()
             );
         }
         assert!(device.db.operations().await.unwrap().is_empty());
@@ -765,22 +773,6 @@ mod recovery {
         ]
     }
 
-    async fn sealed_bytes(db: &Database) -> Vec<u8> {
-        db.read_oldest_upload(|upload| {
-            let coven_database::WaitingUpload::Sealed { bytes, .. } = upload else {
-                panic!("attempted write must remain sealed")
-            };
-            let mut result = Vec::new();
-            for chunk in bytes {
-                result.extend(chunk?);
-            }
-            Ok::<_, DbError>(result)
-        })
-        .await
-        .unwrap()
-        .unwrap()
-    }
-
     #[tokio::test]
     async fn recovery_converts_old_waiting_writes_and_preserves_attempted_bytes() {
         for rebuild in [false, true] {
@@ -821,7 +813,7 @@ mod recovery {
                         assert!(devices[1].sync.upload_writes().await.is_err());
                     }
                     let sealed = if attempted {
-                        Some(sealed_bytes(&devices[1].db).await)
+                        Some(writes::resealed(&devices[1]).await.1)
                     } else {
                         None
                     };
@@ -906,7 +898,7 @@ mod recovery {
                     assert_eq!(waiting.header.had_read, original.header.had_read);
                     if attempted {
                         assert_eq!(waiting, &original);
-                        assert_eq!(sealed_bytes(&device.db).await, sealed.unwrap());
+                        assert_eq!(writes::resealed(device).await.1, sealed.unwrap());
                     } else {
                         assert_eq!(
                             waiting.header.disposition,

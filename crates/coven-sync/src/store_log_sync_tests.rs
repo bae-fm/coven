@@ -106,6 +106,15 @@ async fn device(storage: Arc<MemoryStorage>, n: u64, member: MemberKeys, store: 
 }
 
 impl Device {
+    fn reseal(&self, upload: &coven_database::StoreLogUpload) -> Vec<u8> {
+        object::seal_upload(
+            upload,
+            self.custody.unlock().unwrap().as_ref(),
+            &self.member,
+        )
+        .unwrap()
+    }
+
     fn writes(&self) -> crate::DeviceLogSync {
         crate::DeviceLogSync::new(
             self.storage.clone(),
@@ -264,6 +273,7 @@ async fn fixed_bytes_survive_restart_and_lost_create_reply() {
             .await;
         assert!(matches!(result, Err(SyncError::Storage(_))));
         let fixed = a.db.local_store_log().await.unwrap().upload.unwrap();
+        let expected = a.reseal(&fixed);
         assert_eq!(fixed.entry.position.number, 2);
         if lost_reply {
             assert_eq!(
@@ -271,7 +281,7 @@ async fn fixed_bytes_survive_restart_and_lost_create_reply() {
                     .read(&object::path(fixed.entry.position))
                     .await
                     .unwrap(),
-                fixed.sealed.bytes
+                expected
             );
         }
         a.restart(storage.clone()).await;
@@ -281,7 +291,7 @@ async fn fixed_bytes_survive_restart_and_lost_create_reply() {
                 .read(&object::path(fixed.entry.position))
                 .await
                 .unwrap(),
-            fixed.sealed.bytes
+            expected
         );
         assert!(a.db.local_store_log().await.unwrap().upload.is_none());
         assert_eq!(a.log().await.entries.len(), 2);
@@ -543,7 +553,12 @@ async fn key_objects_are_fixed_and_published_before_the_entry() {
         .unwrap()
         .is_empty());
     assert!(a.custody.unlock().unwrap().is_none());
-    let sealed_key = &pending.sealed.keys[0];
+    let expected = a.reseal(&pending);
+    assert!(matches!(
+        object::seal_upload(&pending, None, &member(2)),
+        Err(SyncError::Rejected(coven_database::DropReason::NotAllowed))
+    ));
+    let sealed_key = &pending.sealing.keys[0];
     assert_eq!(
         storage
             .read(&ObjectPath::parse(&sealed_key.path).unwrap())
@@ -558,7 +573,7 @@ async fn key_objects_are_fixed_and_published_before_the_entry() {
             .read(&object::path(pending.entry.position))
             .await
             .unwrap(),
-        pending.sealed.bytes
+        expected
     );
     assert_eq!(
         storage
@@ -854,3 +869,53 @@ mod operations;
 
 #[path = "snapshots_tests.rs"]
 mod snapshots;
+
+#[tokio::test]
+async fn a_waiting_entry_reseals_with_its_recorded_key_after_rotation() {
+    let storage = storage();
+    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
+    a.create(key(1)).await;
+    a.add(&member(2), MemberRole::Member).await;
+    let mut b = device(storage.clone(), 2, member(1), store(1)).await;
+    b.sync().await;
+    storage
+        .set_faults(Faults {
+            lose_completion_reply: true,
+            ..Faults::none()
+        })
+        .await;
+    assert!(a
+        .sync
+        .make_and_upload_entry(StoreChange::AddDevice {
+            device: DeviceId(20),
+            name: "waiting".into(),
+        })
+        .await
+        .is_err());
+    let pending = a.db.local_store_log().await.unwrap().upload.unwrap();
+    let path = object::path(pending.entry.position);
+    let first = storage.read(&path).await.unwrap();
+    b.sync
+        .make_and_upload_entry(StoreChange::RemoveMember {
+            member: member(2).member_id(),
+            key: key(2),
+            circle_keys: vec![],
+        })
+        .await
+        .unwrap();
+    // Apply the downloaded rotation while the local entry is still queued.
+    let rotation = b.log().await.entries.last().unwrap().entry.clone();
+    let (entry, replay) = crate::replay_entry(&a.log().await, rotation);
+    a.db.apply_store_log(entry, replay).await.unwrap();
+    a.custody
+        .persist(&b.custody.unlock().unwrap().unwrap())
+        .unwrap();
+    a.restart(storage.clone()).await;
+    assert_eq!(a.log().await.replay.state.store.unwrap().key, key(2));
+    assert_eq!(a.reseal(&pending), first);
+    // Remove the fixture's first copy so the retry must actually reproduce it.
+    storage.delete(&path).await.unwrap();
+    a.sync().await;
+    assert_eq!(storage.read(&path).await.unwrap(), first);
+    assert!(a.db.local_store_log().await.unwrap().upload.is_none());
+}

@@ -44,7 +44,7 @@ impl Database {
         F: FnOnce(
                 &crate::StoreLog,
                 &coven_format::store_log::StoreLogEntry,
-            ) -> Result<(crate::SealedStoreLog, OperationUpdate), E>
+            ) -> Result<(crate::StoreLogSealing, OperationUpdate), E>
             + Send
             + 'static,
         E: From<DbError> + Send + 'static,

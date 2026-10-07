@@ -94,7 +94,7 @@ impl StoreLogSync {
         Ok(report)
     }
 
-    /// Fix and publish a new entry. Existing queued bytes go first. The change's
+    /// Fix and publish a new entry. Existing queued entries go first. The change's
     /// key ids are fresh names; this owner generates and seals their material.
     /// After a failed upload, call `sync_store_log` to retry that same entry.
     pub async fn make_and_upload_entry(
@@ -138,7 +138,7 @@ impl StoreLogSync {
                 keys::seal(log, entry, ring.as_ref(), &author)
             })
             .await?;
-        // Re-read the committed bytes, so the first attempt uses the same path as
+        // Re-read the committed queue, so the first attempt uses the same path as
         // every retry and never depends on a callback's transient return value.
         local = self.database.local_store_log().await?;
         let mut ring = self.store_keys.unlock()?;
@@ -408,7 +408,8 @@ impl StoreLogSync {
         report: &mut SyncResults,
     ) -> Result<(), SyncError> {
         if let Some(upload) = local.upload.take() {
-            for key in upload.sealed.keys {
+            let bytes = object::seal_upload(&upload, ring.as_ref(), member)?;
+            for key in &upload.sealing.keys {
                 self.storage
                     .as_deref()
                     .ok_or(SyncError::NoStorage)?
@@ -421,7 +422,7 @@ impl StoreLogSync {
             self.storage
                 .as_deref()
                 .ok_or(SyncError::NoStorage)?
-                .create_once(&object::path(upload.entry.position), &upload.sealed.bytes)
+                .create_once(&object::path(upload.entry.position), &bytes)
                 .await?;
             self.apply(local, upload.entry, member, ring, report)
                 .await?;

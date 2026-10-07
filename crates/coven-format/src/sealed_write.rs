@@ -7,15 +7,12 @@ use crate::wire::{Decoder, Encoder, Wire, MAX_ITEMS, MAX_OBJECT};
 use coven_crypto::{Signature, SEALED_OBJECT_CHUNK_OVERHEAD};
 use coven_foundation::id_source::KeyId;
 
-const PREFIX_LENGTH: usize = 23;
-
 /// The exact stored size, independent of key identities, nonces and signature
 /// contents. Header and part lengths come from the validated plaintext codec.
 pub fn sealed_length(header_length: usize, part_lengths: &[u64]) -> Result<u64, Error> {
     validate_lengths(header_length, part_lengths)?;
     let overhead = (4 + SEALED_OBJECT_CHUNK_OVERHEAD) as u64;
-    let mut length = PREFIX_LENGTH as u64
-        + 16 * part_lengths.len() as u64
+    let mut length = WriteObjectPrefix::encoded_length(part_lengths.len())? as u64
         + header_length as u64
         + overhead
         + 64;
@@ -60,6 +57,12 @@ pub struct WriteObjectPrefix {
     pub part_keys: Vec<KeyId>,
 }
 impl WriteObjectPrefix {
+    /// Exact prefix size for this many parts, before their key ids are selected.
+    pub fn encoded_length(parts: usize) -> Result<usize, Error> {
+        bound(parts, MAX_ITEMS, "write section keys")?;
+        Ok(23 + 16 * parts)
+    }
+
     /// Encode kind, version, header key and the counted list of part keys.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         let mut out = Encoder::new();
@@ -76,8 +79,7 @@ impl WriteObjectPrefix {
         sealed::prefix(bytes, 32)?;
         let count = bytes.get(19..23).ok_or(Error::Truncated)?;
         let count = u32::from_be_bytes(count.try_into().expect("four bytes")) as usize;
-        bound(count, MAX_ITEMS, "write section keys")?;
-        Ok(PREFIX_LENGTH + count * 16)
+        Self::encoded_length(count)
     }
 
     /// Decode exactly the complete prefix, refusing trailing bytes.

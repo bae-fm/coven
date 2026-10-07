@@ -1,9 +1,10 @@
-//! A waiting write's immutable plaintext and first sealed upload attempt.
+//! A waiting write's plaintext and the keys fixed by its first upload attempt.
 
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{counter, encoded};
 use crate::DbError;
 use coven_format::chunks::CHUNK_SIZE;
+use coven_format::sealed_write::WriteObjectPrefix;
 use coven_format::write_stream::{PartHeader, WriteHeaderFrame};
 use coven_foundation::id_source::DeviceId;
 use coven_merge::WriteId;
@@ -12,23 +13,15 @@ use std::rc::Rc;
 
 /// The oldest waiting write, read under one committed reader transaction.
 /// Sealing and transport belong to sync; these are its input streams.
-pub enum WaitingUpload<'a> {
-    /// No attempt has fixed this write's sealed bytes yet.
-    Plaintext {
-        /// Identity, causality and the audience stream boundaries.
-        header: WriteHeaderFrame,
-        /// The exact plaintext header frame, sealed as one chunk.
-        header_frame: Vec<u8>,
-        /// Each audience's record stream, in header order, cut into 64 KiB chunks.
-        parts: UploadParts<'a>,
-    },
-    /// Every attempt must send these already fixed bytes.
-    Sealed {
-        /// The object path's device and number.
-        write: WriteId,
-        /// The original sealed object, read incrementally.
-        bytes: UploadBytes<'a>,
-    },
+pub struct WaitingUpload<'a> {
+    /// Identity, causality and the audience stream boundaries.
+    pub header: WriteHeaderFrame,
+    /// The exact plaintext header frame, sealed as one chunk.
+    pub header_frame: Vec<u8>,
+    /// Each audience's record stream, in header order, cut into 64 KiB chunks.
+    pub parts: UploadParts<'a>,
+    /// Fixed by the first attempt; absence means migrations may still convert it.
+    pub keys: Option<WriteObjectPrefix>,
 }
 
 /// A queue read failed in the database or in its consumer.
@@ -50,20 +43,6 @@ pub struct UploadBytes<'a> {
 }
 
 impl<'a> UploadBytes<'a> {
-    /// Bytes remaining in this bounded reader.
-    pub fn remaining(&self) -> u64 {
-        (self.end - self.offset) as u64
-    }
-
-    /// Skip confirmed sealed bytes without reading them into memory.
-    pub fn skip_bytes(&mut self, length: u64) -> Result<(), DbError> {
-        if length > self.remaining() {
-            return Err(DbError::DamagedDatabase);
-        }
-        self.offset += length as usize;
-        Ok(())
-    }
-
     pub(crate) fn new(blob: rusqlite::blob::Blob<'a>) -> Self {
         let end = blob.len();
         Self {
@@ -125,31 +104,16 @@ impl<'a> Iterator for UploadParts<'a> {
     }
 }
 
-pub(crate) enum UploadValue {
-    Plaintext,
-    Sealed,
-}
-
-impl UploadValue {
-    pub(crate) fn column(&self) -> (&'static str, &'static str) {
-        match self {
-            Self::Plaintext => ("_coven_uploads", "record"),
-            Self::Sealed => ("_coven_upload_seals", "sealed_bytes"),
-        }
-    }
-}
-
 struct Oldest {
     rowid: i64,
     write: WriteId,
-    sealed: Option<i64>,
+    keys: Option<Vec<u8>>,
 }
 
 fn oldest(database: &DatabaseConnection) -> Result<Option<Oldest>, DbError> {
     Ok(database
         .query(
-            "SELECT u.rowid,u.device,u.number,s.rowid FROM _coven_uploads u
-         LEFT JOIN _coven_upload_seals s USING(device,number) ORDER BY u.rowid LIMIT 1",
+            "SELECT rowid,device,number,sealing_keys FROM _coven_uploads ORDER BY rowid LIMIT 1",
             [],
             |r| {
                 Ok(Oldest {
@@ -158,7 +122,7 @@ fn oldest(database: &DatabaseConnection) -> Result<Option<Oldest>, DbError> {
                         device: DeviceId(counter(r.get(1)?)),
                         number: counter(r.get(2)?),
                     },
-                    sealed: r.get(3)?,
+                    keys: r.get(3)?,
                 })
             },
         )?
@@ -169,7 +133,7 @@ fn plaintext<'a>(
     database: &'a DatabaseConnection,
     entry: &Oldest,
 ) -> Result<(WriteHeaderFrame, Vec<u8>, UploadBytes<'a>), DbError> {
-    let mut bytes = database.upload_value(UploadValue::Plaintext, entry.rowid)?;
+    let mut bytes = database.upload_plaintext(entry.rowid)?;
     let prefix = bytes.read(0, coven_format::FRAME_PREFIX_LEN)?;
     let length = encoded(coven_format::frame_length(&prefix))?;
     let header_frame = bytes.read(0, length)?;
@@ -192,28 +156,27 @@ pub(crate) fn read<R, E>(
     let Some(entry) = oldest(database)? else {
         return Ok(None);
     };
-    let upload = match entry.sealed {
-        Some(rowid) => WaitingUpload::Sealed {
-            write: entry.write,
-            bytes: database.upload_value(UploadValue::Sealed, rowid)?,
-        },
-        None => {
-            let (header, header_frame, bytes) = plaintext(database, &entry)?;
-            let parts = UploadParts {
-                bytes,
-                headers: header.parts.clone().into_iter(),
-            };
-            WaitingUpload::Plaintext {
-                header,
-                header_frame,
-                parts,
-            }
-        }
+    let (header, header_frame, bytes) = plaintext(database, &entry)?;
+    let keys = entry
+        .keys
+        .as_deref()
+        .map(WriteObjectPrefix::decode)
+        .transpose()
+        .map_err(DbError::from)?;
+    let parts = UploadParts {
+        bytes,
+        headers: header.parts.clone().into_iter(),
+    };
+    let upload = WaitingUpload {
+        header,
+        header_frame,
+        parts,
+        keys,
     };
     consume(upload).map(Some).map_err(UploadReadError::Consumer)
 }
 
-/// Read every waiting plaintext, including entries with fixed ciphertext.
+/// Read every waiting plaintext, including attempted entries.
 /// The caller holds a reader transaction for a consistent queue view.
 pub(crate) fn each_plaintext(
     database: &DatabaseConnection,
@@ -229,7 +192,7 @@ pub(crate) fn each_plaintext(
                     device: DeviceId(counter(row.get(1)?)),
                     number: counter(row.get(2)?),
                 },
-                sealed: None,
+                keys: None,
             })
         },
     )?;
@@ -246,52 +209,27 @@ pub(crate) fn each_plaintext(
 
 pub(crate) fn prepare(
     database: &DatabaseConnection,
-    seal: impl FnOnce(
-        &crate::StoreLog,
-        u32,
-        WaitingUpload<'_>,
-        &mut dyn FnMut(&[u8]) -> Result<(), DbError>,
-    ) -> Result<(), DbError>,
+    select: impl FnOnce(&crate::StoreLog, u32, &WriteHeaderFrame) -> Result<WriteObjectPrefix, DbError>,
 ) -> Result<Option<WriteId>, DbError> {
     database.stream_transaction(|database| {
-        let Some(entry) = oldest(database)? else { return Ok(None); };
-        if entry.sealed.is_some() { return Ok(Some(entry.write)); }
-        let (header, frame, _) = plaintext(database, &entry)?;
-        let expected = check_length(database, frame.len(), &header.parts)?;
-        let rowid = database.query_row(
-            "INSERT INTO _coven_upload_seals(device,number,sealed_bytes) VALUES(?1,?2,zeroblob(?3)) RETURNING rowid",
-            params![entry.write.device.0.to_be_bytes().as_slice(), entry.write.number.to_be_bytes().as_slice(), expected as i64],
-            |row| row.get(0),
-        )?;
-        let log = crate::store_log_tables::read(database)?;
-        let version = database.schema_version()?;
-        let (header, header_frame, bytes) = plaintext(database, &entry)?;
-        let parts = UploadParts { bytes, headers: header.parts.clone().into_iter() };
-        let actual = database.write_upload_seal(rowid, |emit| {
-            seal(&log, version, WaitingUpload::Plaintext { header, header_frame, parts }, emit)
-        })?;
-        if actual != expected {
-            return Err(DbError::UploadLength { write: entry.write, expected: expected as u64, actual: actual as u64 });
+        let Some(entry) = oldest(database)? else {
+            return Ok(None);
+        };
+        if entry.keys.is_some() {
+            return Ok(Some(entry.write));
         }
+        let (header, _, _) = plaintext(database, &entry)?;
+        let log = crate::store_log_tables::read(database)?;
+        let keys = select(&log, database.schema_version()?, &header)?;
+        if keys.part_keys.len() != header.parts.len() {
+            return Err(DbError::DamagedDatabase);
+        }
+        database.internal_execute(
+            "UPDATE _coven_uploads SET sealing_keys=?1 WHERE rowid=?2",
+            params![keys.encode()?, entry.rowid],
+        )?;
         Ok(Some(entry.write))
     })
-}
-
-pub(crate) fn check_length(
-    database: &DatabaseConnection,
-    header_length: usize,
-    parts: &[PartHeader],
-) -> Result<usize, DbError> {
-    let lengths: Vec<_> = parts.iter().map(|part| part.plaintext_length).collect();
-    let sealed = encoded(coven_format::sealed_write::sealed_length(
-        header_length,
-        &lengths,
-    ))?;
-    let length = database.check_value_length("sealed write", sealed)?;
-    // SQLite limits the complete row too. Three fields (two eight-byte keys
-    // and the BLOB) need at most 24 bytes for the keys and record header.
-    database.check_value_length("sealed write row", sealed + 24)?;
-    Ok(length)
 }
 
 pub(crate) fn succeeded(database: &DatabaseConnection, write: WriteId) -> Result<bool, DbError> {
@@ -310,8 +248,8 @@ pub(crate) fn succeeded(database: &DatabaseConnection, write: WriteId) -> Result
         let entry = oldest(database)?
             .filter(|e| e.write == write)
             .ok_or(DbError::UploadNotOldest { write })?;
-        if entry.sealed.is_none() {
-            return Err(DbError::UploadNotSealed { write });
+        if entry.keys.is_none() {
+            return Err(DbError::UploadNotAttempted { write });
         }
         database.internal_execute("DELETE FROM _coven_uploads WHERE rowid=?1", [entry.rowid])?;
         Ok(true)
@@ -338,7 +276,7 @@ pub(crate) fn keep_session(
     bytes: Vec<u8>,
 ) -> Result<(), DbError> {
     database.stream_transaction(|database| {
-        if oldest(database)?.is_none_or(|e| e.write != write || e.sealed.is_none()) {
+        if oldest(database)?.is_none_or(|e| e.write != write || e.keys.is_none()) {
             return Err(DbError::UploadNotOldest { write });
         }
         database.internal_execute(

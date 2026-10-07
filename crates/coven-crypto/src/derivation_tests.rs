@@ -154,3 +154,36 @@ fn objects_cannot_be_opened_without_a_storage_path() {
         .unwrap();
     let _opened = key.open_object_chunk("", b"cleartext prefix", 0, 0, &sealed);
 }
+
+#[test]
+fn retry_nonces_are_pinned_and_separate_keys_paths_sections_and_chunks() {
+    let key = DerivedKeys::new(&[17; 32]);
+    let path = "devices/1/3";
+    let sealed = key.reseal_object_chunk(path, b"prefix", 1, 2, b"payload");
+    // Independently calculated with Python's hashlib/hmac and D11's encoding.
+    assert_eq!(
+        hex::encode(&sealed[..24]),
+        "384981a444444a653c9ae5752659daf9613bf9c415916342"
+    );
+    assert_eq!(
+        sealed,
+        key.reseal_object_chunk(path, b"prefix", 1, 2, b"payload")
+    );
+    assert_eq!(
+        key.open_object_chunk(path, b"prefix", 1, 2, &sealed)
+            .unwrap(),
+        b"payload"
+    );
+    for other in [
+        key.reseal_object_chunk("devices/1/4", b"prefix", 1, 2, b"payload"),
+        key.reseal_object_chunk("store-log/1/3", b"prefix", 1, 2, b"payload"),
+        key.reseal_object_chunk(path, b"prefix", 2, 2, b"payload"),
+        key.reseal_object_chunk(path, b"prefix", 1, 3, b"payload"),
+        DerivedKeys::new(&[18; 32]).reseal_object_chunk(path, b"prefix", 1, 2, b"payload"),
+    ] {
+        assert_ne!(sealed[..24], other[..24]);
+    }
+    assert!(key
+        .open_object_chunk(path, b"changed prefix", 1, 2, &sealed)
+        .is_err());
+}

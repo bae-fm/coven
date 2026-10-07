@@ -112,8 +112,8 @@ pub enum DbError {
     /// The wall clock or next timestamp exceeds its representation (§7.2).
     #[error("clock is outside the timestamp range")]
     ClockOutOfRange,
-    /// A value or row exceeds the format (§5), or a write's plaintext or sealed
-    /// bytes cannot fit in a SQLite value and its queue row (§6).
+    /// A value or row exceeds the format (§5), or a write's plaintext and sealing
+    /// key ids cannot fit in its SQLite queue row (§6).
     #[error("{field} length {actual} exceeds {maximum}")]
     TooLarge {
         /// The bounded field or collection.
@@ -129,21 +129,11 @@ pub enum DbError {
         /// The write whose upload was requested.
         write: coven_merge::WriteId,
     },
-    /// An upload cannot succeed before its bytes have been fixed (§6).
-    #[error("write {write:?} has no kept sealed bytes")]
-    UploadNotSealed {
+    /// An upload cannot succeed before its sealing keys have been fixed (§6).
+    #[error("write {write:?} has no recorded upload attempt")]
+    UploadNotAttempted {
         /// The write whose success was reported.
         write: coven_merge::WriteId,
-    },
-    /// Sync supplied bytes whose length differs from the write's sealed layout.
-    #[error("sealed write {write:?} has length {actual}, expected {expected}")]
-    UploadLength {
-        /// The write being sealed.
-        write: coven_merge::WriteId,
-        /// Bytes supplied by sync.
-        actual: u64,
-        /// Bytes required by the format.
-        expected: u64,
     },
     /// A reference reaches an audience the source row's readers cannot read (§14.5).
     #[error("reference {table}.{column} at {key:?} reaches another audience")]

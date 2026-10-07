@@ -122,20 +122,7 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
 }
 
 async fn upload(db: &crate::Database, record: &coven_format::write::WriteRecord) {
-    let encoder = coven_format::write_stream::WriteEncoder::new(record).unwrap();
-    let length = coven_format::sealed_write::sealed_length(
-        encoder.header_frame().len(),
-        &encoder
-            .header()
-            .parts
-            .iter()
-            .map(|p| p.plaintext_length)
-            .collect::<Vec<_>>(),
-    )
-    .unwrap();
-    crate::upload::tests::attempt(db, vec![17; length as usize])
-        .await
-        .unwrap();
+    crate::upload::tests::attempt(db, 17).await.unwrap();
     assert!(db.upload_succeeded(record.header.position).await.unwrap());
 }
 
