@@ -78,11 +78,7 @@ pub(crate) fn update(
             let columns = state
                 .cells()
                 .iter()
-                .map(|(name, cell)| {
-                    let mut value = cell.value.clone();
-                    value.value = row.values[name].clone();
-                    (name.clone(), value)
-                })
+                .map(|(name, cell)| (name.clone(), cell.value.clone()))
                 .collect();
             fields.push(encoded(merge_fields::encode_columns(&columns))?);
             fields.push(encoded(merge_fields::encode_rules(rules))?);
@@ -96,9 +92,6 @@ pub(crate) fn update(
             fields.push(encoded(merge_fields::encode_write_id(&key.write))?);
             fields.push(lost.incarnation.to_be_bytes().to_vec());
             fields.push(encoded(merge_fields::encode_column_value(&lost.value))?);
-            fields.push(encoded(merge_fields::encode_column_value(
-                &view.lost_value(id, key, lost)?,
-            ))?);
             fields.push(encoded(merge_fields::encode_write_id(&lost.replaced_by))?);
         }
         let leaf = hash(&fields.iter().map(Vec::as_slice).collect::<Vec<_>>());

@@ -86,13 +86,7 @@ impl<'a> DatabaseRemovalView<'a> {
     ) -> Result<Self, DbError> {
         let mut edges = BTreeMap::<RowId, BTreeSet<RowId>>::new();
         for (id, update) in updates {
-            for value in update
-                .state
-                .cells()
-                .values()
-                .map(|c| &c.value)
-                .chain(update.state.lost().values().map(|l| &l.value))
-            {
+            for value in update.state.cells().values().map(|c| &c.value) {
                 for parent in value.parents.values() {
                     edges
                         .entry(parent.row.clone())
@@ -355,44 +349,6 @@ impl<'a> DatabaseRemovalView<'a> {
         )
     }
 
-    pub(crate) fn lost_value(
-        &self,
-        id: &RowId,
-        key: &coven_merge::LostKey,
-        lost: &coven_merge::LostValue<Value>,
-    ) -> Result<coven_merge::ColumnValue<Value>, DbError> {
-        let mut value = lost.value.clone();
-        let table = self.schema.table(&id.table);
-        for (name, parent) in &lost.value.parents {
-            if self.state(&parent.row)?.generation() == parent.generation {
-                continue;
-            }
-            let fk = table
-                .foreign_keys
-                .iter()
-                .find(|fk| self.schema.foreign_key(table, fk) == *name)
-                .expect("lost reference constraint");
-            if fk.on_delete == "SET NULL" || fk.on_delete == "SET DEFAULT" {
-                let replacement = crate::removal_sql::replacement(
-                    self.database,
-                    table,
-                    fk,
-                    fk.on_delete == "SET DEFAULT",
-                )?;
-                // A lost cell is not an app row. It retains its original parent
-                // metadata while reading the stale reference's replacement.
-                let values = crate::removal_sql::reference_values(
-                    self.database,
-                    table,
-                    std::slice::from_ref(&key.column),
-                    std::slice::from_ref(&replacement[&key.column]),
-                )?;
-                value.value = values.into_iter().next().expect("one column");
-            }
-        }
-        Ok(value)
-    }
-
     pub(crate) fn default_parent(
         &self,
         child: &TableSchema,
@@ -552,10 +508,6 @@ impl<'a> DatabaseRemovalView<'a> {
                 }
             }
         }
-        for lost in self.state(id)?.lost().values() {
-            related.extend(lost.value.parents.values().map(|parent| parent.row.clone()));
-        }
-        related.extend(self.database.query("SELECT DISTINCT l.table_name,l.key,l.audience FROM _coven_lost_references v JOIN _coven_lost l ON l.id=v.loss_id WHERE v.parent_table=?1 AND v.parent_key=?2 AND v.parent_audience=?3", params![id.table,id.key,crate::write_encoding::audience_text(&id.audience)], crate::row_queries::read_identity)?);
         if let Some(children) = self.edges.get(id) {
             related.extend(children.iter().cloned());
         }

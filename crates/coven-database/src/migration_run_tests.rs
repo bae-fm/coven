@@ -399,7 +399,6 @@ async fn a_removed_row_is_forgotten_but_its_loss_survives_migration_and_reinsert
         "_coven_cells",
         "_coven_references",
         "_coven_claims",
-        "_coven_lost_references",
     ] {
         assert_eq!(count(&db, table), 0, "{table}");
     }

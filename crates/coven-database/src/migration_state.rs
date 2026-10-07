@@ -24,7 +24,6 @@ pub(crate) fn carry(
         crate::fingerprint::retire_losses(db, &id)?;
         crate::fingerprint::forget_rows(db, std::iter::once(&id))?;
         let audience = audience_text(&id.audience);
-        db.internal_execute("DELETE FROM _coven_lost_references WHERE loss_id IN (SELECT id FROM _coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND retired=0 AND replacement_kind IN ('rules','write'))",params![id.table,id.key,audience])?;
         db.internal_execute("UPDATE _coven_lost SET retired=1 WHERE table_name=?1 AND key=?2 AND audience=?3 AND retired=0 AND replacement_kind IN ('rules','write')",params![id.table,id.key,audience])?;
         for table in ["_coven_references", "_coven_cells", "_coven_claims"] {
             db.internal_execute(&format!("DELETE FROM {table} WHERE row_id IN (SELECT id FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3)"),params![id.table,id.key,audience])?;
@@ -80,10 +79,9 @@ pub(crate) fn carry(
     Ok(refresh)
 }
 
-/// Retired rows no longer participate in reference recomputation. Keep exactly
-/// their displayed values, without parent generations that could restore them.
+/// Retired losses keep their written values without active reference metadata.
 fn freeze_losses(db: &DatabaseConnection, row: &coven_merge::RowId) -> Result<(), DbError> {
-    db.visit("SELECT id,replacement_kind,COALESCE(read_value,value) FROM _coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND retired=0 AND replacement_kind IN ('rules','write')", params![row.table,row.key,audience_text(&row.audience)], |r| {
+    db.visit("SELECT id,replacement_kind,value FROM _coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND retired=0 AND replacement_kind IN ('rules','write')", params![row.table,row.key,audience_text(&row.audience)], |r| {
         let id: i64 = r.get(0)?;
         let bytes: Vec<u8> = r.get(2)?;
         let value = if r.get::<_,String>(1)? == "rules" {
@@ -95,7 +93,7 @@ fn freeze_losses(db: &DatabaseConnection, row: &coven_merge::RowId) -> Result<()
             value.parents.clear();
             encoded(merge_fields::encode_column_value(&value))?
         };
-        db.internal_execute("UPDATE _coven_lost SET value=?2,read_value=NULL WHERE id=?1",params![id,value])?;
+        db.internal_execute("UPDATE _coven_lost SET value=?2 WHERE id=?1",params![id,value])?;
         Ok(())
     })
 }
@@ -238,10 +236,6 @@ fn references(
                 "DELETE FROM _coven_references WHERE foreign_key_id=?1",
                 [id],
             )?;
-            db.internal_execute(
-                "DELETE FROM _coven_lost_references WHERE foreign_key_id=?1",
-                [id],
-            )?;
             db.internal_execute("DELETE FROM _coven_foreign_keys WHERE id=?1", [id])?;
         }
     }
@@ -251,11 +245,10 @@ fn references(
             params![id, table, encoded(merge_fields::encode_foreign_key(&key))?],
         )?;
         db.internal_execute("UPDATE _coven_references SET parent_table=?2 WHERE foreign_key_id=?1 AND parent_table<>?2",params![id,key.parent])?;
-        db.internal_execute("UPDATE _coven_lost_references SET parent_table=?2 WHERE foreign_key_id=?1 AND parent_table<>?2",params![id,key.parent])?;
     }
     for table in losses {
         // Values of concurrent cell losses embed reference identities as well.
-        db.visit("SELECT id,value,read_value FROM _coven_lost WHERE table_name=?1 AND retired=0 AND replacement_kind='write'",[&table],|r| {
+        db.visit("SELECT id,value FROM _coven_lost WHERE table_name=?1 AND retired=0 AND replacement_kind='write'",[&table],|r| {
             let id: i64 = r.get(0)?;
             let mut value = decoded(merge_fields::decode_column_value(&r.get::<_,Vec<u8>>(1)?))?;
             let old = value.clone();
@@ -267,12 +260,7 @@ fn references(
                 Some((fk,parent))
             }).collect();
             if value != old {
-                if value.parents.is_empty() {
-                    if let Some(displayed) = r.get::<_,Option<Vec<u8>>>(2)? {
-                        value.value = decoded(merge_fields::decode_column_value(&displayed))?.value;
-                    }
-                }
-                db.internal_execute("UPDATE _coven_lost SET value=?2,read_value=NULL WHERE id=?1",params![id,encoded(merge_fields::encode_column_value(&value))?])?;
+                db.internal_execute("UPDATE _coven_lost SET value=?2 WHERE id=?1",params![id,encoded(merge_fields::encode_column_value(&value))?])?;
             }
             Ok(())
         })?;

@@ -208,6 +208,8 @@ at.
     parent is current, and is never stale;
   - later writes to the cell compete with the stamp of the write whose
     reference won, as with any cell.
+  - Lost values show what their setters wrote; these substitutions apply
+    only to the app's rows, including a removed row when it comes back.
   - E.g. at 16:00 Ana deletes note 43 while Ben, offline, adds link 6
     pointing at it, under set null. Every device stores link 6 with
     `note_id` null, whichever write arrived first. Lean: `example_8_4`.

@@ -744,7 +744,7 @@ impl DatabaseConnection {
 
     pub(crate) fn lost_values(&self) -> CovenResult<Vec<crate::LostValue>> {
         let records = self.query(
-            "SELECT l.table_name,l.key,l.column_id,c.table_name,c.column_name,COALESCE(l.read_value,l.value),l.set_by,l.replacement_kind,l.replaced_by,l.audience,l.generation,l.retired FROM _coven_lost l LEFT JOIN _coven_columns c ON c.id=l.column_id ORDER BY l.id",
+            "SELECT l.table_name,l.key,l.column_id,c.table_name,c.column_name,l.value,l.set_by,l.replacement_kind,l.replaced_by,l.audience,l.generation,l.retired FROM _coven_lost l LEFT JOIN _coven_columns c ON c.id=l.column_id ORDER BY l.id",
             [], crate::lost::LostRecord::read,
         )?;
         records

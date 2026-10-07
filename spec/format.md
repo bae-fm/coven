@@ -259,8 +259,8 @@
     change forgot ([§17.1](coven.md#171-host-application)).
     Its values are `0 | key:LostKey | value:LostValue` for a displaced cell,
     or `1 | generation:u64 | cells:map<name, write:WriteId | value:ColumnValue>
-    | replaced_by:set<Rule>` for a removed row. Values are frozen as they
-    read at the migration, with empty parent maps. Within a row and
+    | replaced_by:set<Rule>` for a removed row. Written values are frozen
+    at the migration, with empty parent maps. Within a row and
     incarnation, cells precede rows; cell losses order by `LostKey`, removed
     rows by their column-to-setter maps. Duplicate identities are refused.
     Incarnations are positive and odd; a removed row has nonempty cells and
@@ -278,6 +278,8 @@
 
   - `LostKey` is `column:name | write:WriteId`; `LostValue` is
     `incarnation:u64 | value:ColumnValue | replaced_by:WriteId`.
+    Lost cells and removed rows carry their values as written, without
+    foreign-key null or default substitution.
   - `Rule` is `0 | ForeignKey`, `1 | check:text` (its name, or its
     expression when unnamed), `2` deleted circle, `3` another audience's
     row, or `4 | Unique`. Rules order by tag, then the foreign-key identity,
@@ -448,12 +450,11 @@
     5. the app-visible values as `map<name, ColumnValue>`, with empty parent
        maps; an encoded empty map if the row is deleted or removed;
     6. if a rule removed the row, its cells as `map<name, ColumnValue>` with
-       displayed scalar values and written parent maps, then its `set<Rule>`;
+       written values and parent maps, then its `set<Rule>`;
        otherwise two zero-length context fields, not encoded empty collections;
     7. the lost-cell count, then, in `LostKey` order, each loss's column,
-       setting `WriteId`, incarnation, written `ColumnValue`, displayed
-       `ColumnValue`, and replacing `WriteId`, each a separate field. The
-       displayed value retains the written parent map.
+       setting `WriteId`, incarnation, written `ColumnValue`, and replacing
+       `WriteId`, each a separate field.
   - Each row of an excluded write part has its own leaf. Its identity hash
     has fields `excluded`, table, key, and the write's `WriteId`. Its value
     hash has fields generation, values as `map<name, ColumnValue>`, setters

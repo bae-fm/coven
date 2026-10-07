@@ -505,7 +505,6 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_key_uploads",
                 "_coven_loaded_audiences",
                 "_coven_lost",
-                "_coven_lost_references",
                 "_coven_members",
                 "_coven_operations",
                 "_coven_positions",

@@ -1247,6 +1247,7 @@ impl CovenHandle {
         R: Send + 'static;
 
     /// Every lost value and removed row, as `_coven_lost` holds them (§8).
+    /// References show what was written, even if their parents were deleted.
     pub async fn lost_values(&self) -> CovenResult<Vec<LostValue>>;
 
     /// Dismisses lost values the app has dealt with, in a write, so every
@@ -1319,6 +1320,7 @@ pub enum Lost {
 
 pub struct LostCell {
     pub column: String,
+    /// The value as written, without foreign-key null or default substitution.
     pub value: rusqlite::types::Value,
     /// The write that set the value.
     pub set_by: WriteId,

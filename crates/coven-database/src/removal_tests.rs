@@ -43,7 +43,7 @@ pub(crate) fn remove(
 type RemovedRow = (String, BTreeMap<String, ColumnValue<Value>>, BTreeSet<Rule>);
 
 fn losses(database: &Database) -> Vec<RemovedRow> {
-    database.inspect_writer(|db| db.query("SELECT table_name,COALESCE(read_value,value),replaced_by FROM _coven_lost WHERE column_id IS NULL ORDER BY table_name,key", [], |r| Ok((r.get(0)?, merge_fields::decode_columns(&r.get::<_, Vec<u8>>(1)?).unwrap(), merge_fields::decode_rules(&r.get::<_, Vec<u8>>(2)?).unwrap()))).unwrap())
+    database.inspect_writer(|db| db.query("SELECT table_name,value,replaced_by FROM _coven_lost WHERE column_id IS NULL ORDER BY table_name,key", [], |r| Ok((r.get(0)?, merge_fields::decode_columns(&r.get::<_, Vec<u8>>(1)?).unwrap(), merge_fields::decode_rules(&r.get::<_, Vec<u8>>(2)?).unwrap()))).unwrap())
 }
 
 #[tokio::test]
@@ -151,10 +151,7 @@ async fn readding_inbox_returns_note_50_without_changing_its_reference_setter() 
     );
     sql(&db, "DELETE FROM folders").await.unwrap();
     assert_eq!(count(&db, "notes"), 0);
-    assert_eq!(
-        losses(&db)[0].1["folder"].value,
-        Value::Text("Inbox".into())
-    );
+    assert_eq!(losses(&db)[0].1["folder"].value, Value::Text("Work".into()));
     let setters: Vec<i64> = db.inspect_writer(|db| db.query("SELECT write_id FROM _coven_cells WHERE row_id IN (SELECT id FROM _coven_rows WHERE table_name='notes') ORDER BY column_id", [], |r| r.get(0)).unwrap());
     sql(&db, "INSERT INTO folders VALUES('Inbox')")
         .await
@@ -294,10 +291,7 @@ async fn a_default_can_name_an_absent_parent_by_its_other_unique_column() {
         ))]),
     );
     sql(&db, "DELETE FROM folders").await.unwrap();
-    assert_eq!(
-        losses(&db)[0].1["folder"].value,
-        Value::Text("Inbox".into())
-    );
+    assert_eq!(losses(&db)[0].1["folder"].value, Value::Text("Work".into()));
     sql(&db, "INSERT INTO folders VALUES('2','Inbox')")
         .await
         .unwrap();
@@ -732,10 +726,7 @@ async fn a_removed_defaults_former_unique_value_does_not_name_its_updated_row() 
     .await
     .unwrap();
     assert_eq!(count(&db, "notes"), 0);
-    assert_eq!(
-        losses(&db)[0].1["folder"].value,
-        Value::Text("Inbox".into())
-    );
+    assert_eq!(losses(&db)[0].1["folder"].value, Value::Text("Work".into()));
     db.close().await.unwrap();
 }
 

@@ -135,23 +135,14 @@ pub(crate) fn persist(
                     let bytes = encoded(merge_fields::encode_column_value(&value.value))?;
                     let setter = encoded(merge_fields::encode_write_id(&key.write))?;
                     let replaced_by = encoded(merge_fields::encode_write_id(&value.replaced_by))?;
-                    let loss_id = if let Some(id) = old.lost_ids.get(key) {
+                    if let Some(id) = old.lost_ids.get(key) {
                         database.internal_execute(
-                            "UPDATE _coven_lost SET value=?1,set_by=?2,replaced_by=?3,read_value=NULL WHERE id=?4",
+                            "UPDATE _coven_lost SET value=?1,set_by=?2,replaced_by=?3 WHERE id=?4",
                             params![bytes, setter, replaced_by, id],
                         )?;
-                        *id
                     } else {
                         let column = column(database, &row.table, &key.column)?;
-                        database.query_row("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,?5,?6,?7,'write',?8) RETURNING id",params![row.table,row.key,audience,value.incarnation.to_be_bytes().as_slice(),column,bytes,setter,replaced_by], |r| r.get::<_,i64>(0))?
-                    };
-                    database.internal_execute(
-                        "DELETE FROM _coven_lost_references WHERE loss_id=?1",
-                        [loss_id],
-                    )?;
-                    for (key, parent) in &value.value.parents {
-                        let key = crate::row_queries::foreign_key(database, &row.table, key)?;
-                        database.internal_execute("INSERT INTO _coven_lost_references(loss_id,foreign_key_id,parent_table,parent_key,parent_audience) VALUES(?1,?2,?3,?4,?5)", params![loss_id,key,parent.row.table,parent.row.key,audience_text(&parent.row.audience)])?;
+                        database.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,?5,?6,?7,'write',?8)",params![row.table,row.key,audience,value.incarnation.to_be_bytes().as_slice(),column,bytes,setter,replaced_by])?;
                     }
                 }
             }

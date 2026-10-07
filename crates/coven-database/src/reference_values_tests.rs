@@ -42,7 +42,7 @@ async fn reference(db: &Database, lost: bool) -> Option<String> {
 }
 
 #[tokio::test]
-async fn restored_parent_generation_restores_the_written_reference_after_reopen() {
+async fn restored_parents_restore_live_references_while_losses_keep_written_values() {
     for (action, lost) in ["SET NULL", "SET DEFAULT"]
         .into_iter()
         .flat_map(|action| [false, true].map(|lost| (action, lost)))
@@ -91,7 +91,9 @@ async fn restored_parent_generation_restores_the_written_reference_after_reopen(
             .unwrap();
         assert_eq!(
             reference(&b, lost).await,
-            if action == "SET NULL" {
+            if lost {
+                Some("PaReNt".into())
+            } else if action == "SET NULL" {
                 None
             } else {
                 Some("Inbox".into())
@@ -148,6 +150,11 @@ async fn restored_parent_generation_restores_the_written_reference_after_reopen(
 
 #[tokio::test]
 async fn migrations_freeze_retired_losses_and_preserve_surviving_written_references() {
+    let clock = |seconds| {
+        std::sync::Arc::new(coven_foundation::clock::FixedClock::new(
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
+        ))
+    };
     for action in ["SET NULL", "SET DEFAULT"] {
         let initial = format!("CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY COLLATE NOCASE); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT DEFAULT 'Inbox' REFERENCES parents(id) ON DELETE {action},guard TEXT REFERENCES parents(id) ON DELETE CASCADE)");
         let migrations = |rename| {
@@ -170,17 +177,20 @@ async fn migrations_freeze_retired_losses_and_preserve_surviving_written_referen
         let b_store = TestStore::with_ids(&ids);
         let a = a_store
             .builder(tables(), migrations(false))
+            .clock(clock(1))
             .open()
             .await
             .unwrap();
         let b = b_store
             .builder(tables(), migrations(false))
+            .clock(clock(2))
             .open()
             .await
             .unwrap();
         let c_store = TestStore::with_ids(&ids);
         let c = c_store
             .builder(tables(), migrations(false))
+            .clock(clock(3))
             .open()
             .await
             .unwrap();
@@ -220,7 +230,28 @@ async fn migrations_freeze_retired_losses_and_preserve_surviving_written_referen
             .unwrap();
         c.close().await.unwrap();
         let losses = a.lost_values().await.unwrap();
-        assert!(!losses.is_empty());
+        let row = losses
+            .iter()
+            .find_map(|loss| match &loss.lost {
+                crate::Lost::Row(cells) => Some(cells),
+                _ => None,
+            })
+            .expect("removed child");
+        assert_eq!(
+            row.iter()
+                .find(|cell| cell.column == "parent")
+                .unwrap()
+                .value,
+            crate::types::Value::Text("PARENT".into())
+        );
+        let snapshot_store = TestStore::with_ids(&ids);
+        let snapshot_target = snapshot_store
+            .builder(tables(), migrations(false))
+            .open()
+            .await
+            .unwrap();
+        crate::snapshot_write::tests::assert_loaded_losses(&a, &snapshot_target).await;
+        snapshot_target.close().await.unwrap();
         a.close().await.unwrap();
         let a = a_store
             .builder(tables(), migrations(true))
@@ -243,10 +274,9 @@ async fn migrations_freeze_retired_losses_and_preserve_surviving_written_referen
         }
         a.inspect_writer_schema(|db, schema| {
             db.visit(
-                "SELECT replacement_kind,value,read_value FROM _coven_lost WHERE retired=1",
+                "SELECT replacement_kind,value FROM _coven_lost WHERE retired=1",
                 [],
                 |r| {
-                    assert!(r.get::<_, Option<Vec<u8>>>(2)?.is_none());
                     let bytes = r.get::<_, Vec<u8>>(1)?;
                     if r.get::<_, String>(0)? == "rules" {
                         for value in coven_format::merge_fields::decode_columns(&bytes)
@@ -280,6 +310,16 @@ async fn migrations_freeze_retired_losses_and_preserve_surviving_written_referen
                 Value::Text("PaReNt".into())
             );
         });
+        let snapshot_target = snapshot_store
+            .builder(tables(), migrations(true))
+            .open()
+            .await
+            .unwrap();
+        for write in records(&snapshot_target) {
+            a.apply_downloaded(write.into()).await.unwrap();
+        }
+        crate::snapshot_write::tests::assert_loaded_losses(&a, &snapshot_target).await;
+        snapshot_target.close().await.unwrap();
         for db in [a, b] {
             db.close().await.unwrap();
         }
@@ -287,7 +327,7 @@ async fn migrations_freeze_retired_losses_and_preserve_surviving_written_referen
 }
 
 #[tokio::test]
-async fn dropping_a_lost_reference_keeps_its_displayed_value_as_plain_data() {
+async fn dropping_a_lost_reference_keeps_its_written_value_as_plain_data() {
     for action in ["SET NULL", "SET DEFAULT"] {
         let ids = SequentialIds::new();
         let a_store = TestStore::with_ids(&ids);
@@ -324,7 +364,7 @@ async fn dropping_a_lost_reference_keeps_its_displayed_value_as_plain_data() {
         b.apply_downloaded(records(&a).remove(1).into())
             .await
             .unwrap();
-        let displayed = reference(&b, true).await;
+        assert_eq!(reference(&b, true).await, Some("PaReNt".into()));
         b.close().await.unwrap();
         let b = b_store.builder(tables(), vec![
             crate::Migration::run(1,"references",move |db| {
@@ -332,12 +372,12 @@ async fn dropping_a_lost_reference_keeps_its_displayed_value_as_plain_data() {
             }),
             crate::Migration::sql(2,"drop reference","CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,parent TEXT DEFAULT 'Inbox'); INSERT INTO rebuilt SELECT * FROM children; DROP TABLE children; ALTER TABLE rebuilt RENAME TO children"),
         ]).open().await.unwrap();
-        assert_eq!(reference(&b, true).await, displayed);
+        assert_eq!(reference(&b, true).await, Some("PaReNt".into()));
         b.inspect_writer(|db| {
             let bytes: Vec<u8> = db.query_row("SELECT l.value FROM _coven_lost l JOIN _coven_columns c ON c.id=l.column_id WHERE c.column_name='parent'", [], |r| r.get(0)).unwrap();
             let lost = coven_format::merge_fields::decode_column_value(&bytes).unwrap();
             assert!(lost.parents.is_empty());
-            assert_eq!(lost.value, displayed.map(Value::Text).unwrap_or(Value::Null));
+            assert_eq!(lost.value, Value::Text("PaReNt".into()));
         });
         for db in [a, b, c] {
             db.close().await.unwrap();

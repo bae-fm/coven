@@ -34,8 +34,8 @@ pub struct Reference {
     pub on_delete: OnDelete,
 }
 
-/// What a reference reads as. Substitution changes neither its winning write
-/// nor its timestamp, in the app's table or in lost values (§8.4).
+/// What a reference reads as in the app's table. Substitution changes neither
+/// its winning write nor its timestamp; lost values stay as written (§8.4).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReferenceValue {
     /// The original parent; stale references take their children out.
@@ -65,8 +65,6 @@ impl ReferenceValue {
 /// Resolve a reference against parent generations, before CHECK and unique
 /// evaluation. `default_generation` is required only for a substituted,
 /// non-null default; omitting it returns [`MergeError::MissingDefaultGeneration`].
-/// Use this for retained lost values as well as winning
-/// cells: their references read null/default under the same rule (§8.4).
 /// Deleted/removed default parents take the child out;
 /// re-adding the default parent lets it return.
 pub fn resolve_reference(
@@ -239,7 +237,7 @@ pub struct RemovalResult {
     pub region: BTreeSet<RowId>,
     /// Removed rows with every final rule, plus the once-judged losers' rules.
     pub removed: BTreeMap<RowId, BTreeSet<Rule>>,
-    /// References as they read in both the app's table and `_coven_lost`.
+    /// References as they read in the app's table.
     /// The original cell setters and timestamps are retained in `RowState`.
     pub references: BTreeMap<RowId, BTreeMap<crate::ForeignKey, ReferenceValue>>,
 }

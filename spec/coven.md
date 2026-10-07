@@ -437,6 +437,8 @@ Two mechanisms order writes:
 - A value is *lost* when some write replaced it, and no write that replaced
   it had read it.
   - A lost value is recorded, so the app can show it and offer it back.
+  - Lost values, including a removed row's cells, show what was written;
+    deleting a reference's parent does not change them.
   - It stops being lost if a later write replaces it having read it.
 - The removal rules take a row out of the app's table while a reason holds:
   - foreign keys: a row whose parent was deleted since the row pointed at
@@ -552,13 +554,6 @@ Two mechanisms order writes:
       the row, or a breaking change or reset its write hadn't read;
     - whether a breaking migration has retired its row from the merge
       ([§17.1](#171-host-application)), keeping the loss as history.
-  - `_coven_lost_references`, one row per reference a lost value holds,
-    naming its `_coven_lost` row, its `_coven_foreign_keys` row and the
-    parent, so a lost reference reads as null or the default when its
-    parent goes ([§8.4](#84-foreign-keys)).
-  - A lost reference keeps its written value too; `_coven_lost.read_value`
-    holds its derived reading while that differs, so displaying a loss
-    does not change its merge record.
 - Store-log publication uses `_coven_store_log_uploads`: the next local entry's
   number, canonical plaintext record and complete fixed encrypted, signed bytes.
   `_coven_store_log_key_uploads` holds its prerequisite sealed-key paths and fixed
@@ -860,17 +855,17 @@ Carol's tablet:
     takes it out of the app's table and records it as lost;
   - under set null or set default, it stays, and its reference is null or
     the default, as SQLite would have made it.
-  - The reference is null or the default wherever coven keeps it, in the
-    app's table and in `_coven_lost`, so every device stores the same value
-    whichever write arrived first.
+  - The app's table reads the reference as null or the default. Lost
+    values always show what was written, without this substitution.
   - The cell still names the write whose reference won; it only reads as
     null or the default, and later writes to it compete with that write's
     timestamp, as with any cell. Nothing is recorded as lost.
-  - Coven's merge records keep the reference as written, and its parent
+  - Coven's merge records keep the live reference as written, and its parent
     generation: the cell reads as null or the default while that
     generation is deleted, and as written again if a reset brings the
-    generation back ([§19.3](#193-resetting-a-store)). Snapshots carry the
-    reference as written.
+    generation back ([§19.3](#193-resetting-a-store)). A later concurrent
+    write that displaces it records the written value as lost, whichever
+    write arrived first. Snapshots carry the reference as written.
   - E.g. links point at notes with set null, and three writes happen:
 
     ```
@@ -1993,7 +1988,7 @@ Carol's tablet:
   ([§8.4](#84-foreign-keys)).
 - Losses kept after their row's merge records are discarded (§17.1) have
   their own snapshot records, ordered by row, retaining each cell's frozen
-  value, setter and replacement. Loading preserves those losses in
+  written value, setter and replacement. Loading preserves those losses in
   `_coven_lost`, and they count in its audience's fingerprint (§19.1).
 - Each device posts its positions only after uploading its own earlier
   writes.
@@ -2596,7 +2591,7 @@ Carol's tablet:
     - the rows the app sees;
     - each row's generations;
     - which write set each cell, named by device and number;
-    - its `_coven_lost` rows;
+    - its `_coven_lost` rows, with their values as written;
   - all computed as if the rule for a key present in two audiences didn't
     exist, since which row it shows depends on which circles a device
     reads ([§14.2](#142-moving-rows));

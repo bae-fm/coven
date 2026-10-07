@@ -285,7 +285,6 @@ macro_rules! coven_tables {
                 value BLOB NOT NULL,
                 set_by BLOB NOT NULL,
                 retired INTEGER NOT NULL DEFAULT 0 CHECK(retired IN (0,1)),
-                read_value BLOB,
                 replacement_kind TEXT NOT NULL CHECK(replacement_kind IN ('write', 'rules', 'excluded')),
                 replaced_by BLOB NOT NULL,
                 CHECK((replacement_kind != 'write' OR column_id IS NOT NULL) AND (replacement_kind != 'rules' OR column_id IS NULL))
@@ -293,18 +292,6 @@ macro_rules! coven_tables {
             CREATE INDEX _coven_lost_row ON _coven_lost(table_name,key,audience,generation,column_id);
             CREATE INDEX _coven_lost_removed ON _coven_lost(table_name,key,audience) WHERE retired=0 AND replacement_kind='rules';
             CREATE INDEX _coven_lost_column ON _coven_lost(column_id);
-        ");
-        $visit!(_coven_lost_references, "
-            CREATE TABLE _coven_lost_references (
-                loss_id INTEGER NOT NULL REFERENCES _coven_lost(id) ON DELETE CASCADE,
-                foreign_key_id INTEGER NOT NULL REFERENCES _coven_foreign_keys(id),
-                parent_table TEXT NOT NULL,
-                parent_key BLOB NOT NULL,
-                parent_audience TEXT NOT NULL,
-                PRIMARY KEY(loss_id,foreign_key_id)
-            ) STRICT, WITHOUT ROWID;
-            CREATE INDEX _coven_lost_references_key ON _coven_lost_references(foreign_key_id,loss_id);
-            CREATE INDEX _coven_lost_references_parent ON _coven_lost_references(parent_table,parent_key,parent_audience,loss_id);
         ");
         $visit!(_coven_uploads, "
             CREATE TABLE _coven_uploads (

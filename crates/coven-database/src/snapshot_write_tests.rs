@@ -704,7 +704,7 @@ async fn excluded_snapshots_keep_only_undismissed_cells_and_rows() {
     }
 }
 
-async fn assert_loaded_losses(source: &Database, target: &Database) {
+pub(crate) async fn assert_loaded_losses(source: &Database, target: &Database) {
     let snapshot = frames(source, Audience::Store).await;
     load_one(
         target,

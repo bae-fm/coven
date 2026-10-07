@@ -392,7 +392,7 @@ async fn reference_db(store: &TestStore) -> Database {
 }
 
 #[tokio::test]
-async fn lost_references_are_null_after_parent_deletion_in_every_arrival_order() {
+async fn lost_references_keep_the_written_parent_in_every_arrival_order() {
     let ids = SequentialIds::new();
     let a_store = TestStore::with_ids(&ids);
     let b_store = TestStore::with_ids(&ids);
@@ -419,6 +419,7 @@ async fn lost_references_are_null_after_parent_deletion_in_every_arrival_order()
         records(&c).remove(0),
     ];
     let mut expected = None;
+    let mut expected_losses = None;
     for order in [
         [0, 1, 2],
         [0, 2, 1],
@@ -430,23 +431,45 @@ async fn lost_references_are_null_after_parent_deletion_in_every_arrival_order()
         let store = TestStore::with_ids(&ids);
         let db = reference_db(&store).await;
         db.apply_downloaded(initial.clone().into()).await.unwrap();
-        for index in order {
+        for (position, index) in order.into_iter().enumerate() {
+            let loaded = db.inspect_writer(|db| db.merge_loads());
             db.apply_downloaded(changes[index].clone().into())
                 .await
                 .unwrap();
+            if index == 0 && position == 2 {
+                // Only the lost value points at P: its deletion need not load the child.
+                assert_eq!(
+                    db.inspect_writer(|db| db.merge_loads()).get("links"),
+                    loaded.get("links")
+                );
+            }
         }
         let losses = db.lost_values().await.unwrap();
         assert_eq!(losses.len(), 1, "{order:?}");
         assert!(
-            matches!(&losses[0].lost,crate::Lost::Cell(cell) if cell.column=="parent" && cell.value==rusqlite::types::Value::Null),
+            matches!(&losses[0].lost,crate::Lost::Cell(cell) if cell.column=="parent" && cell.value==rusqlite::types::Value::Text("p".into()) && cell.set_by==changes[1].header.position),
             "{order:?}: {losses:?}"
         );
+        assert_eq!(
+            losses[0].replaced_by,
+            crate::Replacement::Write(changes[2].header.position)
+        );
+        let stored = db.inspect_writer(|db| db.query("SELECT table_name,key,audience,generation,value,set_by,replacement_kind,replaced_by,retired FROM _coven_lost ORDER BY id", [], |r| Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,String>(2)?,r.get::<_,Vec<u8>>(3)?,r.get::<_,Vec<u8>>(4)?,r.get::<_,Vec<u8>>(5)?,r.get::<_,String>(6)?,r.get::<_,Vec<u8>>(7)?,r.get::<_,bool>(8)?))).unwrap());
+        if let Some(expected) = &expected_losses {
+            assert_eq!(&stored, expected, "{order:?}");
+        } else {
+            expected_losses = Some(stored);
+        }
         let actual = fingerprint(&db, Audience::Store).await;
         if let Some(expected) = expected {
             assert_eq!(actual, expected, "{order:?}");
         } else {
             expected = Some(actual);
         }
+        let restored_store = TestStore::with_ids(&ids);
+        let restored = reference_db(&restored_store).await;
+        crate::snapshot_write::tests::assert_loaded_losses(&db, &restored).await;
+        restored.close().await.unwrap();
         db.close().await.unwrap();
     }
     for db in [a, b, c] {
