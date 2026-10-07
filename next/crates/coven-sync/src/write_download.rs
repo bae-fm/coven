@@ -1,6 +1,7 @@
 //! Ranged envelope reads feed authenticated chunks into one database transaction.
 
 use super::DeviceLogSync;
+use crate::replay_cache::ReplayCache;
 use crate::{DamagedObject, ObjectCheckFailure, SyncError};
 use coven_crypto::{MemberId, ObjectHasher, StoreKeyring};
 use coven_database::{
@@ -127,6 +128,7 @@ impl DeviceLogSync {
         object: &StoredObject,
         ring: &StoreKeyring,
         log: &StoreLog,
+        replays: &mut ReplayCache<'_>,
         member: &MemberId,
     ) -> Result<ApplyOutcome, SyncError> {
         let opened = self.open_write(object, ring).await?;
@@ -141,7 +143,7 @@ impl DeviceLogSync {
         if !missing.is_empty() {
             return Ok(ApplyOutcome::Waiting(WriteWait::StoreLog(missing)));
         }
-        let author = authority(log, header).map_err(|e| damaged(&object.path, e))?;
+        let author = authority(log, replays, header).map_err(|e| damaged(&object.path, e))?;
         let mut senders = Vec::new();
         let mut parts = Vec::new();
         for (part, key) in opened.header.parts.iter().zip(&opened.prefix.part_keys) {
@@ -155,7 +157,9 @@ impl DeviceLogSync {
             let holds = crate::write_seal::holds(ring, &part.audience, *key);
             // Dropped removals share their keys with the latest audience (§11,
             // §14.4). Its members wait for that copy before applying the part.
-            if !holds && key_audience_contains(log, &introduction.entry, &part.audience, member) {
+            if !holds
+                && key_audience_contains(log, replays, &introduction.entry, &part.audience, member)
+            {
                 return Err(SyncError::KeyUnavailable(*key));
             }
             if holds {
@@ -280,6 +284,7 @@ impl DeviceLogSync {
 
 fn key_audience_contains(
     log: &StoreLog,
+    replays: &mut ReplayCache<'_>,
     introduction: &coven_format::store_log::StoreLogEntry,
     audience: &coven_merge::Audience,
     member: &MemberId,
@@ -294,10 +299,10 @@ fn key_audience_contains(
     let mut past = introduction.had_read.clone();
     past.0.push(introduction.position);
     past.0.sort_by_key(|id| id.device);
-    let at_introduction = crate::replay::at(log, &past).state;
+    let at_introduction = &replays.at(&past).state;
     let included = match audience {
-        Audience::Store => crate::effects::member(&at_introduction, member).is_some(),
-        Audience::Circle(circle) => crate::effects::circle(&at_introduction, *circle)
+        Audience::Store => crate::effects::member(at_introduction, member).is_some(),
+        Audience::Circle(circle) => crate::effects::circle(at_introduction, *circle)
             .is_some_and(|state| state.members.contains(member)),
     };
     included
@@ -322,6 +327,7 @@ fn key_audience_contains(
 
 fn authority(
     log: &StoreLog,
+    replays: &mut ReplayCache<'_>,
     header: &coven_format::write::WriteHeader,
 ) -> Result<MemberId, ObjectCheckFailure> {
     for applied in &log.entries {
@@ -341,7 +347,7 @@ fn authority(
             ));
         }
     }
-    let view = crate::replay::at(log, &header.store_log_read);
+    let view = replays.at(&header.store_log_read);
     let device = view
         .state
         .devices

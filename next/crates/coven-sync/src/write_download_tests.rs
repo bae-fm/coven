@@ -257,3 +257,63 @@ async fn a_newer_schema_does_not_hide_a_damaged_signature() {
     assert!(report.waiting.is_empty());
     assert!(rows(&devices[1].db).await.is_empty());
 }
+
+#[tokio::test]
+async fn a_cached_read_view_still_checks_each_writes_timestamp() {
+    let storage = storage();
+    let mut devices = group(storage.clone(), 2).await;
+    sql(
+        &devices[0].db,
+        "INSERT INTO notes VALUES('one','before','body')",
+    )
+    .await;
+    let first = queued(&devices[0].db).await;
+    devices[0].sync.upload_writes().await.unwrap();
+    sql(&devices[0].db, "UPDATE notes SET title='after'").await;
+    let mut second = queued(&devices[0].db).await;
+    assert_eq!(first.header.store_log_read, second.header.store_log_read);
+    second.header.timestamp = Timestamp::new(0, 0, DeviceId(1)).unwrap();
+    publish(&storage, &second).await;
+    let report = devices[1].sync.download_writes().await.unwrap();
+    assert_eq!(report.damaged_objects.len(), 1, "{report:?}");
+    assert_eq!(
+        report.damaged_objects[0].path,
+        crate::write_seal::path(second.header.position).as_str()
+    );
+    assert!(report.damaged_objects[0]
+        .failure
+        .to_string()
+        .contains("timestamp"));
+    assert_eq!(rows(&devices[1].db).await[0].1, "before");
+}
+
+#[tokio::test]
+async fn missing_read_view_waits_then_replays_after_the_store_log_arrives() {
+    let storage = storage();
+    let mut devices = group(storage.clone(), 2).await;
+    devices[0]
+        .log
+        .make_and_upload_entry(StoreChange::AddDevice {
+            device: DeviceId(3),
+            name: "third".into(),
+        })
+        .await
+        .unwrap();
+    sql(
+        &devices[0].db,
+        "INSERT INTO notes VALUES('one','before','body')",
+    )
+    .await;
+    devices[0].sync.upload_writes().await.unwrap();
+    sql(&devices[0].db, "UPDATE notes SET title='after'").await;
+    devices[0].sync.upload_writes().await.unwrap();
+    let report = devices[1].sync.download_writes().await.unwrap();
+    assert_eq!(report.waiting.len(), 2, "{report:?}");
+    assert!(report.damaged_objects.is_empty(), "{report:?}");
+    assert!(rows(&devices[1].db).await.is_empty());
+    devices[1].log.sync_store_log().await.unwrap();
+    let report = devices[1].sync.download_writes().await.unwrap();
+    assert!(report.waiting.is_empty(), "{report:?}");
+    assert!(report.damaged_objects.is_empty(), "{report:?}");
+    assert_eq!(rows(&devices[1].db).await[0].1, "after");
+}

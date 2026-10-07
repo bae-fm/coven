@@ -838,7 +838,7 @@ fn concurrent_store_removals_keep_the_earlier_keys_and_only_its_removed_devices(
     });
 }
 
-fn realistic_history() -> History {
+pub(crate) fn realistic_history() -> History {
     let mut h = History::new();
     for m in 1..20 {
         h.all(

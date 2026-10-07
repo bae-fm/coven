@@ -148,6 +148,7 @@ impl DeviceLogSync {
         let mut damaged = BTreeSet::new();
         let mut waiting = BTreeMap::new();
         let mut positions = state.positions;
+        let mut replays = crate::replay_cache::ReplayCache::new(&local.log);
         loop {
             let mut progressed = false;
             for (write, object) in &objects {
@@ -166,7 +167,7 @@ impl DeviceLogSync {
                     continue;
                 }
                 match self
-                    .receive_write(object, &ring, &local.log, &member.member_id())
+                    .receive_write(object, &ring, &local.log, &mut replays, &member.member_id())
                     .await
                 {
                     Ok(ApplyOutcome::Applied | ApplyOutcome::AlreadyApplied) => {
