@@ -2343,8 +2343,10 @@ Carol's tablet:
 - Writes already uploaded in the old version that the breaking change
   hadn't read are lost: every device records them in `coven_lost`, and
   none applies them.
-- This happens only when a device uploads just as another makes the
-  breaking change.
+- This happens only to a write whose upload was tried before its device
+  updated: one uploaded just as another device made the breaking change,
+  or one whose upload failed partway, since a tried write's bytes are
+  fixed and may already be stored ([§6](#6-syncing-writes)).
 - If two devices make the same breaking change at once, the one with the
   smaller timestamp counts; the other's entry is dropped, with its snapshot
   ([§9](#9-members-and-roles)).
