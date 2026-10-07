@@ -14,7 +14,7 @@ async fn transfer_limits_bound_requests_and_an_active_batch_keeps_its_limit() {
     tokio::time::timeout(Duration::from_secs(20), async {
         let root = tempfile::tempdir().unwrap();
         let app = TestCoven::new();
-        let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1000)));
+        let clock = Arc::new(coven_foundation::clock::ClosureClock(|| UNIX_EPOCH + Duration::from_secs(1000)));
         let memory = Arc::new(MemoryStorage::new(StorageConfig::S3 {
             bucket: "files".into(), region: "test".into(), endpoint: None, prefix: "store".into(),
         }, clock.clone()).unwrap().with_transfer_limits(1024 * 1024, 65536).unwrap());

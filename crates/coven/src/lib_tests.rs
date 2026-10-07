@@ -39,6 +39,8 @@ fn builder(
     ids: IdSourceRef,
     storage: Arc<MemoryStorage>,
 ) -> CovenBuilder {
+    // Keep timestamps controlled while joining and provider polling use runtime time.
+    let clock = Arc::new(coven_foundation::clock::ClosureClock(move || clock.now()));
     app.builder(layout)
         .synced_tables(tables())
         .migrations(migrations())

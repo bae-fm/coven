@@ -287,7 +287,7 @@ async fn cancelled_app_future_keeps_running_and_permanent_failure_retries_or_dis
     let files = file_owner(&d);
     let operations = {
         let writes = d.writes();
-        crate::Operations::new(d.sync, files, writes)
+        crate::Operations::new(d.sync, files, writes, d.clock.clone())
     };
     let mut waiting = Box::pin(operations.create_circle("offline"));
     std::future::poll_fn(|cx| {
@@ -428,7 +428,7 @@ async fn permanent_storage_failure_preserves_fixed_bytes_for_retry_and_discard()
         let files = file_owner(&a);
         let operations = {
             let writes = a.writes();
-            crate::Operations::new(a.sync, files, writes)
+            crate::Operations::new(a.sync, files, writes, a.clock.clone())
         };
         let report = operations.report().await.unwrap();
         assert_eq!(report.blocked_operations.len(), 1);
@@ -486,7 +486,7 @@ async fn retained_provider_grants_block_both_requested_and_remote_revocations() 
         let files = file_owner(&a);
         let operations = {
             let writes = a.writes();
-            crate::Operations::new(a.sync, files, writes)
+            crate::Operations::new(a.sync, files, writes, a.clock.clone())
         };
         if !remote {
             assert_eq!(
@@ -620,17 +620,17 @@ async fn role_changes_preserve_an_admin_and_owner_accounts_cannot_be_removed() {
     let files = file_owner(&a);
     let a = {
         let writes = a.writes();
-        crate::Operations::new(a.sync, files, writes)
+        crate::Operations::new(a.sync, files, writes, a.clock.clone())
     };
     let files = file_owner(&b);
     let b = {
         let writes = b.writes();
-        crate::Operations::new(b.sync, files, writes)
+        crate::Operations::new(b.sync, files, writes, b.clock.clone())
     };
     let files = file_owner(&c);
     let c = {
         let writes = c.writes();
-        crate::Operations::new(c.sync, files, writes)
+        crate::Operations::new(c.sync, files, writes, c.clock.clone())
     };
     assert!(matches!(
         b.remove_member(&owner).await,
@@ -715,17 +715,17 @@ async fn store_reset_requires_admin_and_circle_reset_requires_membership() {
     let files = file_owner(&a);
     let a = {
         let writes = a.writes();
-        crate::Operations::new(a.sync, files, writes)
+        crate::Operations::new(a.sync, files, writes, a.clock.clone())
     };
     let files = file_owner(&b);
     let b = {
         let writes = b.writes();
-        crate::Operations::new(b.sync, files, writes)
+        crate::Operations::new(b.sync, files, writes, b.clock.clone())
     };
     let files = file_owner(&c);
     let c = {
         let writes = c.writes();
-        crate::Operations::new(c.sync, files, writes)
+        crate::Operations::new(c.sync, files, writes, c.clock.clone())
     };
     assert!(matches!(
         c.reset_store().await,

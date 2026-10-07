@@ -34,6 +34,12 @@ impl Drop for TestServer {
     }
 }
 pub(crate) fn session(provider: CloudProvider) -> OAuthSession {
+    session_with_clock(provider, Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)))
+}
+pub(crate) fn session_with_clock(
+    provider: CloudProvider,
+    clock: coven_foundation::clock::ClockRef,
+) -> OAuthSession {
     OAuthSession::new(
         provider,
         OAuthTokens {
@@ -41,7 +47,7 @@ pub(crate) fn session(provider: CloudProvider) -> OAuthSession {
             refresh_token: None,
             expires_at: None,
         },
-        Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
+        clock,
     )
     .unwrap()
 }

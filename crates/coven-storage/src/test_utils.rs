@@ -343,7 +343,7 @@ impl MemoryStorage {
             (state.faults.delay, failure)
         };
         if !delay.is_zero() {
-            tokio::time::sleep(delay).await;
+            self.clock.sleep(delay).await;
         }
         match failure {
             Some(failure) => Err(StorageError::Injected(failure)),

@@ -4,7 +4,7 @@ use coven_database::{
     Provenance, RowIdentity, SyncedTable,
 };
 use coven_foundation::{
-    clock::FixedClock,
+    clock::ClosureClock,
     files::StoreLayout,
     id_source::{StoreId, UuidIds},
 };
@@ -28,9 +28,9 @@ impl Fixture {
     async fn new(provenance: Provenance, fill: CacheFill) -> Self {
         let root = tempfile::tempdir().unwrap();
         let ids: IdSourceRef = Arc::new(UuidIds);
-        let clock: ClockRef = Arc::new(FixedClock::new(
-            SystemTime::UNIX_EPOCH + Duration::from_secs(100),
-        ));
+        let clock: ClockRef = Arc::new(ClosureClock(|| {
+            SystemTime::UNIX_EPOCH + Duration::from_secs(100)
+        }));
         let layout = StoreLayout::new(root.path().to_owned());
         let directory = layout
             .create_store_dir(StoreId(ids.new_id()), "files", ids.as_ref())

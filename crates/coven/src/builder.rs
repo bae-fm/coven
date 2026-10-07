@@ -443,7 +443,8 @@ impl OpeningOwners {
             self.ids.clone(),
             self.limits,
         );
-        let operations = coven_sync::Operations::new(sync, files.clone(), writes);
+        let operations =
+            coven_sync::Operations::new(sync, files.clone(), writes, self.clock.clone());
         let codes = coven_sync::RestoreCodes::new(
             database.clone(),
             self.identity,

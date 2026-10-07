@@ -6,6 +6,7 @@ use coven_format::{
     sealed_single::{SingleChunkObject, SingleChunkPrefix},
     Object,
 };
+use coven_foundation::clock::Clock;
 
 async fn invite(d: &mut Device, account: &str) -> (OperationId, Invite) {
     let id = begin(
@@ -234,16 +235,48 @@ async fn replacement_request_cannot_be_approved_from_a_stale_prompt() {
     finish(&mut a, operation).await;
 }
 
+struct RetryClock {
+    time: Arc<FixedClock>,
+    sleeps: tokio::sync::watch::Sender<usize>,
+}
+
+impl Clock for RetryClock {
+    fn now(&self) -> std::time::SystemTime {
+        self.time.now()
+    }
+    fn sleep(
+        &self,
+        duration: Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        let sleep = self.time.sleep(duration);
+        self.sleeps.send_modify(|count| *count += 1);
+        sleep
+    }
+}
+
 #[tokio::test]
 async fn failed_join_request_still_expires_and_live_requests_are_delivered() {
     let storage = google();
-    let [a, _b, _c] = accounts(storage.clone()).await;
+    let [mut a, _b, _c] = accounts(storage.clone()).await;
+    let (sleeps, mut sleeping) = tokio::sync::watch::channel(0);
+    let clock = Arc::new(RetryClock {
+        time: a.clock.clone(),
+        sleeps,
+    });
+    a.sync.clock = clock.clone();
     let files = file_owner(&a);
     let operations = {
         let writes = a.writes();
-        crate::Operations::new(a.sync, files, writes)
+        crate::Operations::new(a.sync, files, writes, clock.clone())
     };
     let mut joins = operations.subscribe_join_requests();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        sleeping.wait_for(|count| *count == 2),
+    )
+    .await
+    .expect("operation worker did not schedule its injected retry")
+    .unwrap();
     let invite = operations
         .create_invite(
             MemberRole::Member,
@@ -254,7 +287,15 @@ async fn failed_join_request_still_expires_and_live_requests_are_delivered() {
         .await
         .unwrap();
     let joining = MemoryStorage::for_recipient(&storage, "join@example.com").unwrap();
+    a.clock.set(UNIX_EPOCH + Duration::from_millis(1500));
+    operations.get_members().await.unwrap();
+    assert_eq!(
+        *sleeping.borrow(),
+        2,
+        "a command must not postpone the retry"
+    );
     request(&joining, &invite, &member(9), "Phone").await;
+    a.clock.set(UNIX_EPOCH + Duration::from_secs(2));
     tokio::time::timeout(Duration::from_secs(10), joins.changed())
         .await
         .unwrap()
@@ -294,7 +335,7 @@ async fn cancelling_keeps_retained_provider_grants_visible_until_acknowledged() 
     let files = file_owner(&a);
     let operations = {
         let writes = a.writes();
-        crate::Operations::new(a.sync, files, writes)
+        crate::Operations::new(a.sync, files, writes, a.clock.clone())
     };
     let invite = operations
         .create_invite(
@@ -339,7 +380,7 @@ async fn invitation_expiring_while_its_create_call_waits_returns_a_failure() {
     let files = file_owner(&a);
     let operations = {
         let writes = a.writes();
-        crate::Operations::new(a.sync, files, writes)
+        crate::Operations::new(a.sync, files, writes, a.clock.clone())
     };
     let mut pending = Box::pin(operations.create_invite(
         MemberRole::Member,

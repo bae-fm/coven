@@ -255,6 +255,34 @@ fn the_clock_and_the_id_source_own_their_reads() {
 }
 
 #[test]
+fn timers_belong_to_the_injected_clock() {
+    for source in [
+        "async fn wait() { tokio::time::sleep(duration).await; }",
+        "async fn wait() { tokio::time::sleep_until(deadline).await; }",
+        "fn retry() { tokio::time::interval(duration); }",
+        "fn retry() { tokio::time::interval_at(deadline, duration); }",
+        "use tokio::time::sleep as pause; async fn wait() { pause(duration).await; }",
+        "use tokio::time as timers; async fn wait() { timers::sleep(duration).await; }",
+        "async fn wait() { tokio::select! { _ = tokio::time::sleep(duration) => {} } }",
+        "fn wait() { std::thread::sleep(duration); }",
+        "fn wait() { std::thread::sleep_until(deadline); }",
+    ] {
+        assert_eq!(
+            kinds("crates/coven-sync/src/operations.rs", source),
+            BTreeSet::from(["system clock"]),
+            "{source}",
+        );
+        assert!(kinds("crates/coven-foundation/src/clock.rs", source).is_empty());
+        assert!(kinds("crates/coven-sync/src/operations_tests.rs", source).is_empty());
+    }
+    assert!(kinds(
+        "crates/coven-sync/src/operations.rs",
+        "async fn wait(clock: ClockRef) { clock.sleep(std::time::Duration::from_secs(1)).await; }",
+    )
+    .is_empty());
+}
+
+#[test]
 fn files_are_rejected_outside_foundations_file_boundary() {
     assert_eq!(
         kinds(

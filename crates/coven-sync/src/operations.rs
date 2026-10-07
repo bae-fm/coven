@@ -4,6 +4,7 @@ use crate::*;
 use coven_crypto::MemberId;
 use coven_database::OperationId;
 use coven_format::store_log::MemberRole;
+use coven_foundation::clock::ClockRef;
 use coven_foundation::id_source::{CircleId, DeviceId, InviteId};
 use coven_storage::{MemberRemoval, ProviderSignOut, Storage};
 use std::{
@@ -109,6 +110,7 @@ struct OperationRun {
     sync: StoreLogSync,
     files: Files,
     writes: DeviceLogSync,
+    clock: ClockRef,
     commands: mpsc::UnboundedReceiver<Request>,
     joins: watch::Sender<Vec<JoinRequest>>,
     waiters: BTreeMap<OperationId, Reply>,
@@ -118,13 +120,15 @@ struct OperationRun {
 impl Operations {
     /// Compose and start the lifetime owner after the database opens. Schedule
     /// migration publication on opening; retained failures stay blocked.
-    pub fn new(sync: StoreLogSync, files: Files, writes: DeviceLogSync) -> Self {
+    /// The store's injected clock drives retries without postponing them on commands.
+    pub fn new(sync: StoreLogSync, files: Files, writes: DeviceLogSync, clock: ClockRef) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
         let (joins, subscription) = watch::channel(Vec::new());
         let run = OperationRun {
             sync,
             files,
             writes,
+            clock,
             commands: receiver,
             joins,
             waiters: BTreeMap::new(),
@@ -411,8 +415,8 @@ impl Drop for RunningOperations {
 
 impl OperationRun {
     async fn run(mut self) {
-        let mut retry = tokio::time::interval(Duration::from_secs(1));
-        retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Opening drives retained work immediately; commands keep the same deadline.
+        let mut retry = self.clock.sleep(Duration::ZERO);
         loop {
             let mut response = None;
             tokio::select! {
@@ -464,7 +468,9 @@ impl OperationRun {
                         }
                     }
                 }
-                _ = retry.tick() => {}
+                _ = &mut retry => {
+                    retry = self.clock.sleep(Duration::from_secs(1));
+                }
             }
             if let Err(error) = self.drive().await {
                 // A journal failure cannot be recorded in the journal. Stop this

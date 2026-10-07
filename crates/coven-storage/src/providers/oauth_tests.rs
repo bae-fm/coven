@@ -233,3 +233,43 @@ fn onedrive_sign_in_accepts_personal_and_organization_accounts() {
         "https://login.microsoftonline.com/common/oauth2/v2.0/token"
     );
 }
+
+#[tokio::test]
+async fn local_redirect_timeout_follows_the_injected_clock() {
+    use std::{future::Future, task::Poll};
+    let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH));
+    let clients = OAuthClients::new(None, Some("dropbox".into()), None, clock.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let redirect = format!("http://{address}/callback");
+    let request = clients
+        .build_authorize_request(CloudProvider::Dropbox, &redirect)
+        .unwrap();
+    let (_cancel, rx) = watch::channel(false);
+    let mut pending = Box::pin(clients.receive_redirect(
+        listener,
+        CloudProvider::Dropbox,
+        rx,
+        request,
+        &redirect,
+    ));
+    for seconds in [0, 299] {
+        clock.set(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds));
+        std::future::poll_fn(|cx| {
+            assert!(pending.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+    }
+    clock.set(SystemTime::UNIX_EPOCH + Duration::from_secs(300));
+    std::future::poll_fn(|cx| {
+        assert!(matches!(
+            pending.as_mut().poll(cx),
+            Poll::Ready(Err(OAuthError::Timeout))
+        ));
+        Poll::Ready(())
+    })
+    .await;
+    drop(pending);
+    assert!(tokio::net::TcpStream::connect(address).await.is_err());
+}

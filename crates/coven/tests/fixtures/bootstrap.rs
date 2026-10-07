@@ -18,6 +18,12 @@ fn tokens(value: &str) -> OAuthTokens {
     }
 }
 
+// These integration fixtures control timestamps while approval polling uses runtime time.
+fn clock_with_runtime_waits(time: &Arc<FixedClock>) -> ClockRef {
+    let time = time.clone();
+    Arc::new(coven_foundation::clock::ClosureClock(move || time.now()))
+}
+
 struct Owner {
     _root: tempfile::TempDir,
     directory: StoreDir,
@@ -170,7 +176,7 @@ impl Owner {
             ids,
             TransferLimits::default(),
         );
-        let operations = Operations::new(sync, files.clone(), writes);
+        let operations = Operations::new(sync, files.clone(), writes, clock_with_runtime_waits(&clock));
         Self {
             _root: root,
             directory,
@@ -240,7 +246,7 @@ impl Installation {
             .synced_tables(tables())
             .migrations(migrations())
             .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
-            .clock(owner.clock.clone())
+            .clock(clock_with_runtime_waits(&owner.clock))
             .storage(storage.clone())
             .storage_connector(storage)
     }
@@ -315,7 +321,7 @@ impl Installation {
             .synced_tables(tables())
             .migrations(migrations())
             .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
-            .clock(owner.clock.clone())
+            .clock(clock_with_runtime_waits(&owner.clock))
             .storage(owner.storage.clone())
             .open(directory.id())
             .await

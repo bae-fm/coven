@@ -725,7 +725,8 @@ async fn a_migration_waits_for_an_operation_that_already_reserved_the_entry_numb
             device.ids.clone(),
             crate::TransferLimits::default(),
         );
-        let operations = crate::Operations::new(device.log, files.clone(), device.sync);
+        let operations =
+            crate::Operations::new(device.log, files.clone(), device.sync, device.clock.clone());
         operations.get_members().await.unwrap();
         assert!(operations
             .report()

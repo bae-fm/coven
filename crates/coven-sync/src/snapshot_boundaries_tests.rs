@@ -503,7 +503,7 @@ mod reset {
         );
         let operations = {
             let writes = a.writes();
-            crate::Operations::new(a.sync, files, writes)
+            crate::Operations::new(a.sync, files, writes, a.clock.clone())
         };
         operations.reload_from_snapshot().await.unwrap();
         assert!(operations

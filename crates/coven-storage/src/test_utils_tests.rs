@@ -114,15 +114,13 @@ async fn setup_refuses_other_store_and_retries_its_own_entry() {
         StorageSetupFailure::LocationOccupied
     );
 }
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn faults_are_counted_and_delay_is_awaited() {
-    let provider = MemoryStorage::new(
-        config(),
-        Arc::new(coven_foundation::clock::FixedClock::new(
-            std::time::SystemTime::UNIX_EPOCH,
-        )),
-    )
-    .unwrap();
+    use std::{future::Future, task::Poll, time::SystemTime};
+    let clock = Arc::new(coven_foundation::clock::FixedClock::new(
+        SystemTime::UNIX_EPOCH,
+    ));
+    let provider = MemoryStorage::new(config(), clock.clone()).unwrap();
     provider
         .set_faults(Faults {
             fail_next: 2,
@@ -131,23 +129,34 @@ async fn faults_are_counted_and_delay_is_awaited() {
             ..Faults::none()
         })
         .await;
-    let start = tokio::time::Instant::now();
-    for _ in 0..2 {
-        assert_eq!(
-            provider
-                .list(&ObjectPrefix::all())
-                .await
-                .unwrap_err()
-                .failure(),
-            StorageFailure::QuotaExceeded
-        );
+    let prefix = ObjectPrefix::all();
+    for attempt in 0..3 {
+        let mut request = Box::pin(provider.list(&prefix));
+        std::future::poll_fn(|cx| {
+            assert!(request.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        clock.set(SystemTime::UNIX_EPOCH + Duration::from_secs(3 * attempt + 2));
+        std::future::poll_fn(|cx| {
+            assert!(request.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        clock.set(SystemTime::UNIX_EPOCH + Duration::from_secs(3 * attempt + 3));
+        let result = std::future::poll_fn(|cx| {
+            let Poll::Ready(result) = request.as_mut().poll(cx) else {
+                panic!("request delay ignored the injected clock")
+            };
+            Poll::Ready(result)
+        })
+        .await;
+        if attempt < 2 {
+            assert_eq!(result.unwrap_err().failure(), StorageFailure::QuotaExceeded);
+        } else {
+            assert!(result.unwrap().is_empty());
+        }
     }
-    assert!(provider
-        .list(&ObjectPrefix::all())
-        .await
-        .unwrap()
-        .is_empty());
-    assert_eq!(start.elapsed(), Duration::from_secs(9));
 }
 
 #[tokio::test]

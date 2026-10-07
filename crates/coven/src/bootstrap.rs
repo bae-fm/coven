@@ -358,7 +358,7 @@ async fn prepare_and_load(
                     coven_sync::JoinOutcome::Declined => return Ok(false),
                     coven_sync::JoinOutcome::Waiting => {}
                 }
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                builder.clock.sleep(Duration::from_secs(1)).await;
             }
         } else {
             status("Opening member keys and the store log");

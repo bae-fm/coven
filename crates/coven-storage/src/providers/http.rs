@@ -85,6 +85,9 @@ impl OAuthSession {
     pub(crate) fn provider(&self) -> CloudProvider {
         self.provider
     }
+    pub(crate) async fn sleep(&self, duration: std::time::Duration) {
+        self.clock.sleep(duration).await;
+    }
     pub(crate) async fn send(
         &self,
         method: Method,

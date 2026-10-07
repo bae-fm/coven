@@ -143,7 +143,7 @@ impl DropboxStorage {
             .await?;
             match http::string(&value, ".tag")? {
                 "complete" => return remaining_parent_access(&value["complete"], member),
-                "in_progress" => tokio::time::sleep(std::time::Duration::from_secs(1)).await,
+                "in_progress" => self.session.sleep(std::time::Duration::from_secs(1)).await,
                 "failed" => return Err(original.into_error(PROVIDER)),
                 _ => return Err(StorageError::Protocol("invalid Dropbox remove status")),
             }

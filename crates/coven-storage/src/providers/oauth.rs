@@ -365,7 +365,7 @@ impl OAuthClients {
         tokio::select! {
             result = callback => result,
             _ = cancel.wait_for(|value| *value) => Err(OAuthError::Cancelled),
-            _ = tokio::time::sleep(Duration::from_secs(300)) => Err(OAuthError::Timeout),
+            _ = self.clock.sleep(Duration::from_secs(300)) => Err(OAuthError::Timeout),
         }
     }
 }

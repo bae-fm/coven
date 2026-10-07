@@ -395,6 +395,7 @@ mod recovery {
                 ),
                 files,
                 coven_sync::DeviceLogSync::disconnected(db.clone(), keys.clone(), identity.clone()),
+                clock.clone(),
             );
             let mut pending = Box::pin(operations.create_circle("Waiting operation"));
             std::future::poll_fn(|cx| {
