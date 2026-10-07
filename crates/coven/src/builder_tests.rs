@@ -168,6 +168,11 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     assert_eq!(circle.name, "While offline");
     handle.circles().rename(circle.id, "Family").await.unwrap();
     assert!(handle.circles().members(circle.id).await.unwrap()[0].is_self);
+    let outsider = MemberKeys::generate().unwrap().member_id();
+    assert!(matches!(
+        handle.circles().add_member(circle.id, &outsider).await,
+        Err(SyncError::NotStoreMember(id)) if id == outsider
+    ));
     let invite = handle
         .create_invite(
             MemberRole::Member,
@@ -200,7 +205,15 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         .is_some());
     handle.circles().delete(circle.id).await.unwrap();
     assert!(handle.circles().list().await.unwrap().is_empty());
+    assert!(matches!(
+        handle.circles().members(circle.id).await,
+        Err(SyncError::CircleDeleted(id)) if id == circle.id
+    ));
     handle.close().await.unwrap();
+    assert!(matches!(
+        handle.circles().list().await,
+        Err(SyncError::Database(DbError::StoreClosed))
+    ));
 
     let updated = || {
         let mut result = migrations();

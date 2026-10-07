@@ -123,7 +123,7 @@ key, and snapshot they pulled while they had access.
 
 Circle commands live on a borrowed namespace off the handle,
 [`coven.circles()`](rustdoc:method:coven::CovenHandle::circles). Every method is
-async and maps internal refusals to a typed [`CircleError`](#errors).
+async and returns [`SyncError`](#errors), as store membership calls do.
 
 ```rust
 let circles = handle.circles();
@@ -464,33 +464,15 @@ received.
 
 ## Errors
 
-[`CircleError`](rustdoc:enum:coven::CircleError) maps each internal refusal to a
-stable public variant carrying the ids a caller needs:
+Circle calls return [`SyncError`](rustdoc:enum:coven::SyncError), preserving the
+same typed causes as store membership calls:
 
-- `NotConfigured` / `LoopNotRunning` — no sync provider, or the sync loop is not
-  running.
-- `BrowsableStorage` — Circles require an opaque cloud home.
-- `RotationRequired { circle_id, removed_members }` — the roster names removed
-  store members; new content is refused until an Owner closes the epoch.
-- `Conflicted { circle_id }` / `NotConflicted { circle_id }` /
-  `ChosenBranchNotRetained { circle_id }` — the control-conflict refusals.
-- `Deleted { circle_id }` — the Circle terminated in a deletion.
-- `NoCloseToCancel` / `NoCloseToExclude` / `DeviceNotACloseParticipant` — the
-  epoch-close refusals.
-- `ResolveToClosingBranch { circle_id }` — conflict resolution selected a
-  branch that starts an epoch close instead of an active branch.
-- `ExcludedDeviceMustReset { circle_id, close_id }` — this device was excluded
-  from the close and must reset from a successor bootstrap.
-- `NotBlocked { operation_id }` / `Blocked { circle_id, block }` — the durable
-  operation refusals.
-- `DiscardRequiresNonactivation { operation_id }` — Coven cannot prove the
-  candidate permanently unable to activate, so it remains durable.
-- `Identity(..)` — the local signing identity is not established.
-- `Protocol(..)` — an internal protocol or database failure with no distinct
-  public category.
+- `CircleNotMember(CircleId)` — the caller is not a member of the circle.
+- `CircleDeleted(CircleId)` — the circle has been deleted or does not exist.
+- `NotStoreMember(MemberId)` — the target is not an active store member.
 
-Write-path outcomes stay on [`WriteStatus`](/docs/sync-model#lifecycle) and
-`WriteBlock`, not on `CircleError`.
+Database, storage, key and operation failures use the corresponding `SyncError`
+variants directly.
 
 ## Security and privacy limits
 

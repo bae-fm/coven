@@ -304,7 +304,7 @@ async fn cancelled_app_future_keeps_running_and_permanent_failure_retries_or_dis
     // Invalid names fail during format validation, after their intent is durable.
     assert!(matches!(
         operations.create_circle("").await,
-        Err(CircleError::Sync(SyncError::Database(_)))
+        Err(SyncError::Database(_))
     ));
     let report = operations.report().await.unwrap();
     assert_eq!(report.blocked_operations.len(), 1);
@@ -655,11 +655,11 @@ async fn role_changes_preserve_an_admin_and_owner_accounts_cannot_be_removed() {
     let circle = a.create_circle("Members' circle").await.unwrap();
     assert!(matches!(
         a.add_circle_member(circle, &member(99).member_id()).await,
-        Err(CircleError::NotStoreMember(_))
+        Err(SyncError::NotStoreMember(id)) if id == member(99).member_id()
     ));
     assert!(matches!(
         a.circle_members(super::circle(99)).await,
-        Err(CircleError::Deleted(_))
+        Err(SyncError::CircleDeleted(id)) if id == super::circle(99)
     ));
     a.close().await.unwrap();
     b.close().await.unwrap();
@@ -735,7 +735,7 @@ async fn store_reset_requires_admin_and_circle_reset_requires_membership() {
     a.sync_store_log().await.unwrap();
     assert!(matches!(
         a.reset_circle(circle).await,
-        Err(CircleError::NotMember(_))
+        Err(SyncError::CircleNotMember(id)) if id == circle
     ));
     c.reset_circle(circle).await.unwrap();
     a.sync_store_log().await.unwrap();

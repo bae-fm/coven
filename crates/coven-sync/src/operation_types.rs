@@ -97,34 +97,6 @@ pub struct CircleMemberInfo {
     pub is_self: bool,
 }
 
-/// Why a circle call failed.
-#[derive(Debug, thiserror::Error)]
-pub enum CircleError {
-    /// The caller is outside the circle.
-    #[error("not a member of circle {0}")]
-    NotMember(CircleId),
-    /// The circle has been deleted or does not exist.
-    #[error("circle {0} is deleted")]
-    Deleted(CircleId),
-    /// The target is not an active store member.
-    #[error("{0} is not a store member")]
-    NotStoreMember(MemberId),
-    /// A database, storage or cryptographic step failed.
-    #[error(transparent)]
-    Sync(crate::SyncError),
-}
-
-impl From<crate::SyncError> for CircleError {
-    fn from(error: crate::SyncError) -> Self {
-        match error {
-            crate::SyncError::CircleNotMember(id) => Self::NotMember(id),
-            crate::SyncError::CircleDeleted(id) => Self::Deleted(id),
-            crate::SyncError::NotStoreMember(id) => Self::NotStoreMember(id),
-            error => Self::Sync(error),
-        }
-    }
-}
-
 /// How the invited person reaches the store's provider.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub enum InviteAccess {

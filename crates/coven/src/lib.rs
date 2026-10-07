@@ -74,9 +74,9 @@ pub use circles::Circles;
 pub use coven_format::store_log::MemberRole;
 pub use coven_storage::{MemberRemoval, ProviderSignOut, RetainedAccess, RetainedAccessReason};
 pub use coven_sync::{
-    AccessKeyToDelete, BlockedOperation, Circle, CircleError, CircleMemberInfo, Disagreement,
-    DroppedEntry, Invite, InviteAccess, JoinRequest, MemberInfo, OperationError, OperationId,
-    OperationKind, StartedBy, StoreLogChange, SyncError, SyncFailure, SyncReport, SyncStatus,
+    AccessKeyToDelete, BlockedOperation, Circle, CircleMemberInfo, Disagreement, DroppedEntry,
+    Invite, InviteAccess, JoinRequest, MemberInfo, OperationError, OperationId, OperationKind,
+    StartedBy, StoreLogChange, SyncError, SyncFailure, SyncReport, SyncStatus,
 };
 
 mod storage;

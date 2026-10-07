@@ -2954,6 +2954,9 @@ pub trait MemberKeyCustody: Send + Sync {
 ### E12 Circles
 
 - A circle's members add and remove its members ([§14.3](coven.md#143-circles)).
+- Circle calls return `SyncError` ([E5](#e5-storage-and-sync)), as member calls
+  do ([E9](#e9-members-and-devices)). `CircleNotMember`, `CircleDeleted` and
+  `NotStoreMember` retain the circle or member id the app can act on.
 - Removing someone from a circle is an operation that replaces the circle's
   key ([§18.1](coven.md#181-operations)); its failure is retried or abandoned with
   the calls of [E6](#e6-operations-and-recovery).
@@ -2962,48 +2965,36 @@ pub trait MemberKeyCustody: Send + Sync {
 /// Circle calls borrowing the open store that owns their work (§14, E12).
 pub struct Circles<'a> { /* private fields */ }
 
-/// A circle call failed (§14, E12).
-pub enum CircleError {
-    /// The caller is not a member of the circle (§14.3).
-    NotMember(CircleId),
-    /// The circle has been deleted (§14.7).
-    Deleted(CircleId),
-    /// Only a member of the store may be added (E12).
-    NotStoreMember(MemberId),
-    /// Sync, keys or a multi-step operation failed.
-    Sync(SyncError),
-}
-
 impl CovenHandle {
     pub fn circles(&self) -> Circles<'_>;
 }
 
 impl Circles<'_> {
     /// Makes a circle with this member in it.
-    pub async fn create(&self, name: &str) -> Result<CircleId, CircleError>;
+    pub async fn create(&self, name: &str) -> Result<CircleId, SyncError>;
 
     /// Renames a circle. Its key, members and rows don't change.
-    pub async fn rename(&self, circle: CircleId, name: &str) -> Result<(), CircleError>;
+    pub async fn rename(&self, circle: CircleId, name: &str) -> Result<(), SyncError>;
 
     /// Deletes a circle: deletes each of its rows this device has, and
     /// removes the circle in the store log (§14.7).
-    pub async fn delete(&self, circle: CircleId) -> Result<(), CircleError>;
+    pub async fn delete(&self, circle: CircleId) -> Result<(), SyncError>;
 
     /// Adds a store member to the circle. They get its current and earlier
     /// keys, so they read its history.
-    pub async fn add_member(&self, circle: CircleId, member: &MemberId) -> Result<(), CircleError>;
+    pub async fn add_member(&self, circle: CircleId, member: &MemberId) -> Result<(), SyncError>;
 
     /// Removes someone from the circle and replaces its key (§14.6).
-    pub async fn remove_member(&self, circle: CircleId, member: &MemberId) -> Result<(), CircleError>;
+    pub async fn remove_member(&self, circle: CircleId, member: &MemberId) -> Result<(), SyncError>;
 
     /// The circles this member is in.
-    pub async fn list(&self) -> Result<Vec<Circle>, CircleError>;
+    pub async fn list(&self) -> Result<Vec<Circle>, SyncError>;
 
     /// A circle's members who are still in the store.
-    pub async fn members(&self, circle: CircleId) -> Result<Vec<CircleMemberInfo>, CircleError>;
+    pub async fn members(&self, circle: CircleId) -> Result<Vec<CircleMemberInfo>, SyncError>;
 
     /// Resets a circle's rows from this device's copy (§19.3).
-    pub async fn reset(&self, circle: CircleId) -> Result<(), CircleError>;
+    pub async fn reset(&self, circle: CircleId) -> Result<(), SyncError>;
 }
 
 pub struct Circle {

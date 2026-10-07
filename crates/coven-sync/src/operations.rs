@@ -274,10 +274,9 @@ impl Operations {
             .await
     }
     /// Snapshot and reset a circle as one of its members, including local reload.
-    pub async fn reset_circle(&self, circle: CircleId) -> Result<(), CircleError> {
-        Ok(self
-            .unit(Command::Reset(coven_merge::Audience::Circle(circle)))
-            .await?)
+    pub async fn reset_circle(&self, circle: CircleId) -> Result<(), SyncError> {
+        self.unit(Command::Reset(coven_merge::Audience::Circle(circle)))
+            .await
     }
     /// Resume a failed operation from its next uncompleted step.
     pub async fn retry_blocked_operation(
@@ -325,44 +324,40 @@ impl Operations {
         self.unit(Command::Cancel(*invite)).await
     }
     /// Create a circle with this member as its first member.
-    pub async fn create_circle(&self, name: &str) -> Result<CircleId, CircleError> {
+    pub async fn create_circle(&self, name: &str) -> Result<CircleId, SyncError> {
         match self.call(Command::CreateCircle(name.into())).await? {
             Output::CircleId(value) => Ok(value),
             _ => unreachable!("circle result"),
         }
     }
     /// Rename a circle as a plain store-log entry.
-    pub async fn rename_circle(&self, circle: CircleId, name: &str) -> Result<(), CircleError> {
-        Ok(self
-            .unit(Command::RenameCircle(circle, name.into()))
-            .await?)
+    pub async fn rename_circle(&self, circle: CircleId, name: &str) -> Result<(), SyncError> {
+        self.unit(Command::RenameCircle(circle, name.into())).await
     }
     /// Delete the circle's local rows and then its store-log membership.
-    pub async fn delete_circle(&self, circle: CircleId) -> Result<(), CircleError> {
-        Ok(self.unit(Command::DeleteCircle(circle)).await?)
+    pub async fn delete_circle(&self, circle: CircleId) -> Result<(), SyncError> {
+        self.unit(Command::DeleteCircle(circle)).await
     }
     /// Seal every historical circle key to an active store member.
     pub async fn add_circle_member(
         &self,
         circle: CircleId,
         member: &MemberId,
-    ) -> Result<(), CircleError> {
-        Ok(self
-            .unit(Command::AddCircleMember(circle, member.clone()))
-            .await?)
+    ) -> Result<(), SyncError> {
+        self.unit(Command::AddCircleMember(circle, member.clone()))
+            .await
     }
     /// Remove a circle member and rotate its key.
     pub async fn remove_circle_member(
         &self,
         circle: CircleId,
         member: &MemberId,
-    ) -> Result<(), CircleError> {
-        Ok(self
-            .unit(Command::RemoveCircleMember(circle, member.clone()))
-            .await?)
+    ) -> Result<(), SyncError> {
+        self.unit(Command::RemoveCircleMember(circle, member.clone()))
+            .await
     }
     /// List circles this member currently belongs to.
-    pub async fn circles(&self) -> Result<Vec<Circle>, CircleError> {
+    pub async fn circles(&self) -> Result<Vec<Circle>, SyncError> {
         match self.call(Command::Circles).await? {
             Output::Circles(value) => Ok(value),
             _ => unreachable!("circle list"),
@@ -372,7 +367,7 @@ impl Operations {
     pub async fn circle_members(
         &self,
         circle: CircleId,
-    ) -> Result<Vec<CircleMemberInfo>, CircleError> {
+    ) -> Result<Vec<CircleMemberInfo>, SyncError> {
         match self.call(Command::CircleMembers(circle)).await? {
             Output::CircleMembers(value) => Ok(value),
             _ => unreachable!("circle members"),
