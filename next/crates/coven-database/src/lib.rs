@@ -83,7 +83,7 @@ mod write_schema;
 
 pub use coven_format::value::EntryId;
 pub use coven_merge::WriteId;
-pub use database::file_database::{CacheReservation, FileChanges, FileDatabase, FileReservation};
+pub use database::file_database::{CacheReservation, FileDatabase, FileReservation};
 pub use database::file_retention::FileRetention;
 pub use database::{Database, DatabaseBuilder, DatabaseReadHandle};
 pub use declaration::{CacheFill, FileDecl, Provenance, RowIdentity, SyncedTable, Uploads};
@@ -138,3 +138,6 @@ pub use operation::{
 };
 
 mod circle_deletion;
+
+mod database_changes;
+pub use database_changes::DatabaseChanges;

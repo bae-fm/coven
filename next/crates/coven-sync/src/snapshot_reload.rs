@@ -6,7 +6,7 @@ use crate::{
     operations::{Output, Progress},
     replay_cache::ReplayCache,
     snapshot_data::*,
-    SyncError, SyncReport,
+    SyncError, SyncResults,
 };
 use coven_database::{
     DownloadedPartStream, DownloadedWriteStream, OperationRecord, SnapshotReload, SnapshotSource,
@@ -21,7 +21,7 @@ impl StoreLogSync {
         &self,
         record: &OperationRecord,
         mut task: SnapshotTask,
-        report: &mut SyncReport,
+        report: &mut SyncResults,
     ) -> Result<Progress, SyncError> {
         match record.last_step {
             0 => {
@@ -74,7 +74,7 @@ impl StoreLogSync {
                     let candidates = self
                         .current_snapshot_candidates(audience, &local.log, report)
                         .await?;
-                    for id in &candidates.positions.0 {
+                    for id in &candidates.required_positions.0 {
                         highest
                             .entry(id.device)
                             .and_modify(|n: &mut u64| *n = (*n).max(id.number))

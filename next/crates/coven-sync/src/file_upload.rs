@@ -13,6 +13,7 @@ use coven_foundation::{
     id_source::FileId,
 };
 use coven_storage::{ObjectPath, UploadSession};
+use futures_util::StreamExt;
 use std::{
     sync::Arc,
     time::{Duration, SystemTime},
@@ -83,7 +84,7 @@ pub struct UploadsLiveQuery {
     files: Files,
     changes: tokio::sync::watch::Receiver<u64>,
     first: bool,
-    commits: coven_database::FileChanges,
+    commits: coven_database::DatabaseChanges,
 }
 impl UploadsLiveQuery {
     /// Current queue immediately, then each change.
@@ -186,52 +187,65 @@ impl FilesInner {
         if waiting.is_empty() {
             return Ok(DrainOutcome::QueueEmpty);
         }
+        let eligible = waiting
+            .into_iter()
+            .filter(|item| force || !in_backoff(item, self.clock.now()))
+            .collect::<Vec<_>>();
+        if eligible.is_empty() {
+            return Ok(DrainOutcome::AllInBackoff);
+        }
+        let limit = self
+            .limits
+            .read()
+            .expect("transfer limits lock poisoned")
+            .uploads
+            .get();
+        let mut attempts = futures_util::stream::iter(eligible)
+            .map(|item| self.attempt_upload(item))
+            .buffer_unordered(limit);
         let mut uploaded = 0;
         let mut failures = Vec::new();
-        let mut attempted = false;
-        for mut item in waiting {
-            if self.paused() {
-                break;
+        while let Some(attempt) = attempts.next().await {
+            match attempt? {
+                AttemptOutcome::Stored => uploaded += 1,
+                AttemptOutcome::Unchanged => (),
+                AttemptOutcome::Failed(file, error) => failures.push((file, error)),
             }
-            if !force && in_backoff(&item, self.clock.now()) {
-                continue;
-            }
-            attempted = true;
-            self.database
-                .begin_attempt(item.id, self.clock.now())
-                .await?;
-            match self.upload(&mut item).await {
-                Ok(true) => uploaded += 1,
-                Ok(false) => {}
-                Err(UploadFailure::File(FileReadError::Database(
-                    error @ DbError::FileCleanup { write: Ok(()), .. },
-                ))) => return Err(error),
-                Err(error) => {
-                    let bytes = serde_json::to_vec(&error.recording())
-                        .map_err(|_| DbError::DamagedDatabase)?;
-                    self.database
-                        .fail_upload(item.id, SecretBytes::new(bytes))
-                        .await?;
-                    let error = Arc::new(error);
-                    self.state
-                        .lock()
-                        .expect("upload state poisoned")
-                        .failures
-                        .insert(item.id, error.clone());
-                    failures.push((item.file, error));
-                }
-            }
-            self.state
-                .lock()
-                .expect("upload state poisoned")
-                .active
-                .remove(&item.id);
-            self.notify();
         }
-        if !attempted {
-            Ok(DrainOutcome::AllInBackoff)
-        } else {
-            Ok(DrainOutcome::Drained { uploaded, failures })
+        Ok(DrainOutcome::Drained { uploaded, failures })
+    }
+
+    async fn attempt_upload(&self, mut item: FileUpload) -> Result<AttemptOutcome, DbError> {
+        if self.paused() {
+            return Ok(AttemptOutcome::Unchanged);
+        }
+        let _activity = UploadActivity {
+            owner: self,
+            id: item.id,
+        };
+        self.database
+            .begin_attempt(item.id, self.clock.now())
+            .await?;
+        match self.upload(&mut item).await {
+            Ok(true) => Ok(AttemptOutcome::Stored),
+            Ok(false) => Ok(AttemptOutcome::Unchanged),
+            Err(UploadFailure::File(FileReadError::Database(
+                error @ DbError::FileCleanup { write: Ok(()), .. },
+            ))) => Err(error),
+            Err(error) => {
+                let bytes =
+                    serde_json::to_vec(&error.recording()).map_err(|_| DbError::DamagedDatabase)?;
+                self.database
+                    .fail_upload(item.id, SecretBytes::new(bytes))
+                    .await?;
+                let error = Arc::new(error);
+                self.state
+                    .lock()
+                    .expect("upload state poisoned")
+                    .failures
+                    .insert(item.id, error.clone());
+                Ok(AttemptOutcome::Failed(item.file, error))
+            }
         }
     }
     pub(super) async fn upload(&self, item: &mut FileUpload) -> Result<bool, UploadFailure> {
@@ -389,6 +403,26 @@ impl FilesInner {
             identity: SecretBytes::new(identity),
         });
         Ok(())
+    }
+}
+enum AttemptOutcome {
+    Stored,
+    Unchanged,
+    Failed(FileRef, Arc<UploadFailure>),
+}
+struct UploadActivity<'a> {
+    owner: &'a FilesInner,
+    id: i64,
+}
+impl Drop for UploadActivity<'_> {
+    fn drop(&mut self) {
+        self.owner
+            .state
+            .lock()
+            .expect("upload state poisoned")
+            .active
+            .remove(&self.id);
+        self.owner.notify();
     }
 }
 pub(crate) fn decode_identity(bytes: &[u8]) -> Result<(FileId, FileKey), DbError> {

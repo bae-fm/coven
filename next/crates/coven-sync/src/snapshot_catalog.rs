@@ -3,7 +3,7 @@
 use super::{io, StoreLogSync};
 use crate::{
     snapshot_data::{SavedSnapshot, SnapshotTask},
-    SyncError, SyncReport,
+    SyncError, SyncResults,
 };
 use coven_database::{EntryOutcome, OperationRecord, StoreLog};
 use coven_format::sealed_snapshot::{SnapshotObjectLayout, SnapshotObjectPrefix};
@@ -19,8 +19,9 @@ pub(super) struct Candidate {
 pub(super) struct Catalog {
     pub(super) listed: usize,
     pub(super) candidates: Vec<Candidate>,
-    /// Clear prefixes require history; they never authorize applying a write.
-    pub(super) positions: coven_format::value::WritePositions,
+    /// Clear prefixes that follow the replay's reset/version boundary require
+    /// history, even when their keys cannot authorize loading their rows.
+    pub(super) required_positions: coven_format::value::WritePositions,
     pub(super) unreadable_prefix: bool,
 }
 
@@ -29,7 +30,7 @@ impl StoreLogSync {
         &self,
         audience: &Audience,
         log: &StoreLog,
-        report: &mut SyncReport,
+        report: &mut SyncResults,
     ) -> Result<Catalog, SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let keys: BTreeSet<_> = log
@@ -68,11 +69,20 @@ impl StoreLogSync {
                 )?;
                 continue;
             }
-            for id in &prefix.writes.0 {
-                positions
-                    .entry(id.device)
-                    .and_modify(|n: &mut u64| *n = (*n).max(id.number))
-                    .or_insert(id.number);
+            // A snapshot prepared for a concurrent raise can include its
+            // author's unpublished migration write. A boundary that excludes
+            // that snapshot also excludes its demand for that write's history.
+            if super::boundaries::allows(
+                log,
+                &object.path.snapshot_id().expect("checked path"),
+                &prefix,
+            ) {
+                for id in &prefix.writes.0 {
+                    positions
+                        .entry(id.device)
+                        .and_modify(|n: &mut u64| *n = (*n).max(id.number))
+                        .or_insert(id.number);
+                }
             }
             if keys.contains(&(audience.clone(), prefix.key)) {
                 candidates.push(Candidate { object, prefix });
@@ -86,7 +96,7 @@ impl StoreLogSync {
         Ok(Catalog {
             listed,
             candidates,
-            positions: coven_format::value::WritePositions(
+            required_positions: coven_format::value::WritePositions(
                 positions
                     .into_iter()
                     .map(|(device, number)| coven_merge::WriteId { device, number })
@@ -100,7 +110,7 @@ impl StoreLogSync {
         &self,
         audience: &Audience,
         log: &StoreLog,
-        report: &mut SyncReport,
+        report: &mut SyncResults,
     ) -> Result<Catalog, SyncError> {
         let mut catalog = self.snapshot_candidates(audience, log, report).await?;
         catalog.candidates.retain(|candidate| {
@@ -137,7 +147,7 @@ impl StoreLogSync {
         candidates: Vec<Candidate>,
         record: &OperationRecord,
         task: &mut SnapshotTask,
-        report: &mut SyncReport,
+        report: &mut SyncResults,
     ) -> Result<Option<SavedSnapshot>, SyncError> {
         for candidate in candidates {
             let file = self.reserve_snapshot_file(record, task).await?;
@@ -230,7 +240,7 @@ pub(super) fn inconsistent(reason: &'static str) -> SyncError {
 }
 
 pub(super) fn snapshot_damage(
-    report: &mut SyncReport,
+    report: &mut SyncResults,
     path: &ObjectPath,
     error: SyncError,
 ) -> Result<(), SyncError> {

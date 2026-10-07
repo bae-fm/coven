@@ -393,6 +393,10 @@ fn escape(value: &str) -> String {
 
 #[async_trait]
 impl Storage for GoogleDriveStorage {
+    async fn account(&self) -> Result<String, StorageError> {
+        self.session.account().await
+    }
+
     fn config(&self) -> StorageConfig {
         self.config.clone()
     }

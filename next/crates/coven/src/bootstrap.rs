@@ -227,12 +227,12 @@ fn keychain_code(keychain: &Keychain) -> Result<Option<RestoreCode>, BootstrapEr
     Ok(Some(code))
 }
 
-enum BootstrapRequest {
+pub(crate) enum BootstrapRequest {
     Restore { code: RestoreCode, name: String },
     Join { code: InviteCode, name: String },
 }
 
-async fn bootstrap_device(
+pub(crate) async fn bootstrap_device(
     request: BootstrapRequest,
     tables: &[SyncedTable],
     migrations: &[Migration],
@@ -387,6 +387,7 @@ async fn prepare_and_load(
             clock.clone(),
             ids.clone(),
         )
+        .await
         .map_err(SyncError::from)?,
     };
     let ring: Arc<dyn StoreKeyCustody> = Arc::new(InMemoryCustody::<StoreKeyring>::empty());

@@ -53,13 +53,33 @@ pub(crate) enum Command {
     Retry(OperationId),
     Discard(OperationId),
     ConfirmKey(String),
+    Credentials {
+        previous: coven_storage::RestoreStorage,
+        next: coven_storage::RestoreStorage,
+        require_connected: bool,
+        commit: crate::StorageCommit,
+    },
+    #[cfg(any(test, feature = "test-utils"))]
+    InspectPositions,
+    CheckKeys,
+    ForgetKeys,
     Sync,
+    SyncAll,
+    Unlock(Arc<dyn Storage>),
+    Setup(
+        Arc<dyn Storage>,
+        coven_format::MemberAccess,
+        String,
+        crate::StorageCommit,
+    ),
     Report,
     Storage(Option<Arc<dyn Storage>>),
     Close,
 }
 
 pub(crate) enum Output {
+    #[cfg(any(test, feature = "test-utils"))]
+    Positions(Option<coven_format::objects::PostedPositions>),
     Unit,
     Removal(MemberRemoval),
     SignOut(ProviderSignOut),
@@ -68,7 +88,7 @@ pub(crate) enum Output {
     Circles(Vec<Circle>),
     CircleMembers(Vec<CircleMemberInfo>),
     Invite(Invite),
-    Report(SyncReport),
+    Report(SyncResults),
 }
 
 type Reply = oneshot::Sender<Result<Output, SyncError>>;
@@ -92,25 +112,27 @@ pub(crate) enum Progress {
 struct OperationRun {
     sync: StoreLogSync,
     files: Files,
+    writes: DeviceLogSync,
     commands: mpsc::UnboundedReceiver<Request>,
     joins: watch::Sender<Vec<JoinRequest>>,
     waiters: BTreeMap<OperationId, Reply>,
-    notices: SyncReport,
+    notices: SyncResults,
 }
 
 impl Operations {
     /// Compose and start the lifetime owner after the database opens. Schedule
     /// migration publication on opening; retained failures stay blocked.
-    pub fn new(sync: StoreLogSync, files: Files) -> Self {
+    pub fn new(sync: StoreLogSync, files: Files, writes: DeviceLogSync) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
         let (joins, subscription) = watch::channel(Vec::new());
         let run = OperationRun {
             sync,
             files,
+            writes,
             commands: receiver,
             joins,
             waiters: BTreeMap::new(),
-            notices: SyncReport::default(),
+            notices: SyncResults::default(),
         };
         Self {
             inner: Arc::new(RunningOperations {
@@ -132,6 +154,52 @@ impl Operations {
             .map_err(|_| coven_database::DbError::StoreClosed)?
     }
 
+    /// Verify and publish setup before committing credentials and keys. The
+    /// supplied commit returns compensation for a subsequent local failure.
+    /// The worker retains the entire call even when its app waiter is dropped.
+    pub async fn setup_storage(
+        &self,
+        storage: Arc<dyn Storage>,
+        access: coven_format::MemberAccess,
+        device_name: String,
+        commit: crate::StorageCommit,
+    ) -> Result<(), SyncError> {
+        self.unit(Command::Setup(storage, access, device_name, commit))
+            .await
+    }
+
+    pub(crate) async fn install_credentials(
+        &self,
+        previous: coven_storage::RestoreStorage,
+        next: coven_storage::RestoreStorage,
+        require_connected: bool,
+        commit: crate::StorageCommit,
+    ) -> Result<(), SyncError> {
+        self.unit(Command::Credentials {
+            previous,
+            next,
+            require_connected,
+            commit,
+        })
+        .await
+    }
+
+    /// Acquire the configured store's current keys and check its store log without
+    /// running a full pass. The previous connection survives a failed unlock.
+    pub async fn unlock_storage(&self, storage: Arc<dyn Storage>) -> Result<(), SyncError> {
+        self.unit(Command::Unlock(storage)).await
+    }
+
+    /// Verify the member and current store key before starting a connected loop.
+    pub async fn check_sync_keys(&self) -> Result<(), SyncError> {
+        self.unit(Command::CheckKeys).await
+    }
+
+    /// Forget custody after active work; a custody failure keeps the provider.
+    pub(crate) async fn forget_store_keys(&self) -> Result<(), SyncError> {
+        self.unit(Command::ForgetKeys).await
+    }
+
     /// Supply or disconnect the provider capability; waiting operations continue
     /// using their persisted bytes. This does not enable a background sync loop.
     pub async fn set_storage(&self, storage: Option<Arc<dyn Storage>>) -> Result<(), SyncError> {
@@ -149,14 +217,22 @@ impl Operations {
             .await
     }
     /// Download and replay available store-log entries, then wake operation work.
-    pub async fn sync_store_log(&self) -> Result<SyncReport, SyncError> {
+    pub async fn sync_store_log(&self) -> Result<SyncResults, SyncError> {
         match self.call(Command::Sync).await? {
             Output::Report(report) => Ok(report),
             _ => unreachable!("sync result"),
         }
     }
+    /// Run one entire pass under the operation worker's serialization. Replay,
+    /// reloads, writes and snapshots cannot interleave with another operation.
+    pub async fn sync(&self) -> Result<SyncResults, SyncError> {
+        match self.call(Command::SyncAll).await? {
+            Output::Report(report) => Ok(report),
+            _ => unreachable!("sync result"),
+        }
+    }
     /// Read retained failures, manual key deletions and this member's dropped entries.
-    pub async fn report(&self) -> Result<SyncReport, SyncError> {
+    pub async fn report(&self) -> Result<SyncResults, SyncError> {
         match self.call(Command::Report).await? {
             Output::Report(report) => Ok(report),
             _ => unreachable!("report result"),
@@ -328,6 +404,16 @@ impl Operations {
             _ => unreachable!("unit result"),
         }
     }
+    /// Inspect the same committed positions and fingerprints used for publication.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn test_positions(
+        &self,
+    ) -> Result<Option<coven_format::objects::PostedPositions>, SyncError> {
+        match self.call(Command::InspectPositions).await? {
+            Output::Positions(state) => Ok(state),
+            _ => unreachable!("position result"),
+        }
+    }
 }
 
 impl Drop for RunningOperations {
@@ -353,14 +439,46 @@ impl OperationRun {
                 command = self.commands.recv() => {
                     let Some(Request { command, reply }) = command else { break; };
                     if matches!(command, Command::Close) { let _ = reply.send(Ok(Output::Unit)); break; }
+                    #[cfg(any(test, feature = "test-utils"))]
+                    if matches!(command, Command::InspectPositions) {
+                        let _ = reply.send(self.writes.current_positions().await.map(Output::Positions));
+                        continue;
+                    }
                     if let Command::KeepFiles(files, destinations) = command {
                         let result = self.files.record_keeps(&files, &destinations).await.map(|()| Output::Unit);
                         // Acceptance means the intent committed; downloading
                         // must not hold this reply, even when storage is online.
                         let _ = reply.send(result);
                     } else {
-                        if let Command::Storage(storage) = &command { self.files.set_storage(storage.clone()); }
-                        if let Command::Discard(id) = command {
+                        if let Command::Storage(storage) = &command {
+                            if let Err(error) = self.files.set_storage(storage.clone(), std::future::ready(Ok(()))).await {
+                                let _ = reply.send(Err(error));
+                                continue;
+                            }
+                            self.writes.set_storage(storage.clone());
+                        }
+                        if matches!(command, Command::ForgetKeys) {
+                            let result = self.files.set_storage(None, async {
+                                self.sync.begin_operation_call(Command::ForgetKeys).await?;
+                                Ok(())
+                            }).await;
+                            if result.is_ok() { self.writes.set_storage(None); }
+                            let _ = reply.send(result.map(|()| Output::Unit));
+                        } else if let Command::Unlock(storage) = command {
+                            let result = self.files.set_storage(Some(storage.clone()), self.sync.unlock_storage(storage.clone())).await;
+                            if result.is_ok() {
+                                self.writes.set_storage(Some(storage));
+                            }
+                            let _ = reply.send(result.map(|()| Output::Unit));
+                        } else if let Command::Setup(storage, access, device_name, commit) = command {
+                            let result = self.files.set_storage(Some(storage.clone()), self.sync.setup_storage(storage.clone(), access, device_name, commit)).await;
+                            if result.is_ok() {
+                                self.writes.set_storage(Some(storage));
+                            }
+                            let _ = reply.send(result.map(|()| Output::Unit));
+                        } else if matches!(command, Command::SyncAll) {
+                            response = Some((reply, self.sync_pass().await.map(Output::Report)));
+                        } else if let Command::Discard(id) = command {
                             response = Some((reply, self.discard(id).await.map(|()| Output::Unit)));
                         } else {
                             match self.sync.begin_operation_call(command).await {
@@ -407,6 +525,31 @@ impl OperationRun {
                 let _ = reply.send(result);
             }
         }
+    }
+
+    async fn sync_pass(&mut self) -> Result<SyncResults, SyncError> {
+        let mut report = self.sync.sync_store_log().await?;
+        self.drive().await?;
+        // A blocked reload leaves its operation visible, without publishing a
+        // snapshot or applying further writes over the unreloaded audience.
+        if self.sync.pending_reload().await?.is_some() {
+            return Ok(report);
+        }
+        report.append(self.sync.reload_deleted_history().await?);
+        self.writes.upload_writes().await?;
+        // Deleting a circle waits for its row deletion's write to be uploaded.
+        self.drive().await?;
+        report.append(self.writes.download_writes().await?);
+        self.drive().await?;
+        if self.sync.pending_reload().await?.is_some() {
+            return Ok(report);
+        }
+        self.files.sync_files().await?;
+        self.writes.upload_writes().await?;
+        report.append(self.sync.write_snapshots().await?);
+        report.append(self.sync.run_retention().await?);
+        self.writes.post_positions().await?;
+        Ok(report)
     }
 
     async fn drive(&mut self) -> Result<(), SyncError> {

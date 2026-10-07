@@ -311,7 +311,7 @@ async fn a_raise_resumes_after_reopening_at_every_publication_step() {
                 .operation_step(
                     &record,
                     crate::operation_data::Data::read(&record).unwrap(),
-                    &mut crate::SyncReport::default(),
+                    &mut crate::SyncResults::default(),
                 )
                 .await
                 .unwrap();
@@ -517,7 +517,7 @@ async fn concurrent_raises_to_different_versions_are_both_kept() {
             .operation_step(
                 &record,
                 crate::operation_data::Data::read(&record).unwrap(),
-                &mut crate::SyncReport::default(),
+                &mut crate::SyncResults::default(),
             )
             .await
             .unwrap();
@@ -694,7 +694,7 @@ async fn a_migration_waits_for_an_operation_that_already_reserved_the_entry_numb
                 .operation_step(
                     &record,
                     Data::read(&record).unwrap(),
-                    &mut crate::SyncReport::default(),
+                    &mut crate::SyncResults::default(),
                 )
                 .await
                 .unwrap();
@@ -723,8 +723,9 @@ async fn a_migration_waits_for_an_operation_that_already_reserved_the_entry_numb
             Some(storage),
             device.clock.clone(),
             device.ids.clone(),
+            crate::TransferLimits::default(),
         );
-        let operations = crate::Operations::new(device.log, files.clone());
+        let operations = crate::Operations::new(device.log, files.clone(), device.sync);
         operations.get_members().await.unwrap();
         assert!(operations
             .report()

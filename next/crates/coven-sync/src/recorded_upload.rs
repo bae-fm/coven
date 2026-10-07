@@ -31,12 +31,22 @@ pub(crate) async fn upload<S: UploadSource>(
             if session.path() != path || session.total_bytes() != total {
                 return Err(StorageError::SessionMismatch.into());
             }
-            match storage.resume_upload(&mut session).await {
-                Ok(()) => (),
-                Err(StorageError::SessionExpired) => {
-                    session = storage.restart_upload(&session).await?;
+            if session.is_at(&storage.config()) {
+                match storage.resume_upload(&mut session).await {
+                    Ok(()) => (),
+                    Err(StorageError::SessionExpired) => {
+                        session = storage.restart_upload(&session).await?;
+                    }
+                    Err(error) => return Err(error.into()),
                 }
-                Err(error) => return Err(error.into()),
+            } else {
+                // A location move copies published objects, but provider sessions
+                // belong to the old location. Reuse the fixed bytes in a new one.
+                match storage.begin_upload(path, total).await {
+                    Ok(replacement) => session = replacement,
+                    Err(StorageError::AlreadyExists) => return Ok(true),
+                    Err(error) => return Err(error.into()),
+                }
             }
             session
         }

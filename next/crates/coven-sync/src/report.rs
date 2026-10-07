@@ -12,7 +12,7 @@ use std::sync::Arc;
 /// Results contributed by each explicit sync step. Waiting store-log entries
 /// remain in storage; waiting device writes retain their first-observed time.
 #[derive(Debug, Default)]
-pub struct SyncReport {
+pub struct SyncResults {
     /// Permanently failed operations awaiting app retry or discard.
     pub blocked_operations: Vec<crate::BlockedOperation>,
     /// S3 key ids awaiting confirmation of deletion in the provider console.
@@ -29,6 +29,56 @@ pub struct SyncReport {
     /// Equal positions and schema, but different audience fingerprints (§19.1).
     /// Reporting a disagreement never starts a reload.
     pub disagreements: Vec<Disagreement>,
+}
+
+/// The application-facing report of one completed pass (§20.5).
+#[derive(Debug)]
+pub struct SyncReport {
+    /// The injected wall clock after every step completed.
+    pub finished_at: std::time::SystemTime,
+    /// Optional row hints; live queries observe the actual committed changes.
+    pub row_changes: Option<Vec<coven_database::RowChange>>,
+    /// Applied positions for the other devices in this store.
+    pub devices: Vec<DeviceActivity>,
+    /// Writes held back by missing dependencies, schemas or keys.
+    pub waiting: Vec<WaitingWrite>,
+    /// Stored objects that failed validation.
+    pub damaged_objects: Vec<DamagedObject>,
+    /// Equal positions and schema with different audience fingerprints.
+    pub disagreements: Vec<Disagreement>,
+    /// Permanently failed operations awaiting app retry or discard.
+    pub blocked_operations: Vec<crate::BlockedOperation>,
+    /// This member's entries dropped during replay.
+    pub dropped_entries: Vec<DroppedEntry>,
+    /// S3 keys awaiting confirmation of deletion in the provider console.
+    pub access_keys_to_delete: Vec<crate::AccessKeyToDelete>,
+}
+
+impl SyncResults {
+    pub(crate) fn finish(self, finished_at: std::time::SystemTime) -> SyncReport {
+        SyncReport {
+            finished_at,
+            row_changes: None,
+            devices: self.devices,
+            waiting: self.waiting,
+            damaged_objects: self.damaged_objects,
+            disagreements: self.disagreements,
+            blocked_operations: self.blocked_operations,
+            dropped_entries: self.dropped_entries,
+            access_keys_to_delete: self.access_keys_to_delete,
+        }
+    }
+    pub(crate) fn append(&mut self, mut other: Self) {
+        self.blocked_operations
+            .append(&mut other.blocked_operations);
+        self.access_keys_to_delete
+            .append(&mut other.access_keys_to_delete);
+        self.devices.append(&mut other.devices);
+        self.waiting.append(&mut other.waiting);
+        self.dropped_entries.append(&mut other.dropped_entries);
+        self.damaged_objects.append(&mut other.damaged_objects);
+        self.disagreements.append(&mut other.disagreements);
+    }
 }
 
 /// Two devices disagree on an audience after applying the same history (§19.1).

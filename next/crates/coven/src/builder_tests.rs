@@ -363,6 +363,7 @@ mod recovery {
                 None,
                 clock.clone(),
                 ids.clone(),
+                coven_sync::TransferLimits::default(),
             );
             let operations = coven_sync::Operations::new(
                 StoreLogSync::disconnected(
@@ -374,6 +375,7 @@ mod recovery {
                     directory.clone(),
                 ),
                 files,
+                coven_sync::DeviceLogSync::disconnected(db.clone(), keys.clone(), identity.clone()),
             );
             let mut pending = Box::pin(operations.create_circle("Waiting operation"));
             std::future::poll_fn(|cx| {

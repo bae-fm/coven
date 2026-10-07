@@ -1,7 +1,7 @@
 //! Prove absence across retained data before deleting an uploader's files.
 
 use super::{catalog::snapshot_damage, StoreLogSync};
-use crate::{replay_cache::ReplayCache, snapshot_data::SnapshotTask, SyncError, SyncReport};
+use crate::{replay_cache::ReplayCache, snapshot_data::SnapshotTask, SyncError, SyncResults};
 use coven_database::OperationRecord;
 use coven_storage::{ObjectPath, ObjectPrefix};
 use std::collections::{BTreeMap, BTreeSet};
@@ -11,7 +11,7 @@ impl StoreLogSync {
         &self,
         record: &OperationRecord,
         task: &mut SnapshotTask,
-        report: &mut SyncReport,
+        report: &mut SyncResults,
     ) -> Result<(), SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         // List first: publication fixes an identity in the local queue before

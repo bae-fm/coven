@@ -24,7 +24,7 @@ impl StoreLogSync {
         &mut self,
         record: &OperationRecord,
         mut data: Data,
-        report: &mut SyncReport,
+        report: &mut SyncResults,
     ) -> Result<Progress, SyncError> {
         if let Data::PublishSchema { version } = data {
             return self.schema_publication_step(record, version).await;
@@ -167,7 +167,7 @@ impl StoreLogSync {
                 }
             }
             let mut ring = self.store_keys.unlock()?;
-            let mut report = SyncReport::default();
+            let mut report = SyncResults::default();
             self.update_keys(&local.log, &member, &mut ring, &mut report)
                 .await?;
             if let Some(damaged) = report.damaged_objects.into_iter().next() {
@@ -234,7 +234,7 @@ impl StoreLogSync {
                             entry.clone(),
                             &member,
                             &mut ring,
-                            &mut SyncReport::default(),
+                            &mut SyncResults::default(),
                         )
                         .await
                     {

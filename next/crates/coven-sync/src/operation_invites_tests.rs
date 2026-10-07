@@ -239,7 +239,10 @@ async fn failed_join_request_still_expires_and_live_requests_are_delivered() {
     let storage = google();
     let [a, _b, _c] = accounts(storage.clone()).await;
     let files = file_owner(&a);
-    let operations = Operations::new(a.sync, files);
+    let operations = {
+        let writes = a.writes();
+        crate::Operations::new(a.sync, files, writes)
+    };
     let mut joins = operations.subscribe_join_requests();
     let invite = operations
         .create_invite(
@@ -289,7 +292,10 @@ async fn cancelling_keeps_retained_provider_grants_visible_until_acknowledged() 
     let storage = google();
     let [a, _b, _c] = accounts(storage.clone()).await;
     let files = file_owner(&a);
-    let operations = Operations::new(a.sync, files);
+    let operations = {
+        let writes = a.writes();
+        crate::Operations::new(a.sync, files, writes)
+    };
     let invite = operations
         .create_invite(
             MemberRole::Member,
@@ -331,7 +337,10 @@ async fn invitation_expiring_while_its_create_call_waits_returns_a_failure() {
     let [mut a, _b, _c] = accounts(storage.clone()).await;
     a.sync.storage = None;
     let files = file_owner(&a);
-    let operations = Operations::new(a.sync, files);
+    let operations = {
+        let writes = a.writes();
+        crate::Operations::new(a.sync, files, writes)
+    };
     let mut pending = Box::pin(operations.create_invite(
         MemberRole::Member,
         InviteAccess::ProviderAccount {

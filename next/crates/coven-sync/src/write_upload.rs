@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 
 impl DeviceLogSync {
     pub(super) async fn send_write(&self, write: WriteId) -> Result<(), SyncError> {
-        let storage = self.storage.as_ref();
+        let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let database = &self.database;
         let path = crate::write_seal::path(write);
         let total = database

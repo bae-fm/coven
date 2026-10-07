@@ -6,6 +6,7 @@ use crate::{
     FileReadError,
 };
 use coven_database::{DbError, FileLocation, FileRef, LiveQueryClosed, RowKey};
+use futures_util::{StreamExt, TryStreamExt};
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 
@@ -44,7 +45,7 @@ pub struct RowsPinnedLiveQuery {
     request: Mutex<(String, Vec<RowKey>)>,
     requested: tokio::sync::Notify,
     changes: watch::Receiver<u64>,
-    commits: coven_database::FileChanges,
+    commits: coven_database::DatabaseChanges,
     first: bool,
     previous: Option<Vec<Option<bool>>>,
 }
@@ -86,46 +87,53 @@ impl Files {
     ) -> Result<(), FileReadError> {
         self.inner.check_open()?;
         let _pins = self.inner.pins.lock().await;
-        let mut progress = self.inner.progress(files).await?;
-        on_progress(progress.clone());
-        for file in files {
-            self.inner.database.validate(file).await?;
-            match file.location() {
-                FileLocation::OnDevice(_) => {
-                    self.inner.database.open_local(file).await?;
-                }
-                FileLocation::Uploaded => {
-                    if self.inner.database.pin_complete(file).await? {
-                        progress.files_completed += 1;
-                        on_progress(progress.clone());
-                        self.inner.notify();
-                        continue;
+        let limit = self.transfer_limits().downloads.get();
+        let progress = Mutex::new(self.inner.progress(files).await?);
+        on_progress(progress.lock().expect("pin progress poisoned").clone());
+        futures_util::stream::iter(files.to_vec())
+            .map(|file| {
+                let progress = &progress;
+                async move {
+                    self.inner.database.validate(&file).await?;
+                    match file.location() {
+                        FileLocation::OnDevice(_) => {
+                            self.inner.database.open_local(&file).await?;
+                        }
+                        FileLocation::Uploaded => {
+                            if !self.inner.database.pin_complete(&file).await? {
+                                let uploaded =
+                                    UploadedFile::open(self.inner.clone(), file.clone()).await?;
+                                let previous = Mutex::new(0);
+                                uploaded
+                                    .keep_whole(|downloaded| {
+                                        let mut previous =
+                                            previous.lock().expect("file progress poisoned");
+                                        let mut progress =
+                                            progress.lock().expect("pin progress poisoned");
+                                        progress.bytes_downloaded += downloaded - *previous;
+                                        *previous = downloaded;
+                                        on_progress(progress.clone());
+                                    })
+                                    .await?;
+                            }
+                        }
                     }
-                    let uploaded = UploadedFile::open(self.inner.clone(), file.clone()).await?;
-                    let base = progress.bytes_downloaded;
-                    let current = Mutex::new(progress.clone());
-                    let result = uploaded
-                        .keep_whole(|downloaded| {
-                            let mut p = current.lock().expect("pin progress poisoned");
-                            p.bytes_downloaded = base + downloaded;
-                            on_progress(p.clone());
-                        })
-                        .await;
-                    progress = current.into_inner().expect("pin progress poisoned");
-                    result?;
+                    let mut progress = progress.lock().expect("pin progress poisoned");
+                    progress.files_completed += 1;
+                    on_progress(progress.clone());
+                    self.inner.notify();
+                    Ok::<_, FileReadError>(())
                 }
-            }
-            progress.files_completed += 1;
-            on_progress(progress.clone());
-            self.inner.notify();
-        }
-        Ok(())
+            })
+            .buffer_unordered(limit)
+            .try_for_each(|()| std::future::ready(Ok(())))
+            .await
     }
     /// Release budget exemptions, then apply each affected namespace budget.
     pub async fn unpin(&self, files: &[FileRef]) -> Result<(), FileReadError> {
         self.inner.check_open()?;
         let _pins = self.inner.pins.lock().await;
-        let _cache = self.inner.cache.lock().await;
+        let _cache = self.inner.cache.write().await;
         for file in files {
             self.inner.database.unpin(file).await?;
             self.inner.trim(file.namespace()).await;
@@ -176,7 +184,7 @@ impl Files {
     pub async fn evict_file(&self, file: &FileRef) -> Result<(), FileReadError> {
         self.inner.check_open()?;
         let _pins = self.inner.pins.lock().await;
-        let _cache = self.inner.cache.lock().await;
+        let _cache = self.inner.cache.write().await;
         self.inner.database.evict(file).await?;
         self.inner.notify();
         Ok(())
@@ -184,7 +192,7 @@ impl Files {
     /// Set the budget and immediately evict this namespace's unpinned LRU bytes.
     pub async fn set_cache_budget(&self, namespace: &str, max_bytes: u64) -> Result<(), DbError> {
         self.inner.check_open()?;
-        let _cache = self.inner.cache.lock().await;
+        let _cache = self.inner.cache.write().await;
         self.inner.database.set_budget(namespace, max_bytes).await?;
         self.inner.database.trim_cache(namespace).await?;
         self.inner.notify();
@@ -225,7 +233,16 @@ impl FilesInner {
             bytes_total,
         })
     }
-    pub(crate) async fn fill_eager(self: &Arc<Self>, seen: &mut Vec<FileRef>) {
+    pub(crate) async fn fill_eager(self: &Arc<Self>) {
+        let mut seen = self.eager_seen.lock().await;
+        if self
+            .storage
+            .read()
+            .expect("storage lock poisoned")
+            .is_none()
+        {
+            return;
+        }
         let files = match self.database.eager_files().await {
             Ok(files) => files,
             Err(error) => {
@@ -268,11 +285,11 @@ impl FilesInner {
         let mut cancel = self.cancel_eager.subscribe();
         self.eager
             .send_replace(EagerCacheFillStatus::Downloading(progress.clone()));
-        for file in pending {
+        for (index, file) in pending.iter().enumerate() {
             let current = Mutex::new(progress.clone());
             let work = async {
-                self.database.validate(&file).await?;
-                let upload = UploadedFile::open(self.clone(), file).await?;
+                self.database.validate(file).await?;
+                let upload = UploadedFile::open(self.clone(), file.clone()).await?;
                 upload
                     .download(|bytes| {
                         let mut p = current.lock().expect("eager progress poisoned");
@@ -284,7 +301,7 @@ impl FilesInner {
             };
             tokio::select! {
                 _=cancel.changed()=>{self.eager.send_replace(EagerCacheFillStatus::Cancelled(current.into_inner().expect("eager progress poisoned")));return},
-                result=work=>if let Err(error)=result {self.eager.send_replace(EagerCacheFillStatus::Failed{progress:current.into_inner().expect("eager progress poisoned"),error:Arc::new(error)});return},
+                result=work=>if let Err(error)=result {seen.retain(|file| !pending[index..].contains(file));self.eager.send_replace(EagerCacheFillStatus::Failed{progress:current.into_inner().expect("eager progress poisoned"),error:Arc::new(error)});return},
             }
             progress = current.into_inner().expect("eager progress poisoned");
             progress.files_completed += 1;

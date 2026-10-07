@@ -15,6 +15,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 struct Device {
+    storage: Arc<MemoryStorage>,
     sync: StoreLogSync,
     db: Database,
     directory: StoreDir,
@@ -84,7 +85,7 @@ async fn device(storage: Arc<MemoryStorage>, n: u64, member: MemberKeys, store: 
     )));
     custody.forget().unwrap();
     let sync = StoreLogSync::new(
-        storage,
+        storage.clone(),
         db.clone(),
         custody.clone(),
         Arc::new(InMemoryCustody::new(member.clone())),
@@ -93,6 +94,7 @@ async fn device(storage: Arc<MemoryStorage>, n: u64, member: MemberKeys, store: 
         directory.clone(),
     );
     Device {
+        storage,
         sync,
         db,
         directory,
@@ -104,6 +106,15 @@ async fn device(storage: Arc<MemoryStorage>, n: u64, member: MemberKeys, store: 
 }
 
 impl Device {
+    fn writes(&self) -> crate::DeviceLogSync {
+        crate::DeviceLogSync::new(
+            self.storage.clone(),
+            self.db.clone(),
+            self.custody.clone(),
+            Arc::new(InMemoryCustody::new(self.member.clone())),
+        )
+    }
+
     async fn create(&mut self, key: KeyId) -> EntryId {
         self.sync
             .make_and_upload_entry(StoreChange::CreateStore {
@@ -131,7 +142,7 @@ impl Device {
             .await
             .unwrap()
     }
-    async fn sync(&mut self) -> SyncReport {
+    async fn sync(&mut self) -> SyncResults {
         self.sync.sync_store_log().await.unwrap()
     }
     async fn log(&self) -> StoreLog {

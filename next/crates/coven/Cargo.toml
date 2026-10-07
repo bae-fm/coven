@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-test-utils = ["coven-foundation/test-utils", "coven-crypto/test-utils", "coven-database/test-utils"]
+test-utils = ["coven-sync/test-utils", "coven-foundation/test-utils", "coven-crypto/test-utils", "coven-database/test-utils"]
 
 [dependencies]
 coven-foundation.workspace = true
@@ -18,6 +18,8 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 
 [dev-dependencies]
+async-trait.workspace = true
+coven-sync = { workspace = true, features = ["test-utils"] }
 coven-storage = { workspace = true, features = ["test-utils"] }
 coven-foundation = { workspace = true, features = ["test-utils"] }
 coven-crypto = { workspace = true, features = ["test-utils"] }

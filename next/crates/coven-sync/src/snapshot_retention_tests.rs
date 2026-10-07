@@ -190,6 +190,7 @@ async fn a_file_named_only_by_a_retained_log_write_stays_until_that_log_goes() {
         Some(storage.clone()),
         a.clock.clone(),
         Arc::new(coven_foundation::id_source::UuidIds),
+        crate::TransferLimits::default(),
     );
     a.db.write_with_files(
         |batch| {

@@ -104,10 +104,11 @@ struct State {
     ranges: Vec<ByteRange>,
     sent_bytes: u64,
     largest_part: usize,
-    held_listing: Option<HeldListing>,
+    held_listing: Option<HeldRequest>,
+    held_creation: Option<HeldRequest>,
 }
 
-struct HeldListing {
+struct HeldRequest {
     prefix: ObjectPrefix,
     listed: tokio::sync::oneshot::Sender<()>,
     resume: tokio::sync::oneshot::Receiver<()>,
@@ -126,9 +127,12 @@ struct HeldListing {
 #[derive(Clone)]
 pub struct MemoryStorage {
     config: StorageConfig,
+    online: Arc<std::sync::atomic::AtomicBool>,
     single_limit: u64,
     part_size: usize,
     requests: Arc<tokio::sync::watch::Sender<u64>>,
+    active_requests: Arc<std::sync::atomic::AtomicUsize>,
+    peak_requests: Arc<std::sync::atomic::AtomicUsize>,
     account: Account,
     clock: ClockRef,
     tokens: Arc<Mutex<Option<OAuthTokens>>>,
@@ -142,9 +146,12 @@ impl MemoryStorage {
         config.validate()?;
         Ok(Self {
             config,
+            online: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             single_limit: 16,
             part_size: 4,
             requests: Arc::new(tokio::sync::watch::channel(0).0),
+            active_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            peak_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             clock,
             tokens: Arc::new(Mutex::new(None)),
             s3_key: Arc::new(Mutex::new(None)),
@@ -160,6 +167,7 @@ impl MemoryStorage {
                 sent_bytes: 0,
                 largest_part: 0,
                 held_listing: None,
+                held_creation: None,
             })),
         })
     }
@@ -174,15 +182,35 @@ impl MemoryStorage {
         }
         Ok(Self {
             config: owner.config(),
+            online: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             single_limit: owner.single_limit,
             part_size: owner.part_size,
             requests: owner.requests.clone(),
+            active_requests: owner.active_requests.clone(),
+            peak_requests: owner.peak_requests.clone(),
             account: Account::Recipient(email.to_ascii_lowercase()),
             clock: owner.clock.clone(),
             tokens: Arc::new(Mutex::new(None)),
             s3_key: Arc::new(Mutex::new(None)),
             state: owner.state.clone(),
         })
+    }
+    /// Another device connected to the same durable backend, with independent
+    /// credentials, request notifications and network availability.
+    pub fn for_device(&self) -> Self {
+        let mut device = self.clone();
+        device.online = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        device.tokens = Arc::new(Mutex::new(None));
+        device.s3_key = Arc::new(Mutex::new(None));
+        device.requests = Arc::new(tokio::sync::watch::channel(0).0);
+        device.active_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        device.peak_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        device
+    }
+    /// Set this connection's network availability without changing other devices.
+    pub fn set_online(&self, online: bool) {
+        self.online
+            .store(online, std::sync::atomic::Ordering::SeqCst);
     }
     /// Choose transfer limits before sharing this adapter with a test's owners.
     pub fn with_transfer_limits(
@@ -200,6 +228,15 @@ impl MemoryStorage {
     /// Request notifications include failed attempts, so tests can wait without polling.
     pub fn subscribe_requests(&self) -> tokio::sync::watch::Receiver<u64> {
         self.requests.subscribe()
+    }
+    /// Greatest number of requests overlapping the injected network delay.
+    pub fn peak_requests(&self) -> usize {
+        self.peak_requests.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    /// Reset the peak for subsequent request starts, retaining active requests.
+    pub fn reset_request_peak(&self) {
+        self.peak_requests
+            .store(0, std::sync::atomic::Ordering::SeqCst);
     }
     /// Every attempted provider request, including injected failures.
     pub fn request_count(&self) -> u64 {
@@ -249,9 +286,24 @@ impl MemoryStorage {
     ) {
         let mut state = self.state.lock().await;
         assert!(state.held_listing.is_none(), "a listing is already held");
-        state.held_listing = Some(HeldListing {
+        state.held_listing = Some(HeldRequest {
             prefix,
             listed,
+            resume,
+        });
+    }
+    /// Hold a single-request creation before publication, notifying its observer.
+    pub async fn hold_next_creation(
+        &self,
+        prefix: ObjectPrefix,
+        started: tokio::sync::oneshot::Sender<()>,
+        resume: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let mut state = self.state.lock().await;
+        assert!(state.held_creation.is_none(), "a creation is already held");
+        state.held_creation = Some(HeldRequest {
+            prefix,
+            listed: started,
             resume,
         });
     }
@@ -266,7 +318,17 @@ impl MemoryStorage {
         }
     }
     async fn before_request(&self) -> Result<(), StorageError> {
+        let active = self
+            .active_requests
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let _request = MemoryRequest(&self.active_requests);
+        self.peak_requests
+            .fetch_max(active, std::sync::atomic::Ordering::SeqCst);
         self.requests.send_modify(|count| *count += 1);
+        if !self.online.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(StorageError::Injected(StorageFailure::Network));
+        }
         let (delay, failure) = {
             let mut state = self.state.lock().await;
             if std::mem::replace(&mut state.faults.expire_uploads, false) {
@@ -323,8 +385,22 @@ impl MemoryStorage {
     }
 }
 
+struct MemoryRequest<'a>(&'a std::sync::atomic::AtomicUsize);
+impl Drop for MemoryRequest<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 #[async_trait]
 impl Storage for MemoryStorage {
+    async fn account(&self) -> Result<String, StorageError> {
+        self.before().await?;
+        Ok(match &self.account {
+            Account::Owner => "owner@example.test".into(),
+            Account::Recipient(account) => account.clone(),
+        })
+    }
     async fn set_s3_credentials(&self, credentials: S3Credentials) -> Result<(), StorageError> {
         if self.config.provider() != CloudProvider::S3
             || credentials.access_key_id.is_empty()
@@ -356,6 +432,25 @@ impl Storage for MemoryStorage {
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         crate::transfer::upload_bytes(self, path, bytes, async {
             self.before().await?;
+            let mut state = self.state.lock().await;
+            let held = if state
+                .held_creation
+                .as_ref()
+                .is_some_and(|held| held.prefix.contains(path))
+            {
+                state.held_creation.take()
+            } else {
+                None
+            };
+            drop(state);
+            if let Some(held) = held {
+                held.listed
+                    .send(())
+                    .map_err(|_| StorageError::Protocol("creation observer dropped"))?;
+                held.resume
+                    .await
+                    .map_err(|_| StorageError::Protocol("creation release dropped"))?;
+            }
             let mut state = self.state.lock().await;
             if state.objects.contains_key(path) {
                 return Err(StorageError::AlreadyExists);
@@ -831,3 +926,35 @@ impl Conformance {
 #[cfg(test)]
 #[path = "test_utils_tests.rs"]
 mod tests;
+
+#[async_trait]
+impl crate::providers::StorageConnector for MemoryStorage {
+    async fn connect(
+        &self,
+        config: StorageConfig,
+        credentials: StorageCredentials,
+        _device: coven_foundation::id_source::DeviceId,
+    ) -> Result<Arc<dyn Storage>, StorageError> {
+        crate::RestoreStorage {
+            location: config.clone(),
+            credentials: credentials.clone(),
+        }
+        .validate()?;
+        if config != self.config {
+            return Err(StorageError::InvalidConfiguration(
+                "memory connector location mismatch",
+            ));
+        }
+        let mut connection = self.clone();
+        // Candidate setup must not mutate the old adapter's sign-in. Network
+        // controls and request observations still belong to this test device.
+        connection.tokens = Arc::new(Mutex::new(None));
+        connection.s3_key = Arc::new(Mutex::new(None));
+        match credentials {
+            StorageCredentials::OAuth(tokens) => connection.set_oauth_tokens(tokens).await?,
+            StorageCredentials::S3(keys) => connection.set_s3_credentials(keys).await?,
+            StorageCredentials::CloudKit => {}
+        }
+        Ok(Arc::new(connection))
+    }
+}

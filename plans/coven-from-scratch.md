@@ -199,8 +199,12 @@
     the creation timestamp without possessing the other store's key. Opening
     the entry also requires these fields to match its encrypted contents
     ([Appendix D, D9](coven-format.md#d9-sealed-objects)).
-  - Its data is all on its devices, so the app sets it up somewhere else,
-    and it uploads everything again.
+  - The app sets it up somewhere else. With the previous connection retained,
+    setup copies this store's immutable encrypted history and files, preserving
+    other devices' signatures and excluding the competing store's objects. It
+    publishes the creation object last and completes an interrupted copy before
+    committing the new location. Subsequent sync uploads waiting local writes.
+    Relocation requires the previous location to remain readable.
 - S3 has no standard way to make or delete access keys; each S3 provider
   has its own, so on S3 an admin makes and deletes members' keys in the
   provider's console, and coven says when.
@@ -4080,8 +4084,28 @@ while let Ok(values) = lost.next().await {
     `LocationOccupied`.
   - Creating uploads the store's first entry and its key sealed to this
     member; waiting writes then go up through sync like any others.
-- Setup commits the storage credentials and keys only once the connection
-  is ready; a failed setup leaves the device as it was.
+- Setup commits the storage credentials, keys, location and restore code only
+  once the connection is ready. Failure preserves their previous values and
+  the previous connection. The fixed first-entry or access-update attempt stays
+  reserved for an identical retry: its number, key ids and sealed bytes cannot
+  be reused for a different attempt (§6, §18).
+- Setup takes the first device's name, as joining and restore do (§10, §12).
+  Reconnecting an existing device keeps its registered name. Changed provider
+  access is published as `Set access` before committing the new credentials.
+- A started connection runs one complete sync at a time, immediately after a
+  local write or `sync_now`, and every 30 seconds while idle. Calls arriving
+  during a sync request another pass; stopping and closing finish the active
+  pass first.
+  - A pass applies the store log and keys, resumes operations and required
+    reloads, then reloads snapshots if they cover missing logs (§15).
+  - It uploads waiting writes, resumes operations waiting for those uploads,
+    downloads writes and completes any reload they require.
+  - File uploads and eager downloads follow. Writes authored by file uploads
+    are then uploaded before snapshot writing, retention and posted positions.
+  - Retention uses previously confirmed posted positions; the new position is
+    published last, after every preceding step has completed. File transfer
+    failures remain visible through their file status and operation reports.
+  - A fingerprint disagreement is reported without an automatic reload (§19.1).
 - A device that isn't connected still reads and writes
   ([§3](#3-guarantees)); its writes wait in `coven_uploads`.
 
@@ -4472,6 +4496,7 @@ impl CovenHandle {
     pub async fn setup_s3_storage(
         &self,
         storage: StorageConfig,
+        device_name: &str,
         access_key_id: String,
         secret_access_key: SecretText,
     ) -> Result<ConnectedStorage, StorageSetupError>;
@@ -4482,6 +4507,7 @@ impl CovenHandle {
     pub async fn setup_oauth_storage(
         &self,
         storage: StorageConfig,
+        device_name: &str,
         cancel: watch::Receiver<bool>,
     ) -> Result<ConnectedStorage, StorageSetupError>;
 
@@ -4489,6 +4515,7 @@ impl CovenHandle {
     pub async fn setup_cloudkit_storage(
         &self,
         storage: StorageConfig,
+        device_name: &str,
     ) -> Result<ConnectedStorage, StorageSetupError>;
 
     /// Checks that the storage `storage` describes can be reached and used,
@@ -4629,7 +4656,7 @@ pub enum SyncFailure {
 Example:
 
 ```rust
-match handle.setup_s3_storage(storage, access_key_id, SecretText::new(secret_access_key)).await {
+match handle.setup_s3_storage(storage, device_name, access_key_id, SecretText::new(secret_access_key)).await {
     Ok(connected) => remember(connected.storage),
     Err(error) => return show_setup_failure(error.failure()),
 }

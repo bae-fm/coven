@@ -4,6 +4,7 @@
 //! caller records upload sessions and commits credentials to key custody only
 //! after setup succeeds. Providers never read the database.
 mod config;
+mod connection;
 mod credentials;
 mod error;
 mod invitation;
@@ -17,6 +18,7 @@ mod storage;
 mod transfer;
 
 pub use config::*;
+pub use connection::StorageConnection;
 pub use credentials::*;
 pub use error::*;
 pub use invitation::StorageInvitation;

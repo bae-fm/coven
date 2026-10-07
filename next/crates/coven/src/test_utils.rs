@@ -40,6 +40,52 @@ impl TestCoven {
         Coven::builder(directory).with_keychain(self.keychain.clone())
     }
 
+    /// Open an invite or restore code through production bootstrap, with this
+    /// installation's isolated keychain and an injected provider connection.
+    pub async fn open_code(
+        &self,
+        code: &str,
+        device_name: &str,
+        tables: &[SyncedTable],
+        migrations: &[Migration],
+        layout: &StoreLayout,
+        storage: Arc<dyn coven_storage::Storage>,
+        clock: ClockRef,
+        ids: IdSourceRef,
+        cancel: &tokio::sync::watch::Receiver<bool>,
+    ) -> Result<Option<StoreDir>, BootstrapError> {
+        use crate::bootstrap::BootstrapRequest;
+        let request = match decode_code_info(code)?.kind {
+            CodeKind::Restore => BootstrapRequest::Restore {
+                code: coven_sync::read_restore_code(code)?,
+                name: device_name.into(),
+            },
+            CodeKind::Invite => BootstrapRequest::Join {
+                code: coven_sync::read_invite_code(code)?,
+                name: device_name.into(),
+            },
+        };
+        crate::bootstrap::bootstrap_device(
+            request,
+            tables,
+            migrations,
+            CovenMigrationPolicy::ApplyPending,
+            KeyCustody::Keyring,
+            IdentityCustody::Keyring,
+            None,
+            layout,
+            Arc::new(OAuthClients::new(None, None, None, clock.clone())),
+            None,
+            clock,
+            ids,
+            |_| {},
+            cancel,
+            self.keychain.clone(),
+            Some(storage),
+        )
+        .await
+    }
+
     /// Delete through the same locked directory and keychain path as `Coven`.
     pub async fn delete_store(
         &self,

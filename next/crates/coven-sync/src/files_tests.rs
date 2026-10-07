@@ -66,6 +66,7 @@ impl Fixture {
             Some(storage.clone()),
             clock.clone(),
             ids.clone(),
+            crate::TransferLimits::default(),
         );
         files.set_uploads_paused(true);
         Self {
@@ -92,6 +93,7 @@ impl Fixture {
             Some(self.storage.clone()),
             self.clock.clone(),
             self.ids.clone(),
+            crate::TransferLimits::default(),
         );
         self.files.set_uploads_paused(true);
     }
@@ -268,6 +270,7 @@ async fn budgets_pins_eviction_and_second_device_reads() {
         Some(f.storage.clone()),
         second.clock.clone(),
         second.ids.clone(),
+        crate::TransferLimits::default(),
     );
     let ref2 = second.database.file_ref("files", "first").await.unwrap();
     assert_eq!(files.read_file(&ref2).await.unwrap(), bytes);
@@ -326,6 +329,7 @@ async fn eager_commit_observation_handles_download_apply() {
         Some(a.storage.clone()),
         b.clock.clone(),
         b.ids.clone(),
+        crate::TransferLimits::default(),
     );
     let mut status = files.subscribe_eager_cache_fill_status();
     for write in a.database.test_queued_writes().await.unwrap() {
@@ -566,6 +570,7 @@ async fn whole_reads_and_pins_check_the_row_hash_after_authenticating_chunks() {
         Some(a.storage.clone()),
         b.clock.clone(),
         b.ids.clone(),
+        crate::TransferLimits::default(),
     );
     let file = b.database.file_ref("files", "hash").await.unwrap();
     let stream = files.open_file_stream(&file).await.unwrap();
@@ -688,4 +693,65 @@ async fn a_file_from_a_newer_format_requests_an_update() {
     };
     assert!(matches!(error, FileReadError::UpdateRequired), "{error}");
     f.close().await;
+}
+
+#[tokio::test]
+async fn a_sync_preserves_eager_cancellation_and_retries_network_failures() {
+    let a = Fixture::new(
+        Provenance::AppProvided,
+        Uploads::WhenAsked,
+        CacheFill::CacheLazy,
+    )
+    .await;
+    let file = a.uploaded("eager", vec![72; CHUNK * 2]).await;
+    let b = Fixture::new(
+        Provenance::AppProvided,
+        Uploads::WhenAsked,
+        CacheFill::CacheEager,
+    )
+    .await;
+    b.files
+        .set_storage(Some(a.storage.clone()), std::future::ready(Ok(())))
+        .await
+        .unwrap();
+    a.storage.set_online(false);
+    let mut status = b.files.subscribe_eager_cache_fill_status();
+    for write in a.database.test_queued_writes().await.unwrap() {
+        b.database.apply_downloaded(write.into()).await.unwrap();
+    }
+    status
+        .wait_for(|s| matches!(s, EagerCacheFillStatus::Failed { .. }))
+        .await
+        .unwrap();
+    a.storage.set_online(true);
+    b.files.sync_files().await.unwrap();
+    assert_eq!(
+        b.files.inner.database.missing_bytes(&file).await.unwrap(),
+        0
+    );
+    b.files.evict_file(&file).await.unwrap();
+    a.storage
+        .set_faults(coven_storage::test_utils::Faults {
+            delay: Duration::from_millis(50),
+            ..coven_storage::test_utils::Faults::none()
+        })
+        .await;
+    // A newly observed version is eligible; cancel after its first request.
+    let second = a.uploaded("another", vec![73; CHUNK * 2]).await;
+    for write in a.database.test_queued_writes().await.unwrap() {
+        b.database.apply_downloaded(write.into()).await.unwrap();
+    }
+    status
+        .wait_for(|s| matches!(s, EagerCacheFillStatus::Downloading(_)))
+        .await
+        .unwrap();
+    b.files.cancel_eager_cache_fill();
+    status
+        .wait_for(|s| matches!(s, EagerCacheFillStatus::Cancelled(_)))
+        .await
+        .unwrap();
+    b.files.sync_files().await.unwrap();
+    assert!(b.files.inner.database.missing_bytes(&second).await.unwrap() > 0);
+    b.close().await;
+    a.close().await;
 }

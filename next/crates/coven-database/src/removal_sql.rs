@@ -93,8 +93,46 @@ pub(crate) fn constraints(
     values: &AppValues,
     stamp: impl Fn(coven_merge::WriteId) -> coven_merge::Timestamp,
 ) -> Result<Constraints, DbError> {
-    evaluate_values(db, table, values)?;
+    let values = unique_values(db, table, rules, values)?;
     let failed_checks = checks(db, table, rules)?;
+    let mut unique = std::collections::BTreeMap::new();
+    for claim in &rules.unique {
+        let Some(value) = values.get(&claim.identity) else {
+            continue;
+        };
+        let timestamp = claim
+            .dependencies
+            .iter()
+            .filter_map(|c| state.cells().get(c).map(|cell| cell.write))
+            .map(&stamp)
+            .max()
+            .unwrap_or_else(|| {
+                let write = state.generations()[&state.generation()];
+                stamp(write)
+            });
+        unique.insert(
+            claim.identity.clone(),
+            UniqueClaim {
+                value: value.clone(),
+                timestamp,
+            },
+        );
+    }
+    Ok(Constraints {
+        failed_checks,
+        unique,
+    })
+}
+
+/// Materialization needs the prior SQL values' occupied unique slots, even when
+/// a snapshot has removed that row's merge state. No write stamp participates.
+pub(crate) fn unique_values(
+    db: &DatabaseConnection,
+    table: &TableSchema,
+    rules: &TableRules,
+    values: &AppValues,
+) -> Result<std::collections::BTreeMap<coven_merge::UniqueConstraint, Vec<u8>>, DbError> {
+    evaluate_values(db, table, values)?;
     let mut unique = std::collections::BTreeMap::new();
     for claim in &rules.unique {
         let values = db.query(
@@ -119,23 +157,12 @@ pub(crate) fn constraints(
         if values.iter().any(|v| matches!(v, Value::Null)) {
             continue;
         }
-        let timestamp = claim
-            .dependencies
-            .iter()
-            .filter_map(|c| state.cells().get(c).map(|cell| cell.write))
-            .map(&stamp)
-            .max()
-            .unwrap_or_else(|| {
-                let write = state.generations()[&state.generation()];
-                stamp(write)
-            });
-        let value = equality_key(&values, &claim.collations)?;
-        unique.insert(claim.identity.clone(), UniqueClaim { value, timestamp });
+        unique.insert(
+            claim.identity.clone(),
+            equality_key(&values, &claim.collations)?,
+        );
     }
-    Ok(Constraints {
-        failed_checks,
-        unique,
-    })
+    Ok(unique)
 }
 
 pub(crate) fn permits(

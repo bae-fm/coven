@@ -160,6 +160,13 @@ pub trait Storage: Send + Sync {
     }
     /// This provider's nonsecret location settings.
     fn config(&self) -> StorageConfig;
+    /// The signed-in sharing account, for the member's store-log access entry.
+    /// S3 uses its supplied access key id instead of an account lookup.
+    async fn account(&self) -> Result<String, StorageError> {
+        Err(StorageError::InvalidConfiguration(
+            "provider has no sharing account",
+        ))
+    }
     /// Largest complete encrypted body sent in one request, in bytes. Larger
     /// create-once objects use resumable or multipart uploads, for every path kind.
     /// Callers retaining sessions across crashes use `begin_upload` and record them.

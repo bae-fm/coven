@@ -1,6 +1,6 @@
 //! One upload, download or position-posting step; scheduling belongs to the caller.
 
-use crate::{DeviceActivity, SyncError, SyncFailure, SyncReport, WaitingWrite};
+use crate::{DeviceActivity, SyncError, SyncFailure, SyncResults, WaitingWrite};
 use coven_crypto::custody::{MemberKeyCustody, StoreKeyCustody};
 use coven_database::{ApplyOutcome, Database, DbError, WriteWait};
 use coven_format::{
@@ -25,7 +25,7 @@ mod upload;
 /// by the opening composition root. Calls on one owner are serialized by `&mut
 /// self`; each step completes its database work before returning.
 pub struct DeviceLogSync {
-    storage: Arc<dyn Storage>,
+    storage: Option<Arc<dyn Storage>>,
     database: Database,
     store_keys: Arc<dyn StoreKeyCustody>,
     member_keys: Arc<dyn MemberKeyCustody>,
@@ -40,11 +40,29 @@ impl DeviceLogSync {
         member_keys: Arc<dyn MemberKeyCustody>,
     ) -> Self {
         Self {
-            storage,
+            storage: Some(storage),
             database,
             store_keys,
             member_keys,
         }
+    }
+
+    /// Compose device-log work before a provider has connected.
+    pub fn disconnected(
+        database: Database,
+        store_keys: Arc<dyn StoreKeyCustody>,
+        member_keys: Arc<dyn MemberKeyCustody>,
+    ) -> Self {
+        Self {
+            storage: None,
+            database,
+            store_keys,
+            member_keys,
+        }
+    }
+
+    pub(crate) fn set_storage(&mut self, storage: Option<Arc<dyn Storage>>) {
+        self.storage = storage;
     }
 
     /// Publish queued writes in number order, fixing the seal before the first
@@ -111,7 +129,7 @@ impl DeviceLogSync {
     /// List device logs and apply ready writes until no further listed write can
     /// advance. Damage blocks that device's successors, while independent devices
     /// continue. A later call rereads damaged objects and retains waiting start times.
-    pub async fn download_writes(&mut self) -> Result<SyncReport, SyncError> {
+    pub async fn download_writes(&mut self) -> Result<SyncResults, SyncError> {
         let local = self.database.local_store_log().await?;
         let state = self.database.sync_state(Vec::new()).await?;
         let member = self
@@ -133,7 +151,13 @@ impl DeviceLogSync {
             .ok_or(SyncError::KeyUnavailable(key))?;
         let mut objects = BTreeMap::new();
         let mut devices: BTreeSet<_> = local.log.replay.state.devices.keys().copied().collect();
-        for object in self.storage.list(&ObjectPrefix::device_logs()).await? {
+        for object in self
+            .storage
+            .as_deref()
+            .ok_or(SyncError::NoStorage)?
+            .list(&ObjectPrefix::device_logs())
+            .await?
+        {
             let (device, number) = object.path.write_position().expect("device-log prefix");
             devices.insert(device);
             let write = WriteId {
@@ -144,7 +168,7 @@ impl DeviceLogSync {
                 objects.insert(write, object);
             }
         }
-        let mut report = SyncReport::default();
+        let mut report = SyncResults::default();
         let mut damaged = BTreeSet::new();
         let mut waiting = BTreeMap::new();
         let mut positions = state.positions;
@@ -261,6 +285,8 @@ impl DeviceLogSync {
             &Object::PostedPositions(positions).encode()?,
         )?;
         self.storage
+            .as_deref()
+            .ok_or(SyncError::NoStorage)?
             .replace(&path, &prefix.encode_chunk(&sealed)?)
             .await?;
         Ok(true)
@@ -270,17 +296,29 @@ impl DeviceLogSync {
     /// Only equal write positions, store-log positions, schema versions and
     /// fingerprint keys are comparable. Damage counts as no post (§19.1).
     /// No database state is changed and no recovery operation is started.
-    pub async fn compare_fingerprints(&mut self) -> Result<SyncReport, SyncError> {
-        let mut report = SyncReport::default();
+    pub async fn compare_fingerprints(&mut self) -> Result<SyncResults, SyncError> {
+        let mut report = SyncResults::default();
         let Some(own) = self.current_positions().await? else {
             return Ok(report);
         };
         let ring = self.store_keys.unlock()?;
-        for object in self.storage.list(&ObjectPrefix::positions()).await? {
+        for object in self
+            .storage
+            .as_deref()
+            .ok_or(SyncError::NoStorage)?
+            .list(&ObjectPrefix::positions())
+            .await?
+        {
             if object.path.device() == Some(own.device) {
                 continue;
             }
-            let bytes = match self.storage.read(&object.path).await {
+            let bytes = match self
+                .storage
+                .as_deref()
+                .ok_or(SyncError::NoStorage)?
+                .read(&object.path)
+                .await
+            {
                 Ok(bytes) => bytes,
                 Err(coven_storage::StorageError::NotFound) => {
                     tracing::debug!(
@@ -337,7 +375,7 @@ impl DeviceLogSync {
         Ok(report)
     }
 
-    async fn current_positions(&self) -> Result<Option<PostedPositions>, SyncError> {
+    pub(crate) async fn current_positions(&self) -> Result<Option<PostedPositions>, SyncError> {
         let local = self.database.local_store_log().await?;
         let member = self
             .member_keys

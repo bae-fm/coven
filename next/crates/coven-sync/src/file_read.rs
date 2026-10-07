@@ -203,7 +203,8 @@ impl UploadedFile {
         let coven_format::file_reference::UploadedFileReference { device, id, key } =
             file.uploaded()?.ok_or(DbError::DamagedDatabase)?;
         let path = ObjectPath::file(device, id);
-        let _guard = owner.cache.lock().await;
+        let _file = owner.lock_file(&file).await;
+        let _guard = owner.cache.read().await;
         let cached = owner.database.cached(&file, -1).await?;
         let bytes = match &cached {
             Some(bytes) => bytes.clone(),
@@ -295,7 +296,7 @@ impl UploadedFile {
             return Err(self.integrity());
         }
         writer.finish().await?;
-        let _cache = self.owner.cache.lock().await;
+        let _cache = self.owner.cache.write().await;
         reservation.publish(&self.file).await?;
         Ok(())
     }
@@ -352,8 +353,8 @@ impl UploadedFile {
         }
         Ok(result)
     }
-    // The cache lock protects fetch/publication from eviction and coalesces
-    // concurrent readers of the same missing chunks without duplicate requests.
+    // Reads of one file coalesce; independent files can fetch concurrently.
+    // The shared cache guard excludes eviction and store close during a fetch.
     async fn chunks(
         &self,
         first: u64,
@@ -361,7 +362,8 @@ impl UploadedFile {
         destination: ChunkDestination,
     ) -> Result<(u64, Vec<OpenedChunk>), FileReadError> {
         self.owner.check_open()?;
-        let _guard = self.owner.cache.lock().await;
+        let _file = self.owner.lock_file(&self.file).await;
+        let _guard = self.owner.cache.read().await;
         if let Some(bytes) = self.owner.database.cached(&self.file, first as i64).await? {
             let plain = self
                 .header

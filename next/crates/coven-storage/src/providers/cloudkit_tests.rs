@@ -67,6 +67,13 @@ impl Bridge {
 }
 #[async_trait]
 impl CloudKitOps for Bridge {
+    async fn account(&self, location: &StorageConfig) -> Result<String, StorageError> {
+        assert_eq!(location, &config());
+        Ok(match &self.recipient {
+            Some(account) => account.clone(),
+            None => "owner".into(),
+        })
+    }
     async fn is_owner(&self, location: &StorageConfig) -> Result<bool, StorageError> {
         assert_eq!(location, &config());
         Ok(!self.non_owner)
@@ -677,4 +684,19 @@ async fn forgotten_native_sessions_cannot_abort_their_replacements() {
     storage.finish_upload(&mut next).await.unwrap();
     storage.abort_upload(&expired).await.unwrap();
     assert_eq!(storage.read(&path).await.unwrap(), b"data");
+}
+
+#[tokio::test]
+async fn account_identifies_the_signed_in_member_even_when_they_do_not_own_the_zone() {
+    let bridge = Bridge::new(
+        MemoryStorage::new(
+            config(),
+            Arc::new(coven_foundation::clock::FixedClock::new(
+                std::time::SystemTime::UNIX_EPOCH,
+            )),
+        )
+        .unwrap(),
+    );
+    let recipient = CloudKitStorage::new(config(), Arc::new(bridge.recipient("member"))).unwrap();
+    assert_eq!(recipient.account().await.unwrap(), "member");
 }

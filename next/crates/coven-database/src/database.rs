@@ -70,6 +70,28 @@ struct DatabaseInner {
 }
 
 impl Database {
+    /// Observe committed changes to the outgoing write queue. Register before
+    /// the first sync to include writes committed while a pass is running.
+    pub fn sync_changes(&self) -> crate::DatabaseChanges {
+        let slot = self.inner.read().expect("database lock poisoned");
+        let reads = vec![crate::observation::TableRead {
+            table: "coven_uploads".into(),
+            columns: BTreeSet::new(),
+            keys: crate::key_scope::KeyScope::All,
+        }];
+        let commits = match slot.as_ref() {
+            Some(inner) => inner.observer.subscribe(),
+            None => CommitSubscription::closed(),
+        };
+        commits.begin();
+        commits.finish(reads.clone());
+        crate::DatabaseChanges {
+            commits,
+            reads,
+            first: true,
+        }
+    }
+
     /// Publish an explicitly recovered database after sync commits its snapshot
     /// reload. Until then, ordinary writer and reader opens refuse the store.
     pub async fn finish_recovery(&self) -> Result<(), DbError> {

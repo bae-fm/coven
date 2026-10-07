@@ -34,6 +34,9 @@ pub enum CloudKitUploadStatus {
 /// classification. None of these calls starts unowned background work.
 #[async_trait]
 pub trait CloudKitOps: Send + Sync {
+    /// The signed-in participant identity used by grants and store membership.
+    /// This identifies the caller even when another account owns the zone.
+    async fn account(&self, location: &StorageConfig) -> Result<String, StorageError>;
     /// Whether the signed-in Apple account owns this store's shared zone.
     async fn is_owner(&self, location: &StorageConfig) -> Result<bool, StorageError>;
     /// Largest encrypted object this bridge saves in one native call. Must be
@@ -163,6 +166,13 @@ impl CloudKitStorage {
 }
 #[async_trait]
 impl Storage for CloudKitStorage {
+    async fn account(&self) -> Result<String, StorageError> {
+        let account = self.ops.account(&self.config).await?;
+        if account.is_empty() {
+            return Err(StorageError::AccountIdUnavailable);
+        }
+        Ok(account)
+    }
     fn config(&self) -> StorageConfig {
         self.config.clone()
     }

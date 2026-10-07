@@ -341,19 +341,17 @@ impl<'a> DatabaseRemovalView<'a> {
         Ok(self.remember(id, row))
     }
 
-    pub(crate) fn constraints_for_values(
+    pub(crate) fn unique_values(
         &self,
         id: &RowId,
         values: &AppValues,
-    ) -> Result<Constraints, DbError> {
+    ) -> Result<BTreeMap<coven_merge::UniqueConstraint, Vec<u8>>, DbError> {
         let table = self.schema.table(&id.table);
-        crate::removal_sql::constraints(
+        crate::removal_sql::unique_values(
             self.database,
             table,
             &self.schema.rules[&table.name],
-            &self.state(id)?,
             values,
-            |write| self.stamp(write),
         )
     }
 

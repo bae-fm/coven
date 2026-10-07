@@ -21,8 +21,8 @@ pub use coven::Coven;
 pub use coven_sync::{decode_code_info, CodeError, CodeInfo, CodeKind};
 pub use coven_sync::{
     DrainOutcome, EagerCacheFillStatus, FileRangeStream, FileReadError, FileStream, PinProgress,
-    QueuedUpload, RecordedUploadFailure, RowsPinnedLiveQuery, UploadFailure, UploadFailures,
-    UploadPhase, UploadQueue, UploadsLiveQuery,
+    QueuedUpload, RecordedUploadFailure, RowsPinnedLiveQuery, TransferLimits, UploadFailure,
+    UploadFailures, UploadPhase, UploadQueue, UploadsLiveQuery,
 };
 pub use error::{RecoveryError, StoreCreationError, StoreDeletionError};
 pub use handle::CovenHandle;
@@ -78,5 +78,14 @@ pub use coven_storage::{MemberRemoval, ProviderSignOut, RetainedAccess, Retained
 pub use coven_sync::{
     AccessKeyToDelete, BlockedOperation, Circle, CircleError, CircleMemberInfo, Disagreement,
     DroppedEntry, Invite, InviteAccess, JoinRequest, MemberInfo, OperationError, OperationId,
-    OperationKind, StartedBy, StoreLogChange, SyncError, SyncFailure, SyncReport,
+    OperationKind, StartedBy, StoreLogChange, SyncError, SyncFailure, SyncReport, SyncStatus,
 };
+
+mod storage;
+pub use coven_storage::providers::StorageConnector;
+pub use coven_storage::{StorageSetupError, StorageSetupFailure};
+pub use storage::{ConnectedStorage, StoreKeyState, StoreKeyUnlockError};
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod tests;

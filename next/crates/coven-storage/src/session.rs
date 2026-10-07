@@ -98,6 +98,10 @@ pub(crate) struct S3Part {
 }
 
 impl UploadSession {
+    /// Whether this recorded transfer belongs to the connected location.
+    pub fn is_at(&self, location: &StorageConfig) -> bool {
+        &self.location == location
+    }
     /// The destination encrypted-object path.
     pub fn path(&self) -> &ObjectPath {
         &self.path

@@ -731,3 +731,44 @@ async fn invalid_account_grants_leave_the_fake_unchanged() {
         assert!(MemoryStorage::for_recipient(&owner, "").is_err());
     }
 }
+
+#[tokio::test]
+async fn a_candidate_connection_does_not_replace_the_active_connections_tokens() {
+    use crate::providers::StorageConnector;
+    use coven_foundation::{clock::FixedClock, id_source::DeviceId};
+    let storage = MemoryStorage::new(
+        StorageConfig::Dropbox {
+            namespace_id: "store".into(),
+        },
+        Arc::new(FixedClock::new(std::time::UNIX_EPOCH)),
+    )
+    .unwrap();
+    let tokens = |expires_at| {
+        StorageCredentials::OAuth(OAuthTokens {
+            access_token: coven_crypto::SecretText::new("token".into()),
+            refresh_token: None,
+            expires_at,
+        })
+    };
+    let active = storage
+        .connect(storage.config(), tokens(None), DeviceId(1))
+        .await
+        .unwrap();
+    let candidate = storage
+        .connect(
+            storage.config(),
+            tokens(Some(std::time::UNIX_EPOCH)),
+            DeviceId(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        candidate
+            .list(&ObjectPrefix::all())
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageFailure::Authentication
+    );
+    active.list(&ObjectPrefix::all()).await.unwrap();
+}

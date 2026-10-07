@@ -35,6 +35,49 @@ impl OAuthSession {
             clock,
         })
     }
+    /// Resolve the signed-in account through the provider's own identity API.
+    pub async fn account(&self) -> Result<String, StorageError> {
+        let (method, url) = match self.provider {
+            CloudProvider::GoogleDrive => (
+                Method::GET,
+                "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)",
+            ),
+            CloudProvider::Dropbox => (
+                Method::POST,
+                "https://api.dropboxapi.com/2/users/get_current_account",
+            ),
+            CloudProvider::OneDrive => (
+                Method::GET,
+                "https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName",
+            ),
+            _ => {
+                return Err(StorageError::InvalidConfiguration(
+                    "provider does not use OAuth",
+                ))
+            }
+        };
+        let value = json(
+            self.provider,
+            self.send(method, url, &[], Body::Empty, true).await?,
+        )
+        .await?;
+        let account = match self.provider {
+            CloudProvider::GoogleDrive => string(&value["user"], "emailAddress")?,
+            CloudProvider::Dropbox => string(&value, "email")?,
+            CloudProvider::OneDrive => {
+                if value["mail"].is_null() {
+                    string(&value, "userPrincipalName")?
+                } else {
+                    string(&value, "mail")?
+                }
+            }
+            _ => unreachable!("checked OAuth provider"),
+        };
+        if account.is_empty() {
+            return Err(StorageError::Protocol("empty signed-in account"));
+        }
+        Ok(account.to_ascii_lowercase())
+    }
     /// Install tokens after the facade has committed their refreshed value to custody.
     pub async fn set_tokens(&self, tokens: OAuthTokens) {
         *self.tokens.write().await = tokens;

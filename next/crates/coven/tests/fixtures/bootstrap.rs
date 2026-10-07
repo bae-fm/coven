@@ -168,8 +168,9 @@ impl Owner {
             Some(storage.clone()),
             clock.clone(),
             ids,
+            TransferLimits::default(),
         );
-        let operations = Operations::new(sync, files.clone());
+        let operations = Operations::new(sync, files.clone(), writes);
         Self {
             _root: root,
             directory,

@@ -283,6 +283,10 @@ fn validate_download_url(api: &str, target: &str) -> Result<(), StorageError> {
 }
 #[async_trait]
 impl Storage for OneDriveStorage {
+    async fn account(&self) -> Result<String, StorageError> {
+        self.session.account().await
+    }
+
     fn config(&self) -> StorageConfig {
         self.config.clone()
     }

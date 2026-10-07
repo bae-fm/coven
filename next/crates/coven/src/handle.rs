@@ -14,6 +14,8 @@ pub struct CovenHandle {
     database: Database,
     operations: coven_sync::Operations,
     files: coven_sync::Files,
+    sync: coven_sync::SyncLoop,
+    storage: Arc<crate::storage::StorageConnections>,
     codes: coven_sync::RestoreCodes,
     custody: Arc<Mutex<Option<StoreCustody>>>,
 }
@@ -24,15 +26,99 @@ impl CovenHandle {
         custody: StoreCustody,
         operations: coven_sync::Operations,
         files: coven_sync::Files,
+        sync: coven_sync::SyncLoop,
+        storage: Arc<crate::storage::StorageConnections>,
         codes: coven_sync::RestoreCodes,
     ) -> Self {
         Self {
             database,
             operations,
             files,
+            sync,
+            storage,
             codes,
             custody: Arc::new(Mutex::new(Some(custody))),
         }
+    }
+
+    /// Limits captured when each file upload drain or pin starts.
+    pub fn transfer_limits(&self) -> TransferLimits {
+        self.files.transfer_limits()
+    }
+    /// Set limits for future transfers; active batches retain their initial limits.
+    pub fn set_transfer_limits(&self, limits: TransferLimits) {
+        self.files.set_transfer_limits(limits);
+    }
+
+    /// Set up and connect an S3 location using this member's own access key.
+    pub async fn setup_s3_storage(
+        &self,
+        storage: StorageConfig,
+        device_name: &str,
+        access_key_id: String,
+        secret_access_key: SecretText,
+    ) -> Result<ConnectedStorage, StorageSetupError> {
+        self.storage
+            .setup_s3(storage, device_name, access_key_id, secret_access_key)
+            .await
+    }
+    /// Sign in and set up a Google Drive, Dropbox or OneDrive location.
+    pub async fn setup_oauth_storage(
+        &self,
+        storage: StorageConfig,
+        device_name: &str,
+        cancel: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<ConnectedStorage, StorageSetupError> {
+        self.storage.setup_oauth(storage, device_name, cancel).await
+    }
+    /// Set up an iCloud location through the configured native bridge.
+    pub async fn setup_cloudkit_storage(
+        &self,
+        storage: StorageConfig,
+        device_name: &str,
+    ) -> Result<ConnectedStorage, StorageSetupError> {
+        self.storage.setup_cloudkit(storage, device_name).await
+    }
+    /// Check provider operations using this device's stored credentials.
+    pub async fn probe_storage(&self, storage: &StorageConfig) -> Result<(), SyncError> {
+        self.storage.probe(storage).await
+    }
+    /// Open this member's sealed keys and connect without starting the loop.
+    pub async fn unlock_store_key(&self) -> Result<ConnectedStorage, StoreKeyUnlockError> {
+        self.storage.unlock().await
+    }
+    /// Whether custody holds opened store keys.
+    pub fn store_key_state(&self) -> Result<StoreKeyState, KeyError> {
+        self.storage.key_state()
+    }
+    /// Remove credentials, then finish the current pass and disconnect.
+    pub async fn disconnect_storage(&self) -> Result<(), SyncError> {
+        self.storage.disconnect().await
+    }
+    /// Connect using this device's configured provider and start the loop.
+    pub async fn connect_sync(&self) -> Result<(), SyncError> {
+        self.storage.connect().await
+    }
+
+    /// Start synchronization on the connected store. Without storage this is a no-op.
+    pub async fn start_sync(&self) -> Result<(), SyncError> {
+        self.sync.start().await
+    }
+    /// Finish the active pass and stop, retaining the idle connection.
+    pub fn stop_sync(&self) {
+        self.sync.stop();
+    }
+    /// Finish the active pass and release the connection.
+    pub fn disconnect_sync(&self) {
+        self.sync.disconnect();
+    }
+    /// Request a pass immediately while started.
+    pub fn sync_now(&self) {
+        self.sync.sync_now();
+    }
+    /// Observe the current status and every subsequent status change.
+    pub fn subscribe_sync_status(&self) -> tokio::sync::watch::Receiver<SyncStatus> {
+        self.sync.subscribe()
     }
 
     /// This member's current restore code, for their other devices (§12.1).
@@ -262,16 +348,7 @@ impl CovenHandle {
     /// Removes the store keys from key custody. A failed removal leaves the
     /// custody failure visible to the caller; member identity is retained.
     pub async fn forget_store_keys(&self) -> Result<(), KeyError> {
-        let custody = self.custody.clone();
-        crate::coven::blocking(move || {
-            custody
-                .lock()
-                .expect("custody lock poisoned")
-                .as_mut()
-                .ok_or(KeyError::StoreClosed)?
-                .forget_store_keys()
-        })
-        .await
+        self.storage.forget_store_keys().await
     }
 
     /// Keeps an app secret, such as an API token, in the same keychain and
@@ -348,6 +425,11 @@ impl CovenHandle {
     pub async fn close(&self) -> Result<(), DbError> {
         let handle = self.clone();
         crate::coven::completion(tokio::spawn(async move {
+            handle.storage.close().await;
+            match handle.sync.close().await {
+                Ok(()) | Err(SyncError::Database(DbError::StoreClosed)) => (),
+                Err(error) => return Err(DbError::OperationWorker(Box::new(error))),
+            }
             handle.codes.close().await;
             match handle.operations.close().await {
                 Ok(()) | Err(SyncError::Database(DbError::StoreClosed)) => (),
@@ -362,6 +444,13 @@ impl CovenHandle {
             handle.database.close().await
         }))
         .await
+    }
+    /// Inspect the actual synchronization state in application integration tests.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn test_sync_state(
+        &self,
+    ) -> Result<Option<coven_format::objects::PostedPositions>, SyncError> {
+        self.operations.test_positions().await
     }
 }
 

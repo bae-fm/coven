@@ -7,6 +7,7 @@ use coven_crypto::custody::{
 };
 use coven_database::DatabaseBuilder;
 use coven_foundation::files::StoreFile;
+use coven_storage::Storage;
 use std::sync::Arc;
 
 /// The choices collected before opening a store (§20.1).
@@ -16,6 +17,10 @@ pub struct CovenBuilder {
     ids: IdSourceRef,
     clock: ClockRef,
     storage: Option<Arc<dyn coven_storage::Storage>>,
+    connector: Option<Arc<dyn StorageConnector>>,
+    limits: TransferLimits,
+    oauth: Option<OAuthClients>,
+    cloudkit: Option<Arc<dyn CloudKitOps>>,
     keys: KeyCustody,
     identity: IdentityCustody,
     #[cfg(any(test, feature = "test-utils"))]
@@ -35,6 +40,10 @@ impl CovenBuilder {
             ids,
             clock,
             storage: None,
+            connector: None,
+            oauth: None,
+            limits: TransferLimits::default(),
+            cloudkit: None,
             keys: KeyCustody::Keyring,
             identity: IdentityCustody::Keyring,
             #[cfg(any(test, feature = "test-utils"))]
@@ -75,6 +84,33 @@ impl CovenBuilder {
     /// Provider setup and credential custody remain with their existing owners.
     pub fn storage(mut self, storage: Arc<dyn coven_storage::Storage>) -> Self {
         self.storage = Some(storage);
+        self
+    }
+
+    /// Supply provider construction for setup and reconnect; tests can use memory storage.
+    pub fn storage_connector(mut self, connector: Arc<dyn StorageConnector>) -> Self {
+        self.connector = Some(connector);
+        self
+    }
+    /// Configure this app's own sign-in clients. Coven supplies no client ids.
+    pub fn oauth_clients(mut self, clients: OAuthClients) -> Self {
+        self.oauth = Some(clients);
+        self
+    }
+    /// Supply the app's native CloudKit bridge.
+    pub fn apply_cloudkit_ops(mut self, ops: Option<Arc<dyn CloudKitOps>>) -> Self {
+        self.cloudkit = ops;
+        self
+    }
+
+    /// Limit file uploads running together; defaults to one.
+    pub fn max_concurrent_uploads(mut self, n: std::num::NonZeroUsize) -> Self {
+        self.limits.uploads = n;
+        self
+    }
+    /// Limit downloads in each pin call; defaults to one.
+    pub fn max_concurrent_downloads(mut self, n: std::num::NonZeroUsize) -> Self {
+        self.limits.downloads = n;
         self
     }
 
@@ -123,6 +159,7 @@ impl CovenBuilder {
         let ids = self.ids.clone();
         let clock = self.clock.clone();
         let storage = self.storage.clone();
+        let limits = self.limits;
         let (database, keys) = crate::coven::blocking(move || self.read_graph()).await?;
         let database = database.open_read_only().await?;
         let files = coven_sync::Files::new(
@@ -131,6 +168,7 @@ impl CovenBuilder {
             storage,
             clock,
             ids,
+            limits,
         );
         Ok(CovenReadHandle::new(database, keys, files))
     }
@@ -164,6 +202,7 @@ impl CovenBuilder {
             settings.id,
             keychain.clone(),
         );
+        let device = lock.settings()?.device_id;
         Ok(OpeningStore {
             database: self.database,
             lock,
@@ -175,11 +214,25 @@ impl CovenBuilder {
                     keychain.clone(),
                 ),
                 keychain,
+                connector: match self.connector {
+                    Some(connector) => connector,
+                    None => Arc::new(coven_storage::providers::ProviderConnector::new(
+                        self.clock.clone(),
+                        self.ids.clone(),
+                        self.cloudkit,
+                    )),
+                },
+                oauth: self.oauth,
+                limits: self.limits,
+                device,
+                initial_name: settings.name,
                 keys,
                 identity,
                 clock: self.clock,
                 ids: self.ids,
-                storage: self.storage,
+                storage: self
+                    .storage
+                    .map(|storage| Arc::new(coven_storage::StorageConnection::new(storage))),
             },
         })
     }
@@ -248,14 +301,19 @@ struct OpeningStore {
 }
 
 struct OpeningOwners {
+    initial_name: String,
+    limits: TransferLimits,
+    keychain: Arc<StoreKeychain>,
+    connector: Arc<dyn StorageConnector>,
+    oauth: Option<OAuthClients>,
+    device: DeviceId,
     directory: StoreDir,
     custody: StoreCustody,
-    keychain: Arc<StoreKeychain>,
     keys: Arc<dyn StoreKeyCustody>,
     identity: Arc<dyn MemberKeyCustody>,
     clock: ClockRef,
     ids: IdSourceRef,
-    storage: Option<Arc<dyn coven_storage::Storage>>,
+    storage: Option<Arc<coven_storage::StorageConnection>>,
 }
 
 impl OpeningStore {
@@ -333,23 +391,65 @@ impl OpeningOwners {
         database: coven_database::Database,
         sync: coven_sync::StoreLogSync,
     ) -> CovenHandle {
+        let writes = match &self.storage {
+            Some(storage) => coven_sync::DeviceLogSync::new(
+                storage.clone(),
+                database.clone(),
+                self.keys.clone(),
+                self.identity.clone(),
+            ),
+            None => coven_sync::DeviceLogSync::disconnected(
+                database.clone(),
+                self.keys.clone(),
+                self.identity.clone(),
+            ),
+        };
         let files = coven_sync::Files::new(
             coven_database::FileDatabase::new(database.clone()),
             self.directory.clone(),
-            self.storage.clone(),
-            self.clock,
-            self.ids,
+            self.storage
+                .clone()
+                .map(|storage| storage as Arc<dyn coven_storage::Storage>),
+            self.clock.clone(),
+            self.ids.clone(),
+            self.limits,
         );
-        let operations = coven_sync::Operations::new(sync, files.clone());
+        let operations = coven_sync::Operations::new(sync, files.clone(), writes);
         let codes = coven_sync::RestoreCodes::new(
             database.clone(),
             self.identity,
             self.keychain,
-            coven_storage::StorageSettings::new(self.directory),
-            self.storage,
+            coven_storage::StorageSettings::new(self.directory.clone()),
             operations.clone(),
+            self.oauth.clone(),
         );
-        CovenHandle::new(database, self.custody, operations, files, codes)
+        let sync = coven_sync::SyncLoop::new(
+            operations.clone(),
+            codes.clone(),
+            database.sync_changes(),
+            self.clock.clone(),
+            self.storage,
+        );
+        let storage = Arc::new(crate::storage::StorageConnections::new(
+            codes.clone(),
+            self.initial_name,
+            self.keys,
+            self.connector,
+            self.oauth,
+            sync.clone(),
+            self.device,
+            self.ids,
+            self.clock,
+        ));
+        CovenHandle::new(
+            database,
+            self.custody,
+            operations,
+            files,
+            sync,
+            storage,
+            codes,
+        )
     }
 }
 

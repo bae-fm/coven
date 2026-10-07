@@ -205,7 +205,7 @@ async fn writing_resumes_after_each_recorded_step_with_identical_ciphertext() {
                     .operation_step(
                         &record,
                         Data::read(&record).unwrap(),
-                        &mut crate::SyncReport::default()
+                        &mut crate::SyncResults::default()
                     )
                     .await
                     .unwrap(),
@@ -466,7 +466,7 @@ async fn selected_snapshot(device: &mut Device) -> ObjectPath {
         .unwrap();
     device
         .sync
-        .operation_step(&record, data, &mut crate::SyncReport::default())
+        .operation_step(&record, data, &mut crate::SyncResults::default())
         .await
         .unwrap();
     let record = device
@@ -737,7 +737,7 @@ async fn reload_reselects_after_store_log_changes_and_preserves_interleaved_app_
             .find(|r| r.id == id)
             .unwrap();
     a.sync
-        .operation_step(&record, data, &mut crate::SyncReport::default())
+        .operation_step(&record, data, &mut crate::SyncResults::default())
         .await
         .unwrap();
     assert!(matches!(
@@ -771,7 +771,7 @@ async fn reload_reselects_after_store_log_changes_and_preserves_interleaved_app_
         .operation_step(
             &record,
             Data::read(&record).unwrap(),
-            &mut crate::SyncReport::default(),
+            &mut crate::SyncResults::default(),
         )
         .await
         .unwrap();

@@ -49,7 +49,12 @@ impl DeviceLogSync {
         replays: &mut ReplayCache<'_>,
         member: &MemberId,
     ) -> Result<ApplyOutcome, SyncError> {
-        let opened = crate::write_object::open(self.storage.as_ref(), object, Some(ring)).await?;
+        let opened = crate::write_object::open(
+            self.storage.as_deref().ok_or(SyncError::NoStorage)?,
+            object,
+            Some(ring),
+        )
+        .await?;
         let header = &opened.header.header;
         let missing: Vec<_> = header
             .store_log_read
@@ -91,7 +96,7 @@ impl DeviceLogSync {
             });
         let transfer = async {
             let result = crate::write_object::finish(
-                self.storage.as_ref(),
+                self.storage.as_deref().ok_or(SyncError::NoStorage)?,
                 object,
                 ring,
                 &author,

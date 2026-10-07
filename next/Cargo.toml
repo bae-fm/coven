@@ -23,6 +23,7 @@ coven-sync = { path = "crates/coven-sync" }
 rusqlite = "0.40.2"
 sqlite3-parser = "0.17.0"
 async-trait = "0.1.92"
+futures-util = "0.3.34"
 tokio = "1.53.2"
 url = "2.5.8"
 reqwest = { version = "0.13.5", default-features = false }
@@ -79,16 +80,14 @@ large_enum_variant = "allow"
 result_large_err = "allow"
 
 [profile.dev]
-# Checkouts build into one shared target dir through sccache, which cannot
-# cache incremental compiles; incremental state only grows that dir.
-incremental = false
+incremental = true
 # Line tables keep backtraces' file:line and keep every rlib small, which is
 # what stops a shared target dir from filling a disk when several checkouts
 # build. Local-variable inspection under lldb is what this gives up.
 debug = "line-tables-only"
 
 [profile.test]
-incremental = false
+incremental = true
 opt-level = 1
 debug = "line-tables-only"
 

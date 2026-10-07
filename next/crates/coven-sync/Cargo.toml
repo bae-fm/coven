@@ -3,7 +3,11 @@ name = "coven-sync"
 version.workspace = true
 edition.workspace = true
 
+[features]
+test-utils = []
+
 [dependencies]
+futures-util.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }

@@ -4,7 +4,7 @@ use super::{
     catalog::{inconsistent, snapshot_damage},
     snapshot_path, StoreLogSync,
 };
-use crate::{replay_cache::ReplayCache, snapshot_data::SnapshotTask, SyncError, SyncReport};
+use crate::{replay_cache::ReplayCache, snapshot_data::SnapshotTask, SyncError, SyncResults};
 use coven_database::{EntryOutcome, OperationRecord, StoreLog};
 use coven_format::{
     sealed_snapshot::SnapshotObjectPrefix, store_log::StoreChange, value::WritePositions,
@@ -22,7 +22,7 @@ impl StoreLogSync {
         &self,
         record: &OperationRecord,
         task: &mut SnapshotTask,
-        report: &mut SyncReport,
+        report: &mut SyncResults,
     ) -> Result<(), SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let local = self.database.local_store_log().await?;
@@ -195,7 +195,7 @@ impl StoreLogSync {
 
     async fn retention_positions(
         &self,
-        report: &mut SyncReport,
+        report: &mut SyncResults,
     ) -> Result<BTreeMap<DeviceId, WritePositions>, SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let mut positions = BTreeMap::new();

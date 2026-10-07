@@ -7,7 +7,9 @@ use coven_crypto::{
 };
 use coven_database::{Database, DbError};
 use coven_format::codes::RestoreCode;
-use coven_storage::{RestoreStorage, S3Credentials, Storage, StorageCredentials, StorageSettings};
+use coven_storage::{
+    RestoreStorage, S3Credentials, Storage, StorageConfig, StorageCredentials, StorageSettings,
+};
 use std::sync::Arc;
 
 /// Owns code generation and credential changes for one open handle. Closing
@@ -21,8 +23,8 @@ struct RestoreCodesInner {
     identity: Arc<dyn MemberKeyCustody>,
     keychain: Arc<StoreKeychain>,
     settings: StorageSettings,
-    storage: Option<Arc<dyn Storage>>,
     operations: crate::Operations,
+    oauth: Option<coven_storage::providers::OAuthClients>,
 }
 
 impl RestoreCodes {
@@ -33,8 +35,8 @@ impl RestoreCodes {
         identity: Arc<dyn MemberKeyCustody>,
         keychain: Arc<StoreKeychain>,
         settings: StorageSettings,
-        storage: Option<Arc<dyn Storage>>,
         operations: crate::Operations,
+        oauth: Option<coven_storage::providers::OAuthClients>,
     ) -> Self {
         Self {
             inner: Arc::new(tokio::sync::Mutex::new(Some(RestoreCodesInner {
@@ -42,8 +44,8 @@ impl RestoreCodes {
                 identity,
                 keychain,
                 settings,
-                storage,
                 operations,
+                oauth,
             }))),
         }
     }
@@ -69,7 +71,6 @@ impl RestoreCodes {
         crate::files::join(tokio::spawn(async move {
             let guard = inner.lock().await;
             let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
-            owner.storage.as_ref().ok_or(SyncError::NoStorage)?;
             let mut code = owner.code().await?;
             let mut data = RestoreStorage::decode(code.storage.as_bytes())?;
             data.credentials = StorageCredentials::S3(S3Credentials {
@@ -77,12 +78,13 @@ impl RestoreCodes {
                 secret_access_key,
             });
             code.storage = data.encode()?;
-            owner.install(&code).await?;
+            let text = code.to_text()?.to_string();
+            owner.install(code, true).await?;
             owner
                 .operations
                 .set_access(coven_format::MemberAccess::S3AccessKey { access_key_id })
                 .await?;
-            Ok(code.to_text()?.to_string())
+            Ok(text)
         }))
         .await
     }
@@ -117,9 +119,136 @@ impl RestoreCodes {
                 return Err(coven_storage::StorageError::InvitationMismatch.into());
             }
             current.storage = replacement.storage;
-            owner.install(&current).await
+            owner.install(current, false).await
         }))
         .await
+    }
+
+    /// Read committed provider data without exposing custody or a connection.
+    pub async fn connection(&self) -> Result<Option<RestoreStorage>, SyncError> {
+        let guard = self.inner.lock().await;
+        let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
+        let Some(location) = owner.settings.read()? else {
+            return Ok(None);
+        };
+        let Some(bytes) = owner.keychain.storage_credentials()? else {
+            return Ok(None);
+        };
+        let data = RestoreStorage {
+            location,
+            credentials: StorageCredentials::decode(bytes.as_bytes())?,
+        };
+        data.validate()?;
+        Ok(Some(data))
+    }
+
+    /// Remove local credentials before disconnecting; failed removal changes no connection.
+    pub async fn forget_credentials(&self) -> Result<(), SyncError> {
+        let guard = self.inner.lock().await;
+        guard
+            .as_ref()
+            .ok_or(DbError::StoreClosed)?
+            .keychain
+            .delete_storage_credentials()?;
+        Ok(())
+    }
+
+    /// Reserve the credential owner until remote setup either commits or fails.
+    /// The returned commit includes the synced restore code and location, and its
+    /// compensation remains available until store keys and the origin are applied.
+    pub(crate) async fn prepare_setup(
+        &self,
+        data: RestoreStorage,
+        initial_name: String,
+    ) -> Result<crate::StorageCommit, SyncError> {
+        data.validate()?;
+        let guard = self.inner.clone().lock_owned().await;
+        let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
+        let local = owner.database.local_store_log().await?;
+        let code = RestoreCode {
+            store: local.store,
+            name: local
+                .log
+                .replay
+                .state
+                .store
+                .map_or(initial_name, |store| store.name),
+            member_keys: owner
+                .identity
+                .unlock()?
+                .ok_or(SyncError::MissingMemberKeys)?,
+            storage: data.encode()?,
+        };
+        let previous = SavedConnection {
+            location: owner.settings.read()?,
+            credentials: owner.keychain.storage_credentials()?,
+            code: if owner.keychain.supports_synced_restore_codes() {
+                owner.keychain.synced_restore_code()?
+            } else {
+                None
+            },
+        };
+        Ok(Box::new(move || {
+            let owner = guard.as_ref().expect("reserved credential owner");
+            commit_restore_code(&owner.keychain, &code)?;
+            if let Err(error) = owner.settings.commit(&data.location) {
+                return Err(match owner.restore_connection(previous) {
+                    Ok(()) => error.into(),
+                    Err(cleanup) => cleanup_error(error.into(), cleanup),
+                });
+            }
+            Ok(Box::new(move || {
+                guard
+                    .as_ref()
+                    .expect("reserved credential owner")
+                    .restore_connection(previous)
+            }))
+        }))
+    }
+
+    /// Refresh expired credentials before a connection or sync pass. Commit
+    /// refreshed tokens and their restore code before installing the live session.
+    pub async fn refresh_if_expired(&self, now: std::time::SystemTime) -> Result<(), SyncError> {
+        let guard = self.inner.lock().await;
+        let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
+        let Some(location) = owner.settings.read()? else {
+            return Ok(());
+        };
+        let Some(bytes) = owner.keychain.storage_credentials()? else {
+            return Ok(());
+        };
+        let StorageCredentials::OAuth(tokens) = StorageCredentials::decode(bytes.as_bytes())?
+        else {
+            return Ok(());
+        };
+        if tokens.expires_at.is_none_or(|expiry| now < expiry) {
+            return Ok(());
+        }
+        let clients =
+            owner
+                .oauth
+                .as_ref()
+                .ok_or(coven_storage::StorageError::InvalidConfiguration(
+                    "OAuth clients are absent",
+                ))?;
+        let tokens = clients
+            .refresh(location.provider(), &tokens)
+            .await
+            .map_err(|error| match error {
+                coven_storage::providers::OAuthError::Storage(error) => error,
+                error => coven_storage::StorageError::Provider {
+                    provider: location.provider(),
+                    failure: coven_storage::StorageFailure::Authentication,
+                    source: Box::new(error),
+                },
+            })?;
+        let mut code = owner.code().await?;
+        code.storage = RestoreStorage {
+            location,
+            credentials: StorageCredentials::OAuth(tokens),
+        }
+        .encode()?;
+        owner.install(code, false).await
     }
 
     /// Finish the current update, then release custody and connection owners.
@@ -130,6 +259,41 @@ impl RestoreCodes {
 }
 
 impl RestoreCodesInner {
+    fn restore_connection(&self, previous: SavedConnection) -> Result<(), SyncError> {
+        let mut failure = None;
+        let credentials = match previous.credentials {
+            Some(bytes) => self.keychain.set_storage_credentials(&bytes),
+            None => self.keychain.delete_storage_credentials(),
+        }
+        .map_err(SyncError::from);
+        let code = if self.keychain.supports_synced_restore_codes() {
+            match previous.code {
+                Some(bytes) => self.keychain.set_synced_restore_code(&bytes),
+                None => self.keychain.delete_synced_restore_code(),
+            }
+            .map_err(SyncError::from)
+        } else {
+            Ok(())
+        };
+        let location = match previous.location {
+            Some(location) => self.settings.commit(&location),
+            None => self.settings.remove(),
+        }
+        .map_err(SyncError::from);
+        for result in [credentials, code, location] {
+            if let Err(error) = result {
+                failure = Some(match failure {
+                    Some(operation) => cleanup_error(operation, error),
+                    None => error,
+                });
+            }
+        }
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
     async fn code(&self) -> Result<RestoreCode, SyncError> {
         let local = self.database.local_store_log().await?;
         let store = local.log.replay.state.store.ok_or(SyncError::NoStorage)?;
@@ -155,32 +319,26 @@ impl RestoreCodesInner {
         })
     }
 
-    async fn install(&self, code: &RestoreCode) -> Result<(), SyncError> {
-        let Some(storage) = self.storage.as_deref() else {
-            return commit_restore_code(&self.keychain, code);
-        };
+    async fn install(&self, code: RestoreCode, require_connected: bool) -> Result<(), SyncError> {
         let current = self.code().await?;
         let previous = RestoreStorage::decode(current.storage.as_bytes())?;
         let next = RestoreStorage::decode(code.storage.as_bytes())?;
-        if storage.config() != next.location {
-            return Err(coven_storage::StorageError::InvitationMismatch.into());
-        }
-        commit_restore_code(&self.keychain, code)?;
-        if let Err(operation) = install_session(storage, next.credentials).await {
-            let mut error = SyncError::Storage(operation);
-            if let Err(cleanup) = commit_restore_code(&self.keychain, &current) {
-                error = cleanup_error(error, cleanup);
-            }
-            if let Err(cleanup) = install_session(storage, previous.credentials).await {
-                error = cleanup_error(error, cleanup.into());
-            }
-            return Err(error);
-        }
-        Ok(())
+        let keychain = self.keychain.clone();
+        self.operations
+            .install_credentials(
+                previous,
+                next,
+                require_connected,
+                Box::new(move || {
+                    commit_restore_code(&keychain, &code)?;
+                    Ok(Box::new(move || commit_restore_code(&keychain, &current)))
+                }),
+            )
+            .await
     }
 }
 
-async fn install_session(
+pub(crate) async fn install_session(
     storage: &dyn Storage,
     credentials: StorageCredentials,
 ) -> Result<(), coven_storage::StorageError> {
@@ -238,4 +396,10 @@ fn cleanup_error(operation: SyncError, cleanup: SyncError) -> SyncError {
         operation: Box::new(operation),
         cleanup: Box::new(cleanup),
     }
+}
+
+struct SavedConnection {
+    location: Option<StorageConfig>,
+    credentials: Option<SecretBytes>,
+    code: Option<SecretBytes>,
 }

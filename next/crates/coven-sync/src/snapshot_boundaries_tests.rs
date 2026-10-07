@@ -100,7 +100,7 @@ async fn a_removed_device_cannot_start_or_resume_snapshot_publication() {
                     .operation_step(
                         &record,
                         Data::read(&record).unwrap(),
-                        &mut crate::SyncReport::default(),
+                        &mut crate::SyncResults::default(),
                     )
                     .await
                     .unwrap();
@@ -163,7 +163,7 @@ async fn reload_retries_with_the_stored_copy_when_a_waiting_write_finishes_uploa
             .find(|r| r.id == id)
             .unwrap();
     a.sync
-        .operation_step(&record, data, &mut crate::SyncReport::default())
+        .operation_step(&record, data, &mut crate::SyncResults::default())
         .await
         .unwrap();
     upload(&a, &storage).await;
@@ -179,7 +179,7 @@ async fn reload_retries_with_the_stored_copy_when_a_waiting_write_finishes_uploa
             .operation_step(
                 &record,
                 Data::read(&record).unwrap(),
-                &mut crate::SyncReport::default()
+                &mut crate::SyncResults::default()
             )
             .await,
         Err(SyncError::Database(coven_database::DbError::Snapshot(
@@ -361,7 +361,7 @@ mod reset {
             .operation_step(
                 &record,
                 Data::read(&record).unwrap(),
-                &mut crate::SyncReport::default(),
+                &mut crate::SyncResults::default(),
             )
             .await
             .unwrap()
@@ -499,8 +499,12 @@ mod reset {
             Some(storage),
             a.clock.clone(),
             a.sync.ids.clone(),
+            crate::TransferLimits::default(),
         );
-        let operations = crate::Operations::new(a.sync, files);
+        let operations = {
+            let writes = a.writes();
+            crate::Operations::new(a.sync, files, writes)
+        };
         operations.reload_from_snapshot().await.unwrap();
         assert!(operations
             .report()

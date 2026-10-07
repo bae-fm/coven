@@ -1,6 +1,7 @@
 //! File metadata operations through the owning database, never through app SQL.
 
 use super::{finish_blocking, Database, DatabaseReadHandle};
+use crate::DatabaseChanges;
 use crate::{
     file_queue, file_ref, sqlite::DatabaseConnection, write_schema::WriteSchema, DbError, FileRef,
     FileUpload, RowKey,
@@ -362,9 +363,9 @@ impl FileDatabase {
     }
     /// Open a database commit observation for application file rows and upload
     /// metadata. Subscribing before reading the work list prevents missed commits.
-    pub fn changes(&self) -> FileChanges {
+    pub fn changes(&self) -> DatabaseChanges {
         match &self.access {
-            FileDatabaseAccess::Reader(_) => FileChanges {
+            FileDatabaseAccess::Reader(_) => DatabaseChanges {
                 commits: crate::observation::CommitSubscription::closed(),
                 reads: Vec::new(),
                 first: true,
@@ -372,7 +373,7 @@ impl FileDatabase {
             FileDatabaseAccess::Writer(database) => {
                 let slot = database.inner.read().expect("database lock poisoned");
                 let Some(inner) = slot.as_ref() else {
-                    return FileChanges {
+                    return DatabaseChanges {
                         commits: crate::observation::CommitSubscription::closed(),
                         reads: Vec::new(),
                         first: true,
@@ -402,7 +403,7 @@ impl FileDatabase {
                 let commits = inner.observer.subscribe();
                 commits.begin();
                 commits.finish(reads.clone());
-                FileChanges {
+                DatabaseChanges {
                     commits,
                     reads,
                     first: true,
@@ -533,31 +534,6 @@ impl FileDatabase {
         let namespace = namespace.to_owned();
         self.run(move |db, _, _, _| cache::budget(db, &namespace))
             .await
-    }
-}
-
-/// A live commit observation; coalesces changes and ends when the writer closes.
-pub struct FileChanges {
-    commits: crate::observation::CommitSubscription,
-    reads: crate::observation::ReadSet,
-    first: bool,
-}
-impl FileChanges {
-    /// The initial state, then each relevant commit. No timer or polling is used.
-    pub async fn next(&mut self) -> Result<(), DbError> {
-        loop {
-            let state = self.commits.state();
-            if let Some(error) = state.error() {
-                return Err(error);
-            }
-            if self.first || state.changed {
-                self.first = false;
-                self.commits.begin();
-                self.commits.finish(self.reads.clone());
-                return Ok(());
-            }
-            self.commits.changed().await;
-        }
     }
 }
 

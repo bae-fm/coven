@@ -221,6 +221,10 @@ fn check_file(value: &Value, path: &ObjectPath, size: u64) -> Result<(), Storage
 }
 #[async_trait]
 impl Storage for DropboxStorage {
+    async fn account(&self) -> Result<String, StorageError> {
+        self.session.account().await
+    }
+
     fn config(&self) -> StorageConfig {
         self.config.clone()
     }

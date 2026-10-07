@@ -59,14 +59,9 @@ pub(crate) fn materialize(
                     }
                 }
             }
-            for (constraint, claim) in view.constraints_for_values(id, &app.values)?.unique {
+            for (constraint, value) in view.unique_values(id, &app.values)? {
                 old_claims.insert(
-                    (
-                        id.table.clone(),
-                        id.audience.clone(),
-                        constraint,
-                        claim.value,
-                    ),
+                    (id.table.clone(), id.audience.clone(), constraint, value),
                     id.clone(),
                 );
             }

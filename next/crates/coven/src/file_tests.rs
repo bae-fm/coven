@@ -1,6 +1,99 @@
 use crate::*;
 use std::sync::Arc;
 
+#[tokio::test]
+async fn transfer_limits_bound_requests_and_an_active_batch_keeps_its_limit() {
+    use coven_storage::{
+        test_utils::{Faults, MemoryStorage},
+        Storage,
+    };
+    use std::{
+        num::NonZeroUsize,
+        time::{Duration, UNIX_EPOCH},
+    };
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let root = tempfile::tempdir().unwrap();
+        let app = TestCoven::new();
+        let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1000)));
+        let memory = Arc::new(MemoryStorage::new(StorageConfig::S3 {
+            bucket: "files".into(), region: "test".into(), endpoint: None, prefix: "store".into(),
+        }, clock.clone()).unwrap().with_transfer_limits(1024 * 1024, 65536).unwrap());
+        let directory = app.create_store(&StoreLayout::new(root.path().into()), "Files", Arc::new(UuidIds)).await.unwrap();
+        let handle = app.builder(directory).clock(clock).storage_connector(memory.clone())
+            .max_concurrent_uploads(NonZeroUsize::new(2).unwrap())
+            .max_concurrent_downloads(NonZeroUsize::new(2).unwrap())
+            .synced_tables(vec![SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
+                "files", Provenance::AppProvided, Uploads::WhenAsked, CacheFill::CacheLazy,
+            ))])
+            .migrations(vec![Migration::sql(1, "files", "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)")])
+            .coven_migration_policy(CovenMigrationPolicy::ApplyPending).open().await.unwrap();
+        handle.initialize_identity().unwrap();
+        handle.setup_s3_storage(memory.config(), "Test device", "key".into(), SecretText::new("secret".into())).await.unwrap();
+        let mut status = handle.subscribe_sync_status();
+        status.wait_for(|s| matches!(s, SyncStatus::Synced(_))).await.unwrap();
+        handle.stop_sync();
+        status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
+        handle.set_uploads_paused(true);
+        handle.write_with_files(|batch| {
+            for id in 0..4 {
+                batch.put_file("files", id.to_string(), FileSource::Stream(Box::pin(std::io::Cursor::new(vec![id as u8; 2048]))));
+            }
+            Ok(())
+        }, |sql| {
+            for id in 0..4 { sql.execute("INSERT INTO files(id) VALUES(?1)", [id.to_string()])?; }
+            Ok(())
+        }).await.unwrap();
+        let mut files = Vec::new();
+        for id in 0..4 { files.push(handle.file_ref("files", id.to_string().as_str()).await.unwrap()); }
+        handle.upload_files(&files).await.unwrap();
+        memory.set_faults(Faults { delay: Duration::from_millis(100), ..Faults::none() }).await;
+        memory.reset_request_peak();
+        let mut requests = memory.subscribe_requests();
+        handle.set_uploads_paused(false);
+        requests.wait_for(|_| memory.peak_requests() == 2).await.unwrap();
+        handle.set_transfer_limits(TransferLimits { uploads: NonZeroUsize::MIN, downloads: NonZeroUsize::new(2).unwrap() });
+        memory.reset_request_peak();
+        let mut uploads = handle.subscribe_uploads();
+        while !uploads.next().await.unwrap().files.is_empty() {}
+        assert_eq!(memory.peak_requests(), 2, "remaining files use the active drain's original limit");
+        let mut uploaded = Vec::new();
+        for id in 0..4 { uploaded.push(handle.file_ref("files", id.to_string().as_str()).await.unwrap()); }
+        memory.reset_request_peak();
+        let progress = std::sync::Mutex::new(Vec::new());
+        let on_progress = |p| progress.lock().unwrap().push(p);
+        let pin = handle.pin(&uploaded, &on_progress);
+        tokio::pin!(pin);
+        tokio::select! {
+            result = &mut pin => panic!("pin ended before two downloads overlapped: {result:?}"),
+            _ = requests.wait_for(|_| memory.peak_requests() == 2) => {},
+        }
+        handle.set_transfer_limits(TransferLimits::default());
+        pin.await.unwrap();
+        assert_eq!(memory.peak_requests(), 2);
+        assert_eq!(progress.lock().unwrap().last().unwrap().files_completed, 4);
+        for file in &uploaded { handle.evict_file(file).await.unwrap(); }
+        memory.reset_request_peak();
+        handle.pin(&uploaded, &|_| {}).await.unwrap();
+        assert_eq!(memory.peak_requests(), 1, "the subsequent pin captures the changed limit");
+        handle.disconnect_sync();
+        status.wait_for(|s| matches!(s, SyncStatus::Disconnected)).await.unwrap();
+        memory.set_faults(Faults::none()).await;
+        memory.set_online(false);
+        handle.connect_sync().await.unwrap();
+        status.wait_for(|s| matches!(s, SyncStatus::Offline)).await.unwrap();
+        memory.set_online(true);
+        handle.evict_file(&uploaded[0]).await.unwrap();
+        assert_eq!(handle.read_file(&uploaded[0]).await.unwrap(), vec![0; 2048]);
+        memory.set_online(false);
+        let before = memory.request_count();
+        handle.sync_now();
+        requests.wait_for(|n| *n > before).await.unwrap();
+        status.wait_for(|s| matches!(s, SyncStatus::Offline | SyncStatus::Failed { .. })).await.unwrap();
+        assert!(matches!(&*status.borrow(), SyncStatus::Failed { .. }), "a file read reached this connection before the failed sync");
+        handle.close().await.unwrap();
+    }).await.expect("bounded transfers finished");
+}
+
 fn tables() -> Vec<SyncedTable> {
     vec![
         SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience"),

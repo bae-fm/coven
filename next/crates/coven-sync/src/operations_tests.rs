@@ -13,6 +13,7 @@ fn file_owner(d: &Device) -> Files {
         d.sync.storage.clone(),
         d.clock.clone(),
         d.sync.ids.clone(),
+        crate::TransferLimits::default(),
     )
 }
 
@@ -89,7 +90,7 @@ async fn step(d: &mut Device, id: OperationId) -> Result<Progress, SyncError> {
             .unwrap();
     let data = Data::read(&row)?;
     d.sync
-        .operation_step(&row, data, &mut crate::SyncReport::default())
+        .operation_step(&row, data, &mut crate::SyncResults::default())
         .await
 }
 async fn finish(d: &mut Device, id: OperationId) -> Output {
@@ -284,7 +285,10 @@ async fn cancelled_app_future_keeps_running_and_permanent_failure_retries_or_dis
     d.add(&member(2), MemberRole::Member).await;
     d.sync.storage = None;
     let files = file_owner(&d);
-    let operations = Operations::new(d.sync, files);
+    let operations = {
+        let writes = d.writes();
+        crate::Operations::new(d.sync, files, writes)
+    };
     let mut waiting = Box::pin(operations.create_circle("offline"));
     std::future::poll_fn(|cx| {
         use std::future::Future;
@@ -422,7 +426,10 @@ async fn permanent_storage_failure_preserves_fixed_bytes_for_retry_and_discard()
             MemoryStorage::for_recipient(&storage, "uninvited@example.com").unwrap(),
         ));
         let files = file_owner(&a);
-        let operations = Operations::new(a.sync, files);
+        let operations = {
+            let writes = a.writes();
+            crate::Operations::new(a.sync, files, writes)
+        };
         let report = operations.report().await.unwrap();
         assert_eq!(report.blocked_operations.len(), 1);
         assert_eq!(report.blocked_operations[0].last_step, 1);
@@ -477,7 +484,10 @@ async fn retained_provider_grants_block_both_requested_and_remote_revocations() 
             a.sync().await;
         }
         let files = file_owner(&a);
-        let operations = Operations::new(a.sync, files);
+        let operations = {
+            let writes = a.writes();
+            crate::Operations::new(a.sync, files, writes)
+        };
         if !remote {
             assert_eq!(
                 operations
@@ -608,11 +618,20 @@ async fn role_changes_preserve_an_admin_and_owner_accounts_cannot_be_removed() {
     let owner = a.member.member_id();
     let admin = b.member.member_id();
     let files = file_owner(&a);
-    let a = Operations::new(a.sync, files);
+    let a = {
+        let writes = a.writes();
+        crate::Operations::new(a.sync, files, writes)
+    };
     let files = file_owner(&b);
-    let b = Operations::new(b.sync, files);
+    let b = {
+        let writes = b.writes();
+        crate::Operations::new(b.sync, files, writes)
+    };
     let files = file_owner(&c);
-    let c = Operations::new(c.sync, files);
+    let c = {
+        let writes = c.writes();
+        crate::Operations::new(c.sync, files, writes)
+    };
     assert!(matches!(
         b.remove_member(&owner).await,
         Err(SyncError::StoreOwner)
@@ -694,11 +713,20 @@ async fn resumed_removal_uses_the_targets_current_storage_account() {
 async fn store_reset_requires_admin_and_circle_reset_requires_membership() {
     let [a, b, c] = accounts(google()).await;
     let files = file_owner(&a);
-    let a = Operations::new(a.sync, files);
+    let a = {
+        let writes = a.writes();
+        crate::Operations::new(a.sync, files, writes)
+    };
     let files = file_owner(&b);
-    let b = Operations::new(b.sync, files);
+    let b = {
+        let writes = b.writes();
+        crate::Operations::new(b.sync, files, writes)
+    };
     let files = file_owner(&c);
-    let c = Operations::new(c.sync, files);
+    let c = {
+        let writes = c.writes();
+        crate::Operations::new(c.sync, files, writes)
+    };
     assert!(matches!(
         c.reset_store().await,
         Err(SyncError::PermissionDenied)

@@ -1,7 +1,8 @@
 //! The wall clock that timestamps use (§7.2); the only reader of system time.
 
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
+use std::{future::Future, pin::Pin};
 
 /// The wall clock that timestamps use (§7.2).
 ///
@@ -10,6 +11,11 @@ use std::time::SystemTime;
 pub trait Clock: Send + Sync {
     /// The wall clock's current time.
     fn now(&self) -> SystemTime;
+    /// Wait for an elapsed duration. System clocks use the runtime's monotonic
+    /// timer; controlled clocks wake only when their supplied time advances.
+    fn sleep(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        Box::pin(tokio::time::sleep(duration))
+    }
 }
 
 /// A shared wall clock, supplied when the store opens.
@@ -26,25 +32,51 @@ impl Clock for SystemClock {
 
 /// A clock that returns the instant supplied by a test until it is set again.
 #[cfg(feature = "test-utils")]
-pub struct FixedClock(std::sync::RwLock<SystemTime>);
+pub struct FixedClock(tokio::sync::watch::Sender<FixedTime>);
+
+#[cfg(feature = "test-utils")]
+struct FixedTime {
+    wall: SystemTime,
+    elapsed: Duration,
+}
 
 #[cfg(feature = "test-utils")]
 impl FixedClock {
     /// A clock initially set to `now`.
     pub fn new(now: SystemTime) -> Self {
-        Self(std::sync::RwLock::new(now))
+        Self(
+            tokio::sync::watch::channel(FixedTime {
+                wall: now,
+                elapsed: Duration::ZERO,
+            })
+            .0,
+        )
     }
 
     /// Set the time every subsequent read returns, including a backward jump.
     pub fn set(&self, now: SystemTime) {
-        *self.0.write().expect("fixed clock lock poisoned") = now;
+        self.0.send_modify(|time| {
+            if let Ok(elapsed) = now.duration_since(time.wall) {
+                time.elapsed += elapsed;
+            }
+            time.wall = now;
+        });
     }
 }
 
 #[cfg(feature = "test-utils")]
 impl Clock for FixedClock {
     fn now(&self) -> SystemTime {
-        *self.0.read().expect("fixed clock lock poisoned")
+        self.0.borrow().wall
+    }
+    fn sleep(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        let mut time = self.0.subscribe();
+        let deadline = time.borrow().elapsed + duration;
+        Box::pin(async move {
+            time.wait_for(|time| time.elapsed >= deadline)
+                .await
+                .expect("clock owner retains its sender");
+        })
     }
 }
 

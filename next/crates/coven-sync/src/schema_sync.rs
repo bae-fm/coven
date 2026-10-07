@@ -5,7 +5,7 @@ use crate::{
     operation_data::Data,
     operations::{Output, Progress},
     snapshot_data::*,
-    SyncError, SyncReport,
+    SyncError, SyncResults,
 };
 use coven_database::{OperationRecord, StoreLogState};
 use coven_format::store_log::{SnapshotId, StoreChange};
@@ -173,7 +173,7 @@ impl StoreLogSync {
         let mut local = self.database.local_store_log().await?;
         let member = self.operation_member()?;
         let mut ring = self.store_keys.unlock()?;
-        let mut report = SyncReport::default();
+        let mut report = SyncResults::default();
         self.update_keys(&local.log, &member, &mut ring, &mut report)
             .await?;
         // A plain app call may have fixed the next entry before this open ran

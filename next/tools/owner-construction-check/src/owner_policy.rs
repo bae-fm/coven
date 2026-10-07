@@ -26,6 +26,14 @@ pub(crate) const POLICY: Policy = Policy {
         &["coven_tables"],
     )),
     composition_roots: &[
+        ("crates/coven/src/lib_tests.rs", "Network", "new"),
+        ("crates/coven/src/test_utils.rs", "TestCoven", "open_code"),
+        ("crates/coven/src/storage_tests.rs", "Fixture", "new"),
+        (
+            "crates/coven-storage/src/providers/connector.rs",
+            "ProviderConnector",
+            "connect",
+        ),
         ("crates/coven/tests/fixtures/bootstrap.rs", "Owner", "new"),
         (
             "crates/coven/src/bootstrap.rs",
@@ -96,6 +104,10 @@ pub(crate) const POLICY: Policy = Policy {
             "StoreDir",
             "recover_database",
         ),
+        ("crates/coven-sync/src/sync_loop.rs", "SyncLoop", "new"),
+        ("crates/coven-sync/src/sync_loop.rs", "SyncLoop", "connect"),
+        ("crates/coven-sync/src/sync_loop.rs", "SyncLoop", "setup"),
+        ("crates/coven-sync/src/sync_loop.rs", "SyncLoop", "unlock"),
         ("crates/coven-sync/src/operations.rs", "Operations", "new"),
         ("crates/coven-sync/src/files_tests.rs", "Fixture", "new"),
         ("crates/coven-sync/src/files_tests.rs", "Fixture", "reopen"),
@@ -156,6 +168,7 @@ pub(crate) const POLICY: Policy = Policy {
         ),
     ],
     lifetime_authorities: &[
+        ("SyncRun", "SyncLoop"),
         ("OperationRun", "Operations"),
         ("RunningOperations", "Operations"),
         ("ReconfigurableLiveQuery", "Database"),
@@ -280,6 +293,7 @@ pub(crate) const POLICY: Policy = Policy {
         "KeyringCustody",
         "StoreKeyCustody",
         "MemberKeyCustody",
+        "StorageConnector",
         "Storage",
         "CloudKitOps",
         "OAuthClients",
@@ -291,6 +305,7 @@ pub(crate) const POLICY: Policy = Policy {
         "IdSource",
         "StoreKeyCustody",
         "MemberKeyCustody",
+        "StorageConnector",
         "Storage",
         "CloudKitOps",
     ],
@@ -312,7 +327,13 @@ pub(crate) const POLICY: Policy = Policy {
         "OAuthSession",
         "DatabaseConnection",
     ],
-    non_owner_types: &["KeyCustody", "IdentityCustody", "Command", "Request"],
+    non_owner_types: &[
+        "KeyCustody",
+        "IdentityCustody",
+        "Command",
+        "SyncCommand",
+        "Request",
+    ],
     // Writes and pending deletions borrow the database's retained connection,
     // StoreDir and id source; app SQL receives none of those dependencies.
     borrowed_facade_types: &[
@@ -335,6 +356,8 @@ pub(crate) const POLICY: Policy = Policy {
         "WriteApply",
     ],
     root_owner_types: &[
+        "StorageConnections",
+        "SyncLoop",
         "Operations",
         "Database",
         "DatabaseReadHandle",
@@ -347,6 +370,8 @@ pub(crate) const POLICY: Policy = Policy {
         "FileDatabase",
     ],
     task_types: &[
+        "UploadActivity",
+        "SyncRun",
         "OperationRun",
         "RunningOperations",
         "Circles",
@@ -585,6 +610,7 @@ const CAPABILITIES: Capabilities = Capabilities {
             "crates/coven-database/src/database_operations.rs",
             "crates/coven-database/src/database_snapshots.rs",
             "crates/coven-database/src/database_file_retention.rs",
+            "crates/coven-sync/src/sync_loop.rs",
             "crates/coven-sync/src/operations.rs",
             "crates/coven-sync/src/restore_codes.rs",
             "crates/coven-database/src/database_sync.rs",
@@ -599,6 +625,7 @@ const CAPABILITIES: Capabilities = Capabilities {
             "crates/coven-database/src/local_file.rs",
             "crates/coven-foundation/src/files/layout.rs",
             "crates/coven-foundation/src/files/atomic_file.rs",
+            "crates/coven/src/storage.rs",
             "crates/coven/src/coven.rs",
             "crates/coven/src/handle.rs",
             "crates/coven/src/read_handle.rs",

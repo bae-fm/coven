@@ -21,3 +21,6 @@ pub use cloudkit::{CloudKitOps, CloudKitStorage, CloudKitUpload, CloudKitUploadS
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;
+
+mod connector;
+pub use connector::{ProviderConnector, StorageConnector};

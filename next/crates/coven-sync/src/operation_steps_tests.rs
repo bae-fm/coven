@@ -377,7 +377,8 @@ async fn a_retained_grant_on_old_access_blocks_removal_until_explicit_retry() {
         .set_retained_access("ben@example.com", shares.clone())
         .await;
     let files = file_owner(&a);
-    let operations = Operations::new(a.sync, files);
+    let writes = a.writes();
+    let operations = Operations::new(a.sync, files, writes);
     assert_eq!(
         operations
             .remove_member(&b.member.member_id())

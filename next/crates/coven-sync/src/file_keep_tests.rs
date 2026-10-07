@@ -186,18 +186,26 @@ async fn existing_destinations_are_refused_before_recording_and_at_publication()
 
 fn operation_owner(f: &Fixture) -> crate::Operations {
     use coven_crypto::{custody::InMemoryCustody, MemberKeys, StoreKey, StoreKeyring};
+    let keys = Arc::new(InMemoryCustody::new(StoreKeyring::new(
+        StoreKey::generate(coven_foundation::id_source::KeyId(f.ids.new_id())).unwrap(),
+    )));
+    let identity = Arc::new(InMemoryCustody::new(MemberKeys::generate().unwrap()));
+    let writes = crate::DeviceLogSync::new(
+        f.storage.clone(),
+        f.database.clone(),
+        keys.clone(),
+        identity.clone(),
+    );
     let sync = crate::StoreLogSync::new(
         f.storage.clone(),
         f.database.clone(),
-        Arc::new(InMemoryCustody::new(StoreKeyring::new(
-            StoreKey::generate(coven_foundation::id_source::KeyId(f.ids.new_id())).unwrap(),
-        ))),
-        Arc::new(InMemoryCustody::new(MemberKeys::generate().unwrap())),
+        keys,
+        identity,
         f.clock.clone(),
         f.ids.clone(),
         f.directory.clone(),
     );
-    crate::Operations::new(sync, f.files.clone())
+    crate::Operations::new(sync, f.files.clone(), writes)
 }
 
 #[tokio::test]
@@ -306,7 +314,10 @@ async fn corrupt_row_hash_blocks_the_operation_and_discard_removes_partial_bytes
         f.database.apply_downloaded(write.into()).await.unwrap();
     }
     f.storage = source.storage.clone();
-    f.files.set_storage(Some(f.storage.clone()));
+    f.files
+        .set_storage(Some(f.storage.clone()), std::future::ready(Ok(())))
+        .await
+        .unwrap();
     let file = f.database.file_ref("files", "one").await.unwrap();
     let (row, _) = record(&f, &file).await;
     let location = f.files.inner.database.keep_location(row.id).await.unwrap();
@@ -385,7 +396,10 @@ async fn concurrent_keeps_converge_and_release_only_the_losing_owned_copy() {
         let a = Fixture::new(provenance.clone(), Uploads::WhenAsked, CacheFill::CacheLazy).await;
         let file = uploaded(&a, &provenance, b"shared").await;
         let b = Fixture::new(provenance.clone(), Uploads::WhenAsked, CacheFill::CacheLazy).await;
-        b.files.set_storage(Some(a.storage.clone()));
+        b.files
+            .set_storage(Some(a.storage.clone()), std::future::ready(Ok(())))
+            .await
+            .unwrap();
         for write in a.database.test_queued_writes().await.unwrap() {
             b.database.apply_downloaded(write.into()).await.unwrap();
         }
@@ -513,7 +527,10 @@ async fn a_crash_after_rename_recovers_only_the_recorded_content_without_storage
             std::fs::write(&destination, bytes).unwrap();
         }
         f.reopen().await;
-        f.files.set_storage(None);
+        f.files
+            .set_storage(None, std::future::ready(Ok(())))
+            .await
+            .unwrap();
         if let Some(bytes) = replacement {
             assert!(matches!(
                 step(&f).await,

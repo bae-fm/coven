@@ -2,7 +2,7 @@
 
 use crate::{
     store_log_keys as keys, store_log_object as object, DamagedObject, DroppedEntry,
-    ObjectCheckFailure, SyncError, SyncFailure, SyncReport,
+    ObjectCheckFailure, SyncError, SyncFailure, SyncResults,
 };
 use coven_crypto::{
     custody::{MemberKeyCustody, StoreKeyCustody},
@@ -81,7 +81,7 @@ impl StoreLogSync {
 
     /// Publish entries, replay downloads, acquire keys and resume snapshot work.
     /// A missing dependency or sealed copy waits solely in storage for a later call.
-    pub async fn sync_store_log(&mut self) -> Result<SyncReport, SyncFailure> {
+    pub async fn sync_store_log(&mut self) -> Result<SyncResults, SyncFailure> {
         let mut report = self.step().await.map_err(SyncFailure::from)?;
         self.schedule_version_changes()
             .await
@@ -110,7 +110,7 @@ impl StoreLogSync {
             .unlock()?
             .ok_or(SyncError::MissingMemberKeys)?;
         let mut ring = self.store_keys.unlock()?;
-        let mut report = SyncReport::default();
+        let mut report = SyncResults::default();
         self.check_stopped(&local, &member)?;
         self.update_keys(&local.log, &member, &mut ring, &mut report)
             .await?;
@@ -142,7 +142,7 @@ impl StoreLogSync {
         // every retry and never depends on a callback's transient return value.
         local = self.database.local_store_log().await?;
         let mut ring = self.store_keys.unlock()?;
-        let mut report = SyncReport::default();
+        let mut report = SyncResults::default();
         self.publish(&mut local, &member, &mut ring, &mut report)
             .await?;
         if let Some(damaged) = report.damaged_objects.into_iter().next() {
@@ -151,14 +151,14 @@ impl StoreLogSync {
         Ok(id)
     }
 
-    async fn step(&self) -> Result<SyncReport, SyncError> {
+    async fn step(&self) -> Result<SyncResults, SyncError> {
         let mut local = self.database.local_store_log().await?;
         let member = self
             .member_keys
             .unlock()?
             .ok_or(SyncError::MissingMemberKeys)?;
         let mut ring = self.store_keys.unlock()?;
-        let mut report = SyncReport::default();
+        let mut report = SyncResults::default();
         self.check_stopped(&local, &member)?;
         self.update_keys(&local.log, &member, &mut ring, &mut report)
             .await?;
@@ -369,7 +369,7 @@ impl StoreLogSync {
         local: &mut LocalStoreLog,
         member: &MemberKeys,
         ring: &mut Option<StoreKeyring>,
-        report: &mut SyncReport,
+        report: &mut SyncResults,
     ) -> Result<(), SyncError> {
         if let Some(upload) = &local.upload {
             // Recovery can retain a fixed entry before restoring its past.
@@ -405,7 +405,7 @@ impl StoreLogSync {
         local: &mut LocalStoreLog,
         member: &MemberKeys,
         ring: &mut Option<StoreKeyring>,
-        report: &mut SyncReport,
+        report: &mut SyncResults,
     ) -> Result<(), SyncError> {
         if let Some(upload) = local.upload.take() {
             for key in upload.sealed.keys {
@@ -435,7 +435,7 @@ impl StoreLogSync {
         entry: StoreLogEntry,
         member: &MemberKeys,
         ring: &mut Option<StoreKeyring>,
-        report: &mut SyncReport,
+        report: &mut SyncResults,
     ) -> Result<(), SyncError> {
         let (entry, replay) = crate::replay_entry(&local.log, entry);
         let mut operations = self
@@ -443,7 +443,7 @@ impl StoreLogSync {
             .await?;
         let before = &local.log.replay.state;
         let after = &replay.state;
-        let changed: BTreeSet<_> = before
+        let mut changed: BTreeSet<_> = before
             .schema
             .keys()
             .chain(after.schema.keys())
@@ -458,6 +458,19 @@ impl StoreLogSync {
             })
             .cloned()
             .collect();
+        // A device advances shared write headers while it cannot read a circle.
+        // Restored membership must reload those skipped parts before continuing
+        // from that frontier. Record the reload with the membership replay.
+        for (circle, current) in &after.circles {
+            if !current.deleted
+                && current.members.contains(&member.member_id())
+                && before.circles.get(circle).is_some_and(|previous| {
+                    !previous.deleted && !previous.members.contains(&member.member_id())
+                })
+            {
+                changed.insert(Audience::Circle(*circle));
+            }
+        }
         if !changed.is_empty() {
             operations.push(
                 crate::operation_data::Data::Snapshots(crate::snapshot_data::SnapshotTask {
@@ -499,7 +512,7 @@ impl StoreLogSync {
         log: &StoreLog,
         member: &MemberKeys,
         ring: &mut Option<StoreKeyring>,
-        report: &mut SyncReport,
+        report: &mut SyncResults,
     ) -> Result<(), SyncError> {
         for (audience, key) in keys::needed(log) {
             self.acquire(&audience, key, member, ring, report).await?;
@@ -586,7 +599,7 @@ impl StoreLogSync {
         key: KeyId,
         member: &MemberKeys,
         ring: &mut Option<StoreKeyring>,
-        report: &mut SyncReport,
+        report: &mut SyncResults,
     ) -> Result<bool, SyncError> {
         if keys::holds(ring, audience, key) {
             return Ok(true);
@@ -654,7 +667,7 @@ impl StoreLogSync {
     }
 
     fn damage(
-        report: &mut SyncReport,
+        report: &mut SyncResults,
         path: &ObjectPath,
         failure: ObjectCheckFailure,
     ) -> Result<(), SyncError> {
@@ -701,5 +714,9 @@ mod snapshots;
 
 #[path = "bootstrap.rs"]
 mod bootstrap;
+#[path = "storage_copy.rs"]
+mod storage_copy;
+#[path = "storage_setup.rs"]
+mod storage_setup;
 
 pub use bootstrap::JoinOutcome;

@@ -9,6 +9,9 @@ use std::sync::Arc;
 /// A synchronization request failed; its durable queue, if any, remains retryable.
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
+    /// Provider setup failed before replacing the active connection.
+    #[error(transparent)]
+    Setup(#[from] Box<coven_storage::StorageSetupError>),
     /// A credential update does not contain a valid restore code.
     #[error(transparent)]
     Code(#[from] crate::CodeError),

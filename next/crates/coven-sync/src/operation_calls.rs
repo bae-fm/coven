@@ -29,6 +29,73 @@ impl StoreLogSync {
         command: Command,
     ) -> Result<Begun, SyncError> {
         match command {
+            Command::ForgetKeys => {
+                self.store_keys.forget()?;
+                self.storage = None;
+                return Ok(Begun::Value(Output::Unit));
+            }
+            Command::Credentials {
+                previous,
+                next,
+                require_connected,
+                commit,
+            } => {
+                if require_connected && self.storage.is_none() {
+                    return Err(SyncError::NoStorage);
+                }
+                if self
+                    .storage
+                    .as_ref()
+                    .is_some_and(|storage| storage.config() != next.location)
+                {
+                    return Err(coven_storage::StorageError::InvitationMismatch.into());
+                }
+                let rollback = commit()?;
+                if let Some(storage) = &self.storage {
+                    if let Err(error) =
+                        crate::restore_codes::install_session(storage.as_ref(), next.credentials)
+                            .await
+                    {
+                        let mut error = SyncError::Storage(error);
+                        for result in [
+                            rollback(),
+                            crate::restore_codes::install_session(
+                                storage.as_ref(),
+                                previous.credentials,
+                            )
+                            .await
+                            .map_err(SyncError::from),
+                        ] {
+                            if let Err(cleanup) = result {
+                                error = SyncError::Cleanup {
+                                    operation: Box::new(error),
+                                    cleanup: Box::new(cleanup),
+                                };
+                            }
+                        }
+                        return Err(error);
+                    }
+                }
+                return Ok(Begun::Value(Output::Unit));
+            }
+            Command::CheckKeys => {
+                let local = self.database.local_store_log().await?;
+                let member = self.operation_member()?;
+                self.check_stopped(&local, &member)?;
+                let key = local
+                    .log
+                    .replay
+                    .state
+                    .store
+                    .as_ref()
+                    .ok_or(SyncError::NoStorage)?
+                    .key;
+                self.store_keys
+                    .unlock()?
+                    .ok_or(SyncError::KeyUnavailable(key))?
+                    .store_key(key)?;
+                return Ok(Begun::Value(Output::Unit));
+            }
             Command::Storage(storage) => {
                 self.storage = storage;
                 return Ok(Begun::Value(Output::Unit));
@@ -96,8 +163,13 @@ impl StoreLogSync {
                     let member = self.operation_member()?;
                     let mut local = self.database.local_store_log().await?;
                     let mut ring = self.store_keys.unlock()?;
-                    self.publish_queued(&mut local, &member, &mut ring, &mut SyncReport::default())
-                        .await?;
+                    self.publish_queued(
+                        &mut local,
+                        &member,
+                        &mut ring,
+                        &mut SyncResults::default(),
+                    )
+                    .await?;
                 }
                 self.database.finish_operation(id).await?;
                 return Ok(Begun::Value(Output::Unit));
@@ -474,8 +546,8 @@ impl StoreLogSync {
             .ok_or(SyncError::NotBlocked(id))
     }
 
-    pub(crate) async fn operation_report(&self) -> Result<SyncReport, SyncError> {
-        let mut report = SyncReport::default();
+    pub(crate) async fn operation_report(&self) -> Result<SyncResults, SyncError> {
+        let mut report = SyncResults::default();
         for record in self.database.operations().await? {
             if let Some(failure) = &record.failure {
                 report.blocked_operations.push(BlockedOperation {
