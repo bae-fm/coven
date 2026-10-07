@@ -15,6 +15,11 @@ struct RemovalJob {
     statuses: std::collections::VecDeque<Value>,
 }
 #[derive(Default)]
+struct BufferedUpload {
+    bytes: Vec<u8>,
+    closed: bool,
+}
+#[derive(Default)]
 struct Remote {
     non_owner: bool,
     mounted: BTreeSet<String>,
@@ -26,10 +31,9 @@ struct Remote {
     lose_remove_reply: bool,
     removal_job: Option<RemovalJob>,
     objects: BTreeMap<String, Vec<u8>>,
-    upload: Vec<u8>,
+    uploads: BTreeMap<String, BufferedUpload>,
+    next_upload: u64,
     fail_reply: bool,
-    closed: bool,
-    missing: bool,
     close_requests: Vec<u64>,
     members: BTreeMap<String, String>,
     sharing_mutations: Vec<String>,
@@ -151,36 +155,37 @@ async fn endpoint(
             None => error("path/not_found/..."),
         },
         "/2/files/upload_session/start" => {
-            state.upload.clear();
-            state.closed = false;
-            reply(json!({"session_id":"session"}))
+            state.next_upload += 1;
+            let id = state.next_upload.to_string();
+            state.uploads.insert(id.clone(), BufferedUpload::default());
+            reply(json!({"session_id":id}))
         }
         "/2/files/upload_session/append_v2" => {
-            assert_eq!(arg["cursor"]["session_id"], "session");
+            let id = arg["cursor"]["session_id"].as_str().unwrap();
             if arg["close"] == true {
                 state
                     .close_requests
                     .push(arg["cursor"]["offset"].as_u64().unwrap());
             }
-            if state.missing {
+            let Some(upload) = state.uploads.get_mut(id) else {
                 return response(
                     409,
                     json!({"error_summary":"not_found/...","error":{".tag":"not_found"}})
                         .to_string(),
                 );
-            }
-            if state.closed {
+            };
+            if upload.closed {
                 return response(
                     409,
                     json!({"error_summary":"closed/...","error":{".tag":"closed"}}).to_string(),
                 );
             }
-            if arg["cursor"]["offset"].as_u64() != Some(state.upload.len() as u64) {
-                return response(409,json!({"error_summary":"incorrect_offset/...","error":{".tag":"incorrect_offset","correct_offset":state.upload.len()}}).to_string());
+            if arg["cursor"]["offset"].as_u64() != Some(upload.bytes.len() as u64) {
+                return response(409,json!({"error_summary":"incorrect_offset/...","error":{".tag":"incorrect_offset","correct_offset":upload.bytes.len()}}).to_string());
             }
-            state.upload.extend_from_slice(&body);
+            upload.bytes.extend_from_slice(&body);
             if arg["close"] == true {
-                state.closed = true;
+                upload.closed = true;
             }
             if std::mem::replace(&mut state.fail_reply, false) {
                 return response(503, "{}");
@@ -192,10 +197,21 @@ async fn endpoint(
             if state.objects.contains_key(&path) {
                 return error("path/conflict/file/...");
             }
-            let bytes = state.upload.clone();
+            let id = arg["cursor"]["session_id"].as_str().unwrap();
+            let Some(upload) = state.uploads.get(id) else {
+                return response(
+                    409,
+                    json!({"error":{".tag":"lookup_failed","lookup_failed":{".tag":"not_found"}}})
+                        .to_string(),
+                );
+            };
+            assert_eq!(
+                arg["cursor"]["offset"].as_u64(),
+                Some(upload.bytes.len() as u64)
+            );
+            let bytes = state.uploads.remove(id).unwrap().bytes;
             let size = bytes.len();
             state.objects.insert(path.clone(), bytes);
-            state.closed = true;
             if std::mem::replace(&mut state.fail_reply, false) {
                 return response(503, "{}");
             }
@@ -353,7 +369,7 @@ async fn lost_completion_requires_byte_verification() {
     storage.upload_part(&mut upload, b"data").await.unwrap();
     storage.finish_upload(&mut upload).await.unwrap();
     assert!(upload.is_complete());
-    assert_eq!(state.lock().unwrap().upload, b"data");
+    assert!(state.lock().unwrap().uploads.is_empty());
 }
 fn provider(url: &str) -> DropboxStorage {
     let mut storage = DropboxStorage::new(
@@ -376,7 +392,7 @@ async fn missing_session_and_destination_is_expired() {
         [0xff; 16],
     )));
     let mut upload = storage.begin_upload(&path, 4).await.unwrap();
-    state.lock().unwrap().closed = true;
+    state.lock().unwrap().uploads.clear();
     assert!(matches!(
         storage.resume_upload(&mut upload).await,
         Err(StorageError::SessionExpired)
@@ -482,9 +498,9 @@ async fn abort_retries_a_lost_close_and_accepts_an_expired_session() {
         storage.abort_upload(&upload).await.unwrap_err().failure(),
         StorageFailure::Network
     );
-    assert!(state.lock().unwrap().closed);
+    assert!(state.lock().unwrap().uploads[storage.id(&upload).unwrap()].closed);
     storage.abort_upload(&upload).await.unwrap();
-    state.lock().unwrap().missing = true;
+    state.lock().unwrap().uploads.clear();
     storage.abort_upload(&upload).await.unwrap();
     assert!(state.lock().unwrap().objects.is_empty());
 }
@@ -511,7 +527,7 @@ async fn abort_uses_the_remote_offset_after_a_lost_part_reply() {
     assert_eq!(upload.confirmed_bytes(), 0);
     storage.abort_upload(&upload).await.unwrap();
     assert_eq!(state.lock().unwrap().close_requests, [0, 4]);
-    assert!(state.lock().unwrap().closed);
+    assert!(state.lock().unwrap().uploads[storage.id(&upload).unwrap()].closed);
     storage.abort_upload(&upload).await.unwrap();
     assert!(state.lock().unwrap().objects.is_empty());
 }
@@ -545,12 +561,12 @@ async fn create_uploads_an_oversized_write_in_parts() {
     assert_eq!(storage.single_request_limit(), 150 * 1024 * 1024);
     let mut bytes = vec![0x7b; storage.single_request_limit() as usize];
     storage.create(&path, &bytes).await.unwrap();
-    assert!(state.lock().unwrap().upload.is_empty());
+    assert!(state.lock().unwrap().uploads.is_empty());
     storage.delete(&path).await.unwrap();
     bytes.push(8);
     storage.create(&path, &bytes).await.unwrap();
     assert_eq!(state.lock().unwrap().objects[&path.absolute()], bytes);
-    assert!(state.lock().unwrap().closed);
+    assert!(state.lock().unwrap().uploads.is_empty());
 }
 
 #[tokio::test]
@@ -870,4 +886,33 @@ async fn listings_refuse_missing_paging_state_and_empty_or_repeated_cursors() {
             StorageFailure::Protocol
         );
     }
+}
+
+#[tokio::test]
+async fn stale_abort_cannot_close_another_native_session() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let first = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    let second = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(32),
+        std::num::NonZeroU64::MIN,
+    );
+    let mut old = storage.begin_upload(&first, 4).await.unwrap();
+    let mut next = storage.begin_upload(&second, 4).await.unwrap();
+    assert_ne!(storage.id(&old).unwrap(), storage.id(&next).unwrap());
+    storage.upload_part(&mut old, b"old!").await.unwrap();
+    storage.upload_part(&mut next, b"next").await.unwrap();
+    storage.abort_upload(&old).await.unwrap();
+    storage.abort_upload(&old).await.unwrap();
+    storage.finish_upload(&mut next).await.unwrap();
+    storage.abort_upload(&old).await.unwrap();
+    assert_eq!(storage.read(&second).await.unwrap(), b"next");
+    assert_eq!(
+        storage.read(&first).await.unwrap_err().failure(),
+        StorageFailure::NotFound
+    );
 }
