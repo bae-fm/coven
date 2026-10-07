@@ -3,7 +3,8 @@
 use std::path::PathBuf;
 
 use crate::files::{
-    lock, settings, AtomicFile, SettingsError, StoreLock, StoreLockError, StoreSettings,
+    lock, settings, AtomicFile, SettingsError, StoreDeletionLock, StoreLock, StoreLockError,
+    StoreReadLock, StoreSettings,
 };
 use crate::id_source::StoreId;
 
@@ -11,7 +12,7 @@ pub(crate) const APP_FILES: &str = "files";
 pub(crate) const CACHE: &str = "cache";
 
 /// One file owned by a crate, beside the database and store settings.
-/// The enum reserves the name so a caller cannot replace the lock or database.
+/// The enum reserves the name so a caller cannot replace the database or settings.
 #[derive(Clone, Copy, Debug)]
 pub enum StoreFile {
     /// coven-storage's provider settings, encoded and interpreted by that crate.
@@ -87,7 +88,7 @@ impl FileName {
 }
 
 /// One store's directory, owning the paths to its database, app-provided files,
-/// cache, settings and lock. It never exposes the directory as a raw path.
+/// cache, settings and sibling locks. It never exposes the directory as a raw path.
 #[derive(Clone, Debug)]
 pub struct StoreDir {
     path: PathBuf,
@@ -116,15 +117,22 @@ impl StoreDir {
         settings::read(&self.path, self.id)
     }
 
-    /// Take the exclusive OS lock for a writable open. Read-only opens skip
-    /// this method. The returned guard must outlive every writable owner.
+    /// Take the exclusive OS lock for a writable open. The returned guard must
+    /// outlive every writable owner and its database connections.
     pub fn lock_exclusive(&self) -> Result<StoreLock, StoreLockError> {
         lock::acquire(&self.path, self.id)
     }
 
+    /// Prevent deletion while reading, alongside other readers and the writer.
+    /// The guard must outlive every open file and database connection it protects.
+    pub fn lock_read_only(&self) -> Result<StoreReadLock, StoreLockError> {
+        lock::acquire_reader(&self.path, self.id)
+    }
+
     /// Lock an existing store or a directory left by an interrupted deletion.
-    /// An absent store needs no guard. No directory is created by this call.
-    pub fn lock_for_deletion(&self) -> Result<Option<StoreLock>, StoreLockError> {
+    /// An absent store with leftover locks can finish their removal on retry.
+    /// No directory is created by this call.
+    pub fn lock_for_deletion(&self) -> Result<Option<StoreDeletionLock>, StoreLockError> {
         lock::for_deletion(&self.path, self.id)
     }
 

@@ -14,10 +14,15 @@ async fn an_absent_layout_lists_no_stores_without_creating_it() {
 async fn discovery_lists_only_valid_store_directories_in_id_order() {
     let directory = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(directory.path().to_owned());
+    let mut locks = Vec::new();
     for (n, name) in [(2, "Second"), (1, "First")] {
-        layout
+        let store = layout
             .create_store_dir(StoreId(Uuid::from_u128(n)), name, &UuidIds)
             .unwrap();
+        locks.push((
+            store.lock_exclusive().unwrap(),
+            store.lock_read_only().unwrap(),
+        ));
     }
     let root = directory.path().join("stores");
     fs::create_dir(root.join("not-a-store-id")).unwrap();

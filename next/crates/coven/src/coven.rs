@@ -35,8 +35,8 @@ impl Coven {
 
     /// Deletes a closed store from this device: every keychain entry coven
     /// holds for it, including the named host secrets, then its directory.
-    /// Refused while the store is open; storage is untouched, and running it
-    /// again finishes a deletion that failed partway.
+    /// Refused while a writer, read-only handle or file stream remains open;
+    /// storage is untouched. Retrying finishes a deletion that failed partway.
     pub async fn delete_store(
         store_dir: &StoreDir,
         host_secret_names: &[&str],

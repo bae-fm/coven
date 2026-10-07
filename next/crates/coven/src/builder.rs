@@ -87,8 +87,8 @@ impl CovenBuilder {
     }
 
     /// Opens the store for reading only, alongside a handle that has it open.
-    /// It takes no lock, runs no migration and refuses a database whose schema
-    /// is newer than its migrations or whose coven tables need migrating.
+    /// Its shared lock prevents deletion. It runs no migration and refuses a
+    /// database whose schema is newer or whose coven tables need migrating.
     pub async fn open_read_only(self) -> CovenResult<CovenReadHandle> {
         let (database, keys) = crate::coven::blocking(move || self.read_graph()).await?;
         Ok(CovenReadHandle::new(database.open_read_only().await?, keys))

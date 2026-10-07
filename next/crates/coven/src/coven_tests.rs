@@ -104,6 +104,10 @@ async fn application_lifecycle_two_stores_lock_read_only_live_query_and_reopen()
         live.next().await,
         Err(CovenError::Database(DbError::StoreClosed))
     ));
+    assert!(matches!(
+        app.delete_store(&first, &[]).await,
+        Err(StoreDeletionError::Lock(StoreLockError::AlreadyOpen(_)))
+    ));
     reader.close().await.unwrap();
     let a = builder(&app, first.clone()).open().await.unwrap();
     assert_eq!(

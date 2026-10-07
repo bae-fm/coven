@@ -66,8 +66,8 @@ impl DatabaseBuilder {
         finish_blocking(tokio::task::spawn_blocking(move || self.open_graph(Some(lock))).await)
     }
 
-    /// Open read-only connections without locking or migrating, including from
-    /// a second process while the store's writer is open.
+    /// Open read-only connections under a shared deletion guard, without
+    /// migrating, including from a second process while the writer is open.
     pub async fn open_read_only(self) -> CovenResult<DatabaseReadHandle> {
         finish_blocking(tokio::task::spawn_blocking(move || self.open_read_graph()).await)
     }
@@ -151,6 +151,7 @@ impl DatabaseBuilder {
         let migrations = self.migrations.ok_or(CovenError::MissingConfiguration {
             field: "migrations",
         })?;
+        let lock = self.directory.lock_read_only()?;
         let settings = self.directory.settings()?;
         let path = self.directory.database_path();
         let first = DatabaseConnection::open(&path, true, SqlAuthorization::new(&tables))?;
@@ -173,6 +174,7 @@ impl DatabaseBuilder {
         Ok(DatabaseReadHandle {
             inner: Arc::new(RwLock::new(Some(ReadOnlyInner {
                 readers: ReadPool::new(readers),
+                lock,
                 schema,
                 directory: self.directory,
                 device: settings.device_id,

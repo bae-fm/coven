@@ -1,4 +1,4 @@
-//! The read-only application surface owns no writer or store lock.
+//! The read-only application surface retains a shared deletion guard.
 
 use crate::*;
 use coven_crypto::custody::StoreKeys;

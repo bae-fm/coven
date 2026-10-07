@@ -2637,6 +2637,9 @@ pub enum Audience {
 - Creating, restoring or joining a store makes the directory and writes
   the settings, so the app never handles a device id ([§10](#10-device-identity)).
 - A `StoreLayout` says where an app's stores live on disk.
+- Store lock files live beside each store directory. Deletion holds the writer
+  and reader locks while removing the directory, then releases and removes the
+  lock files. Creation and lock-file removal are serialized by the layout.
 - Opening a store needs its declared tables ([§20.2](#202-declaring-synced-tables))
   and its migrations ([§20.13](#2013-migrations)).
 - *Key custody* is where this device keeps the store keys and circle keys
@@ -3117,7 +3120,7 @@ pub enum SettingsError {
     File(FileError),
 }
 
-/// The writer's lock could not be taken (§20.1).
+/// The requested writer, reader or deletion lock could not be taken (§20.1).
 pub enum StoreLockError {
     /// Another handle or process holds the lock.
     AlreadyOpen(StoreId),
@@ -3305,8 +3308,8 @@ impl Coven {
 
     /// Deletes a closed store from this device: every keychain entry coven
     /// holds for it, including the named host secrets, then its directory.
-    /// Refused while the store is open; storage is untouched, and running it
-    /// again finishes a deletion that failed partway.
+    /// Refused while a writer, read-only handle or file stream remains open;
+    /// storage is untouched. Retrying finishes a deletion that failed partway.
     pub async fn delete_store(
         store_dir: &StoreDir,
         host_secret_names: &[&str],
@@ -3368,9 +3371,9 @@ impl CovenBuilder {
     pub async fn open_reloading(self) -> CovenResult<CovenHandle>;
 
     /// Opens the store for reading only, alongside a handle that has it open,
-    /// for example from another process. It takes no lock and runs no
-    /// migration, and refuses a database whose schema is newer than its
-    /// migrations or whose coven tables need migrating.
+    /// for example from another process. Its shared lock prevents deletion.
+    /// It runs no migration and refuses a database whose schema is newer than
+    /// its migrations or whose coven tables need migrating.
     pub async fn open_read_only(self) -> CovenResult<CovenReadHandle>;
 }
 
@@ -3750,6 +3753,7 @@ pub enum LiveQueryCause {
 }
 
 /// An open file with checked identity, header and range-reading state (§16.3).
+/// Retaining a stream prevents store deletion, including after the store closes.
 pub struct FileStream { /* private fields */ }
 
 /// App data could not be sealed or opened with its store key (§11, §20.11).
@@ -4856,6 +4860,8 @@ pub enum FileReadError {
     Database(DbError),
     /// The disk failed, with its cause.
     Disk(DiskError),
+    /// The store cannot be retained while opening its file.
+    Lock(StoreLockError),
 }
 ```
 

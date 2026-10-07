@@ -7,7 +7,10 @@ use crate::{
 };
 use coven_crypto::ContentHasher;
 use coven_foundation::{
-    files::{FileArea, FileError, FileName, FileReader, ObservationError, StoreDir},
+    files::{
+        FileArea, FileError, FileName, FileReader, ObservationError, StoreDir, StoreLockError,
+        StoreReadLock,
+    },
     id_source::DeviceId,
 };
 use std::{path::PathBuf, sync::Arc};
@@ -64,12 +67,22 @@ pub enum LocalFileError {
     /// The filesystem failed.
     #[error(transparent)]
     Disk(#[from] FileError),
+    /// The store cannot be retained while opening its file.
+    #[error(transparent)]
+    Lock(#[from] StoreLockError),
 }
 
 /// An open local file checked against one committed row version. Retaining it
-/// keeps the opened bytes readable across row replacement and file unlinking.
+/// keeps the opened bytes readable across row replacement and file unlinking,
+/// and prevents store deletion until its reads and handles have finished.
 pub struct LocalFileStream {
-    reader: Arc<FileReader>,
+    file: Arc<LocalFileReader>,
+}
+
+struct LocalFileReader {
+    reader: FileReader,
+    // Drop the open file before allowing deletion, even on a cancelled read.
+    _lock: StoreReadLock,
     id: String,
     provenance: Provenance,
 }
@@ -77,11 +90,24 @@ pub struct LocalFileStream {
 impl LocalFileStream {
     /// The complete plaintext byte count.
     pub fn plaintext_size(&self) -> u64 {
-        self.reader.size()
+        self.file.plaintext_size()
     }
 
     /// Read a positioned range on a blocking worker, retaining this open handle.
     pub async fn read_at(&self, offset: u64, len: u64) -> Result<Vec<u8>, LocalFileError> {
+        let file = self.file.clone();
+        crate::database::finish_blocking(
+            tokio::task::spawn_blocking(move || file.read_at(offset, len)).await,
+        )
+    }
+}
+
+impl LocalFileReader {
+    fn plaintext_size(&self) -> u64 {
+        self.reader.size()
+    }
+
+    fn read_at(&self, offset: u64, len: u64) -> Result<Vec<u8>, LocalFileError> {
         let end = offset.saturating_add(len);
         if offset.checked_add(len).is_none() || end > self.reader.size() {
             return Err(LocalFileError::RangeOutOfBounds {
@@ -96,17 +122,9 @@ impl LocalFileStream {
             actual: len,
             maximum: usize::MAX as u64,
         })?;
-        let reader = self.reader.clone();
-        let id = self.id.clone();
-        let provenance = self.provenance.clone();
-        crate::database::finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                reader
-                    .read_at(offset, length)
-                    .map_err(|error| observation(error, &id, provenance))
-            })
-            .await,
-        )
+        self.reader
+            .read_at(offset, length)
+            .map_err(|error| observation(error, &self.id, self.provenance.clone()))
     }
 }
 
@@ -129,6 +147,7 @@ pub(crate) fn open(
         });
     }
     let (_, file) = file_row::declaration(schema, reference.table())?;
+    let lock = directory.lock_read_only()?;
     let reader = match file.provenance {
         Provenance::UserProvided => {
             let user = crate::user_file::read(db, schema, reference.table(), reference.key())?.ok_or(DbError::DamagedDatabase)?;
@@ -157,9 +176,12 @@ pub(crate) fn open(
         return Err(LocalFileError::Integrity { id });
     }
     Ok(LocalFileStream {
-        reader: Arc::new(reader),
-        id,
-        provenance: file.provenance.clone(),
+        file: Arc::new(LocalFileReader {
+            reader,
+            _lock: lock,
+            id,
+            provenance: file.provenance.clone(),
+        }),
     })
 }
 

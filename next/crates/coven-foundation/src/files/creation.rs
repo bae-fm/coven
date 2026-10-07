@@ -4,7 +4,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use crate::files::{directory, FileError, SettingsError, StoreDir, StoreSettings};
+use crate::files::{directory, lock, FileError, SettingsError, StoreDir, StoreSettings};
 use crate::id_source::{IdSource, StoreId};
 
 /// A store creation failure, with publication and rollback failures explicit.
@@ -70,12 +70,20 @@ pub(crate) fn create<E: std::error::Error + Send + Sync + 'static>(
         .map_err(|source| FileError::at("create stores directory", root, source))?;
     let root = fs::canonicalize(root)
         .map_err(|source| FileError::at("resolve stores directory", root, source))?;
+    let _layout = lock::lock_layout(&root)?;
     let destination = root.join(id.to_string());
-    match fs::symlink_metadata(&destination) {
-        Ok(_) => return Err(StoreCreationError::AlreadyExists(id)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(source) => {
-            return Err(FileError::at("inspect store destination", &destination, source).into())
+    // A deletion must finish before the id can be reused, including removal
+    // of its locks. Otherwise cleanup could unlink the replacement's lock.
+    for path in [destination.clone(), lock::deletion_path(&destination, id)]
+        .into_iter()
+        .chain(lock::lock_paths(&destination, id))
+    {
+        match fs::symlink_metadata(&path) {
+            Ok(_) => return Err(StoreCreationError::AlreadyExists(id)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(FileError::at("inspect store destination", &path, source).into())
+            }
         }
     }
     let stage = tempfile::Builder::new()

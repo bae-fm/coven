@@ -11,7 +11,7 @@ mod read_pool;
 use read_pool::ReadPool;
 
 use coven_foundation::clock::{ClockRef, SystemClock};
-use coven_foundation::files::{StoreDir, StoreLock};
+use coven_foundation::files::{StoreDir, StoreLock, StoreReadLock};
 use coven_foundation::id_source::{DeviceId, IdSourceRef, UuidIds};
 
 use crate::authorization::SqlAuthorization;
@@ -786,7 +786,7 @@ impl Database {
     }
 }
 
-/// A database open that cannot write or migrate. It owns no writer or store lock.
+/// A database open that cannot write or migrate. Its shared lock prevents deletion.
 ///
 /// ```compile_fail
 /// async fn cannot_write(handle: &coven_database::DatabaseReadHandle) {
@@ -817,6 +817,8 @@ struct ReadOnlyInner {
     directory: StoreDir,
     device: DeviceId,
     readers: ReadPool,
+    // Connections must drop before deletion is allowed, including implicit drop.
+    lock: StoreReadLock,
     schema: crate::write_schema::WriteSchema,
 }
 
@@ -939,6 +941,7 @@ impl DatabaseReadHandle {
                 let mut slot = handle.inner.write().expect("database lock poisoned");
                 let readers = slot.take().ok_or(DbError::StoreClosed)?;
                 let failures = readers.readers.close();
+                drop(readers.lock);
                 if failures.is_empty() {
                     Ok(())
                 } else {

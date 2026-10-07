@@ -186,8 +186,17 @@ async fn originals_owned_copies_ranges_references_and_deletion_use_the_app_api()
         Err(FileReadError::UserFileMissing { .. })
     ));
     std::fs::write(&path, b"the user's new original").unwrap();
+    let current_stream = handle.open_file_stream(&current).await.unwrap();
     readonly.close().await.unwrap();
     handle.close().await.unwrap();
+    assert!(matches!(
+        app.delete_store(&directory, &[]).await,
+        Err(StoreDeletionError::Lock(StoreLockError::AlreadyOpen(_)))
+    ));
+    assert_eq!(current_stream.read_at(0, 11).await.unwrap(), b"replacement");
+    drop(current_stream);
+    drop(old_stream);
+    drop(stream);
     app.delete_store(&directory, &[]).await.unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), b"the user's new original");
 }

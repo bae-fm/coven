@@ -88,7 +88,13 @@ pub(crate) const POLICY: Policy = Policy {
             "crates/coven-foundation/src/files/directory.rs",
             "StoreDir",
             "lock_for_deletion",
-            "StoreLock",
+            "StoreDeletionLock",
+        ),
+        (
+            "crates/coven-foundation/src/files/directory.rs",
+            "StoreDir",
+            "lock_read_only",
+            "StoreReadLock",
         ),
         (
             "crates/coven-foundation/src/files/layout.rs",
@@ -148,6 +154,8 @@ pub(crate) const POLICY: Policy = Policy {
         "FileWriter",
         "FileReader",
         "StoreLock",
+        "StoreReadLock",
+        "StoreDeletionLock",
         "Keychain",
         "StoreKeychain",
         "KeyringCustody",
@@ -170,6 +178,8 @@ pub(crate) const POLICY: Policy = Policy {
     construction_only_capability_types: &[
         "StoreDir",
         "StoreLock",
+        "StoreReadLock",
+        "StoreDeletionLock",
         "AtomicFile",
         "FileWriter",
         "ClockRef",

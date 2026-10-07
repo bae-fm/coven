@@ -123,27 +123,7 @@ impl AtomicFile {
     /// directory even on a retry after an earlier directory-sync failure.
     /// A missing parent is already absent and needs no durability barrier.
     pub fn remove(&self) -> Result<(), FileError> {
-        match fs::remove_file(&self.path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                tracing::debug!(path = %self.path.display(), "file is already absent");
-            }
-            Err(source) => return Err(FileError::at("remove file", &self.path, source)),
-        }
-        #[cfg(unix)]
-        match sync_directory(parent(&self.path)) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                tracing::debug!(path = %self.path.display(), "file's parent is absent");
-            }
-            Err(source) => {
-                return Err(FileError::AfterRemove {
-                    path: self.path.clone(),
-                    source,
-                })
-            }
-        }
-        Ok(())
+        remove(&self.path)
     }
 }
 
@@ -187,6 +167,30 @@ impl FileWriter {
         .await;
         result.map_err(|source| FileError::at("stream and sync owned file", &self.path, source))
     }
+}
+
+pub(crate) fn remove(path: &Path) -> Result<(), FileError> {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            tracing::debug!(path = %path.display(), "file is already absent");
+        }
+        Err(source) => return Err(FileError::at("remove file", path, source)),
+    }
+    #[cfg(unix)]
+    match sync_directory(parent(path)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            tracing::debug!(path = %path.display(), "file's parent is absent");
+        }
+        Err(source) => {
+            return Err(FileError::AfterRemove {
+                path: path.to_owned(),
+                source,
+            })
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, FileError> {

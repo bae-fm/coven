@@ -1,10 +1,11 @@
 //! Adapt the database's local file capability to the application API.
 
-use crate::{DbError, DeviceId, DiskError, FileLocation};
+use crate::{DbError, DeviceId, DiskError, FileLocation, StoreLockError};
 use coven_database::{LocalFileError, LocalFileStream};
 use std::path::PathBuf;
 
 /// An open file with checked identity and range-reading state (§16.3).
+/// Retaining a stream prevents store deletion, including after the store closes.
 pub struct FileStream {
     local: LocalFileStream,
 }
@@ -79,6 +80,9 @@ pub enum FileReadError {
     /// The disk failed, with its cause.
     #[error(transparent)]
     Disk(#[from] DiskError),
+    /// The store cannot be retained while opening its file.
+    #[error(transparent)]
+    Lock(#[from] StoreLockError),
 }
 
 impl From<LocalFileError> for FileReadError {
@@ -108,6 +112,7 @@ impl From<LocalFileError> for FileReadError {
             },
             LocalFileError::Database(error) => Self::Database(error),
             LocalFileError::Disk(error) => Self::Disk(error),
+            LocalFileError::Lock(error) => Self::Lock(error),
         }
     }
 }
