@@ -9,7 +9,6 @@ use crate::DbError;
 use coven_format::{
     merge_fields,
     snapshot_rows::{MergeRow, SyncedRow},
-    value::Value,
 };
 use coven_merge::{Audience, LostChange, RowId, RowState, RowUpdate, WriteId};
 use rusqlite::params;
@@ -65,18 +64,14 @@ pub(crate) fn synced(
     mut row: SyncedRow,
     additions: bool,
 ) -> Result<(), DbError> {
-    let table = table(schema, &row.row)?;
+    let table = schema.row_table(&row.row)?;
     let values = row
         .columns
         .iter()
         .map(|(name, value)| (name.clone(), value.value.clone()))
         .collect();
-    if row
-        .columns
-        .keys()
-        .any(|name| !table.columns.iter().any(|column| column.name == *name))
-    {
-        return Err(invalid("synced row names an unknown column"));
+    for (name, value) in &row.columns {
+        schema.row_column(table, name, value)?;
     }
     let evaluated = crate::removal_sql::evaluate_values(database, table, &values)?;
     if values
@@ -105,21 +100,6 @@ pub(crate) fn synced(
     Ok(())
 }
 
-pub(crate) fn table<'a>(
-    schema: &'a WriteSchema,
-    row: &RowId,
-) -> Result<&'a crate::schema::TableSchema, DbError> {
-    let table = schema.row_table(row)?;
-    let key = decoded(coven_format::key::decode_key(&row.key))?;
-    let values = crate::write_rows::key_columns(table)
-        .into_iter()
-        .map(|column| column.name.clone())
-        .zip(key)
-        .collect();
-    crate::write_capture::validate_key(schema, table, &values)?;
-    Ok(table)
-}
-
 pub(crate) fn merged(
     database: &DatabaseConnection,
     schema: &WriteSchema,
@@ -127,93 +107,25 @@ pub(crate) fn merged(
 ) -> Result<RowId, DbError> {
     let state = &merged.state;
     let row = state.row();
-    let table = table(schema, row)?;
+    let table = schema.row_columns(
+        row,
+        state.present(),
+        state.cells().iter().map(|(name, cell)| (name, &cell.value)),
+    )?;
     if state.generations().is_empty() {
         return Err(invalid("merge row has no generations"));
     }
-    for (name, value) in state
+    for (key, lost) in state.lost() {
+        schema.row_column(table, &key.column, &lost.value)?;
+    }
+    for name in state
         .cells()
-        .iter()
-        .map(|(name, cell)| (name, &cell.value))
-        .chain(
-            state
-                .lost()
-                .iter()
-                .map(|(key, lost)| (&key.column, &lost.value)),
-        )
+        .keys()
+        .chain(state.lost().keys().map(|key| &key.column))
     {
-        if !table.columns.iter().any(|column| column.name == *name) {
-            return Err(invalid("merge record names an unknown column"));
-        }
         let declared: bool=database.query_row("SELECT EXISTS(SELECT 1 FROM temp._coven_snapshot_columns WHERE table_name=?1 AND column_name=?2)",params![row.table,name],|r| r.get(0))?;
         if !declared {
             return Err(invalid("merge cell has no column record"));
-        }
-        for (key, parent) in &value.parents {
-            if !key.columns.0.contains(name)
-                || !table
-                    .foreign_keys
-                    .iter()
-                    .any(|fk| schema.foreign_key(table, fk) == *key)
-                || parent.row.table != key.parent
-            {
-                return Err(invalid(
-                    "reference does not match the application foreign key",
-                ));
-            }
-            self::table(schema, &parent.row)?;
-        }
-    }
-    if state.present() {
-        if crate::write_rows::key_columns(table)
-            .iter()
-            .any(|column| !state.cells().contains_key(&column.name))
-            || table
-                .foreign_keys
-                .iter()
-                .flat_map(|fk| &fk.columns)
-                .any(|name| !state.cells().contains_key(name))
-        {
-            return Err(invalid("present row is missing a key or reference cell"));
-        }
-        let values = state
-            .cells()
-            .iter()
-            .map(|(name, cell)| (name.clone(), cell.value.value.clone()))
-            .collect();
-        if crate::write_rows::row_key(table, &values)? != row.key {
-            return Err(invalid("merge cells disagree with their row key"));
-        }
-        if let crate::declaration::AudienceSource::Column(column) =
-            &schema.declaration(&row.table).audience
-        {
-            if values.get(column) != Some(&Value::Text(audience_text(&row.audience))) {
-                return Err(invalid("merge cells disagree with their audience"));
-            }
-        }
-    }
-    if let crate::declaration::AudienceSource::ForeignKey(column) =
-        &schema.declaration(&row.table).audience
-    {
-        if state.present() {
-            let key = table
-                .foreign_keys
-                .iter()
-                .find(|fk| {
-                    fk.columns
-                        .iter()
-                        .any(|name| name.eq_ignore_ascii_case(column))
-                })
-                .expect("declared audience reference");
-            let key = schema.foreign_key(table, key);
-            let parent = state.cells()[column]
-                .value
-                .parents
-                .get(&key)
-                .ok_or_else(|| invalid("audience reference has no parent"))?;
-            if parent.row.audience != row.audience {
-                return Err(invalid("inherited audience differs from its parent"));
-            }
         }
     }
     let synced = database

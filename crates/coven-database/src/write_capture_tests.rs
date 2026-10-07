@@ -1,7 +1,6 @@
 use crate::tests::TestStore;
-use crate::write::tests::{count, notes, records, sql, NOTES};
-use crate::{ApplyOutcome, DbError, RowIdentity, RowKey, SyncedTable};
-use coven_foundation::id_source::SequentialIds;
+use crate::write::tests::{count, records, sql, NOTES};
+use crate::{DbError, RowIdentity, RowKey, SyncedTable};
 use coven_merge::Operation;
 use rusqlite::types::Value;
 
@@ -155,51 +154,6 @@ async fn independent_key_changes_validate_the_raw_insert_before_collation() {
 }
 
 #[tokio::test]
-async fn downloaded_keys_are_trusted_but_local_readds_are_checked() {
-    let ids = SequentialIds::new();
-    let source_store = TestStore::with_ids(&ids);
-    let receiver_store = TestStore::with_ids(&ids);
-    // Author a non-UUID fixture through shared-key declarations to exercise
-    // the receiver's trust boundary independently of the author's UUID check.
-    let source = source_store.schema(notes(), NOTES).await.unwrap();
-    let receiver = receiver_store.schema(independent(), NOTES).await.unwrap();
-    sql(
-        &source,
-        "INSERT INTO notes VALUES('not a uuid','download','')",
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        receiver
-            .apply_downloaded(records(&source).remove(0).into())
-            .await
-            .unwrap(),
-        ApplyOutcome::Applied
-    );
-    assert_eq!(count(&receiver, "notes"), 1);
-    assert!(records(&receiver).is_empty());
-    receiver.close().await.unwrap();
-    let receiver = receiver_store.schema(independent(), NOTES).await.unwrap();
-    sql(&receiver, "UPDATE notes SET title='edited'")
-        .await
-        .unwrap();
-    sql(&receiver, "DELETE FROM notes").await.unwrap();
-    let state = receiver.sync_state(vec![]).await.unwrap();
-    let error = sql(&receiver, "INSERT INTO local_rows VALUES('rollback'); INSERT INTO notes VALUES('not a uuid','re-add','')").await.unwrap_err();
-    assert_key_error(error, vec![Value::Text("not a uuid".into())]);
-    assert_eq!(count(&receiver, "notes"), 0);
-    assert_eq!(count(&receiver, "local_rows"), 0);
-    assert_eq!(
-        receiver.sync_state(vec![]).await.unwrap().positions,
-        state.positions
-    );
-    assert_eq!(records(&receiver).len(), 2);
-    for db in [source, receiver] {
-        db.close().await.unwrap();
-    }
-}
-
-#[tokio::test]
 async fn valid_readds_advance_generations_and_canceled_inserts_leave_no_record() {
     let store = TestStore::new();
     let db = store.schema(independent(), NOTES).await.unwrap();
@@ -228,57 +182,36 @@ async fn valid_readds_advance_generations_and_canceled_inserts_leave_no_record()
 }
 
 #[tokio::test]
-async fn readding_a_rule_removed_row_checks_its_key_even_when_the_merge_would_update() {
-    for key in [V4, "not a uuid"] {
-        let ids = SequentialIds::new();
-        let source_store = TestStore::with_ids(&ids);
-        let receiver_store = TestStore::with_ids(&ids);
-        let source = source_store.schema(notes(), NOTES).await.unwrap();
-        let receiver = receiver_store.schema(independent(), "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL DEFAULT '',CONSTRAINT title_present CHECK(title <> ''))").await.unwrap();
-        source
-            .write(move |context| {
-                context.execute("INSERT INTO notes VALUES(?1,'download','')", [key])?;
-                Ok(())
-            })
-            .await
-            .unwrap();
-        receiver
-            .apply_downloaded(records(&source).remove(0).into())
-            .await
-            .unwrap();
-        crate::removal::tests::remove(
-            &receiver,
-            "notes",
-            key,
-            &[("title", coven_format::value::Value::Text(String::new()))],
-            [coven_merge::Rule::Check("title_present".into())].into(),
-        );
-        let losses = receiver.lost_values().await.unwrap();
-        assert_eq!(losses.len(), 1);
-        let result = receiver
-            .write(move |context| {
-                context.execute("INSERT INTO notes VALUES(?1,'restored','')", [key])?;
-                Ok(())
-            })
-            .await;
-        if key == V4 {
-            result.unwrap();
-            let writes = records(&receiver);
-            assert_eq!(writes[0].parts[0].rows[0].change.generation, 1);
-            assert!(matches!(
-                writes[0].parts[0].rows[0].change.operation,
-                Operation::Update(_)
-            ));
-            assert!(receiver.lost_values().await.unwrap().is_empty());
-            assert_eq!(count(&receiver, "notes"), 1);
-        } else {
-            assert_key_error(result.unwrap_err(), vec![Value::Text(key.into())]);
-            assert_eq!(receiver.lost_values().await.unwrap(), losses);
-            assert!(records(&receiver).is_empty());
-            assert_eq!(count(&receiver, "notes"), 0);
-        }
-        for db in [source, receiver] {
-            db.close().await.unwrap();
-        }
-    }
+async fn readding_a_rule_removed_row_keeps_its_generation() {
+    let store = TestStore::new();
+    let db = store.schema(independent(), "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL DEFAULT '',CONSTRAINT title_present CHECK(title <> ''))").await.unwrap();
+    db.write(|context| {
+        context.execute("INSERT INTO notes VALUES(?1,'original','')", [V4])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    crate::removal::tests::remove(
+        &db,
+        "notes",
+        V4,
+        &[("title", coven_format::value::Value::Text(String::new()))],
+        [coven_merge::Rule::Check("title_present".into())].into(),
+    );
+    assert_eq!(db.lost_values().await.unwrap().len(), 1);
+    db.write(|context| {
+        context.execute("INSERT INTO notes VALUES(?1,'restored','')", [V4])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let restored = records(&db).pop().unwrap();
+    assert_eq!(restored.parts[0].rows[0].change.generation, 1);
+    assert!(matches!(
+        restored.parts[0].rows[0].change.operation,
+        Operation::Update(_)
+    ));
+    assert!(db.lost_values().await.unwrap().is_empty());
+    assert_eq!(count(&db, "notes"), 1);
+    db.close().await.unwrap();
 }

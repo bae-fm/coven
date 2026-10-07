@@ -1698,6 +1698,12 @@ Carol's tablet:
 - Audience is defined once, from these declarations, and everything that
   decides where a row goes uses that one definition: writes, snapshots and
   files.
+- Downloaded writes and snapshots use the same schema checks for row keys,
+  columns and references. An independent key must hold a canonical UUID
+  (§8.5), a root's audience cell must match its row, and a descendant's
+  audience reference must name a parent in that same audience. Inserts and
+  present snapshot rows supply their key, reference and audience cells;
+  updates may omit unchanged cells.
 
 ### 14.1 Roots and descendants
 

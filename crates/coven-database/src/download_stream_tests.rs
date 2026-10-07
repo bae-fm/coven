@@ -22,6 +22,87 @@ fn stream(record: &WriteRecord) -> DownloadedWriteStream<Cursor<Vec<u8>>> {
     }
 }
 
+async fn rejects_schema_violation(
+    record: WriteRecord,
+    tables: Vec<SyncedTable>,
+    schema: &'static str,
+) {
+    let mut accepted = Vec::new();
+    for streamed in [false, true] {
+        let store = TestStore::new();
+        let db = store.schema(tables.clone(), schema).await.unwrap();
+        let before = fingerprint(&db, Audience::Store).await;
+        let result = if streamed {
+            db.apply_downloaded_stream(
+                stream(&record),
+                coven_format::value::EntryPositions(Vec::new()),
+                || Ok(()),
+            )
+            .await
+        } else {
+            db.apply_downloaded(record.clone().into()).await
+        };
+        match result {
+            Ok(outcome) => accepted.push((streamed, outcome)),
+            Err(DbError::Snapshot(_)) => {
+                assert_eq!(count(&db, "_coven_writes"), 0);
+                assert_eq!(count(&db, "_coven_positions"), 0);
+                assert_eq!(count(&db, "_coven_rows"), 0);
+                assert_eq!(fingerprint(&db, Audience::Store).await, before);
+            }
+            Err(error) => panic!("expected schema validation failure: {error:?}"),
+        }
+        db.close().await.unwrap();
+    }
+    assert!(
+        accepted.is_empty(),
+        "invalid writes accepted (streamed, outcome): {accepted:?}"
+    );
+}
+
+#[tokio::test]
+async fn downloads_refuse_non_uuid_independent_keys() {
+    let store = TestStore::new();
+    let source = open(&store).await;
+    sql(
+        &source,
+        "INSERT INTO notes VALUES('not-a-uuid','title','body')",
+    )
+    .await
+    .unwrap();
+    let record = records(&source).pop().unwrap();
+    source.close().await.unwrap();
+    rejects_schema_violation(
+        record,
+        vec![SyncedTable::new("notes", RowIdentity::IndependentUuid)],
+        NOTES,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn downloads_refuse_a_descendant_in_another_audience_than_its_parent() {
+    let store = TestStore::new();
+    let source = circle_db(&store).await;
+    sql(&source, "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','store','title'); INSERT INTO children VALUES('00000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000001')").await.unwrap();
+    let mut record = records(&source).pop().unwrap();
+    let index = record.parts[0]
+        .rows
+        .iter()
+        .position(|row| row.row.table == "children")
+        .unwrap();
+    let mut child = record.parts[0].rows.remove(index);
+    let audience = Audience::Circle(CircleId(uuid::Uuid::from_u128(10)));
+    child.row.audience = audience.clone();
+    record.parts.push(WritePart {
+        audience,
+        rows: vec![child],
+        dismissals: Vec::new(),
+    });
+    source.close().await.unwrap();
+    rejects_schema_violation(record, circle_tables(), CIRCLE_SCHEMA).await;
+}
+
 #[tokio::test]
 async fn streamed_retarget_is_one_write_including_local_trigger_effects() {
     let ids = SequentialIds::new();
