@@ -503,8 +503,10 @@ async fn repeated_setup_and_sync_requests_do_not_deadlock_credential_refresh() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced(_))).await;
-    tokio::time::timeout(Duration::from_secs(5), async {
-        for _ in 0..30 {
+    // Each round has its own generous limit: a deadlock never finishes, while
+    // a slow filesystem (Windows CI) only takes longer.
+    for round in 0..30 {
+        tokio::time::timeout(Duration::from_secs(60), async {
             let setup = f.setup();
             let request = async {
                 tokio::task::yield_now().await;
@@ -512,10 +514,12 @@ async fn repeated_setup_and_sync_requests_do_not_deadlock_credential_refresh() {
             };
             let (setup, ()) = tokio::join!(setup, request);
             setup.unwrap();
-        }
-    })
-    .await
-    .expect("setup and sync share a consistent credential lock order");
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!("round {round}: setup and sync share a consistent credential lock order")
+        });
+    }
     f.handle.close().await.unwrap();
 }
 
