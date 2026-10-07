@@ -6,7 +6,7 @@ use crate::{
 };
 use coven_crypto::{
     custody::{MemberKeyCustody, StoreKeyCustody},
-    CryptoError, MemberKeys, SealedKey, StoreKeyring,
+    seal_circle_key, seal_store_key, CryptoError, MemberKeys, SealedKey, StoreKeyring,
 };
 use coven_database::{Database, EntryOutcome, LocalStoreLog, StoreLog};
 use coven_format::{
@@ -71,9 +71,9 @@ impl StoreLogSync {
         let mut ring = self.store_keys.unlock()?;
         let mut report = SyncReport::default();
         self.check_stopped(&local, &member)?;
-        self.publish(&mut local, &member, &mut ring, &mut report)
+        self.update_keys(&local.log, &member, &mut ring, &mut report)
             .await?;
-        self.acquire_kept(&local.log, &member, &mut ring, &mut report)
+        self.publish(&mut local, &member, &mut ring, &mut report)
             .await?;
         if let Some(damaged) = report.damaged_objects.into_iter().next() {
             return Err(damaged.into());
@@ -128,9 +128,9 @@ impl StoreLogSync {
         let mut ring = self.store_keys.unlock()?;
         let mut report = SyncReport::default();
         self.check_stopped(&local, &member)?;
-        self.publish(&mut local, &member, &mut ring, &mut report)
+        self.update_keys(&local.log, &member, &mut ring, &mut report)
             .await?;
-        self.acquire_kept(&local.log, &member, &mut ring, &mut report)
+        self.publish(&mut local, &member, &mut ring, &mut report)
             .await?;
         let paths = self.storage.list(&ObjectPrefix::store_logs()).await?;
         let mut entries = BTreeMap::new();
@@ -365,10 +365,10 @@ impl StoreLogSync {
         local.log.entries.sort_by_key(|e| e.entry.timestamp);
         local.log.replay = replay;
         self.check_stopped(local, member)?;
-        self.acquire_kept(&local.log, member, ring, report).await
+        self.update_keys(&local.log, member, ring, report).await
     }
 
-    async fn acquire_kept(
+    async fn update_keys(
         &self,
         log: &StoreLog,
         member: &MemberKeys,
@@ -377,6 +377,58 @@ impl StoreLogSync {
     ) -> Result<(), SyncError> {
         for (audience, key) in keys::needed(log) {
             self.acquire(&audience, key, member, ring, report).await?;
+        }
+        self.share_dropped_keys(log, ring).await
+    }
+
+    async fn share_dropped_keys(
+        &self,
+        log: &StoreLog,
+        ring: &Option<StoreKeyring>,
+    ) -> Result<(), SyncError> {
+        for (audience, key) in keys::dropped_removal_keys(log) {
+            if !keys::holds(ring, &audience, key) {
+                tracing::debug!(?audience, ?key, "dropped removal's key has not arrived");
+                continue;
+            }
+            let ring = ring.as_ref().expect("held key has a keyring");
+            for (member, recipient) in keys::recipients(log, &audience) {
+                let path = keys::path(&audience, key, member);
+                if self.read(&path).await?.is_none() {
+                    let recipient = *recipient;
+                    let sealed_path = path.clone();
+                    let bytes = match audience {
+                        Audience::Store => {
+                            let key = ring.store_key(key)?.clone();
+                            self.database
+                                .prepare_key_upload(path.as_str().into(), move || {
+                                    Ok::<_, SyncError>(seal_store_key(
+                                        &key,
+                                        &recipient,
+                                        sealed_path.as_str(),
+                                    )?)
+                                })
+                                .await?
+                        }
+                        Audience::Circle(circle) => {
+                            let key = ring.circle_key(circle, key)?.clone();
+                            self.database
+                                .prepare_key_upload(path.as_str().into(), move || {
+                                    Ok::<_, SyncError>(seal_circle_key(
+                                        &key,
+                                        &recipient,
+                                        sealed_path.as_str(),
+                                    )?)
+                                })
+                                .await?
+                        }
+                    };
+                    // This path may have another writer: any first copy of the
+                    // same key counts, even when its random sealed bytes differ.
+                    self.storage.create_once(&path, &bytes).await?;
+                }
+                self.database.complete_key_upload(path.into()).await?;
+            }
         }
         Ok(())
     }
@@ -440,7 +492,7 @@ impl StoreLogSync {
                             "sealed circle key identity disagrees with path",
                         ));
                     }
-                    // A kept circle introduction follows an opened store-log entry.
+                    // A circle introduction follows an opened store-log entry.
                     ring.as_mut()
                         .expect("circle key follows an opened store key")
                         .insert_circle_key(opened)

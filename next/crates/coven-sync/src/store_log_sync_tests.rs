@@ -821,3 +821,6 @@ async fn changing_custody_cannot_change_a_devices_author() {
 
 #[path = "store_log_object_tests.rs"]
 mod objects;
+
+#[path = "store_log_keys_tests.rs"]
+mod key_distribution;

@@ -1061,6 +1061,7 @@ dependencies = [
 name = "coven-sync"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "coven-crypto",
  "coven-database",
  "coven-format",

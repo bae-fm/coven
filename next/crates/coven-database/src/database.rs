@@ -428,6 +428,48 @@ impl Database {
         )
     }
 
+    /// Fix a sealed key copy before its first storage attempt. An existing path
+    /// returns its original bytes without calling `seal`, including after reopen.
+    /// The callback receives no database capability; failure reserves nothing.
+    /// Paths are opaque here: the sync owner chooses recipients from its replay.
+    pub async fn prepare_key_upload<F, E>(&self, path: String, seal: F) -> Result<Vec<u8>, E>
+    where
+        F: FnOnce() -> Result<Vec<u8>, E> + Send + 'static,
+        E: From<DbError> + Send + 'static,
+    {
+        let database = self.clone();
+        finish_blocking(
+            tokio::task::spawn_blocking(move || {
+                let slot = database.inner.read().expect("database lock poisoned");
+                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+                let writer = inner
+                    .writer
+                    .lock()
+                    .expect("writer connection lock poisoned");
+                crate::key_upload::prepare(&writer, &path, seal)
+            })
+            .await,
+        )
+    }
+
+    /// Retire a fixed sealed copy only after storage accepted it or its path was
+    /// already occupied. Retrying retirement is safe after an uncertain reply.
+    pub async fn complete_key_upload(&self, path: String) -> Result<(), DbError> {
+        let database = self.clone();
+        finish_blocking(
+            tokio::task::spawn_blocking(move || {
+                let slot = database.inner.read().expect("database lock poisoned");
+                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+                let writer = inner
+                    .writer
+                    .lock()
+                    .expect("writer connection lock poisoned");
+                crate::key_upload::complete(&writer, &path)
+            })
+            .await,
+        )
+    }
+
     /// Commit one entry, its immutable author-view check, every kept/dropped mark,
     /// and sync's whole replay result in one transaction (§9).
     ///

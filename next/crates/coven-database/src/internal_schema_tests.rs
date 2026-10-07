@@ -529,6 +529,7 @@ async fn only_the_spec_tables_are_created() {
                 "coven_fingerprint_leaves",
                 "coven_fingerprint_sums",
                 "coven_foreign_keys",
+                "coven_key_uploads",
                 "coven_lost",
                 "coven_lost_references",
                 "coven_members",

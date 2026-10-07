@@ -569,6 +569,11 @@ Two mechanisms order writes:
   bytes. These contain no unsealed keys. Both commit before the first storage
   attempt; applying the published entry and its replay removes them atomically
   ([§9](#9-members-and-roles), [§18](#18-operations)).
+- `coven_key_uploads` holds the paths and fixed sealed bytes of copies shared
+  after a removal is dropped ([§11](#11-keys)). These copies have no pending
+  local entry; their bytes commit before their first attempt and are removed
+  after storage accepts a copy or the path is found occupied. No unsealed keys
+  are kept here.
 - The store log's effects that the database applies are kept with it:
   - `coven_circles.deleted` records whether each circle is deleted; local
     writes, downloaded writes and row recomputation all read that same fact
@@ -1238,6 +1243,12 @@ Carol's tablet:
     stored, it is applied through the same replay boundary as a download, and
     that transaction deletes its queue rows. If publication or its reply fails,
     the next store-log step sends exactly the recorded bytes;
+  - `coven_key_uploads`: sealed copies for dropped removals, fixed before their
+    first attempt independently of the entry queue. Each attempt chooses
+    recipients from the latest replay; a queued copy for a member outside that
+    audience waits without being sent or resealed. A stored copy, including one
+    another device stored first, retires its local queue row. Failure reaches
+    the caller, and the next store-log call retries before publishing entries;
   - the replay's result: `coven_members` (every member a kept entry
     added, their public keys and role, and whether they were removed),
     `coven_devices` (every device a kept entry added, its member and name,

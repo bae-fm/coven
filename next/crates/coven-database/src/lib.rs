@@ -22,6 +22,7 @@ mod file_write;
 mod fingerprint;
 mod internal_schema;
 mod key_scope;
+mod key_upload;
 mod live_query;
 mod lost;
 mod merge_store;

@@ -1,4 +1,4 @@
-//! Keys introduced and shared by a store-log entry, using its applied author view.
+//! Key introductions, author-view sharing and dropped removals' current audience.
 
 use crate::SyncError;
 use coven_crypto::{
@@ -35,9 +35,55 @@ pub(crate) fn introduced(change: &StoreChange) -> Vec<(Audience, KeyId)> {
 pub(crate) fn needed(log: &StoreLog) -> BTreeSet<(Audience, KeyId)> {
     log.entries
         .iter()
-        .filter(|e| log.replay.entries[&e.entry.position] == EntryOutcome::Kept)
+        .filter(|e| {
+            log.replay.entries[&e.entry.position] == EntryOutcome::Kept
+                || is_removal(&e.entry.change)
+        })
         .flat_map(|e| introduced(&e.entry.change))
         .collect()
+}
+
+fn is_removal(change: &StoreChange) -> bool {
+    matches!(
+        change,
+        StoreChange::RemoveMember { .. } | StoreChange::RemoveCircleMember { .. }
+    )
+}
+
+pub(crate) fn dropped_removal_keys(log: &StoreLog) -> BTreeSet<(Audience, KeyId)> {
+    log.entries
+        .iter()
+        .filter(|e| {
+            matches!(
+                log.replay.entries[&e.entry.position],
+                EntryOutcome::Dropped(_)
+            ) && is_removal(&e.entry.change)
+        })
+        .flat_map(|e| introduced(&e.entry.change))
+        .collect()
+}
+
+pub(crate) fn recipients<'a>(
+    log: &'a StoreLog,
+    audience: &'a Audience,
+) -> impl Iterator<Item = (&'a MemberId, &'a SealingPublicKey)> {
+    log.replay
+        .state
+        .members
+        .iter()
+        .filter_map(move |(id, member)| {
+            let included = !member.removed
+                && match audience {
+                    Audience::Store => true,
+                    Audience::Circle(circle) => log
+                        .replay
+                        .state
+                        .circles
+                        .get(circle)
+                        .is_some_and(|circle| !circle.deleted && circle.members.contains(id)),
+                };
+            included.then_some((id, &member.sealing))
+        })
 }
 
 pub(crate) fn path(audience: &Audience, key: KeyId, member: &MemberId) -> ObjectPath {

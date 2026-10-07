@@ -273,7 +273,9 @@ pub trait Storage: Send + Sync {
     }
 
     /// Retry an operation's create with its fixed encrypted bytes (§18).
-    /// An occupied single-writer path counts as stored, without a second read.
+    /// An occupied path counts as stored, without a second read. Paths have one
+    /// writer except dropped-removal key copies (§4, §11): competing sealed
+    /// copies at those paths contain the same key, and the first stored wins.
     /// On Drive a retry keeps the earliest copy (createdTime, then id) and
     /// deletes later copies from this writer.
     async fn create_once(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {

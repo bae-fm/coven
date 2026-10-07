@@ -51,6 +51,12 @@ macro_rules! coven_tables {
                 FOREIGN KEY(device,number) REFERENCES coven_store_log_uploads(device,number) ON DELETE CASCADE
             ) STRICT, WITHOUT ROWID;
         ");
+        $visit!(coven_key_uploads, "
+            CREATE TABLE coven_key_uploads (
+                path TEXT PRIMARY KEY NOT NULL,
+                bytes BLOB NOT NULL
+            ) STRICT, WITHOUT ROWID;
+        ");
         $visit!(coven_members, "
             CREATE TABLE coven_members (
                 member BLOB PRIMARY KEY NOT NULL CHECK(length(member)=32),

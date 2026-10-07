@@ -110,8 +110,9 @@ impl GoogleDriveStorage {
         let mut own = copies
             .iter()
             .filter(|item| item["properties"]["covenDevice"].as_str() == Some(device.as_str()));
-        // Only this path's writer retries it. A lost reply may leave several
-        // copies; deleting later copies is itself safe to retry after a lost reply.
+        // A lost reply may leave several copies from this device. Keep its first
+        // and never delete another device's copy, including shared key paths.
+        // Deleting later copies is itself safe to retry after a lost reply.
         own.next();
         for duplicate in own {
             let response = self
