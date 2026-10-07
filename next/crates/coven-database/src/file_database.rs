@@ -14,6 +14,8 @@ use std::time::SystemTime;
 
 #[path = "file_cache.rs"]
 mod cache;
+#[path = "file_keep.rs"]
+mod keep;
 
 #[derive(Clone)]
 enum FileDatabaseAccess {

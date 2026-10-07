@@ -469,7 +469,12 @@ async fn fetch(
     start: u64,
     end: u64,
 ) -> Result<Vec<u8>, FileReadError> {
-    let storage = owner.storage.as_ref().ok_or(FileReadError::NoStorage)?;
+    let storage = owner
+        .storage
+        .read()
+        .expect("storage lock poisoned")
+        .clone()
+        .ok_or(FileReadError::NoStorage)?;
     let bytes = storage
         .read_range(path, ByteRange::new(start, end)?)
         .await

@@ -3,6 +3,7 @@
 mod atomic_file;
 mod creation;
 mod directory;
+mod download;
 mod file_reader;
 mod layout;
 mod lock;
@@ -12,6 +13,7 @@ mod settings;
 pub use atomic_file::{AtomicFile, FileError, FileWriter};
 pub use creation::StoreCreationError;
 pub use directory::{FileArea, FileName, FileNameError, StoreDir, StoreFile};
+pub use download::{DownloadFile, DownloadLocation};
 pub use file_reader::FileReader;
 pub use layout::{StoreInfo, StoreLayout, StoreLayoutError};
 pub use lock::{StoreDeletionLock, StoreLock, StoreLockError, StoreReadLock};

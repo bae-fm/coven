@@ -460,6 +460,53 @@ impl<'a> FileWrite<'a> {
         reference: &crate::FileRef,
         location: &coven_crypto::SecretText,
     ) -> Result<(), DbError> {
+        self.set_location(reference, location.as_str())
+    }
+
+    pub(crate) fn keep_file(
+        &self,
+        reference: &crate::FileRef,
+        name: &FileName,
+        prepared: Option<PreparedUserFile>,
+    ) -> Result<(), DbError> {
+        crate::file_ref::validate(self.database, self.schema, reference)?;
+        let (_, file) = file_row::declaration(self.schema, reference.table())?;
+        let (key, values) = file_row::lookup(
+            self.database,
+            self.schema,
+            reference.table(),
+            reference.key(),
+        )?;
+        match (file.provenance.clone(), prepared) {
+            (Provenance::AppProvided, None) => {
+                self.forget_owned(&key, &file.id)?;
+                self.database.internal_execute(
+                    "INSERT INTO coven_device_files(table_name,key,column_name,identity,path) VALUES(?1,?2,?3,?4,?5)",
+                    (&key.0, &key.1, &file.id, file_row::identity(file, &values)?, name.as_str()),
+                )?;
+            }
+            (Provenance::UserProvided, Some(prepared)) => {
+                prepared.observed.validate()?;
+                file_row::check_size(&values, file, prepared.observed.size())?;
+                if prepared.hash != reference.content_hash() {
+                    return Err(DbError::FileAttachmentChanged {
+                        table: reference.table().into(),
+                        key: reference.key().clone(),
+                    });
+                }
+                self.database.internal_execute(
+                    "INSERT INTO coven_user_files(table_name,key,column_name,identity,path,size,modified_at) VALUES(?1,?2,?3,?4,?5,?6,?7)
+                     ON CONFLICT(table_name,key,column_name) DO UPDATE SET identity=excluded.identity,path=excluded.path,size=excluded.size,modified_at=excluded.modified_at",
+                    rusqlite::params![&key.0, &key.1, &file.id, file_row::identity(file, &values)?, crate::user_file::encode_path(prepared.observed.path()), prepared.observed.size().to_be_bytes().as_slice(), crate::user_file::encode_time(prepared.observed.modified_at())],
+                )?;
+                self.originals.borrow_mut().push(prepared);
+            }
+            _ => return Err(DbError::DamagedDatabase),
+        }
+        self.set_location(reference, &self.device.0.to_string())
+    }
+
+    fn set_location(&self, reference: &crate::FileRef, location: &str) -> Result<(), DbError> {
         crate::file_ref::validate(self.database, self.schema, reference)?;
         let (table, file) = file_row::declaration(self.schema, reference.table())?;
         let (key, mut expected) = file_row::lookup(
@@ -468,11 +515,8 @@ impl<'a> FileWrite<'a> {
             reference.table(),
             reference.key(),
         )?;
-        expected.insert(
-            file.location.clone(),
-            Value::Text(location.as_str().to_owned()),
-        );
-        let mut parameters = vec![rusqlite::types::Value::Text(location.as_str().to_owned())];
+        expected.insert(file.location.clone(), Value::Text(location.to_owned()));
+        let mut parameters = vec![rusqlite::types::Value::Text(location.to_owned())];
         parameters.extend(reference.key().0.clone());
         self.database.file_execute(
             &format!(

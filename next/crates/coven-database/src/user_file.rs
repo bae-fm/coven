@@ -130,7 +130,7 @@ pub(crate) fn decode_time(bytes: &[u8]) -> Result<SystemTime, DbError> {
     .ok_or(DbError::DamagedDatabase)
 }
 
-fn decode_path(bytes: Vec<u8>) -> Result<PathBuf, DbError> {
+pub(crate) fn decode_path(bytes: Vec<u8>) -> Result<PathBuf, DbError> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStringExt;

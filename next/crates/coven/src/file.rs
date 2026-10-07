@@ -2,6 +2,18 @@
 use crate::*;
 
 impl CovenHandle {
+    /// Record downloads that keep uploaded files on this device. User-provided
+    /// files require a previously absent destination, keyed by their file id.
+    /// The call returns after recording; permanent failures remain operations.
+    pub async fn keep_files_on_this_device(
+        &self,
+        files: &[FileRef],
+        destinations: &std::collections::HashMap<String, std::path::PathBuf>,
+    ) -> Result<(), OperationError> {
+        self.operations
+            .keep_files_on_this_device(files, destinations)
+            .await
+    }
     /// Durably queue local files; uploading proceeds after this call returns.
     pub async fn upload_files(&self, files: &[FileRef]) -> Result<(), OperationError> {
         self.files.upload_files(files).await

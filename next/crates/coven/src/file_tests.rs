@@ -358,6 +358,33 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
     assert_eq!(stream.read_at(1234, 37).await.unwrap(), vec![42; 37]);
     handle.evict_file(&file).await.unwrap();
     assert_eq!(pins.next().await.unwrap(), vec![Some(false), None]);
+    let row = thumbnail.clone();
+    let mut locations = handle.subscribe(move |sql| {
+        Ok(
+            sql.query_row("SELECT location FROM thumbnails WHERE id=?1", [&row], |r| {
+                r.get::<_, String>(0)
+            })?,
+        )
+    });
+    assert!(locations.next().await.unwrap().starts_with("uploaded "));
+    handle
+        .keep_files_on_this_device(
+            std::slice::from_ref(&file),
+            &std::collections::HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let location = tokio::time::timeout(std::time::Duration::from_secs(10), locations.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!location.starts_with("uploaded "));
+    let kept = handle
+        .file_ref("thumbnails", thumbnail.as_str())
+        .await
+        .unwrap();
+    assert!(matches!(kept.location(), FileLocation::OnDevice(_)));
+    assert_eq!(handle.read_file(&kept).await.unwrap(), vec![42; 200_000]);
     handle.close().await.unwrap();
     assert!(matches!(
         app.delete_store(&directory, &[]).await,

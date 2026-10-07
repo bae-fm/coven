@@ -9,6 +9,24 @@ use std::sync::Arc;
 /// A synchronization request failed; its durable queue, if any, remains retryable.
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
+    /// A user-selected download path already has a filesystem entry.
+    #[error("download destination already exists: {}", path.display())]
+    DestinationExists {
+        /// The path that was refused, never replaced.
+        path: std::path::PathBuf,
+    },
+    /// Keeping a user-provided file requires its destination path.
+    #[error("file {id} requires a download destination")]
+    DestinationRequired {
+        /// The file id used as the destinations map key.
+        id: String,
+    },
+    /// Two requested files cannot both own one download destination.
+    #[error("download destination is repeated: {}", path.display())]
+    DestinationRepeated {
+        /// The repeated destination.
+        path: std::path::PathBuf,
+    },
     /// This call requires connected storage; durable work remains queued.
     #[error("storage is not connected")]
     NoStorage,

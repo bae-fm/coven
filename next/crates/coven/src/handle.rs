@@ -312,11 +312,11 @@ impl CovenHandle {
     pub async fn close(&self) -> Result<(), DbError> {
         let handle = self.clone();
         crate::coven::completion(tokio::spawn(async move {
-            handle.files.close().await;
             match handle.operations.close().await {
                 Ok(()) | Err(SyncError::Database(DbError::StoreClosed)) => (),
                 Err(error) => return Err(DbError::OperationWorker(Box::new(error))),
             }
+            handle.files.close().await;
             let custody = handle.custody.clone();
             crate::coven::blocking(move || {
                 custody.lock().expect("custody lock poisoned").take();

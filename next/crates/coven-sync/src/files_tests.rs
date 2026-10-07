@@ -6,7 +6,7 @@ use coven_database::{
 use coven_foundation::{
     clock::FixedClock,
     files::StoreLayout,
-    id_source::{SequentialIds, StoreId},
+    id_source::{StoreId, UuidIds},
 };
 use coven_storage::{test_utils::MemoryStorage, StorageConfig};
 use std::time::{Duration, SystemTime};
@@ -25,7 +25,7 @@ struct Fixture {
 impl Fixture {
     async fn new(provenance: Provenance, uploads: Uploads, fill: CacheFill) -> Self {
         let root = tempfile::tempdir().unwrap();
-        let ids: IdSourceRef = Arc::new(SequentialIds::new());
+        let ids: IdSourceRef = Arc::new(UuidIds);
         let clock: ClockRef = Arc::new(FixedClock::new(
             SystemTime::UNIX_EPOCH + Duration::from_secs(100),
         ));
@@ -660,3 +660,6 @@ async fn unused_headers_do_not_displace_recently_read_chunks() {
         .is_none());
     f.close().await;
 }
+
+#[path = "file_keep_tests.rs"]
+mod keeps;

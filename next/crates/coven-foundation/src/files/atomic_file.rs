@@ -1,5 +1,8 @@
 //! Durable file creation, atomic replacement and removal.
 
+#[path = "file_link.rs"]
+mod link;
+
 use super::StoreReadLock;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -74,6 +77,14 @@ pub struct AtomicFile {
 impl AtomicFile {
     pub(crate) fn new(path: PathBuf) -> Self {
         Self { path }
+    }
+
+    pub(super) fn publish_link(&self, destination: &Path) -> Result<(), FileError> {
+        link::publish(&self.path, destination)
+    }
+
+    pub(super) fn remove_link(&self, destination: &Path) -> Result<(), FileError> {
+        link::remove(&self.path, destination)
     }
 
     /// Read the complete file. Only a missing file is `None`; other errors

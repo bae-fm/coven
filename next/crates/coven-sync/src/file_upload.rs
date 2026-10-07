@@ -242,7 +242,12 @@ impl FilesInner {
         let (id, key) = decode_identity(fixed.identity.as_bytes()).map_err(FileReadError::from)?;
         let path = ObjectPath::file(id);
         if !item.stored {
-            let storage = self.storage.as_ref().ok_or(FileReadError::NoStorage)?;
+            let storage = self
+                .storage
+                .read()
+                .expect("storage lock poisoned")
+                .clone()
+                .ok_or(FileReadError::NoStorage)?;
             let file = self.directory.file(FileArea::AppProvided, &fixed.name);
             let row_id = item.file.id();
             let directory = self.directory.clone();

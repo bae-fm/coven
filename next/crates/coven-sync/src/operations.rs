@@ -28,6 +28,10 @@ struct RunningOperations {
 }
 
 pub(crate) enum Command {
+    KeepFiles(
+        Vec<coven_database::FileRef>,
+        std::collections::HashMap<String, std::path::PathBuf>,
+    ),
     RemoveMember(MemberId),
     CreateCircle(String),
     AddCircleMember(CircleId, MemberId),
@@ -84,6 +88,7 @@ pub(crate) enum Progress {
 /// One running task; all mutations of StoreLogSync happen here, in command order.
 struct OperationRun {
     sync: StoreLogSync,
+    files: Files,
     commands: mpsc::UnboundedReceiver<Request>,
     joins: watch::Sender<Vec<JoinRequest>>,
     waiters: BTreeMap<OperationId, Reply>,
@@ -92,11 +97,12 @@ struct OperationRun {
 impl Operations {
     /// Compose and start the lifetime owner after the database opens. No key is
     /// read if the journal is empty; retained failures stay blocked on reopening.
-    pub fn new(sync: StoreLogSync) -> Self {
+    pub fn new(sync: StoreLogSync, files: Files) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
         let (joins, subscription) = watch::channel(Vec::new());
         let run = OperationRun {
             sync,
+            files,
             commands: receiver,
             joins,
             waiters: BTreeMap::new(),
@@ -125,6 +131,17 @@ impl Operations {
     /// using their persisted bytes. This does not enable a background sync loop.
     pub async fn set_storage(&self, storage: Option<Arc<dyn Storage>>) -> Result<(), SyncError> {
         self.unit(Command::Storage(storage)).await
+    }
+    /// Record keep-file operations without waiting for their downloads.
+    /// Each operation resumes independently and reports a permanent failure in
+    /// the same journal/report as membership operations (§18, §20.7).
+    pub async fn keep_files_on_this_device(
+        &self,
+        files: &[coven_database::FileRef],
+        destinations: &std::collections::HashMap<String, std::path::PathBuf>,
+    ) -> Result<(), OperationError> {
+        self.unit(Command::KeepFiles(files.to_vec(), destinations.clone()))
+            .await
     }
     /// Download and replay available store-log entries, then wake operation work.
     pub async fn sync_store_log(&self) -> Result<SyncReport, SyncError> {
@@ -306,14 +323,26 @@ impl OperationRun {
                 command = self.commands.recv() => {
                     let Some(Request { command, reply }) = command else { break; };
                     if matches!(command, Command::Close) { let _ = reply.send(Ok(Output::Unit)); break; }
-                    match self.sync.begin_operation_call(command).await {
-                        Ok(Begun::Value(value)) => response = Some((reply, Ok(value))),
-                        Ok(Begun::Operation(id)) => {
-                            if let Some(previous) = self.waiters.insert(id, reply) {
-                                let _ = previous.send(Err(SyncError::InvitationChanged));
+                    if let Command::KeepFiles(files, destinations) = command {
+                        let result = self.files.record_keeps(&files, &destinations).await.map(|()| Output::Unit);
+                        // Acceptance means the intent committed; downloading
+                        // must not hold this reply, even when storage is online.
+                        let _ = reply.send(result);
+                    } else {
+                        if let Command::Storage(storage) = &command { self.files.set_storage(storage.clone()); }
+                        if let Command::Discard(id) = command {
+                            response = Some((reply, self.discard(id).await.map(|()| Output::Unit)));
+                        } else {
+                            match self.sync.begin_operation_call(command).await {
+                                Ok(Begun::Value(value)) => response = Some((reply, Ok(value))),
+                                Ok(Begun::Operation(id)) => {
+                                    if let Some(previous) = self.waiters.insert(id, reply) {
+                                        let _ = previous.send(Err(SyncError::InvitationChanged));
+                                    }
+                                }
+                                Err(error) => response = Some((reply, Err(error))),
                             }
                         }
-                        Err(error) => response = Some((reply, Err(error))),
                     }
                 }
                 _ = retry.tick() => {}
@@ -367,7 +396,12 @@ impl OperationRun {
                 if data.writes_entry() && writer != Some(record.id) {
                     continue;
                 }
-                match self.sync.operation_step(&record, data).await {
+                let step = if matches!(data, crate::operation_data::Data::KeepFile(_)) {
+                    self.files.keep_step(&record, data).await
+                } else {
+                    self.sync.operation_step(&record, data).await
+                };
+                match step {
                     Ok(Progress::Waiting) => (),
                     Ok(Progress::Advanced) => advanced = true,
                     Ok(Progress::Reply(result)) => {
@@ -385,6 +419,17 @@ impl OperationRun {
                     Err(SyncError::NoStorage | SyncError::KeyUnavailable(_)) => (),
                     Err(SyncError::Storage(error)) if error.retryable() => {
                         tracing::debug!(operation = record.id.0, error = %error, "operation waiting for storage");
+                    }
+                    Err(SyncError::File(
+                        FileReadError::Offline { .. } | FileReadError::NoStorage,
+                    )) => {
+                        tracing::debug!(
+                            operation = record.id.0,
+                            "file operation waiting for storage"
+                        );
+                    }
+                    Err(SyncError::File(FileReadError::Storage(error))) if error.retryable() => {
+                        tracing::debug!(operation = record.id.0, error = %error, "file operation waiting for storage");
                     }
                     Err(error) => {
                         self.sync
@@ -409,5 +454,30 @@ impl OperationRun {
                 return Ok(());
             }
         }
+    }
+
+    async fn discard(&mut self, id: OperationId) -> Result<(), SyncError> {
+        let Some(record) = self
+            .sync
+            .operation_records()
+            .await?
+            .into_iter()
+            .find(|r| r.id == id && r.failure.is_some())
+        else {
+            return Err(SyncError::NotBlocked(id));
+        };
+        let data = crate::operation_data::Data::read(&record)?;
+        match data {
+            crate::operation_data::Data::KeepFile(_) => {
+                if let Err(error) = self.files.discard_keep(&record, data).await {
+                    self.sync.block_operation(id, error.to_string()).await?;
+                    return Err(error);
+                }
+            }
+            _ => {
+                self.sync.begin_operation_call(Command::Discard(id)).await?;
+            }
+        }
+        Ok(())
     }
 }

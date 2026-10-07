@@ -2188,8 +2188,10 @@ Carol's tablet:
   - `coven_cache`: each cached file or chunk, its namespace, size, when it
     was last read, and whether it is pinned;
   - `coven_cache_budgets`: each namespace's budget;
-  - `coven_file_removals`: bytes in coven's own folder that nothing names,
-    waiting to be deleted.
+  - `coven_file_removals`: unused local copies waiting to be deleted, and
+    names reserved by unfinished downloads. A download records its operation
+    id and, for a user-provided file, its destination and temporary sibling.
+    An accepted user destination is never deleted; only its sibling is.
 - The bytes themselves are files in the store's directory: coven's own
   copies, and the cache.
 - A file's bytes are written and synced to disk before the row that names
@@ -2200,7 +2202,10 @@ Carol's tablet:
     `coven_file_removals`, and the write that attaches them takes it out;
   - the write that lets bytes go records them there in its transaction;
   - after a write commits or fails, and when the database opens, coven
-    deletes the bytes `coven_file_removals` names, then their records.
+    deletes the unused bytes `coven_file_removals` names, then their records.
+    Names still owned by unfinished operations are retained. A stale or
+    discarded download releases its names for deletion in the transaction
+    recording that decision.
   - A deletion that fails stays recorded and is tried again then; the
     write that let the bytes go stays committed, and reports the failure.
 
@@ -2400,6 +2405,8 @@ Carol's tablet:
 - The app call that starts an operation returns once it finishes or fails
   for good; without storage it waits. Dropping the call doesn't stop the
   operation.
+  - File upload and keep calls in §20.7 return after recording their work;
+    a later permanent failure is reported through §20.6.
 - Steps are ordered so other devices never see a half-done operation.
 - Anything another device reads, such as a store log entry, is uploaded
   last, after everything it refers to.
@@ -4255,6 +4262,10 @@ pub enum SyncError {
     File(FileReadError),
     /// A user-provided download destination already exists (§16.1).
     DestinationExists { path: PathBuf },
+    /// A user-provided file has no destination in the keep call.
+    DestinationRequired { id: String },
+    /// Multiple requested files name the same download destination.
+    DestinationRepeated { path: PathBuf },
     /// Circle membership is required by this operation.
     CircleNotMember(CircleId),
     /// The circle has been deleted or does not exist.

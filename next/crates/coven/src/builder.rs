@@ -241,7 +241,7 @@ impl OpeningStore {
                 self.ids.clone(),
             ),
         };
-        let operations = coven_sync::Operations::new(sync);
+        let operations = coven_sync::Operations::new(sync, files.clone());
         Ok(CovenHandle::new(database, self.custody, operations, files))
     }
 }

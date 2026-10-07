@@ -4,6 +4,8 @@
 mod file_cache;
 #[path = "file_error.rs"]
 mod file_error;
+#[path = "file_keep.rs"]
+mod file_keep;
 #[path = "file_read.rs"]
 mod file_read;
 #[path = "file_upload.rs"]
@@ -36,7 +38,7 @@ pub struct Files {
 struct FilesInner {
     database: FileDatabase,
     directory: StoreDir,
-    storage: Option<Arc<dyn Storage>>,
+    storage: std::sync::RwLock<Option<Arc<dyn Storage>>>,
     clock: ClockRef,
     ids: IdSourceRef,
     state: Mutex<UploadState>,
@@ -80,7 +82,7 @@ impl Files {
         let inner = Arc::new(FilesInner {
             database,
             directory,
-            storage,
+            storage: std::sync::RwLock::new(storage),
             clock,
             ids,
             state: Mutex::new(UploadState {
@@ -145,7 +147,13 @@ impl Files {
     /// Retry all waiting files now; no timer or implicit retry is installed.
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError> {
         self.inner.check_open()?;
-        if self.inner.storage.is_none() {
+        if self
+            .inner
+            .storage
+            .read()
+            .expect("storage lock poisoned")
+            .is_none()
+        {
             return Err(SyncError::NoStorage);
         }
         Ok(self.inner.drain_uploads(true).await?)
@@ -161,6 +169,11 @@ impl Files {
         if !paused {
             self.inner.wake.notify_one();
         }
+    }
+
+    pub(crate) fn set_storage(&self, storage: Option<Arc<dyn Storage>>) {
+        *self.inner.storage.write().expect("storage lock poisoned") = storage;
+        self.inner.wake.notify_one();
     }
 }
 impl FilesInner {

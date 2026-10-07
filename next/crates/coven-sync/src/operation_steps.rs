@@ -295,7 +295,7 @@ impl StoreLogSync {
                     access: work.access.member_access(),
                 }));
             }
-            Data::Revoke { .. } => unreachable!(),
+            Data::Revoke { .. } | Data::KeepFile(_) => unreachable!(),
         };
         Ok(Some(match intent {
             Intent::RemoveMember { member, access } => {
@@ -384,6 +384,9 @@ impl StoreLogSync {
                         Some(member.parse()?)
                     }
                     Data::Invite(_) => None,
+                    Data::KeepFile(_) => {
+                        return Err(coven_database::DbError::DamagedDatabase.into())
+                    }
                 };
                 let key = AccessKeyToDelete {
                     access_key_id,

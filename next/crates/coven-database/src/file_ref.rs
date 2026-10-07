@@ -83,7 +83,9 @@ impl FileRef {
         }
         Ok(Some((id, coven_crypto::FileKey::from_bytes(bytes))))
     }
-    pub(crate) fn encode(&self) -> Result<Vec<u8>, DbError> {
+    /// Encode captured facts for a device-local journal. Contains the uploaded
+    /// file key; callers must keep these bytes private, like the database itself.
+    pub fn encode(&self) -> Result<Vec<u8>, DbError> {
         let mut fields = vec![
             Value::Text(self.row.table.clone()),
             Value::Blob(self.row.key.clone()),
@@ -103,7 +105,9 @@ impl FileRef {
         }
         Ok(coven_format::key::encode_key(&fields)?)
     }
-    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, DbError> {
+    /// Read a captured reference from the local journal without consulting the
+    /// current row. Validate it before reading or changing that row.
+    pub fn decode(bytes: &[u8]) -> Result<Self, DbError> {
         let fields = coven_format::key::decode_key(bytes)?;
         let [Value::Text(table), Value::Blob(key), Value::Text(audience), Value::Text(column), Value::Text(namespace), Value::Blob(generation), id, Value::Integer(size), Value::Blob(hash), location, setters @ ..] =
             fields.as_slice()

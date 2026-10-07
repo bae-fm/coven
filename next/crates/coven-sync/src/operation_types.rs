@@ -12,6 +12,8 @@ pub type OperationError = crate::SyncError;
 /// The work retained in an unfinished journal row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OperationKind {
+    /// Download an uploaded file and conditionally keep it on this device.
+    ChangeFileLocation,
     /// Remove a member and rotate every affected key.
     RemoveMember,
     /// Create a circle and its first key.

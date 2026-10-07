@@ -6,6 +6,16 @@ use crate::{
 };
 use coven_storage::{MemberRemoval, StorageError};
 
+fn file_owner(d: &Device) -> Files {
+    Files::new(
+        coven_database::FileDatabase::new(d.db.clone()),
+        d.directory.clone(),
+        d.sync.storage.clone(),
+        d.clock.clone(),
+        d.sync.ids.clone(),
+    )
+}
+
 fn google() -> Arc<MemoryStorage> {
     Arc::new(
         MemoryStorage::new(
@@ -271,7 +281,8 @@ async fn cancelled_app_future_keeps_running_and_permanent_failure_retries_or_dis
     d.create(key(1)).await;
     d.add(&member(2), MemberRole::Member).await;
     d.sync.storage = None;
-    let operations = Operations::new(d.sync);
+    let files = file_owner(&d);
+    let operations = Operations::new(d.sync, files);
     let mut waiting = Box::pin(operations.create_circle("offline"));
     std::future::poll_fn(|cx| {
         use std::future::Future;
@@ -408,7 +419,8 @@ async fn permanent_storage_failure_preserves_fixed_bytes_for_retry_and_discard()
         a.sync.storage = Some(Arc::new(
             MemoryStorage::for_recipient(&storage, "uninvited@example.com").unwrap(),
         ));
-        let operations = Operations::new(a.sync);
+        let files = file_owner(&a);
+        let operations = Operations::new(a.sync, files);
         let report = operations.report().await.unwrap();
         assert_eq!(report.blocked_operations.len(), 1);
         assert_eq!(report.blocked_operations[0].last_step, 1);
@@ -462,7 +474,8 @@ async fn retained_provider_grants_block_both_requested_and_remote_revocations() 
             finish(&mut b, id).await;
             a.sync().await;
         }
-        let operations = Operations::new(a.sync);
+        let files = file_owner(&a);
+        let operations = Operations::new(a.sync, files);
         if !remote {
             assert_eq!(
                 operations
@@ -592,9 +605,12 @@ async fn role_changes_preserve_an_admin_and_owner_accounts_cannot_be_removed() {
     let [a, b, c] = accounts(google()).await;
     let owner = a.member.member_id();
     let admin = b.member.member_id();
-    let a = Operations::new(a.sync);
-    let b = Operations::new(b.sync);
-    let c = Operations::new(c.sync);
+    let files = file_owner(&a);
+    let a = Operations::new(a.sync, files);
+    let files = file_owner(&b);
+    let b = Operations::new(b.sync, files);
+    let files = file_owner(&c);
+    let c = Operations::new(c.sync, files);
     assert!(matches!(
         b.remove_member(&owner).await,
         Err(SyncError::StoreOwner)

@@ -1,4 +1,4 @@
-//! Each operation's retained intent and fixed entry, without retained key material.
+//! Each operation's retained intent, including the captured file reference for a download.
 
 use crate::{InviteAccess, OperationKind, SyncError};
 use coven_database::{NewOperation, OperationRecord, OperationUpdate};
@@ -88,6 +88,7 @@ pub(crate) enum InviteState {
 
 #[derive(Serialize, Deserialize)]
 pub(crate) enum Data {
+    KeepFile(KeepFileWork),
     Entry(EntryWork),
     Invite(InviteWork),
     Revoke {
@@ -95,6 +96,14 @@ pub(crate) enum Data {
         access: MemberAccess,
         result: Option<MemberRemoval>,
     },
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct KeepFileWork {
+    // Encoded FileRef contains its file key, like the private operation record.
+    pub(crate) reference: Vec<u8>,
+    // A changed row ends this intent permanently, including explicit retries.
+    pub(crate) obsolete: bool,
 }
 
 impl Data {
@@ -107,6 +116,7 @@ impl Data {
     }
     pub(crate) fn kind(&self) -> OperationKind {
         match self {
+            Self::KeepFile(_) => OperationKind::ChangeFileLocation,
             Self::Entry(work) => work.intent.kind(),
             Self::Invite(_) => OperationKind::Invite,
             Self::Revoke { .. } => OperationKind::RevokeAccess,
@@ -186,6 +196,7 @@ impl Data {
 impl OperationKind {
     pub(crate) fn name(self) -> &'static str {
         match self {
+            Self::ChangeFileLocation => "change-file-location",
             Self::RemoveMember => "remove-member",
             Self::CreateCircle => "create-circle",
             Self::AddCircleMember => "add-circle-member",
