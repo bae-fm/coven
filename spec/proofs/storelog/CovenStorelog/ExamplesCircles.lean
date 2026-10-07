@@ -71,7 +71,8 @@ theorem circle_created_by_member : EveryOrder (outsider (.deleteCircle 0)) 4 (Li
   apply every_order; decide
 
 theorem circle_renamed : EveryOrder renames 7 (List.range 7) (fun r =>
-    lookup r.state.circles 0 = some ⟨"Birthdays", [1, 0]⟩ ∧ r.dropped = [6]) := by
+    lookup r.state.circles 0 = some ⟨"Presents", [1, 0]⟩ ∧
+    5 ∈ r.kept ∧ 6 ∈ r.kept ∧ r.dropped = []) := by
   apply every_order; decide
 
 /-- The §14.7 store-log deletion; Appendix B checks the associated row loss. -/

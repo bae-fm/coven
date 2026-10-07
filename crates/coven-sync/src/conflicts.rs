@@ -204,14 +204,6 @@ fn deletes_circle(view: &StoreLogCheck, change: &StoreChange, circle: CircleId) 
     }
 }
 
-fn circle_name(change: &StoreChange) -> Option<(CircleId, &str)> {
-    match change {
-        StoreChange::CreateCircle { circle, name, .. }
-        | StoreChange::RenameCircle { circle, name } => Some((*circle, name)),
-        _ => None,
-    }
-}
-
 fn special(va: &StoreLogCheck, a: &StoreChange, vb: &StoreLogCheck, b: &StoreChange) -> bool {
     use StoreChange::*;
     let keys_and_snapshots = match (a, b) {
@@ -255,7 +247,6 @@ fn special(va: &StoreLogCheck, a: &StoreChange, vb: &StoreLogCheck, b: &StoreCha
     keys_and_snapshots
         || circle_target(b).is_some_and(|circle| deletes_circle(va, a, circle))
         || circle_target(a).is_some_and(|circle| deletes_circle(vb, b, circle))
-        || matches!((circle_name(a), circle_name(b)), (Some((c,x)),Some((d,y))) if c==d && x!=y)
 }
 
 pub(crate) fn conflict(

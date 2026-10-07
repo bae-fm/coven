@@ -98,7 +98,6 @@
   - different statements about the same member or device; a device entry
     is also about its owner, and set-access is about its author;
   - a store addition against a store removal;
-  - different names for one circle;
   - deleting a circle against changing it, raising its version, or resetting it;
   - a circle addition against replacement of that circle's key;
   - two replacements of the same store or circle key;
@@ -288,7 +287,8 @@
   `member_removal_updates_circles`, `store_removal_beats_circle_add`.
 - [§14.3](../coven.md#143-circles): an ordinary member makes
   a circle and becomes its first member; concurrent different names use
-  the earlier timestamp. Lean: `Examples.circle_created_by_member`,
+  the later timestamp, keeping both rename entries and reporting neither.
+  Lean: `Examples.circle_created_by_member`,
   `circle_renamed`.
 - [§14.6](../coven.md#146-leaving-a-circle): Ana removes Ben
   from Gifts; Ben stays in the store and his concurrent rename still has
@@ -362,10 +362,11 @@
   differential test against its `resolve`, comparing state, kept entries,
   and dropped entries. State includes the current access of active and removed
   members; generated histories include access updates and repeated access values.
-  The histories include concurrent key replacements
-  and resets against version raises, in both timestamp orders, for the store
-  and circles. The comparison includes each audience's selected versions and
-  snapshots; generated histories also cover different versions of one audience,
+  The histories include concurrent circle renames and renames against circle
+  deletions in both timestamp orders. They also include concurrent key
+  replacements and resets against version raises, in both timestamp orders,
+  for the store and circles. The comparison includes each audience's selected
+  versions and snapshots; generated histories also cover different versions of one audience,
   equal versions of different audiences, and circle deletions against raises.
 - Rust retains each applied entry's author-view check, observed device owner,
   and derived circle deletions with its immutable bytes. The recorded past is

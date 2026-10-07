@@ -103,7 +103,7 @@ impl Generator {
         };
         let audience = self.audience();
         let format = self.pick(2) == 0;
-        match self.pick(10) {
+        match self.pick(12) {
             0 => [remove(1, &[0, 1]), remove(2, &[0, 1])],
             1 => [leave(0, 1), leave(0, 2)],
             2 => [remove(1, &[0, 1]), leave(0, 2)],
@@ -126,6 +126,8 @@ impl Generator {
                 raise(format, 2, 31, audience),
             ],
             9 => [delete(0), raise(format, 2, 30, Audience::Circle(circle(0)))],
+            10 => [rename(0, "Birthdays"), rename(0, "Presents")],
+            11 => [rename(0, "Birthdays"), delete(0)],
             _ => unreachable!(),
         }
     }

@@ -82,10 +82,6 @@ def deletesCircle (view : State) (a : Action) (c : Nat) : Bool :=
       (lookup view.circles c).any (fun circle => circle.members == [m])
   | _ => false
 
-def circleName : Action → Option (Nat × String)
-  | .makeCircle c name | .renameCircle c name => some (c, name)
-  | _ => none
-
 def specialConflict (va vb : State) (a b : Action) : Bool :=
   (match a, b with
     | .addMember _ _ _, .removeMember _ _ | .removeMember _ _, .addMember _ _ _ => true
@@ -99,10 +95,7 @@ def specialConflict (va vb : State) (a b : Action) : Bool :=
     | .reset s, .raiseVersion _ _ t | .raiseVersion _ _ t, .reset s => s.audience == t.audience
     | _, _ => false) ||
   (match circleTarget b with | some c => deletesCircle va a c | none => false) ||
-  (match circleTarget a with | some c => deletesCircle vb b c | none => false) ||
-  (match circleName a, circleName b with
-    | some (c, x), some (d, y) => c == d && x != y
-    | _, _ => false)
+  (match circleTarget a with | some c => deletesCircle vb b c | none => false)
 
 def pairConflict (M : Log) (views : Nat → State) (a b : Nat) : Bool :=
   concurrent M a b && !sameMeaning (M a) (M b) &&
@@ -120,7 +113,7 @@ theorem store_removal_circle_add (M : Log) (views : Nat → State) (a b m n c : 
       (lookup (views a).circles c).any (fun circle => circle.members == [m]))) := by
   simp only [pairConflict, sameMeaning, ha, hb,
     sameTarget, memberTarget, deviceTarget, specialConflict, removesCircleKey,
-    circleTarget, deletesCircle, circleName]
+    circleTarget, deletesCircle]
   cases concurrent M a b <;> cases m == n <;> cases decide (c ∈ keys) <;>
     cases (lookup (views a).circles c).any (fun circle => circle.members == [m]) <;> simp
 

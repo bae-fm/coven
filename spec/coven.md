@@ -1311,7 +1311,6 @@ Carol's tablet:
     where an entry about a device is also about the member it belongs to;
   - one adds a member and the other removes one, which replaces the store
     key ([§13](#13-removing-members-and-devices));
-  - they give one circle different names;
   - one deletes a circle and the other changes it, its members, or resets
     it;
   - one adds someone to a circle and the other replaces that circle's key:
@@ -1796,6 +1795,11 @@ Carol's tablet:
 - Any member of the store can make a circle, and is its first member.
 - A circle's own members rename it, add and remove its members, and delete
   it ([§14.7](#147-deleting-a-circle)); an admin outside the circle can't.
+- Concurrent renames don't conflict: both entries are kept, and the name is
+  the latest kept rename's in timestamp order, as for edits to one cell
+  ([§8.2](#82-concurrent-writes-to-one-row)). A rename that has read another
+  has a later timestamp. Renames still conflict with deleting the circle
+  ([§9](#9-members-and-roles)).
 - Each circle has its own key, sealed to each of its members' public keys,
   like the store key ([§11](#11-keys)).
   - Its sealed copies live at `keys/circles/<circle>/<key>/<member>`

@@ -513,14 +513,24 @@ pub(crate) fn gifts() -> History {
 }
 
 #[test]
-fn concurrent_circle_names_use_the_earlier_stamp() {
-    let mut h = gifts();
-    h.push(0, 0, &[0, 1, 2, 3, 4], rename(0, "Birthdays"));
-    h.push(1, 1, &[0, 1, 2, 3, 4], rename(0, "Presents"));
-    h.every_order(|r| {
-        assert_eq!(r.state.circles[&circle(0)].name, "Birthdays");
-        assert_eq!(h.drops(r), [6]);
-    });
+fn concurrent_circle_renames_keep_both_entries_and_use_the_later_stamp() {
+    for first_author in [0, 1] {
+        for later_name in ["Presents", "Birthdays", "Gifts"] {
+            let mut h = gifts();
+            for (author, name) in [(first_author, "Birthdays"), (1 - first_author, later_name)] {
+                h.push(author, u64::from(author), &[0, 1, 2, 3, 4], rename(0, name));
+            }
+            assert!(!crate::replay::had_read(&h.entries[5], &h.entries[6]));
+            assert!(!crate::replay::had_read(&h.entries[6], &h.entries[5]));
+            h.every_order(|r| {
+                assert_eq!(r.state.circles[&circle(0)].name, later_name);
+                assert!(h.drops(r).is_empty());
+                for entry in &h.entries[5..] {
+                    assert_eq!(r.entries[&entry.position], EntryOutcome::Kept);
+                }
+            });
+        }
+    }
 }
 
 #[test]
@@ -954,12 +964,6 @@ async fn replay_cost() {
         assert!(result.state.members[&member(m)].removed);
         assert!(result.state.circles[&circle(u64::from(m))].deleted);
     }
-    assert!(
-        result
-            .entries
-            .values()
-            .filter(|v| **v != EntryOutcome::Kept)
-            .count()
-            > 20
-    );
+    // Only the renames of private circles deleted by member removals drop.
+    assert_eq!(h.drops(&result), [600, 1_200, 1_800]);
 }
