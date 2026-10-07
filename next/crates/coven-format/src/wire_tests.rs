@@ -60,3 +60,12 @@ fn maps_and_sets_reject_duplicate_or_descending_keys_before_collecting() {
         Err(Error::Limit { .. })
     ));
 }
+
+#[test]
+fn name_length_is_checked_before_reading_or_allocating_the_name() {
+    let frame = crate::encode_frame(2, &1025u32).unwrap();
+    assert!(matches!(
+        crate::write::RowChange::decode(&frame),
+        Err(crate::Error::Limit { field: "name", .. })
+    ));
+}

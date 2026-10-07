@@ -35,7 +35,7 @@
 | --- | --- | --- |
 | `bytes` | `length:u32 \| bytes` | At most 8 MiB. |
 | `text` | `bytes`, UTF-8 | Not normalized; may be empty or hold NUL. |
-| `name` | `text` | 1 to 1,024 bytes, no NUL: table, column and circle names. |
+| `name` | `text` | 1 to 1,024 bytes, no NUL: table, column, store, device and circle names. |
 | `[T]` | `count:u32 \| T…` | At most 65,536 items; all collections in one frame together at most 65,536. |
 | `map<K, V>` | `count:u32 \| (K V)…` | Keys strictly increasing. |
 | `set<T>` | `count:u32 \| T…` | Strictly increasing. |
@@ -53,12 +53,15 @@
 | `Parent` | `row:RowId \| generation:u64` | The generation is odd: a present row. |
 | `Columns` | `[name]` | In declaration order. |
 | `ForeignKey` | `columns:Columns \| parent:name \| parent_columns:Columns` | Both lists nonempty and equally long. |
-| `Unique` | `terms:[text] \| predicate:Option<text>` | Each term a column or an expression as written. |
+| `Unique` | `terms:[text] \| predicate:Option<text>` | Nonempty terms; each is a column or an expression as written. Terms and predicates use `text`, not `name`. |
 | `ColumnValue` | `value:Value \| parents:map<ForeignKey, Parent>` | |
 | `MemberKeys` | `signing:MemberId \| sealing:SealingKey` | |
 | `MemberAccess` | `0 \| account:text`, or `1 \| access_key_id:text` | A provider account, or an S3 key's public id. |
 
-- Identifiers order as their bytes, except where a row says otherwise.
+- Identifiers order as their bytes, except where a row says otherwise. Names
+  order by UTF-8 bytes; `RowId` orders by table, encoded key, then audience.
+  A `Value` retains its SQLite storage class: an integer and an integral real
+  have distinct encodings outside ordered keys. Infinities are valid reals.
 - `ForeignKey` orders by its columns, then parent, then parent columns;
   `Unique` by its terms, then its predicate, absent first.
 - E.g. `title`, `lower(title)`, and `title WHERE active = 1` are three
@@ -69,6 +72,9 @@
 - A row's key is its key columns' values, encoded so that byte order is
   SQLite's order ([§8.5](coven-from-scratch.md#85-keys-and-uniqueness)):
   numbers, then text by bytes, then blobs by bytes.
+- Keys have 1 to 65,536 non-NULL components and at most 8 MiB of encoded
+  bytes. These components are inside `bytes`, not a counted collection in
+  the containing frame. Text uses binary collation.
 - Components follow each other with no count or end; a shorter key that is
   a prefix of a longer one sorts first.
 - Numbers, integer or real, share one encoding, so `1` and `1.0` are one key:
@@ -85,6 +91,9 @@
     significand's top bit set; integers are normalized exactly, without
     passing through a 64-bit float.
   - A decoded number is an integer when it is whole and fits in i64.
+    Otherwise it must be exactly representable as a nonzero finite IEEE 754
+    double; other exponent/significand pairs are refused. NaN and negative
+    zero are refused as inputs; zero has only tag `0x12`.
 - Text is `0x20`, blobs `0x30`, then their bytes with each `00` written
   `00 FF`, then `00 00`.
 - E.g. the key `(7, "a")` is `13 0434 E000000000000000 20 61 00 00`:
@@ -103,8 +112,8 @@
 | 7 | Snapshot end | empty |
 | 8 | Posted positions | D8 |
 | 9 | Join request | D8 |
-| 10 | Restore code | D12 |
-| 11 | Invite code | D12 |
+| 10 | Restore code | D13 |
+| 11 | Invite code | D13 |
 
 ### D5 Writes
 
@@ -121,11 +130,18 @@
   parts           [audience:Audience | rows:u64 | length:u64]
   ```
 
+  - Schema version zero is representable. A lost disposition's version is
+    positive and names the breaking version reached by the store.
   - Parts are in increasing audience order, each with at least one record.
+    `rows` counts both row changes and dismissals. Own earlier writes are
+    implicit in `had_read`; an explicit own-device position is refused.
   - A migration write has no parts; every other write has at least one
     ([§17.1](coven-from-scratch.md#171-host-application)).
 - A part's stream is its records, one frame each, in increasing `RowId`
-  order, each of the part's audience; `length` counts every byte of them.
+  order, each of the part's audience; `length` counts every byte of them,
+  including each seven-byte frame prefix. Record counts and total stream
+  lengths have only their u64 bound; individual frames keep D1/D2's bounds.
+  There is no surrounding collection count.
   - A row change (kind 2):
 
     ```
@@ -136,6 +152,10 @@
     old         map<name, Value>       insert none; update the same columns; delete any
     ```
 
+  - A delete omits the `columns` field completely; every operation carries
+    the `old` map's count, including an insert's zero count. Generations and
+    references obey merge's parity, advancement without overflow, and
+    parent-generation/audience checks (§8).
   - A dismissal (kind 3) names a lost cell the app dismissed
     ([§20.4](coven-from-scratch.md#204-reading)):
 
@@ -150,8 +170,8 @@
   - A row has at most one change in a write, and changes come before
     dismissals of the same row. Those dismissals are ordered by column,
     then write, with no duplicates; each names a write the author had read.
-- A write waiting in `coven_uploads` is the header frame followed by its
-  parts' streams, with nothing between them.
+- A part's record count and byte length must match its header. A frame
+  announced beyond the part's end is refused before allocation.
 
 ### D6 Store log entries
 
@@ -184,16 +204,18 @@
 
 - A role is `0` admin or `1` member. `SnapshotId` is
   `audience:Audience | device:DeviceId | number:u64`, its path's parts (D10).
+  Its number is positive and belongs to the device's snapshot sequence.
+  The entry's timestamp names its writing device.
 - The create-store entry is number 1 of its device, reads nothing, and its
   `admin` is its author; the device it adds is the one writing it.
-- An added device belongs to the entry's author; a created circle's first
-  member is its author.
+- Add-device carries no member id; create-circle carries no member list.
 - `key` names the key the entry brings in ([§11](coven-from-scratch.md#11-keys));
-  a removal's `circle_keys` are strictly increasing by circle.
-- Which circles a removal deletes is not written: the replay finds them in
-  the author's view ([§9](coven-from-scratch.md#9-members-and-roles)).
+  a removal's `circle_keys` are strictly increasing by circle. Their count
+  is present even when zero. Key ids have no numerical ordering or succession.
+  A removal carries no list of deleted circles.
 - Raised versions are at least 1, and a raise names a snapshot of the
-  audience it raises.
+  audience it raises; a reset names the audience it resets. The sealed
+  creation identity must agree with the plaintext creation (D9).
 
 ### D7 Snapshots
 
@@ -210,16 +232,26 @@
   | 1 | Applied write: `id:WriteId \| timestamp:Timestamp \| had_read:WritePositions` | `WriteId` |
   | 2 | Synced column: `table:name \| column:name` | table, column |
   | 3 | Merge row (below) | `RowId` |
-  | 4 | Lost write: `header` (D5's header fields up to `disposition`) `\| audience:Audience \| rows:u64 \| cause` | `WriteId` |
+  | 4 | Lost write: `header` (D5's header fields through `disposition`, inclusive) `\| audience:Audience \| rows:u64 \| cause` | `WriteId` |
   | 5 | Kept loss: `row:RowId \| values` (below) | row, incarnation, loss identity |
 
+  - Empty sections emit nothing. A synced row's columns are nonempty. An
+    applied write's timestamp names its device; its had-read positions name
+    other devices only, with own earlier writes implicit.
   - A lost write is followed at once by `rows` records of tag `6`, each a
     row change (D5) of its write, in increasing `RowId` order; the count
     in the header counts lost writes, not their rows. Dismissed cells are
     absent from these changes (including an update's or delete's old values);
-    rows and lost-write headers emptied by dismissal are omitted.
+    rows and lost-write headers emptied by dismissal are omitted. `rows`
+    is positive, covers only this audience, and its row records cannot be
+    interrupted by another record or the end marker. Extra rows are refused.
+    A lost-write header cannot have the migration disposition.
   - `cause` is `0 | version:u32`, lost to a schema change, or
-    `1 | entry:EntryId`, lost to a reset.
+    `1 | entry:EntryId`, lost to a reset. A schema-change version is positive
+    and at most the snapshot's schema version; a reset entry is covered by
+    its store-log positions. A header with lost disposition `v` requires
+    schema-change cause `v`. These writes were excluded from merge, so they
+    are distinct from concurrent lost cells; neither replaces the other.
   - A kept loss is a removed row's loss whose merge records a breaking
     change forgot ([§17.1](coven-from-scratch.md#171-host-application)).
     Its values are `0 | key:LostKey | value:LostValue` for a displaced cell,
@@ -228,6 +260,9 @@
     read at the migration, with empty parent maps. Within a row and
     incarnation, cells precede rows; cell losses order by `LostKey`, removed
     rows by their column-to-setter maps. Duplicate identities are refused.
+    Incarnations are positive and odd; a removed row has nonempty cells and
+    removal rules. Names, values, write identities and circle-only rules
+    have the same checks as merged rows.
 - A merge row is merge's state of one row ([§8](coven-from-scratch.md#8-merge)):
 
   ```
@@ -242,9 +277,24 @@
     `incarnation:u64 | value:ColumnValue | replaced_by:WriteId`.
   - `Rule` is `0 | ForeignKey`, `1 | check:text` (its name, or its
     expression when unnamed), `2` deleted circle, `3` another audience's
-    row, or `4 | Unique`.
-- Every write a record names is an applied write of section 1, or covered
-  by the snapshot's positions.
+    row, or `4 | Unique`. Rules order by tag, then the foreign-key identity,
+    CHECK text or unique identity. Another audience's row names no winner
+    and imposes no ordering on which circle can win.
+- Synced-row references obey merge's written-parent checks. A merge row
+  must have contiguous generations, valid transition and cell timestamps,
+  no cells when deleted, valid parent generations/audiences, and valid lost
+  incarnations and replacing writes that had not read the lost values (§8).
+  A removed row is present in merge state; deleted-circle and other-audience
+  rules require a circle.
+- All row records, lost-write headers and the plaintext header have the
+  sealed prefix's audience. Every write id named by applied/merge/kept-loss
+  records or lost-write headers is covered by its write positions. Applied
+  writes' read positions are covered too; excluded writes' dependencies need
+  not be. Positions describe consumed writes, including excluded ones.
+- The decoder refuses incorrect section/record order, duplicate identities,
+  mismatched counts, audiences and coverage. EOF without the end marker is
+  truncation; no records may follow the marker.
+- No local row ids, uploads, operations or storage paths occur in a snapshot.
 
 ### D8 Small frames
 
@@ -467,16 +517,24 @@
   sealed key, file and code, including:
   - a write with a store part and a circle part, the first spanning three
     chunks;
-  - a member removal replacing two circles' keys;
+  - all fourteen store-log change tags, including both member-access variants
+    across creation and addition, and a removal replacing two circles' keys;
+  - a dismissal frame;
   - a snapshot with every section, a lost write and a kept loss;
   - a migration write.
 - Every successful decode re-encodes to the same bytes; tests decode every
   truncation and single-bit change of every fixture without panicking.
 
+- `v1.hex` pins the plaintext frames, then a write prefix/header/part chunks
+  and a snapshot prefix/plaintext chunks. `migration.hex` also pins the
+  migration header separately. Frame mutations exercise the payload decoder,
+  including dismissal and migration frames; a successful mutation must
+  re-encode to exactly the mutated bytes.
 - The sealed fixtures are `sealed-write.hex`, `sealed-store-log.hex`,
   `sealed-snapshot.hex`, `sealed-positions.hex` and `sealed-join-request.hex`;
   `sealed-store-key.hex` and `sealed-circle-key.hex` hold the two key boxes.
-  `file.hex` has a full 4-KiB chunk and a 29-byte last chunk. The code frames
+  `file.hex` has a full 4-KiB chunk and a 29-byte last chunk; `uploaded-file.txt`
+  pins its device-qualified path and uploaded row reference. The code frames
   are `restore-code.hex` and `invite-code.hex`, with their text in `codes.txt`.
   All key material and fixed nonces in these fixtures are public test data.
   Ciphertext, HKDF and signatures were calculated independently using

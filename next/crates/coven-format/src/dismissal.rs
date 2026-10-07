@@ -15,7 +15,7 @@ pub struct Dismissal {
     /// The write that set that value.
     pub write: WriteId,
 }
-wire_struct!(Dismissal, row, column, write);
+wire_struct!(Dismissal, row, column => crate::wire::get_name, write);
 
 impl Dismissal {
     /// Encode a bounded kind-3 dismissal frame.

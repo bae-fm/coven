@@ -40,6 +40,7 @@ pub(crate) fn write<E>(
     database: &DatabaseConnection,
     schema: &WriteSchema,
     id: SnapshotId,
+    begin: impl FnOnce(&SnapshotHeader) -> Result<(), E>,
     mut emit: impl FnMut(Vec<u8>) -> Result<(), E>,
 ) -> Result<(), SnapshotWriteError<E>> {
     let audience = audience_text(&id.audience);
@@ -95,6 +96,7 @@ pub(crate) fn write<E>(
         counts,
     };
     let (mut encoder, header_frame) = SnapshotEncoder::start(header)?;
+    begin(encoder.header()).map_err(SnapshotWriteError::Output)?;
     emit(header_frame).map_err(SnapshotWriteError::Output)?;
     let mut record = |record| emit(encoder.record(record)?).map_err(SnapshotWriteError::Output);
     visit_rows(database, schema, &selected, |stored| {

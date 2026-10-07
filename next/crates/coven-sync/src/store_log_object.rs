@@ -133,14 +133,6 @@ pub(crate) fn open(
             "creation identity disagrees with its encrypted entry",
         ));
     }
-    if entry
-        .had_read
-        .0
-        .iter()
-        .any(|p| p.device == entry.position.device)
-    {
-        return Err(invalid("own-device history must be implicit"));
-    }
     Ok(entry)
 }
 

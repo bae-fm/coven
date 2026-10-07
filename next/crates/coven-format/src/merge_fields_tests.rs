@@ -241,7 +241,10 @@ fn field_codecs_refuse_invalid_values_and_noncanonical_bytes() {
     for real in [f64::NAN.to_bits(), (-0.0_f64).to_bits()] {
         assert!(encode_column_value(&fixture::column(Value::Real(real))).is_err());
     }
-    assert!(encode_rules(&BTreeSet::from([Rule::Check("".into())])).is_err());
+    assert!(encode_rules(&BTreeSet::from([Rule::Check(
+        "x".repeat(crate::wire::MAX_BYTES + 1)
+    )]))
+    .is_err());
     assert!(decode_rules(&[0, 0, 0, 2, 3, 2]).is_err());
     assert!(decode_rules(&[0, 0, 0, 2, 2, 2]).is_err());
     assert!(decode_rules(&[0, 1, 0, 1]).is_err());
@@ -325,17 +328,9 @@ fn unique_identity_retains_terms_order_and_partial_predicate() {
     assert_eq!(encodings.len(), identities.len());
     let rules = identities.into_iter().map(Rule::Unique).collect();
     assert_eq!(decode_rules(&encode_rules(&rules).unwrap()).unwrap(), rules);
-    for identity in [
-        UniqueConstraint::from([]),
-        UniqueConstraint::from([""]),
-        UniqueConstraint {
-            terms: vec!["title".into()],
-            partial: Some(String::new()),
-        },
-    ] {
-        assert!(encode_unique_constraint(&identity).is_err());
-        assert!(decode_unique_constraint(&encode(&identity).unwrap()).is_err());
-    }
+    let empty = UniqueConstraint::from([]);
+    assert!(encode_unique_constraint(&empty).is_err());
+    assert!(decode_unique_constraint(&encode(&empty).unwrap()).is_err());
 }
 #[test]
 fn schema_loss_uses_a_positive_u32_while_reset_retains_its_entry() {
@@ -348,4 +343,21 @@ fn schema_loss_uses_a_positive_u32_while_reset_retains_its_entry() {
     }
     assert!(encode_lost_write_cause(&LostWriteCause::SchemaChange(0)).is_err());
     assert!(decode_lost_write_cause(&[0, 0, 0, 0, 0]).is_err());
+}
+
+#[test]
+fn check_and_unique_expressions_have_text_bounds() {
+    use coven_merge::{Rule, UniqueConstraint};
+    for text in [String::new(), "a\0b".into(), "x".repeat(1025)] {
+        let rules = [
+            Rule::Check(text.clone()),
+            Rule::Unique(UniqueConstraint {
+                terms: vec![text.clone()],
+                partial: Some(text),
+            }),
+        ]
+        .into();
+        let bytes = crate::merge_fields::encode_rules(&rules).unwrap();
+        assert_eq!(crate::merge_fields::decode_rules(&bytes).unwrap(), rules);
+    }
 }

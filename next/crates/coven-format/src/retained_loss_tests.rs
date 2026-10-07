@@ -7,12 +7,15 @@ use coven_merge::{Audience, Parent};
 fn encoder(count: u64) -> (SnapshotEncoder, SnapshotDecoder) {
     let mut header = test_utils::snapshot_header();
     header.counts = [0, 0, 0, 0, 0, count];
-    let (encoder, frame) = SnapshotEncoder::start(header).unwrap();
-    (encoder, SnapshotDecoder::start(&frame).unwrap())
+    let (encoder, frame) = SnapshotEncoder::start(header.clone()).unwrap();
+    (
+        encoder,
+        SnapshotDecoder::start(&frame, &test_utils::snapshot_prefix(&header)).unwrap(),
+    )
 }
 
 fn raw(loss: &RetainedLoss) -> Vec<u8> {
-    crate::encode_frame_with(4, |out| {
+    crate::encode_frame_with(6, |out| {
         5u8.put(out)?;
         loss.put(out)
     })
@@ -94,11 +97,7 @@ fn invalid_losses_leave_order_and_counts_unchanged() {
     let mut circle = original[1].clone();
     circle.row.audience = Audience::Circle(CircleId(uuid::Uuid::from_u128(1)));
     invalid.push(circle);
-    for rule in [
-        Rule::DeletedCircle,
-        Rule::OtherAudience,
-        Rule::Check(String::new()),
-    ] {
+    for rule in [Rule::DeletedCircle, Rule::OtherAudience] {
         let mut loss = original[1].clone();
         let RetainedValues::Row { replaced_by, .. } = &mut loss.values else {
             unreachable!()
@@ -210,8 +209,9 @@ fn circle_losses_keep_all_original_removal_reasons() {
     let mut header = test_utils::snapshot_header();
     header.id.audience = loss.row.audience.clone();
     header.counts = [0, 0, 0, 0, 0, 1];
-    let (mut encoder, first) = SnapshotEncoder::start(header).unwrap();
-    let mut decoder = SnapshotDecoder::start(&first).unwrap();
+    let (mut encoder, first) = SnapshotEncoder::start(header.clone()).unwrap();
+    let mut decoder =
+        SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(encoder.header())).unwrap();
     let expected = SnapshotRecord::RetainedLoss(loss);
     assert_eq!(
         decoder

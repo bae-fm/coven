@@ -1,38 +1,30 @@
 //! Snapshots stream a header, six ordered sections and an end marker (§15).
 //! The caller stages records and supplies the applied write metadata to merge.
 
+use crate::encode_frame_with;
 use crate::error::{require, Error, Rule};
 use crate::retained_loss::{LossIdentity, RetainedLoss};
 use crate::snapshot_rows::*;
 use crate::store_log::SnapshotId;
 use crate::value::{name, positive, EntryPositions, WritePositions};
-use crate::wire::{decode_frame, wire_struct, Decoder, Encoder, Wire};
-use crate::{encode_frame, encode_frame_with};
+use crate::wire::{decode_frame, Decoder, Encoder, Wire};
 use coven_merge::{RowId, WriteId, WriteOracle};
 
-/// Snapshot identity, covered positions and counts of each ordered section.
+/// Snapshot metadata assembled from its plaintext header and sealed prefix.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SnapshotHeader {
     /// Writing device, snapshot number and audience.
     pub id: SnapshotId,
     /// The app schema version.
     pub schema_version: u32,
-    /// Consumed device write positions, including recorded lost writes.
+    /// Consumed device writes from the sealed prefix, including recorded lost writes.
     pub writes: WritePositions,
-    /// Consumed store-log positions.
+    /// Consumed store-log positions from the sealed prefix.
     pub store_log: EntryPositions,
     /// Counts: synced rows, applied writes, columns, merged rows, lost writes,
     /// and losses retained without merge records.
     pub counts: [u64; 6],
 }
-wire_struct!(
-    SnapshotHeader,
-    id,
-    schema_version,
-    writes,
-    store_log,
-    counts
-);
 impl Wire for [u64; 6] {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {
         for n in self {
@@ -299,10 +291,18 @@ impl StreamState {
 /// Encodes bounded frames, retaining only the header, counts and previous identity.
 pub struct SnapshotEncoder(StreamState);
 impl SnapshotEncoder {
+    /// Metadata used to construct the sealed prefix before emitting frames.
+    pub fn header(&self) -> &SnapshotHeader {
+        &self.0.header
+    }
     /// Start a snapshot and return its header frame.
     pub fn start(header: SnapshotHeader) -> Result<(Self, Vec<u8>), Error> {
         header.validate()?;
-        let bytes = encode_frame(5, &header)?;
+        let bytes = encode_frame_with(5, |out| {
+            header.id.put(out)?;
+            header.schema_version.put(out)?;
+            header.counts.put(out)
+        })?;
         Ok((Self(StreamState::new(header)), bytes))
     }
     /// Validate and encode a record. Failure leaves the cursor unchanged.
@@ -323,13 +323,32 @@ impl SnapshotEncoder {
 /// Decodes a snapshot without retaining its rows or write history. The caller
 /// stages records and commits only after `finish` succeeds. Its oracle must
 /// describe the causally closed applied writes recorded by this snapshot.
+/// Populate that oracle from section 1; lost-write records add no oracle
+/// metadata, and frozen kept losses need no oracle. Only the header, counts and
+/// previous record identities are retained between frames. The database consumer
+/// checks cross-section completeness, SQL schema rules and app-row visibility;
+/// merge's removal computation checks which removal rules actually hold.
 pub struct SnapshotDecoder(StreamState);
 impl SnapshotDecoder {
-    /// Read the initial header frame.
-    pub fn start(frame: &[u8]) -> Result<Self, Error> {
+    /// Read the initial header frame using positions from the authenticated sealed prefix.
+    pub fn start(
+        frame: &[u8],
+        prefix: &crate::sealed_snapshot::SnapshotObjectPrefix,
+    ) -> Result<Self, Error> {
         let (kind, mut input) = decode_frame(frame)?;
         require(kind == 5, "snapshot header kind", Rule::Kind)?;
-        let header = SnapshotHeader::get(&mut input)?;
+        let header = SnapshotHeader {
+            id: Wire::get(&mut input)?,
+            schema_version: Wire::get(&mut input)?,
+            counts: Wire::get(&mut input)?,
+            writes: prefix.writes.clone(),
+            store_log: prefix.store_log.clone(),
+        };
+        require(
+            header.id.audience == prefix.audience,
+            "snapshot prefix audience",
+            Rule::Audience,
+        )?;
         input.finish()?;
         header.validate()?;
         Ok(Self(StreamState::new(header)))

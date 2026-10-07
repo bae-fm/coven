@@ -22,8 +22,15 @@ fn encode<T: Wire>(value: &T) -> Result<Vec<u8>, Error> {
 }
 
 fn decode<T: Wire>(bytes: &[u8]) -> Result<T, Error> {
+    decode_with(bytes, T::get)
+}
+
+fn decode_with<T>(
+    bytes: &[u8],
+    get: impl FnOnce(&mut Decoder<'_>) -> Result<T, Error>,
+) -> Result<T, Error> {
     let mut input = Decoder::new(bytes)?;
-    let value = T::get(&mut input)?;
+    let value = get(&mut input)?;
     input.finish()?;
     Ok(value)
 }
@@ -125,7 +132,7 @@ pub fn encode_columns(value: &BTreeMap<String, ColumnValue<Value>>) -> Result<Ve
 
 /// Decode exactly one snapshot field containing a removed row’s values and parents.
 pub fn decode_columns(bytes: &[u8]) -> Result<BTreeMap<String, ColumnValue<Value>>, Error> {
-    let value: BTreeMap<String, ColumnValue<Value>> = decode(bytes)?;
+    let value = decode_with(bytes, crate::wire::get_name_map)?;
     merge_wire::columns(&value)?;
     Ok(value)
 }
@@ -138,7 +145,7 @@ pub fn encode_setters(value: &BTreeMap<String, WriteId>) -> Result<Vec<u8>, Erro
 
 /// Decode exactly one snapshot field containing a removed row’s setters.
 pub fn decode_setters(bytes: &[u8]) -> Result<BTreeMap<String, WriteId>, Error> {
-    let value: BTreeMap<String, WriteId> = decode(bytes)?;
+    let value = decode_with(bytes, crate::wire::get_name_map)?;
     merge_wire::setters(&value)?;
     Ok(value)
 }

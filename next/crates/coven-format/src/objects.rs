@@ -17,7 +17,7 @@ pub struct JoinRequest {
     /// The new device's name shown to the approving admin.
     pub device_name: String,
 }
-wire_struct!(JoinRequest, invite, keys, device_name);
+wire_struct!(JoinRequest, invite, keys, device_name => crate::wire::get_name);
 impl JoinRequest {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         name(&self.device_name)

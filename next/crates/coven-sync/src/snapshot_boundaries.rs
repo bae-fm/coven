@@ -100,15 +100,10 @@ impl StoreLogSync {
                 let sealed = layout.decode_chunk(&piece)?;
                 let plain = key.open_object_chunk(path.as_str(), &clear, 0, index, sealed)?;
                 if let Some(frame) = frames.next(&mut plain.as_slice())? {
-                    let decoder = SnapshotDecoder::start(&frame)?;
+                    let decoder = SnapshotDecoder::start(&frame, &prefix)?;
                     let header = decoder.header();
-                    if header.id != *id
-                        || header.writes != prefix.writes
-                        || header.store_log != prefix.store_log
-                    {
-                        return Err(inconsistent(
-                            "boundary header and authenticated prefix disagree",
-                        ));
+                    if header.id != *id {
+                        return Err(inconsistent("boundary header and path disagree"));
                     }
                     break;
                 }

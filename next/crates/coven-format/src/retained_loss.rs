@@ -67,7 +67,7 @@ impl Wire for RetainedValues {
             }),
             1 => Ok(Self::Row {
                 generation: Wire::get(input)?,
-                cells: Wire::get(input)?,
+                cells: crate::wire::get_name_map(input)?,
                 replaced_by: Wire::get(input)?,
             }),
             tag => Err(Error::UnknownTag {

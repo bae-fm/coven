@@ -40,7 +40,7 @@ fn a_snapshot_is_sealed_opened_and_applied_a_chunk_at_a_time() {
     let keys = key.derive();
     let mut writer = SnapshotObjectLayout::new();
     let mut reader = SnapshotObjectLayout::new();
-    let mut snapshot = SnapshotChunkDecoder::new(prefix.audience.clone());
+    let mut snapshot = SnapshotChunkDecoder::new(prefix.clone());
     let mut oracle = test_utils::TestOracle {
         writes: Default::default(),
     };

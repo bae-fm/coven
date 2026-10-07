@@ -1,7 +1,7 @@
 //! Inputs and journal progress committed by one snapshot reload.
 
 use crate::{DownloadedWriteStream, OperationUpdate, WriteBoundary};
-use coven_format::store_log::SnapshotId;
+use coven_format::{sealed_snapshot::SnapshotObjectPrefix, store_log::SnapshotId};
 use coven_merge::Audience;
 
 /// One audience's starting state. An audience without a stored snapshot starts
@@ -11,6 +11,8 @@ pub enum SnapshotSource<R> {
     Stored {
         /// Expected object identity.
         id: SnapshotId,
+        /// Authenticated sealed prefix carrying the snapshot positions.
+        prefix: SnapshotObjectPrefix,
         /// Plaintext snapshot stream.
         input: R,
     },
@@ -40,11 +42,14 @@ pub struct SnapshotReload<R, W> {
 impl<R, W> SnapshotReload<R, W> {
     /// Load stored snapshots and their gap writes, retaining existing boundaries
     /// and without an operation journal transition.
-    pub fn new(snapshots: Vec<(SnapshotId, R)>, writes: Vec<DownloadedWriteStream<W>>) -> Self {
+    pub fn new(
+        snapshots: Vec<(SnapshotId, SnapshotObjectPrefix, R)>,
+        writes: Vec<DownloadedWriteStream<W>>,
+    ) -> Self {
         Self {
             snapshots: snapshots
                 .into_iter()
-                .map(|(id, input)| SnapshotSource::Stored { id, input })
+                .map(|(id, prefix, input)| SnapshotSource::Stored { id, prefix, input })
                 .collect(),
             writes,
             absent: Vec::new(),
@@ -57,7 +62,7 @@ impl<R, W> SnapshotReload<R, W> {
 
 /// A validated snapshot's header and declared file references.
 pub struct SnapshotInspection {
-    /// Authenticated plaintext header.
+    /// Header metadata, including positions from the authenticated sealed prefix.
     pub header: coven_format::snapshot::SnapshotHeader,
     /// Uploaded files named by its synced rows.
     pub files: std::collections::BTreeSet<(

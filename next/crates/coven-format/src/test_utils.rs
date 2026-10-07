@@ -131,10 +131,7 @@ pub fn member_removal() -> StoreLogEntry {
         },
         timestamp: Timestamp::new(7, 0, DeviceId(1)).unwrap(),
         author: member().signing,
-        had_read: EntryPositions(vec![EntryId {
-            device: DeviceId(1),
-            number: 1,
-        }]),
+        had_read: EntryPositions(vec![]),
         change: StoreChange::RemoveMember {
             member: "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
                 .parse()
@@ -287,6 +284,15 @@ pub fn snapshot_header() -> SnapshotHeader {
         counts: [1, 3, 1, 1, 1, 2],
     }
 }
+/// The sealed prefix carrying a snapshot's coverage, with a fixed test key.
+pub fn snapshot_prefix(header: &SnapshotHeader) -> crate::sealed_snapshot::SnapshotObjectPrefix {
+    crate::sealed_snapshot::SnapshotObjectPrefix {
+        audience: header.id.audience.clone(),
+        key: KeyId(Uuid::from_bytes([1; 16])),
+        writes: header.writes.clone(),
+        store_log: header.store_log.clone(),
+    }
+}
 /// Records in their canonical section and identity order.
 pub fn snapshot_records() -> Vec<SnapshotRecord> {
     let mut records = vec![SnapshotRecord::Synced(SyncedRow {
@@ -390,9 +396,68 @@ pub fn invite() -> InviteCode {
         storage: SecretBytes::new(vec![0x44]),
     }
 }
+/// Each store-log change in its canonical tag order.
+pub fn store_changes() -> Vec<StoreChange> {
+    let c = CircleId(uuid::Uuid::from_bytes([2; 16]));
+    let m = member().signing;
+    let snapshot = snapshot_header().id;
+    vec![
+        store_log().change,
+        StoreChange::AddMember {
+            access: crate::MemberAccess::ProviderAccount("member@example.test".into()),
+            keys: member(),
+            role: MemberRole::Member,
+        },
+        member_removal().change,
+        StoreChange::ChangeRole {
+            member: m.clone(),
+            role: MemberRole::Admin,
+        },
+        StoreChange::AddDevice {
+            device: DeviceId(2),
+            name: "D".into(),
+        },
+        StoreChange::RemoveDevice {
+            device: DeviceId(2),
+        },
+        StoreChange::CreateCircle {
+            circle: c,
+            name: "C".into(),
+            key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([1; 16])),
+        },
+        StoreChange::RenameCircle {
+            circle: c,
+            name: "N".into(),
+        },
+        StoreChange::DeleteCircle { circle: c },
+        StoreChange::AddCircleMember {
+            circle: c,
+            member: m.clone(),
+        },
+        StoreChange::RemoveCircleMember {
+            circle: c,
+            member: m.clone(),
+            key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([2; 16])),
+        },
+        StoreChange::RaiseSchema {
+            version: 2,
+            snapshot: snapshot.clone(),
+        },
+        StoreChange::RaiseFormat {
+            version: 2,
+            snapshot: snapshot.clone(),
+        },
+        StoreChange::Reset {
+            snapshot: SnapshotId {
+                audience: Audience::Circle(c),
+                ..snapshot.clone()
+            },
+        },
+    ]
+}
 /// Every independently decoded ordinary object kind.
 pub fn objects() -> Vec<Object> {
-    vec![
+    let mut objects = vec![
         Object::StoreLog(store_log()),
         Object::StoreLog(member_removal()),
         Object::StoreLog(StoreLogEntry {
@@ -433,7 +498,22 @@ pub fn objects() -> Vec<Object> {
                 bytes: coven_crypto::Fingerprint::from_bytes([0x88; 32]),
             }],
         }),
-    ]
+    ];
+    objects.extend(
+        store_changes()
+            .into_iter()
+            .enumerate()
+            .filter_map(|(tag, change)| {
+                if matches!(tag, 0 | 2 | 11 | 12) {
+                    return None;
+                }
+                Some(Object::StoreLog(StoreLogEntry {
+                    change,
+                    ..store_log()
+                }))
+            }),
+    );
+    objects
 }
 /// A two-audience write with a row frame spanning three chunks.
 pub fn chunked_write() -> WriteRecord {
@@ -476,6 +556,19 @@ pub fn frame_examples() -> Vec<Zeroizing<Vec<u8>>> {
     let encoder = crate::write_stream::WriteEncoder::new(&record).unwrap();
     frames.push(Zeroizing::new(encoder.header_frame().to_vec()));
     frames.push(Zeroizing::new(record.parts[0].rows[0].encode().unwrap()));
+    frames.push(Zeroizing::new(
+        crate::dismissal::Dismissal {
+            row: row(),
+            column: "x".into(),
+            write: position(),
+        }
+        .encode()
+        .unwrap(),
+    ));
+    let mut migration = record.clone();
+    migration.header.disposition = WriteDisposition::Migration;
+    migration.parts.clear();
+    frames.push(Zeroizing::new(write_plaintext(&migration).unwrap()));
     frames.extend(snapshot_frames().into_iter().map(Zeroizing::new));
     frames
 }

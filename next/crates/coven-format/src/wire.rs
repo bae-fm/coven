@@ -124,22 +124,7 @@ impl<T: Wire> Wire for Vec<T> {
         Ok(())
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
-        let count = u32::get(input)? as usize;
-        bound(count, MAX_ITEMS, "collection")?;
-        // Every Wire value occupies at least one byte. Refuse a truncated
-        // collection before reserving its declared capacity.
-        if count > input.bytes.len() {
-            return Err(Error::Truncated);
-        }
-        input.charge_items(count)?;
-        let mut result = Vec::new();
-        result
-            .try_reserve_exact(count)
-            .map_err(|_| Error::Allocation)?;
-        for _ in 0..count {
-            result.push(T::get(input)?);
-        }
-        Ok(result)
+        get_sequence(input, T::get)
     }
 }
 
@@ -155,25 +140,7 @@ impl<K: Wire + Ord, V: Wire> Wire for BTreeMap<K, V> {
         Ok(())
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
-        let count = u32::get(input)? as usize;
-        bound(count, MAX_ITEMS, "collection")?;
-        if count > input.bytes.len() / 2 {
-            return Err(Error::Truncated);
-        }
-        input.charge_items(count)?;
-        let mut result = BTreeMap::new();
-        for _ in 0..count {
-            let key = K::get(input)?;
-            require(
-                result
-                    .last_key_value()
-                    .is_none_or(|(previous, _)| previous < &key),
-                "map keys",
-                Rule::Order,
-            )?;
-            result.insert(key, V::get(input)?);
-        }
-        Ok(result)
+        get_map(input, K::get)
     }
 }
 impl<T: Wire + Ord> Wire for BTreeSet<T> {
@@ -191,6 +158,69 @@ impl<T: Wire + Ord> Wire for BTreeSet<T> {
         require(values.windows(2).all(|p| p[0] < p[1]), "set", Rule::Order)?;
         Ok(values.into_iter().collect())
     }
+}
+
+pub(crate) fn get_sequence<T>(
+    input: &mut Decoder<'_>,
+    get: impl Fn(&mut Decoder<'_>) -> Result<T, Error>,
+) -> Result<Vec<T>, Error> {
+    let count = u32::get(input)? as usize;
+    bound(count, MAX_ITEMS, "collection")?;
+    if count > input.bytes.len() {
+        return Err(Error::Truncated);
+    }
+    input.charge_items(count)?;
+    let mut result = Vec::new();
+    for _ in 0..count {
+        // Reserve only after decoding a real item. A hostile count must not
+        // allocate space for values whose bytes have not been checked.
+        let value = get(input)?;
+        result.try_reserve(1).map_err(|_| Error::Allocation)?;
+        result.push(value);
+    }
+    Ok(result)
+}
+
+fn get_map<K: Ord, V: Wire>(
+    input: &mut Decoder<'_>,
+    get_key: impl Fn(&mut Decoder<'_>) -> Result<K, Error>,
+) -> Result<BTreeMap<K, V>, Error> {
+    let count = u32::get(input)? as usize;
+    bound(count, MAX_ITEMS, "collection")?;
+    if count > input.bytes.len() / 2 {
+        return Err(Error::Truncated);
+    }
+    input.charge_items(count)?;
+    let mut result = BTreeMap::new();
+    for _ in 0..count {
+        let key = get_key(input)?;
+        require(
+            result
+                .last_key_value()
+                .is_none_or(|(previous, _)| previous < &key),
+            "map keys",
+            Rule::Order,
+        )?;
+        result.insert(key, V::get(input)?);
+    }
+    Ok(result)
+}
+
+pub(crate) fn get_name_map<V: Wire>(input: &mut Decoder<'_>) -> Result<BTreeMap<String, V>, Error> {
+    get_map(input, get_name)
+}
+
+pub(crate) fn get_name(input: &mut Decoder<'_>) -> Result<String, Error> {
+    let length = u32::get(input)? as usize;
+    bound(length, 1024, "name")?;
+    let text = std::str::from_utf8(input.take(length)?).map_err(|_| Error::Utf8)?;
+    crate::value::name(text)?;
+    let mut value = String::new();
+    value
+        .try_reserve_exact(length)
+        .map_err(|_| Error::Allocation)?;
+    value.push_str(text);
+    Ok(value)
 }
 
 pub(crate) fn put_blob(bytes: &[u8], out: &mut Encoder) -> Result<(), Error> {
@@ -221,14 +251,16 @@ impl Wire for String {
 }
 
 macro_rules! wire_struct {
-    ($ty:ty, $($field:ident),+ $(,)?) => {
+    (@get $input:ident) => { crate::wire::Wire::get($input) };
+    (@get $input:ident, $get:path) => { $get($input) };
+    ($ty:ty, $($field:ident $(=> $get:path)?),+ $(,)?) => {
         impl crate::wire::Wire for $ty {
             fn put(&self, out: &mut crate::wire::Encoder) -> Result<(), crate::Error> {
                 $(crate::wire::Wire::put(&self.$field, out)?;)+
                 Ok(())
             }
             fn get(input: &mut crate::wire::Decoder<'_>) -> Result<Self, crate::Error> {
-                Ok(Self { $($field: crate::wire::Wire::get(input)?,)+ })
+                Ok(Self { $($field: crate::wire::wire_struct!(@get input $(, $get)?)?,)+ })
             }
         }
     };

@@ -29,3 +29,23 @@ fn references_carry_the_uploader_and_refuse_noncanonical_or_secret_leaking_encod
         assert!(UploadedFileReference::decode(&bad).is_err());
     }
 }
+
+#[test]
+fn uploaded_file_reference_matches_the_pinned_text_and_path() {
+    let mut fixture = include_str!("../fixtures/uploaded-file.txt").lines();
+    let path = fixture.next().unwrap();
+    let text = fixture.next().unwrap();
+    assert!(fixture.next().is_none());
+    let reference = UploadedFileReference {
+        device: DeviceId(1),
+        id: FileId(uuid::Uuid::from_bytes([0x11; 16])),
+        key: FileKey::from_bytes([0x77; 32]),
+    };
+    assert_eq!(reference.encode().as_str(), text);
+    let decoded = UploadedFileReference::decode(text).unwrap();
+    assert_eq!(decoded.encode().as_str(), text);
+    assert_eq!(
+        crate::path::ObjectPath::file(decoded.device, decoded.id).as_str(),
+        path
+    );
+}

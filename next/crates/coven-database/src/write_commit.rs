@@ -159,6 +159,9 @@ pub(crate) fn persist(
     Ok(())
 }
 
+/// Keep the header followed directly by its parts' plaintext frame streams in
+/// `coven_uploads`. Queue readers use format's header and part decoders; sync
+/// seals the value when fixing the first upload attempt.
 pub(crate) fn queue(database: &DatabaseConnection, record: &WriteRecord) -> Result<(), DbError> {
     let encoder = encoded(WriteEncoder::new(record))?;
     let bytes = plaintext(database, encoder)?;
@@ -173,6 +176,8 @@ pub(crate) fn queue(database: &DatabaseConnection, record: &WriteRecord) -> Resu
     Ok(())
 }
 
+/// Check the encoder's exact plaintext length against SQLite's connection limit
+/// before allocating the queue buffer. Sealed upload overhead must fit too.
 pub(crate) fn plaintext(
     database: &DatabaseConnection,
     encoder: WriteEncoder<'_>,

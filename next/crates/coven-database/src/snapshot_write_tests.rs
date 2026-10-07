@@ -37,21 +37,73 @@ pub(crate) fn id(audience: Audience) -> SnapshotId {
     }
 }
 
-pub(crate) async fn frames(database: &Database, audience: Audience) -> Vec<Vec<u8>> {
-    let frames = Arc::new(Mutex::new(Vec::new()));
-    let output = frames.clone();
-    database
-        .write_snapshot(id(audience), move |frame| {
-            output.lock().unwrap().push(frame);
-            Ok::<_, std::convert::Infallible>(())
-        })
-        .await
-        .unwrap();
-    Arc::try_unwrap(frames).unwrap().into_inner().unwrap()
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SnapshotFrames {
+    pub prefix: coven_format::sealed_snapshot::SnapshotObjectPrefix,
+    pub frames: Vec<Vec<u8>>,
+}
+impl SnapshotFrames {
+    pub(crate) fn concat(&self) -> Vec<u8> {
+        self.frames.concat()
+    }
+    pub(crate) fn input(
+        &self,
+    ) -> (
+        SnapshotId,
+        coven_format::sealed_snapshot::SnapshotObjectPrefix,
+        std::io::Cursor<Vec<u8>>,
+    ) {
+        (
+            id(self.prefix.audience.clone()),
+            self.prefix.clone(),
+            std::io::Cursor::new(self.concat()),
+        )
+    }
 }
 
-pub(crate) fn decode(frames: &[Vec<u8>]) -> (SnapshotHeader, Vec<SnapshotRecord>) {
-    let mut decoder = SnapshotDecoder::start(&frames[0]).unwrap();
+pub(crate) fn prefix(
+    header: &SnapshotHeader,
+) -> coven_format::sealed_snapshot::SnapshotObjectPrefix {
+    coven_format::sealed_snapshot::SnapshotObjectPrefix {
+        audience: header.id.audience.clone(),
+        key: coven_foundation::id_source::KeyId(uuid::Uuid::from_u128(1)),
+        writes: header.writes.clone(),
+        store_log: header.store_log.clone(),
+    }
+}
+
+pub(crate) async fn frames(database: &Database, audience: Audience) -> SnapshotFrames {
+    let frames = Arc::new(Mutex::new(Vec::new()));
+    let metadata = Arc::new(Mutex::new(None));
+    let output = frames.clone();
+    let start = metadata.clone();
+    database
+        .write_snapshot(
+            id(audience),
+            move |header| {
+                *start.lock().unwrap() = Some(prefix(header));
+                Ok(())
+            },
+            move |frame| {
+                output.lock().unwrap().push(frame);
+                Ok::<_, std::convert::Infallible>(())
+            },
+        )
+        .await
+        .unwrap();
+    SnapshotFrames {
+        prefix: Arc::try_unwrap(metadata)
+            .unwrap()
+            .into_inner()
+            .unwrap()
+            .unwrap(),
+        frames: Arc::try_unwrap(frames).unwrap().into_inner().unwrap(),
+    }
+}
+
+pub(crate) fn decode(snapshot: &SnapshotFrames) -> (SnapshotHeader, Vec<SnapshotRecord>) {
+    let frames = &snapshot.frames;
+    let mut decoder = SnapshotDecoder::start(&frames[0], &snapshot.prefix).unwrap();
     let mut oracle = Oracle::default();
     let mut records = Vec::new();
     for frame in &frames[1..] {
@@ -89,11 +141,12 @@ pub(crate) fn stream(
 pub(crate) async fn load_one<R: std::io::Read + Send + 'static>(
     database: &Database,
     expected: SnapshotId,
+    prefix: coven_format::sealed_snapshot::SnapshotObjectPrefix,
     plaintext: R,
 ) -> Result<(), crate::DbError> {
     database
         .load_snapshots(crate::SnapshotReload::new(
-            vec![(expected, plaintext)],
+            vec![(expected, prefix, plaintext)],
             Vec::<crate::DownloadedWriteStream<std::io::Cursor<Vec<u8>>>>::new(),
         ))
         .await
@@ -195,18 +248,24 @@ async fn snapshot_frames_keep_one_committed_state_while_the_writer_commits() {
     let (release, wait) = std::sync::mpsc::channel();
     let output = Arc::new(Mutex::new(Vec::new()));
     let produced = output.clone();
+    let metadata = Arc::new(Mutex::new(None));
+    let metadata_output = metadata.clone();
     let clone = database.clone();
     let snapshot = tokio::spawn(async move {
-        let mut started = Some(started);
         clone
-            .write_snapshot(id(Audience::Store), move |frame| {
-                produced.lock().unwrap().push(frame);
-                if let Some(started) = started.take() {
+            .write_snapshot(
+                id(Audience::Store),
+                move |header| {
+                    *metadata_output.lock().unwrap() = Some(prefix(header));
                     started.send(()).unwrap();
                     wait.recv_timeout(Duration::from_secs(20)).unwrap();
-                }
-                Ok::<_, std::convert::Infallible>(())
-            })
+                    Ok(())
+                },
+                move |frame| {
+                    produced.lock().unwrap().push(frame);
+                    Ok::<_, std::convert::Infallible>(())
+                },
+            )
             .await
             .unwrap();
     });
@@ -226,7 +285,10 @@ async fn snapshot_frames_keep_one_committed_state_while_the_writer_commits() {
     .unwrap();
     release.send(()).unwrap();
     snapshot.await.unwrap();
-    let during = decode(&output.lock().unwrap());
+    let during = decode(&SnapshotFrames {
+        prefix: metadata.lock().unwrap().take().unwrap(),
+        frames: output.lock().unwrap().clone(),
+    });
     assert_eq!(during, before);
     let after = decode(&frames(&database, Audience::Store).await);
     assert_ne!(after, before);
@@ -277,8 +339,19 @@ async fn circle_snapshot_has_only_its_rows_and_reference_metadata() {
 async fn output_errors_and_panics_release_the_reader_transaction() {
     let store = TestStore::new();
     let database = store.schema(notes(), NOTES).await.unwrap();
+    let refused_prefix = database
+        .write_snapshot(
+            id(Audience::Store),
+            |_| Err("prefix refused"),
+            |_| -> Result<(), &str> { panic!("no frames after prefix failure") },
+        )
+        .await;
+    assert!(matches!(
+        refused_prefix,
+        Err(SnapshotWriteError::Output("prefix refused"))
+    ));
     let result = database
-        .write_snapshot(id(Audience::Store), |_| Err("consumer refused"))
+        .write_snapshot(id(Audience::Store), |_| Ok(()), |_| Err("consumer refused"))
         .await;
     assert!(matches!(
         result,
@@ -287,9 +360,11 @@ async fn output_errors_and_panics_release_the_reader_transaction() {
     let clone = database.clone();
     let task = tokio::spawn(async move {
         clone
-            .write_snapshot(id(Audience::Store), |_| -> Result<(), ()> {
-                panic!("consumer panic")
-            })
+            .write_snapshot(
+                id(Audience::Store),
+                |_| Ok(()),
+                |_| -> Result<(), ()> { panic!("consumer panic") },
+            )
             .await
     });
     assert!(task.await.unwrap_err().is_panic());
@@ -634,6 +709,7 @@ async fn assert_loaded_losses(source: &Database, target: &Database) {
     load_one(
         target,
         id(Audience::Store),
+        snapshot.prefix.clone(),
         std::io::Cursor::new(snapshot.concat()),
     )
     .await

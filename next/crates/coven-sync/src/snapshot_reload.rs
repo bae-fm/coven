@@ -185,6 +185,7 @@ impl StoreLogSync {
                         id: snapshot.path.snapshot_id().ok_or_else(|| {
                             inconsistent("recorded snapshot path has another layout")
                         })?,
+                        prefix: SnapshotObjectPrefix::decode(&snapshot.prefix)?,
                         input: io::SnapshotInput::open(&self.directory, &snapshot.file)?,
                     });
                 }

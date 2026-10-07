@@ -45,8 +45,7 @@ impl RestoreCode {
         let (kind, mut input) = decode_frame(bytes)?;
         require(kind == 10, "restore code kind", Rule::Kind)?;
         let store = Wire::get(&mut input)?;
-        let label = String::get(&mut input)?;
-        name(&label)?;
+        let label = crate::wire::get_name(&mut input)?;
         let keys_len = u32::get(&mut input)? as usize;
         let member_keys =
             MemberKeys::from_secret_bytes(input.take(keys_len)?).map_err(Error::Material)?;
@@ -101,8 +100,7 @@ impl InviteCode {
         let (kind, mut input) = decode_frame(bytes)?;
         require(kind == 11, "invite code kind", Rule::Kind)?;
         let store = Wire::get(&mut input)?;
-        let label = String::get(&mut input)?;
-        name(&label)?;
+        let label = crate::wire::get_name(&mut input)?;
         let invite = Wire::get(&mut input)?;
         let mut secret = Zeroizing::new([0; 32]);
         secret.copy_from_slice(input.take(32)?);

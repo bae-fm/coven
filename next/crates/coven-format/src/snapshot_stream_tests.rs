@@ -29,7 +29,8 @@ fn lost_writes_stream_more_rows_than_a_frame_can_hold() {
             index += 1;
             Some(encoder.record(SnapshotRecord::LostWriteRow(row)))
         }));
-    let mut decoder = SnapshotChunkDecoder::new(Audience::Store);
+    let mut decoder =
+        SnapshotChunkDecoder::new(test_utils::snapshot_prefix(&test_utils::snapshot_header()));
     let oracle = test_utils::oracle();
     let mut received = 0;
     for chunk in PlaintextChunks::new(frames) {
@@ -54,7 +55,8 @@ fn missing_end_markers_partial_frames_and_wrong_prefix_audiences_are_refused() {
     let frames = test_utils::snapshot_frames();
     let bytes = frames.concat();
     for end in 0..bytes.len() {
-        let mut decoder = SnapshotChunkDecoder::new(Audience::Store);
+        let mut decoder =
+            SnapshotChunkDecoder::new(test_utils::snapshot_prefix(&test_utils::snapshot_header()));
         let mut input = &bytes[..end];
         let result = (|| {
             while decoder
@@ -67,7 +69,8 @@ fn missing_end_markers_partial_frames_and_wrong_prefix_audiences_are_refused() {
     }
     let mut trailing = bytes.clone();
     trailing.push(0);
-    let mut decoder = SnapshotChunkDecoder::new(Audience::Store);
+    let mut decoder =
+        SnapshotChunkDecoder::new(test_utils::snapshot_prefix(&test_utils::snapshot_header()));
     let mut input = trailing.as_slice();
     while decoder
         .next_record(&mut input, &test_utils::oracle())
@@ -75,9 +78,10 @@ fn missing_end_markers_partial_frames_and_wrong_prefix_audiences_are_refused() {
         .is_some()
     {}
     assert!(decoder.finish().is_err());
-    let mut decoder = SnapshotChunkDecoder::new(Audience::Circle(coven_crypto::CircleId(
-        uuid::Uuid::from_u128(1),
-    )));
+    let mut decoder = SnapshotChunkDecoder::new(crate::sealed_snapshot::SnapshotObjectPrefix {
+        audience: coven_merge::Audience::Circle(coven_crypto::CircleId(uuid::Uuid::from_u128(1))),
+        ..test_utils::snapshot_prefix(&test_utils::snapshot_header())
+    });
     assert!(decoder
         .next_record(&mut bytes.as_slice(), &test_utils::oracle())
         .is_err());
@@ -96,11 +100,12 @@ fn generated_snapshot_chunks_never_panic() {
             })
             .collect();
         if n % 2 == 0 && bytes.len() >= 7 {
-            bytes[..3].copy_from_slice(&[3, 0, 1]);
+            bytes[..3].copy_from_slice(&[5, 0, 1]);
             let length = (bytes.len() - 7) as u32;
             bytes[3..7].copy_from_slice(&length.to_be_bytes());
         }
-        let mut decoder = SnapshotChunkDecoder::new(Audience::Store);
+        let mut decoder =
+            SnapshotChunkDecoder::new(test_utils::snapshot_prefix(&test_utils::snapshot_header()));
         let mut input = bytes.as_slice();
         let result = (|| {
             while decoder

@@ -174,65 +174,7 @@ fn device_and_circle_creation_encode_no_derived_member() {
 
 #[test]
 fn every_store_log_change_round_trips_with_a_pinned_tag() {
-    let c = CircleId(uuid::Uuid::from_bytes([2; 16]));
-    let m = test_utils::member().signing;
-    let snapshot = test_utils::snapshot_header().id;
-    let changes = vec![
-        test_utils::store_log().change,
-        StoreChange::AddMember {
-            access: crate::MemberAccess::S3AccessKey {
-                access_key_id: "fixture-access-key".into(),
-            },
-            keys: test_utils::member(),
-            role: MemberRole::Member,
-        },
-        test_utils::member_removal().change,
-        StoreChange::ChangeRole {
-            member: m.clone(),
-            role: MemberRole::Admin,
-        },
-        StoreChange::AddDevice {
-            device: DeviceId(2),
-            name: "D".into(),
-        },
-        StoreChange::RemoveDevice {
-            device: DeviceId(2),
-        },
-        StoreChange::CreateCircle {
-            circle: c,
-            name: "C".into(),
-            key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([1; 16])),
-        },
-        StoreChange::RenameCircle {
-            circle: c,
-            name: "N".into(),
-        },
-        StoreChange::DeleteCircle { circle: c },
-        StoreChange::AddCircleMember {
-            circle: c,
-            member: m.clone(),
-        },
-        StoreChange::RemoveCircleMember {
-            circle: c,
-            member: m.clone(),
-            key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([2; 16])),
-        },
-        StoreChange::RaiseSchema {
-            version: 2,
-            snapshot: snapshot.clone(),
-        },
-        StoreChange::RaiseFormat {
-            version: 2,
-            snapshot: snapshot.clone(),
-        },
-        StoreChange::Reset {
-            snapshot: SnapshotId {
-                audience: Audience::Circle(c),
-                ..snapshot.clone()
-            },
-        },
-    ];
-    for (tag, change) in changes.into_iter().enumerate() {
+    for (tag, change) in test_utils::store_changes().into_iter().enumerate() {
         let mut entry = test_utils::store_log();
         entry.change = change;
         let object = Object::StoreLog(entry);
@@ -243,7 +185,7 @@ fn every_store_log_change_round_trips_with_a_pinned_tag() {
 }
 
 #[test]
-fn had_read_can_name_earlier_entries_on_the_same_device() {
+fn had_read_refuses_every_explicit_own_device_position() {
     let mut entry = test_utils::store_log();
     entry.position.number = 3;
     entry.change = StoreChange::RemoveDevice {
@@ -253,10 +195,9 @@ fn had_read_can_name_earlier_entries_on_the_same_device() {
         device: DeviceId(1),
         number: 2,
     }]);
-    let object = Object::StoreLog(entry.clone());
-    assert_eq!(Object::decode(&object.encode().unwrap()).unwrap(), object);
-    for number in [3, 4] {
+    for number in [1, 2, 3, 4] {
         entry.had_read.0[0].number = number;
+        assert!(Object::StoreLog(entry.clone()).encode().is_err());
         assert!(matches!(
             Object::decode(&encode_frame(4, &entry).unwrap()),
             Err(Error::Invalid {

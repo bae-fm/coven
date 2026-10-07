@@ -144,7 +144,7 @@ fn sqlite_values_keep_their_storage_classes_outside_keys() {
         );
         assert!(test_utils::write_plaintext(&write).is_err());
         assert!(crate::write::RowChange::decode(
-            &encode_frame(13, &write.parts[0].rows[0]).unwrap()
+            &encode_frame(2, &write.parts[0].rows[0]).unwrap()
         )
         .is_err());
     }

@@ -20,6 +20,10 @@ use crate::{conflicts, effects};
 /// Checking downloaded entries and deciding when they are ready precedes this call.
 /// Authority, required targets and circle-key lists are checked by this replay;
 /// their failures produce dropped marks, not errors or partial state.
+/// Removal keys must name exactly the circles shared with others in the author's
+/// view; circles left empty are derived from that view. Replay also resolves
+/// conflicts and version effects and selects current keys. None of those facts
+/// can be established by decoding one store-log frame.
 pub fn replay(entries: &[StoreLogEntry]) -> StoreLogReplay {
     let mut entries: Vec<_> = entries.iter().collect();
     entries.sort_by_key(|entry| entry.timestamp);

@@ -202,7 +202,13 @@ fn non_power_of_two_chunks_and_eight_mib_chunks_share_the_range_layout() {
 #[test]
 fn file_fixture_opens_reencodes_and_decodes_every_mutation() {
     let bytes = crate::tests::hex(include_str!("../fixtures/file.hex"));
-    let key = FileKey::from_bytes([0x77; 32]);
+    let mut reference = include_str!("../fixtures/uploaded-file.txt").lines();
+    assert_eq!(reference.next().unwrap(), PATH);
+    let reference =
+        crate::file_reference::UploadedFileReference::decode(reference.next().unwrap()).unwrap();
+    let path = crate::path::ObjectPath::file(reference.device, reference.id);
+    assert_eq!(path.as_str(), PATH);
+    let key = reference.key;
     let file = FileObject::decode(&bytes).unwrap();
     assert_eq!(file.header().chunk_size(), 4096);
     assert_eq!(file.header().size(), 4125);
@@ -210,6 +216,12 @@ fn file_fixture_opens_reencodes_and_decodes_every_mutation() {
     assert_eq!(file.encode().unwrap(), bytes);
     let plain: Vec<_> = (0..4125).map(|i| (i % 251) as u8).collect();
     assert_eq!(file.read_range(&key, PATH, 0..4125).unwrap(), plain);
+    for wrong_path in [
+        "files/2/11111111-1111-1111-1111-111111111111",
+        "files/11111111-1111-1111-1111-111111111111",
+    ] {
+        assert!(file.read_range(&key, wrong_path, 0..4125).is_err());
+    }
     assert_eq!(
         file.read_range(&key, PATH, 4095..4098).unwrap(),
         plain[4095..4098]

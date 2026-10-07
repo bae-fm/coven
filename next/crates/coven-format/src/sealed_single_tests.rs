@@ -21,18 +21,18 @@ fn each_single_frame_envelope_authenticates_its_routing_and_signature() {
                         _ => None,
                     },
                 },
-                format!(
-                    "store-log/{}/{}",
-                    entry.position.device.0, entry.position.number
+                crate::path::ObjectPath::store_log(
+                    entry.position.device,
+                    entry.position.number.try_into().unwrap(),
                 ),
             ),
             Object::PostedPositions(positions) => (
                 SingleChunkPrefix::PostedPositions(key.id()),
-                format!("positions/{}", positions.device.0),
+                crate::path::ObjectPath::positions(positions.device),
             ),
             Object::JoinRequest(request) => (
                 SingleChunkPrefix::JoinRequest,
-                format!("join-requests/{}", request.invite),
+                crate::path::ObjectPath::join_request(request.invite),
             ),
         };
         let path = path.as_str();

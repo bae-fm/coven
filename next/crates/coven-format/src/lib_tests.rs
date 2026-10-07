@@ -77,7 +77,7 @@ fn pinned_chunks_decode_with_their_declared_boundaries() {
     );
     let prefix = crate::sealed_snapshot::SnapshotObjectPrefix::decode(&pieces[index]).unwrap();
     index += 1;
-    let mut decoder = crate::snapshot_stream::SnapshotChunkDecoder::new(prefix.audience);
+    let mut decoder = crate::snapshot_stream::SnapshotChunkDecoder::new(prefix);
     let mut oracle = test_utils::TestOracle {
         writes: Default::default(),
     };
@@ -117,8 +117,14 @@ fn reencode(bytes: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
         2 => Ok(Zeroizing::new(
             crate::write::RowChange::decode(bytes)?.encode()?,
         )),
+        3 => Ok(Zeroizing::new(
+            crate::dismissal::Dismissal::decode(bytes)?.encode()?,
+        )),
         5 => {
-            let reader = crate::snapshot::SnapshotDecoder::start(bytes)?;
+            let reader = crate::snapshot::SnapshotDecoder::start(
+                bytes,
+                &test_utils::snapshot_prefix(&test_utils::snapshot_header()),
+            )?;
             Ok(Zeroizing::new(
                 crate::snapshot::SnapshotEncoder::start(reader.header().clone())?.1,
             ))
@@ -154,7 +160,7 @@ fn arbitrary_truncated_and_bit_flipped_inputs_never_panic() {
         decode_or_typed_error(&bytes);
         if bytes.len() >= 7 {
             // Reach the payload decoder as well as the prefix checks.
-            bytes[0] = 1 + source.next() % 13;
+            bytes[0] = 1 + source.next() % 11;
             bytes[1..3].copy_from_slice(&1u16.to_be_bytes());
             let len = (bytes.len() - 7) as u32;
             bytes[3..7].copy_from_slice(&len.to_be_bytes());
@@ -254,15 +260,16 @@ fn sealed_key_fixtures_open_and_reencode_without_losing_their_random_bytes() {
         let key_id = KeyId(Uuid::from_bytes([if circle { 3 } else { 1 }; 16]));
         let circle_id = CircleId(Uuid::from_bytes([2; 16]));
         let path = if circle {
-            format!("keys/circles/{circle_id}/{key_id}/{}", member.member_id())
+            crate::path::ObjectPath::circle_key(circle_id, key_id, &member.member_id())
         } else {
-            format!("keys/store/{key_id}/{}", member.member_id())
+            crate::path::ObjectPath::store_key(key_id, &member.member_id())
         };
+        let path = path.as_str();
         assert_eq!(SealedKey::decode(&bytes).unwrap().encode(), bytes);
         let initial = StoreKey::from_bytes(KeyId(Uuid::from_bytes([1; 16])), [17; 32]);
         let mut expected = StoreKeyring::new(initial.clone());
         let actual = if circle {
-            let key = member.open_circle_key(&path, &bytes).unwrap();
+            let key = member.open_circle_key(path, &bytes).unwrap();
             assert_eq!((key.circle(), key.id()), (circle_id, key_id));
             expected
                 .insert_circle_key(CircleKey::from_bytes(circle_id, key_id, [18; 32]))
@@ -271,7 +278,7 @@ fn sealed_key_fixtures_open_and_reencode_without_losing_their_random_bytes() {
             actual.insert_circle_key(key).unwrap();
             actual
         } else {
-            let key = member.open_store_key(&path, &bytes).unwrap();
+            let key = member.open_store_key(path, &bytes).unwrap();
             assert_eq!(key.id(), key_id);
             StoreKeyring::new(key)
         };
@@ -281,9 +288,9 @@ fn sealed_key_fixtures_open_and_reencode_without_losing_their_random_bytes() {
         );
         let open = |bytes: &[u8]| {
             if circle {
-                member.open_circle_key(&path, bytes).map(|_| ())
+                member.open_circle_key(path, bytes).map(|_| ())
             } else {
-                member.open_store_key(&path, bytes).map(|_| ())
+                member.open_store_key(path, bytes).map(|_| ())
             }
         };
         for end in 0..bytes.len() {

@@ -21,7 +21,8 @@ fn single_header(section: usize, audience: Audience, count: u64) -> SnapshotHead
 fn round_trip(record: SnapshotRecord, audience: Audience) {
     let (mut writer, first) =
         SnapshotEncoder::start(single_header(record.section() as usize, audience, 1)).unwrap();
-    let mut reader = SnapshotDecoder::start(&first).unwrap();
+    let mut reader =
+        SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
     assert_eq!(
         reader
             .frame(
@@ -51,7 +52,8 @@ fn round_trip(record: SnapshotRecord, audience: Audience) {
 fn every_section_streams_with_write_metadata_supplied_by_its_consumer() {
     let header = test_utils::snapshot_header();
     let (mut writer, first) = SnapshotEncoder::start(header.clone()).unwrap();
-    let mut reader = SnapshotDecoder::start(&first).unwrap();
+    let mut reader =
+        SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
     let mut oracle = test_utils::TestOracle {
         writes: BTreeMap::new(),
     };
@@ -80,7 +82,8 @@ fn every_section_streams_with_write_metadata_supplied_by_its_consumer() {
 #[test]
 fn rejected_frames_do_not_advance_counts_or_order() {
     let (mut writer, first) = SnapshotEncoder::start(test_utils::snapshot_header()).unwrap();
-    let mut reader = SnapshotDecoder::start(&first).unwrap();
+    let mut reader =
+        SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
     let oracle = test_utils::oracle();
     assert!(writer.finish().is_err());
     assert!(reader
@@ -111,7 +114,8 @@ fn rejected_frames_do_not_advance_counts_or_order() {
 #[test]
 fn duplicate_identity_and_uncovered_writes_are_rejected() {
     let (mut writer, first) = SnapshotEncoder::start(single_header(1, Audience::Store, 2)).unwrap();
-    let mut reader = SnapshotDecoder::start(&first).unwrap();
+    let mut reader =
+        SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
     let oracle = test_utils::oracle();
     let make = |number| {
         SnapshotRecord::Write(AppliedWrite {
@@ -140,7 +144,8 @@ fn duplicate_identity_and_uncovered_writes_are_rejected() {
 fn a_snapshot_larger_than_the_frame_bound_is_streamed_in_key_order() {
     let (mut writer, first) =
         SnapshotEncoder::start(single_header(0, Audience::Store, 10_000)).unwrap();
-    let mut reader = SnapshotDecoder::start(&first).unwrap();
+    let mut reader =
+        SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
     let oracle = test_utils::oracle();
     let mut total = first.len();
     for i in -5000..5000 {
@@ -163,11 +168,12 @@ fn empty_snapshot_requires_an_exact_end_frame() {
     let mut header = test_utils::snapshot_header();
     header.counts = [0; 6];
     let (mut writer, first) = SnapshotEncoder::start(header).unwrap();
-    let mut reader = SnapshotDecoder::start(&first).unwrap();
+    let mut reader =
+        SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
     let oracle = test_utils::oracle();
     assert!(reader.frame(&first, &oracle).is_err());
     let end = writer.finish().unwrap();
-    assert!(SnapshotDecoder::start(&end).is_err());
+    assert!(SnapshotDecoder::start(&end, &test_utils::snapshot_prefix(writer.header())).is_err());
     for n in 0..end.len() {
         assert!(reader.frame(&end[..n], &oracle).is_err());
     }
@@ -230,7 +236,8 @@ fn synced_rows_use_merges_written_reference_validation() {
         });
         let (mut writer, first) =
             SnapshotEncoder::start(single_header(0, Audience::Store, 1)).unwrap();
-        let mut reader = SnapshotDecoder::start(&first).unwrap();
+        let mut reader =
+            SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
         assert_eq!(
             writer.record(record.clone()),
             Err(Error::Merge(expected.clone()))
@@ -269,8 +276,9 @@ fn merge_owns_snapshot_row_invariants_and_a_rejected_row_can_be_retried() {
         })
         .unwrap()
     };
-    let (_, header) = SnapshotEncoder::start(single_header(3, Audience::Store, 1)).unwrap();
-    let mut reader = SnapshotDecoder::start(&header).unwrap();
+    let (writer, header) = SnapshotEncoder::start(single_header(3, Audience::Store, 1)).unwrap();
+    let mut reader =
+        SnapshotDecoder::start(&header, &test_utils::snapshot_prefix(writer.header())).unwrap();
     let oracle = test_utils::oracle();
     let mut generations = state.generations().clone();
     let first = generations.remove(&1).unwrap();
@@ -378,7 +386,8 @@ fn lost_writes_preserve_both_causes_and_require_matching_author_markers() {
         });
         let (mut writer, first) =
             SnapshotEncoder::start(single_header(4, Audience::Store, 1)).unwrap();
-        let mut reader = SnapshotDecoder::start(&first).unwrap();
+        let mut reader =
+            SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
         assert!(matches!(
             writer.record(record.clone()),
             Err(Error::Invalid {
@@ -400,7 +409,8 @@ fn lost_write_audience_cause_coverage_and_write_order_are_checked() {
     let circle = Audience::Circle(CircleId(Uuid::from_bytes([1; 16])));
     let entry = test_utils::loss_entry();
     let (mut writer, first) = SnapshotEncoder::start(single_header(4, circle.clone(), 2)).unwrap();
-    let mut reader = SnapshotDecoder::start(&first).unwrap();
+    let mut reader =
+        SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
     let oracle = test_utils::oracle();
     let wrong = SnapshotRecord::LostWrite(test_utils::lost_write());
     assert!(writer.record(wrong.clone()).is_err());
@@ -438,8 +448,9 @@ fn lost_write_audience_cause_coverage_and_write_order_are_checked() {
 #[test]
 fn decoded_snapshot_state_is_directly_usable_by_the_merge() {
     let original = test_utils::merge_row();
-    let (_, first) = SnapshotEncoder::start(single_header(3, Audience::Store, 1)).unwrap();
-    let mut reader = SnapshotDecoder::start(&first).unwrap();
+    let (writer, first) = SnapshotEncoder::start(single_header(3, Audience::Store, 1)).unwrap();
+    let mut reader =
+        SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
     let oracle = test_utils::oracle();
     let Some(SnapshotRecord::Merge(decoded)) = reader
         .frame(&raw(&SnapshotRecord::Merge(original.clone())), &oracle)
@@ -479,7 +490,11 @@ fn decoded_snapshot_state_is_directly_usable_by_the_merge() {
 
 #[test]
 fn snapshot_fixture_classifies_every_consumed_write_once() {
-    let mut reader = SnapshotDecoder::start(&test_utils::snapshot_frames()[0]).unwrap();
+    let mut reader = SnapshotDecoder::start(
+        &test_utils::snapshot_frames()[0],
+        &test_utils::snapshot_prefix(&test_utils::snapshot_header()),
+    )
+    .unwrap();
     let mut classified = BTreeSet::new();
     for frame in &test_utils::snapshot_frames()[1..] {
         match reader.frame(frame, &test_utils::oracle()).unwrap() {
@@ -506,7 +521,8 @@ fn schema_loss_coverage_uses_the_snapshot_version_without_a_store_log_entry() {
     header.schema_version = 7;
     header.store_log.0.clear();
     let (mut writer, first) = SnapshotEncoder::start(header).unwrap();
-    let mut reader = SnapshotDecoder::start(&first).unwrap();
+    let mut reader =
+        SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
     let make = |version| {
         SnapshotRecord::LostWrite(LostWrite {
             header: test_utils::write().header,
@@ -544,7 +560,8 @@ fn lost_row_records_require_their_header_audience_order_and_exact_count() {
     let mut header = test_utils::snapshot_header();
     header.counts = [0, 0, 0, 0, 1, 0];
     let (mut encoder, frame) = SnapshotEncoder::start(header).unwrap();
-    let mut decoder = SnapshotDecoder::start(&frame).unwrap();
+    let mut decoder =
+        SnapshotDecoder::start(&frame, &test_utils::snapshot_prefix(encoder.header())).unwrap();
     let oracle = test_utils::oracle();
     let row = SnapshotRecord::LostWriteRow(test_utils::lost_write_row());
     assert!(encoder.record(row.clone()).is_err());
@@ -593,7 +610,8 @@ fn lost_rows_belong_to_the_preceding_header_without_repeating_its_id() {
     let mut header = single_header(4, Audience::Store, 2);
     header.writes.0[0] = second.header.position;
     let (mut encoder, frame) = SnapshotEncoder::start(header).unwrap();
-    let mut decoder = SnapshotDecoder::start(&frame).unwrap();
+    let mut decoder =
+        SnapshotDecoder::start(&frame, &test_utils::snapshot_prefix(encoder.header())).unwrap();
     let oracle = test_utils::oracle();
     let row = SnapshotRecord::LostWriteRow(test_utils::lost_write_row());
     let mut row_frames = Vec::new();
@@ -612,4 +630,58 @@ fn lost_rows_belong_to_the_preceding_header_without_repeating_its_id() {
     assert_eq!(row_frames[0], row_frames[1]);
     decoder.frame(&encoder.finish().unwrap(), &oracle).unwrap();
     decoder.finish().unwrap();
+}
+
+#[test]
+fn snapshot_header_contains_only_identity_schema_and_counts() {
+    use crate::wire::Wire;
+    let header = test_utils::snapshot_header();
+    let mut expected = crate::wire::Encoder::new();
+    header.id.put(&mut expected).unwrap();
+    header.schema_version.put(&mut expected).unwrap();
+    header.counts.put(&mut expected).unwrap();
+    let (_, bytes) = SnapshotEncoder::start(header).unwrap();
+    assert_eq!(&bytes[crate::FRAME_PREFIX_LEN..], expected.bytes);
+}
+
+#[test]
+fn snapshot_positions_are_bounded_in_the_prefix_independently_of_the_frame() {
+    use coven_foundation::id_source::DeviceId;
+    let mut header = test_utils::snapshot_header();
+    header.counts = [0; 6];
+    header.writes.0 = (0..crate::wire::MAX_ITEMS)
+        .map(|device| coven_merge::WriteId {
+            device: DeviceId(device as u64),
+            number: 1,
+        })
+        .collect();
+    header.store_log.0 = header
+        .writes
+        .0
+        .iter()
+        .map(|write| crate::value::EntryId {
+            device: write.device,
+            number: write.number,
+        })
+        .collect();
+    let prefix = test_utils::snapshot_prefix(&header);
+    let (_, frame) = SnapshotEncoder::start(header.clone()).unwrap();
+    assert_eq!(frame.len(), 76);
+    let prefix =
+        crate::sealed_snapshot::SnapshotObjectPrefix::decode(&prefix.encode().unwrap()).unwrap();
+    assert_eq!(
+        crate::snapshot::SnapshotDecoder::start(&frame, &prefix)
+            .unwrap()
+            .header(),
+        &header
+    );
+    header.writes.0.push(coven_merge::WriteId {
+        device: DeviceId(crate::wire::MAX_ITEMS as u64),
+        number: 1,
+    });
+    assert!(SnapshotEncoder::start(header.clone()).is_err());
+    assert!(
+        crate::snapshot::SnapshotDecoder::start(&frame, &test_utils::snapshot_prefix(&header))
+            .is_err()
+    );
 }

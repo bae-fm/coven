@@ -120,6 +120,7 @@ macro_rules! positions {
         );
         impl $ty {
             pub(crate) fn validate(&self) -> Result<(), Error> {
+                bound(self.0.len(), crate::wire::MAX_ITEMS, "collection")?;
                 ordered(&self.0, |p| p.device, "positions")?;
                 for p in &self.0 {
                     positive(p.number)?;
@@ -132,18 +133,13 @@ macro_rules! positions {
                     .iter()
                     .any(|p| p.device == position.device && p.number >= position.number)
             }
-            pub(crate) fn own_before(&self, position: $id, include_own: bool) -> Result<(), Error> {
+            pub(crate) fn without_own_device(&self, device: DeviceId) -> Result<(), Error> {
                 self.validate()?;
-                for p in &self.0 {
-                    if p.device == position.device {
-                        require(
-                            include_own && p.number < position.number,
-                            "had-read own device",
-                            Rule::OwnPosition,
-                        )?;
-                    }
-                }
-                Ok(())
+                require(
+                    self.0.iter().all(|p| p.device != device),
+                    "had-read own device",
+                    Rule::OwnPosition,
+                )
             }
         }
         byte_id!($ty);
@@ -245,7 +241,7 @@ impl Wire for RowId {
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
         Ok(Self {
-            table: Wire::get(input)?,
+            table: crate::wire::get_name(input)?,
             key: get_blob(input)?,
             audience: Wire::get(input)?,
         })

@@ -9,6 +9,9 @@ use coven_merge::{MergeError, Timestamp, WriteId, WriteOracle};
 use rusqlite::params;
 use std::cell::RefCell;
 
+/// Section 1 supplies causal metadata for every consumed write, including
+/// writes whose rows were excluded. Section 4 must agree with that metadata;
+/// its rows do not enter merge state or supply additional oracle entries.
 pub(crate) struct SnapshotMetadata<'a> {
     database: &'a DatabaseConnection,
     failure: RefCell<Option<DbError>>,

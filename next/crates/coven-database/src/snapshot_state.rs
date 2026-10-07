@@ -301,6 +301,8 @@ pub(crate) fn merged(
     Ok(row)
 }
 
+/// Retain frozen losses in `coven_lost` and the fingerprint without restoring
+/// discarded merge records or recomputing their original replacement reasons.
 pub(crate) fn retained(
     database: &DatabaseConnection,
     loss: coven_format::retained_loss::RetainedLoss,

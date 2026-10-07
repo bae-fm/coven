@@ -16,7 +16,7 @@ pub struct SyncedRow {
     /// Columns in name order, carrying merge's value and parent metadata.
     pub columns: BTreeMap<String, ColumnValue<Value>>,
 }
-wire_struct!(SyncedRow, row, columns);
+wire_struct!(SyncedRow, row, columns => crate::wire::get_name_map);
 impl SyncedRow {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         row(&self.row)?;
@@ -54,7 +54,7 @@ impl AppliedWrite {
             "applied write timestamp",
             FormatRule::TimestampDevice,
         )?;
-        self.had_read.own_before(self.id, false)
+        self.had_read.without_own_device(self.id.device)
     }
 }
 
@@ -66,7 +66,7 @@ pub struct SyncedColumn {
     /// The column.
     pub column: String,
 }
-wire_struct!(SyncedColumn, table, column);
+wire_struct!(SyncedColumn, table => crate::wire::get_name, column => crate::wire::get_name);
 
 /// A row's merge state, retained even while removal rules hide it from the app.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -88,7 +88,7 @@ impl MergeRow {
         let state = RowState::from_parts(
             Wire::get(input)?,
             Wire::get(input)?,
-            Wire::get(input)?,
+            crate::wire::get_name_map(input)?,
             Wire::get(input)?,
             oracle,
         )

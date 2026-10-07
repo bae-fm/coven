@@ -1,4 +1,7 @@
 //! A write's old values and merge-owned changes, split into audience parts (§5, §14.4).
+//!
+//! `WriteRecord` and `WritePart` are in-memory values, not additional encodings.
+//! `write_stream::WriteEncoder` emits the header and per-audience frame streams.
 
 use crate::error::{require, Error, Rule};
 use crate::value::{name, positive, row, EntryPositions, Value, WritePositions};
@@ -39,7 +42,7 @@ impl WriteHeader {
             "write timestamp",
             Rule::TimestampDevice,
         )?;
-        self.had_read.own_before(self.position, false)?;
+        self.had_read.without_own_device(self.position.device)?;
         self.store_log_read.validate()?;
         if let WriteDisposition::Lost(version) = self.disposition {
             require(version > 0, "breaking schema version", Rule::Required)?;
@@ -106,8 +109,8 @@ impl Wire for Operation<Value> {
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
         match u8::get(input)? {
-            0 => Ok(Self::Insert(Wire::get(input)?)),
-            1 => Ok(Self::Update(Wire::get(input)?)),
+            0 => Ok(Self::Insert(crate::wire::get_name_map(input)?)),
+            1 => Ok(Self::Update(crate::wire::get_name_map(input)?)),
             2 => Ok(Self::Delete),
             tag => Err(Error::UnknownTag {
                 field: "row operation",
@@ -129,7 +132,7 @@ pub struct RowChange {
     /// and optionally populated on delete. SQL NULL is a value, not absence.
     pub old: BTreeMap<String, Value>,
 }
-wire_struct!(RowChange, row, change, old);
+wire_struct!(RowChange, row, change, old => crate::wire::get_name_map);
 impl RowChange {
     /// Validate and encode one bounded row-change frame (kind 2).
     pub fn encode(&self) -> Result<Vec<u8>, Error> {

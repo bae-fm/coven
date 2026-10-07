@@ -198,7 +198,11 @@ impl StoreLogSync {
                         self.storage
                             .as_deref()
                             .ok_or(SyncError::NoStorage)?
-                            .create_once(&ObjectPath::parse(&key.path)?, &key.bytes)
+                            .create_once(
+                                &ObjectPath::parse(&key.path)
+                                    .map_err(coven_storage::StorageError::from)?,
+                                &key.bytes,
+                            )
                             .await?;
                     }
                     self.database

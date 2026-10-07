@@ -213,17 +213,10 @@ impl StoreLogSync {
             .validate_snapshot(
                 path.snapshot_id()
                     .ok_or_else(|| inconsistent("snapshot has another path layout"))?,
+                candidate.prefix.clone(),
                 io::SnapshotInput::open(&self.directory, file)?,
             )
             .await?;
-        let header = inspection.header;
-        if header.writes != candidate.prefix.writes
-            || header.store_log != candidate.prefix.store_log
-        {
-            return Err(inconsistent(
-                "snapshot header and cleartext positions differ",
-            ));
-        }
         Ok(inspection.files)
     }
 }

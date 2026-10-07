@@ -4,7 +4,6 @@
 //! crypto with validated headers and ranges. Plaintext frames
 //! are bounded; writes and snapshots stream without an object-size bound.
 //! Appendix D of `plans/coven-format.md` specifies stored bytes.
-//! `FORMAT.md` describes the plaintext frame codecs.
 
 pub mod chunks;
 pub mod codes;
@@ -16,6 +15,7 @@ pub mod key;
 pub mod merge_fields;
 mod merge_wire;
 pub mod objects;
+pub mod path;
 pub mod retained_loss;
 mod sealed;
 pub mod sealed_single;

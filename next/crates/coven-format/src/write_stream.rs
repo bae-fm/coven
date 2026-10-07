@@ -76,7 +76,8 @@ impl WriteHeaderFrame {
     }
 }
 
-/// A borrowed write producer. Measuring its header encodes one row at a time;
+/// A borrowed write producer. Before emitting, it encodes one row at a time
+/// to measure each part's byte length and construct the header;
 /// emitting a part retains at most one row frame and one 64-KiB chunk.
 pub struct WriteEncoder<'a> {
     record: &'a WriteRecord,
@@ -177,7 +178,9 @@ fn add_length(a: u64, b: u64) -> Result<u64, Error> {
 
 /// Decode opened chunks of one part in order, retaining only its unfinished
 /// frame and previous row identity. The caller stages yielded rows until the
-/// whole object and signature have been checked.
+/// whole object and signature have been checked. `finish` checks the declared
+/// record count and byte length; frames crossing the part's end are refused
+/// before their allocation.
 pub struct PartDecoder {
     header: PartHeader,
     frames: FrameDecoder,

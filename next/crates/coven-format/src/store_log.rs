@@ -1,4 +1,9 @@
 //! Changes to the store itself, carrying causal positions and replay timestamps (§9).
+//!
+//! Decoding checks one frame's fields. Sync checks causal closure before replay;
+//! replay determines authority, conflicts, version effects and current keys from
+//! the entry set. A removal's exact replacement-circle list and deleted circles
+//! also depend on its author's view, so the frame decoder checks only list order.
 
 use crate::error::{require, Error, Rule};
 use crate::value::{name, ordered, positive, EntryId, EntryPositions};
@@ -216,7 +221,7 @@ impl StoreChange {
 
 // The tag and named fields are the whole wire layout of each store change.
 macro_rules! store_changes {
-    ($($tag:literal => $variant:ident { $($field:ident),+ }),+ $(,)?) => {
+    ($($tag:literal => $variant:ident { $($field:ident $(=> $get:path)?),+ }),+ $(,)?) => {
         impl Wire for StoreChange {
             fn put(&self, out: &mut Encoder) -> Result<(), Error> {
                 match self { $(Self::$variant { $($field),+ } => {
@@ -225,7 +230,7 @@ macro_rules! store_changes {
             }
             fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
                 match u8::get(input)? {
-                    $($tag => Ok(Self::$variant { $($field: Wire::get(input)?),+ }),)+
+                    $($tag => Ok(Self::$variant { $($field: crate::wire::wire_struct!(@get input $(, $get)?)?),+ }),)+
                     tag => Err(Error::UnknownTag { field: "store change", tag }),
                 }
             }
@@ -233,14 +238,14 @@ macro_rules! store_changes {
     };
 }
 store_changes!(
-    0 => CreateStore { store, name, admin, access, device_name, key },
+    0 => CreateStore { store, name => crate::wire::get_name, admin, access, device_name => crate::wire::get_name, key },
     1 => AddMember { keys, role, access },
     2 => RemoveMember { member, key, circle_keys },
     3 => ChangeRole { member, role },
-    4 => AddDevice { device, name },
+    4 => AddDevice { device, name => crate::wire::get_name },
     5 => RemoveDevice { device },
-    6 => CreateCircle { circle, name, key },
-    7 => RenameCircle { circle, name },
+    6 => CreateCircle { circle, name => crate::wire::get_name, key },
+    7 => RenameCircle { circle, name => crate::wire::get_name },
     8 => DeleteCircle { circle },
     9 => AddCircleMember { circle, member },
     10 => RemoveCircleMember { circle, member, key },
@@ -258,7 +263,7 @@ pub struct StoreLogEntry {
     pub timestamp: Timestamp,
     /// The member whose signature must cover the entry.
     pub author: MemberId,
-    /// Store-log positions the author had read, including their own if present.
+    /// Other devices’ store-log positions; the author’s own earlier entries are implicit.
     pub had_read: EntryPositions,
     /// The change to the store.
     pub change: StoreChange,
@@ -272,7 +277,7 @@ impl StoreLogEntry {
             "store-log timestamp",
             Rule::TimestampDevice,
         )?;
-        self.had_read.own_before(self.position, true)?;
+        self.had_read.without_own_device(self.position.device)?;
         if let StoreChange::CreateStore { admin, .. } = &self.change {
             require(
                 self.position.number == 1 && self.had_read.0.is_empty(),

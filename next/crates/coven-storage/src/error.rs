@@ -240,3 +240,9 @@ impl StorageSetupError {
 #[cfg(test)]
 #[path = "error_tests.rs"]
 mod tests;
+
+impl From<coven_format::path::PathError> for StorageError {
+    fn from(_: coven_format::path::PathError) -> Self {
+        Self::InvalidPath
+    }
+}

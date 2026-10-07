@@ -67,9 +67,11 @@ impl Database {
     /// Run the snapshot loader's format, schema and merge checks in a transaction
     /// that always rolls back. Sync uses this before selecting a stored candidate;
     /// a damaged snapshot cannot leave rows, metadata or observations behind.
+    /// Supply its authenticated sealed prefix alongside the opened plaintext.
     pub async fn validate_snapshot<R: std::io::Read + Send + 'static>(
         &self,
         id: coven_format::store_log::SnapshotId,
+        prefix: coven_format::sealed_snapshot::SnapshotObjectPrefix,
         input: R,
     ) -> Result<crate::SnapshotInspection, DbError> {
         let database = self.clone();
@@ -83,8 +85,13 @@ impl Database {
                     .expect("writer connection lock poisoned");
                 writer.read_transaction(|| {
                     crate::snapshot_state::create_tables(&writer)?;
-                    let (header, _) =
-                        crate::snapshot_load::read(&writer, &inner.write_schema, &id, input)?;
+                    let (header, _) = crate::snapshot_load::read(
+                        &writer,
+                        &inner.write_schema,
+                        &id,
+                        prefix,
+                        input,
+                    )?;
                     let files =
                         super::file_retention::snapshot_references(&writer, &inner.write_schema)
                             .map_err(|error| match error {
@@ -101,14 +108,17 @@ impl Database {
     }
 
     /// Stream an audience's plaintext snapshot frames from one committed reader
-    /// transaction. The consumer can seal and upload each frame as it arrives;
+    /// transaction. `begin` receives metadata before any frame, so the consumer
+    /// can write the sealed prefix and seal each subsequent frame as it arrives;
     /// commits on the writer connection continue throughout this call.
-    pub async fn write_snapshot<F, E>(
+    pub async fn write_snapshot<B, F, E>(
         &self,
         id: coven_format::store_log::SnapshotId,
+        begin: B,
         emit: F,
     ) -> Result<(), crate::SnapshotWriteError<E>>
     where
+        B: FnOnce(&coven_format::snapshot::SnapshotHeader) -> Result<(), E> + Send + 'static,
         F: FnMut(Vec<u8>) -> Result<(), E> + Send + 'static,
         E: Send + 'static,
     {
@@ -120,7 +130,7 @@ impl Database {
                 let reader = inner.readers.acquire_reader();
                 reader.with_reader(|reader| {
                     reader.read_transaction(|| {
-                        crate::snapshot_write::write(reader, &inner.write_schema, id, emit)
+                        crate::snapshot_write::write(reader, &inner.write_schema, id, begin, emit)
                     })
                 })
             })
@@ -128,7 +138,8 @@ impl Database {
         )
     }
 
-    /// Load authenticated snapshots and gap writes supplied by sync. Snapshot
+    /// Load authenticated snapshots and gap writes supplied by sync. Each stored
+    /// snapshot supplies its identity, authenticated prefix and plaintext. Snapshot
     /// frames and write parts are read in chunks of at most 64 KiB; only one
     /// decoded write is retained at a time. Inputs may arrive in any order.
     ///

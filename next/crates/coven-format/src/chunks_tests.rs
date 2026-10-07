@@ -27,7 +27,7 @@ fn frames_cross_chunks_and_network_fragments_without_being_retained_together() {
 #[test]
 fn announced_lengths_are_checked_before_growing_the_frame_buffer() {
     for (length, remaining) in [(100u32, Some(7)), (u32::MAX, None)] {
-        let mut prefix = vec![13, 0, 1];
+        let mut prefix = vec![2, 0, 1];
         prefix.extend_from_slice(&length.to_be_bytes());
         let mut decoder = FrameDecoder::new(remaining);
         assert!(decoder.next(&mut prefix.as_slice()).is_err());

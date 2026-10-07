@@ -76,8 +76,8 @@ pub(crate) fn load<R: Read, W: Read>(
         let mut touched = BTreeSet::new();
         for source in snapshots {
             match source {
-                crate::SnapshotSource::Stored { id, input } => {
-                    let (header, rows) = read(database, schema, &id, input)?;
+                crate::SnapshotSource::Stored { id, prefix, input } => {
+                    let (header, rows) = read(database, schema, &id, prefix, input)?;
                     coverage.loaded(id.audience, header.writes);
                     touched.extend(rows);
                 }
@@ -110,12 +110,13 @@ pub(crate) fn read(
     database: &DatabaseConnection,
     schema: &WriteSchema,
     expected: &SnapshotId,
+    prefix: coven_format::sealed_snapshot::SnapshotObjectPrefix,
     mut input: impl Read,
 ) -> Result<(SnapshotHeader, BTreeSet<RowId>), DbError> {
     let local_version = database.schema_version()?;
     let mut touched = crate::snapshot_state::begin(database, &expected.audience)?;
     let metadata = SnapshotMetadata::new(database);
-    let mut decoder = SnapshotChunkDecoder::new(expected.audience.clone());
+    let mut decoder = SnapshotChunkDecoder::new(prefix);
     let mut checked_header = false;
     let mut excluded = None;
     let mut chunk = [0; coven_format::chunks::CHUNK_SIZE];

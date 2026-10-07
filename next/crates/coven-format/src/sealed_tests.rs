@@ -179,7 +179,7 @@ fn snapshot_fixture_binds_positions_and_requires_its_plaintext_end_marker() {
     let prefix_length = SnapshotObjectPrefix::length(&bytes).unwrap();
     let prefix_bytes = &bytes[..prefix_length];
     let prefix = SnapshotObjectPrefix::decode(prefix_bytes).unwrap();
-    let mut reader = SnapshotChunkDecoder::new(prefix.audience.clone());
+    let mut reader = SnapshotChunkDecoder::new(prefix.clone());
     let mut oracle = test_utils::TestOracle {
         writes: Default::default(),
     };

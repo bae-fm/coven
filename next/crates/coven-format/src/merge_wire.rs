@@ -6,7 +6,7 @@ use crate::wire::{wire_struct, Decoder, Encoder, Wire};
 use coven_merge::{Cell, ColumnValue, LostKey, LostValue, Parent, Rule};
 use std::collections::{BTreeMap, BTreeSet};
 
-wire_struct!(coven_merge::ForeignKey, columns, parent, parent_columns);
+wire_struct!(coven_merge::ForeignKey, columns, parent => crate::wire::get_name, parent_columns);
 impl Wire for coven_merge::UniqueConstraint {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {
         self.terms.put(out)?;
@@ -36,7 +36,7 @@ impl Wire for coven_merge::UniqueConstraint {
 wire_struct!(Parent, row, generation);
 wire_struct!(ColumnValue<Value>, value, parents);
 wire_struct!(Cell<Value>, write, value);
-wire_struct!(LostKey, column, write);
+wire_struct!(LostKey, column => crate::wire::get_name, write);
 wire_struct!(LostValue<Value>, incarnation, value, replaced_by);
 
 impl Wire for Rule {
@@ -126,7 +126,7 @@ pub(crate) fn rules(values: &BTreeSet<Rule>) -> Result<(), Error> {
         match rule {
             Rule::ForeignKey(n) => foreign_key(n)?,
             Rule::Unique(n) => unique_constraint(n)?,
-            Rule::Check(n) => name(n)?,
+            Rule::Check(n) => crate::error::bound(n.len(), crate::wire::MAX_BYTES, "text")?,
             Rule::DeletedCircle | Rule::OtherAudience => {}
         }
     }
@@ -138,7 +138,10 @@ impl Wire for coven_merge::ConstraintColumns {
         self.0.put(out)
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
-        Ok(Self(Wire::get(input)?))
+        Ok(Self(crate::wire::get_sequence(
+            input,
+            crate::wire::get_name,
+        )?))
     }
 }
 
@@ -176,10 +179,10 @@ pub(crate) fn unique_constraint(constraint: &coven_merge::UniqueConstraint) -> R
         crate::error::Rule::Required,
     )?;
     for term in &constraint.terms {
-        name(term)?;
+        crate::error::bound(term.len(), crate::wire::MAX_BYTES, "text")?;
     }
     if let Some(partial) = &constraint.partial {
-        name(partial)?;
+        crate::error::bound(partial.len(), crate::wire::MAX_BYTES, "text")?;
     }
     Ok(())
 }

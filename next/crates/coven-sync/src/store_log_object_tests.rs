@@ -144,7 +144,11 @@ async fn invalid_causal_past_and_timestamps_are_damaged() {
                     ..prior
                 };
                 bad.timestamp = coven_merge::Timestamp::new(2000, 0, prior.device).unwrap();
-                bad.had_read.0 = vec![prior];
+                // Encode a valid other-device past, then alter its authenticated bytes below.
+                bad.had_read.0 = vec![EntryId {
+                    device: DeviceId(70),
+                    ..prior
+                }];
             }
             "author" => {
                 bad.position = EntryId {
@@ -164,13 +168,29 @@ async fn invalid_causal_past_and_timestamps_are_damaged() {
             a.member.clone()
         };
         let path = object::path(bad.position);
-        storage
-            .create(
-                &path,
-                &object::seal(&bad, ring.store_key(key(1)).unwrap(), &signer).unwrap(),
-            )
-            .await
-            .unwrap();
+        let key = ring.store_key(key(1)).unwrap();
+        let mut bytes = object::seal(&bad, key, &signer).unwrap();
+        if defect == "own position" {
+            let sealed = SingleChunkObject::decode(&bytes).unwrap();
+            let prefix = sealed.prefix();
+            let aad = prefix.encode().unwrap();
+            let mut plain = key
+                .derive()
+                .open_object_chunk(path.as_str(), &aad, 0, 0, sealed.chunk())
+                .unwrap();
+            // D6: frame prefix, entry id, timestamp, author, then the had-read count.
+            assert_eq!(&plain[71..75], &1u32.to_be_bytes());
+            plain[75..83].copy_from_slice(&bad.position.device.0.to_be_bytes());
+            let chunk = key
+                .derive()
+                .seal_object_chunk(path.as_str(), &aad, 0, 0, &plain)
+                .unwrap();
+            bytes = prefix.encode_chunk(&chunk).unwrap();
+            let mut hash = coven_crypto::ObjectHasher::new();
+            hash.update(&bytes);
+            bytes.extend_from_slice(signer.sign_object(path.as_str(), &hash.finish()).as_bytes());
+        }
+        storage.create(&path, &bytes).await.unwrap();
         let mut c = device(storage.clone(), 3, member(1), store(1)).await;
         let report = c.sync().await;
         assert_eq!(report.damaged_objects.len(), 1, "{defect}");

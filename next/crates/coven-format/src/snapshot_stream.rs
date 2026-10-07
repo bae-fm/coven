@@ -1,23 +1,24 @@
 //! Feed opened snapshot chunks to the frame decoder without retaining rows.
 
 use crate::chunks::FrameDecoder;
-use crate::error::{require, Error, Rule};
+use crate::error::Error;
+use crate::sealed_snapshot::SnapshotObjectPrefix;
 use crate::snapshot::{SnapshotDecoder, SnapshotHeader, SnapshotRecord};
-use coven_merge::{Audience, WriteOracle};
+use coven_merge::WriteOracle;
 
 /// Incrementally reconstruct frames and check the snapshot's end marker.
 /// Call [`Self::next_record`] repeatedly on each opened chunk, updating the
 /// oracle after each applied-write record before asking for the next record.
 pub struct SnapshotChunkDecoder {
-    audience: Audience,
+    prefix: SnapshotObjectPrefix,
     frames: FrameDecoder,
     snapshot: Option<SnapshotDecoder>,
 }
 impl SnapshotChunkDecoder {
-    /// The expected audience comes from the sealed snapshot prefix.
-    pub fn new(audience: Audience) -> Self {
+    /// Supply the authenticated prefix, including the snapshot’s coverage positions.
+    pub fn new(prefix: SnapshotObjectPrefix) -> Self {
         Self {
-            audience,
+            prefix,
             frames: FrameDecoder::new(None),
             snapshot: None,
         }
@@ -42,12 +43,7 @@ impl SnapshotChunkDecoder {
                     return Ok(Some(record));
                 }
             } else {
-                let snapshot = SnapshotDecoder::start(&frame)?;
-                require(
-                    snapshot.header().id.audience == self.audience,
-                    "snapshot prefix audience",
-                    Rule::Audience,
-                )?;
+                let snapshot = SnapshotDecoder::start(&frame, &self.prefix)?;
                 self.snapshot = Some(snapshot);
             }
         }
