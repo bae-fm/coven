@@ -268,13 +268,7 @@ impl WriteObjectLayout {
     /// Read the final 64-byte signature. Crypto verifies it against the author,
     /// path and accumulated digest; this method only checks layout.
     pub fn read_signature(&mut self, bytes: &[u8]) -> Result<Signature, Error> {
-        if bytes.len() < 64 {
-            return Err(Error::Truncated);
-        }
-        if bytes.len() > 64 {
-            return Err(Error::TrailingBytes);
-        }
-        let signature = Signature::from_bytes(bytes.try_into().expect("64 bytes"));
+        let signature = sealed::signature(bytes)?;
         self.signature(&signature)?;
         Ok(signature)
     }

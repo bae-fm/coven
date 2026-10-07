@@ -68,6 +68,7 @@ fn each_single_frame_envelope_authenticates_its_routing_and_signature() {
             SingleChunkPrefix::PostedPositions(key) => SingleChunkObject::PostedPositions {
                 key: *key,
                 chunk: &chunk,
+                signature,
             },
             SingleChunkPrefix::JoinRequest => SingleChunkObject::JoinRequest {
                 chunk: &chunk,
@@ -89,12 +90,10 @@ fn each_single_frame_envelope_authenticates_its_routing_and_signature() {
                 )
                 | (SingleChunkPrefix::JoinRequest, Object::JoinRequest(_))
         ));
-        if let Some(signature) = decoded.signature() {
-            test_utils::member()
-                .signing
-                .verify_object(path, &digest, signature)
-                .unwrap();
-        }
+        test_utils::member()
+            .signing
+            .verify_object(path, &digest, decoded.signature())
+            .unwrap();
         let mut changed_prefix = aad.clone();
         changed_prefix[0] ^= 1;
         assert!(open(&changed_prefix, decoded.chunk()).is_err());
@@ -130,10 +129,11 @@ fn a_chunk_holds_one_bounded_frame() {
             .is_err());
     }
     for length in [crate::FRAME_PREFIX_LEN, MAX_OBJECT] {
-        let bytes = SingleChunkPrefix::PostedPositions(KeyId(uuid::Uuid::nil()))
+        let mut bytes = SingleChunkPrefix::PostedPositions(KeyId(uuid::Uuid::nil()))
             .encode_chunk(&vec![0; length + SEALED_OBJECT_CHUNK_OVERHEAD])
             .unwrap();
+        bytes.extend_from_slice(&[0; 64]);
         assert!(SingleChunkObject::decode(&bytes).is_ok());
-        assert_eq!(bytes.len(), 19 + length + 44);
+        assert_eq!(bytes.len(), 19 + length + 44 + 64);
     }
 }

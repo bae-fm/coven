@@ -35,7 +35,7 @@ mod seal;
 mod write_input;
 
 impl StoreLogSync {
-    /// A clear snapshot prefix may require a reload, but never authorizes rows.
+    /// A signed snapshot prefix may require a reload, but never authorizes rows.
     /// The reload authenticates the complete snapshot and its intervening writes
     /// before its atomic database replacement (§15, §19.1).
     pub(crate) async fn reload_deleted_history(&mut self) -> Result<SyncResults, SyncError> {
@@ -394,7 +394,8 @@ impl StoreLogSync {
                             .ok_or(SyncError::KeyUnavailable(key_id))?;
                         let key = io::key(&ring, &audience, key_id)?;
                         let name = self.reserve_snapshot_file(record, &mut task).await?;
-                        self.seal_snapshot(id, key_id, key, &path, &name).await?;
+                        self.seal_snapshot(id, key_id, key, &member, &path, &name)
+                            .await?;
                         self.save_snapshot_task(record, &task, 1).await?;
                     }
                     1 => {

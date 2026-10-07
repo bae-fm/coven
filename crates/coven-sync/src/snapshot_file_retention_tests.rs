@@ -6,7 +6,7 @@ use coven_foundation::id_source::KeyId;
 use coven_merge::Audience;
 use coven_storage::{ObjectPath, ObjectPrefix, Storage};
 
-async fn sync(f: &Fixture) -> StoreLogSync {
+async fn sync(f: &Fixture) -> (StoreLogSync, MemberKeys) {
     let member = MemberKeys::generate().unwrap();
     let key = KeyId(uuid::Uuid::from_u128(500));
     let mut sync = StoreLogSync::new(
@@ -33,7 +33,7 @@ async fn sync(f: &Fixture) -> StoreLogSync {
     })
     .await
     .unwrap();
-    sync
+    (sync, member)
 }
 
 fn path(file: &FileRef) -> ObjectPath {
@@ -44,7 +44,7 @@ fn path(file: &FileRef) -> ObjectPath {
 #[tokio::test]
 async fn an_excluded_snapshot_prevents_proving_file_absence() {
     let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-    let mut sync = sync(&f).await;
+    let (mut sync, author) = sync(&f).await;
     let file = f.uploaded("old", vec![31; CHUNK]).await;
     sync.write_snapshot(Audience::Store).await.unwrap();
     f.database
@@ -68,17 +68,13 @@ async fn an_excluded_snapshot_prevents_proving_file_absence() {
         .remove(0);
     let mut bytes = f.storage.read(&object.path).await.unwrap();
     use coven_format::sealed_snapshot::SnapshotObjectPrefix;
-    let mut end = 0;
-    loop {
-        let needed = SnapshotObjectPrefix::needed_prefix_length(&bytes[..end]).unwrap();
-        if needed == end {
-            break;
-        }
-        end = needed;
-    }
+    let end = SnapshotObjectPrefix::length(&bytes).unwrap();
     let mut prefix = SnapshotObjectPrefix::decode(&bytes[..end]).unwrap();
     prefix.key = KeyId(uuid::Uuid::from_u128(501));
-    bytes.splice(..end, prefix.encode().unwrap());
+    let clear = prefix.encode().unwrap();
+    let signature = author.sign_prefix(object.path.as_str(), &clear);
+    bytes.splice(..end, clear);
+    bytes[end..end + 64].copy_from_slice(signature.as_bytes());
     f.storage.delete(&object.path).await.unwrap();
     f.storage.create(&object.path, &bytes).await.unwrap();
     sync.run_retention().await.unwrap();
@@ -89,7 +85,7 @@ async fn an_excluded_snapshot_prevents_proving_file_absence() {
 #[tokio::test]
 async fn file_references_survive_in_waiting_writes_and_kept_snapshots() {
     let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-    let mut sync = sync(&f).await;
+    let (mut sync, _) = sync(&f).await;
     let old = f.uploaded("old", vec![31; CHUNK]).await;
     let kept = f.uploaded("kept", vec![32; CHUNK]).await;
     sync.write_snapshot(Audience::Store).await.unwrap();
@@ -124,7 +120,7 @@ async fn file_references_survive_in_waiting_writes_and_kept_snapshots() {
 #[tokio::test]
 async fn deleting_an_unused_publication_retires_its_queue() {
     let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-    let mut sync = sync(&f).await;
+    let (mut sync, _) = sync(&f).await;
     super::uploads::unused_upload(&f).await;
     sync.run_retention().await.unwrap();
     assert!(f

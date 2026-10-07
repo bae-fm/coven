@@ -5,11 +5,13 @@ use crate::error::{bound, require, Error, Rule};
 use crate::sealed;
 use crate::value::{EntryPositions, WritePositions};
 use crate::wire::{Decoder, Encoder, Wire, MAX_ITEMS};
-use coven_crypto::SEALED_OBJECT_CHUNK_OVERHEAD;
+use coven_crypto::{Signature, SEALED_OBJECT_CHUNK_OVERHEAD};
 use coven_foundation::id_source::KeyId;
 use coven_merge::Audience;
 
 /// Cleartext routing information for the snapshot's single encrypted section.
+/// Decoding alone does not authenticate it: verify its prefix signature before
+/// using any field, and its whole-object signature before applying its data.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SnapshotObjectPrefix {
     /// The snapshot's audience; the opened header must agree.
@@ -22,6 +24,10 @@ pub struct SnapshotObjectPrefix {
     pub store_log: EntryPositions,
 }
 impl SnapshotObjectPrefix {
+    /// Largest prefix plus its signature: a circle audience, key, two maximal
+    /// position lists and 64 signature bytes. Bounds a single ranged read.
+    pub const MAX_SIGNED_LENGTH: usize = 36 + 2 * (4 + MAX_ITEMS * 16) + 64;
+
     /// Encode kind 34, version, audience, key and both counted position lists.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         self.writes.validate()?;
@@ -50,21 +56,13 @@ impl SnapshotObjectPrefix {
         positions_end(bytes, entries)
     }
 
-    /// Bytes required by the next prefix-only read. Repeating this with those
-    /// bytes reaches the exact prefix length without reading encrypted chunks.
-    pub fn needed_prefix_length(bytes: &[u8]) -> Result<usize, Error> {
-        if bytes.len() < 4 {
-            return Ok(4);
-        }
-        let routing = Self::routing_length(bytes)?;
-        if bytes.len() < routing + 4 {
-            return Ok(routing + 4);
-        }
-        let entries = positions_end(bytes, routing)?;
-        if bytes.len() < entries + 4 {
-            return Ok(entries + 4);
-        }
-        positions_end(bytes, entries)
+    /// Decode exactly a cleartext prefix followed by its 64-byte signature.
+    /// The caller verifies the signature with the expected member and path.
+    pub fn decode_signed(bytes: &[u8]) -> Result<(Self, Signature), Error> {
+        let length = Self::length(bytes)?;
+        let prefix = Self::decode(bytes.get(..length).ok_or(Error::Truncated)?)?;
+        let signature = sealed::signature(&bytes[length..])?;
+        Ok((prefix, signature))
     }
 
     /// Decode exactly the prefix, checking both lists fit before allocation.
@@ -118,8 +116,9 @@ fn positions_end(bytes: &[u8], offset: usize) -> Result<usize, Error> {
     Ok(offset + 4 + count * 16)
 }
 
-/// Delimits sealed snapshot chunks without buffering the object. EOF is valid
-/// only after the opened plaintext's snapshot decoder accepts its end marker.
+/// Delimits sealed snapshot chunks without buffering the object. The caller
+/// reserves the final 64 bytes for the whole-object signature. Acceptance also
+/// requires that signature and the plaintext decoder's end-marker check.
 pub struct SnapshotObjectLayout {
     index: u64,
     partial: bool,
@@ -168,6 +167,14 @@ impl SnapshotObjectLayout {
         let bytes = sealed::chunk(piece, CHUNK_SIZE)?;
         self.advance(bytes.len())?;
         Ok(bytes)
+    }
+
+    /// Consume the layout at its final signature, requiring at least one chunk.
+    /// The caller verifies it against the digest of every preceding object byte,
+    /// including the prefix signature, before applying any plaintext.
+    pub fn read_signature(self, bytes: &[u8]) -> Result<Signature, Error> {
+        require(self.index > 0, "snapshot chunks", Rule::Required)?;
+        sealed::signature(bytes)
     }
 
     fn advance(&mut self, length: usize) -> Result<(), Error> {

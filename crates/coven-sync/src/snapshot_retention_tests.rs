@@ -1,6 +1,6 @@
 use super::*;
 
-async fn post(device: &Device, storage: &Arc<MemoryStorage>) {
+pub(super) async fn post(device: &Device, storage: &Arc<MemoryStorage>) {
     assert!(crate::DeviceLogSync::new(
         storage.clone(),
         device.db.clone(),
@@ -10,6 +10,58 @@ async fn post(device: &Device, storage: &Arc<MemoryStorage>) {
     .post_positions()
     .await
     .unwrap());
+}
+
+#[tokio::test]
+async fn unsigned_positions_cannot_authorize_log_deletion() {
+    let storage = snapshot_storage();
+    let mut a = notes_device(storage.clone(), 1).await;
+    a.create(key(1)).await;
+    let other = member(2);
+    a.add(&other, MemberRole::Member).await;
+    write_rows(&a, 0, 1, 17, Audience::Store).await;
+    upload(&a, &storage).await;
+    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    post(&a, &storage).await;
+    let path = ObjectPath::positions(a.device().await);
+    let bytes = storage.read(&path).await.unwrap();
+    let unsigned = coven_format::sealed_single::SingleChunkObject::decode(&bytes)
+        .unwrap()
+        .signed_bytes()
+        .unwrap();
+    let mut hash = coven_crypto::ObjectHasher::new();
+    hash.update(&unsigned);
+    let mut forged = unsigned.clone();
+    forged.extend_from_slice(other.sign_object(path.as_str(), &hash.finish()).as_bytes());
+    for damaged in [unsigned, forged] {
+        storage.replace(&path, &damaged).await.unwrap();
+        let report = a.sync.run_retention().await.unwrap();
+        assert!(report
+            .damaged_objects
+            .iter()
+            .any(|object| object.path == path.as_str()));
+        assert_eq!(
+            storage
+                .list(&ObjectPrefix::device_logs())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    storage.replace(&path, &bytes).await.unwrap();
+    assert!(a
+        .sync
+        .run_retention()
+        .await
+        .unwrap()
+        .damaged_objects
+        .is_empty());
+    assert!(storage
+        .list(&ObjectPrefix::device_logs())
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]

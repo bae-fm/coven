@@ -1,12 +1,10 @@
 //! Replay-selected boundaries constrain both snapshot choice and late writes.
 
-use super::{catalog::inconsistent, io, snapshot_path, StoreLogSync};
+use super::{catalog::inconsistent, snapshot_path, StoreLogSync};
 use crate::{snapshot_data::SavedBoundary, SyncError};
 use coven_database::{EntryOutcome, StoreLog, WriteBoundary};
 use coven_format::{
-    chunks::FrameDecoder,
-    sealed_snapshot::{SnapshotObjectLayout, SnapshotObjectPrefix},
-    snapshot::SnapshotDecoder,
+    sealed_snapshot::SnapshotObjectPrefix,
     store_log::{SnapshotId, StoreChange, StoreLogEntry},
     Object,
 };
@@ -69,46 +67,27 @@ impl StoreLogSync {
     ) -> Result<Vec<SavedBoundary>, SyncError> {
         let readable = self.snapshot_audiences(log)?;
         let mut saved = Vec::new();
-        for (entry, id) in entries(log) {
-            if !readable.contains_key(&id.audience)
-                || matches!(entry.change, StoreChange::RaiseFormat { .. })
-            {
-                continue;
-            }
+        let boundaries: Vec<_> = entries(log)
+            .filter(|(entry, id)| {
+                readable.contains_key(&id.audience)
+                    && !matches!(entry.change, StoreChange::RaiseFormat { .. })
+            })
+            .collect();
+        if boundaries.is_empty() {
+            return Ok(saved);
+        }
+        let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
+        let objects = storage
+            .list(&coven_storage::ObjectPrefix::snapshots())
+            .await?;
+        for (entry, id) in boundaries {
             let path = snapshot_path(id)?;
-            let prefix = self.snapshot_prefix(&path).await?;
-            if prefix.audience != id.audience {
-                return Err(inconsistent("boundary audience differs from its snapshot"));
-            }
-            // Its prefix is authenticated by each chunk. Open the complete
-            // header frame without requiring an obsolete app schema to load.
-            let ring = self
-                .store_keys
-                .unlock()?
-                .ok_or(SyncError::KeyUnavailable(prefix.key))?;
-            let key = io::key(&ring, &id.audience, prefix.key)?;
-            let clear = prefix.encode()?;
-            let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
-            let mut offset = clear.len() as u64;
-            let mut layout = SnapshotObjectLayout::new();
-            let mut frames = FrameDecoder::new(None);
-            loop {
-                let mut piece = io::range(storage, &path, offset, 4).await?;
-                let length = layout.chunk_length(&piece)?;
-                piece.extend(io::range(storage, &path, offset + 4, length - 4).await?);
-                let index = layout.index();
-                let sealed = layout.decode_chunk(&piece)?;
-                let plain = key.open_object_chunk(path.as_str(), &clear, 0, index, sealed)?;
-                if let Some(frame) = frames.next(&mut plain.as_slice())? {
-                    let decoder = SnapshotDecoder::start(&frame, &prefix)?;
-                    let header = decoder.header();
-                    if header.id != *id {
-                        return Err(inconsistent("boundary header and path disagree"));
-                    }
-                    break;
-                }
-                offset += length as u64;
-            }
+            let object = objects
+                .iter()
+                .find(|object| object.path == path)
+                .ok_or(coven_storage::StorageError::NotFound)?;
+            let candidate = self.snapshot_prefix(object, log).await?;
+            let clear = candidate.prefix.encode()?;
             saved.push(SavedBoundary {
                 entry: Object::StoreLog(entry.clone()).encode()?,
                 prefix: clear,

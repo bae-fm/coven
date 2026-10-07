@@ -85,12 +85,14 @@ pub enum SingleChunkObject<'a> {
         /// Signature over the prefix and entire encoded chunk.
         signature: Signature,
     },
-    /// A device's posted positions, authenticated by the store key.
+    /// A device's posted positions, signed by its member.
     PostedPositions {
         /// The store key sealing these positions.
         key: KeyId,
         /// Stored nonce, ciphertext and tag, without the length field.
         chunk: &'a [u8],
+        /// Signature over the prefix and entire encoded chunk.
+        signature: Signature,
     },
     /// A request sealed with the invite-derived key and signed by its new member.
     JoinRequest {
@@ -106,22 +108,19 @@ impl<'a> SingleChunkObject<'a> {
     pub fn decode(bytes: &'a [u8]) -> Result<Self, Error> {
         let kind = *bytes.first().ok_or(Error::Truncated)?;
         sealed::prefix(bytes, kind)?;
-        let (prefix_length, signature_length) = match kind {
-            33 => (
-                match bytes.get(19).ok_or(Error::Truncated)? {
-                    0 => 20,
-                    1 => 84,
-                    tag => {
-                        return Err(Error::UnknownTag {
-                            field: "store origin",
-                            tag: *tag,
-                        })
-                    }
-                },
-                64,
-            ),
-            35 => (19, 0),
-            36 => (3, 64),
+        let prefix_length = match kind {
+            33 => match bytes.get(19).ok_or(Error::Truncated)? {
+                0 => 20,
+                1 => 84,
+                tag => {
+                    return Err(Error::UnknownTag {
+                        field: "store origin",
+                        tag: *tag,
+                    })
+                }
+            },
+            35 => 19,
+            36 => 3,
             tag => {
                 return Err(Error::UnknownTag {
                     field: "single-chunk object kind",
@@ -131,7 +130,7 @@ impl<'a> SingleChunkObject<'a> {
         };
         let body = bytes.get(prefix_length..).ok_or(Error::Truncated)?;
         let chunk_length = sealed::chunk_length(body, MAX_OBJECT)?;
-        let total = chunk_length + signature_length;
+        let total = chunk_length + 64;
         if body.len() < total {
             return Err(Error::Truncated);
         }
@@ -140,13 +139,9 @@ impl<'a> SingleChunkObject<'a> {
         }
         let chunk = &body[4..chunk_length];
         check_frame_length(chunk)?;
+        let signature = Signature::from_bytes(body[chunk_length..].try_into().expect("64 bytes"));
         if kind == 36 {
-            return Ok(Self::JoinRequest {
-                chunk,
-                signature: Signature::from_bytes(
-                    body[chunk_length..].try_into().expect("64 bytes"),
-                ),
-            });
+            return Ok(Self::JoinRequest { chunk, signature });
         }
         let mut input = Decoder::new(&bytes[3..prefix_length])?;
         let key = KeyId::get(&mut input)?;
@@ -165,12 +160,14 @@ impl<'a> SingleChunkObject<'a> {
                 key,
                 origin,
                 chunk,
-                signature: Signature::from_bytes(
-                    body[chunk_length..].try_into().expect("64 bytes"),
-                ),
+                signature,
             }
         } else {
-            Self::PostedPositions { key, chunk }
+            Self::PostedPositions {
+                key,
+                chunk,
+                signature,
+            }
         })
     }
 
@@ -195,22 +192,19 @@ impl<'a> SingleChunkObject<'a> {
         }
     }
 
-    /// The author's signature, absent for posted positions.
-    pub fn signature(&self) -> Option<&Signature> {
+    /// The author's required signature.
+    pub fn signature(&self) -> &Signature {
         match self {
-            Self::StoreLog { signature, .. } | Self::JoinRequest { signature, .. } => {
-                Some(signature)
-            }
-            Self::PostedPositions { .. } => None,
+            Self::StoreLog { signature, .. }
+            | Self::JoinRequest { signature, .. }
+            | Self::PostedPositions { signature, .. } => signature,
         }
     }
 
     /// Reproduce the envelope, including the original nonce and signature.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         let mut bytes = self.signed_bytes()?;
-        if let Some(signature) = self.signature() {
-            bytes.extend_from_slice(signature.as_bytes());
-        }
+        bytes.extend_from_slice(self.signature().as_bytes());
         Ok(bytes)
     }
 

@@ -262,7 +262,11 @@ impl DeviceLogSync {
     /// state. Returns false while any local write awaits upload: clipping only
     /// the position would publish fingerprints that still include those writes.
     pub async fn post_positions(&mut self) -> Result<bool, SyncError> {
-        let Some(positions) = self.current_positions().await? else {
+        let member = self
+            .member_keys
+            .unlock()?
+            .ok_or(SyncError::MissingMemberKeys)?;
+        let Some(positions) = self.positions_for(&member).await? else {
             return Ok(false);
         };
         let key = positions
@@ -284,10 +288,14 @@ impl DeviceLogSync {
             0,
             &Object::PostedPositions(positions).encode()?,
         )?;
+        let mut bytes = prefix.encode_chunk(&sealed)?;
+        let mut hash = coven_crypto::ObjectHasher::new();
+        hash.update(&bytes);
+        bytes.extend_from_slice(member.sign_object(path.as_str(), &hash.finish()).as_bytes());
         self.storage
             .as_deref()
             .ok_or(SyncError::NoStorage)?
-            .replace(&path, &prefix.encode_chunk(&sealed)?)
+            .replace(&path, &bytes)
             .await?;
         Ok(true)
     }
@@ -302,6 +310,7 @@ impl DeviceLogSync {
             return Ok(report);
         };
         let ring = self.store_keys.unlock()?;
+        let log = self.database.local_store_log().await?.log;
         for object in self
             .storage
             .as_deref()
@@ -329,22 +338,23 @@ impl DeviceLogSync {
                 }
                 Err(error) => return Err(error.into()),
             };
-            let peer = match crate::posted_positions::open(&bytes, &object.path, ring.as_ref()) {
-                Ok(peer) => peer,
-                Err(SyncError::Damaged(object)) => {
-                    report.damaged_objects.push(object);
-                    continue;
-                }
-                Err(SyncError::KeyUnavailable(key)) => {
-                    tracing::debug!(
-                        path = object.path.as_str(),
-                        ?key,
-                        "positions key is unavailable"
-                    );
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
+            let peer =
+                match crate::posted_positions::open(&bytes, &object.path, ring.as_ref(), &log) {
+                    Ok(peer) => peer,
+                    Err(SyncError::Damaged(object)) => {
+                        report.damaged_objects.push(object);
+                        continue;
+                    }
+                    Err(SyncError::KeyUnavailable(key)) => {
+                        tracing::debug!(
+                            path = object.path.as_str(),
+                            ?key,
+                            "positions key is unavailable"
+                        );
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
             if own.writes != peer.writes
                 || own.store_log != peer.store_log
                 || own.schema_version != peer.schema_version
@@ -376,11 +386,18 @@ impl DeviceLogSync {
     }
 
     pub(crate) async fn current_positions(&self) -> Result<Option<PostedPositions>, SyncError> {
-        let local = self.database.local_store_log().await?;
         let member = self
             .member_keys
             .unlock()?
             .ok_or(SyncError::MissingMemberKeys)?;
+        self.positions_for(&member).await
+    }
+
+    async fn positions_for(
+        &self,
+        member: &coven_crypto::MemberKeys,
+    ) -> Result<Option<PostedPositions>, SyncError> {
+        let local = self.database.local_store_log().await?;
         let store = local
             .log
             .replay
@@ -414,7 +431,7 @@ impl DeviceLogSync {
             })
             .collect::<Result<_, SyncError>>()?;
         let state = self.database.sync_state(hashers).await?;
-        crate::write_seal::check_member(&local.log, &member, local.device)?;
+        crate::write_seal::check_member(&local.log, member, local.device)?;
         if state.uploads_pending {
             return Ok(None);
         }

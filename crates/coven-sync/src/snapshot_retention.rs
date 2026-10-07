@@ -100,7 +100,7 @@ impl StoreLogSync {
                 coverage.insert(audience.clone(), prefix.writes);
             }
         }
-        let positions = self.retention_positions(report).await?;
+        let positions = self.retention_positions(&local.log, report).await?;
         let mut replays = ReplayCache::new(&local.log);
         for object in storage.list(&ObjectPrefix::device_logs()).await? {
             let id = object
@@ -195,12 +195,13 @@ impl StoreLogSync {
 
     async fn retention_positions(
         &self,
+        log: &StoreLog,
         report: &mut SyncResults,
     ) -> Result<BTreeMap<DeviceId, WritePositions>, SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let mut positions = BTreeMap::new();
         for object in storage.list(&ObjectPrefix::positions()).await? {
-            match self.open_retention_positions(&object.path).await {
+            match self.open_retention_positions(&object.path, log).await {
                 Ok((device, writes)) => {
                     positions.insert(device, writes);
                 }
@@ -213,11 +214,12 @@ impl StoreLogSync {
     async fn open_retention_positions(
         &self,
         path: &ObjectPath,
+        log: &StoreLog,
     ) -> Result<(DeviceId, WritePositions), SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let bytes = storage.read(path).await?;
         let ring = self.store_keys.unlock()?;
-        let positions = crate::posted_positions::open(&bytes, path, ring.as_ref())?;
+        let positions = crate::posted_positions::open(&bytes, path, ring.as_ref(), log)?;
         Ok((positions.device, positions.writes))
     }
 }

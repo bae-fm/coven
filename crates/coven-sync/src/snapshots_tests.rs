@@ -11,6 +11,8 @@ use std::num::NonZeroU64;
 mod boundaries;
 #[path = "snapshot_retention_tests.rs"]
 mod retention;
+#[path = "snapshot_catalog_tests.rs"]
+mod signatures;
 
 fn snapshot_storage() -> Arc<MemoryStorage> {
     Arc::new(
@@ -704,7 +706,7 @@ async fn a_snapshot_exceeding_the_transfer_memory_budget_streams_in_bounded_requ
         .await
         .iter()
         .all(|range| range.end() - range.start()
-            <= 65536 + coven_crypto::SEALED_OBJECT_CHUNK_OVERHEAD as u64));
+            <= coven_format::sealed_snapshot::SnapshotObjectPrefix::MAX_SIGNED_LENGTH as u64));
 }
 
 #[tokio::test]

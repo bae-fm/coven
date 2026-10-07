@@ -1,10 +1,12 @@
 //! Prefix-only ordering followed by streamed authentication and database checks.
 
 use super::{io, StoreLogSync};
+use crate::write_object::{checked, damaged};
 use crate::{
     snapshot_data::{SavedSnapshot, SnapshotTask},
     SyncError, SyncResults,
 };
+use coven_crypto::{MemberId, ObjectHasher, Signature};
 use coven_database::{EntryOutcome, OperationRecord, StoreLog};
 use coven_format::sealed_snapshot::{SnapshotObjectLayout, SnapshotObjectPrefix};
 use coven_merge::Audience;
@@ -14,12 +16,14 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(super) struct Candidate {
     pub(super) object: StoredObject,
     pub(super) prefix: SnapshotObjectPrefix,
+    author: MemberId,
+    signature: Signature,
 }
 
 pub(super) struct Catalog {
     pub(super) listed: usize,
     pub(super) candidates: Vec<Candidate>,
-    /// Clear prefixes that follow the replay's reset/version boundary require
+    /// Verified prefixes that follow the replay's reset/version boundary require
     /// history, even when their keys cannot authorize loading their rows.
     pub(super) required_positions: coven_format::value::WritePositions,
     pub(super) unreadable_prefix: bool,
@@ -47,20 +51,16 @@ impl StoreLogSync {
         let mut positions = BTreeMap::new();
         let mut unreadable_prefix = false;
         for object in objects {
-            let prefix = match self.snapshot_prefix(&object.path).await {
-                Ok(prefix) => prefix,
+            let candidate = match self.snapshot_prefix(&object, log).await {
+                Ok(candidate) => candidate,
                 Err(error) => {
                     unreadable_prefix = true;
                     snapshot_damage(report, &object.path, error)?;
                     continue;
                 }
             };
-            if prefix.audience != *audience
-                || object
-                    .path
-                    .snapshot_id()
-                    .is_none_or(|id| id.audience != *audience)
-            {
+            let prefix = &candidate.prefix;
+            if prefix.audience != *audience {
                 unreadable_prefix = true;
                 snapshot_damage(
                     report,
@@ -75,7 +75,7 @@ impl StoreLogSync {
             if super::boundaries::allows(
                 log,
                 &object.path.snapshot_id().expect("checked path"),
-                &prefix,
+                prefix,
             ) {
                 for id in &prefix.writes.0 {
                     positions
@@ -85,7 +85,7 @@ impl StoreLogSync {
                 }
             }
             if keys.contains(&(audience.clone(), prefix.key)) {
-                candidates.push(Candidate { object, prefix });
+                candidates.push(candidate);
             }
         }
         candidates.sort_by(|a, b| {
@@ -129,17 +129,45 @@ impl StoreLogSync {
 
     pub(super) async fn snapshot_prefix(
         &self,
-        path: &ObjectPath,
-    ) -> Result<SnapshotObjectPrefix, SyncError> {
+        object: &StoredObject,
+        log: &StoreLog,
+    ) -> Result<Candidate, SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
-        let mut bytes = Vec::new();
-        loop {
-            let needed = SnapshotObjectPrefix::needed_prefix_length(&bytes)?;
-            if needed == bytes.len() {
-                return Ok(SnapshotObjectPrefix::decode(&bytes)?);
-            }
-            bytes.extend(io::range(storage, path, bytes.len() as u64, needed - bytes.len()).await?);
+        let path = &object.path;
+        let author = crate::object_author::member(log, path)?;
+        let length = object
+            .size
+            .min(SnapshotObjectPrefix::MAX_SIGNED_LENGTH as u64) as usize;
+        if length == 0 {
+            return checked(path, Err(coven_format::Error::Truncated));
         }
+        let bytes = io::range(storage, path, 0, length).await?;
+        let length = checked(path, SnapshotObjectPrefix::length(&bytes))?;
+        let signed = checked(
+            path,
+            bytes
+                .get(..length + 64)
+                .ok_or(coven_format::Error::Truncated),
+        )?;
+        let (prefix, signature) = checked(path, SnapshotObjectPrefix::decode_signed(signed))?;
+        author
+            .verify_prefix(path.as_str(), &signed[..length], &signature)
+            .map_err(|error| damaged(path, crate::ObjectCheckFailure::Signature(error)))?;
+        if path
+            .snapshot_id()
+            .is_none_or(|id| id.audience != prefix.audience)
+        {
+            return Err(damaged(
+                path,
+                crate::write_object::invalid("snapshot path and audience differ"),
+            ));
+        }
+        Ok(Candidate {
+            object: object.clone(),
+            prefix,
+            author: author.clone(),
+            signature,
+        })
     }
 
     pub(super) async fn choose_snapshot(
@@ -202,21 +230,40 @@ impl StoreLogSync {
                 &io::name(file)?,
             )
             .create_writer(self.directory.lock_read_only()?)?;
-        let mut offset = prefix.len() as u64;
+        let mut hash = ObjectHasher::new();
+        hash.update(&prefix);
+        hash.update(candidate.signature.as_bytes());
+        let mut offset = prefix.len() as u64 + 64;
+        let end = candidate
+            .object
+            .size
+            .checked_sub(64)
+            .ok_or(coven_format::Error::Truncated)?;
         let mut layout = SnapshotObjectLayout::new();
-        while offset < candidate.object.size {
+        while offset < end {
+            if end - offset < 4 {
+                return Err(coven_format::Error::Truncated.into());
+            }
             let mut piece = io::range(storage, path, offset, 4).await?;
             let length = layout.chunk_length(&piece)?;
+            if length as u64 > end - offset {
+                return Err(coven_format::Error::Truncated.into());
+            }
             piece.extend(io::range(storage, path, offset + 4, length - 4).await?);
+            hash.update(&piece);
             let index = layout.index();
             let sealed = layout.decode_chunk(&piece)?;
             let plaintext = key.open_object_chunk(path.as_str(), &prefix, 0, index, sealed)?;
             writer.append(&plaintext).await?;
             offset += length as u64;
         }
-        if offset != candidate.object.size {
-            return Err(coven_format::Error::TrailingBytes.into());
+        if offset != end {
+            return Err(coven_format::Error::Truncated.into());
         }
+        let signature = layout.read_signature(&io::range(storage, path, end, 64).await?)?;
+        candidate
+            .author
+            .verify_object(path.as_str(), &hash.finish(), &signature)?;
         writer.finish().await?;
         let inspection = self
             .database

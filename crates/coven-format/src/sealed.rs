@@ -4,6 +4,18 @@ use crate::error::{bound, require, Error, Rule};
 
 use coven_crypto::SEALED_OBJECT_CHUNK_OVERHEAD;
 
+pub(crate) fn signature(bytes: &[u8]) -> Result<coven_crypto::Signature, Error> {
+    if bytes.len() < 64 {
+        return Err(Error::Truncated);
+    }
+    if bytes.len() > 64 {
+        return Err(Error::TrailingBytes);
+    }
+    Ok(coven_crypto::Signature::from_bytes(
+        bytes.try_into().expect("64 bytes"),
+    ))
+}
+
 pub(crate) fn prefix(bytes: &[u8], kind: u8) -> Result<(), Error> {
     let prefix = bytes.get(..3).ok_or(Error::Truncated)?;
     if prefix[0] != kind {

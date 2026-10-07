@@ -425,10 +425,15 @@ mod agreement {
                 &Object::PostedPositions(post).encode().unwrap(),
             )
             .unwrap();
-        storage
-            .replace(&path, &prefix.encode_chunk(&chunk).unwrap())
-            .await
-            .unwrap();
+        let mut bytes = prefix.encode_chunk(&chunk).unwrap();
+        let mut hash = coven_crypto::ObjectHasher::new();
+        hash.update(&bytes);
+        bytes.extend_from_slice(
+            member()
+                .sign_object(path.as_str(), &hash.finish())
+                .as_bytes(),
+        );
+        storage.replace(&path, &bytes).await.unwrap();
     }
 
     #[tokio::test]
@@ -483,10 +488,23 @@ mod agreement {
     async fn damaged_positions_are_reported_as_not_posted_and_reread() {
         let storage = storage();
         let mut devices = group(storage.clone(), 2).await;
+        devices[1]
+            .db
+            .test_damage_fingerprint(Audience::Store)
+            .await
+            .unwrap();
         devices[1].sync.post_positions().await.unwrap();
         let path = ObjectPath::positions(DeviceId(2));
         let original = storage.read(&path).await.unwrap();
-        for damaged in [vec![0], {
+        let unsigned = original[..original.len() - 64].to_vec();
+        let mut secret = b"CVMK\x01".to_vec();
+        secret.extend([4; 64]);
+        let other = MemberKeys::from_secret_bytes(&secret).unwrap();
+        let mut hash = coven_crypto::ObjectHasher::new();
+        hash.update(&unsigned);
+        let mut forged = unsigned.clone();
+        forged.extend_from_slice(other.sign_object(path.as_str(), &hash.finish()).as_bytes());
+        for damaged in [vec![0], unsigned, forged, {
             let mut bytes = original.clone();
             *bytes.last_mut().unwrap() ^= 1;
             bytes
@@ -502,7 +520,7 @@ mod agreement {
         storage.replace(&path, &original).await.unwrap();
         let report = devices[0].sync.compare_fingerprints().await.unwrap();
         assert!(report.damaged_objects.is_empty());
-        assert!(report.disagreements.is_empty());
+        assert_eq!(report.disagreements.len(), 1);
     }
 }
 

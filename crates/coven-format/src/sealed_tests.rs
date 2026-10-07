@@ -62,14 +62,15 @@ fn walk_write(
 fn walk_snapshot(
     mut bytes: &[u8],
     mut visit: impl FnMut(u64, &[u8]),
-) -> Result<SnapshotObjectPrefix, Error> {
+) -> Result<(SnapshotObjectPrefix, Signature, Signature), Error> {
     let length = SnapshotObjectPrefix::length(bytes)?;
     let prefix_bytes = take(&mut bytes, length)?;
     let prefix = SnapshotObjectPrefix::decode(prefix_bytes)?;
     assert_eq!(prefix.encode()?, prefix_bytes);
+    let prefix_signature = crate::sealed::signature(take(&mut bytes, 64)?)?;
     let mut layout = SnapshotObjectLayout::new();
     let mut writer = SnapshotObjectLayout::new();
-    while !bytes.is_empty() {
+    while bytes.len() > 64 {
         let length = layout.chunk_length(bytes)?;
         let index = layout.index();
         let piece = take(&mut bytes, length)?;
@@ -77,7 +78,7 @@ fn walk_snapshot(
         assert_eq!(writer.encode_chunk(sealed)?, piece);
         visit(index, sealed);
     }
-    Ok(prefix)
+    Ok((prefix, prefix_signature, layout.read_signature(bytes)?))
 }
 
 // These bytes were produced independently with Python hashlib/hmac and libsodium.
@@ -178,16 +179,22 @@ fn snapshot_fixture_binds_positions_and_requires_its_plaintext_end_marker() {
     let bytes = hex(include_str!("../fixtures/sealed-snapshot.hex"));
     let prefix_length = SnapshotObjectPrefix::length(&bytes).unwrap();
     let prefix_bytes = &bytes[..prefix_length];
-    let prefix = SnapshotObjectPrefix::decode(prefix_bytes).unwrap();
+    let (prefix, prefix_signature) =
+        SnapshotObjectPrefix::decode_signed(&bytes[..prefix_length + 64]).unwrap();
+    test_utils::member()
+        .signing
+        .verify_prefix(SNAPSHOT_PATH, prefix_bytes, &prefix_signature)
+        .unwrap();
     let mut reader = SnapshotChunkDecoder::new(prefix.clone());
     let mut oracle = test_utils::TestOracle {
         writes: Default::default(),
     };
     let mut writer = SnapshotObjectLayout::new();
     let mut encoded = prefix.encode().unwrap();
+    encoded.extend_from_slice(prefix_signature.as_bytes());
     let mut plaintext = Vec::new();
     let mut count = 0;
-    walk_snapshot(&bytes, |index, sealed| {
+    let (_, _, signature) = walk_snapshot(&bytes, |index, sealed| {
         encoded.extend(writer.encode_chunk(sealed).unwrap());
         let opened = store_key()
             .derive()
@@ -207,6 +214,13 @@ fn snapshot_fixture_binds_positions_and_requires_its_plaintext_end_marker() {
         }
     })
     .unwrap();
+    let mut hash = ObjectHasher::new();
+    hash.update(&encoded);
+    test_utils::member()
+        .signing
+        .verify_object(SNAPSHOT_PATH, &hash.finish(), &signature)
+        .unwrap();
+    encoded.extend_from_slice(signature.as_bytes());
     reader.finish().unwrap();
     assert_eq!(reader.header().unwrap().writes, prefix.writes);
     assert_eq!(reader.header().unwrap().store_log, prefix.store_log);
@@ -262,25 +276,23 @@ fn single_chunk_fixtures_open_with_their_own_keys_and_authors() {
         let author = match frame {
             Object::StoreLog(entry) => {
                 assert_eq!(kind, 33);
-                Some(entry.author)
+                entry.author
             }
             Object::JoinRequest(request) => {
                 assert_eq!(kind, 36);
-                Some(request.keys.signing)
+                request.keys.signing
             }
             Object::PostedPositions(_) => {
                 assert_eq!(kind, 35);
-                None
+                test_utils::member().signing
             }
         };
-        if let Some(author) = author {
+        {
             let mut hash = ObjectHasher::new();
             hash.update(&bytes[..bytes.len() - 64]);
             author
-                .verify_object(path, &hash.finish(), object.signature().unwrap())
+                .verify_object(path, &hash.finish(), object.signature())
                 .unwrap();
-        } else {
-            assert!(object.signature().is_none());
         }
         mutations(&bytes, |changed| {
             if let Ok(object) = SingleChunkObject::decode(changed) {
@@ -288,6 +300,83 @@ fn single_chunk_fixtures_open_with_their_own_keys_and_authors() {
             }
         });
     }
+}
+
+#[test]
+fn snapshot_fixture_signatures_reject_truncation_and_every_changed_bit() {
+    let bytes = hex(include_str!("../fixtures/sealed-snapshot.hex"));
+    let length = SnapshotObjectPrefix::length(&bytes).unwrap();
+    let author = test_utils::member().signing;
+    let verify_prefix = |bytes: &[u8]| -> Result<(), Box<dyn std::error::Error>> {
+        let (_, signature) = SnapshotObjectPrefix::decode_signed(bytes)?;
+        author.verify_prefix(SNAPSHOT_PATH, &bytes[..length], &signature)?;
+        Ok(())
+    };
+    let signed = &bytes[..length + 64];
+    verify_prefix(signed).unwrap();
+    for end in 0..signed.len() {
+        assert!(verify_prefix(&signed[..end]).is_err());
+    }
+    let mut changed = signed.to_vec();
+    for index in 0..changed.len() {
+        for bit in 0..8 {
+            changed[index] ^= 1 << bit;
+            assert!(verify_prefix(&changed).is_err());
+            changed[index] ^= 1 << bit;
+        }
+    }
+    let (_, prefix_signature, signature) = walk_snapshot(&bytes, |_, _| {}).unwrap();
+    assert!(author
+        .verify_prefix("snapshots/store/2/1", &bytes[..length], &prefix_signature)
+        .is_err());
+    let mut hash = ObjectHasher::new();
+    hash.update(&bytes[..bytes.len() - 64]);
+    let digest = hash.finish();
+    author
+        .verify_object(SNAPSHOT_PATH, &digest, &signature)
+        .unwrap();
+    for end in bytes.len() - 64..bytes.len() {
+        assert!(walk_snapshot(&bytes[..end], |_, _| {}).is_err());
+    }
+    let mut changed = *signature.as_bytes();
+    for index in 0..changed.len() {
+        for bit in 0..8 {
+            changed[index] ^= 1 << bit;
+            assert!(author
+                .verify_object(SNAPSHOT_PATH, &digest, &Signature::from_bytes(changed))
+                .is_err());
+            changed[index] ^= 1 << bit;
+        }
+    }
+    // The whole-object digest includes the prefix signature, not only the chunks.
+    let mut changed = bytes[..bytes.len() - 64].to_vec();
+    changed[length] ^= 1;
+    let mut hash = ObjectHasher::new();
+    hash.update(&changed);
+    assert!(author
+        .verify_object(SNAPSHOT_PATH, &hash.finish(), &signature)
+        .is_err());
+}
+
+#[test]
+fn positions_fixture_rejects_every_truncation_and_bit_change() {
+    let bytes = hex(include_str!("../fixtures/sealed-positions.hex"));
+    let author = test_utils::member().signing;
+    let verify = |bytes: &[u8]| -> Result<(), Box<dyn std::error::Error>> {
+        let object = SingleChunkObject::decode(bytes)?;
+        let mut hash = ObjectHasher::new();
+        hash.update(&object.signed_bytes()?);
+        author.verify_object("positions/1", &hash.finish(), object.signature())?;
+        Ok(())
+    };
+    verify(&bytes).unwrap();
+    mutations(&bytes, |changed| assert!(verify(changed).is_err()));
+    let object = SingleChunkObject::decode(&bytes).unwrap();
+    let mut hash = ObjectHasher::new();
+    hash.update(&object.signed_bytes().unwrap());
+    assert!(author
+        .verify_object("positions/2", &hash.finish(), object.signature())
+        .is_err());
 }
 
 #[test]

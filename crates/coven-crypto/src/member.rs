@@ -45,6 +45,18 @@ impl MemberId {
     ) -> Result<(), CryptoError> {
         self.verify(&object_message(path, digest), signature)
     }
+
+    /// Verify a snapshot prefix independently of its encrypted data (D9).
+    /// `prefix` is exactly kind, version and routing fields, without signatures.
+    /// Panics if the storage path is empty.
+    pub fn verify_prefix(
+        &self,
+        path: &str,
+        prefix: &[u8],
+        signature: &Signature,
+    ) -> Result<(), CryptoError> {
+        self.verify(&prefix_message(path, prefix), signature)
+    }
 }
 
 impl FromStr for MemberId {
@@ -189,6 +201,13 @@ impl MemberKeys {
         self.sign(&object_message(path, digest))
     }
 
+    /// Sign a snapshot's exact kind, version and routing fields (D9).
+    /// The prefix domain and path are bound separately from whole-object signing.
+    /// Panics if the storage path is empty.
+    pub fn sign_prefix(&self, path: &str, prefix: &[u8]) -> Signature {
+        self.sign(&prefix_message(path, prefix))
+    }
+
     /// Encode both private seeds for custody or the person's restore code (§12.1).
     pub fn to_secret_bytes(&self) -> SecretBytes {
         let mut bytes = Zeroizing::new(Vec::with_capacity(69));
@@ -292,6 +311,14 @@ fn object_message(path: &str, digest: &ObjectDigest) -> Vec<u8> {
         b"coven/object-signature/v1",
         cipher::storage_path(path),
         digest.as_bytes(),
+    ])
+}
+
+fn prefix_message(path: &str, prefix: &[u8]) -> Vec<u8> {
+    cipher::context(&[
+        b"coven/prefix-signature/v1",
+        cipher::storage_path(path),
+        prefix,
     ])
 }
 

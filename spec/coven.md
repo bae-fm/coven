@@ -285,6 +285,9 @@
 - It also posts those positions to storage at `positions/<device>`,
   replacing its own object when the positions advance.
   - In its own log it posts the last write it has uploaded.
+  - The object is signed with its author's member key. Every reader checks
+    that signature against the member the applied store log names for the
+    device in its path; a missing or wrong signature is damaged (§19.1).
 - A device finds devices it doesn't know yet, and their logs, by listing
   `devices/` and `store-log/` ([E5](api.md#e5-storage-and-sync)).
 
@@ -1926,9 +1929,14 @@ Carol's tablet:
     audience is `store` or a circle's id.
   - Its prefix, outside its encryption, names its audience, its key and
     its positions, so any device can choose one and decide what it
-    covers without opening it.
+    covers by verifying the prefix's own member signature, without opening
+    its encrypted data. Unverified positions never establish coverage.
   - A snapshot is one object, encrypted in chunks like a write
     ([§6](#6-syncing-writes)), and written and loaded a chunk at a time.
+    Its author's member key signs both its prefix and its complete sealed
+    bytes. Every read verifies the prefix against the member the applied
+    store log names for the device in its path; loading also verifies the
+    complete object's signature before applying anything from it (D9).
   - A snapshot *covers* a write when the write is within its positions:
     `snapshots/store/ana-phone/3` covers ana-phone's writes 1 to 40.
 - A device writes one for an audience once that audience's parts after
@@ -2578,9 +2586,11 @@ Carol's tablet:
     one; the device reads it again on every sync, in case the failure was
     passing.
   - A damaged snapshot is passed over for the next latest, or the logs.
-    Readable cleartext positions still require that history; they never
-    authorize applying it. Missing required logs fail the reload without
-    changing the database, rather than silently loading less history.
+    Positions whose prefix signature verifies still require that history,
+    even if the snapshot's encrypted data or final signature is damaged;
+    they never authorize applying it. Unverified prefixes are never trusted.
+    Missing required logs fail the reload without changing the database,
+    rather than silently loading less history.
   - A damaged positions object counts as not posted.
 - A damaged local database, found by SQLite's integrity check when the
   database opens.

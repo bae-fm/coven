@@ -324,13 +324,13 @@
   kind:u8 | version:u16 | prefix | chunks | signature
   ```
 
-  | Kind | Object | Prefix | Signature |
-  | --- | --- | --- | --- |
-  | 32 | Write | `header_key:uuid \| part_keys:[uuid]` | the author's |
-  | 33 | Store log entry | `key:uuid \| origin:option<store:uuid, timestamp:Timestamp, author:MemberId>` | the author's |
-  | 34 | Snapshot | `audience:Audience \| key:uuid \| writes:WritePositions \| store_log:EntryPositions` | none |
-  | 35 | Posted positions | `key:uuid` | none |
-  | 36 | Join request | nothing | the requester's |
+  | Kind | Object | Prefix |
+  | --- | --- | --- |
+  | 32 | Write | `header_key:uuid \| part_keys:[uuid]` |
+  | 33 | Store log entry | `key:uuid \| origin:option<store:uuid, timestamp:Timestamp, author:MemberId>` |
+  | 34 | Snapshot | `audience:Audience \| key:uuid \| writes:WritePositions \| store_log:EntryPositions` |
+  | 35 | Posted positions | `key:uuid` |
+  | 36 | Join request | nothing |
 
 - A store-log `origin` is `0` for an ordinary entry, or `1` followed by
   the store id, timestamp and author's public signing key for a create-store
@@ -340,6 +340,30 @@
   decrypting either store. Its timestamp's device must match the path, whose
   number is 1. After opening, the origin must equal the creation frame's
   fields; it is required exactly on create-store entries.
+- A snapshot has two 64-byte Ed25519 signatures:
+
+  ```
+  kind:u8 (34) | version:u16 | prefix | prefix_signature:64 bytes | chunks | signature:64 bytes
+  ```
+
+  - `prefix_signature` signs the D11 context of `coven/prefix-signature/v1`,
+    the path, and the exact cleartext `kind | version | prefix` bytes. The
+    separate label distinguishes this message from a whole-object digest.
+  - Verify it before using any prefix field to choose a snapshot, establish
+    required history, or decide retention coverage, including reset and
+    version-raise boundaries. It can be checked from one bounded ranged read;
+    encrypted chunks and their keys are unnecessary.
+  - The final signature uses `coven/object-signature/v1` as below, hashing
+    every preceding byte, including `prefix_signature`. Verify it when loading,
+    before applying any snapshot data.
+  - Both signatures must verify with the member the store log names for the
+    device in the path, as of the entries the reader has applied. An unknown
+    device, missing signature or wrong signer makes the object damaged (§19.1).
+- Posted positions have exactly one chunk followed by the author's 64-byte
+  `coven/object-signature/v1` signature. Every read verifies it against the
+  member the applied store log names for the device in the path, before using
+  positions or fingerprints. An unknown device or missing or wrong signature
+  is damaged and counts as not posted (§19.1).
 - A chunk is `length:u32 | nonce:24 bytes | ciphertext | tag:16 bytes`:
   XChaCha20-Poly1305 with a random nonce, under the encryption key derived
   from the named key (D11). `length` is the ciphertext's, which is the
@@ -352,7 +376,7 @@
     `header_key`; section `i + 1` is part `i`'s stream, with
     `part_keys[i]`, cut into 64 KiB chunks, the last shorter;
   - a snapshot: one section, its frames cut into 64 KiB chunks, to the end
-    of the object;
+    of the encrypted data, before the final signature;
   - an entry, positions or a join request: one section of one chunk
     holding its frame.
   - The write prefix has exactly one key per declared part, including no
@@ -362,6 +386,7 @@
 - Each chunk's associated data binds, as in D11's context encoding, the
   label `coven/object-chunk/v1`, the object's path, its whole cleartext
   `kind | version | prefix`, the section and the chunk's index in it.
+  A snapshot's prefix signature is not part of this associated data.
   - So a provider can't change the prefix, swap, drop or reorder chunks, or
     move an object to another path, unnoticed.
   - A truncated snapshot lacks its end frame.
@@ -404,7 +429,8 @@
 ### D11 Keys, contexts and fingerprints
 
 - A *context* encodes a list of byte strings as each one's
-  `length:u64 | bytes`; it is used as associated data, and as HKDF's info.
+  `length:u64 | bytes`; it is used as associated data, as HKDF's info, and
+  for D9's `coven/object-signature/v1` and `coven/prefix-signature/v1` messages.
   A number in a context, such as a section or a chunk's index, is one
   string of its 8 bytes, as a `u64`.
 - From a store or circle key, HKDF-SHA256 with no salt derives 32-byte keys
@@ -545,3 +571,6 @@
   All key material and fixed nonces in these fixtures are public test data.
   Ciphertext, HKDF and signatures were calculated independently using
   Python hashlib/hmac and libsodium; tests open them through the Rust APIs.
+  Snapshot fixtures pin both signatures and the positions fixture pins its
+  author signature. Tests reject every truncation and every single-bit change
+  of those signatures, and verify their path and author bindings.

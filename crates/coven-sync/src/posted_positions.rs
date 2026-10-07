@@ -4,7 +4,8 @@ use crate::{
     write_object::{checked, damaged, invalid},
     ObjectCheckFailure, SyncError,
 };
-use coven_crypto::StoreKeyring;
+use coven_crypto::{ObjectHasher, StoreKeyring};
+use coven_database::StoreLog;
 use coven_format::{objects::PostedPositions, sealed_single::SingleChunkObject, Object};
 use coven_merge::Audience;
 use coven_storage::ObjectPath;
@@ -13,14 +14,26 @@ pub(crate) fn open(
     bytes: &[u8],
     path: &ObjectPath,
     ring: Option<&StoreKeyring>,
+    log: &StoreLog,
 ) -> Result<PostedPositions, SyncError> {
     let object = checked(path, SingleChunkObject::decode(bytes))?;
-    let SingleChunkObject::PostedPositions { key, chunk } = object else {
+    let SingleChunkObject::PostedPositions {
+        key,
+        chunk,
+        ref signature,
+    } = object
+    else {
         return Err(damaged(
             path,
             invalid("positions path holds another object"),
         ));
     };
+    let author = crate::object_author::member(log, path)?;
+    let mut hash = ObjectHasher::new();
+    hash.update(&bytes[..bytes.len() - 64]);
+    author
+        .verify_object(path.as_str(), &hash.finish(), signature)
+        .map_err(|error| damaged(path, ObjectCheckFailure::Signature(error)))?;
     let secret = crate::write_seal::derive(
         ring.ok_or(SyncError::KeyUnavailable(key))?,
         &Audience::Store,

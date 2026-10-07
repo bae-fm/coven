@@ -15,6 +15,7 @@ pub use replay::{replay, replay_entry};
 mod tests;
 
 mod error;
+mod object_author;
 mod posted_positions;
 mod report;
 mod store_log_keys;

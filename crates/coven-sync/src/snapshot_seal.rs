@@ -2,7 +2,7 @@
 
 use super::{io, StoreLogSync};
 use crate::SyncError;
-use coven_crypto::DerivedKeys;
+use coven_crypto::{DerivedKeys, MemberKeys, ObjectHasher};
 use coven_format::{
     sealed_snapshot::{SnapshotObjectLayout, SnapshotObjectPrefix},
     store_log::SnapshotId,
@@ -17,6 +17,7 @@ impl StoreLogSync {
         id: SnapshotId,
         key_id: KeyId,
         key: DerivedKeys,
+        member: &MemberKeys,
         path: &ObjectPath,
         name: &str,
     ) -> Result<(), SyncError> {
@@ -46,7 +47,7 @@ impl StoreLogSync {
                     .map_err(|_| std::io::Error::from(std::io::ErrorKind::BrokenPipe))
             },
         );
-        let consume = seal_frames(writer, receive_prefix, receive, path, key);
+        let consume = seal_frames(writer, receive_prefix, receive, path, key, member);
         let (produced, consumed) = tokio::join!(produce, consume);
         // A failed producer can close before the first frame. A failed consumer
         // instead makes the producer's next send fail with BrokenPipe.
@@ -68,6 +69,7 @@ async fn seal_frames(
     mut receive: mpsc::Receiver<Vec<u8>>,
     path: &ObjectPath,
     key: DerivedKeys,
+    member: &MemberKeys,
 ) -> Result<(), SyncError> {
     let prefix = prefix
         .await
@@ -75,6 +77,11 @@ async fn seal_frames(
         .encode()?;
     let first = receive.recv().await.ok_or(coven_format::Error::Truncated)?;
     writer.append(&prefix).await?;
+    let signature = member.sign_prefix(path.as_str(), &prefix);
+    writer.append(signature.as_bytes()).await?;
+    let mut hash = ObjectHasher::new();
+    hash.update(&prefix);
+    hash.update(signature.as_bytes());
     let mut layout = SnapshotObjectLayout::new();
     let mut chunk = Vec::with_capacity(io::BUFFER);
     let mut frame = Some(first);
@@ -87,7 +94,9 @@ async fn seal_frames(
             if chunk.len() == io::BUFFER {
                 let sealed =
                     key.seal_object_chunk(path.as_str(), &prefix, 0, layout.index(), &chunk)?;
-                writer.append(&layout.encode_chunk(&sealed)?).await?;
+                let piece = layout.encode_chunk(&sealed)?;
+                hash.update(&piece);
+                writer.append(&piece).await?;
                 chunk.clear();
             }
         }
@@ -95,8 +104,13 @@ async fn seal_frames(
     }
     if !chunk.is_empty() {
         let sealed = key.seal_object_chunk(path.as_str(), &prefix, 0, layout.index(), &chunk)?;
-        writer.append(&layout.encode_chunk(&sealed)?).await?;
+        let piece = layout.encode_chunk(&sealed)?;
+        hash.update(&piece);
+        writer.append(&piece).await?;
     }
+    writer
+        .append(member.sign_object(path.as_str(), &hash.finish()).as_bytes())
+        .await?;
     writer.finish().await?;
     Ok(())
 }

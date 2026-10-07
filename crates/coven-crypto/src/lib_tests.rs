@@ -169,6 +169,42 @@ fn streamed_object_signatures_bind_path_digest_member_and_domain() {
 }
 
 #[test]
+fn prefix_signatures_bind_exact_bytes_path_member_and_a_separate_domain() {
+    let keys = MemberKeys::generate().unwrap();
+    let path = "snapshots/store/1/3";
+    let prefix = b"kind, version, audience, key and positions";
+    let signature = keys.sign_prefix(path, prefix);
+    let author = keys.member_id();
+    author.verify_prefix(path, prefix, &signature).unwrap();
+    author
+        .verify(
+            &cipher::context(&[b"coven/prefix-signature/v1", path.as_bytes(), prefix]),
+            &signature,
+        )
+        .unwrap();
+    assert!(author
+        .verify_prefix("snapshots/store/2/3", prefix, &signature)
+        .is_err());
+    assert!(MemberKeys::generate()
+        .unwrap()
+        .member_id()
+        .verify_prefix(path, prefix, &signature)
+        .is_err());
+    for index in 0..prefix.len() {
+        let mut changed = *prefix;
+        changed[index] ^= 1;
+        assert!(author.verify_prefix(path, &changed, &signature).is_err());
+    }
+    let mut hash = ObjectHasher::new();
+    hash.update(prefix);
+    let digest = hash.finish();
+    assert!(author.verify_object(path, &digest, &signature).is_err());
+    assert!(author
+        .verify_prefix(path, prefix, &keys.sign_object(path, &digest))
+        .is_err());
+}
+
+#[test]
 #[should_panic(expected = "storage paths must be nonempty")]
 fn object_chunk_requires_a_path() {
     let key_ids = SequentialIds::new();
