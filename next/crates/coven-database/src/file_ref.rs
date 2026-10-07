@@ -34,10 +34,120 @@ pub struct FileRef {
     row: RowId,
     key: RowKey,
     column: String,
+    namespace: String,
     version: FileVersion,
 }
 
 impl FileRef {
+    /// The cache namespace declared for this file.
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+    /// The row's content hash, for checking a complete download.
+    pub fn content_hash(&self) -> ContentHash {
+        self.version.hash
+    }
+    /// The row's file id, for diagnostics.
+    pub fn id(&self) -> String {
+        match &self.version.id {
+            Value::Text(id) => id.clone(),
+            value => format!("{:?}", crate::write_encoding::sql_value(value)),
+        }
+    }
+    /// The uploaded object's identity and key carried inside the row.
+    /// Returns None for a device-local file; this never consults key custody.
+    pub fn uploaded(
+        &self,
+    ) -> Result<Option<(coven_foundation::id_source::FileId, coven_crypto::FileKey)>, DbError> {
+        let StoredLocation::Uploaded(text) = &self.version.location else {
+            return Ok(None);
+        };
+        let (id, key) = text
+            .as_str()
+            .strip_prefix("uploaded ")
+            .and_then(|v| v.split_once(' '))
+            .ok_or(DbError::DamagedDatabase)?;
+        let id = coven_foundation::id_source::FileId(
+            uuid::Uuid::parse_str(id).map_err(|_| DbError::DamagedDatabase)?,
+        );
+        let mut bytes = [0; 32];
+        for (i, pair) in key.as_bytes().chunks_exact(2).enumerate() {
+            let digit = |b: u8| {
+                if b.is_ascii_digit() {
+                    b - b'0'
+                } else {
+                    b - b'a' + 10
+                }
+            };
+            bytes[i] = digit(pair[0]) * 16 + digit(pair[1]);
+        }
+        Ok(Some((id, coven_crypto::FileKey::from_bytes(bytes))))
+    }
+    pub(crate) fn encode(&self) -> Result<Vec<u8>, DbError> {
+        let mut fields = vec![
+            Value::Text(self.row.table.clone()),
+            Value::Blob(self.row.key.clone()),
+            Value::Text(crate::write_encoding::audience_text(&self.row.audience)),
+            Value::Text(self.column.clone()),
+            Value::Text(self.namespace.clone()),
+            Value::Blob(self.version.generation.to_be_bytes().to_vec()),
+            self.version.id.clone(),
+            Value::Integer(self.version.size as i64),
+            Value::Blob(self.version.hash.as_bytes().to_vec()),
+            self.version.location.value(),
+        ];
+        for setter in &self.version.setters {
+            fields.push(Value::Blob(coven_format::merge_fields::encode_write_id(
+                setter,
+            )?));
+        }
+        Ok(coven_format::key::encode_key(&fields)?)
+    }
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, DbError> {
+        let fields = coven_format::key::decode_key(bytes)?;
+        let [Value::Text(table), Value::Blob(key), Value::Text(audience), Value::Text(column), Value::Text(namespace), Value::Blob(generation), id, Value::Integer(size), Value::Blob(hash), location, setters @ ..] =
+            fields.as_slice()
+        else {
+            return Err(DbError::DamagedDatabase);
+        };
+        if setters.len() != 4 || *size < 0 {
+            return Err(DbError::DamagedDatabase);
+        }
+        let setters = setters
+            .iter()
+            .map(|v| match v {
+                Value::Blob(b) => Ok(coven_format::merge_fields::decode_write_id(b)?),
+                _ => Err(DbError::DamagedDatabase),
+            })
+            .collect::<Result<Vec<_>, DbError>>()?;
+        Ok(Self {
+            row: RowId {
+                table: table.clone(),
+                key: key.clone(),
+                audience: crate::write_encoding::audience(audience)?,
+            },
+            key: crate::file_row::key(&(table.clone(), key.clone()))?,
+            column: column.clone(),
+            namespace: namespace.clone(),
+            version: FileVersion {
+                generation: u64::from_be_bytes(
+                    generation
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| DbError::DamagedDatabase)?,
+                ),
+                setters: setters.try_into().map_err(|_| DbError::DamagedDatabase)?,
+                id: id.clone(),
+                size: *size as u64,
+                hash: ContentHash::from_bytes(
+                    hash.as_slice()
+                        .try_into()
+                        .map_err(|_| DbError::DamagedDatabase)?,
+                ),
+                location: StoredLocation::decode(location)?,
+            },
+        })
+    }
     /// The declared table.
     pub fn table(&self) -> &str {
         &self.row.table
@@ -135,6 +245,7 @@ fn current(
         key: file_row::key(&key)?,
         row,
         column: file.id.clone(),
+        namespace: file.namespace.clone(),
         version: FileVersion {
             generation: stored.state.generation(),
             setters: [id_setter?, size_setter?, hash_setter?, location_setter?],

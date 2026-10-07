@@ -4,6 +4,9 @@
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, RwLock};
 
+#[path = "file_database.rs"]
+pub(crate) mod file_database;
+
 #[path = "file_staging.rs"]
 mod file_staging;
 #[path = "read_pool.rs"]
@@ -657,46 +660,6 @@ impl Database {
             .await
     }
 
-    /// Apply an entry and record work caused by its kept effects atomically.
-    /// The sync owner supplies the operation data; the database does not interpret it.
-    pub async fn apply_store_log_operations(
-        &self,
-        entry: crate::ReplayEntry,
-        replay: crate::StoreLogReplay,
-        operations: Vec<crate::NewOperation>,
-        updates: Vec<crate::OperationUpdate>,
-    ) -> Result<(), DbError> {
-        let database = self.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = database.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let writer = inner
-                    .writer
-                    .lock()
-                    .expect("writer connection lock poisoned");
-                let files = crate::file_write::FileWrite::new(
-                    &writer,
-                    &inner.directory,
-                    &inner.write_schema,
-                    inner.device,
-                    &inner.staging,
-                    Vec::new(),
-                );
-                files.finish(crate::store_log::apply(
-                    &writer,
-                    &inner.write_schema,
-                    entry,
-                    replay,
-                    &files,
-                    &operations,
-                    &updates,
-                ))
-            })
-            .await,
-        )
-    }
-
     /// Applied entries and their complete replay result from one committed snapshot.
     pub async fn store_log(&self) -> CovenResult<crate::StoreLog> {
         self.read(|sql| sql.store_log()).await
@@ -808,7 +771,9 @@ impl Database {
     }
 }
 
-/// A database open that cannot write or migrate. Its shared lock prevents deletion.
+/// An application read handle that cannot write synced rows or migrate.
+/// It owns a connection restricted to local cache metadata and a shared store
+/// lock that prevents deletion until all its connections close.
 ///
 /// ```compile_fail
 /// async fn cannot_write(handle: &coven_database::DatabaseReadHandle) {
@@ -836,6 +801,7 @@ pub struct DatabaseReadHandle {
 }
 
 struct ReadOnlyInner {
+    cache_writer: Mutex<DatabaseConnection>,
     directory: StoreDir,
     device: DeviceId,
     readers: ReadPool,
@@ -962,7 +928,15 @@ impl DatabaseReadHandle {
             tokio::task::spawn_blocking(move || {
                 let mut slot = handle.inner.write().expect("database lock poisoned");
                 let readers = slot.take().ok_or(DbError::StoreClosed)?;
-                let failures = readers.readers.close();
+                let mut failures = readers.readers.close();
+                if let Err(error) = readers
+                    .cache_writer
+                    .into_inner()
+                    .expect("cache connection lock poisoned")
+                    .close()
+                {
+                    failures.push(error);
+                }
                 drop(readers.lock);
                 if failures.is_empty() {
                     Ok(())

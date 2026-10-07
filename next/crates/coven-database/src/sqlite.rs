@@ -345,6 +345,7 @@ impl DatabaseConnection {
             if let Some(record) = &record {
                 crate::write_commit::queue(database, record)?;
             }
+            files.queue_attached(now)?;
             files.before_commit()?;
             Ok(result)
         })

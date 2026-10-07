@@ -424,6 +424,9 @@ pub enum DbError {
     /// Reading or keeping file bytes failed.
     #[error(transparent)]
     Disk(#[from] coven_foundation::files::FileError),
+    /// Retaining the store while staging file bytes failed.
+    #[error(transparent)]
+    Lock(#[from] StoreLockError),
     /// File cleanup failed, retaining the write's outcome and every failure.
     #[error("file cleanup failed: {failures:?}; write outcome: {write:?}")]
     FileCleanup {

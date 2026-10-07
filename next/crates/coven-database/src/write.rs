@@ -51,6 +51,14 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
         self.files.validate_file_ref(reference)
     }
 
+    pub(crate) fn mark_uploaded(
+        &self,
+        reference: &crate::FileRef,
+        location: &coven_crypto::SecretText,
+    ) -> Result<(), crate::DbError> {
+        self.files.mark_uploaded(reference, location)
+    }
+
     /// Execute one app statement with parameters.
     pub fn execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
         self.files.execute(sql, params)

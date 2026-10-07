@@ -39,27 +39,28 @@ impl<'a> FileRemovals<'a> {
         let mut failures = Vec::new();
         let result = self.database.transaction(|database| {
             let names = database.query(
-                "SELECT path FROM coven_file_removals ORDER BY path",
+                "SELECT path,area FROM coven_file_removals ORDER BY area,path",
                 [],
-                |r| r.get::<_, String>(0),
+                |r| Ok((r.get::<_, String>(0)?,r.get::<_, String>(1)?)),
             )?;
-            for name in names {
+            for (name,area) in names {
                 let result = (|| {
                     let name = FileName::new(name).map_err(|_| DbError::DamagedDatabase)?;
                     if self.active.contains(&name) {
                         return Ok(());
                     }
                     if database.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM coven_device_files WHERE path=?1)",
+                        "SELECT EXISTS(SELECT 1 FROM coven_device_files WHERE path=?1 UNION ALL SELECT 1 FROM coven_file_uploads WHERE path=?1 UNION ALL SELECT 1 FROM coven_cache WHERE path=?1)",
                         [name.as_str()],
                         |r| r.get::<_, bool>(0),
                     )? {
                         return Err(DbError::DamagedDatabase);
                     }
-                    self.directory.file(FileArea::AppProvided, &name).remove()?;
+                    let file_area=match area.as_str() { "files"=>FileArea::AppProvided,"cache"=>FileArea::Cache,_=>return Err(DbError::DamagedDatabase) };
+                    self.directory.file(file_area, &name).remove()?;
                     database.internal_execute(
-                        "DELETE FROM coven_file_removals WHERE path=?1",
-                        [name.as_str()],
+                        "DELETE FROM coven_file_removals WHERE path=?1 AND area=?2",
+                        (name.as_str(), &area),
                     )?;
                     Ok(())
                 })();

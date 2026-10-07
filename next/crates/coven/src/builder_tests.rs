@@ -7,8 +7,27 @@ use coven_sync::StoreLogSync;
 use std::sync::Arc;
 use std::{future::Future, task::Poll, time::UNIX_EPOCH};
 
+fn tables() -> Vec<SyncedTable> {
+    vec![
+        SyncedTable::new("attachments", RowIdentity::SharedKey).carries_files(FileDecl::new(
+            "attachments",
+            Provenance::AppProvided,
+            Uploads::WhenAsked,
+            CacheFill::CacheLazy,
+        )),
+    ]
+}
+
+fn migrations() -> Vec<Migration> {
+    vec![Migration::sql(
+        1,
+        "attachments",
+        "CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)",
+    )]
+}
+
 #[tokio::test]
-async fn app_reopening_resumes_an_operation_and_exposes_members_circles_and_invites() {
+async fn app_reopening_resumes_operations_and_files_using_one_storage_capability() {
     let root = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(root.path().into());
     let app = TestCoven::new();
@@ -28,6 +47,8 @@ async fn app_reopening_resumes_an_operation_and_exposes_members_circles_and_invi
             },
             clock.clone(),
         )
+        .unwrap()
+        .with_transfer_limits(65536, 65536)
         .unwrap(),
     );
     let member = MemberKeys::generate().unwrap();
@@ -37,8 +58,8 @@ async fn app_reopening_resumes_an_operation_and_exposes_members_circles_and_invi
         StoreKey::generate(store_key).unwrap(),
     )));
     let db = DatabaseBuilder::new(directory.clone())
-        .synced_tables(vec![])
-        .migrations(vec![])
+        .synced_tables(tables())
+        .migrations(migrations())
         .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
         .clock(clock.clone())
         .open()
@@ -71,14 +92,33 @@ async fn app_reopening_resumes_an_operation_and_exposes_members_circles_and_invi
     drop(sync);
     let open = || {
         app.builder(directory.clone())
-            .synced_tables(vec![])
-            .migrations(vec![])
+            .synced_tables(tables())
+            .migrations(migrations())
             .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
             .key_custody(KeyCustody::Custom(keys.clone()))
             .identity_custody(IdentityCustody::Custom(identity.clone()))
             .clock(clock.clone())
     };
     let handle = open().open().await.unwrap();
+    handle.set_uploads_paused(true);
+    handle
+        .write_with_files(
+            |batch| {
+                batch.put_file("attachments", "shared", vec![42; 200_000]);
+                Ok(())
+            },
+            |sql| {
+                sql.execute("INSERT INTO attachments(id) VALUES('shared')", [])?;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+    let local = handle.file_ref("attachments", "shared").await.unwrap();
+    handle
+        .upload_files(std::slice::from_ref(&local))
+        .await
+        .unwrap();
     let members = handle.get_members().await.unwrap();
     assert_eq!(members.len(), 1);
     assert!(members[0].is_self);
@@ -92,7 +132,34 @@ async fn app_reopening_resumes_an_operation_and_exposes_members_circles_and_invi
     handle.get_members().await.unwrap(); // The preceding call's intent has committed.
     drop(waiting);
     handle.close().await.unwrap();
-    let handle = open().storage(storage).open().await.unwrap();
+    let handle = open().storage(storage.clone()).open().await.unwrap();
+    let mut uploads = handle.subscribe_uploads();
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let queue = uploads.next().await.unwrap();
+            if queue.files.is_empty() {
+                break;
+            }
+            assert!(queue.files.iter().all(|file| file.last_failure.is_none()));
+        }
+    })
+    .await
+    .unwrap();
+    let file = handle.file_ref("attachments", "shared").await.unwrap();
+    assert_eq!(file.location(), FileLocation::Uploaded);
+    assert_eq!(handle.read_file(&file).await.unwrap(), vec![42; 200_000]);
+    let requests = storage.request_count();
+    let stream = handle.open_file_stream(&file).await.unwrap();
+    assert_eq!(stream.read_at(70_000, 37).await.unwrap(), vec![42; 37]);
+    assert_eq!(storage.request_count(), requests);
+    assert!(matches!(
+        handle.upload_files(&[local]).await,
+        Err(OperationError::Database(DbError::FileRefChanged { .. }))
+    ));
+    assert!(matches!(
+        handle.retry_blocked_operation(OperationId(-1)).await,
+        Err(OperationError::NotBlocked(OperationId(-1)))
+    ));
     handle.get_members().await.unwrap();
     let circle = handle.circles().list().await.unwrap().remove(0);
     assert_eq!(circle.name, "While offline");

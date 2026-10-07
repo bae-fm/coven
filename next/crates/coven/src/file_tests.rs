@@ -281,3 +281,93 @@ async fn a_restored_install_gets_a_new_id_before_its_first_write() {
     );
     handle.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
+    let root = tempfile::tempdir().unwrap();
+    let app = TestCoven::new();
+    let ids: IdSourceRef = Arc::new(SequentialIds::new());
+    let layout = StoreLayout::new(root.path().to_owned());
+    let directory = app
+        .create_store(&layout, "uploaded", ids.clone())
+        .await
+        .unwrap();
+    let storage = Arc::new(
+        coven_storage::test_utils::MemoryStorage::new(
+            StorageConfig::Dropbox {
+                namespace_id: "uploaded".into(),
+            },
+            Arc::new(SystemClock),
+        )
+        .unwrap()
+        .with_transfer_limits(65536, 65536)
+        .unwrap(),
+    );
+    let handle = builder(&app, directory.clone(), ids.clone())
+        .storage(storage.clone())
+        .open()
+        .await
+        .unwrap();
+    handle.set_uploads_paused(true);
+    let note = ids.new_id().to_string();
+    let thumbnail = ids.new_id().to_string();
+    let supplied = thumbnail.clone();
+    let row = thumbnail.clone();
+    handle
+        .write_with_files(
+            move |batch| {
+                batch.put_file("thumbnails", supplied, vec![42; 200_000]);
+                Ok(())
+            },
+            move |sql| {
+                sql.execute("INSERT INTO notes VALUES(?1,'note','store')", [&note])?;
+                sql.execute(
+                    "INSERT INTO thumbnails(id,note_id,title) VALUES(?1,?2,'preview')",
+                    (&row, &note),
+                )?;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+    let mut uploads = handle.subscribe_uploads();
+    assert_eq!(uploads.next().await.unwrap().files.len(), 1);
+    handle.set_uploads_paused(false);
+    handle.retry_uploads_now().await.unwrap();
+    let file = handle
+        .file_ref("thumbnails", thumbnail.as_str())
+        .await
+        .unwrap();
+    assert_eq!(file.location(), FileLocation::Uploaded);
+    let mut pins = handle.subscribe_rows_pinned(
+        "thumbnails",
+        vec![thumbnail.as_str().into(), "absent".into()],
+    );
+    assert_eq!(pins.next().await.unwrap(), vec![Some(false), None]);
+    handle
+        .pin(std::slice::from_ref(&file), &|_| {})
+        .await
+        .unwrap();
+    assert_eq!(pins.next().await.unwrap(), vec![Some(true), None]);
+    let readonly = builder(&app, directory.clone(), ids)
+        .storage(storage)
+        .open_read_only()
+        .await
+        .unwrap();
+    let stream = readonly.open_file_stream(&file).await.unwrap();
+    assert_eq!(stream.read_at(1234, 37).await.unwrap(), vec![42; 37]);
+    handle.evict_file(&file).await.unwrap();
+    assert_eq!(pins.next().await.unwrap(), vec![Some(false), None]);
+    handle.close().await.unwrap();
+    assert!(matches!(
+        app.delete_store(&directory, &[]).await,
+        Err(StoreDeletionError::Lock(StoreLockError::AlreadyOpen(_)))
+    ));
+    readonly.close().await.unwrap();
+    assert!(matches!(
+        app.delete_store(&directory, &[]).await,
+        Err(StoreDeletionError::Lock(StoreLockError::AlreadyOpen(_)))
+    ));
+    drop(stream);
+    app.delete_store(&directory, &[]).await.unwrap();
+}

@@ -1,14 +1,13 @@
-//! The device-local application API for coven stores (§20).
+//! The application API for coven stores (§20).
 //!
 //! Declare tables and migrations, create a store directory, then open it with
 //! [`Coven::builder`]. SQL, files, keys and their capabilities remain with the
-//! crates that own them. Opening resumes unfinished operations without starting
-//! the sync loop; an empty operation journal needs no unlocked keys.
+//! crates that own them. Opening resumes unfinished operations and committed
+//! file work without starting a sync loop; an empty journal needs no unlocked keys.
 
 mod builder;
 mod coven;
 mod error;
-mod file;
 mod handle;
 mod read_handle;
 #[cfg(any(test, feature = "test-utils"))]
@@ -16,8 +15,12 @@ mod test_utils;
 
 pub use builder::CovenBuilder;
 pub use coven::Coven;
+pub use coven_sync::{
+    DrainOutcome, EagerCacheFillStatus, FileRangeStream, FileReadError, FileStream, PinProgress,
+    QueuedUpload, RecordedUploadFailure, RowsPinnedLiveQuery, UploadFailure, UploadFailures,
+    UploadPhase, UploadQueue, UploadsLiveQuery,
+};
 pub use error::{StoreCreationError, StoreDeletionError};
-pub use file::{FileReadError, FileStream};
 pub use handle::CovenHandle;
 pub use read_handle::CovenReadHandle;
 

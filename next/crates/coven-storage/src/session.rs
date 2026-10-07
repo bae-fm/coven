@@ -197,7 +197,7 @@ impl UploadSession {
             SessionState::Complete => {}
             #[cfg(any(test, feature = "test-utils"))]
             SessionState::Memory { id, .. } => {
-                return if *id != 0 && self.part_size == 4 {
+                return if *id != 0 {
                     Ok(())
                 } else {
                     Err(StorageError::InvalidPart)

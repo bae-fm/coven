@@ -138,14 +138,15 @@ impl FileStaging {
             let file_name = name.clone();
             let (next, writer) = finish_blocking(
                 tokio::task::spawn_blocking(move || {
-                    let writer = {
+                    let writer = (|| -> Result<_, DbError> {
                         let slot = self.database.inner.read().expect("database lock poisoned");
                         let inner = slot.as_ref().expect("staging holds close guard");
-                        inner
+                        let lock = inner.directory.lock_read_only()?;
+                        Ok(inner
                             .directory
                             .file(FileArea::AppProvided, &file_name)
-                            .create_writer()
-                    };
+                            .create_writer(lock)?)
+                    })();
                     (self, writer)
                 })
                 .await,
@@ -153,7 +154,7 @@ impl FileStaging {
             self = next;
             let writer = match writer {
                 Ok(writer) => writer,
-                Err(error) => return (self, Err(error.into())),
+                Err(error) => return (self, Err(error)),
             };
             let mut hash = ContentHasher::new();
             let mut size = 0;

@@ -1,4 +1,4 @@
-//! Failures of store-log publication and a sync step (§20.5).
+//! Failures of store-log publication, file uploads and sync steps (§20.5, §20.7).
 
 use coven_crypto::{custody::KeyError, CryptoError, MaterialError};
 use coven_database::{DbError, DropReason};
@@ -6,10 +6,10 @@ use coven_foundation::id_source::{KeyId, StoreId};
 use coven_storage::StorageError;
 use std::sync::Arc;
 
-/// A local store-log operation failed; its durable queue, if any, remains retryable.
+/// A synchronization request failed; its durable queue, if any, remains retryable.
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
-    /// This handle has no connected provider; operations wait for one.
+    /// This call requires connected storage; durable work remains queued.
     #[error("storage is not connected")]
     NoStorage,
     /// The caller has no authority for this change.
@@ -50,6 +50,9 @@ pub enum SyncError {
     /// The local database failed.
     #[error(transparent)]
     Database(#[from] DbError),
+    /// A file reference or source needed by the operation could not be used.
+    #[error(transparent)]
+    File(#[from] crate::FileReadError),
     /// Unlocking or keeping keys failed.
     #[error(transparent)]
     SecureStorage(#[from] KeyError),

@@ -473,6 +473,8 @@ async fn only_the_spec_tables_are_created() {
             [
                 "coven_access_keys_to_delete",
                 "coven_applied_boundaries",
+                "coven_cache",
+                "coven_cache_budgets",
                 "coven_cells",
                 "coven_circle_members",
                 "coven_circles",
@@ -484,6 +486,7 @@ async fn only_the_spec_tables_are_created() {
                 "coven_excluded_rows",
                 "coven_excluded_writes",
                 "coven_file_removals",
+                "coven_file_uploads",
                 "coven_fingerprint_leaves",
                 "coven_fingerprint_sums",
                 "coven_foreign_keys",

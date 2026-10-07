@@ -112,7 +112,7 @@ pub(crate) fn read(
         .transpose()
 }
 
-fn decode_time(bytes: &[u8]) -> Result<SystemTime, DbError> {
+pub(crate) fn decode_time(bytes: &[u8]) -> Result<SystemTime, DbError> {
     if bytes.len() != 13 {
         return Err(DbError::DamagedDatabase);
     }

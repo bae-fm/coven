@@ -1,8 +1,10 @@
 //! Durable file creation, atomic replacement and removal.
 
+use super::StoreReadLock;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// A file operation's cause, including whether replacement already happened.
 #[derive(Debug, thiserror::Error)]
@@ -100,7 +102,8 @@ impl AtomicFile {
 
     /// Create a named file for asynchronous streaming without replacing anything.
     /// The caller records its name first and removes partial bytes after failure.
-    pub fn create_writer(&self) -> Result<FileWriter, FileError> {
+    /// Supply this file's store read lock; every outstanding write retains it.
+    pub fn create_writer(&self, lock: StoreReadLock) -> Result<FileWriter, FileError> {
         let directory = fs::canonicalize(parent(&self.path))
             .map_err(|source| FileError::at("resolve parent directory", &self.path, source))?;
         let name = self.path.file_name().ok_or_else(|| {
@@ -114,7 +117,7 @@ impl AtomicFile {
         let file = create_new(&path)
             .map_err(|source| FileError::at("create owned file", &path, source))?;
         Ok(FileWriter {
-            file: tokio::fs::File::from_std(file),
+            file: Arc::new(tokio::sync::Mutex::new(LockedWriter { file, _lock: lock })),
             path,
         })
     }
@@ -129,9 +132,15 @@ impl AtomicFile {
 
 /// An unpublished file's open writer. Its OS handle and path stay private.
 /// Dropping it leaves the named bytes for the caller's recorded cleanup.
+/// The shared store lock lasts until its handle and any cancelled I/O finish.
 pub struct FileWriter {
-    file: tokio::fs::File,
+    file: Arc<tokio::sync::Mutex<LockedWriter>>,
     path: PathBuf,
+}
+struct LockedWriter {
+    file: fs::File,
+    // Close the handle before allowing the store directory to be deleted.
+    _lock: StoreReadLock,
 }
 
 impl FileWriter {
@@ -142,30 +151,60 @@ impl FileWriter {
         reader: &mut R,
         mut written: impl FnMut(&[u8]),
     ) -> Result<(), FileError> {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let result = async {
-            let mut buffer = [0; 64 * 1024];
-            loop {
-                let count = reader.read(&mut buffer).await?;
-                if count == 0 {
-                    break;
-                }
-                self.file.write_all(&buffer[..count]).await?;
-                // Tokio may return from write_all with a blocking write queued.
-                // Complete it before asking the source for another chunk.
-                self.file.flush().await?;
-                written(&buffer[..count]);
+        use tokio::io::AsyncReadExt;
+        let mut buffer = [0; 64 * 1024];
+        loop {
+            let count = reader
+                .read(&mut buffer)
+                .await
+                .map_err(|source| FileError::at("read file source", &self.path, source))?;
+            if count == 0 {
+                break;
             }
-            self.file.sync_all().await?;
-            #[cfg(unix)]
-            tokio::fs::File::open(parent(&self.path))
-                .await?
-                .sync_all()
-                .await?;
-            Ok(())
+            self.append(&buffer[..count]).await?;
+            written(&buffer[..count]);
         }
-        .await;
-        result.map_err(|source| FileError::at("stream and sync owned file", &self.path, source))
+        self.finish().await
+    }
+
+    /// Append one bounded buffer, completing its disk write before returning.
+    pub async fn append(&mut self, bytes: &[u8]) -> Result<(), FileError> {
+        let bytes = bytes.to_vec();
+        self.run("append owned file", move |file, _| file.write_all(&bytes))
+            .await
+    }
+
+    /// Sync all appended bytes and their directory before publishing metadata.
+    pub async fn finish(self) -> Result<(), FileError> {
+        self.run("sync owned file", |file, path| {
+            file.sync_all()?;
+            #[cfg(unix)]
+            sync_directory(parent(path))?;
+            #[cfg(not(unix))]
+            let _ = path;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn run(
+        &self,
+        operation: &'static str,
+        run: impl FnOnce(&mut fs::File, &Path) -> io::Result<()> + Send + 'static,
+    ) -> Result<(), FileError> {
+        // Acquire before spawning so later calls wait for cancelled work too.
+        // The owned guard carries the OS handle and store lock into the task.
+        let mut file = self.file.clone().lock_owned().await;
+        let path = self.path.clone();
+        match tokio::task::spawn_blocking(move || {
+            run(&mut file.file, &path).map_err(|source| FileError::at(operation, &path, source))
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(error) => panic!("owned file task was cancelled: {error}"),
+        }
     }
 }
 

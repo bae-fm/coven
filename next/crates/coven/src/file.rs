@@ -1,122 +1,74 @@
-//! Adapt the database's local file capability to the application API.
+//! Application file calls delegate to the composed sync file owner.
+use crate::*;
 
-use crate::{DbError, DeviceId, DiskError, FileLocation, StoreLockError};
-use coven_database::{LocalFileError, LocalFileStream};
-use std::path::PathBuf;
-
-/// An open file with checked identity and range-reading state (§16.3).
-/// Retaining a stream prevents store deletion, including after the store closes.
-pub struct FileStream {
-    local: LocalFileStream,
-}
-
-impl FileStream {
-    pub(crate) fn new(local: LocalFileStream) -> Self {
-        Self { local }
+impl CovenHandle {
+    /// Durably queue local files; uploading proceeds after this call returns.
+    pub async fn upload_files(&self, files: &[FileRef]) -> Result<(), OperationError> {
+        self.files.upload_files(files).await
     }
-    /// The file's whole size in bytes.
-    pub fn plaintext_size(&self) -> u64 {
-        self.local.plaintext_size()
+    /// Current and subsequent upload queue states.
+    pub fn subscribe_uploads(&self) -> UploadsLiveQuery {
+        self.files.subscribe_uploads()
     }
-    /// Reads `len` bytes at `offset`. A range past the end is an error, never
-    /// a short read.
-    pub async fn read_at(&self, offset: u64, len: u64) -> Result<Vec<u8>, FileReadError> {
-        Ok(self.local.read_at(offset, len).await?)
+    /// Attempt waiting uploads without waiting for their backoff.
+    pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError> {
+        self.files.retry_uploads_now().await
     }
-}
-
-/// Reading a file failed with a cause the app can distinguish (§20.8).
-#[derive(Debug, thiserror::Error)]
-pub enum FileReadError {
-    /// An uploaded file was read with no storage connected.
-    #[error("no storage connected")]
-    NoStorage,
-    /// The file is only on another device, which the app can name.
-    #[error("file {id} is on device {device:?}")]
-    OnOtherDevice {
-        /// The row's file id.
-        id: String,
-        /// The device keeping its bytes.
-        device: DeviceId,
-    },
-    /// A user-provided file is gone from its recorded path.
-    #[error("file {id} is missing at {}", path.display())]
-    UserFileMissing {
-        /// The row's file id.
-        id: String,
-        /// Its recorded original path.
-        path: PathBuf,
-    },
-    /// A user-provided file's size or modification time no longer matches
-    /// what coven recorded.
-    #[error("file {id} changed at {}", path.display())]
-    UserFileChanged {
-        /// The row's file id.
-        id: String,
-        /// Its recorded original path.
-        path: PathBuf,
-    },
-    /// A copy on this device failed its check.
-    #[error("file {id} failed its content check")]
-    Integrity {
-        /// The row's file id.
-        id: String,
-    },
-    /// The range lies outside the file.
-    #[error("file {id} range {offset}..{end} exceeds {size}")]
-    RangeOutOfBounds {
-        /// The row's file id.
-        id: String,
-        /// The requested first byte.
-        offset: u64,
-        /// The requested exclusive end, saturated if addition overflows.
-        end: u64,
-        /// The file's whole size.
-        size: u64,
-    },
-    /// The database failed, with its cause.
-    #[error(transparent)]
-    Database(#[from] DbError),
-    /// The disk failed, with its cause.
-    #[error(transparent)]
-    Disk(#[from] DiskError),
-    /// The store cannot be retained while opening its file.
-    #[error(transparent)]
-    Lock(#[from] StoreLockError),
-}
-
-impl From<LocalFileError> for FileReadError {
-    fn from(error: LocalFileError) -> Self {
-        match error {
-            LocalFileError::Unavailable {
-                location: FileLocation::Uploaded,
-                ..
-            } => Self::NoStorage,
-            LocalFileError::Unavailable {
-                id,
-                location: FileLocation::OnDevice(device),
-            } => Self::OnOtherDevice { id, device },
-            LocalFileError::UserFileMissing { id, path } => Self::UserFileMissing { id, path },
-            LocalFileError::UserFileChanged { id, path } => Self::UserFileChanged { id, path },
-            LocalFileError::Integrity { id } => Self::Integrity { id },
-            LocalFileError::RangeOutOfBounds {
-                id,
-                offset,
-                end,
-                size,
-            } => Self::RangeOutOfBounds {
-                id,
-                offset,
-                end,
-                size,
-            },
-            LocalFileError::Database(error) => Self::Database(error),
-            LocalFileError::Disk(error) => Self::Disk(error),
-            LocalFileError::Lock(error) => Self::Lock(error),
-        }
+    /// Pause or resume file transfers at provider part boundaries.
+    pub fn set_uploads_paused(&self, paused: bool) {
+        self.files.set_uploads_paused(paused)
+    }
+    /// Retain uploaded files regardless of the namespace's cache budget.
+    pub async fn pin(
+        &self,
+        files: &[FileRef],
+        on_progress: &(dyn Fn(PinProgress) + Send + Sync),
+    ) -> Result<(), FileReadError> {
+        self.files.pin(files, on_progress).await
+    }
+    /// Release pins and apply cache budgets.
+    pub async fn unpin(&self, files: &[FileRef]) -> Result<(), FileReadError> {
+        self.files.unpin(files).await
+    }
+    /// Whether every requested file is pinned; an empty list is pinned.
+    pub async fn is_pinned(&self, files: &[FileRef]) -> Result<bool, FileReadError> {
+        self.files.is_pinned(files).await
+    }
+    /// Pin state in key order; absent files produce `None`.
+    pub async fn rows_pinned(
+        &self,
+        table: &str,
+        keys: Vec<RowKey>,
+    ) -> Result<Vec<Option<bool>>, FileReadError> {
+        self.files.rows_pinned(table, keys).await
+    }
+    /// Observe row and pin changes, with a replaceable row request.
+    pub fn subscribe_rows_pinned(&self, table: &str, keys: Vec<RowKey>) -> RowsPinnedLiveQuery {
+        self.files.subscribe_rows_pinned(table, keys)
+    }
+    /// Remove cache copies only, without changing storage or local originals.
+    pub async fn evict_file(&self, file: &FileRef) -> Result<(), FileReadError> {
+        self.files.evict_file(file).await
+    }
+    /// Set and enforce a namespace's independent byte budget.
+    pub async fn set_cache_budget(&self, namespace: &str, max_bytes: u64) -> Result<(), DbError> {
+        self.files.set_cache_budget(namespace, max_bytes).await
+    }
+    /// An unset budget evicts nothing.
+    pub async fn get_cache_budget(&self, namespace: &str) -> Result<Option<u64>, DbError> {
+        self.files.get_cache_budget(namespace).await
+    }
+    /// Observe eager downloads triggered by committed file rows.
+    pub fn subscribe_eager_cache_fill_status(
+        &self,
+    ) -> tokio::sync::watch::Receiver<EagerCacheFillStatus> {
+        self.files.subscribe_eager_cache_fill_status()
+    }
+    /// Stop current eager downloads without affecting uploads.
+    pub fn cancel_eager_cache_fill(&self) {
+        self.files.cancel_eager_cache_fill()
     }
 }
-
 #[cfg(test)]
 #[path = "file_tests.rs"]
 mod tests;

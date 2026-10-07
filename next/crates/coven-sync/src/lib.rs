@@ -1,4 +1,4 @@
-//! Store-log replay, authenticated storage transport and member key distribution (§§9–14).
+//! Store-log replay, keys, file transfers and durable operations (§§9–18).
 
 mod conflicts;
 mod effects;
@@ -25,3 +25,9 @@ pub use operation_types::*;
 mod operation_data;
 mod operations;
 pub use operations::Operations;
+mod files;
+pub use files::{
+    DrainOutcome, EagerCacheFillStatus, FileRangeStream, FileReadError, FileStream, Files,
+    PinProgress, QueuedUpload, RecordedUploadFailure, RowsPinnedLiveQuery, UploadFailure,
+    UploadFailures, UploadPhase, UploadQueue, UploadsLiveQuery,
+};

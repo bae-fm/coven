@@ -14,13 +14,14 @@ coven-format.workspace = true
 coven-database.workspace = true
 coven-storage.workspace = true
 thiserror.workspace = true
+hex.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 coven-database = { workspace = true, features = ["test-utils"] }
 coven-storage = { workspace = true, features = ["test-utils"] }
 coven-foundation = { workspace = true, features = ["test-utils"] }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 async-trait.workspace = true
 tempfile.workspace = true
 uuid.workspace = true

@@ -28,6 +28,8 @@ pub(crate) const POLICY: Policy = Policy {
     composition_roots: &[
         ("crates/coven/src/builder.rs", "OpeningStore", "open"),
         ("crates/coven-sync/src/operations.rs", "Operations", "new"),
+        ("crates/coven-sync/src/files_tests.rs", "Fixture", "new"),
+        ("crates/coven-sync/src/files_tests.rs", "Fixture", "reopen"),
         (
             "crates/coven-database/src/database_builder.rs",
             "DatabaseBuilder",
@@ -222,11 +224,22 @@ pub(crate) const POLICY: Policy = Policy {
         "StoreLogSync",
         "CovenHandle",
         "CovenReadHandle",
+        "Files",
+        "FileDatabase",
     ],
     task_types: &[
         "OperationRun",
         "RunningOperations",
         "Circles",
+        "FileReservation",
+        "CacheReservation",
+        "PendingFile",
+        "UploadedFile",
+        "SpoolReader",
+        "FileRangeStream",
+        "UploadsLiveQuery",
+        "RowsPinnedLiveQuery",
+        "FileWorker",
         "LocalFileStream",
         "FileStream",
         "FileStaging",
@@ -440,6 +453,7 @@ const CAPABILITIES: Capabilities = Capabilities {
     },
     // Database calls await blocking work while retaining the database owner.
     // The operation owner also retains and stops its journal worker.
+    // File work is owned by Files and advances on commits or explicit requests.
     runtimes: Capability {
         name: "runtimes and spawned work",
         homes: &[
@@ -447,9 +461,14 @@ const CAPABILITIES: Capabilities = Capabilities {
             "crates/coven-database/src/database_operations.rs",
             "crates/coven-sync/src/operations.rs",
             "crates/coven-database/src/file_staging.rs",
+            "crates/coven-database/src/file_database.rs",
+            "crates/coven-sync/src/files.rs",
+            "crates/coven-sync/src/file_upload.rs",
+            "crates/coven-sync/src/file_read.rs",
             "crates/coven-database/src/database_builder.rs",
             "crates/coven-database/src/local_file.rs",
             "crates/coven-foundation/src/files/layout.rs",
+            "crates/coven-foundation/src/files/atomic_file.rs",
             "crates/coven/src/coven.rs",
             "crates/coven/src/handle.rs",
             "crates/coven/src/read_handle.rs",

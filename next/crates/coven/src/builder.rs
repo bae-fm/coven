@@ -1,4 +1,4 @@
-//! Compose the database and custody without unlocking member or store keys.
+//! Compose database, custody, operation and file owners at the store boundary.
 
 use crate::*;
 use coven_crypto::custody::{
@@ -25,11 +25,14 @@ pub struct CovenBuilder {
 impl CovenBuilder {
     pub(crate) fn new(directory: StoreDir) -> Self {
         let ids: IdSourceRef = Arc::new(UuidIds);
+        let clock: ClockRef = Arc::new(SystemClock);
         Self {
-            database: DatabaseBuilder::new(directory.clone()).id_source(ids.clone()),
+            database: DatabaseBuilder::new(directory.clone())
+                .id_source(ids.clone())
+                .clock(clock.clone()),
             directory,
             ids,
-            clock: Arc::new(SystemClock),
+            clock,
             storage: None,
             keys: KeyCustody::Keyring,
             identity: IdentityCustody::Keyring,
@@ -67,8 +70,8 @@ impl CovenBuilder {
         self.ids = ids;
         self
     }
-    /// Crate-to-crate composition: provide the connected storage capability used
-    /// by operations. Opening resumes the journal but does not start a sync loop.
+    /// Supply the connected storage capability used by operations and files.
+    /// Provider setup and credential custody remain with their existing owners.
     pub fn storage(mut self, storage: Arc<dyn coven_storage::Storage>) -> Self {
         self.storage = Some(storage);
         self
@@ -89,9 +92,9 @@ impl CovenBuilder {
     }
 
     /// Opens the store for reading and writing, taking the store's lock.
-    /// Opening runs migrations and resumes unfinished operations. An empty
-    /// journal needs no keys; resumed steps read keys when needed. Opening does
-    /// not start the sync loop, and local database calls need no unlocked key.
+    /// Opening runs migrations and resumes unfinished operations and committed
+    /// file work. An empty journal needs no keys; resumed steps read keys when
+    /// needed. No sync loop starts, and local database calls need no unlocked key.
     pub async fn open(self) -> CovenResult<CovenHandle> {
         crate::coven::blocking(move || self.open_graph())
             .await?
@@ -100,11 +103,24 @@ impl CovenBuilder {
     }
 
     /// Opens the store for reading only, alongside a handle that has it open.
-    /// Its shared lock prevents deletion. It runs no migration and refuses a
-    /// database whose schema is newer or whose coven tables need migrating.
+    /// Its shared lock protects both read connections and local cache metadata.
+    /// It runs no migration and refuses a database whose schema is newer or
+    /// whose coven tables need migrating.
     pub async fn open_read_only(self) -> CovenResult<CovenReadHandle> {
+        let directory = self.directory.clone();
+        let ids = self.ids.clone();
+        let clock = self.clock.clone();
+        let storage = self.storage.clone();
         let (database, keys) = crate::coven::blocking(move || self.read_graph()).await?;
-        Ok(CovenReadHandle::new(database.open_read_only().await?, keys))
+        let database = database.open_read_only().await?;
+        let files = coven_sync::Files::new(
+            coven_database::FileDatabase::read_only(database.clone()),
+            directory,
+            storage,
+            clock,
+            ids,
+        );
+        Ok(CovenReadHandle::new(database, keys, files))
     }
 
     fn open_graph(self) -> CovenResult<OpeningStore> {
@@ -136,6 +152,7 @@ impl CovenBuilder {
         };
         Ok(OpeningStore {
             database: self.database,
+            directory: self.directory,
             custody: StoreCustody::new(StoreKeys::new(keys.clone()), identity.clone(), keychain),
             keys,
             identity,
@@ -187,6 +204,7 @@ impl CovenBuilder {
 /// Retains the graph while its asynchronous database opening is in progress.
 struct OpeningStore {
     database: DatabaseBuilder,
+    directory: StoreDir,
     custody: StoreCustody,
     keys: Arc<dyn StoreKeyCustody>,
     identity: Arc<dyn MemberKeyCustody>,
@@ -199,6 +217,13 @@ struct OpeningStore {
 impl OpeningStore {
     async fn open(self) -> CovenResult<CovenHandle> {
         let database = self.database.open_locked(self.lock).await?;
+        let files = coven_sync::Files::new(
+            coven_database::FileDatabase::new(database.clone()),
+            self.directory,
+            self.storage.clone(),
+            self.clock.clone(),
+            self.ids.clone(),
+        );
         let sync = match self.storage {
             Some(storage) => coven_sync::StoreLogSync::new(
                 storage,
@@ -217,7 +242,7 @@ impl OpeningStore {
             ),
         };
         let operations = coven_sync::Operations::new(sync);
-        Ok(CovenHandle::new(database, self.custody, operations))
+        Ok(CovenHandle::new(database, self.custody, operations, files))
     }
 }
 

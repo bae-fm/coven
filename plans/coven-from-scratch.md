@@ -1465,14 +1465,16 @@ Carol's tablet:
     first, so she reads the entries sealed with it.
 - The *current* store key is the one named by the latest entry the replay
   keeps, in its order, that brings one in, and likewise for each circle; new
-  writes, entries, snapshots and files use it.
+  writes, entries and snapshots use it.
   - An entry already in place changes nothing, so it brings no key in,
     though what was sealed with the key it names still opens: that key
     is sealed to the same members.
   - E.g. Ana and Ben both remove Dan: Ana's earlier removal brings its
     key in, and Ben's applies without one.
-- Every encrypted object names, outside its encryption, the key that seals
-  each of its parts, so a reader knows which key opens it.
+- Every object encrypted with a store or circle key names that key outside
+  its encryption, so a reader knows which key opens it.
+- A file's independent key is carried in its row's encrypted writes
+  ([§16.1](#161-kinds-and-where-files-are)).
 - So a member's key alone gets the current store key: a device holding it
   reads its member's sealed copy from storage and opens it.
 - The store key is replaced whenever a member is removed.
@@ -2130,6 +2132,10 @@ Carol's tablet:
   own ([§20.8](#208-files-and-the-cache)).
 - The app can pin a file to keep it whole on the device regardless of the
   budget, and unpin it.
+  - Pinning assembles a complete encrypted cache file from cached and fetched
+    chunks, checks its content hash, and syncs it before publishing the pin.
+    Publication replaces the separate cached chunks atomically. Cancellation
+    or a crash leaves no partially downloaded file exempt from eviction.
 - The app can also fetch an uploaded file into the cache ahead of reading
   it, or remove it from the cache, which never touches storage.
 
@@ -2165,7 +2171,15 @@ Carol's tablet:
   - `coven_device_files`: each app-provided file this device keeps, and
     where in coven's own folder;
   - `coven_file_uploads`: the upload queue, each file's attempts, last
-    failure, and its provider upload session while one is in progress;
+    failure category, its fixed encrypted file and independent id and key,
+    and its provider upload session while one is in progress;
+    - Provider sessions belong to this queue; file upload operations do not
+      keep a second recording of the same session.
+    - Native error objects are available in the running process. Reopening
+      exposes the persisted failure category rather than reconstructing an
+      operating-system or provider error from text.
+    - A stored upload whose row changed remains recorded as unused until
+      the uploaded-file deletion rules permit removing it;
   - `coven_cache`: each cached file or chunk, its namespace, size, when it
     was last read, and whether it is pinned;
   - `coven_cache_budgets`: each namespace's budget;
@@ -3028,6 +3042,8 @@ pub enum DbError {
     FileAbsent { table: String, key: RowKey },
     /// Reading or keeping file bytes failed (§20.3).
     Disk(DiskError),
+    /// Retaining the store while staging file bytes failed.
+    Lock(StoreLockError),
     /// Removing owned bytes or their pending records failed. A committed write
     /// stays committed; an unsuccessful write retains its original error (§16.6).
     FileCleanup { write: Result<(), Box<DbError>>, failures: Vec<DbError> },
@@ -3310,8 +3326,9 @@ impl Coven {
 
     /// Deletes a closed store from this device: every keychain entry coven
     /// holds for it, including the named host secrets, then its directory.
-    /// Refused while a writer, read-only handle or file stream remains open;
-    /// storage is untouched. Retrying finishes a deletion that failed partway.
+    /// Refused while a writer, read-only handle, file stream or outstanding
+    /// file I/O retains its store lock; storage is untouched. Retrying finishes
+    /// a deletion that failed partway.
     pub async fn delete_store(
         store_dir: &StoreDir,
         host_secret_names: &[&str],
@@ -3335,6 +3352,10 @@ impl CovenBuilder {
 
     /// The source of new ids (§21.2). Defaults to `UuidIds`, random UUIDs.
     pub fn id_source(self, ids: IdSourceRef) -> Self;
+
+    /// An already connected provider capability shared by operations and files
+    /// at the composition root. The adapter owns its settings and credentials.
+    pub fn storage(self, storage: Arc<dyn coven_storage::Storage>) -> Self;
 
     /// The app's own OAuth clients for Google Drive, Dropbox and OneDrive.
     /// Coven ships none.
@@ -3360,9 +3381,10 @@ impl CovenBuilder {
     pub fn identity_custody(self, custody: IdentityCustody) -> Self;
 
     /// Opens the store for reading and writing, taking the store's lock.
-    /// Opening runs migrations and reads no key, so a store opens and works
-    /// on the device before any key is unlocked; the first call that needs a
-    /// key reads it. Opening never starts syncing; `connect_sync` does.
+    /// Opening runs migrations and resumes unfinished operations and committed
+    /// file work. An empty journal needs no keys; resumed steps read keys when
+    /// needed. Local database calls need no unlocked key. Opening does not start
+    /// the sync loop; `connect_sync` starts it.
     pub async fn open(self) -> CovenResult<CovenHandle>;
 
     /// Opens a store whose database is damaged (§19.2): moves the damaged
@@ -3373,7 +3395,8 @@ impl CovenBuilder {
     pub async fn open_reloading(self) -> CovenResult<CovenHandle>;
 
     /// Opens the store for reading only, alongside a handle that has it open,
-    /// for example from another process. Its shared lock prevents deletion.
+    /// for example from another process. Its shared lock prevents deletion
+    /// while its read connections and local cache connection remain open.
     /// It runs no migration and refuses a database whose schema is newer than
     /// its migrations or whose coven tables need migrating.
     pub async fn open_read_only(self) -> CovenResult<CovenReadHandle>;
@@ -3401,9 +3424,10 @@ pub enum CovenMigrationPolicy {
 }
 
 impl CovenHandle {
-    /// Closes the store: stops syncing, closes every database connection and
-    /// releases the lock. Later database calls on any clone fail with
-    /// `DbError::StoreClosed`; custody calls fail with `KeyError::StoreClosed`.
+    /// Closes the store: stops syncing, operation and file work, closes every
+    /// connection and releases the writer lock. Open file streams and outstanding file I/O
+    /// retain their shared deletion guards. Later database calls on any clone
+    /// fail with `DbError::StoreClosed`; custody calls fail with `KeyError::StoreClosed`.
     /// Reports connection-close failures; cancellation does not stop closing.
     pub async fn close(&self) -> Result<(), DbError>;
 }
@@ -4222,8 +4246,20 @@ pub enum SyncError {
     WrongStore { expected: StoreId, actual: StoreId },
     /// A credential update's code names another member (§20.9).
     WrongMember { expected: MemberId, actual: MemberId },
-    /// A multi-step operation stopped (§18).
-    Operation(Box<OperationError>),
+    /// Reading a file needed by an operation failed (§16.1).
+    File(FileReadError),
+    /// A user-provided download destination already exists (§16.1).
+    DestinationExists { path: PathBuf },
+    /// Circle membership is required by this operation.
+    CircleNotMember(CircleId),
+    /// The circle has been deleted or does not exist.
+    CircleDeleted(CircleId),
+    /// The target is not an active store member.
+    NotStoreMember(MemberId),
+    /// The requested journal row is not a blocked operation.
+    NotBlocked(OperationId),
+    /// Decoding persisted operation data failed, retaining its cause.
+    OperationData(serde_json::Error),
 }
 
 /// How far this device has applied one device's writes (§6, §20.5).
@@ -4550,25 +4586,9 @@ pub enum StartedBy {
     Coven,
 }
 
-/// A multi-step operation stopped with a failure the app can act on (§18).
-pub enum OperationError {
-    /// Reading or committing the operation's state failed.
-    Database(DbError),
-    /// A storage step failed.
-    Storage(StorageError),
-    /// Reading or keeping keys failed.
-    SecureStorage(KeyError),
-    /// Making or checking encrypted or signed bytes failed.
-    Crypto(CryptoError),
-    /// Reading a file needed by the operation failed (§16.1).
-    File(FileReadError),
-    /// A user-provided download destination already exists (§16.1).
-    DestinationExists { path: PathBuf },
-    /// The member lacks authority for the operation (§9, §14.3, §19.3).
-    PermissionDenied,
-    /// The provider retained grants requiring the owner's action (§20.9).
-    AccessRemains(Vec<RetainedAccess>),
-}
+/// Operation calls retain the same typed causes as sync calls, including file
+/// failures before an upload is accepted into its queue (§18, §20.7).
+pub type OperationError = SyncError;
 
 impl CovenHandle {
     /// Runs a failed operation again from the step after its last completed
@@ -4610,9 +4630,10 @@ pub struct BlockedOperation {
   - The write commits at once on this device; its moved rows' uploaded
     files stay where they are ([§16.1](#161-kinds-and-where-files-are)).
 - Uploading a file, and keeping an uploaded file on one device, change
-  where it is ([§16.1](#161-kinds-and-where-files-are)); each is an
-  operation ([§18.1](#181-operations)), so the call records it and
-  returns, and it finishes whenever storage can be reached.
+  where it is ([§16.1](#161-kinds-and-where-files-are)). Uploading records
+  it in the file queue; keeping it on one device records an operation
+  ([§18.1](#181-operations)). Both calls return after recording the work,
+  which finishes whenever storage can be reached.
 
 ```rust
 /// Live upload-queue results, ending when the store closes (§20.7).
@@ -4624,14 +4645,23 @@ pub enum UploadFailure {
     File(FileReadError),
     /// The provider refused or failed the upload.
     Storage(StorageError),
-    /// Encrypting the file failed.
+    /// Creating the independent file key failed.
     Crypto(CryptoError),
-    /// Unlocking the file's audience key failed.
-    SecureStorage(KeyError),
+    /// A prior process recorded this failure category.
+    Recorded(RecordedUploadFailure),
+}
+
+/// Actionable categories that can be retained across a process restart.
+pub enum RecordedUploadFailure {
+    NoStorage,
+    File,
+    Local,
+    Crypto,
+    Storage(StorageFailure),
 }
 
 /// The failed files and their causes from one upload drain (§20.7).
-pub type UploadFailures = Vec<(FileRef, UploadFailure)>;
+pub type UploadFailures = Vec<(FileRef, Arc<UploadFailure>)>;
 
 impl CovenHandle {
     /// Uploads files that are on this device, then marks them uploaded.
@@ -4676,7 +4706,7 @@ pub struct QueuedUpload {
     pub phase: UploadPhase,
     /// Failed attempts so far.
     pub attempts: u64,
-    pub last_failure: Option<UploadFailure>,
+    pub last_failure: Option<Arc<UploadFailure>>,
     pub queued_at: SystemTime,
     pub last_attempt_at: Option<SystemTime>,
 }
@@ -4775,6 +4805,7 @@ impl CovenHandle {
 
     /// Opens a file for reading ranges (§16.3). Opening checks the file
     /// against its row once; keep the stream for as long as the file is read.
+    /// Its shared store lock prevents deletion until it and its I/O finish.
     pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError>;
 
     /// Makes sure a file's bytes are on this device: an uploaded file is
@@ -4855,6 +4886,15 @@ impl FileStream {
     /// Reads `len` bytes at `offset`. A range past the end is an error, never
     /// a short read.
     pub async fn read_at(&self, offset: u64, len: u64) -> Result<Vec<u8>, FileReadError>;
+
+    /// The same range as bounded plaintext buffers, without allocating its
+    /// whole length. Authentication precedes each yielded buffer; a complete
+    /// sequential read checks the row's content hash before the final buffer.
+    pub fn read_range(&self, offset: u64, len: u64) -> Result<FileRangeStream<'_>, FileReadError>;
+}
+
+impl FileRangeStream<'_> {
+    pub async fn next(&mut self) -> Result<Option<Vec<u8>>, FileReadError>;
 }
 
 pub enum FileReadError {

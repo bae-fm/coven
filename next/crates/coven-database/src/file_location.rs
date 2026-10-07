@@ -48,6 +48,12 @@ impl StoredLocation {
         }
     }
 
+    pub(crate) fn value(&self) -> Value {
+        Value::Text(match self {
+            Self::Uploaded(text) => text.as_str().to_owned(),
+            Self::OnDevice(device) => device.0.to_string(),
+        })
+    }
     pub(crate) fn public(&self) -> FileLocation {
         match self {
             Self::Uploaded(_) => FileLocation::Uploaded,

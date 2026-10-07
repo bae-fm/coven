@@ -1071,6 +1071,7 @@ dependencies = [
  "coven-foundation",
  "coven-merge",
  "coven-storage",
+ "hex",
  "serde",
  "serde_json",
  "tempfile",

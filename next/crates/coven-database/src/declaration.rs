@@ -129,8 +129,8 @@ pub enum Uploads {
 pub struct FileDecl {
     pub(crate) namespace: String,
     pub(crate) provenance: Provenance,
-    uploads: Uploads,
-    fill: CacheFill,
+    pub(crate) uploads: Uploads,
+    pub(crate) fill: CacheFill,
     pub(crate) id: String,
     pub(crate) size: String,
     pub(crate) hash: String,

@@ -1,11 +1,12 @@
-//! The read-only application surface retains a shared deletion guard.
+//! The read-only application surface caches files under a shared deletion guard.
 
 use crate::*;
 use coven_crypto::custody::StoreKeys;
 use coven_database::DatabaseReadHandle;
 use std::sync::{Arc, Mutex};
 
-/// A handle that only reads an already open store (§5, §20.1).
+/// A handle that reads synced rows and maintains its local file cache (§5, §20.1).
+/// Its shared store lock prevents deletion until all its connections close.
 ///
 /// ```compile_fail
 /// async fn no_writes(handle: &coven::CovenReadHandle) {
@@ -20,13 +21,19 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone)]
 pub struct CovenReadHandle {
     database: DatabaseReadHandle,
+    files: coven_sync::Files,
     keys: Arc<Mutex<Option<StoreKeys>>>,
 }
 
 impl CovenReadHandle {
-    pub(crate) fn new(database: DatabaseReadHandle, keys: StoreKeys) -> Self {
+    pub(crate) fn new(
+        database: DatabaseReadHandle,
+        keys: StoreKeys,
+        files: coven_sync::Files,
+    ) -> Self {
         Self {
             database,
+            files,
             keys: Arc::new(Mutex::new(Some(keys))),
         }
     }
@@ -57,8 +64,9 @@ impl CovenReadHandle {
     }
     /// Opens a file for reading ranges (§16.3). Opening checks the file
     /// against its row once; keep the stream for as long as the file is read.
+    /// Its shared store lock prevents deletion until it and its I/O finish.
     pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError> {
-        Ok(FileStream::new(self.database.open_local_file(file).await?))
+        self.files.open_file_stream(file).await
     }
     /// Decrypts app data with the retained store key its header names.
     pub fn open_app_data(&self, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>, SealError> {
@@ -69,10 +77,12 @@ impl CovenReadHandle {
             .ok_or(KeyError::StoreClosed)?
             .open_app_data(sealed, aad)
     }
-    /// Closes every connection and drops unlocked key material on all clones.
+    /// Closes read and cache connections, releases their shared store lock,
+    /// and drops unlocked keys on all clones. File streams retain their own locks.
     pub async fn close(&self) -> Result<(), DbError> {
         let handle = self.clone();
         crate::coven::completion(tokio::spawn(async move {
+            handle.files.close().await;
             let custody = handle.keys.clone();
             crate::coven::blocking(move || {
                 custody.lock().expect("custody lock poisoned").take();

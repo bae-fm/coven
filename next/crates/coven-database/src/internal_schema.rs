@@ -329,7 +329,9 @@ macro_rules! coven_tables {
         ");
         $visit!(coven_file_removals, "
             CREATE TABLE coven_file_removals (
-                path TEXT PRIMARY KEY NOT NULL
+                path TEXT NOT NULL,
+                area TEXT NOT NULL DEFAULT 'files' CHECK(area IN ('files','cache')),
+                PRIMARY KEY(area,path)
             ) STRICT, WITHOUT ROWID;
         ");
         $visit!(coven_device_files, "
@@ -348,6 +350,45 @@ macro_rules! coven_tables {
                 access_key_id TEXT PRIMARY KEY NOT NULL,
                 member BLOB
             );
+        ");
+        $visit!(coven_file_uploads, "
+            CREATE TABLE coven_file_uploads (
+                id INTEGER PRIMARY KEY,
+                reference BLOB NOT NULL UNIQUE,
+                queued_at BLOB NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts>=0),
+                last_attempt_at BLOB,
+                failure BLOB,
+                path TEXT,
+                fixed BLOB,
+                session BLOB,
+                stored INTEGER NOT NULL DEFAULT 0 CHECK(stored IN (0,1)),
+                unused INTEGER NOT NULL DEFAULT 0 CHECK(unused IN (0,1)),
+                CHECK((path IS NULL)=(fixed IS NULL)),
+                CHECK(session IS NULL OR fixed IS NOT NULL),
+                CHECK(stored=0 OR fixed IS NOT NULL),
+                CHECK(unused=0 OR stored=1)
+            ) STRICT;
+        ");
+        $visit!(coven_cache, "
+            CREATE TABLE coven_cache (
+                namespace TEXT NOT NULL,
+                file_id TEXT NOT NULL,
+                chunk INTEGER NOT NULL CHECK(chunk>=-2),
+                path TEXT NOT NULL UNIQUE,
+                size INTEGER NOT NULL CHECK(size>=0),
+                last_read INTEGER NOT NULL,
+                pinned INTEGER NOT NULL CHECK(pinned IN (0,1)) CHECK(pinned=0 OR chunk=-2),
+                checked_hash BLOB CHECK((chunk=-2)=(checked_hash IS NOT NULL)) CHECK(checked_hash IS NULL OR length(checked_hash)=32),
+                PRIMARY KEY(namespace,file_id,chunk)
+            ) STRICT, WITHOUT ROWID;
+            CREATE INDEX coven_cache_lru ON coven_cache(namespace,pinned,last_read);
+        ");
+        $visit!(coven_cache_budgets, "
+            CREATE TABLE coven_cache_budgets (
+                namespace TEXT PRIMARY KEY NOT NULL,
+                bytes BLOB NOT NULL CHECK(length(bytes)=8)
+            ) STRICT, WITHOUT ROWID;
         ");
         $visit!(coven_operations, "
             CREATE TABLE coven_operations (

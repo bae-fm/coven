@@ -444,6 +444,67 @@ impl<'a> FileWrite<'a> {
         result
     }
 
+    pub(crate) fn queue_attached(&self, now: std::time::SystemTime) -> Result<(), DbError> {
+        crate::file_queue::attached(
+            self.database,
+            self.schema,
+            self.attached.borrow().keys().cloned(),
+            now,
+        )
+    }
+
+    pub(crate) fn mark_uploaded(
+        &self,
+        reference: &crate::FileRef,
+        location: &coven_crypto::SecretText,
+    ) -> Result<(), DbError> {
+        crate::file_ref::validate(self.database, self.schema, reference)?;
+        let (table, file) = file_row::declaration(self.schema, reference.table())?;
+        let (key, mut expected) = file_row::lookup(
+            self.database,
+            self.schema,
+            reference.table(),
+            reference.key(),
+        )?;
+        expected.insert(
+            file.location.clone(),
+            Value::Text(location.as_str().to_owned()),
+        );
+        let mut parameters = vec![rusqlite::types::Value::Text(location.as_str().to_owned())];
+        parameters.extend(reference.key().0.clone());
+        self.database.file_execute(
+            &format!(
+                "UPDATE main.{} SET {}=? WHERE {}",
+                crate::sql::identifier(&table.name),
+                crate::sql::identifier(&file.location),
+                crate::write_rows::key_columns(table)
+                    .iter()
+                    .map(|c| format!("{}=?", crate::sql::identifier(&c.name)))
+                    .collect::<Vec<_>>()
+                    .join(" AND ")
+            ),
+            rusqlite::params_from_iter(parameters),
+        )?;
+        let actual =
+            crate::write_rows::read_values(self.database, table, &key.1)?.ok_or_else(|| {
+                DbError::FileRowRemoved {
+                    table: reference.table().into(),
+                    key: reference.key().clone(),
+                }
+            })?;
+        if file
+            .columns()
+            .iter()
+            .any(|column| actual[*column] != expected[*column])
+        {
+            return Err(DbError::FileAttachmentChanged {
+                table: reference.table().into(),
+                key: reference.key().clone(),
+            });
+        }
+        Ok(())
+    }
+
     pub(crate) fn before_commit(&self) -> Result<(), DbError> {
         if let Some((table, key)) = self.changed_reference.borrow().as_ref() {
             return Err(DbError::FileRefChanged {

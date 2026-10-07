@@ -173,6 +173,11 @@ impl DatabaseBuilder {
         }
         Ok(DatabaseReadHandle {
             inner: Arc::new(RwLock::new(Some(ReadOnlyInner {
+                cache_writer: Mutex::new(DatabaseConnection::open(
+                    &path,
+                    false,
+                    SqlAuthorization::new(&tables),
+                )?),
                 readers: ReadPool::new(readers),
                 lock,
                 schema,

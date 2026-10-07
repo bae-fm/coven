@@ -50,10 +50,14 @@ struct Pending {
     path: ObjectPath,
     total: u64,
     bytes: Vec<u8>,
+    part_size: usize,
 }
 impl Pending {
     fn check(&self, session: &UploadSession) -> Result<(), StorageError> {
-        if self.path != session.path || self.total != session.total {
+        if self.path != session.path
+            || self.total != session.total
+            || self.part_size != session.part_size
+        {
             return Err(StorageError::SessionMismatch);
         }
         if (self.bytes.len() as u64) < session.confirmed || self.bytes.len() as u64 > self.total {
@@ -97,6 +101,9 @@ struct State {
     accounts: BTreeMap<String, AccountAccess>,
     retained_access: BTreeMap<String, Vec<RetainedAccess>>,
     faults: Faults,
+    ranges: Vec<ByteRange>,
+    sent_bytes: u64,
+    largest_part: usize,
 }
 
 /// Clones share a provider's durable objects and sessions across simulated crashes.
@@ -112,6 +119,9 @@ struct State {
 #[derive(Clone)]
 pub struct MemoryStorage {
     config: StorageConfig,
+    single_limit: u64,
+    part_size: usize,
+    requests: Arc<tokio::sync::watch::Sender<u64>>,
     account: Account,
     clock: ClockRef,
     tokens: Arc<Mutex<Option<OAuthTokens>>>,
@@ -124,6 +134,9 @@ impl MemoryStorage {
         config.validate()?;
         Ok(Self {
             config,
+            single_limit: 16,
+            part_size: 4,
+            requests: Arc::new(tokio::sync::watch::channel(0).0),
             clock,
             tokens: Arc::new(Mutex::new(None)),
             account: Account::Owner,
@@ -134,6 +147,9 @@ impl MemoryStorage {
                 accounts: BTreeMap::new(),
                 retained_access: BTreeMap::new(),
                 faults: Faults::none(),
+                ranges: Vec::new(),
+                sent_bytes: 0,
+                largest_part: 0,
             })),
         })
     }
@@ -148,11 +164,57 @@ impl MemoryStorage {
         }
         Ok(Self {
             config: owner.config(),
+            single_limit: owner.single_limit,
+            part_size: owner.part_size,
+            requests: owner.requests.clone(),
             account: Account::Recipient(email.to_ascii_lowercase()),
             clock: owner.clock.clone(),
             tokens: Arc::new(Mutex::new(None)),
             state: owner.state.clone(),
         })
+    }
+    /// Choose transfer limits before sharing this adapter with a test's owners.
+    pub fn with_transfer_limits(
+        mut self,
+        single_limit: u64,
+        part_size: usize,
+    ) -> Result<Self, StorageError> {
+        if single_limit == 0 || part_size == 0 {
+            return Err(StorageError::InvalidPart);
+        }
+        self.single_limit = single_limit;
+        self.part_size = part_size;
+        Ok(self)
+    }
+    /// Request notifications include failed attempts, so tests can wait without polling.
+    pub fn subscribe_requests(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.requests.subscribe()
+    }
+    /// Every attempted provider request, including injected failures.
+    pub fn request_count(&self) -> u64 {
+        *self.requests.borrow()
+    }
+    /// Successful ranged requests, in order.
+    pub async fn ranges(&self) -> Vec<ByteRange> {
+        self.state.lock().await.ranges.clone()
+    }
+    /// Part bytes with successful replies and their largest buffer, across sessions.
+    pub async fn transferred(&self) -> (u64, usize) {
+        let state = self.state.lock().await;
+        (state.sent_bytes, state.largest_part)
+    }
+    /// Damage one stored byte without issuing a provider request.
+    pub async fn corrupt_byte(&self, path: &ObjectPath, offset: usize) -> Result<(), StorageError> {
+        let mut state = self.state.lock().await;
+        let byte = state
+            .objects
+            .get_mut(path)
+            .ok_or(StorageError::NotFound)?
+            .bytes
+            .get_mut(offset)
+            .ok_or(StorageError::InvalidRange)?;
+        *byte ^= 1;
+        Ok(())
     }
     /// Set faults absolutely, so repeating the command has the same effect.
     pub async fn set_faults(&self, faults: Faults) {
@@ -169,6 +231,7 @@ impl MemoryStorage {
         }
     }
     async fn before_request(&self) -> Result<(), StorageError> {
+        self.requests.send_modify(|count| *count += 1);
         let (delay, failure) = {
             let mut state = self.state.lock().await;
             if std::mem::replace(&mut state.faults.expire_uploads, false) {
@@ -243,7 +306,7 @@ impl Storage for MemoryStorage {
         Ok(())
     }
     fn single_request_limit(&self) -> u64 {
-        16
+        self.single_limit
     }
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         crate::transfer::upload_bytes(self, path, bytes, async {
@@ -296,7 +359,11 @@ impl Storage for MemoryStorage {
         path: &ObjectPath,
         range: ByteRange,
     ) -> Result<Vec<u8>, StorageError> {
-        range.select(&self.read(path).await?)
+        self.before().await?;
+        let mut state = self.state.lock().await;
+        let bytes = range.select(&state.objects.get(path).ok_or(StorageError::NotFound)?.bytes)?;
+        state.ranges.push(range);
+        Ok(bytes)
     }
     async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
         self.before().await?;
@@ -442,6 +509,7 @@ impl Storage for MemoryStorage {
                 path: path.clone(),
                 total,
                 bytes: Vec::new(),
+                part_size: self.part_size,
             },
         );
         Ok(UploadSession {
@@ -449,7 +517,7 @@ impl Storage for MemoryStorage {
             path: path.clone(),
             total,
             confirmed: 0,
-            part_size: 4,
+            part_size: self.part_size,
             state: SessionState::Memory {
                 id,
                 complete: false,
@@ -498,6 +566,8 @@ impl Storage for MemoryStorage {
         if std::mem::replace(&mut state.faults.lose_part_reply, false) {
             return Err(StorageError::Injected(StorageFailure::Network));
         }
+        state.sent_bytes += bytes.len() as u64;
+        state.largest_part = state.largest_part.max(bytes.len());
         session.confirmed = end;
         Ok(())
     }

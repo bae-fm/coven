@@ -2,7 +2,7 @@ use crate::{providers::OAuthError, CloudProvider};
 use coven_crypto::custody::KeyError;
 
 /// Failures the app can distinguish and act on (§21.3).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StorageFailure {
     /// No route to the provider, a timeout, or an interrupted response.
     Network,

@@ -6,6 +6,46 @@ use crate::{
 };
 
 impl Database {
+    /// Apply an entry and record work caused by its kept effects atomically.
+    /// The sync owner supplies the operation data; the database does not interpret it.
+    pub async fn apply_store_log_operations(
+        &self,
+        entry: crate::ReplayEntry,
+        replay: crate::StoreLogReplay,
+        operations: Vec<crate::NewOperation>,
+        updates: Vec<crate::OperationUpdate>,
+    ) -> Result<(), DbError> {
+        let database = self.clone();
+        finish_blocking(
+            tokio::task::spawn_blocking(move || {
+                let slot = database.inner.read().expect("database lock poisoned");
+                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+                let writer = inner
+                    .writer
+                    .lock()
+                    .expect("writer connection lock poisoned");
+                let files = crate::file_write::FileWrite::new(
+                    &writer,
+                    &inner.directory,
+                    &inner.write_schema,
+                    inner.device,
+                    &inner.staging,
+                    Vec::new(),
+                );
+                files.finish(crate::store_log::apply(
+                    &writer,
+                    &inner.write_schema,
+                    entry,
+                    replay,
+                    &files,
+                    &operations,
+                    &updates,
+                ))
+            })
+            .await,
+        )
+    }
+
     /// Prepare a store-log entry and advance its operation in one transaction.
     /// The sealing closure receives only values and must also encode the entry’s
     /// identity and author view into the operation data it returns.

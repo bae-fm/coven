@@ -1,4 +1,7 @@
-//! Application calls delegate to the database and store custody owners.
+//! Application calls delegate to database, custody, operation and file owners.
+
+#[path = "file.rs"]
+mod file;
 
 use crate::*;
 use coven_crypto::custody::StoreCustody;
@@ -10,6 +13,7 @@ use std::sync::{Arc, Mutex};
 pub struct CovenHandle {
     database: Database,
     operations: coven_sync::Operations,
+    files: coven_sync::Files,
     custody: Arc<Mutex<Option<StoreCustody>>>,
 }
 
@@ -18,10 +22,12 @@ impl CovenHandle {
         database: Database,
         custody: StoreCustody,
         operations: coven_sync::Operations,
+        files: coven_sync::Files,
     ) -> Self {
         Self {
             database,
             operations,
+            files,
             custody: Arc::new(Mutex::new(Some(custody))),
         }
     }
@@ -184,15 +190,15 @@ impl CovenHandle {
 
     /// Opens a file for reading ranges (§16.3). Opening checks the file
     /// against its row once; keep the stream for as long as the file is read.
+    /// Its shared store lock prevents deletion until it and its I/O finish.
     pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError> {
-        Ok(FileStream::new(self.database.open_local_file(file).await?))
+        self.files.open_file_stream(file).await
     }
 
-    /// Makes sure a file's bytes are on this device by checking the local
-    /// copy. An uploaded file requires connected storage.
+    /// Checks a local file, or downloads and checks an uploaded file through
+    /// the cache. Missing chunks require connected storage.
     pub async fn ensure_file_on_device(&self, file: &FileRef) -> Result<(), FileReadError> {
-        self.open_file_stream(file).await?;
-        Ok(())
+        self.files.ensure_file_on_device(file).await
     }
 
     /// The path, size and modification time coven recorded for a row's
@@ -299,12 +305,14 @@ impl CovenHandle {
             .open_app_data(sealed, aad)
     }
 
-    /// Closes every database connection and releases the store lock. Later
+    /// Stops operation and file work, closes connections and releases the writer
+    /// lock. Open file streams retain their shared deletion guards. Later
     /// database calls on any clone fail with `DbError::StoreClosed`; custody
     /// calls fail with `KeyError::StoreClosed`. Closing reports every failure.
     pub async fn close(&self) -> Result<(), DbError> {
         let handle = self.clone();
         crate::coven::completion(tokio::spawn(async move {
+            handle.files.close().await;
             match handle.operations.close().await {
                 Ok(()) | Err(SyncError::Database(DbError::StoreClosed)) => (),
                 Err(error) => return Err(DbError::OperationWorker(Box::new(error))),
