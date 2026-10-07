@@ -36,9 +36,29 @@ impl RustFile {
 #[derive(Default)]
 pub(crate) struct TypeNames {
     pub(crate) names: BTreeSet<String>,
+    callback_outputs_only: bool,
 }
 
 impl<'ast> Visit<'ast> for TypeNames {
+    fn visit_parenthesized_generic_arguments(
+        &mut self,
+        node: &'ast syn::ParenthesizedGenericArguments,
+    ) {
+        if self.callback_outputs_only {
+            self.visit_return_type(&node.output);
+        } else {
+            visit::visit_parenthesized_generic_arguments(self, node);
+        }
+    }
+
+    fn visit_type_fn_ptr(&mut self, node: &'ast syn::TypeFnPtr) {
+        if self.callback_outputs_only {
+            self.visit_return_type(&node.output);
+        } else {
+            visit::visit_type_fn_ptr(self, node);
+        }
+    }
+
     fn visit_type_path(&mut self, node: &'ast syn::TypePath) {
         if let Some(segment) = node.path.segments.last() {
             self.names.insert(segment.ident.to_string());
@@ -60,6 +80,17 @@ impl<'ast> Visit<'ast> for TypeNames {
 
 pub(crate) fn type_names(ty: &syn::Type) -> BTreeSet<String> {
     let mut names = TypeNames::default();
+    names.visit_type(ty);
+    names.names
+}
+
+/// Types supplied to a callee. A callback receives its arguments from that
+/// callee; only its return value can supply a capability to it.
+pub(crate) fn supplied_type_names(ty: &syn::Type) -> BTreeSet<String> {
+    let mut names = TypeNames {
+        callback_outputs_only: true,
+        ..TypeNames::default()
+    };
     names.visit_type(ty);
     names.names
 }

@@ -30,7 +30,7 @@ use coven_foundation::files::{StoreDir, StoreLock, StoreReadLock};
 use coven_foundation::id_source::{DeviceId, IdSourceRef, UuidIds};
 
 use crate::authorization::SqlAuthorization;
-use crate::observation::{CommitObserver, CommitSubscription, ReadSet};
+use crate::observation::{CommitObserver, CommitSubscription};
 use crate::sqlite::DatabaseConnection;
 use crate::{
     CovenError, CovenMigrationPolicy, CovenResult, DbError, Migration, MigrationOutcome,
@@ -69,7 +69,68 @@ struct DatabaseInner {
     recovery: Option<coven_foundation::files::DatabaseRecovery>,
 }
 
+// SQLite rolls back before this boundary catches an unwind. Releasing the
+// connection outside unwinding preserves the mutex for the next caller.
+fn with_connection<R>(
+    connection: &Mutex<DatabaseConnection>,
+    run: impl FnOnce(&DatabaseConnection) -> R,
+) -> R {
+    let guard = connection
+        .lock()
+        .expect("database connection lock poisoned");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&guard)));
+    drop(guard);
+    match result {
+        Ok(result) => result,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+impl DatabaseInner {
+    fn with_writer<R>(&self, run: impl FnOnce(&DatabaseConnection) -> R) -> R {
+        with_connection(&self.writer, run)
+    }
+
+    fn with_files<R, E: crate::WriteFailure>(
+        &self,
+        staged: Vec<crate::file_write::StagedFile>,
+        run: impl FnOnce(&DatabaseConnection, &crate::file_write::FileWrite<'_>) -> Result<R, E>,
+    ) -> Result<R, E> {
+        self.with_writer(|writer| {
+            let files = crate::file_write::FileWrite::new(
+                writer,
+                &self.directory,
+                &self.write_schema,
+                self.device,
+                &self.staging,
+                staged,
+            );
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(writer, &files)));
+            match result {
+                Ok(result) => files.finish(result),
+                Err(panic) => {
+                    if let Err(error) = files.rollback() {
+                        panic!("file cleanup after callback panic failed: {error:?}");
+                    }
+                    std::panic::resume_unwind(panic)
+                }
+            }
+        })
+    }
+}
+
 impl Database {
+    async fn call<R, E>(
+        &self,
+        run: impl FnOnce(&DatabaseInner) -> Result<R, E> + Send + 'static,
+    ) -> Result<R, E>
+    where
+        R: Send + 'static,
+        E: From<DbError> + Send + 'static,
+    {
+        finish_blocking(start_call(self.inner.clone(), run).await)
+    }
     /// Observe committed changes to the outgoing write queue. Register before
     /// the first sync to include writes committed while a pass is running.
     pub fn sync_changes(&self) -> crate::DatabaseChanges {
@@ -101,17 +162,15 @@ impl Database {
                 let mut slot = owner.inner.write().expect("database lock poisoned");
                 let inner = slot.as_mut().ok_or(DbError::StoreClosed)?;
                 if let Some(recovery) = &inner.recovery {
-                    let writer = inner
-                        .writer
-                        .lock()
-                        .expect("writer connection lock poisoned");
-                    crate::file_removals::FileRemovals::new(
-                        &writer,
-                        &inner.directory,
-                        &BTreeSet::new(),
-                    )
-                    .finish(Ok::<_, DbError>(()))?;
-                    recovery.finish()?;
+                    inner.with_writer(|writer| {
+                        crate::file_removals::FileRemovals::new(
+                            writer,
+                            &inner.directory,
+                            &BTreeSet::new(),
+                        )
+                        .finish(Ok::<_, DbError>(()))?;
+                        recovery.finish().map_err(DbError::from)
+                    })?;
                 }
                 inner.recovery = None;
                 Ok(())
@@ -126,22 +185,17 @@ impl Database {
         &self,
         reference: &crate::FileRef,
     ) -> Result<crate::LocalFileStream, crate::LocalFileError> {
-        let owner = self.clone();
         let reference = reference.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = owner.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let reader = inner.readers.acquire_reader();
-                reader.local_file(
-                    &inner.write_schema,
-                    &inner.directory,
-                    inner.device,
-                    &reference,
-                )
-            })
-            .await,
-        )
+        self.call(move |inner| {
+            let reader = inner.readers.acquire_reader();
+            reader.local_file(
+                &inner.write_schema,
+                &inner.directory,
+                inner.device,
+                &reference,
+            )
+        })
+        .await
     }
 
     /// The row's file, audience and version from one committed state.
@@ -150,20 +204,15 @@ impl Database {
         table: &str,
         key: impl Into<crate::RowKey>,
     ) -> Result<crate::FileRef, DbError> {
-        let owner = self.clone();
         let table = table.to_owned();
         let key = key.into();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = owner.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let reader = inner.readers.acquire_reader();
-                reader
-                    .read_snapshot(|sql| sql.file_ref(&inner.write_schema, &table, &key))
-                    .0
-            })
-            .await,
-        )
+        self.call(move |inner| {
+            let reader = inner.readers.acquire_reader();
+            reader
+                .read_snapshot(|sql| sql.file_ref(&inner.write_schema, &table, &key))
+                .0
+        })
+        .await
     }
 
     /// The recorded original's path, size and modification time; never reread its bytes.
@@ -172,20 +221,15 @@ impl Database {
         table: &str,
         key: impl Into<crate::RowKey>,
     ) -> Result<Option<crate::UserFile>, DbError> {
-        let owner = self.clone();
         let table = table.to_owned();
         let key = key.into();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = owner.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let reader = inner.readers.acquire_reader();
-                reader
-                    .read_snapshot(|sql| sql.user_file(&inner.write_schema, &table, &key))
-                    .0
-            })
-            .await,
-        )
+        self.call(move |inner| {
+            let reader = inner.readers.acquire_reader();
+            reader
+                .read_snapshot(|sql| sql.user_file(&inner.write_schema, &table, &key))
+                .0
+        })
+        .await
     }
 
     /// Run ordinary SQL against one consistent snapshot when awaited.
@@ -233,37 +277,21 @@ impl Database {
     /// Dismisses lost values in a write so every device drops them from
     /// `_coven_lost`; a removed row is deleted for good (§8, E4).
     pub async fn dismiss_lost_values(&self, values: &[LostValue]) -> CovenResult<()> {
-        let database = self.clone();
         let values = values.to_vec();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = database.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let writer = inner
-                    .writer
-                    .lock()
-                    .expect("writer connection lock poisoned");
-                let files = crate::file_write::FileWrite::new(
-                    &writer,
-                    &inner.directory,
+        self.call(move |inner| {
+            inner.with_files(Vec::new(), |writer, files| {
+                crate::dismissal::dismiss(
+                    writer,
                     &inner.write_schema,
                     inner.device,
-                    &inner.staging,
-                    Vec::new(),
-                );
-                files
-                    .finish(crate::dismissal::dismiss(
-                        &writer,
-                        &inner.write_schema,
-                        inner.device,
-                        inner.clock.now(),
-                        &values,
-                        &files,
-                    ))
-                    .map_err(Into::into)
+                    inner.clock.now(),
+                    &values,
+                    files,
+                )
+                .map_err(Into::into)
             })
-            .await,
-        )
+        })
+        .await
     }
 
     /// Observe the decoded lost cells and removed rows.
@@ -276,8 +304,9 @@ impl Database {
         F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static,
     {
-        let database = self.clone();
-        tokio::task::spawn_blocking(move || database.run_read(read).0)
+        start_call(self.inner.clone(), move |inner| {
+            inner.readers.acquire_reader().read_snapshot(read).0
+        })
     }
 
     pub(crate) async fn observed_read<F, R>(
@@ -289,27 +318,12 @@ impl Database {
         F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static,
     {
-        let database = self.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let (result, reads) = database.run_read(read);
-                commits.finish(reads);
-                result
-            })
-            .await,
-        )
-    }
-
-    fn run_read<F, R>(&self, read: F) -> (CovenResult<R>, ReadSet)
-    where
-        F: FnOnce(SqlReadContext<'_>) -> CovenResult<R>,
-    {
-        let inner = self.inner.read().expect("database lock poisoned");
-        let Some(inner) = inner.as_ref() else {
-            return (Err(DbError::StoreClosed.into()), ReadSet::new());
-        };
-        let reader = inner.readers.acquire_reader();
-        reader.read_snapshot(read)
+        self.call(move |inner| {
+            let (result, reads) = inner.readers.acquire_reader().read_snapshot(read);
+            commits.finish(reads);
+            result
+        })
+        .await
     }
 
     /// Run app SQL and commit its unsigned write record and merge metadata in
@@ -356,16 +370,11 @@ impl Database {
 
     /// The committed app schema version, read on a read-only connection.
     pub async fn schema_version(&self) -> Result<u32, DbError> {
-        let database = self.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let inner = database.inner.read().expect("database lock poisoned");
-                let inner = inner.as_ref().ok_or(DbError::StoreClosed)?;
-                let reader = inner.readers.acquire_reader();
-                reader.schema_version()
-            })
-            .await,
-        )
+        self.call(move |inner| {
+            let reader = inner.readers.acquire_reader();
+            reader.schema_version()
+        })
+        .await
     }
 
     /// The migrations this open committed, classified individually.
@@ -457,22 +466,27 @@ struct ReadOnlyInner {
 }
 
 impl DatabaseReadHandle {
+    async fn call<R, E>(
+        &self,
+        run: impl FnOnce(&ReadOnlyInner) -> Result<R, E> + Send + 'static,
+    ) -> Result<R, E>
+    where
+        R: Send + 'static,
+        E: From<DbError> + Send + 'static,
+    {
+        finish_blocking(start_call(self.inner.clone(), run).await)
+    }
     /// Open local bytes selected by the reference while checking its current row.
     pub async fn open_local_file(
         &self,
         reference: &crate::FileRef,
     ) -> Result<crate::LocalFileStream, crate::LocalFileError> {
-        let owner = self.clone();
         let reference = reference.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = owner.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let reader = inner.readers.acquire_reader();
-                reader.local_file(&inner.schema, &inner.directory, inner.device, &reference)
-            })
-            .await,
-        )
+        self.call(move |inner| {
+            let reader = inner.readers.acquire_reader();
+            reader.local_file(&inner.schema, &inner.directory, inner.device, &reference)
+        })
+        .await
     }
 
     /// The row's file, audience and version from one committed state.
@@ -481,20 +495,15 @@ impl DatabaseReadHandle {
         table: &str,
         key: impl Into<crate::RowKey>,
     ) -> Result<crate::FileRef, DbError> {
-        let owner = self.clone();
         let table = table.to_owned();
         let key = key.into();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = owner.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let reader = inner.readers.acquire_reader();
-                reader
-                    .read_snapshot(|sql| sql.file_ref(&inner.schema, &table, &key))
-                    .0
-            })
-            .await,
-        )
+        self.call(move |inner| {
+            let reader = inner.readers.acquire_reader();
+            reader
+                .read_snapshot(|sql| sql.file_ref(&inner.schema, &table, &key))
+                .0
+        })
+        .await
     }
 
     /// The recorded original's path, size and modification time; never reread its bytes.
@@ -503,20 +512,15 @@ impl DatabaseReadHandle {
         table: &str,
         key: impl Into<crate::RowKey>,
     ) -> Result<Option<crate::UserFile>, DbError> {
-        let owner = self.clone();
         let table = table.to_owned();
         let key = key.into();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = owner.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let reader = inner.readers.acquire_reader();
-                reader
-                    .read_snapshot(|sql| sql.user_file(&inner.schema, &table, &key))
-                    .0
-            })
-            .await,
-        )
+        self.call(move |inner| {
+            let reader = inner.readers.acquire_reader();
+            reader
+                .read_snapshot(|sql| sql.user_file(&inner.schema, &table, &key))
+                .0
+        })
+        .await
     }
 
     /// Read one consistent snapshot when awaited.
@@ -538,33 +542,15 @@ impl DatabaseReadHandle {
         F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static,
     {
-        let handle = self.clone();
-        tokio::task::spawn_blocking(move || {
-            let inner = handle.inner.read().expect("database lock poisoned");
-            let reader = inner
-                .as_ref()
-                .ok_or(DbError::StoreClosed)?
-                .readers
-                .acquire_reader();
-            reader.read_snapshot(read).0
+        start_call(self.inner.clone(), move |inner| {
+            inner.readers.acquire_reader().read_snapshot(read).0
         })
     }
 
     /// The committed app schema version.
     pub async fn schema_version(&self) -> Result<u32, DbError> {
-        let handle = self.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let inner = handle.inner.read().expect("database lock poisoned");
-                let reader = inner
-                    .as_ref()
-                    .ok_or(DbError::StoreClosed)?
-                    .readers
-                    .acquire_reader();
-                reader.schema_version()
-            })
-            .await,
-        )
+        self.call(|inner| inner.readers.acquire_reader().schema_version())
+            .await
     }
 
     /// Wait for active calls and close every clone of this handle.
@@ -593,6 +579,21 @@ impl DatabaseReadHandle {
             .await,
         )
     }
+}
+
+fn start_call<I, R, E>(
+    inner: Arc<RwLock<Option<I>>>,
+    run: impl FnOnce(&I) -> Result<R, E> + Send + 'static,
+) -> tokio::task::JoinHandle<Result<R, E>>
+where
+    I: Send + Sync + 'static,
+    R: Send + 'static,
+    E: From<DbError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let slot = inner.read().expect("database lock poisoned");
+        run(slot.as_ref().ok_or(DbError::StoreClosed)?)
+    })
 }
 
 pub(crate) fn finish_blocking<T>(result: Result<T, tokio::task::JoinError>) -> T {

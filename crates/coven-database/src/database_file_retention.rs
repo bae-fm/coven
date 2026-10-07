@@ -1,6 +1,6 @@
 //! File references used to prove that storage deletion cannot strand a row.
 
-use super::{finish_blocking, Database};
+use super::Database;
 use crate::{DbError, DownloadedPart, DownloadedWriteStream, FileUpload};
 use coven_format::{file_reference::UploadedFileReference, value::Value, write::RowChange};
 use coven_foundation::id_source::{DeviceId, FileId};
@@ -19,15 +19,8 @@ impl Database {
     /// Retire an unused publication and its chunk hashes after storage confirms
     /// deletion. Repeating deletion after a lost reply is safe.
     pub async fn retire_unused_file(&self, id: i64) -> Result<(), DbError> {
-        let database = self.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = database.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let writer = inner
-                    .writer
-                    .lock()
-                    .expect("writer connection lock poisoned");
+        self.call(move |inner| {
+            inner.with_writer(|writer| {
                 writer.transaction(|db| {
                     let invalid: bool = db.query_row(
                         "SELECT EXISTS(SELECT 1 FROM _coven_file_uploads WHERE id=?1 AND (unused=0 OR stored=0))",
@@ -38,69 +31,62 @@ impl Database {
                     Ok::<_, DbError>(())
                 })
             })
-            .await,
-        )
+        })
+        .await
     }
 
     /// Read local protection after listing storage files. A file already listed
     /// must either remain in this queue or have a committed row/write reference.
     pub async fn retained_files(&self) -> Result<FileRetention, DbError> {
-        let database = self.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = database.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let reader = inner.readers.acquire_reader();
-                reader.with_reader(|db| {
-                    db.read_transaction(|| {
-                        let schema = &inner.write_schema;
-                        let mut references = BTreeSet::new();
-                        for table in &schema.declarations {
-                            let Some(file) = &table.files else {
-                                continue;
-                            };
-                            db.for_each(
-                                &format!(
-                                    "SELECT {} FROM main.{} WHERE {} IS NOT NULL",
-                                    crate::sql::identifier(&file.location),
-                                    crate::sql::identifier(&table.name),
-                                    crate::sql::identifier(&file.location)
-                                ),
-                                [],
-                                |row| {
-                                    retain_value(
-                                        &crate::write_encoding::value(row.get_ref(0)?)?,
-                                        &mut references,
-                                    )
-                                },
-                            )?;
-                        }
-                        crate::upload::each_plaintext(db, |_, parts| {
-                            for (header, chunks) in parts {
-                                let mut decoder =
-                                    coven_format::write_stream::PartDecoder::new(header)?;
-                                for chunk in chunks {
-                                    for frame in decoder.chunk(&chunk?)? {
-                                        if let coven_format::dismissal::WriteFrame::Change(row) =
-                                            frame
-                                        {
-                                            retain_change(schema, &row, &mut references)?;
-                                        }
+        self.call(move |inner| {
+            let reader = inner.readers.acquire_reader();
+            reader.with_reader(|db| {
+                db.read_transaction(|| {
+                    let schema = &inner.write_schema;
+                    let mut references = BTreeSet::new();
+                    for table in &schema.declarations {
+                        let Some(file) = &table.files else {
+                            continue;
+                        };
+                        db.for_each(
+                            &format!(
+                                "SELECT {} FROM main.{} WHERE {} IS NOT NULL",
+                                crate::sql::identifier(&file.location),
+                                crate::sql::identifier(&table.name),
+                                crate::sql::identifier(&file.location)
+                            ),
+                            [],
+                            |row| {
+                                retain_value(
+                                    &crate::write_encoding::value(row.get_ref(0)?)?,
+                                    &mut references,
+                                )
+                            },
+                        )?;
+                    }
+                    crate::upload::each_plaintext(db, |_, parts| {
+                        for (header, chunks) in parts {
+                            let mut decoder = coven_format::write_stream::PartDecoder::new(header)?;
+                            for chunk in chunks {
+                                for frame in decoder.chunk(&chunk?)? {
+                                    if let coven_format::dismissal::WriteFrame::Change(row) = frame
+                                    {
+                                        retain_change(schema, &row, &mut references)?;
                                     }
                                 }
-                                decoder.finish()?;
                             }
-                            Ok(())
-                        })?;
-                        Ok(FileRetention {
-                            references,
-                            uploads: crate::file_queue::read(db)?,
-                        })
+                            decoder.finish()?;
+                        }
+                        Ok(())
+                    })?;
+                    Ok(FileRetention {
+                        references,
+                        uploads: crate::file_queue::read(db)?,
                     })
                 })
             })
-            .await,
-        )
+        })
+        .await
     }
 
     /// Find declared uploaded references in one authenticated write. A skipped
@@ -109,26 +95,21 @@ impl Database {
         &self,
         write: DownloadedWriteStream<R>,
     ) -> Result<Option<BTreeSet<(DeviceId, FileId)>>, DbError> {
-        let database = self.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = database.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let mut references = BTreeSet::new();
-                for part in write.read()?.parts {
-                    match part {
-                        DownloadedPart::Skipped(_) => return Ok(None),
-                        DownloadedPart::Opened(part) => {
-                            for row in part.rows {
-                                retain_change(&inner.write_schema, &row, &mut references)?;
-                            }
+        self.call(move |inner| {
+            let mut references = BTreeSet::new();
+            for part in write.read()?.parts {
+                match part {
+                    DownloadedPart::Skipped(_) => return Ok(None),
+                    DownloadedPart::Opened(part) => {
+                        for row in part.rows {
+                            retain_change(&inner.write_schema, &row, &mut references)?;
                         }
                     }
                 }
-                Ok(Some(references))
-            })
-            .await,
-        )
+            }
+            Ok(Some(references))
+        })
+        .await
     }
 }
 

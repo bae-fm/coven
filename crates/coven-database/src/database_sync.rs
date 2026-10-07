@@ -1,6 +1,6 @@
 //! Database operations used by synchronization, on the retained connections.
 
-use super::{finish_blocking, Database};
+use super::Database;
 use crate::{CovenResult, DbError};
 
 impl Database {
@@ -10,19 +10,12 @@ impl Database {
         &self,
         writes: Vec<crate::WriteId>,
     ) -> Result<Vec<(crate::WriteId, std::time::SystemTime)>, DbError> {
-        let database = self.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = database.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let writer = inner
-                    .writer
-                    .lock()
-                    .expect("writer connection lock poisoned");
-                crate::waiting_write::record(&writer, writes, inner.clock.now())
+        self.call(move |inner| {
+            inner.with_writer(|writer| {
+                crate::waiting_write::record(writer, writes, inner.clock.now())
             })
-            .await,
-        )
+        })
+        .await
     }
     /// Consume bounded plaintext streams inside one transaction. `authenticate`
     /// runs after every stream ends and must confirm the complete sealed object,
@@ -38,70 +31,36 @@ impl Database {
         R: std::io::Read + Send + 'static,
         F: FnOnce() -> Result<(), DbError> + Send + 'static,
     {
-        let database = self.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = database.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let reader = inner.readers.acquire_reader();
-                let writer = inner
-                    .writer
-                    .lock()
-                    .expect("writer connection lock poisoned");
-                let files = crate::file_write::FileWrite::new(
-                    &writer,
-                    &inner.directory,
-                    &inner.write_schema,
-                    inner.device,
-                    &inner.staging,
-                    Vec::new(),
-                );
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let result = reader.with_reader(|reader| {
-                        reader.read_transaction(|| {
-                            inner.write_schema.prepare(reader)?;
-                            // Pin the before view before the streamed transaction changes merge state.
-                            reader.schema_version()?;
-                            write.apply(
-                                &writer,
-                                reader,
-                                &inner.write_schema,
-                                inner.clock.now(),
-                                &files,
-                                &store_log,
-                                authenticate,
-                            )
-                        })
-                    });
-                    files.finish(result)
-                }));
-                drop(writer);
-                match result {
-                    Ok(result) => result,
-                    Err(panic) => std::panic::resume_unwind(panic),
-                }
+        self.call(move |inner| {
+            let reader = inner.readers.acquire_reader();
+            inner.with_files(Vec::new(), |writer, files| {
+                reader.with_reader(|reader| {
+                    reader.read_transaction(|| {
+                        inner.write_schema.prepare(reader)?;
+                        // Pin the before view before the streamed transaction changes merge state.
+                        reader.schema_version()?;
+                        write.apply(
+                            writer,
+                            reader,
+                            &inner.write_schema,
+                            inner.clock.now(),
+                            files,
+                            &store_log,
+                            authenticate,
+                        )
+                    })
+                })
             })
-            .await,
-        )
+        })
+        .await
     }
     /// The provider's opaque upload recording, retained with the fixed seal.
     pub async fn write_upload_session(
         &self,
         write: crate::WriteId,
     ) -> Result<Option<Vec<u8>>, DbError> {
-        let database = self.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = database.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let writer = inner
-                    .writer
-                    .lock()
-                    .expect("writer connection lock poisoned");
-                crate::upload::session(&writer, write)
-            })
-            .await,
-        )
+        self.call(move |inner| inner.with_writer(|writer| crate::upload::session(writer, write)))
+            .await
     }
 
     /// Record a session before sending and after provider-confirmed progress.
@@ -110,19 +69,10 @@ impl Database {
         write: crate::WriteId,
         bytes: Vec<u8>,
     ) -> Result<(), DbError> {
-        let database = self.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = database.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let writer = inner
-                    .writer
-                    .lock()
-                    .expect("writer connection lock poisoned");
-                crate::upload::keep_session(&writer, write, bytes)
-            })
-            .await,
-        )
+        self.call(move |inner| {
+            inner.with_writer(|writer| crate::upload::keep_session(writer, write, bytes))
+        })
+        .await
     }
     /// Seal the oldest plaintext upload directly into a SQLite BLOB. The first
     /// successful attempt commits all bytes before returning its position. The
@@ -139,26 +89,8 @@ impl Database {
             + Send
             + 'static,
     {
-        let database = self.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = database.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let writer = inner
-                    .writer
-                    .lock()
-                    .expect("writer connection lock poisoned");
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    crate::upload::prepare(&writer, seal)
-                }));
-                drop(writer);
-                match result {
-                    Ok(result) => result,
-                    Err(panic) => std::panic::resume_unwind(panic),
-                }
-            })
-            .await,
-        )
+        self.call(move |inner| inner.with_writer(|writer| crate::upload::prepare(writer, seal)))
+            .await
     }
     /// Apply one authenticated download, or report the prerequisite it awaits.
     /// Row changes, merge state, fingerprints and positions commit together.
@@ -166,33 +98,12 @@ impl Database {
         &self,
         write: crate::DownloadedWrite,
     ) -> Result<crate::ApplyOutcome, DbError> {
-        let database = self.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = database.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let writer = inner
-                    .writer
-                    .lock()
-                    .expect("writer connection lock poisoned");
-                let files = crate::file_write::FileWrite::new(
-                    &writer,
-                    &inner.directory,
-                    &inner.write_schema,
-                    inner.device,
-                    &inner.staging,
-                    Vec::new(),
-                );
-                files.finish(crate::download::apply(
-                    &writer,
-                    &inner.write_schema,
-                    inner.clock.now(),
-                    write,
-                    &files,
-                ))
+        self.call(move |inner| {
+            inner.with_files(Vec::new(), |writer, files| {
+                crate::download::apply(writer, &inner.write_schema, inner.clock.now(), write, files)
             })
-            .await,
-        )
+        })
+        .await
     }
 
     /// Read only the oldest waiting write, streaming plaintext parts or its
@@ -207,36 +118,20 @@ impl Database {
         R: Send + 'static,
         E: Send + 'static,
     {
-        let database = self.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = database.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let reader = inner.readers.acquire_reader();
-                reader.with_reader(|reader| {
-                    reader.read_transaction(|| crate::upload::read(reader, consume))
-                })
+        self.call(move |inner| {
+            let reader = inner.readers.acquire_reader();
+            reader.with_reader(|reader| {
+                reader.read_transaction(|| crate::upload::read(reader, consume))
             })
-            .await,
-        )
+        })
+        .await
     }
 
     /// Report a successful upload and remove its plaintext and sealed bytes
     /// together. A repeated report returns false; attempts must stay in order.
     pub async fn upload_succeeded(&self, write: coven_merge::WriteId) -> Result<bool, DbError> {
-        let database = self.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = database.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let writer = inner
-                    .writer
-                    .lock()
-                    .expect("writer connection lock poisoned");
-                crate::upload::succeeded(&writer, write)
-            })
-            .await,
-        )
+        self.call(move |inner| inner.with_writer(|writer| crate::upload::succeeded(writer, write)))
+            .await
     }
 
     /// Record an applied breaking change's snapshot coverage. Returns false on repetition.
@@ -275,41 +170,23 @@ impl Database {
         &self,
         boundary: crate::write_boundary::WriteBoundary,
     ) -> Result<bool, DbError> {
-        let database = self.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = database.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let writer = inner
-                    .writer
-                    .lock()
-                    .expect("writer connection lock poisoned");
-                boundary.record(&writer)
-            })
-            .await,
-        )
+        self.call(move |inner| inner.with_writer(|writer| boundary.record(writer)))
+            .await
     }
 
     /// Read applied entries and the fixed publication queue under the writer lock.
     pub async fn local_store_log(&self) -> Result<crate::LocalStoreLog, DbError> {
-        let database = self.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = database.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let writer = inner
-                    .writer
-                    .lock()
-                    .expect("writer connection lock poisoned");
+        self.call(move |inner| {
+            inner.with_writer(|writer| {
                 Ok(crate::LocalStoreLog {
                     store: inner.directory.id(),
                     device: inner.device,
-                    log: crate::store_log_tables::read(&writer)?,
-                    upload: crate::store_log_upload::read(&writer)?,
+                    log: crate::store_log_tables::read(writer)?,
+                    upload: crate::store_log_upload::read(writer)?,
                 })
             })
-            .await,
-        )
+        })
+        .await
     }
 
     /// Fix the next entry's number, stamp, causal past, sealed bytes and sealed-key
@@ -331,17 +208,10 @@ impl Database {
             + 'static,
         E: From<DbError> + Send + 'static,
     {
-        let database = self.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = database.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let writer = inner
-                    .writer
-                    .lock()
-                    .expect("writer connection lock poisoned");
+        self.call(move |inner| {
+            inner.with_writer(|writer| {
                 crate::store_log_upload::prepare(
-                    &writer,
+                    writer,
                     inner.device,
                     inner.clock.now(),
                     author,
@@ -349,8 +219,8 @@ impl Database {
                     move |log, entry| seal(log, entry).map(|sealed| (sealed, None)),
                 )
             })
-            .await,
-        )
+        })
+        .await
     }
 
     /// Fix a sealed key copy before its first storage attempt. An existing path
@@ -362,37 +232,19 @@ impl Database {
         F: FnOnce() -> Result<Vec<u8>, E> + Send + 'static,
         E: From<DbError> + Send + 'static,
     {
-        let database = self.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = database.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let writer = inner
-                    .writer
-                    .lock()
-                    .expect("writer connection lock poisoned");
-                crate::key_upload::prepare(&writer, &path, seal)
-            })
-            .await,
-        )
+        self.call(move |inner| {
+            inner.with_writer(|writer| crate::key_upload::prepare(writer, &path, seal))
+        })
+        .await
     }
 
     /// Retire a fixed sealed copy only after storage accepted it or its path was
     /// already occupied. Retrying retirement is safe after an uncertain reply.
     pub async fn complete_key_upload(&self, path: String) -> Result<(), DbError> {
-        let database = self.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = database.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let writer = inner
-                    .writer
-                    .lock()
-                    .expect("writer connection lock poisoned");
-                crate::key_upload::complete(&writer, &path)
-            })
-            .await,
-        )
+        self.call(move |inner| {
+            inner.with_writer(|writer| crate::key_upload::complete(writer, &path))
+        })
+        .await
     }
 
     /// Commit one entry, its immutable author-view check, every kept/dropped mark,
@@ -432,27 +284,20 @@ impl Database {
         &self,
         keys: Vec<(coven_merge::Audience, coven_crypto::FingerprintHasher)>,
     ) -> Result<crate::SyncState, DbError> {
-        let database = self.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = database.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let writer = inner
-                    .writer
-                    .lock()
-                    .expect("writer connection lock poisoned");
+        self.call(move |inner| {
+            inner.with_writer(|writer| {
                 let schema_version = writer.schema_version()?;
-                let positions = crate::download::positions(&writer)?;
+                let positions = crate::download::positions(writer)?;
                 let fingerprints = keys
                     .into_iter()
                     .map(|(audience, key)| {
-                        crate::fingerprint::read(&writer, &audience, key)
+                        crate::fingerprint::read(writer, &audience, key)
                             .map(|value| (audience, value))
                     })
                     .collect::<Result<_, _>>()?;
                 Ok(crate::SyncState {
                     device: inner.device,
-                    store_log: crate::store_log::positions(&writer)?,
+                    store_log: crate::store_log::positions(writer)?,
                     uploads_pending: writer.query_row(
                         "SELECT EXISTS(SELECT 1 FROM _coven_uploads)",
                         [],
@@ -468,7 +313,7 @@ impl Database {
                     fingerprints,
                 })
             })
-            .await,
-        )
+        })
+        .await
     }
 }

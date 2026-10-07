@@ -301,3 +301,80 @@ async fn opening_checks_integrity_once_for_all_its_connections() {
     reader.close().await.unwrap();
     database.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn callback_panics_release_the_writer_and_reserve_nothing() {
+    let mut poisoned = Vec::new();
+    for callback in [
+        "store log",
+        "key upload",
+        "operation entry",
+        "circle deletion",
+    ] {
+        let store = TestStore::new();
+        let db = store.builder(vec![], vec![]).open().await.unwrap();
+        let call = db.clone();
+        let panic = tokio::spawn(async move {
+            let entry = coven_format::test_utils::store_log();
+            match callback {
+                "store log" => {
+                    call.prepare_store_log(
+                        entry.author,
+                        entry.change,
+                        |_, _| -> Result<_, DbError> { std::panic::panic_any(123_u64) },
+                    )
+                    .await
+                    .unwrap();
+                }
+                "key upload" => {
+                    call.prepare_key_upload("key".into(), || -> Result<Vec<u8>, DbError> {
+                        std::panic::panic_any(123_u64)
+                    })
+                    .await
+                    .unwrap();
+                }
+                "operation entry" => {
+                    call.prepare_operation_entry(
+                        entry.author,
+                        entry.change,
+                        |_, _| -> Result<_, DbError> { std::panic::panic_any(123_u64) },
+                    )
+                    .await
+                    .unwrap();
+                }
+                "circle deletion" => {
+                    call.delete_circle_rows(
+                        coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(1)),
+                        |_| std::panic::panic_any(123_u64),
+                    )
+                    .await
+                    .unwrap();
+                }
+                _ => unreachable!(),
+            }
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(*panic.into_panic().downcast::<u64>().unwrap(), 123);
+        let reuse = tokio::spawn(async move {
+            assert!(db.local_store_log().await.unwrap().upload.is_none());
+            assert!(db.operations().await.unwrap().is_empty());
+            assert_eq!(
+                db.prepare_key_upload("key".into(), || Ok::<_, DbError>(vec![7]))
+                    .await
+                    .unwrap(),
+                vec![7]
+            );
+            db.write(|_| Ok(())).await.unwrap();
+            db.close().await.unwrap();
+        })
+        .await;
+        if reuse.is_err() {
+            poisoned.push(callback);
+        }
+    }
+    assert!(
+        poisoned.is_empty(),
+        "callbacks poisoned the writer: {poisoned:?}"
+    );
+}

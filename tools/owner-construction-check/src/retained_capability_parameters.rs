@@ -10,7 +10,7 @@ use syn::spanned::Spanned;
 use crate::capability_construction::construction_only_types;
 use crate::owner_construction::Constructor;
 use crate::policy::Policy;
-use crate::syntax::{is_test_only, is_test_source, type_name, type_names, RustFile};
+use crate::syntax::{is_test_only, is_test_source, supplied_type_names, type_name, RustFile};
 
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
 pub(crate) struct RetainedCapabilityParameterViolation {
@@ -93,7 +93,7 @@ fn find_in_items(
                         let syn::FnArg::Typed(input) = input else {
                             continue;
                         };
-                        let names = type_names(&input.ty);
+                        let names = supplied_type_names(&input.ty);
                         for capability in capabilities {
                             if names.contains(capability) {
                                 violations.insert(RetainedCapabilityParameterViolation {

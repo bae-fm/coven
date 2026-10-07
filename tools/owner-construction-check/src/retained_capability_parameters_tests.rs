@@ -2,6 +2,36 @@ use super::*;
 use crate::owner_construction::{collect_constructors, infer_owners};
 
 #[test]
+fn callbacks_consume_the_retained_capability_but_factories_supply_one() {
+    const POLICY: Policy = Policy {
+        capability_types: &["DatabaseConnection"],
+        construction_only_capability_types: &["DatabaseConnection"],
+        ..Policy::EMPTY
+    };
+    let files = [RustFile::fixture(
+        "crates/coven-database/src/database.rs",
+        r#"
+        struct DatabaseConnection;
+        struct Database { connection: DatabaseConnection }
+        impl Database {
+            fn consume(&self, run: impl FnOnce(&DatabaseConnection)) {}
+            fn consume_boxed(&self, run: Box<dyn Fn(&DatabaseConnection)>) {}
+            fn consume_pointer(&self, run: fn(&DatabaseConnection)) {}
+            fn supply(&self, build: impl FnOnce() -> DatabaseConnection) {}
+            fn supply_pointer(&self, build: fn() -> DatabaseConnection) {}
+            fn mixed(&self, run: (fn(&DatabaseConnection), DatabaseConnection)) {}
+        }
+        "#,
+    )];
+    let owners = infer_owners(&crate::syntax::collect_structs(&files), &POLICY);
+    let constructors = collect_constructors(&files, &owners);
+    let violations =
+        find_retained_capability_parameter_violations(&files, &owners, &constructors, &POLICY);
+    let methods: BTreeSet<_> = violations.iter().map(|v| v.method.as_str()).collect();
+    assert_eq!(methods, ["supply", "supply_pointer", "mixed"].into());
+}
+
+#[test]
 fn retained_owner_runtime_method_cannot_accept_the_store_directory() {
     const POLICY: Policy = Policy {
         capability_types: &["Database", "StoreDir"],

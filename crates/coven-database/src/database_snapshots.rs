@@ -1,6 +1,6 @@
 //! Snapshot streams and atomic reload through the database owner.
 
-use super::{finish_blocking, Database};
+use super::Database;
 use crate::DbError;
 
 impl Database {
@@ -9,25 +9,20 @@ impl Database {
     pub async fn waiting_snapshot_headers(
         &self,
     ) -> Result<Vec<coven_format::write_stream::WriteHeaderFrame>, DbError> {
-        let database = self.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = database.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let reader = inner.readers.acquire_reader();
-                reader.with_reader(|db| {
-                    db.read_transaction(|| {
-                        let mut headers = Vec::new();
-                        crate::upload::each_plaintext(db, |header, _| {
-                            headers.push(header);
-                            Ok(())
-                        })?;
-                        Ok(headers)
-                    })
+        self.call(move |inner| {
+            let reader = inner.readers.acquire_reader();
+            reader.with_reader(|db| {
+                db.read_transaction(|| {
+                    let mut headers = Vec::new();
+                    crate::upload::each_plaintext(db, |header, _| {
+                        headers.push(header);
+                        Ok(())
+                    })?;
+                    Ok(headers)
                 })
             })
-            .await,
-        )
+        })
+        .await
     }
 
     /// Positions a reload must preserve for the local author's future writes,
@@ -41,10 +36,7 @@ impl Database {
         ),
         DbError,
     > {
-        let database = self.clone();
-        finish_blocking(tokio::task::spawn_blocking(move || {
-            let slot = database.inner.read().expect("database lock poisoned");
-            let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+        self.call(move |inner| {
             let reader = inner.readers.acquire_reader();
             reader.with_reader(|reader| reader.read_transaction(|| {
                 let waiting = reader.query("SELECT device,number FROM _coven_uploads ORDER BY device,number", [], |r| Ok(coven_merge::WriteId {
@@ -61,7 +53,7 @@ impl Database {
                 })?;
                 Ok((coven_format::value::WritePositions(required.into_iter().map(|(device,number)| coven_merge::WriteId { device, number }).collect()), waiting))
             }))
-        }).await)
+        }).await
     }
 
     /// Run the snapshot loader's format, schema and merge checks in a transaction
@@ -74,26 +66,19 @@ impl Database {
         prefix: coven_format::sealed_snapshot::SnapshotObjectPrefix,
         input: R,
     ) -> Result<crate::SnapshotInspection, DbError> {
-        let database = self.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = database.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let writer = inner
-                    .writer
-                    .lock()
-                    .expect("writer connection lock poisoned");
+        self.call(move |inner| {
+            inner.with_writer(|writer| {
                 writer.read_transaction(|| {
-                    crate::snapshot_state::create_tables(&writer)?;
+                    crate::snapshot_state::create_tables(writer)?;
                     let (header, _) = crate::snapshot_load::read(
-                        &writer,
+                        writer,
                         &inner.write_schema,
                         &id,
                         prefix,
                         input,
                     )?;
                     let files =
-                        super::file_retention::snapshot_references(&writer, &inner.write_schema)
+                        super::file_retention::snapshot_references(writer, &inner.write_schema)
                             .map_err(|error| match error {
                                 DbError::DamagedDatabase => crate::snapshot_error::invalid(
                                     "snapshot file location is invalid",
@@ -103,8 +88,8 @@ impl Database {
                     Ok(crate::SnapshotInspection { header, files })
                 })
             })
-            .await,
-        )
+        })
+        .await
     }
 
     /// Stream an audience's plaintext snapshot frames from one committed reader
@@ -122,20 +107,15 @@ impl Database {
         F: FnMut(Vec<u8>) -> Result<(), E> + Send + 'static,
         E: Send + 'static,
     {
-        let database = self.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = database.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let reader = inner.readers.acquire_reader();
-                reader.with_reader(|reader| {
-                    reader.read_transaction(|| {
-                        crate::snapshot_write::write(reader, &inner.write_schema, id, begin, emit)
-                    })
+        self.call(move |inner| {
+            let reader = inner.readers.acquire_reader();
+            reader.with_reader(|reader| {
+                reader.read_transaction(|| {
+                    crate::snapshot_write::write(reader, &inner.write_schema, id, begin, emit)
                 })
             })
-            .await,
-        )
+        })
+        .await
     }
 
     /// Load authenticated snapshots and gap writes supplied by sync. Each stored
@@ -157,49 +137,27 @@ impl Database {
         R: std::io::Read + Send + 'static,
         W: std::io::Read + Send + 'static,
     {
-        let database = self.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = database.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                // Reserve a reader before locking the writer: snapshot consumers
-                // may be waiting for a commit before releasing their readers.
-                let reader = inner.readers.acquire_reader();
-                let writer = inner
-                    .writer
-                    .lock()
-                    .expect("writer connection lock poisoned");
-                let files = crate::file_write::FileWrite::new(
-                    &writer,
-                    &inner.directory,
-                    &inner.write_schema,
-                    inner.device,
-                    &inner.staging,
-                    Vec::new(),
-                );
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    reader.with_reader(|reader| {
-                        reader.read_transaction(|| {
-                            inner.write_schema.prepare(reader)?;
-                            crate::snapshot_load::load(
-                                &writer,
-                                reader,
-                                &inner.write_schema,
-                                reload,
-                                &files,
-                                (inner.device, inner.clock.now()),
-                            )
-                        })
-                    })?;
-                    files.finish(Ok(()))
-                }));
-                drop(writer);
-                match result {
-                    Ok(result) => result,
-                    Err(panic) => std::panic::resume_unwind(panic),
-                }
+        self.call(move |inner| {
+            // Reserve a reader before locking the writer: snapshot consumers
+            // may be waiting for a commit before releasing their readers.
+            let reader = inner.readers.acquire_reader();
+            inner.with_files(Vec::new(), |writer, files| {
+                reader.with_reader(|reader| {
+                    reader.read_transaction(|| {
+                        inner.write_schema.prepare(reader)?;
+                        crate::snapshot_load::load(
+                            writer,
+                            reader,
+                            &inner.write_schema,
+                            reload,
+                            files,
+                            (inner.device, inner.clock.now()),
+                        )
+                    })
+                })?;
+                Ok(())
             })
-            .await,
-        )
+        })
+        .await
     }
 }

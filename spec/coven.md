@@ -227,6 +227,9 @@
     tags   "errands"  delete
   ```
 
+- Database callbacks release their connections before propagating a panic.
+  An uncommitted transaction rolls back, and later calls can reuse the writer
+  and readers.
 - Reads run on several read-only connections at once.
 - Another process, such as a widget, can open the store for reading only
   while the app has it open.

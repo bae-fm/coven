@@ -37,84 +37,84 @@ impl FileStaging {
                 build(&mut batch)?;
                 Ok::<_, E>(batch)
             }));
-            let writer = inner
-                .writer
-                .lock()
-                .expect("writer connection lock poisoned");
-            let built = match built {
-                Ok(built) => built,
-                Err(panic) => {
-                    let active = inner.staging.lock().expect("file staging lock poisoned");
-                    let failures =
-                        crate::file_removals::FileRemovals::new(&writer, &inner.directory, &active)
-                            .remove_unused();
-                    drop(active);
-                    drop(writer);
-                    if !failures.is_empty() {
-                        panic!("file cleanup after batch panic failed: {failures:?}");
-                    }
-                    std::panic::resume_unwind(panic)
-                }
-            };
-            let prepared = built.and_then(|batch| {
-                if batch.files.is_empty() {
-                    return Ok(VecDeque::new());
-                }
-                writer
-                    .transaction(|db| {
-                        let mut identities = BTreeSet::new();
-                        let mut sources = VecDeque::new();
-                        for (namespace, id, source) in batch.files {
-                            if !identities.insert((namespace.clone(), id.clone())) {
-                                return Err(DbError::FileBatchDuplicate { namespace, id });
-                            }
-                            if !inner.write_schema.declarations.iter().any(|d| {
-                                d.files.as_ref().is_some_and(|f| {
-                                    f.namespace == namespace
-                                        && f.provenance == Provenance::AppProvided
-                                })
-                            }) {
-                                return Err(DbError::FileNamespaceNotAppProvided { namespace });
-                            }
-                            let name = FileName::new(inner.ids.new_id().to_string())
-                                .expect("UUID is a portable filename");
-                            let recorded = db.internal_execute(
-                                "INSERT INTO _coven_file_removals(path) SELECT ?1
-                         WHERE NOT EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1)",
-                                [name.as_str()],
-                            )?;
-                            if recorded != 1 {
-                                return Err(DbError::FileNameReused { name });
-                            }
-                            sources.push_back(StagingSource {
-                                namespace,
-                                id,
-                                name,
-                                source,
-                            });
+            inner.with_writer(|writer| {
+                let built = match built {
+                    Ok(built) => built,
+                    Err(panic) => {
+                        let active = inner.staging.lock().expect("file staging lock poisoned");
+                        let failures = crate::file_removals::FileRemovals::new(
+                            writer,
+                            &inner.directory,
+                            &active,
+                        )
+                        .remove_unused();
+                        drop(active);
+                        if !failures.is_empty() {
+                            panic!("file cleanup after batch panic failed: {failures:?}");
                         }
-                        Ok(sources)
-                    })
-                    .map_err(E::from)
-            });
-            let sources = match prepared {
-                Ok(sources) => sources,
-                Err(error) => {
-                    let active = inner.staging.lock().expect("file staging lock poisoned");
-                    return crate::file_removals::FileRemovals::new(
-                        &writer,
-                        &inner.directory,
-                        &active,
-                    )
-                    .finish(Err(error));
-                }
-            };
-            inner
-                .staging
-                .lock()
-                .expect("file staging lock poisoned")
-                .extend(sources.iter().map(|s| s.name.clone()));
-            sources
+                        std::panic::resume_unwind(panic)
+                    }
+                };
+                let prepared = built.and_then(|batch| {
+                    if batch.files.is_empty() {
+                        return Ok(VecDeque::new());
+                    }
+                    writer
+                        .transaction(|db| {
+                            let mut identities = BTreeSet::new();
+                            let mut sources = VecDeque::new();
+                            for (namespace, id, source) in batch.files {
+                                if !identities.insert((namespace.clone(), id.clone())) {
+                                    return Err(DbError::FileBatchDuplicate { namespace, id });
+                                }
+                                if !inner.write_schema.declarations.iter().any(|d| {
+                                    d.files.as_ref().is_some_and(|f| {
+                                        f.namespace == namespace
+                                            && f.provenance == Provenance::AppProvided
+                                    })
+                                }) {
+                                    return Err(DbError::FileNamespaceNotAppProvided { namespace });
+                                }
+                                let name = FileName::new(inner.ids.new_id().to_string())
+                                    .expect("UUID is a portable filename");
+                                let recorded = db.internal_execute(
+                                    "INSERT INTO _coven_file_removals(path) SELECT ?1
+                         WHERE NOT EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1)",
+                                    [name.as_str()],
+                                )?;
+                                if recorded != 1 {
+                                    return Err(DbError::FileNameReused { name });
+                                }
+                                sources.push_back(StagingSource {
+                                    namespace,
+                                    id,
+                                    name,
+                                    source,
+                                });
+                            }
+                            Ok(sources)
+                        })
+                        .map_err(E::from)
+                });
+                let sources = match prepared {
+                    Ok(sources) => sources,
+                    Err(error) => {
+                        let active = inner.staging.lock().expect("file staging lock poisoned");
+                        return crate::file_removals::FileRemovals::new(
+                            writer,
+                            &inner.directory,
+                            &active,
+                        )
+                        .finish(Err(error));
+                    }
+                };
+                inner
+                    .staging
+                    .lock()
+                    .expect("file staging lock poisoned")
+                    .extend(sources.iter().map(|s| s.name.clone()));
+                Ok::<_, E>(sources)
+            })?
         };
         Ok(Self {
             database,
@@ -191,46 +191,29 @@ impl FileStaging {
         let database = self.database.clone();
         let slot = database.inner.read().expect("database lock poisoned");
         let inner = slot.as_ref().expect("staging holds close guard");
-        let writer = inner
-            .writer
-            .lock()
-            .expect("writer connection lock poisoned");
-        let files = crate::file_write::FileWrite::new(
-            &writer,
-            &inner.directory,
-            &inner.write_schema,
-            inner.device,
-            &inner.staging,
-            std::mem::take(&mut self.staged),
-        );
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            prepared?;
-            writer.local_write(
-                &inner.write_schema,
-                inner.device,
-                inner.clock.now(),
-                &files,
-                sql,
-            )
-        }));
-        {
-            let mut active = inner.staging.lock().expect("file staging lock poisoned");
-            for name in &self.names {
-                assert!(active.remove(name), "staging name is registered");
-            }
-        }
-        let _lease = self.lease.take();
-        match result {
-            Ok(result) => files.finish(result),
-            Err(panic) => {
-                let cleanup = files.rollback();
-                drop(writer);
-                if let Err(error) = cleanup {
-                    panic!("file cleanup after app panic failed: {error:?}");
+        inner.with_files(std::mem::take(&mut self.staged), |writer, files| {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                prepared?;
+                writer.local_write(
+                    &inner.write_schema,
+                    inner.device,
+                    inner.clock.now(),
+                    files,
+                    sql,
+                )
+            }));
+            {
+                let mut active = inner.staging.lock().expect("file staging lock poisoned");
+                for name in &self.names {
+                    assert!(active.remove(name), "staging name is registered");
                 }
-                std::panic::resume_unwind(panic)
             }
-        }
+            let _lease = self.lease.take();
+            match result {
+                Ok(result) => result,
+                Err(panic) => std::panic::resume_unwind(panic),
+            }
+        })
     }
 }
 
@@ -245,19 +228,17 @@ impl Drop for FileStaging {
             let _lease = lease;
             let slot = database.inner.read().expect("database lock poisoned");
             let inner = slot.as_ref().expect("staging holds close guard");
-            let writer = inner
-                .writer
-                .lock()
-                .expect("writer connection lock poisoned");
-            let mut active = inner.staging.lock().expect("file staging lock poisoned");
-            for name in names {
-                assert!(active.remove(&name), "staging name is registered");
-            }
-            let result =
-                crate::file_removals::FileRemovals::new(&writer, &inner.directory, &active)
-                    .finish(Ok::<_, DbError>(()));
-            drop(active);
-            drop(writer);
+            let result = inner.with_writer(|writer| {
+                let mut active = inner.staging.lock().expect("file staging lock poisoned");
+                for name in names {
+                    assert!(active.remove(&name), "staging name is registered");
+                }
+                let result =
+                    crate::file_removals::FileRemovals::new(writer, &inner.directory, &active)
+                        .finish(Ok::<_, DbError>(()));
+                drop(active);
+                result
+            });
             if let Err(error) = result {
                 panic!("file cleanup after cancelled staging failed: {error:?}");
             }

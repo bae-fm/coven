@@ -49,30 +49,26 @@ impl FileDatabase {
             + Send
             + 'static,
     ) -> Result<T, DbError> {
-        let owner = self.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || match &owner.access {
-                FileDatabaseAccess::Writer(database) => {
-                    let slot = database.inner.read().expect("database lock poisoned");
-                    let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                    let writer = inner
-                        .writer
-                        .lock()
-                        .expect("writer connection lock poisoned");
-                    run(&writer, &inner.write_schema, &inner.directory, inner.device)
-                }
-                FileDatabaseAccess::Reader(database) => {
-                    let slot = database.inner.read().expect("database lock poisoned");
-                    let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                    let writer = inner
-                        .cache_writer
-                        .lock()
-                        .expect("cache connection lock poisoned");
-                    run(&writer, &inner.schema, &inner.directory, inner.device)
-                }
-            })
-            .await,
-        )
+        match &self.access {
+            FileDatabaseAccess::Writer(database) => {
+                database
+                    .call(move |inner| {
+                        inner.with_writer(|writer| {
+                            run(writer, &inner.write_schema, &inner.directory, inner.device)
+                        })
+                    })
+                    .await
+            }
+            FileDatabaseAccess::Reader(database) => {
+                database
+                    .call(move |inner| {
+                        super::with_connection(&inner.cache_writer, |writer| {
+                            run(writer, &inner.schema, &inner.directory, inner.device)
+                        })
+                    })
+                    .await
+            }
+        }
     }
 
     /// Validate a captured reference against one committed row version.
@@ -256,59 +252,45 @@ impl FileDatabase {
         };
         let database = database.clone();
         let file = file.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = database.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let writer = inner
-                    .writer
-                    .lock()
-                    .expect("writer connection lock poisoned");
-                let files = crate::file_write::FileWrite::new(
-                    &writer,
-                    &inner.directory,
-                    &inner.write_schema,
-                    inner.device,
-                    &inner.staging,
-                    Vec::new(),
-                );
-                let result = writer.local_write(
-                    &inner.write_schema,
-                    inner.device,
-                    inner.clock.now(),
-                    &files,
-                    |sql| {
-                        if !writer.query_row(
-                            "SELECT stored FROM _coven_file_uploads WHERE id=?1",
-                            [id],
-                            |r| r.get::<_, bool>(0),
-                        )? {
-                            return Err(DbError::DamagedDatabase);
-                        }
-                        match file_ref::validate(&writer, &inner.write_schema, &file) {
-                            Err(DbError::FileRefChanged { .. }) => {
-                                writer.internal_execute(
-                                    "UPDATE _coven_file_uploads SET unused=1 WHERE id=?1",
-                                    [id],
-                                )?;
-                                Ok(false)
+        database
+            .call(move |inner| {
+                inner.with_files(Vec::new(), |writer, files| {
+                    writer.local_write(
+                        &inner.write_schema,
+                        inner.device,
+                        inner.clock.now(),
+                        files,
+                        |sql| {
+                            if !writer.query_row(
+                                "SELECT stored FROM _coven_file_uploads WHERE id=?1",
+                                [id],
+                                |r| r.get::<_, bool>(0),
+                            )? {
+                                return Err(DbError::DamagedDatabase);
                             }
-                            Err(error) => Err(error),
-                            Ok(()) => {
-                                sql.mark_uploaded(&file, &location)?;
-                                writer.internal_execute(
-                                    "DELETE FROM _coven_file_uploads WHERE id=?1",
-                                    [id],
-                                )?;
-                                Ok(true)
+                            match file_ref::validate(writer, &inner.write_schema, &file) {
+                                Err(DbError::FileRefChanged { .. }) => {
+                                    writer.internal_execute(
+                                        "UPDATE _coven_file_uploads SET unused=1 WHERE id=?1",
+                                        [id],
+                                    )?;
+                                    Ok(false)
+                                }
+                                Err(error) => Err(error),
+                                Ok(()) => {
+                                    sql.mark_uploaded(&file, &location)?;
+                                    writer.internal_execute(
+                                        "DELETE FROM _coven_file_uploads WHERE id=?1",
+                                        [id],
+                                    )?;
+                                    Ok(true)
+                                }
                             }
-                        }
-                    },
-                );
-                files.finish(result)
+                        },
+                    )
+                })
             })
-            .await,
-        )
+            .await
     }
     /// Reserve a cache file while it is assembled and checked. Only the writer
     /// can pin; read-only file owners continue to cache individual chunks.
@@ -318,15 +300,10 @@ impl FileDatabase {
         };
         let database = database.clone();
         let lease = database.file_tasks.clone().read_owned().await;
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                {
-                    let slot = database.inner.read().expect("database lock poisoned");
-                    let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                    let writer = inner
-                        .writer
-                        .lock()
-                        .expect("writer connection lock poisoned");
+        database
+            .clone()
+            .call(move |inner| {
+                inner.with_writer(|writer| {
                     writer.transaction(|db| {
                         if db.query_row(
                             "SELECT EXISTS(
@@ -348,16 +325,17 @@ impl FileDatabase {
                         .lock()
                         .expect("staging lock poisoned")
                         .insert(name.clone());
-                }
+                    Ok::<_, DbError>(())
+                })?;
                 Ok(CacheReservation {
                     database,
                     name,
                     lease: Some(lease),
                 })
             })
-            .await,
-        )
+            .await
     }
+
     /// Open a database commit observation for application file rows and upload
     /// metadata. Subscribing before reading the work list prevents missed commits.
     pub fn changes(&self) -> DatabaseChanges {
@@ -555,19 +533,17 @@ impl CacheReservation {
                         .read()
                         .expect("database lock poisoned");
                     let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                    let writer = inner
-                        .writer
-                        .lock()
-                        .expect("writer connection lock poisoned");
-                    writer.transaction(|db| {
-                        file_ref::validate(db, &inner.write_schema, &file)?;
-                        cache::publish(db, &inner.directory, &file, &pending.name)
+                    inner.with_writer(|writer| {
+                        writer.transaction(|db| {
+                            file_ref::validate(db, &inner.write_schema, &file)?;
+                            cache::publish(db, &inner.directory, &file, &pending.name)
+                        })?;
+                        let mut active = inner.staging.lock().expect("staging lock poisoned");
+                        active.remove(&pending.name);
+                        pending.lease.take();
+                        crate::file_removals::FileRemovals::new(writer, &inner.directory, &active)
+                            .finish(Ok::<_, DbError>(()))
                     })?;
-                    let mut active = inner.staging.lock().expect("staging lock poisoned");
-                    active.remove(&pending.name);
-                    pending.lease.take();
-                    crate::file_removals::FileRemovals::new(&writer, &inner.directory, &active)
-                        .finish(Ok::<_, DbError>(()))?;
                 }
                 Ok(())
             })
@@ -586,17 +562,15 @@ impl Drop for CacheReservation {
             let _lease = lease;
             let slot = database.inner.read().expect("database lock poisoned");
             let inner = slot.as_ref().expect("reservation holds close guard");
-            let writer = inner
-                .writer
-                .lock()
-                .expect("writer connection lock poisoned");
-            let mut active = inner.staging.lock().expect("staging lock poisoned");
-            active.remove(&name);
-            let result =
-                crate::file_removals::FileRemovals::new(&writer, &inner.directory, &active)
-                    .finish(Ok::<_, DbError>(()));
-            drop(active);
-            drop(writer);
+            let result = inner.with_writer(|writer| {
+                let mut active = inner.staging.lock().expect("staging lock poisoned");
+                active.remove(&name);
+                let result =
+                    crate::file_removals::FileRemovals::new(writer, &inner.directory, &active)
+                        .finish(Ok::<_, DbError>(()));
+                drop(active);
+                result
+            });
             if let Err(error) = result {
                 panic!("reserved file cleanup failed: {error:?}")
             }

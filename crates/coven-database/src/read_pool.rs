@@ -74,24 +74,11 @@ impl ReaderLease<'_> {
     }
 
     pub(super) fn with_reader<R>(&self, read: impl FnOnce(&DatabaseConnection) -> R) -> R {
-        let reader = self.database.readers[self.index]
-            .lock()
-            .expect("read connection lock poisoned");
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read(&reader)));
-        // The read transaction rolls back while unwinding. Release the mutex
-        // before propagating the app panic so the pool can reuse this reader.
-        drop(reader);
-        match result {
-            Ok(result) => result,
-            Err(panic) => std::panic::resume_unwind(panic),
-        }
+        super::with_connection(&self.database.readers[self.index], read)
     }
 
     pub(super) fn schema_version(&self) -> Result<u32, DbError> {
-        self.database.readers[self.index]
-            .lock()
-            .expect("read connection lock poisoned")
-            .schema_version()
+        self.with_reader(DatabaseConnection::schema_version)
     }
 }
 

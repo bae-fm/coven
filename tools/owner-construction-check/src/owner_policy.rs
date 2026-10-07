@@ -586,13 +586,9 @@ const CAPABILITIES: Capabilities = Capabilities {
         name: "runtimes and spawned work",
         homes: &[
             "crates/coven-database/src/database.rs",
-            "crates/coven-database/src/database_operations.rs",
-            "crates/coven-database/src/database_snapshots.rs",
-            "crates/coven-database/src/database_file_retention.rs",
             "crates/coven-sync/src/sync_loop.rs",
             "crates/coven-sync/src/operations.rs",
             "crates/coven-sync/src/restore_codes.rs",
-            "crates/coven-database/src/database_sync.rs",
             "crates/coven-database/src/file_staging.rs",
             "crates/coven-database/src/file_database.rs",
             "crates/coven-sync/src/files.rs",
