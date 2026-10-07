@@ -1,45 +1,55 @@
 #!/bin/bash
-# Every check of §20.4, in order. CI runs this same script on every platform;
-# a branch that passes it here passes there.
+# Every check of §20.4, in order. CI runs the code checks on every platform
+# and the proofs once, on Linux: a proof checks the same everywhere.
 #
-#   scripts/check.sh
+#   scripts/check.sh           everything
+#   scripts/check.sh code      the code checks only
+#   scripts/check.sh proofs    the Lean proofs and their differential tests
 set -euo pipefail
 
-if [ "$#" -ne 0 ]; then
-    echo "usage: scripts/check.sh (takes no arguments)" >&2
-    exit 2
-fi
+case "${1-all}:$#" in
+    all:0 | code:1 | proofs:1) part=${1-all} ;;
+    *)
+        echo "usage: scripts/check.sh [code | proofs]" >&2
+        exit 2
+        ;;
+esac
 
 cd "$(dirname "$0")/.."
 
 step() { echo ""; echo "── $1"; }
 
-# Build the structural checker before the crates whose graph it validates (§20.4).
-step "owner-construction-check: §20.1 dependencies, §20.2 capabilities and owners, §20.3 conventions"
-cargo run --quiet -p owner-construction-check -- .
+code_checks() {
+    # Build the structural checker before the crates whose graph it validates (§20.4).
+    step "owner-construction-check: §20.1 dependencies, §20.2 capabilities and owners, §20.3 conventions"
+    cargo run --quiet -p owner-construction-check -- .
 
-step "cargo fmt --check"
-cargo fmt --all --check
+    step "cargo fmt --check"
+    cargo fmt --all --check
 
-step "cargo clippy --all-targets --all-features"
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+    step "cargo clippy --all-targets --all-features"
+    cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-step "cargo doc (broken links denied)"
-RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D warnings" \
-    cargo doc --workspace --no-deps --all-features
+    step "cargo doc (broken links denied)"
+    RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D warnings" \
+        cargo doc --workspace --no-deps --all-features
 
-# Default targets — every library and binary, no tests — with production
-# features only, so an item only test code or a test-only feature uses shows
-# up as dead. (`--lib` alone would skip the binaries, and fails outright while
-# the workspace holds no library.)
-step "every crate built without test code"
-cargo check --workspace
+    # Default targets — every library and binary, no tests — with production
+    # features only, so an item only test code or a test-only feature uses shows
+    # up as dead. (`--lib` alone would skip the binaries, and fails outright while
+    # the workspace holds no library.)
+    step "every crate built without test code"
+    cargo check --workspace
 
-step "cargo test --all-features"
-cargo test --workspace --all-features
+    step "cargo test --all-features"
+    cargo test --workspace --all-features
 
-step "cargo test --no-default-features"
-cargo test --workspace --no-default-features
+    step "cargo test --no-default-features"
+    cargo test --workspace --no-default-features
+
+    step "release store-log replay cost (2,000 entries)"
+    cargo test -p coven-sync --release replay_cost -- --ignored --nocapture
+}
 
 # A Lean proof, built from scratch: every module is imported by its root, so
 # none can drop out of the build; no `sorry`, and no axiom beyond Lean's own.
@@ -87,26 +97,32 @@ lean_proof() {
 }
 
 # The merge (spec/proofs/merge.md) and the store log
-# (spec/proofs/storelog.md).
-lean_proof "the merge" spec/proofs/merge CovenMerge
-lean_proof "the store log" spec/proofs/storelog CovenStorelog
+# (spec/proofs/storelog.md), each checked against Rust by a differential test.
+proofs() {
+    lean_proof "the merge" spec/proofs/merge CovenMerge
+    lean_proof "the store log" spec/proofs/storelog CovenStorelog
 
-step "Rust / Lean differential merge test"
-runner="$(cd spec/proofs/merge && pwd)/.lake/build/bin/mergeRunner"
-if [ -f "$runner.exe" ]; then
-    runner="$runner.exe"
+    step "Rust / Lean differential merge test"
+    runner="$(cd spec/proofs/merge && pwd)/.lake/build/bin/mergeRunner"
+    if [ -f "$runner.exe" ]; then
+        runner="$runner.exe"
+    fi
+    COVEN_MERGE_LEAN="$runner" cargo test -p coven-merge --all-features lean_differential -- --ignored
+
+    step "Rust / Lean differential store-log test"
+    runner="$(cd spec/proofs/storelog && pwd)/.lake/build/bin/storelogRunner"
+    if [ -f "$runner.exe" ]; then
+        runner="$runner.exe"
+    fi
+    COVEN_STORELOG_LEAN="$runner" cargo test -p coven-sync --all-features lean_differential -- --ignored
+}
+
+if [ "$part" != proofs ]; then
+    code_checks
 fi
-COVEN_MERGE_LEAN="$runner" cargo test -p coven-merge --all-features lean_differential -- --ignored
-
-step "Rust / Lean differential store-log test"
-runner="$(cd spec/proofs/storelog && pwd)/.lake/build/bin/storelogRunner"
-if [ -f "$runner.exe" ]; then
-    runner="$runner.exe"
+if [ "$part" != code ]; then
+    proofs
 fi
-COVEN_STORELOG_LEAN="$runner" cargo test -p coven-sync --all-features lean_differential -- --ignored
-
-step "release store-log replay cost (2,000 entries)"
-cargo test -p coven-sync --release replay_cost -- --ignored --nocapture
 
 echo ""
 echo "✅ all checks passed"

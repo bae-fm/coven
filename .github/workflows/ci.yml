@@ -1,7 +1,7 @@
 name: ci
 
-# One script runs every check of §20.4, and this runs that same script on
-# every platform.
+# One script runs every check of §20.4: its code checks on every platform,
+# and the Lean proofs once, on Linux, since a proof checks the same anywhere.
 # Spec edits alone don't run it, so they never cancel a run checking code.
 on:
   push:
@@ -42,15 +42,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: coven-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'rust-toolchain.toml') }}
-      # elan reads the Lean toolchain from spec/proofs/merge/lean-toolchain the
-      # first time lake runs there; the cache keeps that toolchain. The proof
-      # itself is built from scratch every run (scripts/check.sh).
-      - name: Restore elan and the Lean toolchain
+      - name: scripts/check.sh code
+        run: scripts/check.sh code
+
+  proofs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: coven-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'rust-toolchain.toml') }}
+      # elan reads each proof's lean-toolchain the first time lake runs there;
+      # the cache keeps those toolchains. The proofs themselves are built from
+      # scratch every run (scripts/check.sh).
+      - name: Restore elan and the Lean toolchains
         id: elan-cache
         uses: actions/cache@v5
         with:
           path: ~/.elan
-          key: elan-${{ runner.os }}-${{ hashFiles('spec/proofs/merge/lean-toolchain') }}
+          key: elan-${{ runner.os }}-${{ hashFiles('spec/proofs/*/lean-toolchain') }}
       - name: Install elan
         if: steps.elan-cache.outputs.cache-hit != 'true'
         run: |
@@ -58,11 +68,6 @@ jobs:
           sh elan-init.sh -y --no-modify-path --default-toolchain none
           rm elan-init.sh
       - name: Put elan on the path
-        run: |
-          if [ "$RUNNER_OS" = Windows ]; then
-            echo "$USERPROFILE\\.elan\\bin" >> "$GITHUB_PATH"
-          else
-            echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
-          fi
-      - name: scripts/check.sh
-        run: scripts/check.sh
+        run: echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: scripts/check.sh proofs
+        run: scripts/check.sh proofs

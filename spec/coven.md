@@ -2811,7 +2811,8 @@ Carol's tablet:
 
 ### 20.4 Checks
 
-- One script runs every check, and CI runs that same script on every
+- One script runs every check. CI runs its code checks on every platform,
+  and the Lean proofs once, on Linux, since a proof checks the same on any
   platform:
   - formatting, and clippy with warnings denied;
   - the dependency rules of [§20.1](#201-crates);
@@ -2826,8 +2827,8 @@ Carol's tablet:
   - every crate built without test code, so an item only tests use shows
     up as dead;
   - the tests, with all features and with none;
-  - the Lean proof, built from scratch, with no `sorry` and no axiom
-    beyond Lean's own.
+  - the Lean proofs, built from scratch, with no `sorry` and no axiom
+    beyond Lean's own, and their differential tests against Rust.
 - The checker is the first thing built, before any crate, so every rule
   holds from the first line of code.
 - The pre-commit hook runs the fast ones: formatting, clippy, and the
