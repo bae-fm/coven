@@ -85,6 +85,12 @@ async fn keeping_both_kinds_resumes_after_every_step_and_changes_other_devices()
                 let path = coven_storage::ObjectPath::file(uploaded.device, uploaded.id);
                 assert!(!f.storage.read(&path).await.unwrap().is_empty());
                 peer.close().await;
+                // Keeping bytes must capture fresh chunk hashes for a later upload.
+                f.enqueue(&kept).await;
+                f.drain().await;
+                let reuploaded = f.database.file_ref("files", "one").await.unwrap();
+                assert_eq!(reuploaded.location(), FileLocation::Uploaded);
+                assert_eq!(f.files.read_file(&reuploaded).await.unwrap(), bytes);
                 f.close().await;
             }
         }

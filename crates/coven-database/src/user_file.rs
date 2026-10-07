@@ -1,7 +1,7 @@
 //! Preparing an original does no database work and never changes the file.
 
+use crate::file_hashes::{FileHasher, FileHashes};
 use crate::DbError;
-use coven_crypto::{ContentHash, ContentHasher};
 use coven_foundation::files::{observe_file, ObservationError, ObservedFile};
 use std::{
     path::{Path, PathBuf},
@@ -12,7 +12,7 @@ use std::{
 #[derive(Debug)]
 pub struct PreparedUserFile {
     pub(crate) observed: ObservedFile,
-    pub(crate) hash: ContentHash,
+    pub(crate) hashes: FileHashes,
 }
 
 /// The facts recorded for the user's original, which coven never changes.
@@ -26,13 +26,14 @@ pub struct UserFile {
     pub modified_at: SystemTime,
 }
 
-/// Read a user's original once, hashing in bounded chunks and reporting total
-/// bytes read. Changes during the read or before attachment are refused.
+/// Read a user's original once, recording its whole-file hash and each upload
+/// chunk's hash from the same bytes, and reporting total bytes read. Changes
+/// during the read or before attachment are refused.
 pub async fn prepare_user_file(
     path: &Path,
     progress: impl Fn(u64) + Send + Sync,
 ) -> Result<PreparedUserFile, DbError> {
-    let mut hash = ContentHasher::new();
+    let mut hash = FileHasher::new();
     let mut read = 0;
     let observed = observe_file(path, |bytes| {
         hash.update(bytes);
@@ -42,7 +43,7 @@ pub async fn prepare_user_file(
     .await?;
     Ok(PreparedUserFile {
         observed,
-        hash: hash.finish(),
+        hashes: hash.finish(),
     })
 }
 

@@ -47,7 +47,7 @@ pub enum FileReadError {
         /// Recorded original path.
         path: PathBuf,
     },
-    /// Authentication or the whole-file hash failed.
+    /// Authentication, a chunk hash or the whole-file hash failed.
     #[error("file {id} failed its content check")]
     Integrity {
         /// The row's file id.

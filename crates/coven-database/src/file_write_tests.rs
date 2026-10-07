@@ -220,7 +220,7 @@ async fn a_stream_exceeds_its_memory_budget_and_is_read_once() {
         .read(|sql| Ok(sql.query_row("SELECT hash FROM files", [], |r| r.get::<_, Vec<u8>>(0))?))
         .await
         .unwrap();
-    assert_eq!(hash, prepared.hash.as_bytes());
+    assert_eq!(hash, prepared.hashes.content.as_bytes());
     assert_eq!(local_count(&db, "_coven_device_files"), 1);
     db.close().await.unwrap();
 }

@@ -1,8 +1,8 @@
-//! Resumable publication of fixed disk bytes shared by files and snapshots.
+//! Resumable publication of repeatable bytes shared by files and snapshots.
 
 use coven_storage::{ObjectPath, Storage, StorageError, UploadSession};
 
-/// Fixed byte reads, durable session progress, and a caller's pause state.
+/// Repeatable byte reads, durable session progress, and a caller's pause state.
 pub(crate) trait UploadSource: Send {
     type Error: From<StorageError>;
     fn read(
@@ -41,7 +41,7 @@ pub(crate) async fn upload<S: UploadSource>(
                 }
             } else {
                 // A location move copies published objects, but provider sessions
-                // belong to the old location. Reuse the fixed bytes in a new one.
+                // belong to the old location. Send the same bytes in a new one.
                 match storage.begin_upload(path, total).await {
                     Ok(replacement) => session = replacement,
                     Err(StorageError::AlreadyExists) => return Ok(true),

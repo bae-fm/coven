@@ -16,10 +16,8 @@ pub struct FileRetention {
 }
 
 impl Database {
-    /// Retire an unused publication after storage confirms its deletion. Its
-    /// disk bytes are removed before the queue row: an error leaves that row
-    /// available to retry. A crash after deletion also retries safely because
-    /// unused publications never send their bytes again and deletion is idempotent.
+    /// Retire an unused publication and its chunk hashes after storage confirms
+    /// deletion. Repeating deletion after a lost reply is safe.
     pub async fn retire_unused_file(&self, id: i64) -> Result<(), DbError> {
         let database = self.clone();
         finish_blocking(
@@ -31,23 +29,11 @@ impl Database {
                     .lock()
                     .expect("writer connection lock poisoned");
                 writer.transaction(|db| {
-                    db.for_each(
-                        "SELECT unused,stored,path FROM _coven_file_uploads WHERE id=?1",
-                        [id],
-                        |r| {
-                            if !r.get::<_, bool>(0)? || !r.get::<_, bool>(1)? {
-                                return Err(DbError::DamagedDatabase);
-                            }
-                            let name =
-                                coven_foundation::files::FileName::new(r.get::<_, String>(2)?)
-                                    .map_err(|_| DbError::DamagedDatabase)?;
-                            inner
-                                .directory
-                                .file(coven_foundation::files::FileArea::AppProvided, &name)
-                                .remove()?;
-                            Ok(())
-                        },
+                    let invalid: bool = db.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM _coven_file_uploads WHERE id=?1 AND (unused=0 OR stored=0))",
+                        [id], |r| r.get(0),
                     )?;
+                    if invalid { return Err(DbError::DamagedDatabase); }
                     db.internal_execute("DELETE FROM _coven_file_uploads WHERE id=?1", [id])?;
                     Ok::<_, DbError>(())
                 })

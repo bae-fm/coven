@@ -52,9 +52,11 @@ pub(crate) fn salvage(
                 "_coven_key_uploads",
                 "_coven_access_keys_to_delete",
                 "_coven_file_uploads",
+                "_coven_file_upload_chunks",
                 "_coven_file_removals",
                 "_coven_user_files",
                 "_coven_device_files",
+                "_coven_file_chunks",
             ] {
                 copy_table(source, db, table)?;
             }

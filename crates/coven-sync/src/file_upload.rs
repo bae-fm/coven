@@ -2,16 +2,13 @@
 
 use crate::{
     files::file_error::*,
-    files::{join, Files, FilesInner},
+    files::{Files, FilesInner},
     OperationError,
 };
-use coven_crypto::{ContentHasher, FileKey, SecretBytes};
-use coven_database::{DbError, FileRef, FileUpload};
-use coven_format::file::FileHeader;
-use coven_foundation::{
-    files::{FileArea, FileName, FileReader, ObservationError, StoreReadLock},
-    id_source::FileId,
-};
+use coven_crypto::{FileKey, SecretBytes, FILE_CHUNK_TAG_LEN};
+use coven_database::{DbError, FileRef, FileUpload, LocalFileStream};
+use coven_format::file::FILE_HEADER_LEN;
+use coven_foundation::id_source::FileId;
 use coven_storage::{ObjectPath, UploadSession};
 use futures_util::StreamExt;
 use std::{
@@ -46,14 +43,14 @@ pub struct QueuedUpload {
 pub enum UploadPhase {
     /// Not running, or in backoff.
     Waiting,
-    /// Encrypting to durable local bytes.
+    /// Checking the source before sending any file bytes.
     Preparing {
-        /// Plaintext bytes written.
+        /// Plaintext bytes checked.
         bytes_read: u64,
         /// Whole plaintext size.
         bytes_total: u64,
     },
-    /// Sending the fixed ciphertext.
+    /// Verifying chunks, encrypting them and sending the matching ciphertext.
     Uploading {
         /// Provider-confirmed ciphertext bytes.
         bytes_sent: u64,
@@ -249,11 +246,11 @@ impl FilesInner {
         }
     }
     pub(super) async fn upload(&self, item: &mut FileUpload) -> Result<bool, UploadFailure> {
-        if item.fixed.is_none() {
-            self.prepare(item).await?;
+        if item.identity.is_none() {
+            self.fix_identity(item).await?;
         }
-        let fixed = item.fixed.as_ref().expect("prepared bytes");
-        let (id, key) = decode_identity(fixed.identity.as_bytes()).map_err(FileReadError::from)?;
+        let identity = item.identity.as_ref().expect("recorded identity");
+        let (id, key) = decode_identity(identity.as_bytes()).map_err(FileReadError::from)?;
         let device = upload_device(item)?;
         let path = ObjectPath::file(device, id);
         if !item.stored {
@@ -263,30 +260,36 @@ impl FilesInner {
                 .expect("storage lock poisoned")
                 .clone()
                 .ok_or(FileReadError::NoStorage)?;
-            let file = self.directory.file(FileArea::AppProvided, &fixed.name);
-            let row_id = item.file.id();
-            let directory = self.directory.clone();
-            let read_id = row_id.clone();
-            let reader = Arc::new(
-                join(tokio::task::spawn_blocking(move || {
-                    let lock = directory.lock_read_only()?;
-                    let reader = file.open_reader().map_err(|e| spool_error(e, &read_id))?;
-                    Ok::<_, FileReadError>(SpoolReader {
-                        reader,
-                        _lock: lock,
-                    })
-                }))
-                .await?,
+            self.phase(
+                item.id,
+                UploadPhase::Preparing {
+                    bytes_read: 0,
+                    bytes_total: item.file.plaintext_size(),
+                },
             );
-            let total = FileHeader::new(item.file.plaintext_size())
+            let source = self.database.open_local(&item.file).await?;
+            let total = item
+                .header
                 .encrypted_size()
-                .map_err(|_| FileReadError::Integrity { id: row_id.clone() })?;
-            if reader.size() != total {
-                return Err(FileReadError::Integrity { id: row_id }.into());
-            }
+                .map_err(|_| FileReadError::Integrity { id: item.file.id() })?;
+            self.phase(
+                item.id,
+                UploadPhase::Preparing {
+                    bytes_read: item.file.plaintext_size(),
+                    bytes_total: item.file.plaintext_size(),
+                },
+            );
+            let mut transfer = FileTransfer {
+                owner: self,
+                item,
+                source,
+                key: &key,
+                path: &path,
+                total,
+            };
             // A single request is bounded even for providers accepting GiB bodies.
             if item.session.is_none() && total <= storage.single_request_limit().min(1024 * 1024) {
-                let bytes = reader.read_at(0, total as usize, &row_id).await?;
+                let bytes = transfer.read_encrypted(0, total as usize).await?;
                 self.phase(
                     item.id,
                     UploadPhase::Uploading {
@@ -306,13 +309,7 @@ impl FilesInner {
                     &path,
                     total,
                     session,
-                    &mut FileTransfer {
-                        owner: self,
-                        item,
-                        reader,
-                        row_id,
-                        total,
-                    },
+                    &mut transfer,
                 )
                 .await?;
                 if !uploaded {
@@ -339,72 +336,19 @@ impl FilesInner {
             .remove(&item.id);
         Ok(changed)
     }
-    pub(super) async fn prepare(&self, item: &mut FileUpload) -> Result<(), UploadFailure> {
-        let source = self.database.open_local(&item.file).await?;
+    pub(super) async fn fix_identity(&self, item: &mut FileUpload) -> Result<(), UploadFailure> {
         let id = FileId(self.ids.new_id());
         let key = FileKey::generate()?;
-        let device = upload_device(item)?;
-        let path = ObjectPath::file(device, id);
-        let name = FileName::new(self.ids.new_id().to_string()).expect("UUID file name");
-        let reservation = self.database.reserve_upload_bytes(name.clone()).await?;
-        let file = self.directory.file(FileArea::AppProvided, &name);
-        let directory = self.directory.clone();
-        // Creation retains the reservation until its blocking work finishes,
-        // including when the caller cancels while creation is in progress.
-        let (reservation, writer) = join(tokio::task::spawn_blocking(move || {
-            let writer = (|| -> Result<_, FileReadError> {
-                let lock = directory.lock_read_only()?;
-                Ok(file.create_writer(lock)?)
-            })();
-            (reservation, writer)
-        }))
-        .await;
-        let mut writer = writer?;
-        let header = FileHeader::new(source.plaintext_size());
-        writer.append(&header.encode()).await?;
-        let mut hash = ContentHasher::new();
-        self.phase(
-            item.id,
-            UploadPhase::Preparing {
-                bytes_read: 0,
-                bytes_total: header.size(),
-            },
-        );
-        for index in 0..header.chunk_count() {
-            let chunk = header.chunk(index).expect("header bounds");
-            let offset = index * u64::from(header.chunk_size());
-            let bytes = source
-                .read_at(offset, chunk.plaintext_length as u64)
-                .await?;
-            hash.update(&bytes);
-            let sealed = header
-                .seal_chunk(&key, path.as_str(), index, &bytes)
-                .map_err(|_| FileReadError::Integrity { id: item.file.id() })?;
-            writer.append(&sealed).await?;
-            self.phase(
-                item.id,
-                UploadPhase::Preparing {
-                    bytes_read: offset + bytes.len() as u64,
-                    bytes_total: header.size(),
-                },
-            );
-        }
-        if hash.finish() != item.file.content_hash() {
-            return Err(FileReadError::Integrity { id: item.file.id() }.into());
-        }
-        writer.finish().await?;
         let mut identity = id.to_string().into_bytes();
         identity.extend_from_slice(key.to_secret_bytes().as_bytes());
-        reservation
-            .publish(item.id, SecretBytes::new(identity.clone()))
+        self.database
+            .record_upload_identity(item.id, SecretBytes::new(identity.clone()))
             .await?;
-        item.fixed = Some(coven_database::FixedFileUpload {
-            name,
-            identity: SecretBytes::new(identity),
-        });
+        item.identity = Some(SecretBytes::new(identity));
         Ok(())
     }
 }
+
 enum AttemptOutcome {
     Stored,
     Unchanged,
@@ -444,38 +388,6 @@ pub(crate) fn decode_identity(bytes: &[u8]) -> Result<(FileId, FileKey), DbError
         ),
     ))
 }
-struct SpoolReader {
-    reader: FileReader,
-    // Keep the lock inside the value retained by blocking reads after cancellation.
-    _lock: StoreReadLock,
-}
-impl SpoolReader {
-    fn size(&self) -> u64 {
-        self.reader.size()
-    }
-    async fn read_at(
-        self: &Arc<Self>,
-        offset: u64,
-        length: usize,
-        id: &str,
-    ) -> Result<Vec<u8>, FileReadError> {
-        let reader = self.clone();
-        join(tokio::task::spawn_blocking(move || {
-            reader.reader.read_at(offset, length)
-        }))
-        .await
-        .map_err(|error| spool_error(error, id))
-    }
-}
-
-fn spool_error(error: ObservationError, id: &str) -> FileReadError {
-    match error {
-        ObservationError::File(error) => FileReadError::Disk(error),
-        ObservationError::Missing(_) | ObservationError::Changed(_) => {
-            FileReadError::Integrity { id: id.into() }
-        }
-    }
-}
 fn in_backoff(item: &FileUpload, now: SystemTime) -> bool {
     if item.failure.is_none() {
         return false;
@@ -493,9 +405,56 @@ fn in_backoff(item: &FileUpload, now: SystemTime) -> bool {
 struct FileTransfer<'a> {
     owner: &'a FilesInner,
     item: &'a FileUpload,
-    reader: Arc<SpoolReader>,
-    row_id: String,
+    source: LocalFileStream,
+    key: &'a FileKey,
+    path: &'a ObjectPath,
     total: u64,
+}
+impl FileTransfer<'_> {
+    async fn read_encrypted(&self, offset: u64, length: usize) -> Result<Vec<u8>, UploadFailure> {
+        let header = self.item.header;
+        let end = offset
+            .checked_add(length as u64)
+            .filter(|end| *end <= self.total)
+            .ok_or(DbError::DamagedDatabase)?;
+        let mut bytes = Vec::with_capacity(length);
+        let mut position = offset;
+        if position < FILE_HEADER_LEN as u64 {
+            let next = end.min(FILE_HEADER_LEN as u64);
+            bytes.extend_from_slice(&header.encode()[position as usize..next as usize]);
+            position = next;
+        }
+        while position < end {
+            let index = (position - FILE_HEADER_LEN as u64)
+                / (u64::from(header.chunk_size()) + FILE_CHUNK_TAG_LEN as u64);
+            let chunk = header.chunk(index).map_err(|_| DbError::DamagedDatabase)?;
+            let expected = self
+                .owner
+                .database
+                .upload_chunk_hash(self.item.id, index)
+                .await?;
+            let plain = self
+                .source
+                .read_verified_at(
+                    index * u64::from(header.chunk_size()),
+                    chunk.plaintext_length as u64,
+                    expected,
+                )
+                .await?;
+            // The exact buffer checked above is the only input to encryption.
+            // Re-reading after checking would permit a source change between them.
+            let sealed = header
+                .seal_chunk(self.key, self.path.as_str(), index, &plain)
+                .map_err(|_| FileReadError::Integrity {
+                    id: self.item.file.id(),
+                })?;
+            let start = (position - chunk.offset) as usize;
+            let count = (end - position).min((sealed.len() - start) as u64) as usize;
+            bytes.extend_from_slice(&sealed[start..start + count]);
+            position += count as u64;
+        }
+        Ok(bytes)
+    }
 }
 impl crate::recorded_upload::UploadSource for FileTransfer<'_> {
     type Error = UploadFailure;
@@ -507,7 +466,7 @@ impl crate::recorded_upload::UploadSource for FileTransfer<'_> {
                 bytes_total: self.total,
             },
         );
-        Ok(self.reader.read_at(offset, length, &self.row_id).await?)
+        self.read_encrypted(offset, length).await
     }
     async fn save(&mut self, session: UploadSession) -> Result<(), UploadFailure> {
         self.owner

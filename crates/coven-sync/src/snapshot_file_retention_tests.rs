@@ -132,58 +132,22 @@ async fn file_references_survive_in_waiting_writes_and_kept_snapshots() {
 }
 
 #[tokio::test]
-async fn deleting_an_unused_publication_retires_its_queue_and_disk_bytes() {
-    for fail_cleanup in [false, true] {
-        let f = Fixture::new(
-            Provenance::AppProvided,
-            Uploads::WhenAsked,
-            CacheFill::CacheLazy,
-        )
-        .await;
-        let mut sync = sync(&f).await;
-        let old = f.attach("files", "old", vec![33; CHUNK]).await;
-        f.enqueue(&old).await;
-        let mut upload = f.files.inner.database.uploads().await.unwrap().remove(0);
-        f.files.inner.prepare(&mut upload).await.unwrap();
-        let name = upload.fixed.as_ref().unwrap().name.clone();
-        f.attach("files", "old", vec![34; CHUNK]).await;
-        let guard = f.files.inner.drain.lock().await;
-        f.files.inner.state.lock().unwrap().paused = false;
-        assert!(!f.files.inner.upload(&mut upload).await.unwrap());
-        f.files.inner.state.lock().unwrap().paused = true;
-        drop(guard);
-        assert!(f.files.inner.database.uploads().await.unwrap()[0].unused);
-        if fail_cleanup {
-            let path = f
-                .root
-                .path()
-                .join("stores")
-                .join(f.directory.id().to_string())
-                .join("files")
-                .join(name.as_str());
-            std::fs::remove_file(&path).unwrap();
-            std::fs::create_dir(&path).unwrap();
-            assert!(sync.run_retention().await.is_err());
-            assert!(
-                sync.run_retention().await.is_err(),
-                "retry must still attempt the failed disk deletion"
-            );
-            std::fs::remove_dir(&path).unwrap();
-        }
-        sync.run_retention().await.unwrap();
-        assert!(f
-            .storage
-            .list(&ObjectPrefix::files())
-            .await
-            .unwrap()
-            .is_empty());
-        assert!(f.files.inner.database.uploads().await.unwrap().is_empty());
-        assert!(f
-            .directory
-            .file(coven_foundation::files::FileArea::AppProvided, &name)
-            .read_optional()
-            .unwrap()
-            .is_none());
-        f.close().await;
-    }
+async fn deleting_an_unused_publication_retires_its_queue() {
+    let f = Fixture::new(
+        Provenance::AppProvided,
+        Uploads::WhenAsked,
+        CacheFill::CacheLazy,
+    )
+    .await;
+    let mut sync = sync(&f).await;
+    super::uploads::unused_upload(&f).await;
+    sync.run_retention().await.unwrap();
+    assert!(f
+        .storage
+        .list(&ObjectPrefix::files())
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(f.files.inner.database.uploads().await.unwrap().is_empty());
+    f.close().await;
 }

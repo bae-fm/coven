@@ -220,13 +220,13 @@ object is accepted reclaim's, not a queued operation. The host observes the queu
 through coven's APIs rather than mutating it. Each upload progresses through:
 
 1. **Pending:** the drain derives the locator and protection from the queued row
-   and current upload authority, verifies the source while preparing its spool,
-   and allocates an exact provider object.
-2. **Prepared:** the exact stored reference and spool are recorded. Uploads and
-   retries use that retained object and spool, rather than choosing another
-   destination or rereading changed source bytes.
+   and current upload authority, verifies the source, and allocates an exact
+   provider object.
+2. **Prepared:** the exact stored reference and first-read plaintext chunk hashes
+   are recorded. Uploads and retries read the source, verify each chunk against
+   its hash, and encrypt it with the same key and chunk nonce.
 3. **Created:** provider creation succeeded and that result is recorded. The
-   drain retires the spool, optionally pins the plaintext, and attempts to
+   drain optionally pins the plaintext and attempts to
    finalize the root's transition. A retry resumes these steps without uploading
    again.
 
@@ -244,8 +244,8 @@ being advanced finishes its uploads, the drain stops admitting more work,
 settles its active attempts, and yields for publication.
 
 Before Publishing, cancellation records **Cancelling** on the root's intent;
-it is not a third outbox operation. Cleanup removes each upload's exact object,
-spool, and cached copy before retiring its record. The last record and the
+it is not a third outbox operation. Cleanup removes each upload's exact object
+and cached copy before retiring its record and chunk hashes. The last record and the
 cancellation intent are removed together. A cleanup failure retains the work
 for retry, and the root remains Local. Once the intent is Publishing,
 `cancel_make_remote` refuses the cancellation.
@@ -257,7 +257,7 @@ for retry, and the root remains Local. Once the intent is Publishing,
 <line class="arr" x1="159" y1="59" x2="176" y2="59" marker-end="url(#fa)"/>
 <rect class="chipo" x="180" y="44" width="140" height="30" rx="7"/>
 <text class="lbl s11" x="250" y="63" text-anchor="middle">Pending → Prepared</text>
-<text class="sub" x="250" y="92" text-anchor="middle">verify source · retain spool</text>
+<text class="sub" x="250" y="92" text-anchor="middle">verify source · retain hashes</text>
 <line class="arr" x1="324" y1="59" x2="341" y2="59" marker-end="url(#fa)"/>
 <rect class="chip" x="345" y="44" width="140" height="30" rx="7"/>
 <text class="lbl s11" x="415" y="63" text-anchor="middle">Created</text>
@@ -339,8 +339,8 @@ different owner. Its object exists at the provider but no accepted history names
 it, so reclaim cannot see it — the `make_remote` journal that created it is what
 takes it back out. A cancelled transition, a deleted root, a row edited under the
 transition, and a discarded publication all put that transition into its unwind,
-and the upload drain deletes each created object, its upload spool, and its
-cached copy before removing the journal. `make_local` refuses a root in that
+and the upload drain deletes each created object and its cached copy before
+removing the journal and chunk hashes. `make_local` refuses a root in that
 state outright, so an unaccepted object is never handed to reclaim.
 
 ## Cloud layout
@@ -438,9 +438,13 @@ an earlier reference; the earlier object is retired by
 
 For make-remote, coven reads the source selected by the row's provenance: its own
 local file for a host-provided blob, or the registered external file for a
-user-provided blob. Preparation verifies the queued plaintext size and hash and
-records a durable upload spool. A Prepared retry reads that spool, so later edits
-to the original file cannot change the reserved upload's bytes.
+user-provided blob. The first read records the whole-file hash and a SHA-256
+hash of each plaintext chunk. Every attempt checks the queued size and whole-file
+hash, and a user original's recorded modification time. Each chunk is checked
+against its first-read hash before encryption; a changed chunk stops the upload
+before that chunk is encrypted or sent. A retry must encrypt the same plaintext
+under the same key and chunk nonces. These checks guarantee that without retaining
+an encrypted copy, including when a provider session resumes inside a chunk.
 
 Store writes retain their own publication sources and exact prepared objects.
 They can reuse an accepted object or read its verified plaintext when local bytes
@@ -463,7 +467,7 @@ plaintext in a browsable home). Progress is cumulative within each attempt and
 coalesced at a 300 ms cadence, with the final total forwarded when needed.
 
 `on_blob_uploaded` follows successful provider creation and the durable Created
-record. Spool cleanup, pinning, or transition finalization can still fail after
+record. Pinning or transition finalization can still fail after
 that notification. `on_blob_upload_failed` reports attempt failures; the retained
 journal determines what retry resumes. When the drain running an attempt is
 dropped (a host cancelling its `drain_uploads` future) after the attempt reported

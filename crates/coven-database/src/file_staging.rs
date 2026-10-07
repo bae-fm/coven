@@ -1,8 +1,8 @@
 //! Async sources are consumed without holding SQLite or a blocking worker.
 
 use super::{finish_blocking, Database};
+use crate::file_hashes::FileHasher;
 use crate::{file_write::StagedFile, DbError, FileSource, Provenance, WriteBatch};
-use coven_crypto::ContentHasher;
 use coven_foundation::files::{FileArea, FileName};
 use std::collections::{BTreeSet, VecDeque};
 use tokio::sync::OwnedRwLockReadGuard;
@@ -156,7 +156,7 @@ impl FileStaging {
                 Ok(writer) => writer,
                 Err(error) => return (self, Err(error)),
             };
-            let mut hash = ContentHasher::new();
+            let mut hash = FileHasher::new();
             let mut size = 0;
             let written = |bytes: &[u8]| {
                 hash.update(bytes);
@@ -174,7 +174,7 @@ impl FileStaging {
                 id,
                 name,
                 size,
-                hash: hash.finish(),
+                hashes: hash.finish(),
             });
         }
         (self, Ok(()))

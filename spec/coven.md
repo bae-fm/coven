@@ -275,9 +275,8 @@
     from Gifts before uploading it: the pin's part is sealed with the
     Gifts key she held, and counts like any write made before she read
     her removal ([§14.6](#146-leaving-a-circle)).
-- Every other object a device uploads has its bytes fixed the same way
-  before its first attempt, and kept until it is stored: store log
-  entries, sealed keys, snapshots and files
+- Store log entries, sealed keys and snapshots have their bytes fixed the
+  same way before their first attempt, and kept until stored
   ([§18](#18-operations)).
 - A write record leaves `_coven_uploads` ([§5](#5-local-database)) once its upload succeeds.
 - Each device remembers how far it has applied every device's log, in
@@ -2058,6 +2057,12 @@ Carol's tablet:
     reading any of it.
 - An *app-provided* file is bytes the app hands to coven, which keeps and
   owns them.
+- The first read records both the whole-file content hash and a SHA-256
+  hash of each plaintext chunk at the file's chunk size: when preparing a
+  user-provided original, or staging an app-provided file. Keeping an
+  uploaded file on this device records chunk hashes from the checked
+  plaintext too, so it can later be uploaded again. These hashes stay
+  local; they are not part of the storage format.
 - The app can hand them over as a stream, so a large file never has to fit
   in memory.
 - Every row of a synced table syncs, but each file is in one of two
@@ -2189,14 +2194,31 @@ Carol's tablet:
 ### 16.5 Uploads and deletion
 
 - A file waits in a local upload queue until it is stored.
+- The queue retains its captured size, content hash and chunk hashes, and
+  fixes its independent id and key before the first upload attempt. It
+  keeps no encrypted copy.
+- Every attempt, including retries and resumed provider sessions, checks
+  the source's size and whole-file content hash, and a user-provided
+  original's recorded modification time, before sending file bytes.
+  As it streams, it checks each plaintext chunk against its recorded hash
+  before encrypting or sending that chunk. A missing or changed source
+  fails the upload with the existing file error; a differing chunk is
+  never encrypted or sent.
+  - A retry must encrypt the same plaintext under the same key and chunk
+    nonces ([§11.1](#111-cryptography)). The per-chunk check guarantees
+    this even if the source changes after the whole-file check, without
+    keeping a copy. Size and modification time alone cannot guarantee it.
+  - A provider part may begin or end inside an encrypted chunk. Coven
+    reads and verifies the whole plaintext chunk before encrypting it
+    and selecting the requested bytes.
 - A large file goes up through the provider's resumable or multipart
   upload, in parts.
   - Providers require it above a size, such as Google Drive above 5 MB per
     request.
   - The upload session is recorded, so after a crash the upload continues
     from the last part stored, instead of starting over.
-  - A session the provider has since expired starts over, from the kept
-    bytes.
+  - A session the provider has since expired starts over, reading and
+    verifying the source again with the same id, key and chunk hashes.
   - Any object past the provider's single request limit goes up this way,
     a large write or snapshot included.
 - The write that marks a file uploaded is made only once the file is
@@ -2220,12 +2242,17 @@ Carol's tablet:
 - Coven keeps, in its local tables, what only this device knows about
   files; none of it syncs:
   - `_coven_user_files`: each user-provided file's path, size and
-    modification time, by its row and column;
+    modification time and upload chunk size, by its row and column;
   - `_coven_device_files`: each app-provided file this device keeps, and
-    where in coven's own folder;
+    where in coven's own folder, with its upload chunk size;
+  - `_coven_file_chunks`: plaintext chunk hashes recorded with the local
+    source, retained until it is uploaded or its local file facts go;
   - `_coven_file_uploads`: the upload queue, each file's attempts, last
-    failure category, its fixed encrypted file and independent id and key,
-    and its provider upload session while one is in progress;
+    failure category, captured file reference, chunk size, independent id
+    and key, and its provider upload session while one is in progress;
+    - `_coven_file_upload_chunks` holds its chunk hashes, copied from the
+      local source when queued and deleted with the queue row. Keeping
+      hashes in separate rows avoids a single SQLite value limiting file size.
     - Provider sessions belong to this queue; file upload operations do not
       keep a second recording of the same session.
     - Native error objects are available in the running process. Reopening

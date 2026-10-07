@@ -48,7 +48,7 @@ impl FileDatabase {
                         return Err(DbError::DamagedDatabase);
                     }
                     let name = FileName::new(inner.ids.new_id().to_string()).expect("UUID download name");
-                    if db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1 UNION ALL SELECT 1 FROM _coven_file_uploads WHERE path=?1 UNION ALL SELECT 1 FROM _coven_cache WHERE path=?1 UNION ALL SELECT 1 FROM _coven_file_removals WHERE path=?1)", [name.as_str()], |r| r.get::<_, bool>(0))? {
+                    if db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1 UNION ALL SELECT 1 FROM _coven_cache WHERE path=?1 UNION ALL SELECT 1 FROM _coven_file_removals WHERE path=?1)", [name.as_str()], |r| r.get::<_, bool>(0))? {
                         return Err(DbError::FileNameReused { name });
                     }
                     let operation = crate::operation::insert(db, &operation)?;

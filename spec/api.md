@@ -1108,9 +1108,9 @@ impl SqlContext<'_, '_> {
     pub fn validate_file_ref(&self, reference: &FileRef) -> Result<(), DbError>;
 }
 
-/// Reads a user's file once, before the write, for its size and content.
-/// `progress` receives the bytes read so far. Fails if the file changes
-/// while it is read.
+/// Reads a user's file once, before the write, recording its size, whole-file
+/// hash and plaintext chunk hashes for uploads. `progress` receives the bytes
+/// read so far. Fails if the file changes while it is read.
 pub async fn prepare_user_file(
     path: &Path,
     progress: impl Fn(u64) + Send + Sync,
@@ -2090,6 +2090,11 @@ pub struct BlockedOperation {
   it in the file queue; keeping it on one device records an operation
   ([§18.1](coven.md#181-operations)). Both calls return after recording the work,
   which finishes whenever storage can be reached.
+- Upload attempts read the source again, checking its size and whole-file
+  content hash before transfer, and the first-read hash of each plaintext
+  chunk before encryption. A changed user original reports `UserFileChanged`;
+  a changed app-provided copy reports `Integrity`. Retries retain the same
+  file id, key, chunk size and chunk hashes, without an encrypted local copy.
 
 ```rust
 /// Live upload-queue results, ending when the store closes (E7).
@@ -2170,9 +2175,10 @@ pub struct QueuedUpload {
 pub enum UploadPhase {
     /// Not started, or waiting for its retry delay.
     Waiting,
-    /// Reading and encrypting the file: bytes read of its size.
+    /// Checking the source before transfer: bytes checked of its size.
     Preparing { bytes_read: u64, bytes_total: u64 },
-    /// Sending it: encrypted bytes the provider has received of the total.
+    /// Verifying chunks, encrypting and sending them: encrypted bytes the
+    /// provider has received of the total.
     Uploading { bytes_sent: u64, bytes_total: u64 },
     /// Stored; the write that refers to it can upload (§16.5).
     Stored,
@@ -2362,8 +2368,8 @@ pub enum FileReadError {
     OnOtherDevice { id: String, device: DeviceId },
     /// A user-provided file is gone from its recorded path.
     UserFileMissing { id: String, path: PathBuf },
-    /// A user-provided file's size or modification time no longer matches
-    /// what coven recorded.
+    /// A user-provided file's size, modification time or checked content no
+    /// longer matches what coven recorded.
     UserFileChanged { id: String, path: PathBuf },
     /// A chunk, or a copy on this device, failed its check.
     Integrity { id: String },

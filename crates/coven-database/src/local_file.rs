@@ -83,7 +83,7 @@ struct LocalFileReader {
     // Drop the open file before allowing deletion, even on a cancelled read.
     _lock: StoreReadLock,
     id: String,
-    provenance: Provenance,
+    original: Option<PathBuf>,
 }
 
 impl LocalFileStream {
@@ -98,6 +98,24 @@ impl LocalFileStream {
         crate::database::finish_blocking(
             tokio::task::spawn_blocking(move || file.read_at(offset, len)).await,
         )
+    }
+
+    /// Read a complete plaintext chunk and compare its first-read hash before
+    /// returning any bytes to an encryptor. Metadata checks alone cannot detect
+    /// a same-size overwrite whose modification time was restored.
+    pub async fn read_verified_at(
+        &self,
+        offset: u64,
+        len: u64,
+        expected: coven_crypto::ContentHash,
+    ) -> Result<Vec<u8>, LocalFileError> {
+        let bytes = self.read_at(offset, len).await?;
+        let mut hash = coven_crypto::ContentHasher::new();
+        hash.update(&bytes);
+        if hash.finish() != expected {
+            return Err(changed(&self.file.id, self.file.original.as_ref()));
+        }
+        Ok(bytes)
     }
 }
 
@@ -123,7 +141,7 @@ impl LocalFileReader {
         })?;
         self.reader
             .read_at(offset, length)
-            .map_err(|error| observation(error, &self.id, self.provenance.clone()))
+            .map_err(|error| observation(error, &self.id, self.original.is_some()))
     }
 }
 
@@ -147,56 +165,73 @@ pub(crate) fn open(
     }
     let (_, file) = file_row::declaration(schema, reference.table())?;
     let lock = directory.lock_read_only()?;
-    let reader = match file.provenance {
+    let (reader, original) = match file.provenance {
         Provenance::UserProvided => {
-            let user = crate::user_file::read(db, schema, reference.table(), reference.key())?.ok_or(DbError::DamagedDatabase)?;
-            FileReader::open_original(&user.path, user.size, user.modified_at)
+            let user = crate::user_file::read(db, schema, reference.table(), reference.key())?
+                .ok_or(DbError::DamagedDatabase)?;
+            (
+                FileReader::open_original(&user.path, user.size, user.modified_at),
+                Some(user.path),
+            )
         }
         Provenance::AppProvided => {
             let identity = coven_format::key::encode_key(&[
                 reference.version.id.clone(),
-                coven_format::value::Value::Integer(i64::try_from(reference.version.size).map_err(|_| DbError::DamagedDatabase)?),
+                coven_format::value::Value::Integer(
+                    i64::try_from(reference.version.size).map_err(|_| DbError::DamagedDatabase)?,
+                ),
                 coven_format::value::Value::Blob(reference.version.hash.as_bytes().to_vec()),
-            ]).map_err(DbError::from)?;
+            ])
+            .map_err(DbError::from)?;
             let names = db.query("SELECT path FROM _coven_device_files WHERE table_name=?1 AND key=?2 AND column_name=?3 AND identity=?4", (&reference.row.table, &reference.row.key, &reference.column, identity), |row| row.get::<_, String>(0))?;
             let name = names.into_iter().next().ok_or(DbError::DamagedDatabase)?;
             let name = FileName::new(name).map_err(|_| DbError::DamagedDatabase)?;
-            directory.file(FileArea::AppProvided, &name).open_reader()
+            (
+                directory.file(FileArea::AppProvided, &name).open_reader(),
+                None,
+            )
         }
-    }.map_err(|error| observation(error, &id, file.provenance.clone()))?;
+    };
+    let reader = reader.map_err(|error| observation(error, &id, original.is_some()))?;
     if !reference
         .matches_content(&reader)
-        .map_err(|error| observation(error, &id, file.provenance.clone()))?
+        .map_err(|error| observation(error, &id, original.is_some()))?
     {
-        return Err(LocalFileError::Integrity { id });
+        return Err(changed(&id, original.as_ref()));
     }
     Ok(LocalFileStream {
         file: Arc::new(LocalFileReader {
             reader,
             _lock: lock,
             id,
-            provenance: file.provenance.clone(),
+            original,
         }),
     })
 }
 
-fn observation(error: ObservationError, id: &str, provenance: Provenance) -> LocalFileError {
-    match (error, provenance) {
-        (ObservationError::Missing(path), Provenance::UserProvided) => {
-            LocalFileError::UserFileMissing {
-                id: id.into(),
-                path,
-            }
-        }
-        (ObservationError::Changed(path), Provenance::UserProvided) => {
-            LocalFileError::UserFileChanged {
-                id: id.into(),
-                path,
-            }
-        }
-        (ObservationError::Missing(_) | ObservationError::Changed(_), Provenance::AppProvided) => {
+fn observation(error: ObservationError, id: &str, original: bool) -> LocalFileError {
+    match (error, original) {
+        (ObservationError::Missing(path), true) => LocalFileError::UserFileMissing {
+            id: id.into(),
+            path,
+        },
+        (ObservationError::Changed(path), true) => LocalFileError::UserFileChanged {
+            id: id.into(),
+            path,
+        },
+        (ObservationError::Missing(_) | ObservationError::Changed(_), false) => {
             LocalFileError::Integrity { id: id.into() }
         }
         (ObservationError::File(error), _) => LocalFileError::Disk(error),
+    }
+}
+
+fn changed(id: &str, original: Option<&PathBuf>) -> LocalFileError {
+    match original {
+        Some(path) => LocalFileError::UserFileChanged {
+            id: id.into(),
+            path: path.clone(),
+        },
+        None => LocalFileError::Integrity { id: id.into() },
     }
 }

@@ -33,9 +33,8 @@ impl StoreLogSync {
             if upload.unused {
                 continue;
             }
-            if let Some(fixed) = &upload.fixed {
-                let (id, _) =
-                    crate::files::file_upload::decode_identity(fixed.identity.as_bytes())?;
+            if let Some(identity) = &upload.identity {
+                let (id, _) = crate::files::file_upload::decode_identity(identity.as_bytes())?;
                 let coven_database::FileLocation::OnDevice(device) = upload.file.location() else {
                     return Err(coven_database::DbError::DamagedDatabase.into());
                 };
@@ -128,10 +127,10 @@ impl StoreLogSync {
         let mut paths: BTreeSet<_> = objects.into_iter().map(|object| object.path).collect();
         let mut unused = BTreeMap::new();
         for upload in protected.uploads.into_iter().filter(|upload| upload.unused) {
-            let fixed = upload
-                .fixed
+            let identity = upload
+                .identity
                 .ok_or(coven_database::DbError::DamagedDatabase)?;
-            let (id, _) = crate::files::file_upload::decode_identity(fixed.identity.as_bytes())?;
+            let (id, _) = crate::files::file_upload::decode_identity(identity.as_bytes())?;
             let coven_database::FileLocation::OnDevice(device) = upload.file.location() else {
                 return Err(coven_database::DbError::DamagedDatabase.into());
             };

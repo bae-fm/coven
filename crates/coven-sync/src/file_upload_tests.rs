@@ -2,10 +2,135 @@ use super::{Fixture, CHUNK};
 use crate::files::file_error::*;
 use crate::files::file_upload::*;
 use coven_database::{CacheFill, FileLocation, Provenance, Uploads};
-use coven_foundation::files::FileArea;
 use coven_storage::{test_utils::Faults, Storage};
 use coven_storage::{ObjectPath, UploadSession};
 use std::time::Duration;
+
+#[tokio::test]
+async fn same_size_edits_with_restored_mtime_send_no_changed_chunks() {
+    for provenance in [Provenance::UserProvided, Provenance::AppProvided] {
+        // A resumed part begins inside chunk zero. Even a change in the part
+        // already sent must prevent re-encrypting that chunk with its old nonce.
+        for resume in [None, Some(false), Some(true)] {
+            let mut f =
+                Fixture::new(provenance.clone(), Uploads::WhenAsked, CacheFill::CacheLazy).await;
+            let bytes = vec![41; CHUNK * 2];
+            let file = match provenance {
+                Provenance::UserProvided => f.original("changed-during-upload", &bytes).await,
+                Provenance::AppProvided => {
+                    f.attach("files", "changed-during-upload", bytes.clone())
+                        .await
+                }
+            };
+            let owned = f
+                .root
+                .path()
+                .join("stores")
+                .join(f.directory.id().to_string())
+                .join("files");
+            let paths = std::fs::read_dir(&owned)
+                .unwrap()
+                .map(|p| p.unwrap().path())
+                .collect::<Vec<_>>();
+            let path = match provenance {
+                Provenance::UserProvided => {
+                    assert!(paths.is_empty());
+                    f.root.path().join("changed-during-upload")
+                }
+                Provenance::AppProvided => {
+                    assert_eq!(paths.len(), 1);
+                    paths[0].clone()
+                }
+            };
+            f.enqueue(&file).await;
+            if resume.is_some() {
+                f.storage
+                    .set_faults(Faults {
+                        lose_part_reply: true,
+                        ..Faults::none()
+                    })
+                    .await;
+                let guard = f.files.inner.drain.lock().await;
+                f.files.inner.state.lock().unwrap().paused = false;
+                let mut item = f.files.inner.database.uploads().await.unwrap().remove(0);
+                assert!(matches!(
+                    f.files.inner.upload(&mut item).await,
+                    Err(UploadFailure::Storage(_))
+                ));
+                f.files.inner.state.lock().unwrap().paused = true;
+                drop(guard);
+                let item = f.files.inner.database.uploads().await.unwrap().remove(0);
+                let mut session =
+                    UploadSession::decode(item.session.as_ref().unwrap().as_bytes()).unwrap();
+                f.storage.resume_upload(&mut session).await.unwrap();
+                assert_eq!(session.confirmed_bytes(), CHUNK as u64);
+                f.reopen().await;
+            }
+            let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+            f.storage
+                .set_faults(Faults {
+                    delay: Duration::from_millis(100),
+                    expire_uploads: resume == Some(true),
+                    ..Faults::none()
+                })
+                .await;
+            let before = f.storage.transferred().await.0;
+            let before_requests = f.storage.request_count();
+            let guard = f.files.inner.drain.lock().await;
+            f.files.inner.state.lock().unwrap().paused = false;
+            let mut item = f.files.inner.database.uploads().await.unwrap().remove(0);
+            let mut requests = f.storage.subscribe_requests();
+            let mut upload = Box::pin(f.files.inner.upload(&mut item));
+            tokio::select! {
+                result = &mut upload => panic!("upload ended before its first request: {result:?}"),
+                result = tokio::time::timeout(Duration::from_secs(10), requests.changed()) => result.unwrap().unwrap(),
+            }
+            let mut changed = bytes.clone();
+            changed[0] = 42;
+            std::fs::write(&path, changed).unwrap();
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(modified))
+                .unwrap();
+            let result = upload.await;
+            f.files.inner.state.lock().unwrap().paused = true;
+            drop(guard);
+            match provenance {
+                Provenance::UserProvided => assert!(
+                    matches!(
+                        result,
+                        Err(UploadFailure::File(FileReadError::UserFileChanged { .. }))
+                    ),
+                    "{result:?}"
+                ),
+                Provenance::AppProvided => assert!(
+                    matches!(
+                        result,
+                        Err(UploadFailure::File(FileReadError::Integrity { .. }))
+                    ),
+                    "{result:?}"
+                ),
+            }
+            assert_eq!(f.storage.transferred().await.0, before);
+            // Only begin/resume (and an expired session's restart) contacted storage.
+            assert_eq!(
+                f.storage.request_count() - before_requests,
+                if resume == Some(true) { 2 } else { 1 }
+            );
+            assert_eq!(std::fs::read_dir(&owned).unwrap().count(), paths.len());
+            assert_eq!(
+                f.database
+                    .file_ref("files", "changed-during-upload")
+                    .await
+                    .unwrap(),
+                file
+            );
+            f.close().await;
+        }
+    }
+}
 
 #[tokio::test]
 async fn an_upload_reader_retains_the_store_after_its_database_closes() {
@@ -18,7 +143,7 @@ async fn an_upload_reader_retains_the_store_after_its_database_closes() {
     let file = f.attach("files", "held", vec![45; CHUNK * 2]).await;
     f.enqueue(&file).await;
     let mut item = f.files.inner.database.uploads().await.unwrap().remove(0);
-    f.files.inner.prepare(&mut item).await.unwrap();
+    f.files.inner.fix_identity(&mut item).await.unwrap();
     f.storage
         .set_faults(Faults {
             delay: Duration::from_secs(30),
@@ -128,7 +253,7 @@ async fn bounded_uploads_from_originals_and_owned_copies_publish_after_storage()
 }
 
 #[tokio::test]
-async fn fixing_bytes_survives_reopen_and_original_changes() {
+async fn a_reopened_upload_refuses_a_changed_original_without_a_copy() {
     let mut f = Fixture::new(
         Provenance::UserProvided,
         Uploads::WhenAsked,
@@ -139,28 +264,42 @@ async fn fixing_bytes_survives_reopen_and_original_changes() {
     let file = f.original("recording", &bytes).await;
     f.enqueue(&file).await;
     let mut item = f.files.inner.database.uploads().await.unwrap().remove(0);
-    f.files.inner.prepare(&mut item).await.unwrap();
-    let fixed = item.fixed.as_ref().unwrap();
-    let encrypted = f
-        .directory
-        .file(FileArea::AppProvided, &fixed.name)
-        .read_optional()
-        .unwrap()
-        .unwrap();
-    let (id, _) = decode_identity(fixed.identity.as_bytes()).unwrap();
+    f.files.inner.fix_identity(&mut item).await.unwrap();
+    let identity = item.identity.as_ref().unwrap().as_bytes().to_vec();
     assert_eq!(f.storage.request_count(), 0);
-    std::fs::write(f.root.path().join("recording"), b"a changed original").unwrap();
-    f.reopen().await;
-    f.drain().await;
     assert_eq!(
-        f.storage
-            .read(&ObjectPath::file(upload_device(&item).unwrap(), id))
-            .await
-            .unwrap(),
-        encrypted
+        std::fs::read_dir(
+            f.root
+                .path()
+                .join("stores")
+                .join(f.directory.id().to_string())
+                .join("files")
+        )
+        .unwrap()
+        .count(),
+        0
     );
-    let uploaded = f.database.file_ref("files", "recording").await.unwrap();
-    assert_eq!(f.files.read_file(&uploaded).await.unwrap(), bytes);
+    let path = f.root.path().join("recording");
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    std::fs::write(&path, vec![94; bytes.len()]).unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    f.reopen().await;
+    let mut item = f.files.inner.database.uploads().await.unwrap().remove(0);
+    assert_eq!(item.identity.as_ref().unwrap().as_bytes(), identity);
+    assert!(matches!(
+        f.files.inner.upload(&mut item).await,
+        Err(UploadFailure::File(FileReadError::UserFileChanged { .. }))
+    ));
+    assert_eq!(f.storage.request_count(), 0);
+    assert_eq!(
+        f.database.file_ref("files", "recording").await.unwrap(),
+        file
+    );
     f.close().await;
 }
 
@@ -196,14 +335,9 @@ async fn recorded_sessions_continue_or_restart_with_the_same_encrypted_bytes() {
         let item = f.files.inner.database.uploads().await.unwrap().remove(0);
         let session = UploadSession::decode(item.session.as_ref().unwrap().as_bytes()).unwrap();
         assert_eq!(session.confirmed_bytes(), 0);
-        let fixed = item.fixed.as_ref().unwrap();
-        let encrypted = f
-            .directory
-            .file(FileArea::AppProvided, &fixed.name)
-            .read_optional()
-            .unwrap()
-            .unwrap();
-        let (id, _) = decode_identity(fixed.identity.as_bytes()).unwrap();
+        let identity = item.identity.as_ref().unwrap().as_bytes().to_vec();
+        let (id, key) = decode_identity(&identity).unwrap();
+        let expected_size = item.header.encrypted_size().unwrap();
         f.reopen().await;
         f.storage
             .set_faults(Faults {
@@ -216,14 +350,24 @@ async fn recorded_sessions_continue_or_restart_with_the_same_encrypted_bytes() {
         let after = f.storage.transferred().await.0;
         assert_eq!(
             after - before,
-            encrypted.len() as u64 - if expire { 0 } else { CHUNK as u64 }
+            expected_size - if expire { 0 } else { CHUNK as u64 }
         );
+        let uploaded = f.database.file_ref("files", "recording").await.unwrap();
+        let reference = uploaded.uploaded().unwrap().unwrap();
+        assert_eq!(reference.id, id);
         assert_eq!(
-            f.storage
-                .read(&ObjectPath::file(upload_device(&item).unwrap(), id))
-                .await
-                .unwrap(),
-            encrypted
+            reference.key.to_secret_bytes().as_bytes(),
+            key.to_secret_bytes().as_bytes()
+        );
+        let encrypted = f
+            .storage
+            .read(&ObjectPath::file(upload_device(&item).unwrap(), id))
+            .await
+            .unwrap();
+        assert_eq!(encrypted.len() as u64, expected_size);
+        assert_eq!(
+            f.files.read_file(&uploaded).await.unwrap(),
+            vec![94; CHUNK * 5 + 18]
         );
         f.close().await;
     }
@@ -275,6 +419,35 @@ async fn lost_completion_reply_resumes_the_published_object() {
     f.close().await;
 }
 
+pub(super) async fn unused_upload(f: &Fixture) {
+    let old = f.attach("files", "old", vec![33; 19]).await;
+    f.enqueue(&old).await;
+    let (started, receiving) = tokio::sync::oneshot::channel();
+    let (release, resume) = tokio::sync::oneshot::channel();
+    f.storage
+        .hold_next_creation(coven_storage::ObjectPrefix::files(), started, resume)
+        .await;
+    let guard = f.files.inner.drain.lock().await;
+    f.files.inner.state.lock().unwrap().paused = false;
+    let mut item = f.files.inner.database.uploads().await.unwrap().remove(0);
+    let mut uploading = Box::pin(f.files.inner.upload(&mut item));
+    tokio::select! {
+        result = &mut uploading => panic!("upload ended before publication: {result:?}"),
+        result = receiving => result.unwrap(),
+    }
+    let new = f.attach("files", "old", vec![34; 19]).await;
+    let writes = f.database.test_queued_writes().await.unwrap().len();
+    release.send(()).unwrap();
+    assert!(!uploading.await.unwrap());
+    f.files.inner.state.lock().unwrap().paused = true;
+    drop(guard);
+    assert_eq!(f.database.file_ref("files", "old").await.unwrap(), new);
+    assert_eq!(f.database.test_queued_writes().await.unwrap().len(), writes);
+    let queue = f.files.inner.database.uploads().await.unwrap();
+    assert_eq!(queue.len(), 1);
+    assert!(queue[0].stored && queue[0].unused);
+}
+
 #[tokio::test]
 async fn replaced_rows_leave_a_stored_unused_copy_and_no_uploaded_write() {
     let f = Fixture::new(
@@ -283,22 +456,7 @@ async fn replaced_rows_leave_a_stored_unused_copy_and_no_uploaded_write() {
         CacheFill::CacheLazy,
     )
     .await;
-    let old = f.attach("files", "one", vec![11; CHUNK * 2]).await;
-    f.enqueue(&old).await;
-    let mut item = f.files.inner.database.uploads().await.unwrap().remove(0);
-    f.files.inner.prepare(&mut item).await.unwrap();
-    let new = f.attach("files", "one", vec![12; CHUNK * 2]).await;
-    let writes = f.database.test_queued_writes().await.unwrap().len();
-    let guard = f.files.inner.drain.lock().await;
-    f.files.inner.state.lock().unwrap().paused = false;
-    assert!(!f.files.inner.upload(&mut item).await.unwrap());
-    f.files.inner.state.lock().unwrap().paused = true;
-    drop(guard);
-    assert_eq!(f.database.file_ref("files", "one").await.unwrap(), new);
-    assert_eq!(f.database.test_queued_writes().await.unwrap().len(), writes);
-    let queue = f.files.inner.database.uploads().await.unwrap();
-    assert_eq!(queue.len(), 1);
-    assert!(queue[0].stored && queue[0].unused);
+    unused_upload(&f).await;
     assert_eq!(
         f.storage
             .list(&coven_storage::ObjectPrefix::files())
@@ -359,7 +517,7 @@ async fn when_attached_starts_after_commit_and_checks_changed_originals() {
     std::fs::write(f.root.path().join("changed"), b"replacement").unwrap();
     let mut item = f.files.inner.database.uploads().await.unwrap().remove(0);
     assert!(matches!(
-        f.files.inner.prepare(&mut item).await,
+        f.files.inner.upload(&mut item).await,
         Err(UploadFailure::File(FileReadError::UserFileChanged { .. }))
     ));
     assert_eq!(f.storage.request_count(), 0);

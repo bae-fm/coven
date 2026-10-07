@@ -18,6 +18,7 @@ mod download_stream;
 mod error;
 mod excluded_write;
 mod file_authorization;
+mod file_hashes;
 mod file_location;
 mod file_queue;
 mod file_ref;
@@ -83,7 +84,7 @@ mod write_schema;
 
 pub use coven_format::value::EntryId;
 pub use coven_merge::WriteId;
-pub use database::file_database::{CacheReservation, FileDatabase, FileReservation};
+pub use database::file_database::{CacheReservation, FileDatabase};
 pub use database::file_retention::FileRetention;
 pub use database::{Database, DatabaseBuilder, DatabaseReadHandle};
 pub use declaration::{CacheFill, FileDecl, Provenance, RowIdentity, SyncedTable, Uploads};
@@ -93,7 +94,7 @@ pub use error::{
     CovenError, CovenMigrationError, CovenResult, DbError, MigrationError, SchemaError,
 };
 pub use file_location::FileLocation;
-pub use file_queue::{FileUpload, FixedFileUpload};
+pub use file_queue::FileUpload;
 pub use file_ref::{FileRef, LocalFileError, LocalFileStream};
 pub use live_query::{
     LiveQuery, LiveQueryCause, LiveQueryClosed, LiveQueryRequests, LiveQueryRevision,

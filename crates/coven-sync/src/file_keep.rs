@@ -172,23 +172,9 @@ impl Files {
             }
             1 => {
                 let prepared = match &location {
-                    DownloadLocation::AppProvided(_) => {
-                        let directory = self.inner.directory.clone();
-                        let location = location.clone();
-                        let file = file.clone();
-                        join(tokio::task::spawn_blocking(move || {
-                            let _lease = lease;
-                            let download =
-                                directory.download(&location).map_err(FileReadError::from)?;
-                            let reader = download.open_reader().map_err(DbError::from)?;
-                            if !file.matches_content(&reader).map_err(DbError::from)? {
-                                return Err(FileReadError::Integrity { id: file.id() }.into());
-                            }
-                            Ok::<_, SyncError>(())
-                        }))
-                        .await?;
-                        None
-                    }
+                    // The database checks the owned download and records its
+                    // upload chunk hashes when attaching it in the same write.
+                    DownloadLocation::AppProvided(_) => None,
                     DownloadLocation::UserProvided { path, .. } => {
                         let prepared = coven_database::prepare_user_file(path, |_| {}).await?;
                         Some(prepared)

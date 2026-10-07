@@ -8,7 +8,7 @@ use crate::{
 };
 use coven_crypto::{SecretBytes, SecretText};
 use coven_foundation::{
-    files::{FileArea, FileName, StoreDir},
+    files::{FileName, StoreDir},
     id_source::DeviceId,
 };
 use std::time::SystemTime;
@@ -153,7 +153,7 @@ impl FileDatabase {
                     match file.location() {
                         crate::FileLocation::Uploaded => {}
                         crate::FileLocation::OnDevice(found) if found == device => {
-                            file_queue::enqueue(db, &file, now)?
+                            file_queue::enqueue(db, schema, &file, now)?
                         }
                         crate::FileLocation::OnDevice(_) => {
                             return Err(DbError::FileBytesRequired {
@@ -198,13 +198,60 @@ impl FileDatabase {
         })
         .await
     }
+    /// Persist the independent identity before the first provider attempt.
+    /// Identity replacement is refused so retries cannot change a published path or key.
+    pub async fn record_upload_identity(
+        &self,
+        id: i64,
+        identity: SecretBytes,
+    ) -> Result<(), DbError> {
+        self.require_writer()?;
+        self.run(move |db, _, _, _| {
+            db.transaction(|db| {
+                changed(db.internal_execute(
+                    "UPDATE _coven_file_uploads SET identity=?2 WHERE id=?1 AND identity IS NULL",
+                    (id, identity.as_bytes()),
+                )?)
+            })
+        })
+        .await
+    }
+
+    /// Read the first-read plaintext hash of one queued chunk. The queue owns
+    /// these records independently of later changes to the source row.
+    pub async fn upload_chunk_hash(
+        &self,
+        id: i64,
+        index: u64,
+    ) -> Result<coven_crypto::ContentHash, DbError> {
+        self.run(move |db, _, _, _| {
+            let index = i64::try_from(index).map_err(|_| DbError::DamagedDatabase)?;
+            let hash = db
+                .query_row(
+                    "SELECT hash FROM _coven_file_upload_chunks WHERE upload=?1 AND chunk=?2",
+                    (id, index),
+                    |r| r.get::<_, Vec<u8>>(0),
+                )
+                .map_err(|error| match error {
+                    DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
+                        DbError::DamagedDatabase
+                    }
+                    error => error,
+                })?;
+            Ok(coven_crypto::ContentHash::from_bytes(
+                hash.try_into().map_err(|_| DbError::DamagedDatabase)?,
+            ))
+        })
+        .await
+    }
+
     /// Persist the provider recording after each confirmed change in progress.
     pub async fn record_session(&self, id: i64, session: SecretBytes) -> Result<(), DbError> {
         self.require_writer()?;
         self.run(move |db, _, _, _| {
             db.transaction(|db| {
                 changed(db.internal_execute(
-                    "UPDATE _coven_file_uploads SET session=?2 WHERE id=?1 AND fixed IS NOT NULL",
+                    "UPDATE _coven_file_uploads SET session=?2 WHERE id=?1 AND identity IS NOT NULL",
                     (id, session.as_bytes()),
                 )?)
             })
@@ -217,7 +264,7 @@ impl FileDatabase {
         self.run(move |db, _, _, _| {
             db.transaction(|db| {
                 changed(db.internal_execute(
-                    "UPDATE _coven_file_uploads SET stored=1,session=NULL WHERE id=?1 AND fixed IS NOT NULL",
+                    "UPDATE _coven_file_uploads SET stored=1,session=NULL WHERE id=?1 AND identity IS NOT NULL",
                     [id],
                 )?)
             })
@@ -278,11 +325,6 @@ impl FileDatabase {
                             Ok(()) => {
                                 sql.mark_uploaded(&file, &location)?;
                                 writer.internal_execute(
-                                    "INSERT INTO _coven_file_removals(path)
-                                     SELECT path FROM _coven_file_uploads WHERE id=?1",
-                                    [id],
-                                )?;
-                                writer.internal_execute(
                                     "DELETE FROM _coven_file_uploads WHERE id=?1",
                                     [id],
                                 )?;
@@ -296,21 +338,9 @@ impl FileDatabase {
             .await,
         )
     }
-    /// Register a spool name before bytes exist. Cancellation retains the lease
-    /// until the partial bytes and pending record have been removed.
-    pub async fn reserve_upload_bytes(&self, name: FileName) -> Result<FileReservation, DbError> {
-        Ok(FileReservation {
-            pending: self.reserve(name, FileArea::AppProvided).await?,
-        })
-    }
     /// Reserve a cache file while it is assembled and checked. Only the writer
     /// can pin; read-only file owners continue to cache individual chunks.
     pub async fn reserve_cache_file(&self, name: FileName) -> Result<CacheReservation, DbError> {
-        Ok(CacheReservation {
-            pending: self.reserve(name, FileArea::Cache).await?,
-        })
-    }
-    async fn reserve(&self, name: FileName, area: FileArea) -> Result<PendingFile, DbError> {
         let FileDatabaseAccess::Writer(database) = &self.access else {
             return Err(read_only());
         };
@@ -329,20 +359,15 @@ impl FileDatabase {
                         if db.query_row(
                             "SELECT EXISTS(
                                 SELECT 1 FROM _coven_device_files WHERE path=?1 UNION ALL
-                                SELECT 1 FROM _coven_file_uploads WHERE path=?1 UNION ALL
                                 SELECT 1 FROM _coven_cache WHERE path=?1)",
                             [name.as_str()],
                             |r| r.get::<_, bool>(0),
                         )? {
                             return Err(DbError::FileNameReused { name: name.clone() });
                         }
-                        let area = match area {
-                            FileArea::AppProvided => "files",
-                            FileArea::Cache => "cache",
-                        };
                         db.internal_execute(
                             "INSERT INTO _coven_file_removals(area,path) VALUES(?1,?2)",
-                            (area, name.as_str()),
+                            ("cache", name.as_str()),
                         )?;
                         Ok(())
                     })?;
@@ -352,7 +377,7 @@ impl FileDatabase {
                         .expect("staging lock poisoned")
                         .insert(name.clone());
                 }
-                Ok(PendingFile {
+                Ok(CacheReservation {
                     database,
                     name,
                     lease: Some(lease),
@@ -537,66 +562,17 @@ impl FileDatabase {
     }
 }
 
-/// Bytes reserved for one fixed encrypted upload.
-pub struct FileReservation {
-    pending: PendingFile,
-}
 /// Bytes reserved for a verified whole-file cache pin.
 pub struct CacheReservation {
-    pending: PendingFile,
-}
-struct PendingFile {
     database: Database,
     name: FileName,
     lease: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
-}
-impl FileReservation {
-    /// Commit the fixed identity only after the caller has synced the named bytes.
-    pub async fn publish(self, id: i64, identity: SecretBytes) -> Result<(), DbError> {
-        let mut pending = self.pending;
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                {
-                    let slot = pending
-                        .database
-                        .inner
-                        .read()
-                        .expect("database lock poisoned");
-                    let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                    let writer = inner
-                        .writer
-                        .lock()
-                        .expect("writer connection lock poisoned");
-                    writer.transaction(|db| {
-                        changed(db.internal_execute(
-                            "UPDATE _coven_file_uploads SET path=?2,fixed=?3
-                             WHERE id=?1 AND fixed IS NULL",
-                            (id, pending.name.as_str(), identity.as_bytes()),
-                        )?)?;
-                        db.internal_execute(
-                            "DELETE FROM _coven_file_removals WHERE path=?1 AND area='files'",
-                            [pending.name.as_str()],
-                        )?;
-                        Ok(())
-                    })?;
-                    inner
-                        .staging
-                        .lock()
-                        .expect("staging lock poisoned")
-                        .remove(&pending.name);
-                }
-                pending.lease.take();
-                Ok(())
-            })
-            .await,
-        )
-    }
 }
 impl CacheReservation {
     /// Atomically publish a fully synced and content-checked whole file as pinned.
     /// Any older chunk files become recorded removals in the same transaction.
     pub async fn publish(self, file: &FileRef) -> Result<(), DbError> {
-        let mut pending = self.pending;
+        let mut pending = self;
         let file = file.clone();
         finish_blocking(
             tokio::task::spawn_blocking(move || {
@@ -627,7 +603,7 @@ impl CacheReservation {
         )
     }
 }
-impl Drop for PendingFile {
+impl Drop for CacheReservation {
     fn drop(&mut self) {
         let Some(lease) = self.lease.take() else {
             return;

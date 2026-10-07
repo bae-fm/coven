@@ -24,7 +24,7 @@ pub(crate) struct StagedFile {
     pub(crate) id: String,
     pub(crate) name: FileName,
     pub(crate) size: u64,
-    pub(crate) hash: ContentHash,
+    pub(crate) hashes: crate::file_hashes::FileHashes,
 }
 
 #[cfg(test)]
@@ -135,7 +135,7 @@ impl<'a> FileWrite<'a> {
                         db,
                         self.schema,
                         &key,
-                        Some((staged.hash, staged.size)),
+                        Some((staged.hashes.content, staged.size)),
                         self.device,
                     )?;
                     let Some(attached_values) = crate::write_rows::read_values(db, table, &key.1)?
@@ -147,22 +147,31 @@ impl<'a> FileWrite<'a> {
                     };
                     db.internal_execute(
                         "INSERT INTO _coven_device_files
-                             (table_name,key,column_name,identity,path)
-                         VALUES(?1,?2,?3,?4,?5)",
+                             (table_name,key,column_name,identity,path,chunk_size)
+                         VALUES(?1,?2,?3,?4,?5,?6)",
                         (
                             &key.0,
                             &key.1,
                             &file.id,
                             file_row::identity(file, &attached_values)?,
                             staged.name.as_str(),
+                            coven_format::file::DEFAULT_CHUNK_SIZE,
                         ),
+                    )?;
+                    staged.hashes.record(
+                        db,
+                        &key,
+                        &file.id,
+                        &file_row::identity(file, &attached_values)?
+                            .ok_or(DbError::DamagedDatabase)?,
+                        staged.size,
                     )?;
                     self.attached.borrow_mut().insert(
                         key,
                         AttachedFile {
                             id: values[&file.id].clone(),
                             size: staged.size,
-                            hash: staged.hash,
+                            hash: staged.hashes.content,
                         },
                     );
                     attached = true;
@@ -198,21 +207,21 @@ impl<'a> FileWrite<'a> {
             db,
             self.schema,
             &key,
-            Some((prepared.hash, prepared.observed.size())),
+            Some((prepared.hashes.content, prepared.observed.size())),
             self.device,
         )?;
         let mut attached_values = values.clone();
         attached_values.insert(
             file.hash.clone(),
-            Value::Blob(prepared.hash.as_bytes().to_vec()),
+            Value::Blob(prepared.hashes.content.as_bytes().to_vec()),
         );
         db.internal_execute(
             "INSERT INTO _coven_user_files
-                 (table_name,key,column_name,identity,path,size,modified_at)
-             VALUES(?1,?2,?3,?4,?5,?6,?7)
+                 (table_name,key,column_name,identity,path,size,modified_at,chunk_size)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
              ON CONFLICT(table_name,key,column_name) DO UPDATE SET
                  identity=excluded.identity,path=excluded.path,
-                 size=excluded.size,modified_at=excluded.modified_at",
+                 size=excluded.size,modified_at=excluded.modified_at,chunk_size=excluded.chunk_size",
             rusqlite::params![
                 key.0,
                 key.1,
@@ -220,15 +229,22 @@ impl<'a> FileWrite<'a> {
                 file_row::identity(file, &attached_values)?,
                 crate::user_file::encode_path(prepared.observed.path()),
                 prepared.observed.size().to_be_bytes().as_slice(),
-                crate::user_file::encode_time(prepared.observed.modified_at())
+                crate::user_file::encode_time(prepared.observed.modified_at()), coven_format::file::DEFAULT_CHUNK_SIZE
             ],
+        )?;
+        prepared.hashes.record(
+            db,
+            &key,
+            &file.id,
+            &file_row::identity(file, &attached_values)?.ok_or(DbError::DamagedDatabase)?,
+            prepared.observed.size(),
         )?;
         self.attached.borrow_mut().insert(
             key,
             AttachedFile {
                 id: values[&file.id].clone(),
                 size: prepared.observed.size(),
-                hash: prepared.hash,
+                hash: prepared.hashes.content,
             },
         );
         self.originals.borrow_mut().push(prepared);
@@ -460,7 +476,18 @@ impl<'a> FileWrite<'a> {
         reference: &crate::FileRef,
         location: &coven_crypto::SecretText,
     ) -> Result<(), DbError> {
-        self.set_location(reference, location.as_str())
+        self.set_location(reference, location.as_str())?;
+        let (key, _) = file_row::lookup(
+            self.database,
+            self.schema,
+            reference.table(),
+            reference.key(),
+        )?;
+        self.database.internal_execute(
+            "DELETE FROM _coven_file_chunks WHERE table_name=?1 AND key=?2 AND column_name=?3",
+            (&key.0, &key.1, reference.column()),
+        )?;
+        Ok(())
     }
 
     pub(crate) fn keep_file(
@@ -479,25 +506,54 @@ impl<'a> FileWrite<'a> {
         )?;
         match (file.provenance.clone(), prepared) {
             (Provenance::AppProvided, None) => {
+                let reader = self
+                    .directory
+                    .file(coven_foundation::files::FileArea::AppProvided, name)
+                    .open_reader()?;
+                let mut hasher = crate::file_hashes::FileHasher::new();
+                reader.scan(|bytes| hasher.update(bytes))?;
+                let hashes = hasher.finish();
+                if reader.size() != reference.plaintext_size()
+                    || hashes.content != reference.content_hash()
+                {
+                    return Err(DbError::FileAttachmentChanged {
+                        table: reference.table().into(),
+                        key: reference.key().clone(),
+                    });
+                }
                 self.forget_owned(&key, &file.id)?;
                 self.database.internal_execute(
-                    "INSERT INTO _coven_device_files(table_name,key,column_name,identity,path) VALUES(?1,?2,?3,?4,?5)",
-                    (&key.0, &key.1, &file.id, file_row::identity(file, &values)?, name.as_str()),
+                    "INSERT INTO _coven_device_files(table_name,key,column_name,identity,path,chunk_size) VALUES(?1,?2,?3,?4,?5,?6)",
+                    (&key.0, &key.1, &file.id, file_row::identity(file, &values)?, name.as_str(), coven_format::file::DEFAULT_CHUNK_SIZE),
+                )?;
+                hashes.record(
+                    self.database,
+                    &key,
+                    &file.id,
+                    &file_row::identity(file, &values)?.ok_or(DbError::DamagedDatabase)?,
+                    reference.plaintext_size(),
                 )?;
             }
             (Provenance::UserProvided, Some(prepared)) => {
                 prepared.observed.validate()?;
                 file_row::check_size(&values, file, prepared.observed.size())?;
-                if prepared.hash != reference.content_hash() {
+                if prepared.hashes.content != reference.content_hash() {
                     return Err(DbError::FileAttachmentChanged {
                         table: reference.table().into(),
                         key: reference.key().clone(),
                     });
                 }
                 self.database.internal_execute(
-                    "INSERT INTO _coven_user_files(table_name,key,column_name,identity,path,size,modified_at) VALUES(?1,?2,?3,?4,?5,?6,?7)
-                     ON CONFLICT(table_name,key,column_name) DO UPDATE SET identity=excluded.identity,path=excluded.path,size=excluded.size,modified_at=excluded.modified_at",
-                    rusqlite::params![&key.0, &key.1, &file.id, file_row::identity(file, &values)?, crate::user_file::encode_path(prepared.observed.path()), prepared.observed.size().to_be_bytes().as_slice(), crate::user_file::encode_time(prepared.observed.modified_at())],
+                    "INSERT INTO _coven_user_files(table_name,key,column_name,identity,path,size,modified_at,chunk_size) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+                     ON CONFLICT(table_name,key,column_name) DO UPDATE SET identity=excluded.identity,path=excluded.path,size=excluded.size,modified_at=excluded.modified_at,chunk_size=excluded.chunk_size",
+                    rusqlite::params![&key.0, &key.1, &file.id, file_row::identity(file, &values)?, crate::user_file::encode_path(prepared.observed.path()), prepared.observed.size().to_be_bytes().as_slice(), crate::user_file::encode_time(prepared.observed.modified_at()), coven_format::file::DEFAULT_CHUNK_SIZE],
+                )?;
+                prepared.hashes.record(
+                    self.database,
+                    &key,
+                    &file.id,
+                    &file_row::identity(file, &values)?.ok_or(DbError::DamagedDatabase)?,
+                    prepared.observed.size(),
                 )?;
                 self.originals.borrow_mut().push(prepared);
             }
