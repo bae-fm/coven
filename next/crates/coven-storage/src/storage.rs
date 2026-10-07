@@ -172,7 +172,7 @@ pub trait Storage: Send + Sync {
     ) -> Result<Vec<u8>, StorageError>;
     /// List every object under the prefix, across all pages.
     async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError>;
-    /// Delete an object, or remove it from Drive's folder when only that is allowed.
+    /// Delete an object; on Drive, remove it from the folder when this account is not its owner.
     /// An already absent object succeeds, making operation retries safe.
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError>;
     /// Share the store using its owner's account, or tell an S3 admin to create a key.

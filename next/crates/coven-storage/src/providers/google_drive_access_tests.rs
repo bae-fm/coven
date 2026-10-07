@@ -247,3 +247,95 @@ async fn deleting_a_path_removes_its_copies_and_preserves_unlinked_bytes() {
     assert_eq!(remote.files["other-account"].1, b"data");
     assert_eq!(remote.files["other-account"].0["parents"], json!([]));
 }
+
+#[tokio::test]
+async fn deletion_refusal_does_not_unlink_an_owned_object() {
+    for owned in [true, false] {
+        let state = Arc::new(Mutex::new(Remote::default()));
+        let path = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
+        {
+            let mut remote = state.lock().unwrap();
+            duplicate(&mut remote, &path, "object", "2026-10-06T00:00:00Z", 31);
+            remote.files.get_mut("object").unwrap().0["ownedByMe"] = json!(owned);
+        }
+        let remote = state.clone();
+        let server=TestServer::new(Router::new().fallback(move |method:Method,uri:Uri,headers:HeaderMap,body:Bytes| {
+            let remote=remote.clone(); async move {
+                if uri.path()=="/drive/files/object" && (method==Method::DELETE || method==Method::PATCH) {
+                    let expected=if owned {Method::DELETE}else{Method::PATCH};
+                    if method!=expected {return response(400,"wrong deletion mutation");}
+                    return response(403,r#"{"error":{"errors":[{"reason":"insufficientFilePermissions"}],"message":"native-refusal"}}"#);
+                }
+                respond(&remote,&method,&uri,&headers,&body)
+            }
+        })).await;
+        // canDelete is descriptive, not a license to switch to another mutation.
+        state.lock().unwrap().files.get_mut("object").unwrap().0["capabilities"]["canDelete"] =
+            json!(false);
+        let error = provider(&server.url).delete(&path).await.unwrap_err();
+        assert_eq!(error.failure(), StorageFailure::PermissionDenied);
+        let StorageError::Provider { source, .. } = error else {
+            panic!()
+        };
+        assert!(source.downcast_ref::<http::ProviderResponse>().is_some());
+        assert_eq!(
+            state.lock().unwrap().files["object"].0["parents"],
+            json!(["folder"])
+        );
+    }
+}
+
+#[tokio::test]
+async fn deletion_uses_ownership_without_capability_guesses() {
+    for (owner, drive, expected) in [
+        (json!(true), None, None),
+        (json!(false), None, None),
+        (Value::Null, Some("shared-drive"), None),
+        (Value::Null, None, Some(StorageFailure::Protocol)),
+        (
+            json!("false"),
+            Some("shared-drive"),
+            Some(StorageFailure::Protocol),
+        ),
+    ] {
+        let state = Arc::new(Mutex::new(Remote::default()));
+        let path = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
+        {
+            let mut remote = state.lock().unwrap();
+            duplicate(&mut remote, &path, "object", "2026-10-06T00:00:00Z", 31);
+            let object = remote
+                .files
+                .get_mut("object")
+                .unwrap()
+                .0
+                .as_object_mut()
+                .unwrap();
+            object.remove("capabilities");
+            object.remove("ownedByMe");
+            if !owner.is_null() {
+                object.insert("ownedByMe".into(), owner.clone());
+            }
+            if let Some(drive) = drive {
+                object.insert("driveId".into(), json!(drive));
+            }
+        }
+        let server =
+            TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+        let result = provider(&server.url).delete(&path).await;
+        if let Some(failure) = expected {
+            assert_eq!(result.unwrap_err().failure(), failure);
+            assert_eq!(
+                state.lock().unwrap().files["object"].0["parents"],
+                json!(["folder"])
+            );
+        } else {
+            result.unwrap();
+            let remote = state.lock().unwrap();
+            if owner == true {
+                assert!(remote.files.is_empty());
+            } else {
+                assert_eq!(remote.files["object"].0["parents"], json!([]));
+            }
+        }
+    }
+}

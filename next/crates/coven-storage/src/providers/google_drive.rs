@@ -133,7 +133,7 @@ impl GoogleDriveStorage {
         let mut seen = BTreeSet::new();
         let mut files = Vec::new();
         loop {
-            let mut parameters = vec![("q", query), ("fields", "nextPageToken,incompleteSearch,files(id,name,mimeType,size,createdTime,parents,properties,ownedByMe,capabilities(canDelete,canRemoveMyDriveParent))"), ("includeItemsFromAllDrives", "true"), ("pageSize", "1000")];
+            let mut parameters = vec![("q", query), ("fields", "nextPageToken,incompleteSearch,files(id,name,mimeType,size,createdTime,parents,properties,ownedByMe,driveId)"), ("includeItemsFromAllDrives", "true"), ("pageSize", "1000")];
             if let Some(token) = &token {
                 parameters.push(("pageToken", token));
             }
@@ -304,11 +304,10 @@ impl GoogleDriveStorage {
     }
     async fn require_owner(&self) -> Result<(), StorageError> {
         let value = self.folder_metadata().await?;
-        match value["ownedByMe"].as_bool() {
-            Some(true) => Ok(()),
-            Some(false) => Err(StorageError::NotStoreOwner),
-            None if value["driveId"].as_str().is_some() => Err(StorageError::NotStoreOwner),
-            None => Err(StorageError::Protocol("Drive omitted folder ownership")),
+        if owned_by_account(&value)? {
+            Ok(())
+        } else {
+            Err(StorageError::NotStoreOwner)
         }
     }
     async fn permissions(&self) -> Result<Vec<Value>, StorageError> {
@@ -378,13 +377,14 @@ fn multipart_content(metadata: &Value, bytes: &[u8]) -> Result<(String, Vec<u8>)
     Ok((format!("multipart/related; boundary={boundary}"), body))
 }
 
-fn can_delete(item: &Value) -> Result<bool, StorageError> {
-    let allowed = item["capabilities"]["canDelete"]
-        .as_bool()
-        .ok_or(StorageError::Protocol("missing Drive deletion right"))?;
-    // Account ownership permits permanent deletion; otherwise the account can
-    // only unlink the shared object. Sync chooses the device that calls delete.
-    Ok(allowed && item["ownedByMe"].as_bool() == Some(true))
+fn owned_by_account(item: &Value) -> Result<bool, StorageError> {
+    match item.get("ownedByMe") {
+        Some(Value::Bool(owned)) => Ok(*owned),
+        None | Some(Value::Null) if item["driveId"].as_str().is_some_and(|id| !id.is_empty()) => {
+            Ok(false)
+        }
+        _ => Err(StorageError::Protocol("Drive omitted account ownership")),
+    }
 }
 fn escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('\'', "\\'")
@@ -484,24 +484,16 @@ impl Storage for GoogleDriveStorage {
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         for item in self.copies(path).await? {
             let id = http::string(&item, "id")?;
-            let response = if can_delete(&item)? {
+            let response = if owned_by_account(&item)? {
                 self.send(Method::DELETE, &self.url(&["files", id], &[])?, Body::Empty)
                     .await?
-            } else if item["capabilities"]["canRemoveMyDriveParent"].as_bool() == Some(true) {
+            } else {
                 self.send(
                     Method::PATCH,
                     &self.url(&["files", id], &[("removeParents", &self.folder)])?,
                     Body::Json(json!({})),
                 )
                 .await?
-            } else {
-                return Err(StorageError::Provider {
-                    provider: PROVIDER,
-                    failure: StorageFailure::PermissionDenied,
-                    source: Box::new(StorageError::Protocol(
-                        "Drive account cannot delete or remove this file",
-                    )),
-                });
             };
             if response.status().as_u16() != 404 {
                 http::checked(PROVIDER, response).await?;
