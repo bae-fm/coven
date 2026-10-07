@@ -2,6 +2,42 @@ use crate::tests::TestStore;
 use crate::{Migration, RowIdentity, SyncedTable};
 
 #[tokio::test]
+async fn declaration_case_preserves_downloads_and_file_retention() {
+    use crate::write::tests::{count, records, sql};
+    let source_store = TestStore::new();
+    let receiver_store = TestStore::new();
+    let schema = "CREATE TABLE Notes(id TEXT NOT NULL PRIMARY KEY, body TEXT)";
+    let source = source_store
+        .schema(
+            vec![SyncedTable::new("NOTES", RowIdentity::SharedKey)],
+            schema,
+        )
+        .await
+        .unwrap();
+    let receiver = receiver_store
+        .schema(
+            vec![SyncedTable::new("notes", RowIdentity::SharedKey)],
+            schema,
+        )
+        .await
+        .unwrap();
+    sql(&source, "INSERT INTO Notes VALUES('n','body')")
+        .await
+        .unwrap();
+    let record = records(&source).pop().unwrap();
+    assert_eq!(record.parts[0].rows[0].row.table, "Notes");
+    let retained = source.retained_files().await.map(|_| ());
+    let downloaded = receiver.apply_downloaded(record.into()).await;
+    assert!(
+        retained.is_ok() && downloaded.is_ok(),
+        "retention: {retained:?}; download: {downloaded:?}"
+    );
+    assert_eq!(count(&receiver, "Notes"), 1);
+    source.close().await.unwrap();
+    receiver.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn unique_terms_follow_changed_constraints_when_reopening() {
     const SCHEMA: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT,body TEXT); CREATE UNIQUE INDEX claim ON notes(title)";
     let store = TestStore::new();

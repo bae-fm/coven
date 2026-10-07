@@ -17,15 +17,20 @@ pub(crate) fn declaration<'a>(
     name: &str,
 ) -> Result<(&'a TableSchema, &'a FileDecl), DbError> {
     let table = schema
+        .schema
+        .tables
+        .get(&name.to_ascii_lowercase())
+        .ok_or_else(|| DbError::FileTableNotSynced { table: name.into() })?;
+    let declaration = schema
         .declarations
         .iter()
-        .find(|d| d.name.eq_ignore_ascii_case(name))
+        .find(|d| d.name == table.name)
         .ok_or_else(|| DbError::FileTableNotSynced { table: name.into() })?;
-    let file = table
+    let file = declaration
         .files
         .as_ref()
         .ok_or_else(|| DbError::FileNotDeclared { table: name.into() })?;
-    Ok((schema.table(&table.name), file))
+    Ok((table, file))
 }
 
 pub(crate) fn lookup(

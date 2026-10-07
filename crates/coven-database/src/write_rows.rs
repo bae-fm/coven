@@ -118,7 +118,7 @@ impl<'a> AppView<'a> {
                 .schema
                 .declarations
                 .iter()
-                .any(|d| d.name.eq_ignore_ascii_case(&target.name))
+                .any(|d| d.name == target.name)
             {
                 return Err(reference_error(table, &values, &foreign_key.columns[0]));
             }

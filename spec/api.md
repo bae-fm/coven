@@ -885,6 +885,9 @@ let handle = Coven::builder(layout.clone())
 
 ### E2 Declaring synced tables
 
+- Table names in declarations match SQLite identifiers without regard to ASCII
+  case. Opening records SQLite's spelling, which identifies the table in writes,
+  snapshots and file retention.
 - Each synced table declares its kind of key ([§8.5](coven.md#85-keys-and-uniqueness)),
   how its rows get their audience ([§14](coven.md#14-audiences)), and whether its rows
   carry a file ([§16](coven.md#16-files)).

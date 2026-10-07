@@ -22,6 +22,7 @@ impl WriteSchema {
         let schema = Schema::read(db)?;
         for declaration in &mut declarations {
             let table = &schema.tables[&declaration.name.to_ascii_lowercase()];
+            declaration.name = table.name.clone();
             if let Some(file) = &mut declaration.files {
                 for column in [
                     &mut file.id,
@@ -78,7 +79,7 @@ impl WriteSchema {
     pub(crate) fn declaration(&self, name: &str) -> &SyncedTable {
         self.declarations
             .iter()
-            .find(|d| d.name.eq_ignore_ascii_case(name))
+            .find(|d| d.name == name)
             .expect("synced table declaration")
     }
 
