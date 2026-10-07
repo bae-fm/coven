@@ -248,3 +248,160 @@ async fn posted_fingerprints_stop_when_a_member_leaves_the_circle() {
     assert_eq!(fingerprints.len(), 1);
     assert_eq!(fingerprints[0].audience, Audience::Store);
 }
+
+#[tokio::test]
+async fn dropped_removal_parts_wait_for_redistributed_keys_and_converge() {
+    for store_removal in [false, true] {
+        for carol_applies_before_drop in [false, true] {
+            for ben_reads_before_copy in [false, true] {
+                dropped_removal_parts(
+                    store_removal,
+                    carol_applies_before_drop,
+                    ben_reads_before_copy,
+                )
+                .await;
+            }
+        }
+    }
+}
+
+async fn dropped_removal_parts(
+    store_removal: bool,
+    carol_applies_before_drop: bool,
+    ben_reads_before_copy: bool,
+) {
+    let storage = storage();
+    let mut devices = household(storage.clone()).await;
+    let [ana, ben, carol] = devices.as_mut_slice() else {
+        panic!("three members");
+    };
+    let circle = CircleId(Uuid::from_u128(10));
+    ana.log
+        .make_and_upload_entry(StoreChange::AddCircleMember {
+            circle,
+            member: identity(5).member_id(),
+        })
+        .await
+        .unwrap();
+    for device in [&mut *ben, &mut *carol] {
+        device.log.sync_store_log().await.unwrap();
+    }
+    let removal = |member, number| {
+        let key = KeyId(Uuid::from_u128(number));
+        if store_removal {
+            StoreChange::RemoveMember {
+                member,
+                key,
+                circle_keys: vec![coven_format::store_log::CircleKeyId {
+                    circle,
+                    key: KeyId(Uuid::from_u128(number + 10)),
+                }],
+            }
+        } else {
+            StoreChange::RemoveCircleMember {
+                circle,
+                member,
+                key,
+            }
+        }
+    };
+    ana.clock.set(UNIX_EPOCH + Duration::from_secs(3));
+    let dropped = ana
+        .log
+        .make_and_upload_entry(removal(identity(4).member_id(), 2))
+        .await
+        .unwrap();
+    sql(&ana.db, "INSERT INTO notes VALUES('one','public','body'); INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','private')").await;
+    let writes = ana.sync.upload_writes().await.unwrap();
+    assert_eq!(writes.len(), 1);
+    carol.log.sync_store_log().await.unwrap();
+    if carol_applies_before_drop {
+        let report = carol.sync.download_writes().await.unwrap();
+        assert!(report.waiting.is_empty(), "{report:?}");
+        assert!(report.damaged_objects.is_empty(), "{report:?}");
+        assert_eq!(count(&carol.db).await, 1);
+    }
+
+    // Ben authors against his unchanged view, earlier than Ana's removal.
+    ben.clock.set(UNIX_EPOCH + Duration::from_secs(2));
+    let winner = ben
+        .log
+        .make_and_upload_entry(removal(identity(3).member_id(), 3))
+        .await
+        .unwrap();
+    let audience = if store_removal {
+        Audience::Store
+    } else {
+        Audience::Circle(circle)
+    };
+    let dropped_key = KeyId(Uuid::from_u128(2));
+    let copy = crate::store_log_keys::path(&audience, dropped_key, &identity(4).member_id());
+    assert!(matches!(
+        storage.read(&copy).await,
+        Err(coven_storage::StorageError::NotFound)
+    ));
+    if ben_reads_before_copy {
+        ben.log.sync_store_log().await.unwrap();
+        assert!(matches!(
+            ben.db.store_log().await.unwrap().replay.entries[&dropped],
+            coven_database::EntryOutcome::Dropped(coven_database::DropReason::BeatenBy(id))
+                if id == winner
+        ));
+        assert!(!crate::write_seal::holds(
+            &ben.keys.unlock().unwrap().unwrap(),
+            &audience,
+            dropped_key,
+        ));
+        let report = ben.sync.download_writes().await.unwrap();
+        assert!(report.damaged_objects.is_empty(), "{report:?}");
+        assert_eq!(report.waiting.len(), 1, "{report:?}");
+        assert_eq!(report.waiting[0].write, writes[0]);
+        assert!(report.waiting[0].waiting_for.is_empty());
+        let since = report.waiting[0].since;
+        ben.clock.set(UNIX_EPOCH + Duration::from_secs(4));
+        assert_eq!(
+            ben.sync.download_writes().await.unwrap().waiting[0].since,
+            since
+        );
+        assert!(rows(&ben.db).await.is_empty());
+        assert_eq!(count(&ben.db).await, 0);
+        assert!(ben.sync.post_positions().await.unwrap());
+        assert!(!posted(&storage, ben, 2).await.writes.covers(writes[0]));
+    }
+
+    // Carol owns K2 and shares it through StoreLogSync when she learns the drop.
+    carol.log.sync_store_log().await.unwrap();
+    assert!(!storage.read(&copy).await.unwrap().is_empty());
+    assert!(matches!(
+        carol.db.store_log().await.unwrap().replay.entries[&dropped],
+        coven_database::EntryOutcome::Dropped(coven_database::DropReason::BeatenBy(id))
+            if id == winner
+    ));
+    if carol_applies_before_drop {
+        assert_eq!(rows(&carol.db).await, rows(&ana.db).await);
+        assert_eq!(count(&carol.db).await, 1);
+    }
+    ben.log.sync_store_log().await.unwrap();
+    assert!(crate::write_seal::holds(
+        &ben.keys.unlock().unwrap().unwrap(),
+        &audience,
+        dropped_key,
+    ));
+    let expected = rows(&ana.db).await;
+    for device in [&mut *ben, &mut *carol] {
+        let report = device.sync.download_writes().await.unwrap();
+        assert!(report.waiting.is_empty(), "{report:?}");
+        assert!(report.damaged_objects.is_empty(), "{report:?}");
+        assert_eq!(rows(&device.db).await, expected);
+        assert_eq!(count(&device.db).await, 1);
+        assert!(device.db.lost_values().await.unwrap().is_empty());
+        assert!(device.sync.post_positions().await.unwrap());
+    }
+    let ben = posted(&storage, ben, 2).await;
+    let carol = posted(&storage, carol, 3).await;
+    assert_eq!(ben.writes, carol.writes);
+    assert_eq!(ben.store_log, carol.store_log);
+    assert_eq!(ben.schema_version, carol.schema_version);
+    assert_eq!(ben.fingerprints.len(), 2);
+    assert_eq!(ben.fingerprints, carol.fingerprints);
+}

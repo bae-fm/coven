@@ -152,18 +152,13 @@ impl DeviceLogSync {
             let Some(introduction) = introduction else {
                 return Err(SyncError::KeyUnavailable(*key));
             };
-            let dropped = matches!(
-                log.replay.entries[&introduction.entry.position],
-                coven_database::EntryOutcome::Dropped(_)
-            );
             let holds = crate::write_seal::holds(ring, &part.audience, *key);
-            if !dropped
-                && !holds
-                && key_audience_contains(log, &introduction.entry, &part.audience, member)
-            {
+            // Dropped removals share their keys with the latest audience (§11,
+            // §14.4). Its members wait for that copy before applying the part.
+            if !holds && key_audience_contains(log, &introduction.entry, &part.audience, member) {
                 return Err(SyncError::KeyUnavailable(*key));
             }
-            if !dropped && holds {
+            if holds {
                 let (sender, receiver) = mpsc::channel(1);
                 senders.push(Some(sender));
                 parts.push(DownloadedPartStream::Opened(PartInput {

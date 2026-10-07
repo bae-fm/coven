@@ -225,10 +225,13 @@ async fn posted(storage: &MemoryStorage, device: &Device, number: u64) -> Posted
     let path = ObjectPath::positions(DeviceId(number));
     let bytes = storage.read(&path).await.unwrap();
     let sealed = coven_format::sealed_single::SingleChunkObject::decode(&bytes).unwrap();
+    let SingleChunkPrefix::PostedPositions(key_id) = sealed.prefix() else {
+        panic!("positions prefix");
+    };
     let prefix = sealed.prefix().encode().unwrap();
     let key = device.keys.unlock().unwrap().unwrap();
     let plain = key
-        .store_key(KeyId(Uuid::from_u128(1)))
+        .store_key(key_id)
         .unwrap()
         .derive()
         .open_object_chunk(path.as_str(), &prefix, 0, 0, sealed.chunk())
