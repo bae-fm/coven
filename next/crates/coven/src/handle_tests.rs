@@ -322,6 +322,9 @@ async fn app_data_uses_the_replayed_key_and_opens_both_generations() {
         &admin,
         1,
         StoreChange::CreateStore {
+            access: coven_format::MemberAccess::S3AccessKey {
+                access_key_id: "fixture-access-key".into(),
+            },
             store: directory.id(),
             name: "keys".into(),
             admin: admin.clone(),
@@ -347,6 +350,9 @@ async fn app_data_uses_the_replayed_key_and_opens_both_generations() {
         &admin,
         2,
         StoreChange::AddMember {
+            access: coven_format::MemberAccess::S3AccessKey {
+                access_key_id: "fixture-access-key".into(),
+            },
             keys: removed.clone(),
             role: MemberRole::Member,
         },

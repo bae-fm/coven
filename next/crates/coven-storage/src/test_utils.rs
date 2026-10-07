@@ -95,6 +95,7 @@ struct State {
     uploads: BTreeMap<u64, Pending>,
     next: u64,
     accounts: BTreeMap<String, AccountAccess>,
+    retained_access: BTreeMap<String, Vec<RetainedAccess>>,
     faults: Faults,
 }
 
@@ -131,6 +132,7 @@ impl MemoryStorage {
                 uploads: BTreeMap::new(),
                 next: 1,
                 accounts: BTreeMap::new(),
+                retained_access: BTreeMap::new(),
                 faults: Faults::none(),
             })),
         })
@@ -155,6 +157,16 @@ impl MemoryStorage {
     /// Set faults absolutely, so repeating the command has the same effect.
     pub async fn set_faults(&self, faults: Faults) {
         self.state.lock().await.faults = faults;
+    }
+    /// Model native grants that remain until the owner changes them in the provider.
+    pub async fn set_retained_access(&self, account: &str, shares: Vec<RetainedAccess>) {
+        let mut state = self.state.lock().await;
+        let account = account.to_ascii_lowercase();
+        if shares.is_empty() {
+            state.retained_access.remove(&account);
+        } else {
+            state.retained_access.insert(account, shares);
+        }
     }
     async fn before_request(&self) -> Result<(), StorageError> {
         let (delay, failure) = {
@@ -389,11 +401,14 @@ impl Storage for MemoryStorage {
                 if !matches!(self.account, Account::Owner) {
                     return Err(StorageError::NotStoreOwner);
                 }
-                self.state
-                    .lock()
-                    .await
-                    .accounts
-                    .remove(&account.to_ascii_lowercase());
+                let mut state = self.state.lock().await;
+                let account = account.to_ascii_lowercase();
+                if let Some(shares) = state.retained_access.get(&account) {
+                    return Ok(MemberRemoval::AccessRemains {
+                        shares: shares.clone(),
+                    });
+                }
+                state.accounts.remove(&account);
                 Ok(MemberRemoval::Revoked)
             }
             _ => Err(StorageError::InvalidConfiguration(

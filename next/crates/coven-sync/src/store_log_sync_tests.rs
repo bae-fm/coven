@@ -89,6 +89,7 @@ async fn device(storage: Arc<MemoryStorage>, n: u64, member: MemberKeys, store: 
         custody.clone(),
         Arc::new(InMemoryCustody::new(member.clone())),
         clock.clone(),
+        Arc::new(coven_foundation::id_source::UuidIds),
     );
     Device {
         sync,
@@ -105,6 +106,9 @@ impl Device {
     async fn create(&mut self, key: KeyId) -> EntryId {
         self.sync
             .make_and_upload_entry(StoreChange::CreateStore {
+                access: coven_format::MemberAccess::S3AccessKey {
+                    access_key_id: "fixture-access-key".into(),
+                },
                 store: self.directory.id(),
                 name: "Store".into(),
                 admin: public(&self.member),
@@ -117,6 +121,9 @@ impl Device {
     async fn add(&mut self, other: &MemberKeys, role: MemberRole) -> EntryId {
         self.sync
             .make_and_upload_entry(StoreChange::AddMember {
+                access: coven_format::MemberAccess::S3AccessKey {
+                    access_key_id: "fixture-access-key".into(),
+                },
                 keys: public(other),
                 role,
             })
@@ -138,6 +145,7 @@ impl Device {
             self.custody.clone(),
             Arc::new(InMemoryCustody::new(self.member.clone())),
             self.clock.clone(),
+            self.sync.ids.clone(),
         );
     }
     async fn device(&self) -> DeviceId {
@@ -502,6 +510,9 @@ async fn key_objects_are_fixed_and_published_before_the_entry() {
         })
         .await;
     let change = StoreChange::CreateStore {
+        access: coven_format::MemberAccess::S3AccessKey {
+            access_key_id: "fixture-access-key".into(),
+        },
         store: store(1),
         name: "Store".into(),
         admin: public(&a.member),
@@ -824,3 +835,6 @@ mod objects;
 
 #[path = "store_log_keys_tests.rs"]
 mod key_distribution;
+
+#[path = "operations_tests.rs"]
+mod operations;

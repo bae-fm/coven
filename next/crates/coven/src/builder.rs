@@ -14,6 +14,8 @@ pub struct CovenBuilder {
     database: DatabaseBuilder,
     directory: StoreDir,
     ids: IdSourceRef,
+    clock: ClockRef,
+    storage: Option<Arc<dyn coven_storage::Storage>>,
     keys: KeyCustody,
     identity: IdentityCustody,
     #[cfg(any(test, feature = "test-utils"))]
@@ -27,6 +29,8 @@ impl CovenBuilder {
             database: DatabaseBuilder::new(directory.clone()).id_source(ids.clone()),
             directory,
             ids,
+            clock: Arc::new(SystemClock),
+            storage: None,
             keys: KeyCustody::Keyring,
             identity: IdentityCustody::Keyring,
             #[cfg(any(test, feature = "test-utils"))]
@@ -53,7 +57,8 @@ impl CovenBuilder {
     }
     /// The wall clock that timestamps use (§7.2). Defaults to the system clock.
     pub fn clock(mut self, clock: ClockRef) -> Self {
-        self.database = self.database.clock(clock);
+        self.database = self.database.clock(clock.clone());
+        self.clock = clock;
         self
     }
     /// The source of new ids (§21.2). Defaults to `UuidIds`, random UUIDs.
@@ -62,6 +67,13 @@ impl CovenBuilder {
         self.ids = ids;
         self
     }
+    /// Crate-to-crate composition: provide the connected storage capability used
+    /// by operations. Opening resumes the journal but does not start a sync loop.
+    pub fn storage(mut self, storage: Arc<dyn coven_storage::Storage>) -> Self {
+        self.storage = Some(storage);
+        self
+    }
+
     /// Where this device keeps the store keys: the OS keychain by default, a
     /// file sealed with a passphrase, memory for this session only, or the
     /// app's own `StoreKeyCustody`.
@@ -77,13 +89,14 @@ impl CovenBuilder {
     }
 
     /// Opens the store for reading and writing, taking the store's lock.
-    /// Opening runs migrations and reads no key, so a store opens and works
-    /// on the device before any key is unlocked; the first call that needs a
-    /// key reads it. Opening never starts syncing.
+    /// Opening runs migrations and resumes unfinished operations. An empty
+    /// journal needs no keys; resumed steps read keys when needed. Opening does
+    /// not start the sync loop, and local database calls need no unlocked key.
     pub async fn open(self) -> CovenResult<CovenHandle> {
-        let (database, custody, lock) = crate::coven::blocking(move || self.open_graph()).await?;
-        let database = database.open_locked(lock).await?;
-        Ok(CovenHandle::new(database, custody))
+        crate::coven::blocking(move || self.open_graph())
+            .await?
+            .open()
+            .await
     }
 
     /// Opens the store for reading only, alongside a handle that has it open.
@@ -94,13 +107,7 @@ impl CovenBuilder {
         Ok(CovenReadHandle::new(database.open_read_only().await?, keys))
     }
 
-    fn open_graph(
-        self,
-    ) -> CovenResult<(
-        DatabaseBuilder,
-        StoreCustody,
-        coven_foundation::files::StoreLock,
-    )> {
+    fn open_graph(self) -> CovenResult<OpeningStore> {
         let lock = self.directory.lock_exclusive()?;
         let settings = lock.settings()?;
         #[cfg(any(test, feature = "test-utils"))]
@@ -127,11 +134,16 @@ impl CovenBuilder {
             IdentityCustody::InMemory(keys) => Arc::new(InMemoryCustody::new(keys)),
             IdentityCustody::Custom(keys) => keys,
         };
-        Ok((
-            self.database,
-            StoreCustody::new(StoreKeys::new(keys), identity, keychain),
+        Ok(OpeningStore {
+            database: self.database,
+            custody: StoreCustody::new(StoreKeys::new(keys.clone()), identity.clone(), keychain),
+            keys,
+            identity,
             lock,
-        ))
+            clock: self.clock,
+            ids: self.ids,
+            storage: self.storage,
+        })
     }
 
     fn read_graph(self) -> CovenResult<(DatabaseBuilder, StoreKeys)> {
@@ -171,3 +183,44 @@ impl CovenBuilder {
         self
     }
 }
+
+/// Retains the graph while its asynchronous database opening is in progress.
+struct OpeningStore {
+    database: DatabaseBuilder,
+    custody: StoreCustody,
+    keys: Arc<dyn StoreKeyCustody>,
+    identity: Arc<dyn MemberKeyCustody>,
+    lock: coven_foundation::files::StoreLock,
+    clock: ClockRef,
+    ids: IdSourceRef,
+    storage: Option<Arc<dyn coven_storage::Storage>>,
+}
+
+impl OpeningStore {
+    async fn open(self) -> CovenResult<CovenHandle> {
+        let database = self.database.open_locked(self.lock).await?;
+        let sync = match self.storage {
+            Some(storage) => coven_sync::StoreLogSync::new(
+                storage,
+                database.clone(),
+                self.keys,
+                self.identity,
+                self.clock,
+                self.ids.clone(),
+            ),
+            None => coven_sync::StoreLogSync::disconnected(
+                database.clone(),
+                self.keys,
+                self.identity,
+                self.clock,
+                self.ids.clone(),
+            ),
+        };
+        let operations = coven_sync::Operations::new(sync);
+        Ok(CovenHandle::new(database, self.custody, operations))
+    }
+}
+
+#[cfg(test)]
+#[path = "builder_tests.rs"]
+mod tests;

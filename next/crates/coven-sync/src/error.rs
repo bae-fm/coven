@@ -9,6 +9,41 @@ use std::sync::Arc;
 /// A local store-log operation failed; its durable queue, if any, remains retryable.
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
+    /// This handle has no connected provider; operations wait for one.
+    #[error("storage is not connected")]
+    NoStorage,
+    /// The caller has no authority for this change.
+    #[error("permission denied")]
+    PermissionDenied,
+    /// The change would remove the final admin.
+    #[error("the store must retain an admin")]
+    LastAdmin,
+    /// The account holding the store cannot be removed.
+    #[error("the store owner cannot be removed")]
+    StoreOwner,
+    /// Circle membership is required by this operation.
+    #[error("not a member of circle {0}")]
+    CircleNotMember(coven_foundation::id_source::CircleId),
+    /// A circle operation named a deleted or absent circle.
+    #[error("circle {0} is deleted")]
+    CircleDeleted(coven_foundation::id_source::CircleId),
+    /// Only current members can be invited into a circle.
+    #[error("{0} is not a store member")]
+    NotStoreMember(coven_crypto::MemberId),
+    /// The request or invitation is absent, expired, or no longer matches.
+    #[error("invitation or join request is no longer current")]
+    InvitationChanged,
+    /// The requested journal row is not a blocked operation.
+    #[error("operation {0:?} is not blocked")]
+    NotBlocked(crate::OperationId),
+    /// Decoding persisted operation data failed; its cause remains available.
+    #[error("invalid operation data: {0}")]
+    OperationData(#[from] serde_json::Error),
+
+    /// Revocation left grants requiring the owner's action. The operation stays
+    /// blocked so an unattended removal cannot lose this result.
+    #[error("storage access remains through grants: {0:?}")]
+    AccessRemains(Vec<coven_storage::RetainedAccess>),
     /// Storage refused or failed a request.
     #[error(transparent)]
     Storage(#[from] StorageError),

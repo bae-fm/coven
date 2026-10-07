@@ -121,3 +121,10 @@ pub mod test_utils;
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
+
+mod operation;
+pub use operation::{
+    AccessKeyToDelete, NewOperation, OperationCommit, OperationId, OperationRecord, OperationUpdate,
+};
+
+mod circle_deletion;

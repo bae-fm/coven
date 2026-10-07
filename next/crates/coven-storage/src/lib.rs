@@ -26,3 +26,6 @@ pub use storage::*;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
+
+mod invite_storage;
+pub use invite_storage::InviteStorage;

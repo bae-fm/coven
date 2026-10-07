@@ -12,6 +12,10 @@ use std::sync::Arc;
 /// Results of the store-log step. Waiting entries remain only in storage.
 #[derive(Debug, Default)]
 pub struct SyncReport {
+    /// Permanently failed operations awaiting app retry or discard.
+    pub blocked_operations: Vec<crate::BlockedOperation>,
+    /// S3 key ids awaiting confirmation of deletion in the provider console.
+    pub access_keys_to_delete: Vec<crate::AccessKeyToDelete>,
     /// This member's dropped entries in the resulting replay.
     pub dropped_entries: Vec<DroppedEntry>,
     /// Entries or sealed keys that failed validation, with their storage paths.
@@ -166,7 +170,7 @@ impl From<&StoreChange> for StoreLogChange {
                 admin: admin.signing,
                 device_name,
             },
-            StoreChange::AddMember { keys, role } => Self::AddMember {
+            StoreChange::AddMember { keys, role, .. } => Self::AddMember {
                 member: keys.signing,
                 role,
             },

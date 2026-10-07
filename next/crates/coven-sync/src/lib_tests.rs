@@ -225,7 +225,7 @@ fn input(h: &History) -> Value {
         let past: Vec<_> = h.entries[..i].iter().enumerate().filter_map(|(j,e)| crate::replay::had_read(entry,e).then_some(j)).collect();
         let action = match &entry.change {
             StoreChange::CreateStore { .. } => json!({"kind":0}),
-            StoreChange::AddMember { keys, role } => json!({"kind":1,"member":member_number(&keys.signing),"role":role_number(*role)}),
+            StoreChange::AddMember { keys, role, .. } => json!({"kind":1,"member":member_number(&keys.signing),"role":role_number(*role)}),
             StoreChange::RemoveMember { member, circle_keys, .. } => json!({"kind":2,"member":member_number(member),"circles":circle_keys.iter().map(|k| circle_number(k.circle)).collect::<Vec<_>>()}),
             StoreChange::ChangeRole { member, role } => json!({"kind":3,"member":member_number(member),"role":role_number(*role)}),
             StoreChange::AddDevice { device, .. } => json!({"kind":4,"member":member_number(&entry.author),"device":device.0}),

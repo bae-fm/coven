@@ -10,6 +10,13 @@ mod file_staging;
 mod read_pool;
 use read_pool::ReadPool;
 
+#[path = "database_operations.rs"]
+mod operations;
+
+#[cfg(any(test, feature = "test-utils"))]
+#[path = "database_operations_tests.rs"]
+mod operation_tests;
+
 use coven_foundation::clock::{ClockRef, SystemClock};
 use coven_foundation::files::{StoreDir, StoreLock, StoreReadLock};
 use coven_foundation::id_source::{DeviceId, IdSourceRef, UuidIds};
@@ -584,7 +591,7 @@ impl Database {
                     inner.clock.now(),
                     author,
                     change,
-                    seal,
+                    move |log, entry| seal(log, entry).map(|sealed| (sealed, None)),
                 )
             })
             .await,
@@ -646,6 +653,19 @@ impl Database {
         entry: crate::ReplayEntry,
         replay: crate::StoreLogReplay,
     ) -> Result<(), DbError> {
+        self.apply_store_log_operations(entry, replay, Vec::new(), Vec::new())
+            .await
+    }
+
+    /// Apply an entry and record work caused by its kept effects atomically.
+    /// The sync owner supplies the operation data; the database does not interpret it.
+    pub async fn apply_store_log_operations(
+        &self,
+        entry: crate::ReplayEntry,
+        replay: crate::StoreLogReplay,
+        operations: Vec<crate::NewOperation>,
+        updates: Vec<crate::OperationUpdate>,
+    ) -> Result<(), DbError> {
         let database = self.clone();
         finish_blocking(
             tokio::task::spawn_blocking(move || {
@@ -669,6 +689,8 @@ impl Database {
                     entry,
                     replay,
                     &files,
+                    &operations,
+                    &updates,
                 ))
             })
             .await,

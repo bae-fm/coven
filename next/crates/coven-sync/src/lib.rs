@@ -19,3 +19,9 @@ pub use coven_database::DropReason;
 pub use error::{SyncError, SyncFailure};
 pub use report::{DamagedObject, DroppedEntry, ObjectCheckFailure, StoreLogChange, SyncReport};
 pub use store_log_sync::StoreLogSync;
+
+mod operation_types;
+pub use operation_types::*;
+mod operation_data;
+mod operations;
+pub use operations::Operations;

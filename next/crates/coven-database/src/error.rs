@@ -450,6 +450,15 @@ pub enum DbError {
     /// A fixed entry must be published before another is made.
     #[error("store-log entry {0:?} is waiting for publication")]
     StoreLogUploadPending(crate::EntryId),
+    /// Stopping the store’s operation worker failed.
+    #[error("operation worker failed: {0}")]
+    OperationWorker(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// A journal value could not be encoded or decoded.
+    #[error(transparent)]
+    OperationData(#[from] serde_json::Error),
+    /// An operation no longer has the state expected by its caller.
+    #[error("operation {0:?} changed or is absent")]
+    OperationChanged(crate::OperationId),
     /// This device has used every store-log number.
     #[error("store-log entry numbers exhausted")]
     StoreLogNumberExhausted,

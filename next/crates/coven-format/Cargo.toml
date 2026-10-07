@@ -10,6 +10,7 @@ test-utils = []
 coven-foundation.workspace = true
 coven-crypto.workspace = true
 coven-merge.workspace = true
+serde = { workspace = true, features = ["derive"] }
 uuid.workspace = true
 zeroize.workspace = true
 

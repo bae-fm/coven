@@ -62,6 +62,7 @@ macro_rules! coven_tables {
             CREATE TABLE coven_members (
                 member BLOB PRIMARY KEY NOT NULL CHECK(length(member)=32),
                 sealing BLOB NOT NULL CHECK(length(sealing)=32),
+                access BLOB NOT NULL,
                 role TEXT NOT NULL CHECK(role IN ('admin','member')),
                 removed INTEGER NOT NULL CHECK(removed IN (0,1))
             ) STRICT, WITHOUT ROWID;
@@ -342,9 +343,15 @@ macro_rules! coven_tables {
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX coven_device_files_path ON coven_device_files(path);
         ");
+        $visit!(coven_access_keys_to_delete, "
+            CREATE TABLE coven_access_keys_to_delete (
+                access_key_id TEXT PRIMARY KEY NOT NULL,
+                member BLOB
+            );
+        ");
         $visit!(coven_operations, "
             CREATE TABLE coven_operations (
-                id INTEGER PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 kind TEXT NOT NULL,
                 last_step INTEGER NOT NULL,
                 data BLOB NOT NULL,

@@ -9,15 +9,88 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone)]
 pub struct CovenHandle {
     database: Database,
+    operations: coven_sync::Operations,
     custody: Arc<Mutex<Option<StoreCustody>>>,
 }
 
 impl CovenHandle {
-    pub(crate) fn new(database: Database, custody: StoreCustody) -> Self {
+    pub(crate) fn new(
+        database: Database,
+        custody: StoreCustody,
+        operations: coven_sync::Operations,
+    ) -> Self {
         Self {
             database,
+            operations,
             custody: Arc::new(Mutex::new(Some(custody))),
         }
+    }
+
+    /// Active members and their active devices from the local store log.
+    pub async fn get_members(&self) -> Result<Vec<MemberInfo>, SyncError> {
+        self.operations.get_members().await
+    }
+    /// Set a member's role as an admin.
+    pub async fn set_member_role(
+        &self,
+        member: &MemberId,
+        role: MemberRole,
+    ) -> Result<(), SyncError> {
+        self.operations.set_member_role(member, role).await
+    }
+    /// Remove a member, rotate keys and settle their storage access.
+    pub async fn remove_member(&self, member: &MemberId) -> Result<MemberRemoval, SyncError> {
+        self.operations.remove_member(member).await
+    }
+    /// Remove a device and return instructions for its provider sign-out.
+    pub async fn remove_device(&self, device: DeviceId) -> Result<ProviderSignOut, SyncError> {
+        self.operations.remove_device(device).await
+    }
+    /// Confirm deletion of an S3 key in the provider console.
+    pub async fn confirm_access_key_deleted(&self, key: &str) -> Result<(), SyncError> {
+        self.operations.confirm_access_key_deleted(key).await
+    }
+    /// Retry a permanently failed operation from its next unfinished step.
+    pub async fn retry_blocked_operation(
+        &self,
+        operation: OperationId,
+    ) -> Result<(), OperationError> {
+        self.operations.retry_blocked_operation(operation).await
+    }
+    /// Abandon a failed operation after publishing any reserved entry.
+    pub async fn discard_blocked_operation(
+        &self,
+        operation: OperationId,
+    ) -> Result<(), OperationError> {
+        self.operations.discard_blocked_operation(operation).await
+    }
+    /// Share access and create an invitation expiring after a day.
+    pub async fn create_invite(
+        &self,
+        role: MemberRole,
+        access: InviteAccess,
+    ) -> Result<Invite, SyncError> {
+        self.operations.create_invite(role, access).await
+    }
+    /// Checked join requests, starting with the current list.
+    pub fn subscribe_join_requests(&self) -> tokio::sync::watch::Receiver<Vec<JoinRequest>> {
+        self.operations.subscribe_join_requests()
+    }
+    /// Approve the exact request shown by the subscription.
+    pub async fn approve_join_request(&self, request: &JoinRequest) -> Result<(), SyncError> {
+        self.operations.approve_join_request(request).await
+    }
+    /// Decline a request and revoke its invitation's access.
+    pub async fn decline_join_request(&self, request: &JoinRequest) -> Result<(), SyncError> {
+        self.operations.decline_join_request(request).await
+    }
+    /// Cancel an unsettled invitation and revoke its access.
+    pub async fn cancel_invite(&self, invite: &InviteId) -> Result<(), SyncError> {
+        self.operations.cancel_invite(invite).await
+    }
+    /// Circle calls borrowing this store's operation owner.
+    pub fn circles(&self) -> Circles<'_> {
+        Circles::new(&self.operations)
     }
 
     /// Runs one write.
@@ -232,6 +305,10 @@ impl CovenHandle {
     pub async fn close(&self) -> Result<(), DbError> {
         let handle = self.clone();
         crate::coven::completion(tokio::spawn(async move {
+            match handle.operations.close().await {
+                Ok(()) | Err(SyncError::Database(DbError::StoreClosed)) => (),
+                Err(error) => return Err(DbError::OperationWorker(Box::new(error))),
+            }
             let custody = handle.custody.clone();
             crate::coven::blocking(move || {
                 custody.lock().expect("custody lock poisoned").take();

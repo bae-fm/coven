@@ -63,16 +63,7 @@ pub enum ProviderSignOut {
     ReplaceAccessKey,
 }
 
-/// An account to share with, or the member's S3 key to revoke.
-pub enum MemberAccess {
-    /// The member's provider account email.
-    ProviderAccount(String),
-    /// An S3 key the admin made by hand.
-    S3AccessKey {
-        /// Public identifier the admin finds in the provider console.
-        access_key_id: String,
-    },
-}
+pub use coven_format::MemberAccess;
 
 /// Granting access succeeds either through the provider or through an admin action.
 pub enum AccessGrant {
@@ -86,7 +77,18 @@ pub enum AccessGrant {
 }
 
 /// Revocation includes S3's manual instruction; it is not an error (§20.9).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MemberRemoval {
+    /// The removal is kept; an owner's device must apply it to revoke sharing.
+    /// Other admins never attempt provider sharing calls.
+    PendingOwner,
+    /// Sharing must remain because an active member or another open invite uses
+    /// the same account. No provider grant is revoked in this case.
+    AccountInUse {
+        /// The shared account whose grant remains necessary.
+        account: String,
+    },
+
     /// The provider no longer shares with the account.
     Revoked,
     /// Exclusive grants were removed; these grants remain for owner action.
@@ -103,7 +105,7 @@ pub enum MemberRemoval {
 }
 
 /// A grant that revocation left for the owner to inspect.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RetainedAccess {
     /// The native permission, membership or group id, scoped to this store.
     pub provider_id: String,
@@ -112,7 +114,7 @@ pub struct RetainedAccess {
 }
 
 /// The provider's reason that a grant was retained.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RetainedAccessReason {
     /// The grant also reaches other accounts, including public or group access.
     OtherAccounts,

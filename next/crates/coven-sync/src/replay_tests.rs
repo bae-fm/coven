@@ -42,6 +42,9 @@ pub(crate) fn key(n: u64) -> KeyId {
 }
 pub(crate) fn add(n: u8, role: MemberRole) -> StoreChange {
     StoreChange::AddMember {
+        access: coven_format::MemberAccess::S3AccessKey {
+            access_key_id: "fixture-access-key".into(),
+        },
         keys: keys(n),
         role,
     }
@@ -85,6 +88,9 @@ impl History {
             0,
             &[],
             StoreChange::CreateStore {
+                access: coven_format::MemberAccess::S3AccessKey {
+                    access_key_id: "fixture-access-key".into(),
+                },
                 store: StoreId(uuid::Uuid::from_u128(1)),
                 name: "Home".into(),
                 admin: keys(0),

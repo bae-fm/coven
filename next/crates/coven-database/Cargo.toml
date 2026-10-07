@@ -7,6 +7,7 @@ edition.workspace = true
 test-utils = []
 
 [dependencies]
+serde_json.workspace = true
 coven-crypto.workspace = true
 coven-foundation.workspace = true
 coven-merge.workspace = true

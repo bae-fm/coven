@@ -14,7 +14,10 @@ use coven_format::{
     store_log::{StoreChange, StoreLogEntry},
     value::EntryId,
 };
-use coven_foundation::{clock::ClockRef, id_source::KeyId};
+use coven_foundation::{
+    clock::ClockRef,
+    id_source::{IdSourceRef, KeyId},
+};
 use coven_merge::Audience;
 use coven_storage::{ObjectPath, ObjectPrefix, Storage, StorageFailure};
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,11 +28,12 @@ use std::time::UNIX_EPOCH;
 /// Calls require exclusive access so one install never authors or applies two
 /// entries concurrently through this owner. The database also checks stale replay.
 pub struct StoreLogSync {
-    storage: Arc<dyn Storage>,
+    storage: Option<Arc<dyn Storage>>,
     database: Database,
     store_keys: Arc<dyn StoreKeyCustody>,
     member_keys: Arc<dyn MemberKeyCustody>,
     clock: ClockRef,
+    ids: IdSourceRef,
 }
 
 impl StoreLogSync {
@@ -40,20 +44,44 @@ impl StoreLogSync {
         store_keys: Arc<dyn StoreKeyCustody>,
         member_keys: Arc<dyn MemberKeyCustody>,
         clock: ClockRef,
+        ids: IdSourceRef,
     ) -> Self {
         Self {
-            storage,
+            storage: Some(storage),
             database,
             store_keys,
             member_keys,
             clock,
+            ids,
+        }
+    }
+
+    /// Compose a store that can journal operations before storage connects.
+    pub fn disconnected(
+        database: Database,
+        store_keys: Arc<dyn StoreKeyCustody>,
+        member_keys: Arc<dyn MemberKeyCustody>,
+        clock: ClockRef,
+        ids: IdSourceRef,
+    ) -> Self {
+        Self {
+            storage: None,
+            database,
+            store_keys,
+            member_keys,
+            clock,
+            ids,
         }
     }
 
     /// Publish fixed entries, download ready entries, replay and acquire keys.
     /// A missing dependency or sealed copy waits solely in storage for a later call.
     pub async fn sync_store_log(&mut self) -> Result<SyncReport, SyncFailure> {
-        self.step().await.map_err(Into::into)
+        let mut report = self.step().await.map_err(SyncFailure::from)?;
+        let operations = self.operation_report().await.map_err(SyncFailure::from)?;
+        report.blocked_operations = operations.blocked_operations;
+        report.access_keys_to_delete = operations.access_keys_to_delete;
+        Ok(report)
     }
 
     /// Fix and publish a new entry. Existing queued bytes go first. The change's
@@ -86,19 +114,7 @@ impl StoreLogSync {
                 });
             }
         }
-        // Sharing history cannot silently omit an old key whose copy is delayed.
-        for (audience, key) in keys::needed(&local.log) {
-            let sharing = match &change {
-                StoreChange::AddMember { .. } => audience == Audience::Store,
-                StoreChange::AddCircleMember { circle, .. } => {
-                    audience == Audience::Circle(*circle)
-                }
-                _ => false,
-            };
-            if sharing && !keys::holds(&ring, &audience, key) {
-                return Err(SyncError::KeyUnavailable(key));
-            }
-        }
+        keys::check_shared_keys(&local.log, &change, &ring)?;
         let author = member.clone();
         let id = self
             .database
@@ -132,7 +148,12 @@ impl StoreLogSync {
             .await?;
         self.publish(&mut local, &member, &mut ring, &mut report)
             .await?;
-        let paths = self.storage.list(&ObjectPrefix::store_logs()).await?;
+        let paths = self
+            .storage
+            .as_deref()
+            .ok_or(SyncError::NoStorage)?
+            .list(&ObjectPrefix::store_logs())
+            .await?;
         let mut entries = BTreeMap::new();
         for stored in paths {
             let path = stored.path;
@@ -334,13 +355,38 @@ impl StoreLogSync {
         ring: &mut Option<StoreKeyring>,
         report: &mut SyncReport,
     ) -> Result<(), SyncError> {
+        if let Some(upload) = &local.upload {
+            for record in self.database.operations().await? {
+                if record.failure.is_some()
+                    && crate::operation_data::Data::read(&record)?
+                        .entry()?
+                        .is_some_and(|entry| entry.position == upload.entry.position)
+                {
+                    return Ok(());
+                }
+            }
+        }
+        self.publish_queued(local, member, ring, report).await
+    }
+
+    async fn publish_queued(
+        &self,
+        local: &mut LocalStoreLog,
+        member: &MemberKeys,
+        ring: &mut Option<StoreKeyring>,
+        report: &mut SyncReport,
+    ) -> Result<(), SyncError> {
         if let Some(upload) = local.upload.take() {
             for key in upload.sealed.keys {
                 self.storage
+                    .as_deref()
+                    .ok_or(SyncError::NoStorage)?
                     .create_once(&ObjectPath::parse(&key.path)?, &key.bytes)
                     .await?;
             }
             self.storage
+                .as_deref()
+                .ok_or(SyncError::NoStorage)?
                 .create_once(&object::path(upload.entry.position), &upload.sealed.bytes)
                 .await?;
             self.apply(local, upload.entry, member, ring, report)
@@ -358,8 +404,23 @@ impl StoreLogSync {
         report: &mut SyncReport,
     ) -> Result<(), SyncError> {
         let (entry, replay) = crate::replay_entry(&local.log, entry);
+        let operations = self
+            .removal_work(&local.log, &entry, &replay, member)
+            .await?;
+        let mut updates = Vec::new();
+        for record in self.database.operations().await? {
+            let data = crate::operation_data::Data::read(&record)?;
+            if record.failure.is_none()
+                && record.last_step < data.entry_step_number(4)
+                && data
+                    .entry()?
+                    .is_some_and(|fixed| fixed.position == entry.entry.position)
+            {
+                updates.push(data.update(&record, data.entry_step_number(4))?);
+            }
+        }
         self.database
-            .apply_store_log(entry.clone(), replay.clone())
+            .apply_store_log_operations(entry.clone(), replay.clone(), operations, updates)
             .await?;
         local.log.entries.push(entry);
         local.log.entries.sort_by_key(|e| e.entry.timestamp);
@@ -425,7 +486,11 @@ impl StoreLogSync {
                     };
                     // This path may have another writer: any first copy of the
                     // same key counts, even when its random sealed bytes differ.
-                    self.storage.create_once(&path, &bytes).await?;
+                    self.storage
+                        .as_deref()
+                        .ok_or(SyncError::NoStorage)?
+                        .create_once(&path, &bytes)
+                        .await?;
                 }
                 self.database.complete_key_upload(path.into()).await?;
             }
@@ -434,7 +499,13 @@ impl StoreLogSync {
     }
 
     async fn read(&self, path: &ObjectPath) -> Result<Option<Vec<u8>>, SyncError> {
-        match self.storage.read(path).await {
+        match self
+            .storage
+            .as_deref()
+            .ok_or(SyncError::NoStorage)?
+            .read(path)
+            .await
+        {
             Ok(bytes) => Ok(Some(bytes)),
             Err(error) if error.failure() == StorageFailure::NotFound => {
                 tracing::debug!(path = path.as_str(), "object has not arrived");
@@ -550,3 +621,10 @@ impl StoreLogSync {
 #[cfg(test)]
 #[path = "store_log_sync_tests.rs"]
 mod tests;
+
+#[path = "operation_calls.rs"]
+mod operation_calls;
+#[path = "operation_invites.rs"]
+mod operation_invites;
+#[path = "operation_steps.rs"]
+mod operation_steps;

@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 coven-foundation.workspace = true
 coven-crypto.workspace = true
+coven-format.workspace = true
 coven-merge.workspace = true
 async-trait.workspace = true
 serde = { workspace = true, features = ["derive"] }

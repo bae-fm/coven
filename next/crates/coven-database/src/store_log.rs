@@ -69,6 +69,8 @@ pub struct StoreIdentity {
 pub struct StoreMember {
     /// The public key used to seal store and circle keys to this member.
     pub sealing: SealingPublicKey,
+    /// The provider account or S3 key id from this member’s addition.
+    pub access: coven_format::MemberAccess,
     /// The member's role, retained when removed.
     pub role: MemberRole,
     /// Whether a kept removal removed this member.
@@ -140,6 +142,8 @@ pub(crate) fn apply(
     incoming: ReplayEntry,
     replay: StoreLogReplay,
     files: &crate::file_write::FileWrite<'_>,
+    operations: &[crate::NewOperation],
+    updates: &[crate::OperationUpdate],
 ) -> Result<(), DbError> {
     let ReplayEntry { entry, check } = incoming;
     let author_view = check.encode();
@@ -210,6 +214,12 @@ pub(crate) fn apply(
         .apply(None, touched)?;
         files.retain_rows(affected, &deleted)?;
         files.before_commit()?;
+        for update in updates {
+            crate::operation::advance(database, update)?;
+        }
+        for operation in operations {
+            crate::operation::insert(database, operation)?;
+        }
         Ok(())
     })
 }

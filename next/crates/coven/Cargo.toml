@@ -13,11 +13,12 @@ coven-merge.workspace = true
 coven-format.workspace = true
 coven-database.workspace = true
 coven-storage.workspace = true
+coven-sync.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }
 
 [dev-dependencies]
-coven-sync.workspace = true
+coven-storage = { workspace = true, features = ["test-utils"] }
 coven-foundation = { workspace = true, features = ["test-utils"] }
 coven-crypto = { workspace = true, features = ["test-utils"] }
 coven-database = { workspace = true, features = ["test-utils"] }

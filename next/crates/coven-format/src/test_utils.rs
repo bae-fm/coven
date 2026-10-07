@@ -110,6 +110,9 @@ pub fn store_log() -> StoreLogEntry {
         author: member().signing,
         had_read: EntryPositions(vec![]),
         change: StoreChange::CreateStore {
+            access: crate::MemberAccess::S3AccessKey {
+                access_key_id: "fixture-access-key".into(),
+            },
             store: StoreId(Uuid::from_bytes([0x10; 16])),
             name: "S".into(),
             admin: member(),

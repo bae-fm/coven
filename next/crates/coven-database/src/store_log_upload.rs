@@ -94,7 +94,10 @@ pub(crate) fn prepare<F, E>(
     seal: F,
 ) -> Result<EntryId, E>
 where
-    F: FnOnce(&StoreLog, &StoreLogEntry) -> Result<SealedStoreLog, E>,
+    F: FnOnce(
+        &StoreLog,
+        &StoreLogEntry,
+    ) -> Result<(SealedStoreLog, Option<crate::OperationUpdate>), E>,
     E: From<DbError>,
 {
     // The database owner holds its writer lock across construction and insertion.
@@ -136,7 +139,7 @@ where
             error,
         }
     })?;
-    let sealed = seal(&log, &entry)?;
+    let (sealed, operation) = seal(&log, &entry)?;
     database.transaction(|database| {
         database.internal_execute(
             "INSERT INTO coven_store_log_uploads(device,number,record,sealed_bytes) VALUES(?1,?2,?3,?4)",
@@ -148,6 +151,7 @@ where
                 (device.0.to_be_bytes().as_slice(), number.to_be_bytes().as_slice(), &key.path, &key.bytes),
             )?;
         }
+        if let Some(update) = &operation { crate::operation::advance(database, update)?; }
         Ok(())
     })?;
     Ok(entry.position)

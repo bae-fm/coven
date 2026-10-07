@@ -471,6 +471,7 @@ async fn only_the_spec_tables_are_created() {
         assert_eq!(
             tables,
             [
+                "coven_access_keys_to_delete",
                 "coven_applied_boundaries",
                 "coven_cells",
                 "coven_circle_members",
@@ -506,7 +507,8 @@ async fn only_the_spec_tables_are_created() {
                 "coven_uploads",
                 "coven_user_files",
                 "coven_versions",
-                "coven_writes"
+                "coven_writes",
+                "sqlite_sequence"
             ]
         );
         let cells = sql

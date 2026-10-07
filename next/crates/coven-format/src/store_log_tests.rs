@@ -9,6 +9,9 @@ fn entries_preserve_every_key_id_byte_including_zero() {
     ] {
         let changes = [
             StoreChange::CreateStore {
+                access: crate::MemberAccess::S3AccessKey {
+                    access_key_id: "fixture-access-key".into(),
+                },
                 store: StoreId(uuid::Uuid::from_u128(1)),
                 name: "S".into(),
                 admin: test_utils::member(),
@@ -177,6 +180,9 @@ fn every_store_log_change_round_trips_with_a_pinned_tag() {
     let changes = vec![
         test_utils::store_log().change,
         StoreChange::AddMember {
+            access: crate::MemberAccess::S3AccessKey {
+                access_key_id: "fixture-access-key".into(),
+            },
             keys: test_utils::member(),
             role: MemberRole::Member,
         },

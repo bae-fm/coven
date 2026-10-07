@@ -18,7 +18,7 @@ pub struct MemberPublicKeys {
 wire_struct!(MemberPublicKeys, signing, sealing);
 
 /// A member's role in the store (§9).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MemberRole {
     /// Can add and remove members and change roles.
     Admin,
@@ -75,6 +75,8 @@ pub enum StoreChange {
         name: String,
         /// The first admin's public keys.
         admin: MemberPublicKeys,
+        /// The owner’s provider account or public S3 key id.
+        access: crate::MemberAccess,
         /// The first store key, introduced by this entry.
         key: KeyId,
         /// The name of the device that wrote this entry, belonging to its author.
@@ -84,6 +86,8 @@ pub enum StoreChange {
     AddMember {
         /// The member's public keys.
         keys: MemberPublicKeys,
+        /// Storage access granted by the inviting owner.
+        access: crate::MemberAccess,
         /// The initial role.
         role: MemberRole,
     },
@@ -229,8 +233,8 @@ macro_rules! store_changes {
     };
 }
 store_changes!(
-    0 => CreateStore { store, name, admin, key, device_name },
-    1 => AddMember { keys, role },
+    0 => CreateStore { store, name, admin, access, device_name, key },
+    1 => AddMember { keys, role, access },
     2 => RemoveMember { member, key, circle_keys },
     3 => ChangeRole { member, role },
     4 => AddDevice { device, name },

@@ -91,11 +91,16 @@ fn same_meaning(
     use StoreChange::*;
     match (&a.change, &b.change) {
         (CreateStore { .. }, CreateStore { .. }) => true,
-        (AddMember { keys: m, role: r }, AddMember { keys: n, role: s }) => {
-            m.signing == n.signing && r == s
-        }
-        (AddMember { keys, role: r }, ChangeRole { member, role: s })
-        | (ChangeRole { member, role: s }, AddMember { keys, role: r }) => {
+        (
+            AddMember {
+                keys: m, role: r, ..
+            },
+            AddMember {
+                keys: n, role: s, ..
+            },
+        ) => m.signing == n.signing && r == s,
+        (AddMember { keys, role: r, .. }, ChangeRole { member, role: s })
+        | (ChangeRole { member, role: s }, AddMember { keys, role: r, .. }) => {
             keys.signing == *member && r == s
         }
         (

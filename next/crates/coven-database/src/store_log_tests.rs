@@ -58,6 +58,9 @@ fn circle_history(circle: CircleId) -> Vec<(StoreLogEntry, StoreLogReplay)> {
     let first = entry(
         1,
         StoreChange::CreateStore {
+            access: coven_format::MemberAccess::S3AccessKey {
+                access_key_id: "fixture-access-key".into(),
+            },
             store: store.id,
             name: store.name.clone(),
             admin: ana.clone(),
@@ -70,6 +73,9 @@ fn circle_history(circle: CircleId) -> Vec<(StoreLogEntry, StoreLogReplay)> {
     replay.state.members.insert(
         ana.signing.clone(),
         StoreMember {
+            access: coven_format::MemberAccess::S3AccessKey {
+                access_key_id: "fixture-access-key".into(),
+            },
             sealing: ana.sealing,
             role: MemberRole::Admin,
             removed: false,
@@ -88,6 +94,9 @@ fn circle_history(circle: CircleId) -> Vec<(StoreLogEntry, StoreLogReplay)> {
     let add = entry(
         2,
         StoreChange::AddMember {
+            access: coven_format::MemberAccess::S3AccessKey {
+                access_key_id: "fixture-access-key".into(),
+            },
             keys: ben.clone(),
             role: MemberRole::Member,
         },
@@ -95,6 +104,9 @@ fn circle_history(circle: CircleId) -> Vec<(StoreLogEntry, StoreLogReplay)> {
     replay.state.members.insert(
         ben.signing.clone(),
         StoreMember {
+            access: coven_format::MemberAccess::S3AccessKey {
+                access_key_id: "fixture-access-key".into(),
+            },
             sealing: ben.sealing,
             role: MemberRole::Member,
             removed: false,

@@ -261,8 +261,8 @@ async fn two_holders_race_to_store_the_same_key_for_one_member() {
         action: CopyAttempt::Race(Barrier::new(2)),
         attempts: Mutex::new(Vec::new()),
     });
-    ana.sync.storage = racing.clone();
-    ben.sync.storage = racing.clone();
+    ana.sync.storage = Some(racing.clone());
+    ben.sync.storage = Some(racing.clone());
     let (a, b) = tokio::time::timeout(Duration::from_secs(10), async {
         tokio::join!(ana.sync.sync_store_log(), ben.sync.sync_store_log())
     })
@@ -324,7 +324,7 @@ async fn interrupted_copy_reuses_fixed_bytes_after_restart_and_lost_reply_counts
             },
             attempts: Mutex::new(Vec::new()),
         });
-        ana.sync.storage = fault.clone();
+        ana.sync.storage = Some(fault.clone());
         assert!(matches!(ana.sync.sync_store_log().await.unwrap_err(),
             SyncFailure::Storage(error) if error.failure() == StorageFailure::Network));
         assert!(matches!(
@@ -345,7 +345,7 @@ async fn interrupted_copy_reuses_fixed_bytes_after_restart_and_lost_reply_counts
                 .unwrap(),
             fixed
         );
-        ana.sync.storage = fault.clone();
+        ana.sync.storage = Some(fault.clone());
         // Both public entry points resume copies left by a previously failed call.
         if lost_reply {
             ana.sync

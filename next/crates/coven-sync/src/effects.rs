@@ -105,7 +105,9 @@ pub(crate) fn already_in_place(state: &StoreLogState, entry: &StoreLogEntry) -> 
     use StoreChange::*;
     match &entry.change {
         CreateStore { .. } => state.store.is_some(),
-        AddMember { keys, role } => member(state, &keys.signing).is_some_and(|m| m.role == *role),
+        AddMember { keys, role, .. } => {
+            member(state, &keys.signing).is_some_and(|m| m.role == *role)
+        }
         ChangeRole { member: id, role } => member(state, id).is_some_and(|m| m.role == *role),
         RemoveMember { member: id, .. } => member(state, id).is_none(),
         AddDevice { device: id, .. } => {
@@ -215,6 +217,7 @@ pub(crate) fn apply_effect(next: &mut StoreLogState, entry: &StoreLogEntry) {
             store,
             name,
             admin,
+            access,
             key,
             device_name,
         } => {
@@ -228,6 +231,7 @@ pub(crate) fn apply_effect(next: &mut StoreLogState, entry: &StoreLogEntry) {
                 entry.author.clone(),
                 StoreMember {
                     sealing: admin.sealing,
+                    access: access.clone(),
                     role: MemberRole::Admin,
                     removed: false,
                 },
@@ -241,11 +245,12 @@ pub(crate) fn apply_effect(next: &mut StoreLogState, entry: &StoreLogEntry) {
                 },
             );
         }
-        AddMember { keys, role } => {
+        AddMember { keys, role, access } => {
             next.members.insert(
                 keys.signing.clone(),
                 StoreMember {
                     sealing: keys.sealing,
+                    access: access.clone(),
                     role: *role,
                     removed: false,
                 },

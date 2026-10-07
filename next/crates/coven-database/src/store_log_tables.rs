@@ -104,7 +104,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
     let state = &mut log.replay.state;
     state.members = database
         .query(
-            "SELECT member,sealing,role,removed FROM coven_members",
+            "SELECT member,sealing,role,removed,access FROM coven_members",
             [],
             |row| {
                 let role = match row.get::<_, String>(2)?.as_str() {
@@ -118,6 +118,15 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
                         sealing: SealingPublicKey::from_bytes(row.get(1)?),
                         role,
                         removed: row.get(3)?,
+                        access: serde_json::from_slice(&row.get::<_, Vec<u8>>(4)?).map_err(
+                            |e| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    4,
+                                    Type::Blob,
+                                    Box::new(e),
+                                )
+                            },
+                        )?,
                     },
                 ))
             },
@@ -288,12 +297,13 @@ pub(crate) fn replace(
             MemberRole::Member => "member",
         };
         database.internal_execute(
-            "INSERT INTO coven_members(member,sealing,role,removed) VALUES(?1,?2,?3,?4)",
+            "INSERT INTO coven_members(member,sealing,role,removed,access) VALUES(?1,?2,?3,?4,?5)",
             params![
                 id.to_bytes().as_slice(),
                 member.sealing.as_bytes().as_slice(),
                 role,
-                member.removed
+                member.removed,
+                serde_json::to_vec(&member.access).expect("member access encoding")
             ],
         )?;
     }

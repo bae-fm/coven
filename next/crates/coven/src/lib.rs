@@ -2,7 +2,8 @@
 //!
 //! Declare tables and migrations, create a store directory, then open it with
 //! [`Coven::builder`]. SQL, files, keys and their capabilities remain with the
-//! crates that own them. Opening never starts sync or unlocks a store key.
+//! crates that own them. Opening resumes unfinished operations without starting
+//! the sync loop; an empty operation journal needs no unlocked keys.
 
 mod builder;
 mod coven;
@@ -59,3 +60,13 @@ pub use coven_storage::{
 pub use coven_foundation::{clock::FixedClock, id_source::SequentialIds};
 #[cfg(any(test, feature = "test-utils"))]
 pub use test_utils::TestCoven;
+
+mod circles;
+pub use circles::Circles;
+pub use coven_format::store_log::MemberRole;
+pub use coven_storage::{MemberRemoval, ProviderSignOut, RetainedAccess, RetainedAccessReason};
+pub use coven_sync::{
+    AccessKeyToDelete, BlockedOperation, Circle, CircleError, CircleMemberInfo, Invite,
+    InviteAccess, JoinRequest, MemberInfo, OperationError, OperationId, OperationKind, StartedBy,
+    SyncError, SyncFailure, SyncReport,
+};

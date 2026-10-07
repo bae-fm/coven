@@ -26,6 +26,8 @@ pub(crate) const POLICY: Policy = Policy {
         &["coven_tables"],
     )),
     composition_roots: &[
+        ("crates/coven/src/builder.rs", "OpeningStore", "open"),
+        ("crates/coven-sync/src/operations.rs", "Operations", "new"),
         (
             "crates/coven-database/src/database_builder.rs",
             "DatabaseBuilder",
@@ -78,6 +80,8 @@ pub(crate) const POLICY: Policy = Policy {
         ),
     ],
     lifetime_authorities: &[
+        ("OperationRun", "Operations"),
+        ("RunningOperations", "Operations"),
         ("ReconfigurableLiveQuery", "Database"),
         ("LiveQuery", "Database"),
     ],
@@ -190,10 +194,11 @@ pub(crate) const POLICY: Policy = Policy {
         "OAuthSession",
         "DatabaseConnection",
     ],
-    non_owner_types: &["KeyCustody", "IdentityCustody"],
+    non_owner_types: &["KeyCustody", "IdentityCustody", "Command", "Request"],
     // Writes and pending deletions borrow the database's retained connection,
     // StoreDir and id source; app SQL receives none of those dependencies.
     borrowed_facade_types: &[
+        "Circles",
         "FileWrite",
         "FileRemovals",
         "SqlReadContext",
@@ -211,6 +216,7 @@ pub(crate) const POLICY: Policy = Policy {
         "WriteApply",
     ],
     root_owner_types: &[
+        "Operations",
         "Database",
         "DatabaseReadHandle",
         "StoreLogSync",
@@ -218,6 +224,9 @@ pub(crate) const POLICY: Policy = Policy {
         "CovenReadHandle",
     ],
     task_types: &[
+        "OperationRun",
+        "RunningOperations",
+        "Circles",
         "LocalFileStream",
         "FileStream",
         "FileStaging",
@@ -430,11 +439,13 @@ const CAPABILITIES: Capabilities = Capabilities {
         }],
     },
     // Database calls await blocking work while retaining the database owner.
-    // There is no long-lived task or runtime construction in this graph.
+    // The operation owner also retains and stops its journal worker.
     runtimes: Capability {
         name: "runtimes and spawned work",
         homes: &[
             "crates/coven-database/src/database.rs",
+            "crates/coven-database/src/database_operations.rs",
+            "crates/coven-sync/src/operations.rs",
             "crates/coven-database/src/file_staging.rs",
             "crates/coven-database/src/database_builder.rs",
             "crates/coven-database/src/local_file.rs",

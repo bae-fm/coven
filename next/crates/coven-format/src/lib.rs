@@ -137,3 +137,6 @@ pub(crate) fn encode_frame_with(
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
+
+mod member_access;
+pub use member_access::MemberAccess;

@@ -2330,7 +2330,7 @@ Carol's tablet:
 
   ```sql
   CREATE TABLE coven_operations (
-    id          INTEGER PRIMARY KEY,
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
     kind        TEXT NOT NULL,     -- 'remove member', 'reload from snapshot', …
     last_step   INTEGER NOT NULL,  -- 0 before the first step completes
     data        BLOB NOT NULL,     -- what this kind's steps need, in its own shape
@@ -2339,6 +2339,8 @@ Carol's tablet:
   );
   ```
 
+- Operation ids are never reused, so a retained app reference cannot retry or
+  discard another operation after its original row is deleted.
 - Each kind defines its own steps and the shape of its `data`, so one table
   holds any operation:
 
@@ -4201,6 +4203,10 @@ pub enum SyncError {
     Unlock(StoreKeyUnlockError),
     /// Making or checking signed or encrypted bytes failed.
     Crypto(CryptoError),
+    /// The request or invitation is absent, expired, or no longer matches.
+    InvitationChanged,
+    /// The provider retained grants requiring the owner's action (§20.9).
+    AccessRemains(Vec<RetainedAccess>),
     /// The member's role does not permit this entry (§9).
     PermissionDenied,
     /// Removing or demoting the member would leave no admin (§9).
@@ -4434,6 +4440,9 @@ pub struct AccessKeyToDelete {
     pub member: Option<MemberId>,
 }
 
+// These notices live in the device-local coven_access_keys_to_delete table,
+// outside the operation journal, until confirm_access_key_deleted removes them.
+
 pub struct WaitingWrite {
     pub write: WriteId,
     pub waiting_for: Vec<WriteId>,
@@ -4509,6 +4518,14 @@ pub enum OperationKind {
     RemoveMember,
     /// Remove a circle member and replace its key.
     RemoveCircleMember,
+    /// Make a circle and publish its first sealed key.
+    CreateCircle,
+    /// Seal the circle's history and add a member.
+    AddCircleMember,
+    /// Delete the circle's rows and publish its deletion.
+    DeleteCircle,
+    /// An owner's device takes back access after applying a kept removal.
+    RevokeAccess,
     /// Migrate the schema, snapshot it and raise the version.
     SchemaChange,
     /// Migrate the format, snapshot it and raise the version.
@@ -4549,6 +4566,8 @@ pub enum OperationError {
     DestinationExists { path: PathBuf },
     /// The member lacks authority for the operation (§9, §14.3, §19.3).
     PermissionDenied,
+    /// The provider retained grants requiring the owner's action (§20.9).
+    AccessRemains(Vec<RetainedAccess>),
 }
 
 impl CovenHandle {
@@ -4889,6 +4908,10 @@ match stream.read_at(resume_at, 256 * 1024).await {
 - Removing an account can leave access through a parent, a grant reaching other
   accounts, an unidentified recipient, or the owner. `MemberRemoval::AccessRemains`
   returns these grants and their reasons for the app to present to the owner.
+  The revocation remains a blocked operation until the app retries after the
+  owner changes those grants, or discards the operation to acknowledge them.
+  This also preserves the result when no app call is waiting, including a
+  revocation initiated by applying another device's removal.
 
 ```rust
 impl CovenHandle {
@@ -4930,6 +4953,12 @@ impl CovenHandle {
 
 /// Revoked sharing or remaining owner actions (§13).
 pub enum MemberRemoval {
+    /// This non-owner admin's removal is kept; an owner's device revokes
+    /// sharing when it applies the removal.
+    PendingOwner,
+    /// Another active member or an open invite uses the same provider account.
+    /// Its sharing must remain until that use ends.
+    AccountInUse { account: String },
     /// The provider no longer shares with the account.
     Revoked,
     /// Exclusive grants were removed; these grants remain for owner action.

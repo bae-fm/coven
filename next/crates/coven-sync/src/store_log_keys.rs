@@ -100,6 +100,25 @@ pub(crate) fn holds(ring: &Option<StoreKeyring>, audience: &Audience, key: KeyId
     })
 }
 
+/// Sharing history requires every key, including introductions from dropped removals.
+pub(crate) fn check_shared_keys(
+    log: &StoreLog,
+    change: &StoreChange,
+    ring: &Option<StoreKeyring>,
+) -> Result<(), SyncError> {
+    for (audience, key) in needed(log) {
+        let sharing = match change {
+            StoreChange::AddMember { .. } => audience == Audience::Store,
+            StoreChange::AddCircleMember { circle, .. } => audience == Audience::Circle(*circle),
+            _ => false,
+        };
+        if sharing && !holds(ring, &audience, key) {
+            return Err(SyncError::KeyUnavailable(key));
+        }
+    }
+    Ok(())
+}
+
 fn store_copy(
     key: &StoreKey,
     member: &MemberId,
