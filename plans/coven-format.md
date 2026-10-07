@@ -201,6 +201,7 @@
 | 11 | Raise schema | `version:u32 \| snapshot:SnapshotId` |
 | 12 | Raise format | `version:u16 \| snapshot:SnapshotId` |
 | 13 | Reset | `snapshot:SnapshotId` |
+| 14 | Set access | `access:MemberAccess` |
 
 - A role is `0` admin or `1` member. `SnapshotId` is
   `audience:Audience | device:DeviceId | number:u64`, its path's parts (D10).
@@ -209,6 +210,7 @@
 - The create-store entry is number 1 of its device, reads nothing, and its
   `admin` is its author; the device it adds is the one writing it.
 - Add-device carries no member id; create-circle carries no member list.
+- Set-access is about its author, the member whose access it records.
 - `key` names the key the entry brings in ([§11](coven-from-scratch.md#11-keys));
   a removal's `circle_keys` are strictly increasing by circle. Their count
   is present even when zero. Key ids have no numerical ordering or succession.

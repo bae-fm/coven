@@ -1229,6 +1229,9 @@ Carol's tablet:
   - only admins add and remove members, and change roles;
   - each member adds and removes their own devices, with their own key, and
     admins can remove any device;
+  - each member records their own new storage access, such as a replaced S3
+    access key, so a later removal takes back the access they have now
+    ([§13](#13-removing-members-and-devices));
   - a removal names a device its author had read the addition of, so it
     knows whose device it is;
   - the store always has at least one admin.
@@ -5006,9 +5009,10 @@ impl CovenHandle {
     pub async fn get_members(&self) -> Result<Vec<MemberInfo>, SyncError>;
 
     /// On S3: switches this member to the access key they made in the
-    /// provider's console, and returns their new restore code, for their
-    /// other devices to scan and for them to write down. They delete the old
-    /// key in the console (§13).
+    /// provider's console, records the new key's id in the store log (§9),
+    /// and returns their new restore code, for their other devices to scan
+    /// and for them to write down. They delete the old key in the console
+    /// (§13).
     pub async fn replace_access_key(
         &self,
         access_key_id: String,
