@@ -2052,6 +2052,17 @@ Carol's tablet:
   writes that device's id to its row.
   - A user-provided file is written to a path the user picks, which must
     not already exist; an app-provided one goes into coven's own folder.
+  - A user-provided download is written and synced to a temporary file in
+    the destination's directory, checked against the row's size and content
+    hash, then published by a no-replace rename. The same rename primitive
+    publishes store directories: `renameat_with` with `NOREPLACE` on Unix,
+    `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING` on Windows. A filesystem
+    that refuses it fails the operation with that error; there is no fallback.
+  - After a crash, if the temporary file is gone and the destination exists,
+    that destination is the operation's file exactly when its size and content
+    hash match the captured row's; otherwise the operation fails with
+    `DestinationExists`. If both names exist, the destination is another file
+    and also fails with `DestinationExists`.
   - The uploaded copy is then deleted like any unused file.
 - A device copy that its row no longer names, because another device's
   later write moved the file, is deleted once that write applies here.
@@ -2190,8 +2201,11 @@ Carol's tablet:
   - `coven_cache_budgets`: each namespace's budget;
   - `coven_file_removals`: unused local copies waiting to be deleted, and
     names reserved by unfinished downloads. A download records its operation
-    id and, for a user-provided file, its destination and temporary sibling.
-    An accepted user destination is never deleted; only its sibling is.
+    id and, for a user-provided file, its destination, temporary sibling and
+    captured file reference. Publication consumes the sibling; the write
+    accepting the user destination removes its reservation, and coven never
+    deletes that accepted original. Abandoned downloads use the same size
+    and content-hash check to recognize a published copy before deleting it.
 - The bytes themselves are files in the store's directory: coven's own
   copies, and the cache.
 - A file's bytes are written and synced to disk before the row that names

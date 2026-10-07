@@ -39,11 +39,11 @@ impl<'a> FileRemovals<'a> {
         let mut failures = Vec::new();
         let result = self.database.transaction(|database| {
             let names = database.query(
-                "SELECT path,area,destination FROM coven_file_removals WHERE operation IS NULL ORDER BY area,path",
+                "SELECT path,area,destination,reference FROM coven_file_removals WHERE operation IS NULL ORDER BY area,path",
                 [],
-                |r| Ok((r.get::<_, String>(0)?,r.get::<_, String>(1)?,r.get::<_, Option<Vec<u8>>>(2)?)),
+                |r| Ok((r.get::<_, String>(0)?,r.get::<_, String>(1)?,r.get::<_, Option<Vec<u8>>>(2)?,r.get::<_, Option<Vec<u8>>>(3)?)),
             )?;
-            for (name,area,destination) in names {
+            for (name,area,destination,reference) in names {
                 let result = (|| {
                     let name = FileName::new(name).map_err(|_| DbError::DamagedDatabase)?;
                     if self.active.contains(&name) {
@@ -59,14 +59,14 @@ impl<'a> FileRemovals<'a> {
                     match area.as_str() {
                         "files" => self.directory.file(FileArea::AppProvided, &name).remove()?,
                         "cache" => self.directory.file(FileArea::Cache, &name).remove()?,
-                        "user" | "user-staging" => {
+                        "user" => {
                             let location = coven_foundation::files::DownloadLocation::UserProvided {
                                 path: crate::user_file::decode_path(destination.ok_or(DbError::DamagedDatabase)?)?,
                                 name: name.clone(),
                             };
                             let download = self.directory.download(&location)?;
-                            if area == "user" { download.remove_unused()?; }
-                            else { download.remove_staging()?; }
+                            let file = crate::FileRef::decode(&reference.ok_or(DbError::DamagedDatabase)?)?;
+                            download.remove_unused(|reader| file.matches_content(reader))?;
                         }
                         _ => return Err(DbError::DamagedDatabase),
                     }

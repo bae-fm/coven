@@ -53,8 +53,11 @@ impl FileDatabase {
                     }
                     let operation = crate::operation::insert(db, &operation)?;
                     let area = if destination.is_some() { "user" } else { "files" };
-                    db.internal_execute("INSERT INTO coven_file_removals(path,area,destination,operation) VALUES(?1,?2,?3,?4)",
-                        (name.as_str(), area, destination.as_deref().map(crate::user_file::encode_path), operation.0))?;
+                    // Retain the captured content facts even after abandonment releases
+                    // the operation; cleanup must recognize an unrecorded rename.
+                    let reference = destination.as_ref().map(|_| file.encode()).transpose()?;
+                    db.internal_execute("INSERT INTO coven_file_removals(path,area,destination,reference,operation) VALUES(?1,?2,?3,?4,?5)",
+                        (name.as_str(), area, destination.as_deref().map(crate::user_file::encode_path), reference, operation.0))?;
                 }
                 Ok(())
             })
@@ -119,25 +122,46 @@ impl FileDatabase {
         };
         let database = database.clone();
         let file = file.clone();
-        finish_blocking(tokio::task::spawn_blocking(move || {
-            let slot = database.inner.read().expect("database lock poisoned");
-            let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-            let writer = inner.writer.lock().expect("writer lock poisoned");
-            let files = crate::file_write::FileWrite::new(&writer, &inner.directory, &inner.write_schema, inner.device, &inner.staging, Vec::new());
-            let result = writer.local_write(&inner.write_schema, inner.device, inner.clock.now(), &files, |_| {
-                file_ref::validate(&writer, &inner.write_schema, &file)?;
-                let (name, area) = writer.query_row("SELECT path,area FROM coven_file_removals WHERE operation=?1", [update.id.0], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-                let name = FileName::new(name).map_err(|_| DbError::DamagedDatabase)?;
-                files.keep_file(&file, &name, prepared)?;
-                match area.as_str() {
-                    "files" => { writer.internal_execute("DELETE FROM coven_file_removals WHERE operation=?1", [update.id.0])?; }
-                    "user" => { writer.internal_execute("UPDATE coven_file_removals SET area='user-staging',operation=NULL WHERE operation=?1", [update.id.0])?; }
-                    _ => return Err(DbError::DamagedDatabase),
-                }
-                crate::operation::advance(&writer, &update)
-            });
-            files.finish(result)
-        }).await)
+        finish_blocking(
+            tokio::task::spawn_blocking(move || {
+                let slot = database.inner.read().expect("database lock poisoned");
+                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+                let writer = inner.writer.lock().expect("writer lock poisoned");
+                let files = crate::file_write::FileWrite::new(
+                    &writer,
+                    &inner.directory,
+                    &inner.write_schema,
+                    inner.device,
+                    &inner.staging,
+                    Vec::new(),
+                );
+                let result = writer.local_write(
+                    &inner.write_schema,
+                    inner.device,
+                    inner.clock.now(),
+                    &files,
+                    |_| {
+                        file_ref::validate(&writer, &inner.write_schema, &file)?;
+                        let name: String = writer.query_row(
+                            "SELECT path FROM coven_file_removals WHERE operation=?1",
+                            [update.id.0],
+                            |r| r.get(0),
+                        )?;
+                        let name = FileName::new(name).map_err(|_| DbError::DamagedDatabase)?;
+                        files.keep_file(&file, &name, prepared)?;
+                        // Publication consumed the user file's temporary sibling. The
+                        // accepted original, like an attached owned copy, needs no removal.
+                        writer.internal_execute(
+                            "DELETE FROM coven_file_removals WHERE operation=?1",
+                            [update.id.0],
+                        )?;
+                        crate::operation::advance(&writer, &update)
+                    },
+                );
+                files.finish(result)
+            })
+            .await,
+        )
     }
 
     /// Make a stale or discarded download unused in the transaction recording

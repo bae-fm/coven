@@ -469,3 +469,66 @@ async fn an_interrupted_download_restarts_its_unfinished_step() {
     assert_eq!(std::fs::read(destination).unwrap(), bytes);
     f.close().await;
 }
+
+#[tokio::test]
+async fn a_crash_after_rename_recovers_only_the_recorded_content_without_storage() {
+    for replacement in [
+        None,
+        Some(b"changed".as_slice()),
+        Some(b"longer bytes".as_slice()),
+    ] {
+        let mut f = Fixture::new(
+            Provenance::UserProvided,
+            Uploads::WhenAsked,
+            CacheFill::CacheLazy,
+        )
+        .await;
+        let file = uploaded(&f, &Provenance::UserProvided, b"checked").await;
+        let (row, destination) = record(&f, &file).await;
+        let location = f.files.inner.database.keep_location(row.id).await.unwrap();
+        step(&f).await.unwrap();
+        let coven_foundation::files::DownloadLocation::UserProvided { name, .. } = location else {
+            panic!("expected a user destination")
+        };
+        assert!(!destination
+            .with_file_name(format!(".coven-download-{}", name.as_str()))
+            .exists());
+        // Retain the real publication's disk effects with the journal still at
+        // its pre-publication value, as after a crash before the step commits.
+        let completed = f.database.operations().await.unwrap().remove(0);
+        f.database
+            .advance_operation(
+                Data::read(&completed)
+                    .unwrap()
+                    .update(&completed, 0)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if let Some(bytes) = replacement {
+            std::fs::write(&destination, bytes).unwrap();
+        }
+        f.reopen().await;
+        f.files.set_storage(None);
+        if let Some(bytes) = replacement {
+            assert!(matches!(
+                step(&f).await,
+                Err(SyncError::DestinationExists { .. })
+            ));
+            let row = f.database.operations().await.unwrap().remove(0);
+            f.files
+                .discard_keep(&row, Data::read(&row).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(std::fs::read(&destination).unwrap(), bytes);
+        } else {
+            for _ in 0..3 {
+                step(&f).await.unwrap();
+            }
+            let kept = f.database.file_ref("files", "one").await.unwrap();
+            assert!(matches!(kept.location(), FileLocation::OnDevice(_)));
+            assert_eq!(f.files.read_file(&kept).await.unwrap(), b"checked");
+        }
+        f.close().await;
+    }
+}

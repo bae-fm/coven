@@ -69,10 +69,10 @@ impl StoreDeletionLock {
         let destination = deletion_path(&self.store.directory, self.store.id);
         if inspect_directory(&self.store.directory)? {
             if self.store.directory != destination {
-                crate::files::creation::rename_new_directory(&self.store.directory, &destination)
+                crate::files::atomic_file::rename_new(&self.store.directory, &destination)
                     .map_err(|source| {
-                    FileError::at("unpublish store", &self.store.directory, source)
-                })?;
+                        FileError::at("unpublish store", &self.store.directory, source)
+                    })?;
                 self.store.directory = destination;
             }
             #[cfg(unix)]

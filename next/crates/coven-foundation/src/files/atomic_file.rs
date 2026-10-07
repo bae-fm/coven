@@ -1,8 +1,5 @@
 //! Durable file creation, atomic replacement and removal.
 
-#[path = "file_link.rs"]
-mod link;
-
 use super::StoreReadLock;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -79,12 +76,18 @@ impl AtomicFile {
         Self { path }
     }
 
-    pub(super) fn publish_link(&self, destination: &Path) -> Result<(), FileError> {
-        link::publish(&self.path, destination)
+    pub(super) fn publish(&self, destination: &Path) -> Result<(), FileError> {
+        rename_new(&self.path, destination)
+            .map_err(|source| FileError::at("publish download", destination, source))?;
+        sync_publication(destination)
     }
 
-    pub(super) fn remove_link(&self, destination: &Path) -> Result<(), FileError> {
-        link::remove(&self.path, destination)
+    pub(super) fn exists(&self) -> Result<bool, FileError> {
+        match fs::symlink_metadata(&self.path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(source) => Err(FileError::at("inspect staged file", &self.path, source)),
+        }
     }
 
     /// Read the complete file. Only a missing file is `None`; other errors
@@ -447,6 +450,51 @@ fn windows_rename(file: &fs::File, to: &Path) -> io::Result<()> {
     } else {
         Ok(())
     }
+}
+
+/// Rename a file or directory without replacing any existing destination.
+/// Callers use resolved siblings and handle directory durability themselves.
+/// Unsupported filesystems return their native error; there is no fallback.
+#[cfg(unix)]
+pub(crate) fn rename_new(from: &Path, to: &Path) -> io::Result<()> {
+    use rustix::fs::{renameat_with, RenameFlags, CWD};
+    renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE).map_err(Into::into)
+}
+
+#[cfg(windows)]
+pub(crate) fn rename_new(from: &Path, to: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+
+    // Both paths have a resolved parent on the same filesystem. Refuse any
+    // existing destination, whether publishing a file or a store directory.
+    let from: Vec<_> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+    let to: Vec<_> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+    if from[..from.len() - 1].contains(&0) || to[..to.len() - 1].contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "NUL in rename path",
+        ));
+    }
+    // SAFETY: both paths are live, NUL-terminated UTF-16 buffers. They have
+    // the same parent; no replacement or cross-volume copy is requested.
+    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_WRITE_THROUGH) } == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+pub(super) fn sync_publication(path: &Path) -> Result<(), FileError> {
+    #[cfg(unix)]
+    sync_directory(parent(path)).map_err(|source| FileError::AfterReplace {
+        path: path.to_owned(),
+        source,
+    })?;
+    // MoveFileExW uses WRITE_THROUGH; Unix needs the explicit parent barrier.
+    #[cfg(windows)]
+    let _ = path;
+    Ok(())
 }
 
 #[cfg(test)]

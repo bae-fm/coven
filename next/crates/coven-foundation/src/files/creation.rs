@@ -102,7 +102,7 @@ pub(crate) fn create<E: std::error::Error + Send + Sync + 'static>(
                 .map_err(|source| StoreCreationError::Initialization { id, source })
         })
         .and_then(|()| {
-            rename_new_directory(stage.path(), &destination).map_err(|source| {
+            crate::files::atomic_file::rename_new(stage.path(), &destination).map_err(|source| {
                 if source.kind() == io::ErrorKind::AlreadyExists {
                     StoreCreationError::AlreadyExists(id)
                 } else {
@@ -157,30 +157,6 @@ fn create_directory_tree_with_sync(
         sync(Path::new("."))?;
     }
     Ok(())
-}
-
-#[cfg(unix)]
-pub(crate) fn rename_new_directory(from: &Path, to: &Path) -> io::Result<()> {
-    use rustix::fs::{renameat_with, RenameFlags, CWD};
-    renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE).map_err(Into::into)
-}
-
-#[cfg(windows)]
-pub(crate) fn rename_new_directory(from: &Path, to: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
-
-    // Both paths are inside the canonicalized stores directory. Publication
-    // must refuse an existing name, even when it is an empty directory.
-    let from: Vec<_> = from.as_os_str().encode_wide().chain(Some(0)).collect();
-    let to: Vec<_> = to.as_os_str().encode_wide().chain(Some(0)).collect();
-    // SAFETY: both paths are live, NUL-terminated UTF-16 buffers. They have
-    // the same parent; no replacement or cross-volume copy is requested.
-    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_WRITE_THROUGH) } == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
 }
 
 #[cfg(test)]

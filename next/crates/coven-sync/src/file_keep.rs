@@ -7,7 +7,7 @@ use crate::{
     FileReadError, SyncError,
 };
 use coven_database::{DbError, FileLocation, FileRef, OperationRecord, Provenance};
-use coven_foundation::files::{DownloadFile, DownloadLocation, FileError};
+use coven_foundation::files::{DownloadFile, DownloadLocation, FileError, ObservationError};
 use std::{
     collections::{BTreeSet, HashMap},
     path::PathBuf,
@@ -120,6 +120,25 @@ impl Files {
         let lease = Arc::new(self.inner.database.keep_lease().await?);
         match record.last_step {
             0 => {
+                let directory = self.inner.directory.clone();
+                let target = location.clone();
+                let captured = file.clone();
+                let retained = lease.clone();
+                let published = join(tokio::task::spawn_blocking(move || {
+                    let _lease = retained;
+                    let download = directory.download(&target).map_err(FileReadError::from)?;
+                    download
+                        .recover_publication(|reader| captured.matches_content(reader))
+                        .map_err(observation_error)
+                }))
+                .await?;
+                if published {
+                    self.inner
+                        .database
+                        .advance_keep(data.update(record, 1)?)
+                        .await?;
+                    return Ok(Progress::Advanced);
+                }
                 let stream = self.open_file_stream(file).await?;
                 let directory = self.inner.directory.clone();
                 let target = location.clone();
@@ -127,7 +146,7 @@ impl Files {
                 let mut writer = join(tokio::task::spawn_blocking(move || {
                     let _lease = retained;
                     let download = directory.download(&target).map_err(FileReadError::from)?;
-                    download.remove_unused()?;
+                    download.remove_staging()?;
                     Ok::<_, FileReadError>(download.create_writer()?)
                 }))
                 .await?;
@@ -162,13 +181,7 @@ impl Files {
                             let download =
                                 directory.download(&location).map_err(FileReadError::from)?;
                             let reader = download.open_reader().map_err(DbError::from)?;
-                            let mut hash = coven_crypto::ContentHasher::new();
-                            reader
-                                .scan(|bytes| hash.update(bytes))
-                                .map_err(DbError::from)?;
-                            if reader.size() != file.plaintext_size()
-                                || hash.finish() != file.content_hash()
-                            {
+                            if !file.matches_content(&reader).map_err(DbError::from)? {
                                 return Err(FileReadError::Integrity { id: file.id() }.into());
                             }
                             Ok::<_, SyncError>(())
@@ -226,5 +239,12 @@ fn disk_error(error: FileError) -> SyncError {
             SyncError::DestinationExists { path }
         }
         error => FileReadError::Disk(error).into(),
+    }
+}
+
+fn observation_error(error: ObservationError) -> SyncError {
+    match error {
+        ObservationError::File(error) => disk_error(error),
+        error => DbError::from(error).into(),
     }
 }

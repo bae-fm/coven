@@ -8,23 +8,27 @@ fn publication_and_abandonment_resume_without_touching_another_file() {
     let download = download(&root, stage.clone(), destination.clone());
     download.staged.replace(b"download").unwrap();
     download.publish().unwrap();
-    download.publish().unwrap();
+    assert!(
+        !stage.exists(),
+        "publication must rename away the temporary file"
+    );
+    assert!(download.recover_publication(matches_download).unwrap());
     assert_eq!(fs::read(&destination).unwrap(), b"download");
-    download.remove_unused().unwrap();
-    download.remove_unused().unwrap();
+    download.remove_unused(matches_download).unwrap();
+    download.remove_unused(matches_download).unwrap();
     assert!(!destination.exists());
     download.staged.replace(b"download").unwrap();
     fs::write(&destination, b"other").unwrap();
     assert!(
         matches!(download.publish(), Err(FileError::Io { source, .. }) if source.kind() == io::ErrorKind::AlreadyExists)
     );
-    download.remove_unused().unwrap();
+    download.remove_unused(matches_download).unwrap();
     assert_eq!(fs::read(&destination).unwrap(), b"other");
     assert!(!stage.exists());
 }
 
 #[test]
-fn accepting_a_user_original_releases_only_the_temporary_link() {
+fn accepting_a_user_original_leaves_no_temporary_file() {
     let root = tempfile::tempdir().unwrap();
     let stage = root.path().join("stage");
     let path = DownloadFile::check_destination(&root.path().join("original")).unwrap();
@@ -36,6 +40,20 @@ fn accepting_a_user_original_releases_only_the_temporary_link() {
     assert!(!stage.exists());
     assert_eq!(fs::read(&path).unwrap(), b"accepted");
     assert!(DownloadFile::check_destination(&path).is_err());
+}
+
+#[test]
+fn publication_refuses_embedded_nuls_without_truncating_the_destination() {
+    let root = tempfile::tempdir().unwrap();
+    let stage = root.path().join("stage");
+    let destination = root.path().join("destination\0suffix");
+    let download = download(&root, stage.clone(), destination);
+    download.staged.replace(b"download").unwrap();
+    assert!(
+        matches!(download.publish(), Err(FileError::Io { source, .. }) if source.kind() == io::ErrorKind::InvalidInput)
+    );
+    assert_eq!(fs::read(stage).unwrap(), b"download");
+    assert!(!root.path().join("destination").exists());
 }
 
 #[cfg(unix)]
@@ -62,4 +80,8 @@ fn download(root: &tempfile::TempDir, stage: PathBuf, destination: PathBuf) -> D
         Some(destination),
         store.lock_read_only().unwrap(),
     )
+}
+
+fn matches_download(reader: &FileReader) -> Result<bool, ObservationError> {
+    Ok(reader.size() == 8 && reader.read_at(0, 8)? == b"download")
 }

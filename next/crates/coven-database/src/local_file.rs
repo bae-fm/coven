@@ -5,7 +5,6 @@ use crate::{
     file_row, sqlite::DatabaseConnection, write_schema::WriteSchema, DbError, FileLocation,
     Provenance,
 };
-use coven_crypto::ContentHasher;
 use coven_foundation::{
     files::{
         FileArea, FileError, FileName, FileReader, ObservationError, StoreDir, StoreLockError,
@@ -165,14 +164,10 @@ pub(crate) fn open(
             directory.file(FileArea::AppProvided, &name).open_reader()
         }
     }.map_err(|error| observation(error, &id, file.provenance.clone()))?;
-    if reader.size() != reference.plaintext_size() {
-        return Err(LocalFileError::Integrity { id });
-    }
-    let mut hash = ContentHasher::new();
-    reader
-        .scan(|bytes| hash.update(bytes))
-        .map_err(|error| observation(error, &id, file.provenance.clone()))?;
-    if hash.finish() != reference.version.hash {
+    if !reference
+        .matches_content(&reader)
+        .map_err(|error| observation(error, &id, file.provenance.clone()))?
+    {
         return Err(LocalFileError::Integrity { id });
     }
     Ok(LocalFileStream {
