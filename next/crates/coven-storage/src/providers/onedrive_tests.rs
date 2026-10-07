@@ -769,3 +769,52 @@ async fn permission_failures_reach_every_object_and_upload_caller() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn listing_refuses_hostile_links_repeated_pages_and_folder_cycles() {
+    for variant in 0..5 {
+        let server=TestServer::new(Router::new().fallback(move |uri:Uri,headers:HeaderMap| async move {
+            if uri.path().ends_with("/root") {return reply(json!({"id":"root","folder":{}}));}
+            let page=match variant {
+                0=>json!({"value":[],"@odata.nextLink":"https://another-account.invalid/list"}),
+                1=>json!({"value":[],"@odata.nextLink":format!("http://{}/graph/drives/drive/items/root/children",headers["host"].to_str().unwrap())}),
+                2=>json!({"value":[{"id":"root","name":"devices","folder":{}}]}),
+                3=>json!({"value":[{"id":"both","name":"devices","folder":{},"file":{}}]}),
+                _=>json!({"value":[{"id":"malformed","name":"devices","folder":true}]}),
+            };
+            reply(page)
+        })).await;
+        assert_eq!(
+            provider(&server.url)
+                .list(&ObjectPrefix::all())
+                .await
+                .unwrap_err()
+                .failure(),
+            StorageFailure::Protocol
+        );
+    }
+}
+
+#[tokio::test]
+async fn setup_refuses_native_items_that_are_not_object_files() {
+    let server = TestServer::new(Router::new().fallback(|uri: Uri| async move {
+        if uri.path().ends_with("/root") {
+            reply(json!({"id":"root","folder":{}}))
+        } else {
+            reply(json!({"value":[{"id":"native","name":"notebook","package":{"type":"oneNote"}}]}))
+        }
+    }))
+    .await;
+    let path = ObjectPath::store_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    assert_eq!(
+        provider(&server.url)
+            .setup(&path, b"first")
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageSetupFailure::LocationOccupied
+    );
+}

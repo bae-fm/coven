@@ -369,6 +369,13 @@ impl Storage for OneDriveStorage {
                     http::json(PROVIDER, self.send(Method::GET, &url, Body::Empty).await?).await?;
                 for item in http::array(&value, "value")? {
                     let name = http::string(item, "name")?;
+                    if ["folder", "file"].iter().any(|facet| {
+                        item.get(*facet)
+                            .is_some_and(|value| !value.is_null() && !value.is_object())
+                    }) || (item["folder"].is_object() && item["file"].is_object())
+                    {
+                        return Err(StorageError::Protocol("invalid OneDrive item kind"));
+                    }
                     if item["folder"].is_object() {
                         let mut parts = names.clone();
                         parts.push(name.to_owned());
@@ -393,7 +400,7 @@ impl Storage for OneDriveStorage {
                             }
                         }
                     } else {
-                        return Err(StorageError::Protocol("unexpected OneDrive item kind"));
+                        return Err(StorageError::InvalidPath);
                     }
                 }
                 match value.get("@odata.nextLink") {

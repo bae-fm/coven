@@ -164,3 +164,86 @@ async fn viewer_upgrades_preserve_access_when_refused_and_retry_a_lost_reply() {
         ]
     );
 }
+
+#[tokio::test]
+async fn conformance_and_account_sharing() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = Arc::new(provider(&server.url));
+    crate::test_utils::Conformance::new(storage.clone())
+        .run()
+        .await
+        .unwrap();
+    storage.grant_access("member").await.unwrap();
+    storage
+        .revoke_access(&MemberAccess::ProviderAccount("member".into()))
+        .await
+        .unwrap();
+    assert!(state.lock().unwrap().permissions.is_empty());
+}
+#[tokio::test]
+async fn sharing_requires_the_store_owners_account() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    storage.grant_access("kept@example.test").await.unwrap();
+    state.lock().unwrap().non_owner = true;
+    for error in [
+        storage
+            .grant_access("new@example.test")
+            .await
+            .err()
+            .unwrap(),
+        storage
+            .revoke_access(&MemberAccess::ProviderAccount("kept@example.test".into()))
+            .await
+            .err()
+            .unwrap(),
+    ] {
+        assert!(matches!(error, StorageError::NotStoreOwner));
+        assert_eq!(error.failure(), StorageFailure::PermissionDenied);
+    }
+    assert_eq!(
+        state
+            .lock()
+            .unwrap()
+            .permissions
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        ["kept@example.test"]
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_path_removes_its_copies_and_preserves_unlinked_bytes() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let path = ObjectPath::store_log(DeviceId(31), std::num::NonZeroU64::MIN);
+    {
+        let mut remote = state.lock().unwrap();
+        duplicate(&mut remote, &path, "first", "2026-10-06T00:00:00Z", 31);
+        duplicate(&mut remote, &path, "later", "2026-10-06T00:00:01Z", 31);
+        duplicate(
+            &mut remote,
+            &path,
+            "other-account",
+            "2026-10-06T00:00:02Z",
+            32,
+        );
+        remote.files.get_mut("other-account").unwrap().0["ownedByMe"] = json!(false);
+    }
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    state.lock().unwrap().lose_delete_reply = true;
+    assert_eq!(
+        storage.delete(&path).await.unwrap_err().failure(),
+        StorageFailure::Network
+    );
+    storage.delete(&path).await.unwrap();
+    assert!(storage.list(&ObjectPrefix::all()).await.unwrap().is_empty());
+    storage.delete(&path).await.unwrap();
+    let remote = state.lock().unwrap();
+    assert_eq!(remote.files.len(), 1);
+    assert_eq!(remote.files["other-account"].1, b"data");
+    assert_eq!(remote.files["other-account"].0["parents"], json!([]));
+}

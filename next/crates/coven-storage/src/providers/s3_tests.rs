@@ -631,3 +631,70 @@ async fn permission_failures_reach_every_object_and_upload_caller() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn listing_requires_an_explicit_end_or_a_fresh_nonempty_cursor() {
+    for tail in [
+        "",
+        "<IsTruncated>true</IsTruncated>",
+        "<IsTruncated>true</IsTruncated><NextContinuationToken></NextContinuationToken>",
+        "<IsTruncated>true</IsTruncated><NextContinuationToken>repeat</NextContinuationToken>",
+    ] {
+        let server = TestServer::new(Router::new().fallback(move || async move {
+            response(200, format!("<ListBucketResult>{tail}</ListBucketResult>"))
+        }))
+        .await;
+        assert_eq!(
+            provider(&server.url)
+                .list(&ObjectPrefix::all())
+                .await
+                .unwrap_err()
+                .failure(),
+            StorageFailure::Protocol
+        );
+    }
+}
+
+#[tokio::test]
+async fn multipart_recovery_refuses_incomplete_pages_and_empty_etags_without_advancing() {
+    for tail in ["", "<IsTruncated>true</IsTruncated>", "<IsTruncated>true</IsTruncated><NextPartNumberMarker></NextPartNumberMarker>", "<IsTruncated>true</IsTruncated><NextPartNumberMarker>1</NextPartNumberMarker>", "<IsTruncated>false</IsTruncated><Part><PartNumber>1</PartNumber><Size>4</Size><ETag></ETag></Part>"] {
+        let server=TestServer::new(Router::new().fallback(move |method:Method,uri:Uri|async move {
+            if query(&uri).contains_key("uploads") {response(200,"<InitiateMultipartUploadResult><UploadId>session</UploadId></InitiateMultipartUploadResult>")}
+            else if method==Method::PUT {Response::builder().header("etag","").body(Body::empty()).unwrap()}
+            else {response(200,format!("<ListPartsResult>{tail}</ListPartsResult>"))}
+        })).await;
+        let storage=provider(&server.url);
+        let path=ObjectPath::device_log(coven_foundation::id_source::DeviceId(31),std::num::NonZeroU64::MIN);
+        let mut upload=storage.begin_upload(&path,4).await.unwrap();
+        assert_eq!(storage.upload_part(&mut upload,b"data").await.unwrap_err().failure(),StorageFailure::Protocol);
+        assert_eq!(upload.confirmed_bytes(),0);
+        assert_eq!(storage.resume_upload(&mut upload).await.unwrap_err().failure(),StorageFailure::Protocol);
+        assert_eq!(upload.confirmed_bytes(),0);
+        UploadSession::decode(upload.encode().unwrap().as_bytes()).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn recovered_parts_cannot_exceed_the_recordings_part_size() {
+    let total = 8 * 1024 * 1024 + 1;
+    let server=TestServer::new(Router::new().fallback(move |uri:Uri|async move {
+        if query(&uri).contains_key("uploads") {response(200,"<InitiateMultipartUploadResult><UploadId>session</UploadId></InitiateMultipartUploadResult>")}
+        else {response(200,format!("<ListPartsResult><IsTruncated>false</IsTruncated><Part><PartNumber>1</PartNumber><Size>{total}</Size><ETag>etag</ETag></Part></ListPartsResult>"))}
+    })).await;
+    let storage = provider(&server.url);
+    let path = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    let mut upload = storage.begin_upload(&path, total).await.unwrap();
+    assert_eq!(
+        storage
+            .resume_upload(&mut upload)
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageFailure::Protocol
+    );
+    assert_eq!(upload.confirmed_bytes(), 0);
+    UploadSession::decode(upload.encode().unwrap().as_bytes()).unwrap();
+}

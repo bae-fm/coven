@@ -262,11 +262,15 @@ impl Storage for S3Storage {
                     }
                 }
             }
-            if response.is_truncated() != Some(true) {
+            if !response
+                .is_truncated()
+                .ok_or(StorageError::Protocol("S3 omitted page completion"))?
+            {
                 break;
             }
             let next = response
                 .next_continuation_token()
+                .filter(|value| !value.is_empty())
                 .ok_or(StorageError::Protocol("S3 omitted continuation token"))?
                 .to_owned();
             if !seen.insert(next.clone()) {
@@ -379,6 +383,7 @@ impl Storage for S3Storage {
                     .ok_or(StorageError::Protocol("S3 omitted part size"))?;
                 let etag = part
                     .e_tag()
+                    .filter(|value| !value.is_empty())
                     .ok_or(StorageError::Protocol("S3 omitted part ETag"))?
                     .to_owned();
                 confirmed = confirmed
@@ -386,6 +391,7 @@ impl Storage for S3Storage {
                     .ok_or(StorageError::InvalidPart)?;
                 if number as usize != parts.len() + 1
                     || size == 0
+                    || size > session.part_size as u64
                     || confirmed > session.total
                     || (size != session.part_size as u64 && confirmed != session.total)
                 {
@@ -393,11 +399,15 @@ impl Storage for S3Storage {
                 }
                 parts.push(S3Part { number, size, etag });
             }
-            if response.is_truncated() != Some(true) {
+            if !response
+                .is_truncated()
+                .ok_or(StorageError::Protocol("S3 omitted page completion"))?
+            {
                 break;
             }
             let next = response
                 .next_part_number_marker()
+                .filter(|value| !value.is_empty())
                 .ok_or(StorageError::Protocol("S3 omitted part marker"))?
                 .to_owned();
             if !seen.insert(next.clone()) {
@@ -441,6 +451,7 @@ impl Storage for S3Storage {
             .map_err(s3_error)?;
         let etag = response
             .e_tag()
+            .filter(|value| !value.is_empty())
             .ok_or(StorageError::Protocol("S3 omitted uploaded ETag"))?
             .to_owned();
         if let SessionState::S3 { parts, .. } = &mut session.state {

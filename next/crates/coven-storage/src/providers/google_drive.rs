@@ -133,7 +133,7 @@ impl GoogleDriveStorage {
         let mut seen = BTreeSet::new();
         let mut files = Vec::new();
         loop {
-            let mut parameters = vec![("q", query), ("fields", "nextPageToken,files(id,name,mimeType,size,createdTime,parents,properties,ownedByMe,capabilities(canDelete,canRemoveMyDriveParent))"), ("includeItemsFromAllDrives", "true"), ("pageSize", "1000")];
+            let mut parameters = vec![("q", query), ("fields", "nextPageToken,incompleteSearch,files(id,name,mimeType,size,createdTime,parents,properties,ownedByMe,capabilities(canDelete,canRemoveMyDriveParent))"), ("includeItemsFromAllDrives", "true"), ("pageSize", "1000")];
             if let Some(token) = &token {
                 parameters.push(("pageToken", token));
             }
@@ -147,6 +147,11 @@ impl GoogleDriveStorage {
                 .await?,
             )
             .await?;
+            if let Some(incomplete) = value.get("incompleteSearch") {
+                if incomplete.as_bool() != Some(false) {
+                    return Err(StorageError::Protocol("Drive search was incomplete"));
+                }
+            }
             files.extend(http::array(&value, "files")?.iter().cloned());
             match value.get("nextPageToken") {
                 None => break,
@@ -450,7 +455,10 @@ impl Storage for GoogleDriveStorage {
         let query = format!("'{}' in parents and trashed = false", escape(&self.folder));
         let mut paths = BTreeMap::new();
         for item in self.pages(&query).await? {
-            if item["mimeType"].as_str() == Some("application/vnd.google-apps.folder") {
+            if item["mimeType"]
+                .as_str()
+                .is_some_and(|kind| kind.starts_with("application/vnd.google-apps."))
+            {
                 return Err(StorageError::InvalidPath);
             }
             let path = ObjectPath::parse(http::string(&item, "name")?)?;
@@ -636,6 +644,7 @@ impl Storage for GoogleDriveStorage {
         let file_id = http::array(&generated, "ids")?
             .first()
             .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
             .ok_or(StorageError::Protocol("Drive omitted generated id"))?
             .to_owned();
         let body = json!({"id":file_id,"name":path.as_str(),"parents":[&self.folder],"properties":{"covenDevice":self.device.0.to_string()}});

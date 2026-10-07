@@ -848,3 +848,26 @@ async fn missing_namespace_and_revoked_membership_keep_the_native_cause() {
         }
     }
 }
+
+#[tokio::test]
+async fn listings_refuse_missing_paging_state_and_empty_or_repeated_cursors() {
+    for page in [
+        json!({"entries":[]}),
+        json!({"entries":[],"has_more":true,"cursor":""}),
+        json!({"entries":[],"has_more":true,"cursor":"repeat"}),
+    ] {
+        let server = TestServer::new(Router::new().fallback(move || {
+            let page = page.clone();
+            async move { reply(page) }
+        }))
+        .await;
+        assert_eq!(
+            provider(&server.url)
+                .list(&ObjectPrefix::all())
+                .await
+                .unwrap_err()
+                .failure(),
+            StorageFailure::Protocol
+        );
+    }
+}

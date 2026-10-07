@@ -373,22 +373,7 @@ fn provider(url: &str) -> GoogleDriveStorage {
     storage.upload_api = format!("{url}/upload");
     storage
 }
-#[tokio::test]
-async fn conformance_and_account_sharing() {
-    let state = Arc::new(Mutex::new(Remote::default()));
-    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-    let storage = Arc::new(provider(&server.url));
-    crate::test_utils::Conformance::new(storage.clone())
-        .run()
-        .await
-        .unwrap();
-    storage.grant_access("member").await.unwrap();
-    storage
-        .revoke_access(&MemberAccess::ProviderAccount("member".into()))
-        .await
-        .unwrap();
-    assert!(state.lock().unwrap().permissions.is_empty());
-}
+
 #[tokio::test]
 async fn session_reopens_and_only_uploader_deletes() {
     let state = Arc::new(Mutex::new(Remote::default()));
@@ -652,40 +637,6 @@ async fn create_switches_to_a_session_above_the_multipart_request_limit() {
 }
 
 #[tokio::test]
-async fn sharing_requires_the_store_owners_account() {
-    let state = Arc::new(Mutex::new(Remote::default()));
-    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-    let storage = provider(&server.url);
-    storage.grant_access("kept@example.test").await.unwrap();
-    state.lock().unwrap().non_owner = true;
-    for error in [
-        storage
-            .grant_access("new@example.test")
-            .await
-            .err()
-            .unwrap(),
-        storage
-            .revoke_access(&MemberAccess::ProviderAccount("kept@example.test".into()))
-            .await
-            .err()
-            .unwrap(),
-    ] {
-        assert!(matches!(error, StorageError::NotStoreOwner));
-        assert_eq!(error.failure(), StorageFailure::PermissionDenied);
-    }
-    assert_eq!(
-        state
-            .lock()
-            .unwrap()
-            .permissions
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>(),
-        ["kept@example.test"]
-    );
-}
-
-#[tokio::test]
 async fn setup_refuses_a_folder_even_when_its_name_is_an_object_path() {
     let state = Arc::new(Mutex::new(Remote::default()));
     state.lock().unwrap().files.insert("directory".into(), (metadata(json!({"id":"directory","name":"devices/31/1","mimeType":"application/vnd.google-apps.folder","parents":["folder"]}), 0), Vec::new()));
@@ -782,39 +733,6 @@ async fn listing_uses_the_same_copy_as_reads_and_refuses_missing_metadata() {
     }
 }
 
-#[tokio::test]
-async fn deleting_a_path_removes_its_copies_and_preserves_unlinked_bytes() {
-    let state = Arc::new(Mutex::new(Remote::default()));
-    let path = ObjectPath::store_log(DeviceId(31), std::num::NonZeroU64::MIN);
-    {
-        let mut remote = state.lock().unwrap();
-        duplicate(&mut remote, &path, "first", "2026-10-06T00:00:00Z", 31);
-        duplicate(&mut remote, &path, "later", "2026-10-06T00:00:01Z", 31);
-        duplicate(
-            &mut remote,
-            &path,
-            "other-account",
-            "2026-10-06T00:00:02Z",
-            32,
-        );
-        remote.files.get_mut("other-account").unwrap().0["ownedByMe"] = json!(false);
-    }
-    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-    let storage = provider(&server.url);
-    state.lock().unwrap().lose_delete_reply = true;
-    assert_eq!(
-        storage.delete(&path).await.unwrap_err().failure(),
-        StorageFailure::Network
-    );
-    storage.delete(&path).await.unwrap();
-    assert!(storage.list(&ObjectPrefix::all()).await.unwrap().is_empty());
-    storage.delete(&path).await.unwrap();
-    let remote = state.lock().unwrap();
-    assert_eq!(remote.files.len(), 1);
-    assert_eq!(remote.files["other-account"].1, b"data");
-    assert_eq!(remote.files["other-account"].0["parents"], json!([]));
-}
-
 #[path = "google_drive_access_tests.rs"]
 mod access_tests;
 
@@ -897,4 +815,115 @@ async fn permission_failures_reach_every_object_and_upload_caller() {
         denied.store(true, Ordering::SeqCst)
     })
     .await;
+}
+
+#[tokio::test]
+async fn incomplete_search_and_invalid_pages_never_describe_an_empty_store() {
+    for page in [
+        json!({"files":[],"incompleteSearch":true}),
+        json!({"files":[],"incompleteSearch":"false"}),
+        json!({"files":[],"nextPageToken":""}),
+        json!({"files":[],"nextPageToken":"repeat"}),
+    ] {
+        let server = TestServer::new(Router::new().fallback(move |uri: Uri| {
+            let page = page.clone();
+            async move {
+                if uri.path().ends_with("/folder") {
+                    reply(json!({"id":"folder","mimeType":"application/vnd.google-apps.folder"}))
+                } else {
+                    reply(page)
+                }
+            }
+        }))
+        .await;
+        assert_eq!(
+            provider(&server.url)
+                .list(&ObjectPrefix::all())
+                .await
+                .unwrap_err()
+                .failure(),
+            StorageFailure::Protocol
+        );
+    }
+}
+
+#[tokio::test]
+async fn setup_refuses_native_documents_and_shortcuts_named_like_objects() {
+    for kind in [
+        "application/vnd.google-apps.document",
+        "application/vnd.google-apps.shortcut",
+    ] {
+        let state = Arc::new(Mutex::new(Remote::default()));
+        state.lock().unwrap().files.insert("native".into(),(metadata(json!({"id":"native","name":"devices/31/1","mimeType":kind,"parents":["folder"]}),0),Vec::new()));
+        let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
+        assert!(matches!(
+            provider(&server.url).list(&ObjectPrefix::all()).await,
+            Err(StorageError::InvalidPath)
+        ));
+        let first = ObjectPath::store_log(DeviceId(31), std::num::NonZeroU64::MIN);
+        assert_eq!(
+            provider(&server.url)
+                .setup(&first, b"first")
+                .await
+                .unwrap_err()
+                .failure(),
+            StorageSetupFailure::LocationOccupied
+        );
+    }
+}
+
+#[tokio::test]
+async fn upload_start_refuses_empty_ids_and_cross_origin_session_urls() {
+    for empty_id in [true, false] {
+        let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = starts.clone();
+        let server =
+            TestServer::new(Router::new().fallback(move |uri: Uri, headers: HeaderMap| {
+                let counted = counted.clone();
+                async move {
+                    match uri.path() {
+                        "/drive/files/folder" => reply(
+                            json!({"id":"folder","mimeType":"application/vnd.google-apps.folder"}),
+                        ),
+                        "/drive/files" => reply(json!({"files":[]})),
+                        "/drive/files/generateIds" => {
+                            reply(json!({"ids":[if empty_id {""}else{"generated"}]}))
+                        }
+                        "/upload/files" => {
+                            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            Response::builder()
+                                .header(
+                                    "Location",
+                                    if empty_id {
+                                        format!(
+                                            "http://{}/session",
+                                            headers["host"].to_str().unwrap()
+                                        )
+                                    } else {
+                                        "https://unrelated.invalid/session".into()
+                                    },
+                                )
+                                .body(Body::empty())
+                                .unwrap()
+                        }
+                        other => panic!("unexpected request {other}"),
+                    }
+                }
+            }))
+            .await;
+        let path = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
+        assert_eq!(
+            provider(&server.url)
+                .begin_upload(&path, 4)
+                .await
+                .err()
+                .unwrap()
+                .failure(),
+            StorageFailure::Protocol
+        );
+        assert_eq!(
+            starts.load(std::sync::atomic::Ordering::SeqCst),
+            usize::from(!empty_id)
+        );
+    }
 }
