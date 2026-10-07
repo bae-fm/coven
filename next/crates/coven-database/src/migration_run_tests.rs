@@ -353,6 +353,7 @@ async fn a_removed_row_is_forgotten_but_its_loss_survives_migration_and_reinsert
     };
     let record = WriteRecord {
         header: WriteHeader {
+            store_log_read: coven_format::value::EntryPositions(Vec::new()),
             position: id,
             timestamp: Timestamp::new(original.header.timestamp.milliseconds() + 1, 0, id.device)
                 .unwrap(),

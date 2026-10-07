@@ -1,0 +1,259 @@
+use super::writes::{publish, queued, seal};
+use super::*;
+use coven_format::value::EntryPositions;
+use coven_merge::Timestamp;
+
+#[tokio::test]
+async fn damaged_objects_roll_back_and_block_only_their_device() {
+    for failure in ["decryption", "signature", "moved", "parse"] {
+        let storage = storage();
+        let mut devices = group(storage.clone(), 3).await;
+        sql(
+            &devices[0].db,
+            "INSERT INTO notes VALUES('bad','first','body')",
+        )
+        .await;
+        let record = queued(&devices[0].db).await;
+        devices[0].sync.upload_writes().await.unwrap();
+        sql(&devices[0].db, "UPDATE notes SET title='later'").await;
+        devices[0].sync.upload_writes().await.unwrap();
+        sql(
+            &devices[1].db,
+            "INSERT INTO notes VALUES('independent','good','body')",
+        )
+        .await;
+        devices[1].sync.upload_writes().await.unwrap();
+        let path = crate::write_seal::path(record.header.position);
+        let mut bytes = storage.read(&path).await.unwrap();
+        match failure {
+            "decryption" => bytes[60] ^= 1,
+            "signature" => {
+                let last = bytes.len() - 1;
+                bytes[last] ^= 1;
+            }
+            "moved" => {
+                bytes = seal(
+                    &record,
+                    &ObjectPath::device_log(DeviceId(99), 1.try_into().unwrap()),
+                    |_, _| {},
+                )
+            }
+            "parse" => {
+                bytes = seal(&record, &path, |section, plain| {
+                    if section > 0 {
+                        plain[0] = 255;
+                    }
+                })
+            }
+            _ => unreachable!(),
+        }
+        storage.delete(&path).await.unwrap();
+        storage.create(&path, &bytes).await.unwrap();
+        let report = devices[2].sync.download_writes().await.unwrap();
+        assert_eq!(report.damaged_objects.len(), 1, "{failure}: {report:?}");
+        assert_eq!(report.damaged_objects[0].path, path.as_str());
+        assert!(
+            matches!(
+                (&report.damaged_objects[0].failure, failure),
+                (
+                    crate::ObjectCheckFailure::Decryption(_),
+                    "decryption" | "moved"
+                ) | (crate::ObjectCheckFailure::Signature(_), "signature")
+                    | (crate::ObjectCheckFailure::Parse(_), "parse")
+            ),
+            "{failure}: {report:?}"
+        );
+        assert_eq!(report.waiting.len(), 1);
+        assert_eq!(
+            report.waiting[0].write,
+            WriteId {
+                device: DeviceId(1),
+                number: 2
+            }
+        );
+        assert_eq!(
+            rows(&devices[2].db).await,
+            vec![("independent".into(), "good".into(), "body".into())]
+        );
+        storage.delete(&path).await.unwrap();
+        publish(&storage, &record).await;
+        let report = devices[2].sync.download_writes().await.unwrap();
+        assert!(report.damaged_objects.is_empty(), "{report:?}");
+        assert!(report.waiting.is_empty());
+        assert_eq!(rows(&devices[2].db).await.len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn removal_checks_the_authors_past_not_the_receivers_present() {
+    let storage = storage();
+    let mut devices = group(storage.clone(), 3).await;
+    sql(
+        &devices[0].db,
+        "INSERT INTO notes VALUES('one','before','body')",
+    )
+    .await;
+    let mut after = queued(&devices[0].db).await;
+    devices[0].sync.upload_writes().await.unwrap();
+    devices[1]
+        .log
+        .make_and_upload_entry(StoreChange::RemoveDevice {
+            device: DeviceId(1),
+        })
+        .await
+        .unwrap();
+    devices[2].log.sync_store_log().await.unwrap();
+    let report = devices[2].sync.download_writes().await.unwrap();
+    assert!(report.damaged_objects.is_empty(), "{report:?}");
+    assert_eq!(rows(&devices[2].db).await[0].1, "before");
+    let log = devices[2].db.local_store_log().await.unwrap();
+    after.header.position.number = 2;
+    after.header.store_log_read = EntryPositions(
+        log.log
+            .entries
+            .iter()
+            .fold(BTreeMap::new(), |mut map, e| {
+                map.insert(e.entry.position.device, e.entry.position);
+                map
+            })
+            .into_values()
+            .collect(),
+    );
+    after.header.timestamp = Timestamp::new(2_000, 0, DeviceId(1)).unwrap();
+    publish(&storage, &after).await;
+    let report = devices[2].sync.download_writes().await.unwrap();
+    assert_eq!(report.damaged_objects.len(), 1, "{report:?}");
+    assert_eq!(rows(&devices[2].db).await[0].1, "before");
+}
+
+#[tokio::test]
+async fn newer_write_waits_until_the_app_schema_updates() {
+    let storage = storage();
+    let mut devices = group(storage.clone(), 2).await;
+    sql(
+        &devices[0].db,
+        "INSERT INTO notes VALUES('one','new','body')",
+    )
+    .await;
+    let mut record = queued(&devices[0].db).await;
+    record.header.schema_version = 2;
+    publish(&storage, &record).await;
+    let report = devices[1].sync.download_writes().await.unwrap();
+    assert_eq!(report.waiting.len(), 1);
+    assert!(report.waiting[0].waiting_for.is_empty());
+    assert!(rows(&devices[1].db).await.is_empty());
+    let device = &mut devices[1];
+    device.db.close().await.unwrap();
+    device.db=DatabaseBuilder::new(device.directory.clone())
+        .synced_tables(vec![SyncedTable::new("notes",RowIdentity::SharedKey)])
+        .migrations(vec![Migration::sql(1,"notes","CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL);"), Migration::sql(2,"extra","CREATE TABLE extra(value TEXT);")])
+        .coven_migration_policy(CovenMigrationPolicy::ApplyPending).clock(device.clock.clone()).open().await.unwrap();
+    device.sync = DeviceLogSync::new(
+        storage,
+        device.db.clone(),
+        device.keys.clone(),
+        device.identity.clone(),
+    );
+    assert!(device
+        .sync
+        .download_writes()
+        .await
+        .unwrap()
+        .waiting
+        .is_empty());
+    assert_eq!(rows(&device.db).await[0].1, "new");
+}
+
+#[tokio::test]
+async fn newer_store_stops_uploads_but_reports_newer_downloads_as_waiting() {
+    let storage = storage();
+    let mut devices = group(storage.clone(), 2).await;
+    sql(
+        &devices[0].db,
+        "INSERT INTO notes VALUES('one','new','body')",
+    )
+    .await;
+    let mut record = queued(&devices[0].db).await;
+    record.header.schema_version = 2;
+    publish(&storage, &record).await;
+    devices[0]
+        .log
+        .make_and_upload_entry(StoreChange::RaiseSchema {
+            version: 2,
+            snapshot: coven_format::store_log::SnapshotId {
+                audience: Audience::Store,
+                device: DeviceId(1),
+                number: 1,
+            },
+        })
+        .await
+        .unwrap();
+    devices[1].log.sync_store_log().await.unwrap();
+    sql(
+        &devices[1].db,
+        "INSERT INTO notes VALUES('local','old','body')",
+    )
+    .await;
+    assert!(matches!(
+        devices[1].sync.upload_writes().await,
+        Err(SyncError::Stopped(SyncFailure::UpdateRequired))
+    ));
+    let report = devices[1].sync.download_writes().await.unwrap();
+    assert_eq!(report.waiting.len(), 1);
+}
+
+#[tokio::test]
+async fn only_a_newer_format_requires_an_update() {
+    for version in [0, 2] {
+        let storage = storage();
+        let mut devices = group(storage.clone(), 2).await;
+        sql(
+            &devices[0].db,
+            "INSERT INTO notes VALUES('one','title','body')",
+        )
+        .await;
+        devices[0].sync.upload_writes().await.unwrap();
+        let path = ObjectPath::device_log(DeviceId(1), 1.try_into().unwrap());
+        let mut bytes = storage.read(&path).await.unwrap();
+        bytes[2] = version;
+        storage.delete(&path).await.unwrap();
+        storage.create(&path, &bytes).await.unwrap();
+        let result = devices[1].sync.download_writes().await;
+        if version == 2 {
+            assert!(matches!(
+                result,
+                Err(SyncError::Stopped(SyncFailure::UpdateRequired))
+            ));
+        } else {
+            assert_eq!(result.unwrap().damaged_objects.len(), 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_newer_schema_does_not_hide_a_damaged_signature() {
+    let storage = storage();
+    let mut devices = group(storage.clone(), 2).await;
+    devices[0]
+        .db
+        .write(|sql| {
+            sql.execute(
+                "INSERT INTO notes VALUES('one','title',?1)",
+                ["x".repeat(200_000)],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let mut record = queued(&devices[0].db).await;
+    record.header.schema_version = 2;
+    let path = crate::write_seal::path(record.header.position);
+    let mut bytes = seal(&record, &path, |_, _| {});
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    storage.create(&path, &bytes).await.unwrap();
+    let report = devices[1].sync.download_writes().await.unwrap();
+    assert_eq!(report.damaged_objects.len(), 1, "{report:?}");
+    assert!(report.waiting.is_empty());
+    assert!(rows(&devices[1].db).await.is_empty());
+}

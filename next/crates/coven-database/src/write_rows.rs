@@ -29,7 +29,7 @@ pub(crate) struct AppView<'a> {
     schema: &'a WriteSchema,
     overrides: BTreeMap<AppKey, Option<AppValues>>,
     lookup: BTreeMap<(String, Vec<String>, Vec<u8>), Vec<AppKey>>,
-    rows: RefCell<BTreeMap<AppKey, Option<AppRow>>>,
+    rows: Option<RefCell<BTreeMap<AppKey, Option<AppRow>>>>,
     migration: Option<&'a crate::migration_snapshot::MigrationSnapshot>,
 }
 
@@ -40,7 +40,7 @@ impl<'a> AppView<'a> {
             schema,
             overrides: BTreeMap::new(),
             lookup: BTreeMap::new(),
-            rows: RefCell::new(BTreeMap::new()),
+            rows: Some(RefCell::new(BTreeMap::new())),
             migration: None,
         }
     }
@@ -73,14 +73,27 @@ impl<'a> AppView<'a> {
         Ok(result)
     }
 
+    pub(crate) fn without_row_cache(mut self) -> Self {
+        self.rows = None;
+        self
+    }
+
+    fn remember(&self, key: &AppKey, row: Option<AppRow>) -> Option<AppRow> {
+        if let Some(rows) = &self.rows {
+            rows.borrow_mut().insert(key.clone(), row.clone());
+        }
+        row
+    }
+
     pub(crate) fn row(&self, key: &AppKey) -> Result<Option<AppRow>, DbError> {
-        if let Some(row) = self.rows.borrow().get(key) {
-            return Ok(row.clone());
+        if let Some(rows) = &self.rows {
+            if let Some(row) = rows.borrow().get(key) {
+                return Ok(row.clone());
+            }
         }
         if let Some(snapshot) = self.migration {
             let row = snapshot.row(self.database, key)?;
-            self.rows.borrow_mut().insert(key.clone(), row.clone());
-            return Ok(row);
+            return Ok(self.remember(key, row));
         }
         let table = self.schema.table(&key.0);
         let values = match self.overrides.get(key) {
@@ -88,8 +101,7 @@ impl<'a> AppView<'a> {
             None => read_values(self.database, table, &key.1)?,
         };
         let Some(values) = values else {
-            self.rows.borrow_mut().insert(key.clone(), None);
-            return Ok(None);
+            return Ok(self.remember(key, None));
         };
         let mut parents = BTreeMap::new();
         for foreign_key in &table.foreign_keys {
@@ -152,10 +164,7 @@ impl<'a> AppView<'a> {
             audience,
             parents,
         };
-        self.rows
-            .borrow_mut()
-            .insert(key.clone(), Some(row.clone()));
-        Ok(Some(row))
+        Ok(self.remember(key, Some(row)))
     }
 
     pub(crate) fn migration_before(

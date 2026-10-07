@@ -887,6 +887,7 @@ async fn migration_download_advances_position_without_rows_or_losses() {
     let device = DeviceId(99);
     let record = WriteRecord {
         header: WriteHeader {
+            store_log_read: coven_format::value::EntryPositions(Vec::new()),
             position: WriteId { device, number: 1 },
             timestamp: Timestamp::new(1_000, 0, device).unwrap(),
             had_read: WritePositions(vec![]),
@@ -923,3 +924,6 @@ async fn migration_download_advances_position_without_rows_or_losses() {
     assert_eq!(records(&db)[0].header.had_read.0, [record.header.position]);
     db.close().await.unwrap();
 }
+
+#[path = "download_stream_tests.rs"]
+mod streams;

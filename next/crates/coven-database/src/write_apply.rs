@@ -135,6 +135,7 @@ impl<'a> WriteApply<'a> {
             .map_err(|error| error.into_db_error(write))?;
         let fingerprint = coven_merge::recompute_fingerprint(old, new, touched)
             .map_err(|error| error.into_db_error(write))?;
+        self.store.retain_materialization_values(&removal.region)?;
         persist()?;
         self.database.batch("PRAGMA defer_foreign_keys=ON")?;
         crate::removal::materialize(self.database, self.schema, self.visible, new, &removal)?;

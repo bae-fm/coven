@@ -15,6 +15,15 @@ impl ObjectPath {
     pub fn device_log(device: DeviceId, number: NonZeroU64) -> Self {
         Self(format!("devices/{}/{number}", device.0))
     }
+    /// The device and positive write number of a device-log path.
+    pub fn write_position(&self) -> Option<(DeviceId, NonZeroU64)> {
+        let rest = self.0.strip_prefix("devices/")?;
+        let (device, number) = rest.split_once('/').expect("validated device-log path");
+        Some((
+            DeviceId(device.parse().expect("validated device")),
+            number.parse().expect("validated write number"),
+        ))
+    }
     /// A device's create-once store log entry (§9).
     pub fn store_log(device: DeviceId, number: NonZeroU64) -> Self {
         Self(format!("store-log/{}/{number}", device.0))

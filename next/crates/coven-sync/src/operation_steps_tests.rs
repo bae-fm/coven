@@ -164,7 +164,16 @@ async fn restarted_circle_deletion_deletes_rows_that_arrived_during_its_first_at
         }
     }
     assert_eq!(count(&a).await, 0);
-    assert_eq!(a.db.test_queued_writes().await.unwrap().len(), 1);
+    let mut writes = a.db.test_queued_writes().await.unwrap();
+    assert_eq!(writes.len(), 1);
+    assert!(matches!(
+        b.db.apply_downloaded(writes.remove(0).into())
+            .await
+            .unwrap(),
+        coven_database::ApplyOutcome::Waiting(coven_database::WriteWait::StoreLog(_))
+    ));
+    // The replacement write read the dropped deletion entry as well as the removal.
+    b.sync().await;
     transfer(&a, &b).await;
     finish(&mut a, deletion).await;
     b.sync().await;

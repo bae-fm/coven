@@ -68,7 +68,7 @@ pub(crate) struct DatabaseRemovalView<'a> {
     updates: &'a BTreeMap<RowId, RowUpdate<Value>>,
     deleted: &'a BTreeSet<CircleId>,
     arriving: Option<(WriteId, Timestamp)>,
-    rows: RefCell<BTreeMap<RowId, EvaluatedRow>>,
+    rows: Option<RefCell<BTreeMap<RowId, EvaluatedRow>>>,
     edges: BTreeMap<RowId, BTreeSet<RowId>>,
     extra_groups: RefCell<BTreeMap<Group, BTreeSet<RowId>>>,
     lookups: RefCell<BTreeMap<ReferenceTarget, BTreeSet<RowId>>>,
@@ -109,7 +109,7 @@ impl<'a> DatabaseRemovalView<'a> {
             updates,
             deleted,
             arriving,
-            rows: RefCell::new(BTreeMap::new()),
+            rows: store.caches_rows().then(|| RefCell::new(BTreeMap::new())),
             edges,
             extra_groups: RefCell::new(BTreeMap::new()),
             lookups: RefCell::new(BTreeMap::new()),
@@ -187,9 +187,18 @@ impl<'a> DatabaseRemovalView<'a> {
         }
     }
 
+    fn remember(&self, id: &RowId, row: EvaluatedRow) -> EvaluatedRow {
+        if let Some(rows) = &self.rows {
+            rows.borrow_mut().insert(id.clone(), row.clone());
+        }
+        row
+    }
+
     pub(crate) fn evaluated(&self, id: &RowId) -> Result<EvaluatedRow, DbError> {
-        if let Some(row) = self.rows.borrow().get(id) {
-            return Ok(row.clone());
+        if let Some(rows) = &self.rows {
+            if let Some(row) = rows.borrow().get(id) {
+                return Ok(row.clone());
+            }
         }
         let state = self.state(id)?;
         let generation = state.generation();
@@ -200,8 +209,7 @@ impl<'a> DatabaseRemovalView<'a> {
                 constraints: Constraints::default(),
                 readings: BTreeMap::new(),
             };
-            self.rows.borrow_mut().insert(id.clone(), row.clone());
-            return Ok(row);
+            return Ok(self.remember(id, row));
         }
         let table = self.schema.table(&id.table);
         let rules = &self.schema.rules[&table.name];
@@ -330,8 +338,7 @@ impl<'a> DatabaseRemovalView<'a> {
             constraints,
             readings,
         };
-        self.rows.borrow_mut().insert(id.clone(), row.clone());
-        Ok(row)
+        Ok(self.remember(id, row))
     }
 
     pub(crate) fn constraints_for_values(

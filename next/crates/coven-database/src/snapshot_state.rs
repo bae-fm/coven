@@ -109,31 +109,14 @@ pub(crate) fn table<'a>(
     schema: &'a WriteSchema,
     row: &RowId,
 ) -> Result<&'a crate::schema::TableSchema, DbError> {
-    let declared = schema
-        .declarations
-        .iter()
-        .any(|declaration| declaration.name == row.table);
-    if !declared {
-        return Err(invalid("row names a table that does not sync"));
-    }
-    let table = schema.table(&row.table);
+    let table = schema.row_table(row)?;
     let key = decoded(coven_format::key::decode_key(&row.key))?;
-    if key.len() != crate::write_rows::key_columns(table).len() {
-        return Err(invalid("row key has the wrong number of columns"));
-    }
     let values = crate::write_rows::key_columns(table)
         .into_iter()
         .map(|column| column.name.clone())
         .zip(key)
         .collect();
     crate::write_capture::validate_key(schema, table, &values)?;
-    if matches!(
-        schema.declaration(&row.table).audience,
-        crate::declaration::AudienceSource::Store
-    ) && row.audience != Audience::Store
-    {
-        return Err(invalid("store table is in a circle snapshot"));
-    }
     Ok(table)
 }
 

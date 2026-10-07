@@ -76,6 +76,7 @@ pub fn write() -> WriteRecord {
     );
     WriteRecord {
         header: WriteHeader {
+            store_log_read: crate::value::EntryPositions(Vec::new()),
             position: position(),
             timestamp: timestamp(),
             had_read: WritePositions(vec![WriteId {
@@ -422,6 +423,7 @@ pub fn objects() -> Vec<Object> {
             device_name: "D".into(),
         }),
         Object::PostedPositions(PostedPositions {
+            schema_version: 1,
             device: DeviceId(1),
             writes: WritePositions(vec![position()]),
             store_log: EntryPositions(vec![]),

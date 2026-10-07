@@ -37,7 +37,10 @@ pub(crate) fn supplemental_tables(
         .collect()
 }
 
-fn shadow_parent(database: &DatabaseConnection, table: &str) -> Result<Option<String>, DbError> {
+pub(crate) fn shadow_parent(
+    database: &DatabaseConnection,
+    table: &str,
+) -> Result<Option<String>, DbError> {
     let shadow: bool = database.query_row(
         "SELECT type='shadow' FROM pragma_table_list WHERE schema='main' AND name=?1 COLLATE NOCASE",
         [table],

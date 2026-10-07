@@ -62,6 +62,8 @@ pub enum ApplyOutcome {
 /// A prerequisite for applying a downloaded write.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WriteWait {
+    /// Store-log entries in the write's authoring view have not applied.
+    StoreLog(Vec<crate::EntryId>),
     /// These positions must have applied, including the author's preceding write.
     Writes(Vec<WriteId>),
     /// The app must support this schema version.
@@ -120,6 +122,17 @@ pub(crate) fn prerequisite(
     header: &WriteHeader,
 ) -> Result<Option<WriteWait>, DbError> {
     let positions = positions(database)?;
+    let entries = crate::store_log::positions(database)?;
+    let missing_entries: Vec<_> = header
+        .store_log_read
+        .0
+        .iter()
+        .copied()
+        .filter(|id| !entries.covers(*id))
+        .collect();
+    if !missing_entries.is_empty() {
+        return Ok(Some(WriteWait::StoreLog(missing_entries)));
+    }
     let mut missing: Vec<_> = header
         .had_read
         .0
@@ -139,6 +152,7 @@ pub(crate) fn prerequisite(
     if !missing.is_empty() {
         return Ok(Some(WriteWait::Writes(missing)));
     }
+    crate::download_checks::past(database, header)?;
     let milliseconds = match now.duration_since(UNIX_EPOCH) {
         Ok(elapsed) => elapsed.as_millis(),
         Err(_) => 0,
@@ -158,6 +172,18 @@ pub(crate) fn apply_opened(
     download: DownloadedWrite,
     deleted: &BTreeSet<CircleId>,
 ) -> Result<BTreeSet<crate::write_rows::AppKey>, DbError> {
+    let record = accepted(database, schema, download)?;
+    let visible = AppView::after(database, schema);
+    let store = MergeStore::new(database, &visible);
+    crate::write_apply::WriteApply::new(database, schema, &store, &visible, &visible, deleted)
+        .apply(Some(&record), BTreeSet::new())
+}
+
+pub(crate) fn accepted(
+    database: &DatabaseConnection,
+    schema: &WriteSchema,
+    download: DownloadedWrite,
+) -> Result<WriteRecord, DbError> {
     let mut record = WriteRecord {
         header: download.header,
         parts: download
@@ -170,8 +196,6 @@ pub(crate) fn apply_opened(
             .collect(),
     };
     let boundaries = crate::write_boundary::WriteBoundary::load(database)?;
-    let visible = AppView::after(database, schema);
-    let store = MergeStore::new(database, &visible);
     let mut kept = Vec::new();
     for part in record.parts {
         let cause = match record.header.disposition {
@@ -190,12 +214,12 @@ pub(crate) fn apply_opened(
                 });
             }
         } else {
+            crate::download_checks::part(schema, &part)?;
             kept.push(part);
         }
     }
     record.parts = kept;
-    crate::write_apply::WriteApply::new(database, schema, &store, &visible, &visible, deleted)
-        .apply(Some(&record), BTreeSet::new())
+    Ok(record)
 }
 
 fn exclude(
@@ -269,6 +293,14 @@ pub(crate) fn exclude_row(
 
 /// Agreement state read atomically for sync to post.
 pub struct SyncState {
+    /// This install's device identity.
+    pub device: DeviceId,
+    /// Applied store-log positions from the same committed state.
+    pub store_log: coven_format::value::EntryPositions,
+    /// A queued local write prevents publishing the current fingerprints.
+    pub uploads_pending: bool,
+    /// The newest local breaking migration; uploads await its store-log raise.
+    pub breaking_version: u32,
     /// Fingerprints may be compared only at the same app schema version.
     pub schema_version: u32,
     /// Applied positions, including skipped and excluded writes.

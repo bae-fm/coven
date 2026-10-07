@@ -18,14 +18,31 @@ pub(crate) fn retain(
     let part = &record.parts[0];
     let header = &record.header;
     let encoder = encoded(WriteEncoder::new(record))?;
+    let mut frame = encoder.header().clone();
+    for bytes in database.query(
+        "SELECT header FROM coven_excluded_writes WHERE audience=?1 AND device=?2 AND number=?3",
+        params![
+            audience_text(&part.audience),
+            header.position.device.0.to_be_bytes().as_slice(),
+            header.position.number.to_be_bytes().as_slice()
+        ],
+        |row| row.get::<_, Vec<u8>>(0),
+    )? {
+        let previous = coven_format::write_stream::WriteHeaderFrame::decode(&bytes)?;
+        if previous.header != frame.header {
+            return Err(DbError::DamagedDatabase);
+        }
+        frame.parts[0].record_count += previous.parts[0].record_count;
+        frame.parts[0].plaintext_length += previous.parts[0].plaintext_length;
+    }
     let ordinal: i64 = database.query_row(
         "INSERT INTO coven_excluded_writes(audience,device,number,header,cause)
-         VALUES(?1,?2,?3,?4,?5) RETURNING id",
+         VALUES(?1,?2,?3,?4,?5) ON CONFLICT(audience,device,number) DO UPDATE SET header=excluded.header RETURNING id",
         params![
             audience_text(&part.audience),
             header.position.device.0.to_be_bytes().as_slice(),
             header.position.number.to_be_bytes().as_slice(),
-            encoder.header_frame(),
+            encoded(frame.encode())?,
             encoded(merge_fields::encode_lost_write_cause(&cause))?,
         ],
         |r| r.get(0),

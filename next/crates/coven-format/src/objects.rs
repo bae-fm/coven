@@ -45,10 +45,19 @@ pub struct PostedPositions {
     pub writes: WritePositions,
     /// Applied positions in the store log, which also affect the merged state.
     pub store_log: EntryPositions,
+    /// The app schema under which these fingerprints were computed (D8).
+    pub schema_version: u32,
     /// One fingerprint per readable audience, in increasing audience order.
     pub fingerprints: Vec<Fingerprint>,
 }
-wire_struct!(PostedPositions, device, writes, store_log, fingerprints);
+wire_struct!(
+    PostedPositions,
+    device,
+    writes,
+    store_log,
+    schema_version,
+    fingerprints
+);
 impl PostedPositions {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         self.writes.validate()?;

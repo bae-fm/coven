@@ -19,16 +19,16 @@ pub(crate) fn materialize(
     view: &DatabaseRemovalView<'_>,
     result: &RemovalResult,
 ) -> Result<(), DbError> {
-    let mut removed_visible = BTreeMap::new();
+    let mut removed_visible = BTreeSet::new();
     for id in &result.region {
         if !result.removed.contains_key(id) && view.state(id)?.present() {
             continue;
         }
-        if let Some(app) = visible
+        if visible
             .row(&(id.table.clone(), id.key.clone()))?
-            .filter(|app| app.audience == id.audience)
+            .is_some_and(|app| app.audience == id.audience)
         {
-            removed_visible.insert(id.clone(), app);
+            removed_visible.insert(id.clone());
         }
     }
     let returning: BTreeSet<_> = result
@@ -38,7 +38,7 @@ pub(crate) fn materialize(
         .cloned()
         .collect();
     let actions: BTreeSet<_> = removed_visible
-        .keys()
+        .iter()
         .chain(returning.iter())
         .cloned()
         .collect();
@@ -54,7 +54,7 @@ pub(crate) fn materialize(
             for parent in app.parents.values() {
                 if let Some(row) = visible.row(parent)? {
                     let parent = crate::write_rows::row_id(parent, &row);
-                    if removed_visible.contains_key(&parent) {
+                    if removed_visible.contains(&parent) {
                         dependencies.entry(parent).or_default().insert(id.clone());
                     }
                 }
@@ -87,7 +87,7 @@ pub(crate) fn materialize(
             }
         }
         for old in removed_visible
-            .keys()
+            .iter()
             .filter(|old| old.table == id.table && old.key == id.key)
         {
             dependencies
@@ -115,7 +115,7 @@ pub(crate) fn materialize(
     database.materialize(|database| {
         for id in ordered {
             let table = schema.table(&id.table);
-            if removed_visible.contains_key(&id) {
+            if removed_visible.contains(&id) {
                 // A native CASCADE may have already deleted another member of
                 // a removal cycle. No surviving synced child remains attached.
                 if let Some(values) = crate::write_rows::read_values(database, table, &id.key)? {

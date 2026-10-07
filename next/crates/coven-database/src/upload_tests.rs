@@ -32,7 +32,7 @@ async fn candidate(db: &Database, byte: u8) -> (WriteId, Vec<u8>) {
     .unwrap()
 }
 
-async fn sealed(db: &Database) -> (WriteId, Vec<u8>) {
+pub(crate) async fn sealed(db: &Database) -> (WriteId, Vec<u8>) {
     db.read_oldest_upload(|upload| {
         let WaitingUpload::Sealed { write, bytes } = upload else {
             panic!("not sealed")
@@ -48,6 +48,16 @@ async fn sealed(db: &Database) -> (WriteId, Vec<u8>) {
     .await
     .unwrap()
     .unwrap()
+}
+
+pub(crate) async fn attempt(db: &Database, bytes: Vec<u8>) -> Result<Option<WriteId>, DbError> {
+    db.prepare_write_upload(move |_, _, _, emit| {
+        for chunk in bytes.chunks(CHUNK_SIZE) {
+            emit(chunk)?;
+        }
+        Ok(())
+    })
+    .await
 }
 
 #[tokio::test]
@@ -137,19 +147,12 @@ async fn only_success_removes_a_write_and_its_seal_and_advances_the_queue() {
         Err(DbError::UploadNotSealed { .. })
     ));
     assert!(matches!(
-        db.keep_upload_sealed(ids[1], bytes.clone()).await,
-        Err(DbError::UploadNotOldest { .. })
-    ));
-    assert!(matches!(
-        db.keep_upload_sealed(first, vec![1]).await,
+        attempt(&db, vec![1]).await,
         Err(DbError::UploadLength { .. })
     ));
     assert_eq!(count(&db, "coven_upload_seals"), 0);
-    assert_eq!(
-        db.keep_upload_sealed(first, bytes.clone()).await.unwrap(),
-        bytes
-    );
-    assert_eq!(db.keep_upload_sealed(first, vec![88]).await.unwrap(), bytes);
+    assert_eq!(attempt(&db, bytes.clone()).await.unwrap(), Some(first));
+    assert_eq!(attempt(&db, vec![88]).await.unwrap(), Some(first));
     assert_eq!(sealed(&db).await, (first, bytes.clone()));
     assert_eq!(count(&db, "coven_uploads"), 2);
     assert!(matches!(
@@ -178,17 +181,23 @@ async fn seal_failure_rolls_back_and_competing_attempts_get_the_same_bytes() {
         .unwrap();
     let (id, bytes) = candidate(&db, 19).await;
     db.inspect_writer(|db| db.batch("CREATE TRIGGER coven_fail AFTER INSERT ON coven_upload_seals BEGIN SELECT RAISE(ABORT,'failed seal'); END").unwrap());
-    assert!(db.keep_upload_sealed(id, bytes.clone()).await.is_err());
+    assert!(attempt(&db, bytes.clone()).await.is_err());
     assert_eq!(count(&db, "coven_upload_seals"), 0);
     assert_eq!(candidate(&db, 19).await, (id, bytes.clone()));
     db.inspect_writer(|db| db.batch("DROP TRIGGER coven_fail").unwrap());
     let (a, b) = tokio::join!(
-        db.keep_upload_sealed(id, bytes.clone()),
-        db.keep_upload_sealed(id, vec![99; bytes.len()])
+        attempt(&db, bytes.clone()),
+        attempt(&db, vec![99; bytes.len()])
     );
-    let a = a.unwrap();
-    assert_eq!(a, b.unwrap());
-    assert_eq!(sealed(&db).await, (id, a));
+    assert_eq!(a.unwrap(), Some(id));
+    assert_eq!(b.unwrap(), Some(id));
+    let kept = sealed(&db).await;
+    assert_eq!(kept.0, id);
+    assert!(kept.1 == bytes || kept.1 == vec![99; bytes.len()]);
+    db.prepare_write_upload(|_, _, _, _| panic!("retry must keep the first seal"))
+        .await
+        .unwrap();
+    assert_eq!(sealed(&db).await, kept);
     db.close().await.unwrap();
 }
 
@@ -203,10 +212,7 @@ async fn plaintext_and_sealed_values_fit_when_their_combined_size_exceeds_sqlite
     let maximum = bytes.len() as i32 + 24;
     assert!(plaintext + bytes.len() as u64 > maximum as u64);
     let old = db.inspect_writer(|db| db.set_value_limit(maximum));
-    assert_eq!(
-        db.keep_upload_sealed(id, bytes.clone()).await.unwrap(),
-        bytes
-    );
+    assert_eq!(attempt(&db, bytes.clone()).await.unwrap(), Some(id));
     db.inspect_writer(|db| db.set_value_limit(old));
     assert_eq!(sealed(&db).await, (id, bytes));
     assert_eq!(records(&db), vec![record]);
@@ -270,15 +276,40 @@ fn a_crash_after_keeping_the_seal_resends_identical_bytes() {
     assert_eq!(runtime.block_on(sealed(&db)), expected);
     assert_eq!(count(&db, "coven_uploads"), 1);
     assert_eq!(
-        runtime
-            .block_on(db.keep_upload_sealed(expected.0, vec![42]))
-            .unwrap(),
-        expected.1
+        runtime.block_on(attempt(&db, vec![42])).unwrap(),
+        Some(expected.0)
     );
+    assert_eq!(runtime.block_on(sealed(&db)), expected);
     assert!(runtime.block_on(db.upload_succeeded(expected.0)).unwrap());
     assert_eq!(count(&db, "coven_uploads"), 0);
     assert_eq!(count(&db, "coven_upload_seals"), 0);
     runtime.block_on(db.close()).unwrap();
+}
+
+#[tokio::test]
+async fn a_panicking_sealer_rolls_back_without_poisoning_the_writer() {
+    let store = TestStore::new();
+    let db = store.schema(notes(), NOTES).await.unwrap();
+    sql(&db, "INSERT INTO notes VALUES('1','title','body')")
+        .await
+        .unwrap();
+    let clone = db.clone();
+    assert!(tokio::spawn(async move {
+        clone
+            .prepare_write_upload(|_, _, _, emit| {
+                emit(&[1, 2, 3])?;
+                panic!("sealer panicked")
+            })
+            .await
+    })
+    .await
+    .unwrap_err()
+    .is_panic());
+    assert_eq!(count(&db, "coven_upload_seals"), 0);
+    let (id, bytes) = candidate(&db, 17).await;
+    assert_eq!(attempt(&db, bytes.clone()).await.unwrap(), Some(id));
+    assert_eq!(sealed(&db).await, (id, bytes));
+    db.close().await.unwrap();
 }
 
 #[test]
@@ -309,7 +340,93 @@ fn crashing_upload_attempt() {
                 .open(),
         )
         .unwrap();
-    let (id, bytes) = runtime.block_on(candidate(&db, 71));
-    runtime.block_on(db.keep_upload_sealed(id, bytes)).unwrap();
+    let (_, bytes) = runtime.block_on(candidate(&db, 71));
+    runtime.block_on(attempt(&db, bytes)).unwrap();
     std::process::exit(86);
+}
+
+#[test]
+fn upload_completion_does_not_retain_the_object_in_sqlite_observation() {
+    const CHILD: &str = "COVEN_UPLOAD_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "upload::tests::upload_completion_does_not_retain_the_object_in_sqlite_observation",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    // SAFETY: the isolated child has not opened SQLite on any thread yet.
+    assert_eq!(
+        unsafe { rusqlite::ffi::sqlite3_config(rusqlite::ffi::SQLITE_CONFIG_MEMSTATUS, 1) },
+        rusqlite::ffi::SQLITE_OK
+    );
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let store = TestStore::new();
+        let db = store.schema(notes(), NOTES).await.unwrap();
+        db.write(|sql| {
+            let body = "x".repeat(16 * 1024);
+            for i in 0..1024 {
+                sql.execute(
+                    "INSERT INTO notes VALUES(?1,'title',?2)",
+                    (i.to_string(), &body),
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let id = db
+            .prepare_write_upload(|_, _, upload, emit| {
+                let WaitingUpload::Plaintext {
+                    header,
+                    header_frame,
+                    ..
+                } = upload
+                else {
+                    panic!("plaintext")
+                };
+                let lengths: Vec<_> = header.parts.iter().map(|p| p.plaintext_length).collect();
+                let mut remaining =
+                    coven_format::sealed_write::sealed_length(header_frame.len(), &lengths)?
+                        as usize;
+                let chunk = vec![9; CHUNK_SIZE];
+                while remaining > 0 {
+                    let length = remaining.min(chunk.len());
+                    emit(&chunk[..length])?;
+                    remaining -= length;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        // This subprocess runs one test, so SQLite's global high-water counter
+        // measures only these queue operations and their connection caches.
+        let baseline = unsafe {
+            rusqlite::ffi::sqlite3_memory_highwater(1);
+            rusqlite::ffi::sqlite3_memory_used()
+        };
+        db.keep_write_upload_session(id, vec![1; 32]).await.unwrap();
+        db.upload_succeeded(id).await.unwrap();
+        let peak = unsafe { rusqlite::ffi::sqlite3_memory_highwater(0) };
+        assert!(baseline > 0, "SQLite memory accounting must be enabled");
+        assert!(
+            peak - baseline < 8 * 1024 * 1024,
+            "SQLite retained {} bytes above its existing caches",
+            peak - baseline
+        );
+        db.close().await.unwrap();
+    });
 }

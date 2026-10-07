@@ -167,21 +167,16 @@ async fn waiting_writes_keep_their_numbers_and_merge_as_late_writes_on_every_loa
             .collect::<Vec<_>>(),
     )
     .unwrap() as usize;
-    let sealed = a
-        .keep_upload_sealed(waiting[0].header.position, vec![17; length])
+    crate::upload::tests::attempt(&a, vec![17; length])
         .await
         .unwrap();
+    let sealed = crate::upload::tests::sealed(&a).await;
     sql(&b, "UPDATE notes SET title='later'").await.unwrap();
     let snapshot = frames(&b, Audience::Store).await;
     for _ in 0..2 {
         load(&a, Audience::Store, snapshot.clone()).await;
         assert_eq!(records(&a), waiting);
-        assert_eq!(
-            a.keep_upload_sealed(waiting[0].header.position, vec![99])
-                .await
-                .unwrap(),
-            sealed
-        );
+        assert_eq!(crate::upload::tests::sealed(&a).await, sealed);
         assert_eq!(
             a.read(
                 |db| Ok(db.query_row("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?)

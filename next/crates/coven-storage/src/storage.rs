@@ -135,10 +135,9 @@ pub struct StoredObject {
     pub size: u64,
     /// Provider timestamp, never the uploading device's clock: Drive's createdTime,
     /// OneDrive's createdDateTime, Dropbox's server_modified, CloudKit's server
-    /// publication time, or S3's Last-Modified. S3 uses initiation time for multipart
-    /// objects, but the 30-day deletion rule applies only to device-log objects
-    /// (§15). Those writes are at most 1 GB (§6), below S3's 5 GiB single-request
-    /// limit, so their retention age does not depend on multipart completion time.
+    /// publication time, or S3's Last-Modified. S3 reports multipart initiation
+    /// time, including for device logs uploaded through recorded sessions; this
+    /// timestamp therefore does not establish their publication age.
     pub stored_at: std::time::SystemTime,
 }
 

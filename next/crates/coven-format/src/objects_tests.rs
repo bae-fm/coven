@@ -6,6 +6,7 @@ use uuid::Uuid;
 #[test]
 fn posted_fingerprints_include_store_and_have_unique_ordered_audiences() {
     let mut posted = PostedPositions {
+        schema_version: 1,
         device: DeviceId(1),
         writes: WritePositions(vec![test_utils::position()]),
         store_log: EntryPositions(vec![]),

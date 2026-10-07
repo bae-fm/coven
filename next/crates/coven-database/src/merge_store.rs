@@ -96,13 +96,14 @@ pub(crate) struct MergeStore<'a> {
     database: &'a DatabaseConnection,
     values: RowValues<'a>,
     metadata: WriteMetadata<'a>,
-    rows: RefCell<BTreeMap<RowId, StoredRow>>,
+    rows: Option<RefCell<BTreeMap<RowId, StoredRow>>>,
 }
 
 enum RowValues<'a> {
     App(&'a AppView<'a>),
     Schema(&'a crate::schema::Schema),
     Snapshot(&'a crate::schema::Schema, &'a BTreeSet<Audience>),
+    Staged(&'a crate::schema::Schema),
 }
 
 impl<'a> MergeStore<'a> {
@@ -111,7 +112,7 @@ impl<'a> MergeStore<'a> {
             database,
             values: RowValues::App(app),
             metadata: WriteMetadata::new(database),
-            rows: RefCell::new(BTreeMap::new()),
+            rows: Some(RefCell::new(BTreeMap::new())),
         }
     }
 
@@ -124,7 +125,7 @@ impl<'a> MergeStore<'a> {
             database,
             values: RowValues::Schema(schema),
             metadata: WriteMetadata::new(database),
-            rows: RefCell::new(BTreeMap::new()),
+            rows: Some(RefCell::new(BTreeMap::new())),
         }
     }
 
@@ -140,8 +141,44 @@ impl<'a> MergeStore<'a> {
             database,
             values: RowValues::Snapshot(schema, audiences),
             metadata: WriteMetadata::new(database),
-            rows: RefCell::new(BTreeMap::new()),
+            rows: Some(RefCell::new(BTreeMap::new())),
         }
+    }
+
+    pub(crate) fn from_staged(
+        database: &'a DatabaseConnection,
+        schema: &'a crate::schema::Schema,
+    ) -> Self {
+        Self {
+            database,
+            values: RowValues::Staged(schema),
+            metadata: WriteMetadata::new(database),
+            rows: Some(RefCell::new(BTreeMap::new())),
+        }
+    }
+
+    /// Immutable reader snapshots and staged rows can be reread without keeping
+    /// every row value in memory while a connected region is materialized.
+    pub(crate) fn without_row_cache(mut self) -> Self {
+        self.rows = None;
+        self
+    }
+
+    pub(crate) fn caches_rows(&self) -> bool {
+        self.rows.is_some()
+    }
+
+    pub(crate) fn retain_materialization_values(
+        &self,
+        region: &BTreeSet<RowId>,
+    ) -> Result<(), DbError> {
+        if matches!(self.values, RowValues::Staged(_)) {
+            for row in region {
+                let state = self.row(row)?.state;
+                crate::download_stage::retain_values(self.database, row, &state)?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn write_ordinal(&self, id: WriteId) -> i64 {
@@ -149,8 +186,10 @@ impl<'a> MergeStore<'a> {
     }
 
     pub(crate) fn row(&self, id: &RowId) -> Result<StoredRow, DbError> {
-        if let Some(row) = self.rows.borrow().get(id) {
-            return Ok(row.clone());
+        if let Some(rows) = &self.rows {
+            if let Some(row) = rows.borrow().get(id) {
+                return Ok(row.clone());
+            }
         }
         #[cfg(test)]
         self.database.record_merge_load(&id.table);
@@ -167,7 +206,16 @@ impl<'a> MergeStore<'a> {
                 retained.len() <= 1,
                 "present row has more than one removal record: {id:?}"
             );
-            let mut values = if let Some((ordinal, columns)) = retained.into_iter().next() {
+            let staged = if matches!(self.values, RowValues::Staged(_)) {
+                crate::download_stage::values(self.database, id)?
+            } else {
+                None
+            };
+            let raw_staged = staged.is_some();
+            let mut values = if let Some(values) = staged {
+                loss = retained.first().map(|(ordinal, _)| *ordinal);
+                values
+            } else if let Some((ordinal, columns)) = retained.into_iter().next() {
                 loss = Some(ordinal);
                 columns.into_iter().map(|(n, v)| (n, v.value)).collect()
             } else {
@@ -184,17 +232,21 @@ impl<'a> MergeStore<'a> {
                     RowValues::Snapshot(_, audiences) if audiences.contains(&id.audience) => {
                         crate::snapshot_state::values(self.database, id)?
                     }
-                    RowValues::Schema(schema) | RowValues::Snapshot(schema, _) => {
-                        crate::write_rows::read_values(
-                            self.database,
-                            &schema.tables[&id.table.to_ascii_lowercase()],
-                            &id.key,
-                        )?
-                        .ok_or(DbError::DamagedDatabase)?
-                    }
+                    RowValues::Schema(schema)
+                    | RowValues::Snapshot(schema, _)
+                    | RowValues::Staged(schema) => crate::write_rows::read_values(
+                        self.database,
+                        &schema.tables[&id.table.to_ascii_lowercase()],
+                        &id.key,
+                    )?
+                    .ok_or(DbError::DamagedDatabase)?,
                 }
             };
-            values.extend(crate::reference_values::load(self.database, ordinal)?);
+            // Staged cells already contain written references. A correction for
+            // an earlier displayed NULL/default must not replace a new target.
+            if !raw_staged {
+                values.extend(crate::reference_values::load(self.database, ordinal)?);
+            }
             let mut references = BTreeMap::<String, BTreeMap<_, _>>::new();
             for (column,key,parent) in self.database.query("SELECT c.column_name,f.identity,v.parent_table,v.parent_key,v.parent_audience,v.parent_generation FROM coven_references v JOIN coven_foreign_keys f ON f.id=v.foreign_key_id JOIN coven_columns c ON c.id=v.column_id WHERE v.row_id=?1", [ordinal], |r| Ok((r.get::<_,String>(0)?,decoded(merge_fields::decode_foreign_key(&r.get::<_,Vec<u8>>(1)?))?, coven_merge::Parent { row: RowId { table:r.get(2)?,key:r.get(3)?,audience:crate::write_encoding::audience(&r.get::<_,String>(4)?)? }, generation:counter(r.get(5)?) })))? {
                 references.entry(column).or_default().insert(key,parent);
@@ -228,7 +280,9 @@ impl<'a> MergeStore<'a> {
             loss,
             lost_ids,
         };
-        self.rows.borrow_mut().insert(id.clone(), row.clone());
+        if let Some(rows) = &self.rows {
+            rows.borrow_mut().insert(id.clone(), row.clone());
+        }
         Ok(row)
     }
 

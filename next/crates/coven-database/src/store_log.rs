@@ -10,6 +10,16 @@ use coven_merge::Audience;
 
 use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError, ReplayEntry};
 
+pub(crate) fn positions(
+    database: &DatabaseConnection,
+) -> Result<coven_format::value::EntryPositions, DbError> {
+    Ok(coven_format::value::EntryPositions(database.query(
+        "SELECT device,max(number) FROM coven_store_log GROUP BY device ORDER BY device",
+        [],
+        |row| crate::store_log_tables::entry_id(row, 0),
+    )?))
+}
+
 /// Applied entries and their replay, read from one committed state (§9).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StoreLog {
@@ -18,6 +28,26 @@ pub struct StoreLog {
     pub entries: Vec<ReplayEntry>,
     /// The result computed by sync for exactly these entries.
     pub replay: StoreLogReplay,
+}
+
+impl StoreLog {
+    /// Applied positions represented by these entries, including dropped entries.
+    pub fn positions(&self) -> coven_format::value::EntryPositions {
+        let mut positions = BTreeMap::new();
+        for applied in &self.entries {
+            let id = applied.entry.position;
+            positions
+                .entry(id.device)
+                .and_modify(|number: &mut u64| *number = (*number).max(id.number))
+                .or_insert(id.number);
+        }
+        coven_format::value::EntryPositions(
+            positions
+                .into_iter()
+                .map(|(device, number)| EntryId { device, number })
+                .collect(),
+        )
+    }
 }
 
 /// The whole result of replaying the applied entries; the database never replays them.

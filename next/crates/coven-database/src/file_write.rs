@@ -357,8 +357,10 @@ impl<'a> FileWrite<'a> {
         deleted: &BTreeSet<coven_foundation::id_source::CircleId>,
     ) -> Result<(), DbError> {
         let db = self.database;
-        let visible = AppView::after(db, self.schema);
-        let store = crate::merge_store::MergeStore::new(db, &visible);
+        // Each file identity is checked once; retaining its app row would keep
+        // every downloaded payload alive until this whole write finishes.
+        let visible = AppView::after(db, self.schema).without_row_cache();
+        let store = crate::merge_store::MergeStore::new(db, &visible).without_row_cache();
         for key in keys {
             let Some(file) = &self.schema.declaration(&key.0).files else {
                 continue;

@@ -50,6 +50,20 @@ pub struct UploadBytes<'a> {
 }
 
 impl<'a> UploadBytes<'a> {
+    /// Bytes remaining in this bounded reader.
+    pub fn remaining(&self) -> u64 {
+        (self.end - self.offset) as u64
+    }
+
+    /// Skip confirmed sealed bytes without reading them into memory.
+    pub fn skip_bytes(&mut self, length: u64) -> Result<(), DbError> {
+        if length > self.remaining() {
+            return Err(DbError::DamagedDatabase);
+        }
+        self.offset += length as usize;
+        Ok(())
+    }
+
     pub(crate) fn new(blob: rusqlite::blob::Blob<'a>) -> Self {
         let end = blob.len();
         Self {
@@ -199,40 +213,36 @@ pub(crate) fn read<R, E>(
     consume(upload).map(Some).map_err(UploadReadError::Consumer)
 }
 
-pub(crate) fn keep(
+pub(crate) fn prepare(
     database: &DatabaseConnection,
-    write: WriteId,
-    bytes: Vec<u8>,
-) -> Result<Vec<u8>, DbError> {
-    database.transaction(|database| {
-        let entry = oldest(database)?
-            .filter(|e| e.write == write)
-            .ok_or(DbError::UploadNotOldest { write })?;
-        if let Some(rowid) = entry.sealed {
-            return database.query_row(
-                "SELECT sealed_bytes FROM coven_upload_seals WHERE rowid=?1",
-                [rowid],
-                |r| r.get(0),
-            );
-        }
+    seal: impl FnOnce(
+        &crate::StoreLog,
+        u32,
+        WaitingUpload<'_>,
+        &mut dyn FnMut(&[u8]) -> Result<(), DbError>,
+    ) -> Result<(), DbError>,
+) -> Result<Option<WriteId>, DbError> {
+    database.stream_transaction(|database| {
+        let Some(entry) = oldest(database)? else { return Ok(None); };
+        if entry.sealed.is_some() { return Ok(Some(entry.write)); }
         let (header, frame, _) = plaintext(database, &entry)?;
-        let expected = check_length(database, frame.len(), &header.parts)? as u64;
-        if bytes.len() as u64 != expected {
-            return Err(DbError::UploadLength {
-                write,
-                expected,
-                actual: bytes.len() as u64,
-            });
-        }
-        database.internal_execute(
-            "INSERT INTO coven_upload_seals(device,number,sealed_bytes) VALUES(?1,?2,?3)",
-            params![
-                write.device.0.to_be_bytes().as_slice(),
-                write.number.to_be_bytes().as_slice(),
-                &bytes
-            ],
+        let expected = check_length(database, frame.len(), &header.parts)?;
+        let rowid = database.query_row(
+            "INSERT INTO coven_upload_seals(device,number,sealed_bytes) VALUES(?1,?2,zeroblob(?3)) RETURNING rowid",
+            params![entry.write.device.0.to_be_bytes().as_slice(), entry.write.number.to_be_bytes().as_slice(), expected as i64],
+            |row| row.get(0),
         )?;
-        Ok(bytes)
+        let log = crate::store_log_tables::read(database)?;
+        let version = database.schema_version()?;
+        let (header, header_frame, bytes) = plaintext(database, &entry)?;
+        let parts = UploadParts { bytes, headers: header.parts.clone().into_iter() };
+        let actual = database.write_upload_seal(rowid, |emit| {
+            seal(&log, version, WaitingUpload::Plaintext { header, header_frame, parts }, emit)
+        })?;
+        if actual != expected {
+            return Err(DbError::UploadLength { write: entry.write, expected: expected as u64, actual: actual as u64 });
+        }
+        Ok(Some(entry.write))
     })
 }
 
@@ -254,7 +264,7 @@ pub(crate) fn check_length(
 }
 
 pub(crate) fn succeeded(database: &DatabaseConnection, write: WriteId) -> Result<bool, DbError> {
-    database.transaction(|database| {
+    database.stream_transaction(|database| {
         let exists = database.query_row(
             "SELECT EXISTS(SELECT 1 FROM coven_uploads WHERE device=?1 AND number=?2)",
             params![
@@ -277,6 +287,41 @@ pub(crate) fn succeeded(database: &DatabaseConnection, write: WriteId) -> Result
     })
 }
 
+pub(crate) fn session(
+    database: &DatabaseConnection,
+    write: WriteId,
+) -> Result<Option<Vec<u8>>, DbError> {
+    database.query_row(
+        "SELECT (SELECT session FROM coven_write_upload_sessions WHERE device=?1 AND number=?2)",
+        params![
+            write.device.0.to_be_bytes().as_slice(),
+            write.number.to_be_bytes().as_slice()
+        ],
+        |r| r.get(0),
+    )
+}
+
+pub(crate) fn keep_session(
+    database: &DatabaseConnection,
+    write: WriteId,
+    bytes: Vec<u8>,
+) -> Result<(), DbError> {
+    database.stream_transaction(|database| {
+        if oldest(database)?.is_none_or(|e| e.write != write || e.sealed.is_none()) {
+            return Err(DbError::UploadNotOldest { write });
+        }
+        database.internal_execute(
+            "INSERT INTO coven_write_upload_sessions(device,number,session) VALUES(?1,?2,?3) ON CONFLICT(device,number) DO UPDATE SET session=excluded.session",
+            params![
+                write.device.0.to_be_bytes().as_slice(),
+                write.number.to_be_bytes().as_slice(),
+                bytes
+            ],
+        )?;
+        Ok(())
+    })
+}
+
 #[cfg(test)]
 #[path = "upload_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -18,7 +18,7 @@ These codecs identify their plaintext frames with kinds 1–11.
 | 6 | Snapshot record | `section:u8, record` |
 | 7 | Snapshot end | Empty |
 | 9 | Join request | `invite_uuid:16, keys:MemberPublicKeys, device_name:text` |
-| 8 | Posted positions | `device:u64, writes:WritePositions, store_log:EntryPositions, fingerprints:[Fingerprint]` |
+| 8 | Posted positions | `device:u64, writes:WritePositions, store_log:EntryPositions, schema_version:u32, fingerprints:[Fingerprint]` |
 | 2 | Write row | `row:RowChange` |
 
 Kind 3 is a lost-cell dismissal: `row:RowId | column:name | write:WriteId`.
@@ -40,9 +40,10 @@ encoded through its `as_bytes` and decoded through `from_bytes`.
 ### Write records
 
 `WriteHeader` is `position:WriteId | timestamp:Timestamp |
-had_read:WritePositions | schema_version:u32 | disposition`. The timestamp's
+had_read:WritePositions | store_log_read:EntryPositions | schema_version:u32 | disposition`. The timestamp's
 device matches the write. Had-read contains other devices only; own earlier
-writes are implicit. Schema version zero is representable. Disposition is `0`
+writes are implicit. Store-log positions include the author's own entries and
+identify the view used to authorize the write. Schema version zero is representable. Disposition is `0`
 to apply, `1 | breaking_version:u32` to upload the write marked lost, or `2`
 for a migration write. A migration write has no parts: only the breaking
 change's snapshot carries its changes (§17.1). Applying its log object consumes

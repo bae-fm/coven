@@ -5,6 +5,18 @@ use coven_foundation::id_source::{CircleId, DeviceId};
 use coven_merge::{ColumnValue, MergeError, Parent};
 use uuid::Uuid;
 
+#[test]
+fn header_contains_both_write_and_store_log_frontiers() {
+    let record = test_utils::write();
+    let encoder = crate::write_stream::WriteEncoder::new(&record).unwrap();
+    // D5: identity, timestamp, one write position, the empty store-log
+    // frontier, schema, disposition, and one audience stream descriptor.
+    assert_eq!(
+        encoder.header_frame().len(),
+        7 + 16 + 16 + 20 + 4 + 4 + 1 + 4 + 17
+    );
+}
+
 // Bypass validation to exercise the decoder's independent checks.
 fn raw(write: &WriteRecord) -> Vec<u8> {
     let streams: Vec<Vec<u8>> = write

@@ -1,4 +1,4 @@
-//! Store-log results presented to the application (§20.5).
+//! Results of store-log and device-log steps (§20.5).
 
 use coven_crypto::{CryptoError, MemberId};
 use coven_database::DropReason;
@@ -9,17 +9,42 @@ use coven_format::{
 use coven_foundation::id_source::{CircleId, DeviceId, StoreId};
 use std::sync::Arc;
 
-/// Results of the store-log step. Waiting entries remain only in storage.
+/// Results contributed by each explicit sync step. Waiting store-log entries
+/// remain in storage; waiting device writes retain their first-observed time.
 #[derive(Debug, Default)]
 pub struct SyncReport {
     /// Permanently failed operations awaiting app retry or discard.
     pub blocked_operations: Vec<crate::BlockedOperation>,
     /// S3 key ids awaiting confirmation of deletion in the provider console.
     pub access_keys_to_delete: Vec<crate::AccessKeyToDelete>,
+    /// Applied positions for the other devices in this store.
+    pub devices: Vec<DeviceActivity>,
+    /// Writes still held back, with their first observed waiting time.
+    pub waiting: Vec<WaitingWrite>,
     /// This member's dropped entries in the resulting replay.
     pub dropped_entries: Vec<DroppedEntry>,
-    /// Entries or sealed keys that failed validation, with their storage paths.
+    /// Writes, entries or sealed keys that failed validation, with their storage paths.
     pub damaged_objects: Vec<DamagedObject>,
+}
+
+/// How far the receiving device has applied an authoring device's log (§20.5).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceActivity {
+    /// The authoring device.
+    pub device: DeviceId,
+    /// Last applied write number; zero means none.
+    pub applied_through: u64,
+}
+
+/// A write held until its dependencies, schema or keys become available (§19.1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WaitingWrite {
+    /// The held write.
+    pub write: coven_merge::WriteId,
+    /// Missing writes; empty for a non-write prerequisite.
+    pub waiting_for: Vec<coven_merge::WriteId>,
+    /// First observed waiting time, retained across process restarts.
+    pub since: std::time::SystemTime,
 }
 
 /// An object whose checks failed (§19.1).

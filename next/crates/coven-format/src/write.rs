@@ -1,7 +1,7 @@
 //! A write's old values and merge-owned changes, split into audience parts (§5, §14.4).
 
 use crate::error::{require, Error, Rule};
-use crate::value::{name, positive, row, Value, WritePositions};
+use crate::value::{name, positive, row, EntryPositions, Value, WritePositions};
 use crate::wire::{wire_struct, Decoder, Encoder, Wire};
 use coven_merge::{Audience, Change, Operation, RowId, Timestamp, WriteId};
 use std::collections::BTreeMap;
@@ -15,6 +15,8 @@ pub struct WriteHeader {
     pub timestamp: Timestamp,
     /// Other devices' read positions; its own earlier writes are implicit.
     pub had_read: WritePositions,
+    /// Applied store-log positions, including this device's entries (§7.1, D5).
+    pub store_log_read: EntryPositions,
     /// The app schema version (§17.1).
     pub schema_version: u32,
     /// Whether to apply rows, retain them as lost, or consume a migration write.
@@ -25,6 +27,7 @@ wire_struct!(
     position,
     timestamp,
     had_read,
+    store_log_read,
     schema_version,
     disposition
 );
@@ -37,6 +40,7 @@ impl WriteHeader {
             Rule::TimestampDevice,
         )?;
         self.had_read.own_before(self.position, false)?;
+        self.store_log_read.validate()?;
         if let WriteDisposition::Lost(version) = self.disposition {
             require(version > 0, "breaking schema version", Rule::Required)?;
         }

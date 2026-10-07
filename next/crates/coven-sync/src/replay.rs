@@ -65,6 +65,24 @@ pub(crate) fn had_read(entry: &StoreLogEntry, prior: &StoreLogEntry) -> bool {
     had_read_position(entry, prior.position)
 }
 
+/// The immutable authoring view of a write. The caller checks the supplied
+/// frontier is present and causally closed before requesting this projection.
+pub(crate) fn at(
+    log: &StoreLog,
+    positions: &coven_format::value::EntryPositions,
+) -> StoreLogReplay {
+    let mut prior: Vec<_> = log.entries.iter().collect();
+    prior.sort_by_key(|applied| applied.entry.timestamp);
+    let entries: Vec<_> = prior.iter().map(|applied| &applied.entry).collect();
+    let checks: Vec<_> = prior.iter().map(|applied| applied.check.clone()).collect();
+    let selected: Vec<_> = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| positions.covers(e.position).then_some(i))
+        .collect();
+    settle(&entries, &checks, &selected)
+}
+
 pub(crate) fn had_read_position(entry: &StoreLogEntry, prior: EntryId) -> bool {
     (entry.position.device == prior.device && entry.position.number > prior.number)
         || entry.had_read.covers(prior)

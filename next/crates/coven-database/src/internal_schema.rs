@@ -315,6 +315,23 @@ macro_rules! coven_tables {
                 FOREIGN KEY(device,number) REFERENCES coven_uploads(device,number) ON DELETE CASCADE
             ) STRICT;
         ");
+        $visit!(coven_write_upload_sessions, "
+            CREATE TABLE coven_write_upload_sessions (
+                device BLOB NOT NULL CHECK(length(device) = 8),
+                number BLOB NOT NULL CHECK(length(number) = 8),
+                session BLOB NOT NULL,
+                PRIMARY KEY(device, number),
+                FOREIGN KEY(device,number) REFERENCES coven_upload_seals(device,number) ON DELETE CASCADE
+            ) STRICT, WITHOUT ROWID;
+        ");
+        $visit!(coven_waiting_writes, "
+            CREATE TABLE coven_waiting_writes (
+                device BLOB NOT NULL CHECK(length(device)=8),
+                number BLOB NOT NULL CHECK(length(number)=8),
+                since BLOB NOT NULL CHECK(length(since)=12),
+                PRIMARY KEY(device,number)
+            ) STRICT, WITHOUT ROWID;
+        ");
         $visit!(coven_user_files, "
             CREATE TABLE coven_user_files (
                 table_name TEXT NOT NULL,

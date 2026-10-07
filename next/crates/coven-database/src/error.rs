@@ -63,6 +63,9 @@ impl From<rusqlite::Error> for CovenError {
 /// A failed database call or a write the database refuses (§5, §8, §14, §16).
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
+    /// A streaming producer or its final authentication check failed.
+    #[error("sync stream failed: {0}")]
+    SyncStream(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// This handle or a clone has closed the store (§20.1).
     #[error("store is closed")]
     StoreClosed,

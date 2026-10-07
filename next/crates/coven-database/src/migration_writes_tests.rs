@@ -36,9 +36,10 @@ async fn seal(db: &Database, byte: u8) -> Vec<u8> {
             .collect::<Vec<_>>(),
     )
     .unwrap() as usize;
-    db.keep_upload_sealed(write.header.position, vec![byte; length])
+    crate::upload::tests::attempt(db, vec![byte; length])
         .await
-        .unwrap()
+        .unwrap();
+    crate::upload::tests::sealed(db).await.1
 }
 
 fn initial() -> Migration {
@@ -659,6 +660,7 @@ async fn a_late_converted_title_competes_with_the_title_setter_and_leaves_the_sl
     let row = original[0].parts[0].rows[0].row.clone();
     let record = WriteRecord {
         header: WriteHeader {
+            store_log_read: coven_format::value::EntryPositions(Vec::new()),
             position: late,
             timestamp: Timestamp::new(old_stamp + 1, 0, late.device).unwrap(),
             had_read: WritePositions(vec![original[0].header.position]),

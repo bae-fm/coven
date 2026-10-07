@@ -50,6 +50,31 @@ impl WriteSchema {
     pub(crate) fn table(&self, name: &str) -> &TableSchema {
         &self.schema.tables[&name.to_ascii_lowercase()]
     }
+    /// Validate an incoming row's table, key shape and declared audience.
+    pub(crate) fn row_table(&self, row: &coven_merge::RowId) -> Result<&TableSchema, DbError> {
+        use crate::snapshot_error::invalid;
+        if !self
+            .declarations
+            .iter()
+            .any(|declaration| declaration.name == row.table)
+        {
+            return Err(invalid("row names a table that does not sync"));
+        }
+        let table = self.table(&row.table);
+        let key = coven_format::key::decode_key(&row.key)?;
+        if key.len() != crate::write_rows::key_columns(table).len() {
+            return Err(invalid("row key has the wrong number of columns"));
+        }
+        if matches!(
+            self.declaration(&row.table).audience,
+            crate::declaration::AudienceSource::Store
+        ) && row.audience != coven_merge::Audience::Store
+        {
+            return Err(invalid("store table is in a circle audience"));
+        }
+        Ok(table)
+    }
+
     pub(crate) fn declaration(&self, name: &str) -> &SyncedTable {
         self.declarations
             .iter()

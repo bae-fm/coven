@@ -358,6 +358,7 @@ pub(crate) fn record(
     let header = WriteHeader {
         position: WriteId { device, number },
         timestamp,
+        store_log_read: crate::store_log::positions(database)?,
         had_read: WritePositions(
             positions
                 .into_iter()

@@ -1,5 +1,11 @@
 //! The leaf SQLite capability. Its connection is never returned or borrowed out.
 
+#[path = "stream_capture.rs"]
+mod stream_capture;
+#[path = "transaction_capture.rs"]
+mod transaction_capture;
+use transaction_capture::ChangeCapture;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -15,7 +21,7 @@ use rusqlite::{
 use crate::authorization::SqlAuthorization;
 use crate::internal_schema;
 use crate::migration::validate_versions;
-use crate::observation::{CommitObserver, ReadSet, RowChange};
+use crate::observation::{CommitObserver, ReadSet};
 use crate::schema::Schema;
 use crate::SqlReadContext;
 use crate::{
@@ -27,6 +33,7 @@ pub(crate) struct DatabaseConnection {
     connection: Connection,
     authorization: SqlAuthorization,
     observation: Option<WriterObservation>,
+    streaming: std::cell::Cell<bool>,
     #[cfg(test)]
     scans: std::sync::Mutex<Vec<(String, i32)>>,
     #[cfg(test)]
@@ -109,6 +116,7 @@ impl DatabaseConnection {
             connection,
             authorization,
             observation: None,
+            streaming: std::cell::Cell::new(false),
             #[cfg(test)]
             scans: std::sync::Mutex::new(Vec::new()),
             #[cfg(test)]
@@ -263,6 +271,28 @@ impl DatabaseConnection {
         )?))
     }
 
+    pub(crate) fn write_upload_seal(
+        &self,
+        rowid: i64,
+        consume: impl FnOnce(&mut dyn FnMut(&[u8]) -> Result<(), DbError>) -> Result<(), DbError>,
+    ) -> Result<usize, DbError> {
+        let _scope = self.authorization.internal();
+        let mut blob = self.connection.blob_open(
+            rusqlite::MAIN_DB,
+            "coven_upload_seals",
+            "sealed_bytes",
+            rowid,
+            false,
+        )?;
+        let mut offset = 0;
+        consume(&mut |bytes| {
+            blob.write_at(bytes, offset)?;
+            offset += bytes.len();
+            Ok(())
+        })?;
+        Ok(offset)
+    }
+
     pub(crate) fn local_write<F, R, E>(
         &self,
         schema: &crate::write_schema::WriteSchema,
@@ -379,7 +409,9 @@ impl DatabaseConnection {
         params: P,
     ) -> Result<usize, DbError> {
         let _scope = self.authorization.internal();
-        self.connection.execute(sql, params).map_err(Into::into)
+        let changed = self.connection.execute(sql, params)?;
+        self.bound_stream_cache()?;
+        Ok(changed)
     }
 
     pub(crate) fn query_row<T, P: Params>(
@@ -468,7 +500,10 @@ impl DatabaseConnection {
             .authorization
             .app_result(self.connection.prepare(sql))?;
         let _scope = self.authorization.step();
-        self.authorization.app_result(statement.execute(params))
+        let changed = self.authorization.app_result(statement.execute(params))?;
+        drop(statement);
+        self.bound_stream_cache()?;
+        Ok(changed)
     }
 
     pub(crate) fn app_batch(&self, sql: &str) -> rusqlite::Result<()> {
@@ -717,11 +752,29 @@ impl DatabaseConnection {
         self.transaction_with_error(run)
     }
 
+    /// Streaming transfers publish table invalidations without a session's
+    /// retained before/after BLOB values growing with the transferred object.
+    pub(crate) fn stream_transaction<T>(
+        &self,
+        run: impl FnOnce(&Self) -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
+        self.transaction_captured(true, run)
+    }
+
     fn transaction_with_error<T, E: crate::WriteFailure>(
         &self,
         run: impl FnOnce(&Self) -> Result<T, E>,
     ) -> Result<T, E> {
+        self.transaction_captured(false, run)
+    }
+
+    fn transaction_captured<T, E: crate::WriteFailure>(
+        &self,
+        streaming: bool,
+        run: impl FnOnce(&Self) -> Result<T, E>,
+    ) -> Result<T, E> {
         self.batch("BEGIN IMMEDIATE")?;
+        self.streaming.set(streaming);
         let mut guard = SqlTransaction {
             database: self,
             active: true,
@@ -730,14 +783,23 @@ impl DatabaseConnection {
             // The write-record session ends before materialization; this session
             // covers app SQL, merge metadata, materialization and local tables.
             let mut capture = match &self.observation {
+                Some(_) if streaming => None,
                 Some(observation) => Some(ChangeCapture::begin(self, observation)?),
                 None => None,
+            };
+            let tables = if streaming {
+                Some(stream_capture::StreamCapture::begin(self)?)
+            } else {
+                None
             };
             let result = run(self)?;
             self.require_transaction()?;
             let changes = match &mut capture {
                 Some(capture) => capture.take_changes()?,
-                None => Vec::new(),
+                None => match &tables {
+                    Some(tables) => tables.changes()?,
+                    None => Vec::new(),
+                },
             };
             self.batch("COMMIT")?;
             if let Some(observation) = &self.observation {
@@ -757,134 +819,41 @@ impl DatabaseConnection {
         }
     }
 
+    fn bound_stream_cache(&self) -> rusqlite::Result<()> {
+        if !self.streaming.get() {
+            return Ok(());
+        }
+        let (mut used, mut high) = (0, 0);
+        // SAFETY: this owner exclusively uses its live connection. CACHE_USED
+        // counts retained pages even when global memory accounting is disabled.
+        let code = unsafe {
+            rusqlite::ffi::sqlite3_db_status(
+                self.connection.handle(),
+                rusqlite::ffi::SQLITE_DBSTATUS_CACHE_USED,
+                &mut used,
+                &mut high,
+                0,
+            )
+        };
+        if code != rusqlite::ffi::SQLITE_OK {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                None,
+            ));
+        }
+        if used > 4 * 1024 * 1024 {
+            // cache_size is a suggestion. Spill uncommitted pages without
+            // committing the transaction, then release reusable cache pages.
+            self.connection.cache_flush()?;
+            self.connection.release_memory()?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn close(self) -> Result<(), DbError> {
         self.connection
             .close()
             .map_err(|(_connection, error)| error.into())
-    }
-}
-
-// rusqlite does not expose the session ROWID option. Keep raw handles here,
-// inside the SQLite owner; the borrow prevents the connection outliving capture.
-struct ChangeCapture<'a> {
-    session: *mut rusqlite::ffi::sqlite3_session,
-    database: &'a DatabaseConnection,
-    supplemental: &'a BTreeMap<String, Option<String>>,
-    hook_changes: Arc<Mutex<BTreeSet<String>>>,
-}
-
-impl<'a> ChangeCapture<'a> {
-    fn begin(
-        database: &'a DatabaseConnection,
-        observation: &'a WriterObservation,
-    ) -> Result<Self, DbError> {
-        let mut session = std::ptr::null_mut();
-        // SAFETY: the borrowed owner retains its connection until this guard drops.
-        sqlite_ok(unsafe {
-            rusqlite::ffi::sqlite3session_create(
-                database.connection.handle(),
-                c"main".as_ptr(),
-                &mut session,
-            )
-        })?;
-        let capture = Self {
-            session,
-            database,
-            supplemental: &observation.supplemental,
-            hook_changes: Arc::new(Mutex::new(BTreeSet::new())),
-        };
-        let mut rowid: std::ffi::c_int = 1;
-        // SAFETY: the live session has no attached tables yet and rowid is an int.
-        sqlite_ok(unsafe {
-            rusqlite::ffi::sqlite3session_object_config(
-                session,
-                rusqlite::ffi::SQLITE_SESSION_OBJCONFIG_ROWID,
-                (&mut rowid as *mut std::ffi::c_int).cast(),
-            )
-        })?;
-        // SAFETY: null attaches every current and subsequently created main table.
-        sqlite_ok(unsafe { rusqlite::ffi::sqlite3session_attach(session, std::ptr::null()) })?;
-        if !observation.supplemental.is_empty() {
-            // A session's pre-update hook disables SQLite's truncate-delete
-            // optimization, so even DELETE without WHERE reaches this hook.
-            let tables = Arc::clone(&observation.supplemental);
-            let changes = Arc::clone(&capture.hook_changes);
-            database
-                .connection
-                .update_hook(Some(move |_, schema: &str, table: &str, _| {
-                    if schema == "main" {
-                        let table = table.to_ascii_lowercase();
-                        if tables.contains_key(&table) {
-                            changes
-                                .lock()
-                                .expect("update hook capture lock poisoned")
-                                .insert(table);
-                        }
-                    }
-                }))?;
-        }
-        Ok(capture)
-    }
-
-    fn take_changes(&mut self) -> Result<Vec<RowChange>, DbError> {
-        self.database.require_transaction()?;
-        let _scope = self.database.authorization.internal();
-        let mut length = 0;
-        let mut bytes = std::ptr::null_mut();
-        // SAFETY: this guard exclusively owns the live session; SQLite allocates
-        // the result, which we copy then free even when reporting a failure.
-        let result = unsafe {
-            rusqlite::ffi::sqlite3session_changeset(self.session, &mut length, &mut bytes)
-        };
-        let copied = if result == rusqlite::ffi::SQLITE_OK && length > 0 {
-            // SAFETY: successful changeset generation returned length initialized bytes.
-            unsafe { std::slice::from_raw_parts(bytes.cast::<u8>(), length as usize) }.to_vec()
-        } else {
-            Vec::new()
-        };
-        // SAFETY: SQLite allocated this buffer and sqlite3_free accepts null.
-        unsafe { rusqlite::ffi::sqlite3_free(bytes) };
-        sqlite_ok(result)?;
-        let mut changes = crate::change_capture::changes(self.database, &copied)?;
-        for table in std::mem::take(
-            &mut *self
-                .hook_changes
-                .lock()
-                .expect("update hook capture lock poisoned"),
-        ) {
-            if let Some(parent) = &self.supplemental[&table] {
-                changes.push(RowChange {
-                    table: parent.clone(),
-                    column: String::new(),
-                    keys: None,
-                });
-            }
-            changes.push(RowChange {
-                table,
-                column: String::new(),
-                keys: None,
-            });
-        }
-        Ok(changes)
-    }
-}
-
-impl Drop for ChangeCapture<'_> {
-    fn drop(&mut self) {
-        self.database
-            .connection
-            .update_hook(None::<fn(rusqlite::hooks::Action, &str, &str, i64)>)
-            .expect("remove transaction update hook");
-        // SAFETY: the guard owns this session and still borrows its live connection.
-        unsafe { rusqlite::ffi::sqlite3session_delete(self.session) };
-    }
-}
-
-fn sqlite_ok(code: std::ffi::c_int) -> Result<(), DbError> {
-    if code == rusqlite::ffi::SQLITE_OK {
-        Ok(())
-    } else {
-        Err(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None).into())
     }
 }
 
@@ -895,6 +864,7 @@ struct SqlTransaction<'a> {
 
 impl Drop for SqlTransaction<'_> {
     fn drop(&mut self) {
+        self.database.streaming.set(false);
         if self.active && !self.database.connection.is_autocommit() {
             self.database
                 .batch("ROLLBACK")

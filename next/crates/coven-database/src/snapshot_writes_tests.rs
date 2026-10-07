@@ -117,7 +117,7 @@ async fn upload(db: &crate::Database, record: &coven_format::write::WriteRecord)
             .collect::<Vec<_>>(),
     )
     .unwrap();
-    db.keep_upload_sealed(record.header.position, vec![17; length as usize])
+    crate::upload::tests::attempt(db, vec![17; length as usize])
         .await
         .unwrap();
     assert!(db.upload_succeeded(record.header.position).await.unwrap());
