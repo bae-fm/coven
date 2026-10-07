@@ -164,6 +164,9 @@
   the key, file or request it holds.
   - So creating an object only has to survive its own device retrying,
     never two devices racing for one path.
+  - The one exception is a dropped removal's key sealed to a member it
+    left out ([§11](#11-keys)): any device holding it may write that
+    path, and every copy holds the same key, so the first stored counts.
   - On Google Drive, which allows two files with one name, a retry first
     looks for its own earlier copy.
 - On the providers that share with an account, only the member whose
@@ -1413,6 +1416,16 @@ Carol's tablet:
     names its own new store key; the two conflict, since each key is
     sealed to the member the other removes, so the earlier applies and
     the other is redone against it ([§9](#9-members-and-roles)).
+- A dropped removal's keys may already seal entries other devices made
+  before they saw the drop, and the member it excluded, still a member,
+  has no copy of them.
+  - So every device holding such a key seals it to each member of its
+    audience in the latest replay who lacks a copy, at that member's
+    path; the first copy stored counts, and a device that finds the path
+    taken is done.
+  - E.g. Ana's removal of Dan beats Ben's removal of Erin. Erin, still a
+    member, gets Ben's key from whichever device holding it sees the drop
+    first, so she reads the entries sealed with it.
 - The *current* store key is the one named by the latest entry the replay
   keeps, in its order, that brings one in, and likewise for each circle; new
   writes, entries, snapshots and files use it.
