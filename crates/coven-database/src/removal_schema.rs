@@ -19,7 +19,6 @@ pub(crate) struct TableRules {
 
 pub(crate) struct UniqueSql {
     pub(crate) identity: coven_merge::UniqueConstraint,
-    pub(crate) index: String,
     pub(crate) collations: Vec<String>,
     pub(crate) dependencies: Vec<String>,
     pub(crate) expressions: Vec<String>,
@@ -185,7 +184,6 @@ impl TableRules {
                 let predicate = partial.clone().unwrap_or_else(|| "1".into());
                 Ok(UniqueSql {
                     identity: coven_merge::UniqueConstraint { terms, partial },
-                    index: index.name.clone(),
                     dependencies: db.columns_read(&format!("{sql} WHERE {predicate}"))?,
                     collations: index.collations.clone(),
                     expressions,

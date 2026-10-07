@@ -1,4 +1,3 @@
-use crate::input::validate_audience;
 use crate::{Audience, MergeError, Parent, RowId, Timestamp};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -13,19 +12,12 @@ pub enum OnDelete {
     NoAction,
     /// Read null after a parent deletion if SQLite accepts it.
     SetNull {
-        /// Whether the column permits the substitution, e.g. is nullable.
-        permitted: bool,
-    },
-    /// Read the default after a parent deletion if SQLite accepts it.
-    SetDefault {
-        /// The default parent, or `None` for a null default.
-        parent: Option<RowId>,
-        /// Whether SQLite permits the substitution.
+        /// Whether the substitution passes the row’s CHECK constraints.
         permitted: bool,
     },
 }
 
-/// One reference in the merged values, before null/default substitution.
+/// One reference in the merged values, before null substitution.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Reference {
     /// The parent generation carried by the winning reference's write.
@@ -47,56 +39,29 @@ pub enum ReferenceValue {
     },
     /// A set-null reference whose parent's generation was deleted.
     Null,
-    /// A set-default reference, always pointing at the default parent's
-    /// current generation and never stale. `None` is a null default.
-    Default(Option<Parent>),
 }
 
 impl ReferenceValue {
     fn dependency(&self) -> Option<(&RowId, bool)> {
         match self {
             Self::Original { parent, stale } => Some((&parent.row, *stale)),
-            Self::Default(Some(parent)) => Some((&parent.row, false)),
-            Self::Null | Self::Default(None) => None,
+            Self::Null => None,
         }
     }
 }
 
-/// Resolve a reference against parent generations, before CHECK and unique
-/// evaluation. `default_generation` is required only for a substituted,
-/// non-null default; omitting it returns [`MergeError::MissingDefaultGeneration`].
-/// Deleted/removed default parents take the child out;
-/// re-adding the default parent lets it return.
+/// Resolve a winning reference against its parent's generation, before CHECK
+/// and unique evaluation. Substitution affects the app's row, while lost values
+/// retain the written reference (§8.4).
 pub fn resolve_reference(
     child: &RowId,
     reference: &Reference,
     parent_generation: u64,
-    default_generation: Option<u64>,
 ) -> Result<ReferenceValue, MergeError> {
     reference.parent.validate_written(child)?;
     let stale = parent_generation != reference.parent.generation;
-    if stale {
-        match &reference.on_delete {
-            OnDelete::SetNull { permitted: true } => return Ok(ReferenceValue::Null),
-            OnDelete::SetDefault {
-                parent,
-                permitted: true,
-            } => {
-                let parent = match parent {
-                    Some(row) => {
-                        validate_audience(child, row)?;
-                        Some(Parent {
-                            row: row.clone(),
-                            generation: default_generation
-                                .ok_or_else(|| MergeError::MissingDefaultGeneration(row.clone()))?,
-                        })
-                    }
-                    None => None,
-                };
-                return Ok(ReferenceValue::Default(parent));
-            }
-            _ => {}
-        }
+    if stale && matches!(reference.on_delete, OnDelete::SetNull { permitted: true }) {
+        return Ok(ReferenceValue::Null);
     }
     Ok(ReferenceValue::Original {
         parent: reference.parent.clone(),
@@ -198,9 +163,8 @@ pub trait RemovalView {
         row: &RowId,
         references: &BTreeMap<crate::ForeignKey, ReferenceValue>,
     ) -> Result<Constraints, Self::Error>;
-    /// Indexed reference edges in both directions: parents, children, default
-    /// parents, and children whose default parent is this row. Include absent
-    /// and removed rows, and edges before and after reference substitution.
+    /// Indexed reference edges in both directions: parents and children. Include
+    /// absent and removed rows, and edges before reference substitution.
     /// Competition belongs in [`Self::groups`], not in these edges.
     fn related(&self, row: &RowId) -> Result<BTreeSet<RowId>, Self::Error>;
     /// The row's key group and its current unique claim groups, using values
@@ -344,21 +308,7 @@ fn evaluate<V: RemovalView>(
                     .get(&reference.parent.row)
                     .ok_or_else(|| MergeError::RegionNotClosed(reference.parent.row.clone()))?
                     .generation();
-                let default_gen = match &reference.on_delete {
-                    OnDelete::SetDefault {
-                        parent: Some(parent),
-                        permitted: true,
-                    } if parent_gen != reference.parent.generation => Some(
-                        raw.get(parent)
-                            .ok_or_else(|| MergeError::RegionNotClosed(parent.clone()))?
-                            .generation(),
-                    ),
-                    _ => None,
-                };
-                resolved.insert(
-                    name.clone(),
-                    resolve_reference(row, reference, parent_gen, default_gen)?,
-                );
+                resolved.insert(name.clone(), resolve_reference(row, reference, parent_gen)?);
             }
         }
         let constraints = if data.present() {

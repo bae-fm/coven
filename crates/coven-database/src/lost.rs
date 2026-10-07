@@ -42,7 +42,7 @@ pub enum Lost {
 pub struct LostCell {
     /// The column's name.
     pub column: String,
-    /// The SQLite value as written, without foreign-key null or default substitution.
+    /// The SQLite value as written, without foreign-key null substitution.
     pub value: Value,
     /// The write that set this cell.
     pub set_by: WriteId,

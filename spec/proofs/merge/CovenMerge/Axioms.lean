@@ -41,6 +41,5 @@ open CovenMerge
 #print axioms Comeback.example_8_5_subnote
 #print axioms Comeback.example_8_5_step3
 #print axioms Check.example_8_6
-#print axioms SetDefault.example_8_4_default
 #print axioms DeletedCircle.example_14_7
 #print axioms SetNull.example_8_4_later

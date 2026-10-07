@@ -520,6 +520,14 @@ impl From<rusqlite::Error> for DbError {
 /// A schema rule checked on open and after migrating (§8, §14.1).
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SchemaError {
+    /// SET DEFAULT is on a synced table or references one (§8.4).
+    #[error("foreign key {table}: {key} cannot use SET DEFAULT")]
+    SetDefault {
+        /// The referencing table.
+        table: String,
+        /// The foreign key's columns and referenced table and columns, as SQL.
+        key: String,
+    },
     /// A local foreign key could prevent deletion of a synced row (§8.4).
     #[error("local reference {table}.{column} must use CASCADE or nullable SET NULL")]
     LocalChildAction {
@@ -554,8 +562,8 @@ pub enum SchemaError {
         /// The non-null managed column.
         column: String,
     },
-    /// SET NULL or SET DEFAULT would change one file column alone (§16.1).
-    #[error("file column {table}.{column} cannot use SET NULL or SET DEFAULT")]
+    /// SET NULL would change one file column alone (§16.1).
+    #[error("file column {table}.{column} cannot use SET NULL")]
     FileForeignKeyAction {
         /// The declared table.
         table: String,
@@ -610,7 +618,7 @@ pub enum SchemaError {
         /// The declared table.
         table: String,
     },
-    /// SET NULL or SET DEFAULT would put NULL in a NOT NULL column (§8.4).
+    /// SET NULL would put NULL in a NOT NULL column (§8.4).
     #[error("foreign key action would put NULL in non-null column {table}.{column}")]
     ImpossibleAction {
         /// The synced or local table.
@@ -618,7 +626,7 @@ pub enum SchemaError {
         /// The non-null referencing column.
         column: String,
     },
-    /// SET NULL or SET DEFAULT acts on a primary-key column (§8.4).
+    /// SET NULL acts on a primary-key column (§8.4).
     #[error("foreign key action changes key column {table}.{column}")]
     PrimaryKeyAction {
         /// The declared table.
@@ -648,8 +656,8 @@ pub enum SchemaError {
         /// The audience foreign-key column.
         column: String,
     },
-    /// The audience foreign key uses SET NULL or SET DEFAULT (§14.1).
-    #[error("audience foreign key {table}.{column} cannot use SET NULL or SET DEFAULT")]
+    /// The audience foreign key uses SET NULL (§14.1).
+    #[error("audience foreign key {table}.{column} cannot use SET NULL")]
     AudienceForeignKeyAction {
         /// The declared table.
         table: String,

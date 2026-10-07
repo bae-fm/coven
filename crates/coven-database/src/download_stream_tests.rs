@@ -454,30 +454,3 @@ async fn retargeting_a_reference_replaces_its_retained_pre_null_value() {
         fingerprint(&b, Audience::Store).await
     );
 }
-
-#[tokio::test]
-async fn a_default_parent_created_in_the_same_write_is_visible_by_its_unique_column() {
-    let ids = SequentialIds::new();
-    let sa = TestStore::with_ids(&ids);
-    let sb = TestStore::with_ids(&ids);
-    let schema = "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY,code TEXT NOT NULL UNIQUE); CREATE TABLE links(id TEXT NOT NULL PRIMARY KEY,parent TEXT DEFAULT 'Inbox' REFERENCES parents(code) ON DELETE SET DEFAULT); CREATE INDEX links_parent ON links(parent)";
-    let a = sa.schema(references(), schema).await.unwrap();
-    let b = sb.schema(references(), schema).await.unwrap();
-    for statement in [
-        "INSERT INTO parents VALUES('old','old'); INSERT INTO links VALUES('link','old')",
-        "INSERT INTO parents VALUES('new','Inbox'); DELETE FROM parents WHERE id='old'",
-    ] {
-        sql(&a, statement).await.unwrap();
-        b.apply_downloaded_stream(
-            stream(&records(&a).pop().unwrap()),
-            coven_format::value::EntryPositions(Vec::new()),
-            || Ok(()),
-        )
-        .await
-        .unwrap();
-    }
-    assert_eq!(
-        fingerprint(&a, Audience::Store).await,
-        fingerprint(&b, Audience::Store).await
-    );
-}

@@ -154,7 +154,7 @@ impl<V> RowState<V> {
     }
 
     /// §8.5: a unique claim dates from the latest winning setter of any of
-    /// its columns. Null/default reference substitutions keep that setter.
+    /// its columns. Null reference substitutions keep that setter.
     pub fn claim_timestamp(
         &self,
         columns: &[String],

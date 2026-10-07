@@ -856,19 +856,19 @@ Carol's tablet:
   every device:
   - under cascade, restrict or no action, the removal rule of [§8](#8-merge)
     takes it out of the app's table and records it as lost;
-  - under set null or set default, it stays, and its reference is null or
-    the default, as SQLite would have made it.
-  - The app's table reads the reference as null or the default. Lost
-    values always show what was written, without this substitution.
+  - under set null, it stays, and its reference is null, as SQLite would
+    have made it.
+  - The app's table reads the reference as null. Lost values always show
+    what was written, without this substitution.
   - The cell still names the write whose reference won; it only reads as
-    null or the default, and later writes to it compete with that write's
-    timestamp, as with any cell. Nothing is recorded as lost.
+    null, and later writes to it compete with that write's timestamp, as
+    with any cell. Nothing is recorded as lost.
   - Coven's merge records keep the live reference as written, and its parent
-    generation: the cell reads as null or the default while that
-    generation is deleted, and as written again if a reset brings the
-    generation back ([§19.3](#193-resetting-a-store)). A later concurrent
-    write that displaces it records the written value as lost, whichever
-    write arrived first. Snapshots carry the reference as written.
+    generation: the cell reads as null while that generation is deleted,
+    and as written again if a reset brings the generation back
+    ([§19.3](#193-resetting-a-store)). A later concurrent write that
+    displaces it records the written value as lost, whichever write arrived
+    first. Snapshots carry the reference as written.
   - E.g. links point at notes with set null, and three writes happen:
 
     ```
@@ -881,19 +881,19 @@ Carol's tablet:
     as null, with the cell still naming Ben's write.
   - Dan's write then wins over Ben's, so every device ends with link 6 on
     note 44, whatever order the writes arrived in.
-- Coven refuses set null on a `NOT NULL` column, and set default where
-  the column is `NOT NULL` and its default is NULL, in any table, checked
-  when the database opens and after migrating.
+- Coven refuses `ON DELETE SET DEFAULT` and `ON UPDATE SET DEFAULT` on
+  any foreign key of a synced table, and on a foreign key from a local
+  table into a synced table, checked when the database opens and after
+  migrating. The error names the table and foreign key
+  ([Appendix A.8](#a8-set-default-foreign-keys)).
+- Coven refuses set null on a `NOT NULL` column in any table, checked when
+  the database opens and after migrating.
   - SQLite can never apply such an action: no device could delete the
     parent, and coven couldn't take it out.
-- Where SQLite would still refuse the default, such as one failing a
-  CHECK, the child is taken out as under restrict.
+- Where setting the reference to null would fail a CHECK, the child is
+  taken out as under restrict.
 - Coven takes rows out with SQLite's foreign keys enforced, children
   first, so SQLite's own actions reach only local children.
-  - Rows the app's schema makes impossible to delete stay so: e.g. two
-    rows pointing at each other with set default, whose default fails a
-    CHECK, can't be deleted by the app, and can't be taken out by coven.
-  - A write that would need it fails with SQLite's error.
 - A synced row coven deletes or takes out can have children that only this
   device has, in local tables, so a local foreign key must never stop it:
   - coven refuses, checked when the database opens and after migrating, a
@@ -906,29 +906,13 @@ Carol's tablet:
 - Anything else in the app's local schema that refuses such a delete, such
   as a trigger that raises an error, fails the write or the apply that
   needs it on that device, until the app changes its schema.
-- A reference set to its default points at whichever generation of the
-  default parent is current, and is never stale.
-  - If that parent is deleted or taken out, the child is taken out as
-    under restrict, as SQLite would refuse it, and comes back once the
-    parent is there again.
-  - E.g. notes point at folders with set default, and the default is
-    "Inbox".
-
-    ```
-    16:00  Ana deletes "Work"; Ben, offline, puts note 50 in "Work"
-    16:10  Carol deletes "Inbox"
-    16:30  every device: note 50's folder would be "Inbox", but there is
-           none, so note 50 is taken out and recorded in _coven_lost
-    17:00  Carol re-adds "Inbox"; note 50 comes back, in Inbox
-    ```
-
 - A child whose parent is taken out by a rule, rather than deleted, is
   taken out with it under every action, and comes back with it.
 - E.g. note 46 loses its title to note 45 and is taken out; link 7, which
   points at note 46 with set null, is taken out with it, not set to null.
-- Coven refuses set null and set default on a primary key column, checked
-  when the database opens and after migrating, since nulling a key
-  column changes the row's key: a delete plus an insert no write recorded.
+- Coven refuses set null on a primary key column, checked when the database
+  opens and after migrating, since nulling a key column changes the row's
+  key: a delete plus an insert no write recorded.
 - A taken-out child's own generation never moves, so it comes back if its
   reference is later pointed at a parent that is present.
 - E.g. at 16:00, while Ana deletes note 43, Ben, offline, adds attachment 9
@@ -1715,9 +1699,8 @@ Carol's tablet:
 ### 14.1 Roots and descendants
 
 - A descendant's declared foreign key is one column, into a synced table.
-  - Its action can't be set null or set default, since the row would lose
-    its audience; coven refuses it, checked when the database opens and
-    after migrating.
+  - Its action can't be set null, since the row would lose its audience;
+    coven refuses it, checked when the database opens and after migrating.
   - Following declared foreign keys from any descendant reaches a root,
     or a table in the store; a loop is refused, checked when the database
     opens and after migrating.
@@ -2105,9 +2088,9 @@ Carol's tablet:
   - E.g. Ana's phone and Ben's laptop each attach a different file to row
     7: the later write wins all four columns, never one file's size with
     the other's hash.
-  - So coven refuses a foreign key with set null or set default on any of
-    the four, checked when the database opens and after migrating: its
-    action would change one column alone ([§8.4](#84-foreign-keys)).
+  - So coven refuses a foreign key with set null on any of the four, checked
+    when the database opens and after migrating: its action would change
+    one column alone ([§8.4](#84-foreign-keys)).
 - An uploaded file is encrypted with a key of its own, which travels in
   its row's where-column, inside the row's encrypted writes, so only the
   row's readers can read it ([§16.2](#162-storage-and-naming)).
@@ -2353,9 +2336,9 @@ Carol's tablet:
 - Rows a removal rule had taken out before a breaking change stay out for
   good: they stay in `_coven_lost`, and coven forgets their other merge
   records.
-  - Their values stay as they read at the migration: a reference whose
-    foreign key the migration drops keeps the null or default it showed
-    then, as a plain value ([§8.4](#84-foreign-keys)).
+  - Their values stay as written: a reference whose foreign key the
+    migration drops keeps its written value as plain data
+    ([§8.4](#84-foreign-keys)).
 - A device that updates runs the migration's second part on its own
   writes still waiting in `_coven_uploads`, then uploads them.
   - Without a second part, it uploads them marked lost, and every device
@@ -2870,3 +2853,25 @@ merge later.
 - Problem: devices running different app versions hold different schemas.
 - Status: additions sync with no change of version; any other change
   raises the store's version, and every device updates and reloads ([§17](#17-schema-changes)).
+
+### A.8 SET DEFAULT foreign keys
+
+- Problem: the default parent is a second parent that merges like any row
+  and can itself be gone. Supporting it requires restrict-like removal
+  while that parent is gone, tracking its current generation, and handling
+  rows that cannot be deleted when their defaults fail a CHECK.
+- Status: refused on foreign keys of synced tables and foreign keys from
+  local tables into synced tables, for both delete and update actions
+  ([§8.4](#84-foreign-keys)). SET DEFAULT appears in so few SQL files that
+  refusing it affects almost nobody. Counts of SQL files on GitHub using
+  each action, from GitHub's REST code search (`GET /search/code`, query
+  `"ON DELETE <action>" language:SQL`, its `total_count`), retrieved
+  2026-10-07; approximate, across all SQL dialects:
+
+  | Action | SQL files |
+  | --- | --- |
+  | `ON DELETE CASCADE` | ~1,714,000 |
+  | `ON DELETE SET NULL` | ~646,000 |
+  | `ON DELETE RESTRICT` | ~496,000 |
+  | `ON DELETE NO ACTION` | ~115,000 |
+  | `ON DELETE SET DEFAULT` | ~2,200 |

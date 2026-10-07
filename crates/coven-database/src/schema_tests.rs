@@ -25,6 +25,196 @@ fn independent(name: &str) -> SyncedTable {
 }
 
 #[tokio::test]
+async fn set_default_is_refused_on_open_and_after_migrating() {
+    for (child_synced, parent_synced) in [(true, true), (true, false), (false, true)] {
+        for action in [
+            "ON DELETE SET DEFAULT",
+            "ON DELETE CASCADE ON UPDATE SET DEFAULT",
+        ] {
+            for default in ["", "DEFAULT 'fallback'", "NOT NULL DEFAULT 'fallback'"] {
+                let store = TestStore::new();
+                let tables = || {
+                    let mut tables = Vec::new();
+                    if child_synced {
+                        tables.push(shared("CHILD"));
+                    }
+                    if parent_synced {
+                        tables.push(shared("PARENT"));
+                    }
+                    tables
+                };
+                let schema = format!("CREATE TABLE Parent(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE Child(id TEXT NOT NULL PRIMARY KEY, parent TEXT {default} REFERENCES pArEnT(id) {action})");
+                let migration_schema = schema.clone();
+                let expected = SchemaError::SetDefault {
+                    table: "Child".into(),
+                    key: "(\"parent\") REFERENCES \"pArEnT\" (\"id\")".into(),
+                };
+                let error = store
+                    .builder(
+                        tables(),
+                        vec![Migration::run(1, "foreign key", move |sql| {
+                            sql.execute_batch(&migration_schema)?;
+                            Ok(())
+                        })],
+                    )
+                    .open()
+                    .await
+                    .err()
+                    .expect("SET DEFAULT must fail migration");
+                assert!(
+                    matches!(database_error(error), DbError::Schema(found) if found == expected)
+                );
+                let db = store.builder(vec![], vec![]).open().await.unwrap();
+                db.inspect_writer(|writer| {
+                    assert_eq!(writer.schema_version().unwrap(), 0);
+                    assert_eq!(writer.query_row("SELECT count(*) FROM sqlite_schema WHERE name IN ('Parent','Child')", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+                    writer.batch(&schema).unwrap();
+                });
+                db.close().await.unwrap();
+                for read_only in [false, true] {
+                    let builder = store.builder(tables(), vec![]);
+                    let error = if read_only {
+                        builder.open_read_only().await.map(|_| ())
+                    } else {
+                        builder.open().await.map(|_| ())
+                    }
+                    .expect_err("SET DEFAULT must fail open");
+                    assert!(
+                        matches!(database_error(error), DbError::Schema(found) if found == expected)
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn set_default_errors_identify_composite_implicit_and_self_references() {
+    for (schema, key) in [
+        (
+            "CREATE TABLE parent(a TEXT,b TEXT,PRIMARY KEY(a,b)); CREATE TABLE child(id TEXT NOT NULL PRIMARY KEY,x TEXT,y TEXT,FOREIGN KEY(x,y) REFERENCES parent(a,b) ON DELETE SET DEFAULT)",
+            "(\"x\", \"y\") REFERENCES \"parent\" (\"a\", \"b\")",
+        ),
+        (
+            "CREATE TABLE parent(id TEXT PRIMARY KEY); CREATE TABLE child(id TEXT NOT NULL PRIMARY KEY,p TEXT REFERENCES parent ON UPDATE SET DEFAULT)",
+            "(\"p\") REFERENCES \"parent\"",
+        ),
+        (
+            "CREATE TABLE child(id TEXT NOT NULL PRIMARY KEY,p TEXT REFERENCES child(id) ON DELETE SET DEFAULT)",
+            "(\"p\") REFERENCES \"child\" (\"id\")",
+        ),
+        (
+            "CREATE TABLE child(id TEXT NOT NULL PRIMARY KEY,p TEXT REFERENCES missing(id) ON DELETE SET DEFAULT)",
+            "(\"p\") REFERENCES \"missing\" (\"id\")",
+        ),
+    ] {
+        let expected = SchemaError::SetDefault {
+            table: "child".into(),
+            key: key.into(),
+        };
+        assert!(expected.to_string().contains(key));
+        assert!(expected.to_string().contains("child"));
+        rejects(schema, vec![shared("child")], expected).await;
+    }
+}
+
+#[tokio::test]
+async fn a_set_default_migration_preserves_the_previous_schema_and_rows() {
+    const INITIAL: &str = "CREATE TABLE parent(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE child(id TEXT NOT NULL PRIMARY KEY,p TEXT REFERENCES parent(id) ON DELETE CASCADE)";
+    for event in ["DELETE", "UPDATE"] {
+        let store = TestStore::new();
+        let tables = || vec![shared("parent"), shared("child")];
+        let db = store.schema(tables(), INITIAL).await.unwrap();
+        crate::write::tests::sql(
+            &db,
+            "INSERT INTO parent VALUES('p'); INSERT INTO child VALUES('c','p')",
+        )
+        .await
+        .unwrap();
+        db.close().await.unwrap();
+        let schema = format!("CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,p TEXT REFERENCES parent(id) ON {event} SET DEFAULT); INSERT INTO rebuilt SELECT * FROM child; DROP TABLE child; ALTER TABLE rebuilt RENAME TO child");
+        let error = store
+            .builder(
+                tables(),
+                vec![
+                    Migration::sql(1, "schema", INITIAL),
+                    Migration::run(2, "change reference", move |sql| {
+                        sql.execute_batch(&schema)?;
+                        Ok(())
+                    }),
+                ],
+            )
+            .open()
+            .await
+            .err()
+            .expect("SET DEFAULT must fail migration");
+        assert!(
+            matches!(database_error(error), DbError::Schema(SchemaError::SetDefault {table, key}) if table == "child" && key == "(\"p\") REFERENCES \"parent\" (\"id\")")
+        );
+        let db = store.schema(tables(), INITIAL).await.unwrap();
+        assert_eq!(db.schema_version().await.unwrap(), 1);
+        db.read(|sql| {
+            assert_eq!(sql.query_row("SELECT p FROM child WHERE id='c'", [], |r| r.get::<_, String>(0))?, "p");
+            assert_eq!(sql.query_row("SELECT sql FROM sqlite_schema WHERE name='child'", [], |r| r.get::<_, String>(0))?, "CREATE TABLE child(id TEXT NOT NULL PRIMARY KEY,p TEXT REFERENCES parent(id) ON DELETE CASCADE)");
+            assert_eq!(sql.query_row("SELECT count(*) FROM sqlite_schema WHERE name='rebuilt'", [], |r| r.get::<_, i64>(0))?, 0);
+            Ok(())
+        }).await.unwrap();
+        db.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn set_default_between_local_tables_remains_sqlites_action() {
+    const SCHEMA: &str = "CREATE TABLE synced(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE parent(id TEXT PRIMARY KEY); CREATE TABLE child(p TEXT NOT NULL DEFAULT 'fallback' REFERENCES parent(id) ON DELETE SET DEFAULT ON UPDATE SET DEFAULT); CREATE TABLE null_default(p TEXT NOT NULL REFERENCES parent(id) ON DELETE SET DEFAULT)";
+    let store = TestStore::new();
+    let db = store.schema(vec![shared("synced")], SCHEMA).await.unwrap();
+    crate::write::tests::sql(&db, "INSERT INTO parent VALUES('p'),('fallback'); INSERT INTO child VALUES('p'); UPDATE parent SET id='q' WHERE id='p'").await.unwrap();
+    db.read(|sql| {
+        assert_eq!(
+            sql.query_row("SELECT p FROM child", [], |r| r.get::<_, String>(0))?,
+            "fallback"
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
+    crate::write::tests::sql(
+        &db,
+        "UPDATE child SET p='q'; DELETE FROM parent WHERE id='q'",
+    )
+    .await
+    .unwrap();
+    db.read(|sql| {
+        assert_eq!(
+            sql.query_row("SELECT p FROM child", [], |r| r.get::<_, String>(0))?,
+            "fallback"
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
+    db.close().await.unwrap();
+    store
+        .schema(vec![shared("synced")], SCHEMA)
+        .await
+        .unwrap()
+        .close()
+        .await
+        .unwrap();
+    store
+        .builder(
+            vec![shared("synced")],
+            vec![Migration::sql(1, "schema", SCHEMA)],
+        )
+        .open_read_only()
+        .await
+        .unwrap()
+        .close()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn primary_key_rules_have_distinct_errors() {
     rejects(
         "CREATE TABLE notes (title TEXT)",
@@ -129,7 +319,7 @@ async fn opening_ten_thousand_independent_rows_does_not_scan_app_tables() {
 async fn key_foreign_keys_cannot_replace_values_on_delete_or_update() {
     for schema in [
         "CREATE TABLE p (id TEXT NOT NULL PRIMARY KEY); CREATE TABLE c (id TEXT NOT NULL PRIMARY KEY REFERENCES p(id) ON DELETE SET NULL)",
-        "CREATE TABLE p (id TEXT NOT NULL PRIMARY KEY); CREATE TABLE c (id TEXT NOT NULL PRIMARY KEY REFERENCES p(id) ON UPDATE SET DEFAULT)",
+        "CREATE TABLE p (id TEXT NOT NULL PRIMARY KEY); CREATE TABLE c (id TEXT NOT NULL PRIMARY KEY REFERENCES p(id) ON UPDATE SET NULL)",
     ] { rejects(schema, vec![shared("p"), shared("c")], SchemaError::PrimaryKeyAction { table: "c".into(), column: "id".into() }).await; }
 }
 
@@ -167,7 +357,7 @@ async fn descendant_audience_requires_one_foreign_key_column_into_synced_data() 
     .await;
     for schema in [
         "CREATE TABLE p (id TEXT NOT NULL PRIMARY KEY); CREATE TABLE c (id TEXT NOT NULL PRIMARY KEY, p_id TEXT REFERENCES p(id) ON DELETE SET NULL)",
-        "CREATE TABLE p (id TEXT NOT NULL PRIMARY KEY); CREATE TABLE c (id TEXT NOT NULL PRIMARY KEY, p_id TEXT REFERENCES p(id) ON UPDATE SET DEFAULT)",
+        "CREATE TABLE p (id TEXT NOT NULL PRIMARY KEY); CREATE TABLE c (id TEXT NOT NULL PRIMARY KEY, p_id TEXT REFERENCES p(id) ON UPDATE SET NULL)",
     ] { rejects(schema, vec![shared("p"), independent("c").audience_from("p_id")], SchemaError::AudienceForeignKeyAction { table: "c".into(), column: "p_id".into() }).await; }
 }
 
@@ -301,21 +491,14 @@ async fn declarations_have_distinct_errors() {
 async fn impossible_actions_are_refused_in_synced_and_local_tables() {
     for synced in [false, true] {
         for event in ["DELETE", "UPDATE"] {
-            for (action, default) in [
-                ("SET NULL", ""),
-                ("SET NULL", "DEFAULT 'valid'"),
-                ("SET DEFAULT", ""),
-                ("SET DEFAULT", "DEFAULT NULL"),
-                ("SET DEFAULT", "DEFAULT (NULL)"),
-                ("SET DEFAULT", "DEFAULT (NULLIF(1,1))"),
-            ] {
+            for default in ["", "DEFAULT 'valid'"] {
                 let store = TestStore::new();
                 let tables = if synced {
                     vec![shared("child")]
                 } else {
                     vec![]
                 };
-                let schema = format!("CREATE TABLE parent(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE child(id TEXT NOT NULL PRIMARY KEY,parent TEXT NOT NULL {default} REFERENCES parent(id) ON {event} {action})");
+                let schema = format!("CREATE TABLE parent(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE child(id TEXT NOT NULL PRIMARY KEY,parent TEXT NOT NULL {default} REFERENCES parent(id) ON {event} SET NULL)");
                 let error = store
                     .builder(
                         tables,
@@ -330,7 +513,7 @@ async fn impossible_actions_are_refused_in_synced_and_local_tables() {
                     .expect("impossible action must fail migration");
                 assert!(
                     matches!(database_error(error), DbError::Schema(SchemaError::ImpossibleAction { table, column }) if table == "child" && column == "parent"),
-                    "{synced}, {event}, {action}, {default}"
+                    "{synced}, {event}, {default}"
                 );
             }
         }
@@ -341,7 +524,7 @@ async fn impossible_actions_are_refused_in_synced_and_local_tables() {
 async fn opening_an_existing_schema_refuses_an_impossible_local_action() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    db.inspect_writer(|db| db.batch("CREATE TABLE parent(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE child(parent TEXT NOT NULL REFERENCES parent(id) ON UPDATE SET DEFAULT)").unwrap());
+    db.inspect_writer(|db| db.batch("CREATE TABLE parent(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE child(parent TEXT NOT NULL REFERENCES parent(id) ON UPDATE SET NULL)").unwrap());
     db.close().await.unwrap();
     for read_only in [false, true] {
         let builder = store.builder(vec![], vec![]);
@@ -358,16 +541,26 @@ async fn opening_an_existing_schema_refuses_an_impossible_local_action() {
 }
 
 #[tokio::test]
-async fn nullable_actions_and_nonnull_defaults_are_accepted() {
+async fn nullable_set_null_actions_are_accepted() {
     for definition in [
         "parent TEXT REFERENCES parent(id) ON DELETE SET NULL",
-        "parent TEXT REFERENCES parent(id) ON UPDATE SET DEFAULT",
-        "parent TEXT NOT NULL DEFAULT 'NULL' REFERENCES parent(id) ON DELETE SET DEFAULT",
-        "parent TEXT NOT NULL DEFAULT (lower('DEFAULT')) REFERENCES parent(id) ON UPDATE SET DEFAULT",
+        "parent TEXT REFERENCES parent(id) ON UPDATE SET NULL",
     ] {
         let store = TestStore::new();
-        let schema = format!("CREATE TABLE parent(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE child({definition})");
-        let db = store.builder(vec![], vec![Migration::run(1, "actions", move |c| { c.execute_batch(&schema)?; Ok(()) })]).open().await.unwrap();
+        let schema = format!(
+            "CREATE TABLE parent(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE child({definition})"
+        );
+        let db = store
+            .builder(
+                vec![],
+                vec![Migration::run(1, "actions", move |c| {
+                    c.execute_batch(&schema)?;
+                    Ok(())
+                })],
+            )
+            .open()
+            .await
+            .unwrap();
         db.close().await.unwrap();
     }
 }

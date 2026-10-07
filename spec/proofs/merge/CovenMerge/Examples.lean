@@ -348,58 +348,6 @@ theorem example_8_6 :
 
 end Check
 
-/-! ## §8.4: set default
-
-Notes point at folders with set default, and the default is "Inbox". Row 1 is
-the folder "Work", row 2 "Inbox", row 50 note 50; cell 0 of note 50 is its
-folder.
-
-* write 0: insert "Work" and "Inbox".
-* write 1, Ana, 16:00, had read write 0: delete "Work".
-* write 2, Ben, 16:00, offline, had read write 0: put note 50 in "Work".
-* write 3, Carol, 16:10, had read writes 0 and 1: delete "Inbox".
-* write 4, Carol, 17:00, had read writes 0, 1 and 3: re-add "Inbox". -/
-
-namespace SetDefault
-
-def M : Writes Nat Nat Nat where
-  ts w := if w = 0 then 1 else if w = 1 then 1600 else if w = 2 then 1601 else if w = 3 then 1610
-    else 1700
-  past w a := (w = 1 && a = 0) || (w = 2 && a = 0) || (w = 3 && (a = 0 || a = 1)) ||
-    (w = 4 && (a = 0 || a = 1 || a = 3))
-  chg w r :=
-    if w = 0 ∧ (r = 1 ∨ r = 2) then some ⟨.ins, 0, fun _ => false⟩
-    else if w = 1 ∧ r = 1 then some ⟨.del, 1, fun _ => false⟩
-    else if w = 2 ∧ r = 50 then some ⟨.ins, 0, fun c => c = 0⟩
-    else if w = 3 ∧ r = 2 then some ⟨.del, 1, fun _ => false⟩
-    else if w = 4 ∧ r = 2 then some ⟨.ins, 2, fun _ => false⟩
-    else none
-
-/-- Note 50's folder reference: "Work" at generation 1, or, once that
-generation is deleted, the default "Inbox", at whatever generation is
-current, never stale. -/
-def inputs (st : St Nat Nat Nat) : Inputs Nat Nat where
-  rows := [1, 2, 50]
-  present r := st.gen r % 2 == 1
-  refs r :=
-    if r = 50 ∧ st.cell 50 0 = some 2 then
-      (if st.gen 1 = 1 then [⟨1, false⟩] else [⟨2, false⟩])
-    else []
-  checkFails _ := false
-  inDeletedCircle _ := false
-  claims _ := []
-  rank r := r
-
-/-- Once "Inbox" is deleted, note 50 is taken out, naming the foreign key;
-once Carol re-adds "Inbox", note 50 is back, in either arrival order. -/
-theorem example_8_4_default :
-    (device M inputs [0, 1, 2, 3]).view.rules 50 = [Rule.foreignKey] ∧
-    (device M inputs [0, 2, 1, 3]).view.rules 50 = [Rule.foreignKey] ∧
-    (device M inputs [0, 1, 2, 3, 4]).view.shown 50 = true ∧
-    (device M inputs [0, 1, 3, 4, 2]).view.shown 50 = true := by decide
-
-end SetDefault
-
 /-! ## §14.7: a row added to a deleted circle
 
 Ana and Ben share the circle "Gifts", holding notes 7 and 8. Ben deletes it:

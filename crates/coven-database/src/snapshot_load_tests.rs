@@ -299,7 +299,7 @@ async fn loading_twice_preserves_values_losses_and_fingerprint() {
 
 #[tokio::test]
 async fn loading_a_parent_snapshot_recomputes_other_audiences_without_rewriting_their_history() {
-    for action in ["CASCADE", "SET NULL", "SET DEFAULT"] {
+    for action in ["CASCADE", "SET NULL"] {
         let tables = || {
             vec![
                 SyncedTable::new("parents", RowIdentity::SharedKey),
@@ -309,7 +309,7 @@ async fn loading_a_parent_snapshot_recomputes_other_audiences_without_rewriting_
         };
         let migrations = || {
             vec![crate::Migration::run(1, "references", move |db| {
-                db.execute_batch(&format!("CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY COLLATE NOCASE); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,parent TEXT DEFAULT 'Inbox' REFERENCES parents(id) ON DELETE {action}); CREATE INDEX child_parent ON children(parent)"))?;
+                db.execute_batch(&format!("CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY COLLATE NOCASE); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,parent TEXT REFERENCES parents(id) ON DELETE {action}); CREATE INDEX child_parent ON children(parent)"))?;
                 Ok(())
             })]
         };
@@ -332,7 +332,7 @@ async fn loading_a_parent_snapshot_recomputes_other_audiences_without_rewriting_
             .open()
             .await
             .unwrap();
-        sql(&a, "INSERT INTO parents VALUES('parent'),('Inbox')")
+        sql(&a, "INSERT INTO parents VALUES('parent')")
             .await
             .unwrap();
         b.apply_downloaded(records(&a).remove(0).into())
@@ -374,10 +374,10 @@ async fn loading_a_parent_snapshot_recomputes_other_audiences_without_rewriting_
             .unwrap();
         assert_eq!(
             visible,
-            match action {
-                "CASCADE" => vec![],
-                "SET NULL" => vec![None],
-                _ => vec![Some("Inbox".into())],
+            if action == "CASCADE" {
+                vec![]
+            } else {
+                vec![None]
             }
         );
         b.apply_reset(

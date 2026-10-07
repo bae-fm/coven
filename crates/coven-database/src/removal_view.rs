@@ -1,14 +1,10 @@
 //! Lazy indexed removal views before and after the merge's row updates.
 use crate::merge_store::MergeStore;
-use crate::schema::{SchemaForeignKey, TableSchema};
 use crate::sql::identifier;
-use crate::write_encoding::{audience, decoded, encoded, sql_value};
-use crate::write_rows::{
-    column_list, column_name, equality_key, key_columns, read_row, row_id, row_key, target_columns,
-    AppValues, AppView,
-};
+use crate::write_encoding::{decoded, sql_value};
+use crate::write_rows::{column_list, column_name, read_row, row_id, row_key, AppValues, AppView};
 use crate::write_schema::WriteSchema;
-use crate::{declaration::AudienceSource, DbError};
+use crate::DbError;
 use coven_format::value::Value;
 use coven_foundation::id_source::CircleId;
 use coven_merge::{
@@ -53,13 +49,6 @@ pub(crate) struct EvaluatedRow {
     pub(crate) readings: BTreeMap<ForeignKey, ReferenceValue>,
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
-struct ReferenceTarget {
-    table: String,
-    columns: Vec<String>,
-    value: Vec<u8>,
-}
-
 pub(crate) struct DatabaseRemovalView<'a> {
     database: &'a crate::sqlite::DatabaseConnection,
     store: &'a MergeStore<'a>,
@@ -71,7 +60,6 @@ pub(crate) struct DatabaseRemovalView<'a> {
     rows: Option<RefCell<BTreeMap<RowId, EvaluatedRow>>>,
     edges: BTreeMap<RowId, BTreeSet<RowId>>,
     extra_groups: RefCell<BTreeMap<Group, BTreeSet<RowId>>>,
-    lookups: RefCell<BTreeMap<ReferenceTarget, BTreeSet<RowId>>>,
 }
 
 impl<'a> DatabaseRemovalView<'a> {
@@ -106,7 +94,6 @@ impl<'a> DatabaseRemovalView<'a> {
             rows: store.caches_rows().then(|| RefCell::new(BTreeMap::new())),
             edges,
             extra_groups: RefCell::new(BTreeMap::new()),
-            lookups: RefCell::new(BTreeMap::new()),
         })
     }
 
@@ -121,47 +108,7 @@ impl<'a> DatabaseRemovalView<'a> {
         }
     }
 
-    fn index(&self, id: &RowId) -> Result<(), DbError> {
-        let state = self.state(id)?;
-        if !state.present() {
-            return Ok(());
-        }
-        let table = self.schema.table(&id.table);
-        let values = state
-            .cells()
-            .iter()
-            .map(|(name, cell)| (name.clone(), cell.value.value.clone()))
-            .collect();
-        let values = crate::removal_sql::evaluate_values(self.database, table, &values)?;
-        for index in &table.indices {
-            if let Some(columns) = index.columns.iter().cloned().collect::<Option<Vec<_>>>() {
-                let values: Vec<_> = columns
-                    .iter()
-                    .map(|column| values[column].clone())
-                    .collect();
-                if !values.iter().any(|value| matches!(value, Value::Null)) {
-                    self.lookups
-                        .borrow_mut()
-                        .entry(ReferenceTarget {
-                            table: table.name.clone(),
-                            columns,
-                            value: equality_key(&values, &index.collations)?,
-                        })
-                        .or_default()
-                        .insert(id.clone());
-                }
-            }
-        }
-        Ok(())
-    }
-
     pub(crate) fn prime(&self, changed: impl IntoIterator<Item = RowId>) -> Result<(), DbError> {
-        // Changes are indexed by their old/new claims so either view can find
-        // them even while the physical app table already holds the new values.
-        let changed: Vec<_> = changed.into_iter().collect();
-        for row in &changed {
-            self.index(row)?;
-        }
         for row in changed {
             for group in self.row_groups(&row)? {
                 self.extra_groups
@@ -213,7 +160,6 @@ impl<'a> DatabaseRemovalView<'a> {
             .map(|(n, c)| (n.clone(), c.value.value.clone()))
             .collect();
         let mut references = BTreeMap::new();
-        let mut unbound = BTreeMap::new();
         for fk in &table.foreign_keys {
             let name = self.schema.foreign_key(table, fk);
             let Some(setter) = fk
@@ -232,10 +178,8 @@ impl<'a> DatabaseRemovalView<'a> {
                 "CASCADE" => OnDelete::Cascade,
                 "RESTRICT" => OnDelete::Restrict,
                 "NO ACTION" => OnDelete::NoAction,
-                "SET NULL" | "SET DEFAULT" => {
-                    let defaults = fk.on_delete == "SET DEFAULT";
-                    let replacement =
-                        crate::removal_sql::replacement(self.database, table, fk, defaults)?;
+                "SET NULL" => {
+                    let replacement = crate::removal_sql::null_reference(table, fk);
                     let permitted = crate::removal_sql::permits(
                         self.database,
                         table,
@@ -243,20 +187,7 @@ impl<'a> DatabaseRemovalView<'a> {
                         &values,
                         &replacement,
                     )?;
-                    if defaults {
-                        let parent = self.default_parent(table, &id.audience, fk, &replacement)?;
-                        let missing = parent.is_none()
-                            && replacement.values().all(|v| !matches!(v, Value::Null));
-                        if permitted && missing {
-                            unbound.insert(name.clone(), replacement);
-                        }
-                        OnDelete::SetDefault {
-                            parent,
-                            permitted: permitted && !missing,
-                        }
-                    } else {
-                        OnDelete::SetNull { permitted }
-                    }
+                    OnDelete::SetNull { permitted }
                 }
                 action => panic!("unknown SQLite ON DELETE action {action}"),
             };
@@ -271,43 +202,18 @@ impl<'a> DatabaseRemovalView<'a> {
         let mut readings = BTreeMap::new();
         for (name, reference) in &references {
             let parent_generation = self.state(&reference.parent.row)?.generation();
-            let default_generation = match &reference.on_delete {
-                OnDelete::SetDefault {
-                    parent: Some(parent),
-                    ..
-                } => Some(self.state(parent)?.generation()),
-                _ => None,
-            };
-            let reading = coven_merge::resolve_reference(
-                id,
-                reference,
-                parent_generation,
-                default_generation,
-            )
-            .map_err(|error| {
-                RemovalFailure::Merge(error).into_db_error(self.arriving.map(|(write, _)| write))
-            })?;
-            let defaults = match reading {
-                ReferenceValue::Null => Some(false),
-                ReferenceValue::Default(_) => Some(true),
-                ReferenceValue::Original { .. } => None,
-            };
-            if let Some(defaults) = defaults {
+            let reading = coven_merge::resolve_reference(id, reference, parent_generation)
+                .map_err(|error| {
+                    RemovalFailure::Merge(error)
+                        .into_db_error(self.arriving.map(|(write, _)| write))
+                })?;
+            if reading == ReferenceValue::Null {
                 let fk = table
                     .foreign_keys
                     .iter()
                     .find(|fk| self.schema.foreign_key(table, fk) == *name)
                     .expect("reference columns");
-                values.extend(crate::removal_sql::replacement(
-                    self.database,
-                    table,
-                    fk,
-                    defaults,
-                )?);
-            } else if matches!(reading, ReferenceValue::Original { stale: true, .. }) {
-                if let Some(replacement) = unbound.get(name) {
-                    values.extend(replacement.clone());
-                }
+                values.extend(crate::removal_sql::null_reference(table, fk));
             }
             readings.insert(name.clone(), reading);
         }
@@ -349,131 +255,6 @@ impl<'a> DatabaseRemovalView<'a> {
         )
     }
 
-    pub(crate) fn default_parent(
-        &self,
-        child: &TableSchema,
-        child_audience: &Audience,
-        fk: &SchemaForeignKey,
-        replacement: &AppValues,
-    ) -> Result<Option<RowId>, DbError> {
-        if replacement.values().any(|v| matches!(v, Value::Null)) {
-            return Ok(None);
-        }
-        let target = self.schema.table(&fk.target);
-        let columns = target_columns(target, fk);
-        let parameters: Vec<_> = fk
-            .columns
-            .iter()
-            .map(|c| replacement[column_name(child, c)].clone())
-            .collect();
-        let parameters =
-            crate::removal_sql::reference_values(self.database, target, &columns, &parameters)?;
-        let index = target
-            .indices
-            .iter()
-            .find(|i| {
-                i.columns.len() == columns.len()
-                    && i.columns
-                        .iter()
-                        .all(|c| c.as_ref().is_some_and(|c| columns.contains(c)))
-            })
-            .expect("reference unique target");
-        let mut parents = BTreeSet::new();
-        for values in self.app.find(target, &columns, &parameters)? {
-            let key = (target.name.clone(), row_key(target, &values)?);
-            if let Some(app) = self.app.row(&key)? {
-                parents.insert(row_id(&key, &app));
-            }
-        }
-        let ordered_columns: Vec<_> = index
-            .columns
-            .iter()
-            .map(|c| c.clone().expect("target column"))
-            .collect();
-        let ordered_values: Vec<_> = ordered_columns
-            .iter()
-            .map(|c| parameters[columns.iter().position(|n| n == c).expect("column")].clone())
-            .collect();
-        let equality = equality_key(&ordered_values, &index.collations)?;
-        if index.primary {
-            parents.extend(self.database.query("SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE table_name=?1 AND key=?2", params![target.name,equality], crate::row_queries::read_identity)?);
-        } else {
-            let unique = self.schema.rules[&target.name]
-                .unique
-                .iter()
-                .find(|u| u.index == index.name)
-                .expect("reference unique target");
-            for audience in BTreeSet::from([Audience::Store, child_audience.clone()]) {
-                parents.extend(crate::row_queries::claimants(
-                    self.database,
-                    &target.name,
-                    &unique.identity,
-                    &audience,
-                    &equality,
-                )?);
-            }
-        }
-        if let Some(added) = self.lookups.borrow().get(&ReferenceTarget {
-            table: target.name.clone(),
-            columns: ordered_columns,
-            value: equality_key(&ordered_values, &index.collations)?,
-        }) {
-            parents.extend(added.iter().cloned());
-        }
-        let wanted = equality_key(&ordered_values, &index.collations)?;
-        let mut current = BTreeSet::new();
-        for parent in parents {
-            if parent.audience != Audience::Store && &parent.audience != child_audience {
-                continue;
-            }
-            let state = self.state(&parent)?;
-            if !state.present() {
-                continue;
-            }
-            let values: Vec<_> = index
-                .columns
-                .iter()
-                .map(|c| {
-                    state.cells()[c.as_ref().expect("target column")]
-                        .value
-                        .value
-                        .clone()
-                })
-                .collect();
-            if values.iter().any(|v| matches!(v, Value::Null)) {
-                continue;
-            }
-            if equality_key(&values, &index.collations)? == wanted {
-                current.insert(parent);
-            }
-        }
-        if let Some(parent) = current
-            .into_iter()
-            .min_by_key(|p| p.audience != Audience::Store)
-        {
-            return Ok(Some(parent));
-        }
-        let primary = key_columns(target);
-        if !primary.iter().all(|c| columns.contains(&c.name)) {
-            return Ok(None);
-        }
-        let values: AppValues = columns.into_iter().zip(parameters).collect();
-        let audience = match &self.schema.declaration(&target.name).audience {
-            AudienceSource::Store => Audience::Store,
-            AudienceSource::Column(c) => match values.get(column_name(target, c)) {
-                Some(Value::Text(text)) => audience(text)?,
-                _ => child_audience.clone(),
-            },
-            AudienceSource::ForeignKey(_) => child_audience.clone(),
-            AudienceSource::Both { .. } => unreachable!(),
-        };
-        Ok(Some(RowId {
-            table: target.name.clone(),
-            key: row_key(target, &values)?,
-            audience,
-        }))
-    }
-
     fn row_groups(&self, id: &RowId) -> Result<BTreeSet<Group>, DbError> {
         let row = self.evaluated(id)?;
         let mut groups = BTreeSet::from([Group::Key {
@@ -499,13 +280,6 @@ impl<'a> DatabaseRemovalView<'a> {
         if let RemovalRow::Present { references, .. } = self.evaluated(id)?.facts {
             for reference in references.into_values() {
                 related.insert(reference.parent.row);
-                if let OnDelete::SetDefault {
-                    parent: Some(parent),
-                    ..
-                } = reference.on_delete
-                {
-                    related.insert(parent);
-                }
             }
         }
         if let Some(children) = self.edges.get(id) {
@@ -524,18 +298,6 @@ impl<'a> DatabaseRemovalView<'a> {
                     &self.schema.foreign_key(table, fk),
                     id,
                 )?);
-                if fk.on_delete == "SET DEFAULT" {
-                    let replacement =
-                        crate::removal_sql::replacement(self.database, table, fk, true)?;
-                    if self
-                        .default_parent(table, &id.audience, fk, &replacement)?
-                        .as_ref()
-                        == Some(id)
-                    {
-                        let name = self.schema.foreign_key(table, fk);
-                        related.extend(self.database.query("SELECT DISTINCT r.table_name,r.key,r.audience FROM _coven_references v JOIN _coven_rows r ON r.id=v.row_id WHERE v.foreign_key_id=(SELECT id FROM _coven_foreign_keys WHERE table_name=?1 AND identity=?2)",params![table.name,encoded(coven_format::merge_fields::encode_foreign_key(&name))?],crate::row_queries::read_identity)?.into_iter().filter(|r| id.audience==Audience::Store || id.audience==r.audience));
-                    }
-                }
             }
         }
         Ok(related)

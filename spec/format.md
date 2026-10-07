@@ -279,7 +279,7 @@
   - `LostKey` is `column:name | write:WriteId`; `LostValue` is
     `incarnation:u64 | value:ColumnValue | replaced_by:WriteId`.
     Lost cells and removed rows carry their values as written, without
-    foreign-key null or default substitution.
+    foreign-key null substitution.
   - `Rule` is `0 | ForeignKey`, `1 | check:text` (its name, or its
     expression when unnamed), `2` deleted circle, `3` another audience's
     row, or `4 | Unique`. Rules order by tag, then the foreign-key identity,

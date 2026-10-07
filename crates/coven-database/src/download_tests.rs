@@ -324,7 +324,6 @@ async fn local_child_actions_are_checked_transitively_at_open_and_after_migratio
             ("parent TEXT", "SET NULL", false),
             ("parent TEXT", "NO ACTION", true),
             ("parent TEXT", "RESTRICT", true),
-            ("parent TEXT DEFAULT 'fallback'", "SET DEFAULT", true),
             ("parent TEXT NOT NULL", "SET NULL", true),
         ] {
             let store = TestStore::new();

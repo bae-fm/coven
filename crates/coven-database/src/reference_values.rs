@@ -1,4 +1,4 @@
-//! Written references hidden by a derived NULL or default are not cell edits.
+//! Written references hidden by a derived NULL are not cell edits.
 
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{sql_value, value};

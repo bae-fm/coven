@@ -70,8 +70,7 @@ pub(crate) fn materialize(
     for id in &returning {
         for reference in result.references[id].values() {
             let parent = match reference {
-                coven_merge::ReferenceValue::Original { parent, .. }
-                | coven_merge::ReferenceValue::Default(Some(parent)) => Some(&parent.row),
+                coven_merge::ReferenceValue::Original { parent, .. } => Some(&parent.row),
                 _ => None,
             };
             if let Some(parent) = parent {

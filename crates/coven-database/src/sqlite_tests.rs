@@ -267,7 +267,6 @@ async fn a_nonnull_set_null_reference_cycle_is_refused_on_open() {
 
 const CYCLE_FIRST: &str = "00000000-0000-4000-8000-000000000001";
 const CYCLE_SECOND: &str = "00000000-0000-4000-8000-000000000002";
-const CYCLE_DEFAULT: &str = "00000000-0000-4000-8000-000000000003";
 const CYCLE_CIRCLE: &str = "00000000-0000-4000-8000-00000000000a";
 
 async fn reference_cycle(store: &TestStore, reference: &str) -> crate::Database {
@@ -288,8 +287,8 @@ async fn reference_cycle(store: &TestStore, reference: &str) -> crate::Database 
         .unwrap();
     db.write(|context| {
         context.execute(
-            "INSERT INTO nodes VALUES(?1,?4,'first',?2),(?2,?4,'second',?1),(?3,'store','default',?3)",
-            [CYCLE_FIRST, CYCLE_SECOND, CYCLE_DEFAULT, CYCLE_CIRCLE],
+            "INSERT INTO nodes VALUES(?1,?3,'first',?2),(?2,?3,'second',?1)",
+            [CYCLE_FIRST, CYCLE_SECOND, CYCLE_CIRCLE],
         )?;
         Ok(())
     })
@@ -332,91 +331,10 @@ async fn native_cycle_deletes_commit_with_enforcement_and_transaction_deferral()
                         .unwrap()
                         .is_empty());
                 });
-                assert_eq!(crate::write::tests::count(&db, "nodes"), 1);
+                assert_eq!(crate::write::tests::count(&db, "nodes"), 0);
                 db.close().await.unwrap();
             }
         }
-    }
-}
-
-#[tokio::test]
-async fn materialization_rolls_back_when_a_cycle_default_fails_a_check() {
-    for timing in ["NOT DEFERRABLE", "DEFERRABLE INITIALLY DEFERRED"] {
-        let store = TestStore::new();
-        let db = reference_cycle(&store, &format!("parent TEXT NOT NULL DEFAULT '{CYCLE_DEFAULT}' REFERENCES nodes(id) ON DELETE SET DEFAULT {timing}, CONSTRAINT parent_allowed CHECK(id='{CYCLE_DEFAULT}' OR parent<>'{CYCLE_DEFAULT}')")).await;
-        // The default is non-null and names an existing store row, so the
-        // failure is the child's CHECK, not ImpossibleAction or a missing parent.
-        for first in [Some(CYCLE_FIRST), Some(CYCLE_SECOND), None] {
-            let error = db.inspect_writer(|writer| {
-                writer
-                    .transaction(|writer| {
-                        writer.batch("PRAGMA defer_foreign_keys=ON")?;
-                        assert!(
-                            writer.query_row("PRAGMA foreign_keys", [], |r| r.get::<_, bool>(0))?
-                        );
-                        assert!(writer
-                            .query_row("PRAGMA defer_foreign_keys", [], |r| r.get::<_, bool>(0))?);
-                        writer.internal_execute(
-                            "DELETE FROM nodes WHERE audience=?1 AND (?2 IS NULL OR id=?2)",
-                            rusqlite::params![CYCLE_CIRCLE, first],
-                        )?;
-                        Ok(())
-                    })
-                    .unwrap_err()
-            });
-            assert!(
-                matches!(error, DbError::Sqlite(rusqlite::Error::SqliteFailure(error, _)) if error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_CHECK)
-            );
-            assert_eq!(crate::write::tests::count(&db, "nodes"), 3);
-        }
-        let before = db.inspect_writer(|db| {
-            db.query(
-                "SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name",
-                [],
-                |r| r.get::<_, String>(0),
-            )
-            .unwrap()
-            .into_iter()
-            .map(|table| {
-                let values = db
-                    .query(
-                        &format!("SELECT * FROM {}", crate::sql::identifier(&table)),
-                        [],
-                        |r| {
-                            (0..r.as_ref().column_count())
-                                .map(|i| r.get::<_, rusqlite::types::Value>(i))
-                                .collect::<rusqlite::Result<Vec<_>>>()
-                        },
-                    )
-                    .unwrap();
-                (table, values)
-            })
-            .collect::<Vec<_>>()
-        });
-        let error = materialize_cycle(&db).unwrap_err();
-        assert!(
-            matches!(error, DbError::Sqlite(rusqlite::Error::SqliteFailure(error, _)) if error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_CHECK)
-        );
-        db.inspect_writer(|db| {
-            for (table, expected) in before {
-                let actual = db
-                    .query(
-                        &format!("SELECT * FROM {}", crate::sql::identifier(&table)),
-                        [],
-                        |r| {
-                            (0..r.as_ref().column_count())
-                                .map(|i| r.get::<_, rusqlite::types::Value>(i))
-                                .collect::<rusqlite::Result<Vec<_>>>()
-                        },
-                    )
-                    .unwrap();
-                assert_eq!(actual, expected, "rollback of {table}");
-            }
-            assert!(db
-                .query_row("PRAGMA foreign_keys", [], |r| r.get::<_, bool>(0))
-                .unwrap());
-        });
-        db.close().await.unwrap();
     }
 }
 
@@ -433,7 +351,7 @@ async fn materialization_takes_out_synced_cycles_with_foreign_keys_on() {
             materialize_cycle(&db).unwrap();
             assert_eq!(
                 crate::write::tests::count(&db, "nodes"),
-                1,
+                0,
                 "{action} {timing}"
             );
             assert_eq!(crate::write::tests::count(&db, "_coven_lost"), 2);

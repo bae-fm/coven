@@ -188,78 +188,76 @@ async fn hash_and_location_must_allow_null_on_both_opens_and_after_migrating() {
 async fn file_columns_refuse_reference_replacement_on_open_and_after_migrating() {
     for column in ["file", "size", "hash", "location"] {
         for event in ["DELETE", "UPDATE"] {
-            for action in ["SET NULL", "SET DEFAULT"] {
-                let schema = format!(
-                    "CREATE TABLE tokens(id TEXT NOT NULL PRIMARY KEY); \
-                     CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,file TEXT,size INTEGER,hash BLOB,location TEXT, \
-                     FOREIGN KEY({column}) REFERENCES tokens(id) ON {event} {action})"
-                );
-                let tables = |files| {
-                    let mut attachment = SyncedTable::new("attachments", RowIdentity::SharedKey);
-                    if files {
-                        attachment = attachment.carries_files(declaration().with_id_column("FILE"));
-                    }
-                    vec![
-                        SyncedTable::new("tokens", RowIdentity::SharedKey),
-                        attachment,
-                    ]
-                };
-                let migrations = || {
-                    let schema = schema.clone();
-                    vec![Migration::run(1, "files", move |sql| {
-                        sql.execute_batch(&schema)?;
-                        Ok(())
-                    })]
-                };
-                let store = TestStore::new();
-                // Ordinary references are valid. Adding a file declaration must
-                // refuse them even when no migration needs to run.
-                store
-                    .builder(tables(false), migrations())
-                    .open()
-                    .await
-                    .unwrap()
-                    .close()
-                    .await
-                    .unwrap();
-                for read_only in [false, true] {
-                    let builder = store.builder(tables(true), migrations());
-                    let result = if read_only {
-                        builder.open_read_only().await.map(|_| ())
-                    } else {
-                        builder.open().await.map(|_| ())
-                    };
-                    assert_file_action(result.unwrap_err(), column);
+            let schema = format!(
+                "CREATE TABLE tokens(id TEXT NOT NULL PRIMARY KEY); \
+                 CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,file TEXT,size INTEGER,hash BLOB,location TEXT, \
+                 FOREIGN KEY({column}) REFERENCES tokens(id) ON {event} SET NULL)"
+            );
+            let tables = |files| {
+                let mut attachment = SyncedTable::new("attachments", RowIdentity::SharedKey);
+                if files {
+                    attachment = attachment.carries_files(declaration().with_id_column("FILE"));
                 }
-                let fresh = TestStore::new();
-                fresh
-                    .schema(table(declaration()), SCHEMA)
-                    .await
-                    .unwrap()
-                    .close()
-                    .await
-                    .unwrap();
-                let migrated = schema.clone();
-                let result = fresh
-                    .builder(
-                        tables(true),
-                        vec![
-                            Migration::sql(1, "files", SCHEMA),
-                            Migration::run(2, "file reference", move |sql| {
-                                sql.execute_batch(&format!("DROP TABLE attachments; {migrated}"))?;
-                                Ok(())
-                            }),
-                        ],
-                    )
-                    .open()
-                    .await
-                    .map(|_| ());
+                vec![
+                    SyncedTable::new("tokens", RowIdentity::SharedKey),
+                    attachment,
+                ]
+            };
+            let migrations = || {
+                let schema = schema.clone();
+                vec![Migration::run(1, "files", move |sql| {
+                    sql.execute_batch(&schema)?;
+                    Ok(())
+                })]
+            };
+            let store = TestStore::new();
+            // Ordinary references are valid. Adding a file declaration must
+            // refuse them even when no migration needs to run.
+            store
+                .builder(tables(false), migrations())
+                .open()
+                .await
+                .unwrap()
+                .close()
+                .await
+                .unwrap();
+            for read_only in [false, true] {
+                let builder = store.builder(tables(true), migrations());
+                let result = if read_only {
+                    builder.open_read_only().await.map(|_| ())
+                } else {
+                    builder.open().await.map(|_| ())
+                };
                 assert_file_action(result.unwrap_err(), column);
-                // The failed migration preserves the previous table and version.
-                let db = fresh.schema(table(declaration()), SCHEMA).await.unwrap();
-                assert_eq!(db.schema_version().await.unwrap(), 1);
-                db.close().await.unwrap();
             }
+            let fresh = TestStore::new();
+            fresh
+                .schema(table(declaration()), SCHEMA)
+                .await
+                .unwrap()
+                .close()
+                .await
+                .unwrap();
+            let migrated = schema.clone();
+            let result = fresh
+                .builder(
+                    tables(true),
+                    vec![
+                        Migration::sql(1, "files", SCHEMA),
+                        Migration::run(2, "file reference", move |sql| {
+                            sql.execute_batch(&format!("DROP TABLE attachments; {migrated}"))?;
+                            Ok(())
+                        }),
+                    ],
+                )
+                .open()
+                .await
+                .map(|_| ());
+            assert_file_action(result.unwrap_err(), column);
+            // The failed migration preserves the previous table and version.
+            let db = fresh.schema(table(declaration()), SCHEMA).await.unwrap();
+            assert_eq!(db.schema_version().await.unwrap(), 1);
+            db.close().await.unwrap();
         }
     }
 }

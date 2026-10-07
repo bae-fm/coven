@@ -243,7 +243,7 @@ impl<'a> MergeStore<'a> {
                 }
             };
             // Staged cells already contain written references. A correction for
-            // an earlier displayed NULL/default must not replace a new target.
+            // an earlier displayed NULL must not replace a new target.
             if !raw_staged {
                 values.extend(crate::reference_values::load(self.database, ordinal)?);
             }

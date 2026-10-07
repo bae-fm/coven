@@ -129,45 +129,6 @@ async fn deleting_groceries_winner_returns_note_46_and_its_link() {
 }
 
 #[tokio::test]
-async fn readding_inbox_returns_note_50_without_changing_its_reference_setter() {
-    let store = TestStore::new();
-    let db = store.schema(vec![table("folders"), table("notes")], "CREATE TABLE folders(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,folder TEXT DEFAULT 'Inbox' REFERENCES folders(id) ON DELETE SET DEFAULT)").await.unwrap();
-    sql(
-        &db,
-        "INSERT INTO folders VALUES('Work'),('Inbox'); INSERT INTO notes VALUES('50','Work')",
-    )
-    .await
-    .unwrap();
-    remove(
-        &db,
-        "notes",
-        "50",
-        &[],
-        BTreeSet::from([Rule::ForeignKey(ForeignKey::new(
-            ["folder"],
-            "folders",
-            ["id"],
-        ))]),
-    );
-    sql(&db, "DELETE FROM folders").await.unwrap();
-    assert_eq!(count(&db, "notes"), 0);
-    assert_eq!(losses(&db)[0].1["folder"].value, Value::Text("Work".into()));
-    let setters: Vec<i64> = db.inspect_writer(|db| db.query("SELECT write_id FROM _coven_cells WHERE row_id IN (SELECT id FROM _coven_rows WHERE table_name='notes') ORDER BY column_id", [], |r| r.get(0)).unwrap());
-    sql(&db, "INSERT INTO folders VALUES('Inbox')")
-        .await
-        .unwrap();
-    assert_eq!(count(&db, "notes"), 1);
-    assert!(losses(&db).is_empty());
-    let restored: String = db.inspect_writer(|db| {
-        db.query_row("SELECT folder FROM notes", [], |r| r.get(0))
-            .unwrap()
-    });
-    assert_eq!(restored, "Inbox");
-    assert_eq!(setters, db.inspect_writer(|db| db.query("SELECT write_id FROM _coven_cells WHERE row_id IN (SELECT id FROM _coven_rows WHERE table_name='notes') ORDER BY column_id", [], |r| r.get::<_, i64>(0)).unwrap()));
-    db.close().await.unwrap();
-}
-
-#[tokio::test]
 async fn deleted_note_43_nulls_link_6_but_takes_out_stale_children() {
     for (action, restored) in [
         ("SET NULL", true),
@@ -266,37 +227,6 @@ async fn every_final_check_and_foreign_key_reason_is_retained() {
             Rule::ForeignKey(ForeignKey::new(["list_id"], "lists", ["id"]))
         ])
     );
-    db.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn a_default_can_name_an_absent_parent_by_its_other_unique_column() {
-    let store = TestStore::new();
-    let db = store.schema(vec![table("folders"), table("notes")], "CREATE TABLE folders(id TEXT NOT NULL PRIMARY KEY,name TEXT UNIQUE); CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,folder TEXT DEFAULT 'Inbox' REFERENCES folders(name) ON DELETE SET DEFAULT)").await.unwrap();
-    sql(
-        &db,
-        "INSERT INTO folders VALUES('1','Work'); INSERT INTO notes VALUES('50','Work')",
-    )
-    .await
-    .unwrap();
-    remove(
-        &db,
-        "notes",
-        "50",
-        &[],
-        BTreeSet::from([Rule::ForeignKey(ForeignKey::new(
-            ["folder"],
-            "folders",
-            ["id"],
-        ))]),
-    );
-    sql(&db, "DELETE FROM folders").await.unwrap();
-    assert_eq!(losses(&db)[0].1["folder"].value, Value::Text("Work".into()));
-    sql(&db, "INSERT INTO folders VALUES('2','Inbox')")
-        .await
-        .unwrap();
-    assert_eq!(count(&db, "notes"), 1);
-    assert!(losses(&db).is_empty());
     db.close().await.unwrap();
 }
 
@@ -692,41 +622,6 @@ async fn unique_then_parent_removal_keeps_both_plan_notes_out() {
         records(&db)[3].parts[0].rows[0].change.operation,
         Operation::Update(_)
     ));
-    db.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn a_removed_defaults_former_unique_value_does_not_name_its_updated_row() {
-    let store = TestStore::new();
-    let db=store.schema(vec![table("folders"),table("notes")],"CREATE TABLE folders(id TEXT NOT NULL PRIMARY KEY,name TEXT UNIQUE); CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,folder TEXT DEFAULT 'Inbox' REFERENCES folders(name) ON DELETE SET DEFAULT)").await.unwrap();
-    sql(&db,"INSERT INTO folders VALUES('1','Work'),('2','Inbox'); INSERT INTO notes VALUES('50','Work')").await.unwrap();
-    remove(
-        &db,
-        "notes",
-        "50",
-        &[],
-        [Rule::ForeignKey(ForeignKey::new(
-            ["folder"],
-            "folders",
-            ["id"],
-        ))]
-        .into(),
-    );
-    remove(
-        &db,
-        "folders",
-        "2",
-        &[],
-        [Rule::Unique(["name"].into())].into(),
-    );
-    sql(
-        &db,
-        "INSERT INTO folders VALUES('2','Other'); DELETE FROM folders WHERE id='1'",
-    )
-    .await
-    .unwrap();
-    assert_eq!(count(&db, "notes"), 0);
-    assert_eq!(losses(&db)[0].1["folder"].value, Value::Text("Work".into()));
     db.close().await.unwrap();
 }
 

@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::declaration::AudienceSource;
-use crate::sql::{guarded_trigger, table_parts, tokens};
+use crate::sql::{guarded_trigger, identifier, table_parts, tokens};
 use crate::sqlite::DatabaseConnection;
 use crate::{DbError, MigrationChange, RowIdentity, SchemaError, SyncedTable};
 
@@ -115,11 +115,7 @@ impl Schema {
         )
     }
 
-    pub(crate) fn validate(
-        &self,
-        db: &DatabaseConnection,
-        declarations: &[SyncedTable],
-    ) -> Result<(), DbError> {
+    pub(crate) fn validate(&self, declarations: &[SyncedTable]) -> Result<(), DbError> {
         let mut declared = BTreeSet::new();
         for declaration in declarations {
             if crate::internal_schema::reserved_name(&declaration.name) {
@@ -132,6 +128,42 @@ impl Schema {
                     table: declaration.name.clone(),
                 }
                 .into());
+            }
+        }
+        for table in self.tables.values() {
+            for key in &table.foreign_keys {
+                if (declared.contains(&table.name.to_ascii_lowercase())
+                    || declared.contains(&key.target.to_ascii_lowercase()))
+                    && [&key.on_delete, &key.on_update]
+                        .iter()
+                        .any(|action| *action == "SET DEFAULT")
+                {
+                    let columns = key
+                        .columns
+                        .iter()
+                        .map(|c| identifier(c))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let target_columns = key
+                        .target_columns
+                        .iter()
+                        .flatten()
+                        .map(|c| identifier(c))
+                        .collect::<Vec<_>>();
+                    let target_columns = if target_columns.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", target_columns.join(", "))
+                    };
+                    return Err(SchemaError::SetDefault {
+                        table: table.name.clone(),
+                        key: format!(
+                            "({columns}) REFERENCES {}{target_columns}",
+                            identifier(&key.target)
+                        ),
+                    }
+                    .into());
+                }
             }
         }
         let mut audience_parents = BTreeMap::new();
@@ -352,7 +384,7 @@ impl Schema {
         for table in self.tables.values() {
             for key in &table.foreign_keys {
                 for action in [&key.on_delete, &key.on_update] {
-                    if action != "SET NULL" && action != "SET DEFAULT" {
+                    if action != "SET NULL" {
                         continue;
                     }
                     for source in &key.columns {
@@ -361,22 +393,7 @@ impl Schema {
                             .iter()
                             .find(|c| c.name.eq_ignore_ascii_case(source))
                             .expect("foreign key column");
-                        if !column.not_null {
-                            continue;
-                        }
-                        let null = if action == "SET NULL" {
-                            true
-                        } else {
-                            match &column.default {
-                                None => true,
-                                Some(default) => {
-                                    db.query_row(&format!("SELECT ({default}) IS NULL"), [], |r| {
-                                        r.get::<_, bool>(0)
-                                    })?
-                                }
-                            }
-                        };
-                        if null {
+                        if column.not_null {
                             return Err(SchemaError::ImpossibleAction {
                                 table: table.name.clone(),
                                 column: column.name.clone(),
@@ -573,7 +590,7 @@ impl SchemaForeignKey {
     fn replaces_reference(&self) -> bool {
         [&self.on_update, &self.on_delete]
             .iter()
-            .any(|s| s.eq_ignore_ascii_case("SET NULL") || s.eq_ignore_ascii_case("SET DEFAULT"))
+            .any(|s| s.eq_ignore_ascii_case("SET NULL"))
     }
 }
 

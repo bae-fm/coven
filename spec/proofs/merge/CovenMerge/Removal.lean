@@ -33,10 +33,9 @@ namespace CovenMerge
 * `stale`: the parent's generation it carries was deleted since (§8.4).
 
 A reference under set null whose parent's generation was deleted holds null
-in the merged state, so it is no reference here. One under set default points
-at the default parent's current generation, never stale. Where SQLite would
-refuse the null or the default, the reference stays here, stale, and the row
-is taken out as under restrict (§8.4). -/
+in the merged state, so it is no reference here. Where setting it to null would
+fail a CHECK, the reference stays here, stale, and the row is taken out as under
+restrict (§8.4). -/
 structure Ref (Row : Type) where
   parent : Row
   stale : Bool

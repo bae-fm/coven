@@ -195,7 +195,7 @@ impl DatabaseConnection {
             return Err(MigrationError::SchemaTooNew { current, supported }.into());
         }
         if read_only || current == supported {
-            Schema::read(self)?.validate(self, tables)?;
+            Schema::read(self)?.validate(tables)?;
             if self.authorization.tables_changed() {
                 self.refresh_hidden_rowids()?;
             }

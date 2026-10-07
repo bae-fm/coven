@@ -510,81 +510,72 @@ async fn a_migration_preserves_removed_rows_and_their_concurrent_losses_in_snaps
 }
 
 #[tokio::test]
-async fn snapshots_keep_the_written_reference_when_the_app_reads_null_or_default() {
-    for action in ["SET NULL", "SET DEFAULT"] {
-        let ids = SequentialIds::new();
-        let a_store = TestStore::with_ids(&ids);
-        let b_store = TestStore::with_ids(&ids);
-        let migrations = || {
-            vec![crate::Migration::run(1, "references", move |sql| {
-                sql.execute_batch(&format!("CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY COLLATE NOCASE); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT DEFAULT 'Inbox' REFERENCES parents(id) ON DELETE {action})"))?;
-                Ok(())
-            })]
-        };
-        let tables = || {
-            ["parents", "children"]
-                .into_iter()
-                .map(|name| SyncedTable::new(name, RowIdentity::SharedKey))
-                .collect()
-        };
-        let a = a_store
-            .builder(tables(), migrations())
-            .open()
-            .await
-            .unwrap();
-        let b = b_store
-            .builder(tables(), migrations())
-            .open()
-            .await
-            .unwrap();
-        sql(&a, "INSERT INTO parents VALUES('parent'),('Inbox')")
-            .await
-            .unwrap();
-        b.apply_downloaded(records(&a).remove(0).into())
-            .await
-            .unwrap();
-        sql(&b, "INSERT INTO children VALUES('child','PaReNt')")
-            .await
-            .unwrap();
-        sql(&a, "DELETE FROM parents WHERE id='parent'")
-            .await
-            .unwrap();
-        b.apply_downloaded(records(&a).remove(1).into())
-            .await
-            .unwrap();
-        let displayed: Option<String> = b
-            .read(|sql| Ok(sql.query_row("SELECT parent FROM children", [], |r| r.get(0))?))
-            .await
-            .unwrap();
-        assert_eq!(
-            displayed,
-            if action == "SET NULL" {
-                None
-            } else {
-                Some("Inbox".into())
+async fn snapshots_keep_the_written_reference_when_the_app_reads_null() {
+    let ids = SequentialIds::new();
+    let a_store = TestStore::with_ids(&ids);
+    let b_store = TestStore::with_ids(&ids);
+    let migrations = || {
+        vec![crate::Migration::run(1, "references", move |sql| {
+            sql.execute_batch("CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY COLLATE NOCASE); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE SET NULL)")?;
+            Ok(())
+        })]
+    };
+    let tables = || {
+        ["parents", "children"]
+            .into_iter()
+            .map(|name| SyncedTable::new(name, RowIdentity::SharedKey))
+            .collect()
+    };
+    let a = a_store
+        .builder(tables(), migrations())
+        .open()
+        .await
+        .unwrap();
+    let b = b_store
+        .builder(tables(), migrations())
+        .open()
+        .await
+        .unwrap();
+    sql(&a, "INSERT INTO parents VALUES('parent')")
+        .await
+        .unwrap();
+    b.apply_downloaded(records(&a).remove(0).into())
+        .await
+        .unwrap();
+    sql(&b, "INSERT INTO children VALUES('child','PaReNt')")
+        .await
+        .unwrap();
+    sql(&a, "DELETE FROM parents WHERE id='parent'")
+        .await
+        .unwrap();
+    b.apply_downloaded(records(&a).remove(1).into())
+        .await
+        .unwrap();
+    let displayed: Option<String> = b
+        .read(|sql| Ok(sql.query_row("SELECT parent FROM children", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    assert_eq!(displayed, None);
+    let (_, snapshot) = decode(&frames(&b, Audience::Store).await);
+    let mut references = Vec::new();
+    for record in snapshot {
+        match record {
+            SnapshotRecord::Synced(row) if row.row.table == "children" => {
+                references.push(row.columns["parent"].clone())
             }
-        );
-        let (_, snapshot) = decode(&frames(&b, Audience::Store).await);
-        let mut references = Vec::new();
-        for record in snapshot {
-            match record {
-                SnapshotRecord::Synced(row) if row.row.table == "children" => {
-                    references.push(row.columns["parent"].clone())
-                }
-                SnapshotRecord::Merge(row) if row.state.row().table == "children" => {
-                    references.push(row.state.cells()["parent"].value.clone())
-                }
-                _ => {}
+            SnapshotRecord::Merge(row) if row.state.row().table == "children" => {
+                references.push(row.state.cells()["parent"].value.clone())
             }
+            _ => {}
         }
-        assert_eq!(references.len(), 2);
-        for written in references {
-            assert_eq!(written.value, Value::Text("PaReNt".into()));
-            assert_eq!(written.parents.values().next().unwrap().generation, 1);
-        }
-        for database in [a, b] {
-            database.close().await.unwrap();
-        }
+    }
+    assert_eq!(references.len(), 2);
+    for written in references {
+        assert_eq!(written.value, Value::Text("PaReNt".into()));
+        assert_eq!(written.parents.values().next().unwrap().generation, 1);
+    }
+    for database in [a, b] {
+        database.close().await.unwrap();
     }
 }
 

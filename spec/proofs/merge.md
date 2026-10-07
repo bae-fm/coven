@@ -200,12 +200,10 @@ at.
   - each row's unique claims, each with a stamp: the timestamp of the latest
     write that set any of the constraint's columns in it ([§8.5](../coven.md#85-keys-and-uniqueness));
   - each key present in two audiences on the device ([§14.2](../coven.md#142-moving-rows)).
-- **Set null and set default** for a child whose parent's generation was
-  deleted are part of the merged state, not the rules ([§8.4](../coven.md#84-foreign-keys)):
+- **Set null** for a child whose parent's generation was deleted is part
+  of the merged state, not the rules ([§8.4](../coven.md#84-foreign-keys)):
   - under set null, the cell holds null, which CHECK and unique constraints
     see like any value;
-  - under set default, it points at whichever generation of the default
-    parent is current, and is never stale;
   - later writes to the cell compete with the stamp of the write whose
     reference won, as with any cell.
   - Lost values show what their setters wrote; these substitutions apply
@@ -220,8 +218,8 @@ at.
     null, with the cell naming Ben's write; Dan's write then wins over
     Ben's, so every device ends with link 6 on note 44. Lean:
     `example_8_4_later`.
-  - Where SQLite would refuse the null or the default, such as on a
-    `NOT NULL` column, the reference stays and counts as stale.
+  - Where setting the reference to null would fail a CHECK, the reference
+    stays and counts as stale.
 - The rules other than unique values and keys in two audiences take a
   present row out when:
   - **foreign keys**: one of its references is stale, or its parent is
@@ -321,10 +319,6 @@ at.
   - Ben's move of attachment 9 to note 44 then arrives: attachment 9 is
     back. Ben's phone, which gets Ana's delete last, never takes it out.
     Lean: `example_8_4`.
-  - [§8.4](../coven.md#84-foreign-keys): notes point at folders with set default "Inbox". Ana deletes "Work"
-    while Ben puts note 50 in it; Carol deletes "Inbox": note 50 is taken
-    out, naming the foreign key. Carol re-adds "Inbox": note 50 is back.
-    Lean: `example_8_4_default`.
   - [§8.5](../coven.md#85-keys-and-uniqueness): Ana renames the tag "urgent" to "important" while Ben tags note 44
     "urgent". Note 42 ends tagged "important", and Ben's `(44, "urgent")` is
     taken out, naming the foreign key. Lean: `example_8_5_key`.
@@ -398,9 +392,8 @@ at.
 - [§8.3](../coven.md#83-deletes): Ben's edit is replaced by Ana's write 7 in every order. Lean:
   `example_8_3`.
 - [§8.4](../coven.md#84-foreign-keys): attachment 9 is taken out, then back when Ben's move arrives;
-  link 6 holds null, then ends on note 44 once Dan's write arrives; note 50
-  is taken out while "Inbox" is gone. Lean: `example_8_4`, `example_8_4_later`,
-  `example_8_4_default`.
+  link 6 holds null, then ends on note 44 once Dan's write arrives. Lean:
+  `example_8_4`, `example_8_4_later`.
 - [§8.5](../coven.md#85-keys-and-uniqueness): a key change leaves Ben's `(44, "urgent")` taken out; note 2's claim
   dates from 12:00; a loser whose winner leaves in step 3 stays out. Lean:
   `example_8_5_key`, `example_8_5_stamp`, `example_8_5_subnote`,
@@ -426,8 +419,7 @@ at.
   - that coven computes the rules' inputs from the merged state as [B7](#b7-the-removal-rules) says:
     - presence from generations;
     - stale references by comparing generations;
-    - null or the default for a set null or set default reference whose
-      parent's generation was deleted;
+    - null for a set null reference whose parent's generation was deleted;
     - CHECK on merged values;
     - claim stamps from the cells' writes;
   - that two devices compute the same inputs for a row when the merged

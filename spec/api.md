@@ -465,6 +465,9 @@ pub enum DbError {
 
 /// A schema rule checked on open and after migrating (§8, §14.1).
 pub enum SchemaError {
+    /// SET DEFAULT is on a synced table or references one (§8.4).
+    /// `key` names the referencing columns and referenced table and columns as SQL.
+    SetDefault { table: String, key: String },
     /// A declared synced table isn't in the database (E2).
     MissingTable { table: String },
     /// Two declarations name one table (E2).
@@ -475,7 +478,7 @@ pub enum SchemaError {
     FileColumn { table: String, column: String },
     /// A hash or where-column cannot represent a row without a file (§16.1).
     FileColumnNotNullable { table: String, column: String },
-    /// SET NULL or SET DEFAULT would change one file column alone (§16.1).
+    /// SET NULL would change one file column alone (§16.1).
     FileForeignKeyAction { table: String, column: String },
     /// A trigger declared shared isn't on the table (§8.7).
     MissingTrigger { table: String, trigger: String },
@@ -483,7 +486,7 @@ pub enum SchemaError {
     NoPrimaryKey { table: String },
     /// A primary key column allows NULL (§8.5).
     NullableKey { table: String, column: String },
-    /// SET NULL or SET DEFAULT would put NULL in a NOT NULL column (§8.4).
+    /// SET NULL would put NULL in a NOT NULL column (§8.4).
     ImpossibleAction { table: String, column: String },
     /// A local table's foreign key could stop coven deleting a synced row (§8.4).
     LocalChildAction { table: String, column: String },
@@ -493,7 +496,7 @@ pub enum SchemaError {
     IndependentKeyNotUuid { table: String },
     /// Declared key columns do not match the table's primary key (E2).
     KeyColumns { table: String },
-    /// SET NULL or SET DEFAULT acts on a primary-key column (§8.4).
+    /// SET NULL acts on a primary-key column (§8.4).
     PrimaryKeyAction { table: String, column: String },
     /// The audience root column is nullable or is not text (§14, E2).
     AudienceColumn { table: String, column: String },
@@ -501,7 +504,7 @@ pub enum SchemaError {
     AudienceForeignKeyColumns { table: String },
     /// The audience foreign key does not point into a synced table (§14.1).
     AudienceForeignKeyTarget { table: String, column: String },
-    /// The audience foreign key uses SET NULL or SET DEFAULT (§14.1).
+    /// The audience foreign key uses SET NULL (§14.1).
     AudienceForeignKeyAction { table: String, column: String },
     /// Following audience foreign keys forms a loop (§14.1).
     AudienceCycle { table: String },
@@ -1320,7 +1323,7 @@ pub enum Lost {
 
 pub struct LostCell {
     pub column: String,
-    /// The value as written, without foreign-key null or default substitution.
+    /// The value as written, without foreign-key null substitution.
     pub value: rusqlite::types::Value,
     /// The write that set the value.
     pub set_by: WriteId,

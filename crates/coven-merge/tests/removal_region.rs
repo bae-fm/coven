@@ -84,24 +84,15 @@ impl IndexedView {
         for (row, (data, constraints)) in &view.rows {
             if let RemovalRow::Present { references, .. } = data {
                 for reference in references.values() {
-                    let mut parents = vec![&reference.parent.row];
-                    if let OnDelete::SetDefault {
-                        parent: Some(parent),
-                        ..
-                    } = &reference.on_delete
-                    {
-                        parents.push(parent);
-                    }
-                    for parent in parents {
-                        view.edges
-                            .entry(row.clone())
-                            .or_default()
-                            .insert(parent.clone());
-                        view.edges
-                            .entry(parent.clone())
-                            .or_default()
-                            .insert(row.clone());
-                    }
+                    let parent = &reference.parent.row;
+                    view.edges
+                        .entry(row.clone())
+                        .or_default()
+                        .insert(parent.clone());
+                    view.edges
+                        .entry(parent.clone())
+                        .or_default()
+                        .insert(row.clone());
                 }
             }
             let mut groups = BTreeSet::from([Group::Key {

@@ -249,20 +249,12 @@ impl RemovalView for MemoryView {
         for (child, facts) in &self.data {
             if let RemovalRow::Present { references, .. } = facts {
                 for reference in references.values() {
-                    let mut parents = vec![&reference.parent.row];
-                    if let OnDelete::SetDefault {
-                        parent: Some(p), ..
-                    } = &reference.on_delete
-                    {
-                        parents.push(p);
+                    let parent = &reference.parent.row;
+                    if child == r {
+                        edges.insert(parent.clone());
                     }
-                    for p in parents {
-                        if child == r {
-                            edges.insert(p.clone());
-                        }
-                        if p == r {
-                            edges.insert(child.clone());
-                        }
+                    if parent == r {
+                        edges.insert(child.clone());
                     }
                 }
             }
@@ -278,7 +270,7 @@ impl RemovalView for MemoryView {
 }
 
 // These adapters evaluate each test view's own constraint implementation so
-// default-reference substitutions participate in region discovery too.
+// null substitutions participate in region discovery too.
 pub(crate) fn view_groups(
     view: &impl RemovalView<Error = MergeError>,
     row: &RowId,
@@ -291,19 +283,7 @@ pub(crate) fn view_groups(
     if let RemovalRow::Present { references, .. } = view.row(row)? {
         for (name, reference) in references {
             let generation = view.row(&reference.parent.row)?.generation();
-            let default_generation = match &reference.on_delete {
-                OnDelete::SetDefault {
-                    parent: Some(parent),
-                    permitted: true,
-                } if generation != reference.parent.generation => {
-                    Some(view.row(parent)?.generation())
-                }
-                _ => None,
-            };
-            resolved.insert(
-                name,
-                resolve_reference(row, &reference, generation, default_generation)?,
-            );
+            resolved.insert(name, resolve_reference(row, &reference, generation)?);
         }
     }
     for (constraint, claim) in view.constraints(row, &resolved)?.unique.into_iter() {
@@ -477,16 +457,12 @@ pub(crate) fn generated_view(
             };
             if let Some(a) = number("0") {
                 if a % 4 == 0 {
-                    let action = match (a + seed) % 5 {
+                    let action = match (a / 4 + seed) % 4 {
                         0 => OnDelete::Cascade,
                         1 => OnDelete::Restrict,
                         2 => OnDelete::NoAction,
-                        3 => OnDelete::SetNull {
+                        _ => OnDelete::SetNull {
                             permitted: seed.is_multiple_of(2),
-                        },
-                        _ => OnDelete::SetDefault {
-                            parent: Some(row(3)),
-                            permitted: true,
                         },
                     };
                     view.reference(
@@ -629,10 +605,7 @@ mod differential {
                     ReferenceValue::Original { parent, stale } => {
                         Some(json!({"parent": row_ids[&parent.row], "stale": stale}))
                     }
-                    ReferenceValue::Default(Some(parent)) => {
-                        Some(json!({"parent": row_ids[&parent.row], "stale": false}))
-                    }
-                    ReferenceValue::Null | ReferenceValue::Default(None) => None,
+                    ReferenceValue::Null => None,
                 })
                 .collect();
             let mut row_claims = Vec::new();

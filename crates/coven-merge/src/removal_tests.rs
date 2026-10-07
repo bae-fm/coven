@@ -48,78 +48,6 @@ fn pointing(g: u64, kind: u8, p: RowId, pg: u64) -> Change<String> {
 }
 
 #[test]
-fn default_generation_is_a_required_caller_input_only_when_substituting() {
-    let mut reference = Reference {
-        parent: Parent {
-            row: row(1),
-            generation: 1,
-        },
-        on_delete: OnDelete::SetDefault {
-            parent: Some(row(2)),
-            permitted: true,
-        },
-    };
-    assert_eq!(
-        resolve_reference(&row(3), &reference, 2, None),
-        Err(MergeError::MissingDefaultGeneration(row(2)))
-    );
-    assert_eq!(
-        resolve_reference(&row(3), &reference, 1, None).unwrap(),
-        ReferenceValue::Original {
-            parent: reference.parent.clone(),
-            stale: false
-        }
-    );
-    assert_eq!(
-        resolve_reference(&row(3), &reference, 2, Some(0)).unwrap(),
-        ReferenceValue::Default(Some(Parent {
-            row: row(2),
-            generation: 0
-        }))
-    );
-    reference.on_delete = OnDelete::SetDefault {
-        parent: None,
-        permitted: true,
-    };
-    assert_eq!(
-        resolve_reference(&row(3), &reference, 2, None).unwrap(),
-        ReferenceValue::Default(None)
-    );
-    reference.on_delete = OnDelete::SetDefault {
-        parent: Some(row(2)),
-        permitted: false,
-    };
-    assert_eq!(
-        resolve_reference(&row(3), &reference, 2, None).unwrap(),
-        ReferenceValue::Original {
-            parent: reference.parent,
-            stale: true
-        }
-    );
-}
-
-#[test]
-fn a_region_omitting_the_default_parent_is_not_closed() {
-    let mut view = MemoryView::default();
-    view.data
-        .insert(row(1), RemovalRow::Absent { generation: 2 });
-    view.present(row(3), 1, stamp(3));
-    view.reference(
-        &row(3),
-        row(1),
-        1,
-        OnDelete::SetDefault {
-            parent: Some(row(2)),
-            permitted: true,
-        },
-    );
-    assert_eq!(
-        super::evaluate(&view, [row(1), row(3)].into(), &[row(1), row(3)], true),
-        Err(MergeError::RegionNotClosed(row(2)))
-    );
-}
-
-#[test]
 fn todo_records_every_reason_after_rules_finish_and_reinsert_can_clear_checks() {
     let writes = vec![
         write(
@@ -249,10 +177,6 @@ fn child_moves_and_null_keeps_its_setter_before_a_later_move() {
         OnDelete::Restrict,
         OnDelete::NoAction,
         OnDelete::SetNull { permitted: false },
-        OnDelete::SetDefault {
-            parent: Some(row(44)),
-            permitted: false,
-        },
     ] {
         let rejected = fk_view(&intermediate, &hist, &[(row(6), action)]);
         assert_eq!(
@@ -287,71 +211,12 @@ fn child_moves_and_null_keeps_its_setter_before_a_later_move() {
 }
 
 #[test]
-fn default_inbox_tracks_the_current_generation_and_comes_back() {
-    let writes = vec![
-        write(
-            1,
-            1,
-            &[],
-            vec![(row(1), change(0, 0, &[])), (row(2), change(0, 0, &[]))],
-        ),
-        write(2, 1600, &[1], vec![(row(1), change(1, 2, &[]))]),
-        write(3, 1600, &[1], vec![(row(50), pointing(0, 0, row(1), 1))]),
-        write(4, 1610, &[1, 2], vec![(row(2), change(1, 2, &[]))]),
-        write(5, 1700, &[1, 2, 4], vec![(row(2), change(2, 0, &[]))]),
-    ];
-    let action = [(
-        row(50),
-        OnDelete::SetDefault {
-            parent: Some(row(2)),
-            permitted: true,
-        },
-    )];
-    let states = agree(&writes[..4], &[&[0, 1, 2, 3], &[0, 2, 1, 3]]);
-    let result = removal_orders(&fk_view(
-        &states,
-        &History::new(writes[..4].to_vec()).unwrap(),
-        &action,
-    ));
-    assert_eq!(
-        rules(&result, &row(50)),
-        [Rule::ForeignKey(ForeignKey::new(
-            ["parent"],
-            "rows",
-            ["id"]
-        ))]
-        .into()
-    );
-    assert_eq!(
-        result.references[&row(50)][&ForeignKey::new(["parent"], "rows", ["id"])],
-        ReferenceValue::Default(Some(Parent {
-            row: row(2),
-            generation: 2
-        }))
-    );
-    let states = agree(&writes, &[&[0, 1, 2, 3, 4], &[0, 1, 3, 4, 2]]);
-    let result = removal_orders(&fk_view(&states, &History::new(writes).unwrap(), &action));
-    assert!(result.removed.is_empty());
-    assert_eq!(
-        result.references[&row(50)][&ForeignKey::new(["parent"], "rows", ["id"])],
-        ReferenceValue::Default(Some(Parent {
-            row: row(2),
-            generation: 3
-        }))
-    );
-}
-
-#[test]
 fn removed_parent_takes_children_out_under_every_action_and_releases_them() {
     for action in [
         OnDelete::Cascade,
         OnDelete::Restrict,
         OnDelete::NoAction,
         OnDelete::SetNull { permitted: true },
-        OnDelete::SetDefault {
-            parent: Some(row(45)),
-            permitted: true,
-        },
     ] {
         let mut view = MemoryView::default();
         for n in [45, 46, 7] {
@@ -790,7 +655,7 @@ fn locality_uses_old_edges_and_never_enumerates_unrelated_rows() {
 }
 
 #[test]
-fn null_and_default_substitutions_feed_checks() {
+fn null_substitutions_feed_checks() {
     struct Resolved(MemoryView);
     impl RemovalView for Resolved {
         type Error = MergeError;
@@ -815,11 +680,8 @@ fn null_and_default_substitutions_feed_checks() {
             refs: &BTreeMap<crate::ForeignKey, ReferenceValue>,
         ) -> Result<Constraints, MergeError> {
             let mut c = Constraints::default();
-            if refs
-                .values()
-                .any(|r| matches!(r, ReferenceValue::Null | ReferenceValue::Default(_)))
-            {
-                c.failed_checks.insert("not default".into());
+            if refs.values().any(|r| matches!(r, ReferenceValue::Null)) {
+                c.failed_checks.insert("not null".into());
             }
             Ok(c)
         }
@@ -828,19 +690,11 @@ fn null_and_default_substitutions_feed_checks() {
     view.data
         .insert(row(1), RemovalRow::Absent { generation: 2 });
     view.present(row(2), 1, stamp(2));
-    for action in [
-        OnDelete::SetNull { permitted: true },
-        OnDelete::SetDefault {
-            parent: None,
-            permitted: true,
-        },
-    ] {
-        view.reference(&row(2), row(1), 1, action);
-        assert_eq!(
-            rules(&removals(&Resolved(view.clone())).unwrap(), &row(2)),
-            [Rule::Check("not default".into())].into()
-        );
-    }
+    view.reference(&row(2), row(1), 1, OnDelete::SetNull { permitted: true });
+    assert_eq!(
+        rules(&removals(&Resolved(view)).unwrap(), &row(2)),
+        [Rule::Check("not null".into())].into()
+    );
 }
 
 #[test]
@@ -871,7 +725,7 @@ fn cycles_terminate_and_invalid_inputs_are_errors() {
         on_delete: OnDelete::Cascade,
     };
     assert!(matches!(
-        resolve_reference(&row(1), &reference, 1, None),
+        resolve_reference(&row(1), &reference, 1),
         Err(MergeError::ReferenceAudience(_))
     ));
     view.order = vec![row(1), row(1)];
@@ -883,85 +737,6 @@ fn cycles_terminate_and_invalid_inputs_are_errors() {
         removals(&view),
         Err(MergeError::GenerationParity(1))
     ));
-}
-
-#[test]
-fn default_reference_unique_claim_keeps_the_original_setters_stamp() {
-    struct ResolvedClaims(MemoryView);
-    impl RemovalView for ResolvedClaims {
-        type Error = MergeError;
-        fn groups(&self, row: &RowId) -> Result<BTreeSet<Group>, MergeError> {
-            view_groups(self, row)
-        }
-        fn members(&self, group: &Group) -> Result<BTreeSet<RowId>, MergeError> {
-            view_members(self, self.0.data.keys(), group)
-        }
-        fn rows(&self) -> Result<Vec<RowId>, MergeError> {
-            self.0.rows()
-        }
-        fn row(&self, r: &RowId) -> Result<RemovalRow, MergeError> {
-            self.0.row(r)
-        }
-        fn related(&self, r: &RowId) -> Result<BTreeSet<RowId>, MergeError> {
-            self.0.related(r)
-        }
-        fn constraints(
-            &self,
-            r: &RowId,
-            refs: &BTreeMap<crate::ForeignKey, ReferenceValue>,
-        ) -> Result<Constraints, MergeError> {
-            let mut result = Constraints::default();
-            let parent = match refs.get(&ForeignKey::new(["parent"], "rows", ["id"])) {
-                Some(
-                    ReferenceValue::Original { parent, .. } | ReferenceValue::Default(Some(parent)),
-                ) => Some(parent),
-                _ => None,
-            };
-            if let Some(parent) = parent {
-                let RemovalRow::Present { started, .. } = self.0.row(r)? else {
-                    panic!("constraints need a present row")
-                };
-                result.unique.insert(
-                    ["folder"].into(),
-                    UniqueClaim {
-                        value: parent.row.key.clone(),
-                        timestamp: started,
-                    },
-                );
-            }
-            Ok(result)
-        }
-    }
-    let mut before = MemoryView::default();
-    for (n, ts) in [(1, 1), (2, 2), (3, 10), (4, 15)] {
-        before.present(row(n), 1, stamp(ts));
-    }
-    before.reference(
-        &row(3),
-        row(1),
-        1,
-        OnDelete::SetDefault {
-            parent: Some(row(2)),
-            permitted: true,
-        },
-    );
-    before.reference(&row(4), row(2), 1, OnDelete::Restrict);
-    assert!(removals(&ResolvedClaims(before.clone()))
-        .unwrap()
-        .removed
-        .is_empty());
-    let mut after = before.clone();
-    after
-        .data
-        .insert(row(1), RemovalRow::Absent { generation: 2 });
-    let full = removals(&ResolvedClaims(after.clone())).unwrap();
-    assert_eq!(
-        rules(&full, &row(4)),
-        [Rule::Unique(["folder"].into())].into()
-    );
-    assert!(!full.removed.contains_key(&row(3)));
-    let partial = recompute(&ResolvedClaims(before), &ResolvedClaims(after), [row(1)]).unwrap();
-    assert_eq!(partial, full);
 }
 
 #[test]

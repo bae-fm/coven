@@ -89,9 +89,7 @@ pub struct RowId {
     pub audience: Audience,
 }
 
-/// The parent and generation a reference names (§8.4). Written references
-/// carry odd incarnations; a resolved default carries the current generation,
-/// including an even generation while that parent is absent.
+/// The parent and odd incarnation a reference names (§8.4).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Parent {
     /// The referenced row, including its audience.
@@ -103,8 +101,6 @@ pub struct Parent {
 impl Parent {
     /// Validate a written reference from `child`: it must name an odd
     /// incarnation in the child's audience or the store (§8.4, §14.1).
-    /// Resolved default references may name even generations and are not
-    /// written references; this check does not apply to those substitutions.
     pub fn validate_written(&self, child: &RowId) -> Result<(), MergeError> {
         if self.generation.is_multiple_of(2) {
             return Err(MergeError::ParentGeneration(self.generation));

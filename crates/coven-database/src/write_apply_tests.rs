@@ -260,54 +260,6 @@ async fn a_downloaded_update_naming_a_stale_deleted_generation_is_refused() {
 }
 
 #[tokio::test]
-async fn a_downloaded_reference_inconsistent_with_removal_is_refused() {
-    let ids = SequentialIds::new();
-    let a_store = TestStore::with_ids(&ids);
-    let b_store = TestStore::with_ids(&ids);
-    let tables = || {
-        vec![
-            SyncedTable::new("parents", RowIdentity::IndependentUuid)
-                .key_columns(["id", "audience"])
-                .audience_column("audience"),
-            SyncedTable::new("notes", RowIdentity::SharedKey),
-        ]
-    };
-    let schema = "CREATE TABLE parents(id TEXT NOT NULL,audience TEXT NOT NULL,PRIMARY KEY(id,audience)); CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,parent TEXT DEFAULT '00000000-0000-4000-8000-000000000002',audience TEXT DEFAULT '00000000-0000-4000-8000-000000000003',FOREIGN KEY(parent,audience) REFERENCES parents(id,audience) ON DELETE SET DEFAULT)";
-    let a = a_store.schema(tables(), schema).await.unwrap();
-    let b = b_store.schema(tables(), schema).await.unwrap();
-    sql(&a, "INSERT INTO parents VALUES('00000000-0000-4000-8000-000000000001','store'); INSERT INTO notes VALUES('n','00000000-0000-4000-8000-000000000001','store')").await.unwrap();
-    let valid = records(&a).remove(0);
-    let mut invalid = valid.clone();
-    let row = invalid.parts[0]
-        .rows
-        .iter_mut()
-        .find(|row| row.row.table == "notes")
-        .unwrap();
-    let id = row.row.clone();
-    let coven_merge::Operation::Insert(columns) = &mut row.change.operation else {
-        panic!("insert");
-    };
-    for column in columns.values_mut() {
-        for parent in column.parents.values_mut() {
-            parent.generation = 3;
-        }
-    }
-    assert_rejected_download(
-        &b,
-        invalid.into(),
-        coven_merge::MergeError::ReferenceAudience(id),
-    )
-    .await;
-    assert_eq!(
-        b.apply_downloaded(valid.into()).await.unwrap(),
-        ApplyOutcome::Applied
-    );
-    for db in [a, b] {
-        db.close().await.unwrap();
-    }
-}
-
-#[tokio::test]
 async fn a_locally_built_invalid_write_still_panics_and_rolls_back() {
     let store = TestStore::new();
     let db = store.schema(notes(), NOTES).await.unwrap();

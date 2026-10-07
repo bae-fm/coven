@@ -195,31 +195,14 @@ fn checks(
     Ok(failed)
 }
 
-pub(crate) fn replacement(
-    db: &DatabaseConnection,
-    table: &TableSchema,
-    key: &SchemaForeignKey,
-    defaults: bool,
-) -> Result<AppValues, DbError> {
+pub(crate) fn null_reference(table: &TableSchema, key: &SchemaForeignKey) -> AppValues {
     key.columns
         .iter()
         .map(|name| {
-            let column = table
-                .columns
-                .iter()
-                .find(|c| c.name.eq_ignore_ascii_case(name))
-                .expect("foreign key column");
-            let expression = if defaults {
-                column.default.as_deref().unwrap_or("NULL")
-            } else {
-                "NULL"
-            };
-            Ok((
-                column.name.clone(),
-                db.query_row(&format!("SELECT {expression}"), [], |r| {
-                    value(r.get_ref(0)?)
-                })?,
-            ))
+            (
+                crate::write_rows::column_name(table, name).to_owned(),
+                Value::Null,
+            )
         })
         .collect()
 }
