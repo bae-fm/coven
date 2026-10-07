@@ -1872,6 +1872,16 @@ Carol's tablet:
     and is skipped.
   - E.g. the store's snapshot reaches ana-phone 40 and Gifts' reaches 38:
     the device applies ana-phone 39 and 40, but only their Gifts parts.
+  - It applies them in the same transaction that loads the snapshots,
+    downloaded first, so no write ever sees one audience at 40 and another
+    at 38: every audience reaches the highest point any snapshot reaches.
+  - Reloading a device that already has writes works the same way, and the
+    highest point also covers what its waiting writes had read, so they
+    apply on top in that transaction.
+  - These writes are all still in storage: a log object is deleted only
+    once snapshots cover every part of it.
+  - So the app writes throughout; a write made while the reload downloads
+    is one more waiting write.
 - Loading an audience's snapshot replaces that audience's rows and merge
   records; other audiences keep theirs, and the removal rules run again on
   rows that point at changed ones, as after any write
@@ -2338,9 +2348,11 @@ Carol's tablet:
   2. upload a snapshot in the new version;
   3. upload the store log entry raising the version.
 - Reloading from a snapshot ([§15](#15-snapshots)):
-  1. download the snapshot to a temporary file;
+  1. download the snapshots, and the writes between the lowest and highest
+     points they and the waiting writes reach, to temporary files;
   2. replace the synced tables and coven's merge tables
-     ([§8](#8-merge)) with it, in one transaction;
+     ([§8](#8-merge)) with the snapshots, apply those writes, and re-apply
+     the waiting writes, in one transaction;
   3. migrate the writes waiting in `coven_uploads`, if the snapshot's
      version is newer ([§17](#17-schema-changes)).
 - Writing a snapshot ([§15](#15-snapshots)):
