@@ -178,7 +178,7 @@ async fn no_converter_marks_waiting_records_lost_without_changing_local_losses()
     assert_eq!(actual[0], original[0]);
     for (old, new) in original[1..].iter().zip(&actual[1..]) {
         let mut expected = old.clone();
-        expected.header.disposition = WriteDisposition::Lost(2);
+        expected.header.disposition = WriteDisposition::Lost(3);
         assert_eq!(*new, expected);
     }
     assert!(db.lost_values().await.unwrap().is_empty());
@@ -497,7 +497,8 @@ async fn additions_before_and_after_the_breaking_change_keep_their_distinct_sett
         .await
         .unwrap();
     let actual = records(&db);
-    assert_eq!(actual[0].header.schema_version, 3);
+    assert_eq!(actual[0].header.schema_version, 4);
+    assert_eq!(db.sync_state(Vec::new()).await.unwrap().breaking_version, 4);
     let current = state(&db, &actual[0].parts[0].rows[0].row);
     assert!(!current.cells().contains_key("color"));
     assert_eq!(current.cells()["length"].write, actual[1].header.position);
@@ -707,5 +708,68 @@ async fn a_late_converted_title_competes_with_the_title_setter_and_leaves_the_sl
         current.cells()["slug"].write,
         records(&db)[2].header.position
     );
+    db.close().await.unwrap();
+}
+
+fn journal_migrations() -> Vec<Migration> {
+    vec![
+        Migration::sql(1, "notes", NOTES),
+        Migration::sql(2, "rename", "ALTER TABLE notes RENAME COLUMN title TO name").writes(
+            |row| {
+                row.rename_column("title", "name");
+                Ok(())
+            },
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn publication_intent_commits_with_the_schema_queue_and_migration_write() {
+    let store = TestStore::new();
+    let db = store.schema(notes(), NOTES).await.unwrap();
+    sql(&db, "INSERT INTO notes VALUES('42','title','body')")
+        .await
+        .unwrap();
+    let original = records(&db);
+    db.close().await.unwrap();
+    assert!(store
+        .builder(notes(), journal_migrations())
+        .migration_operation(|_| Err(DbError::ClockOutOfRange))
+        .open()
+        .await
+        .is_err());
+    let db = store.schema(notes(), NOTES).await.unwrap();
+    assert_eq!(db.schema_version().await.unwrap(), 1);
+    assert_eq!(records(&db), original);
+    assert!(db.operations().await.unwrap().is_empty());
+    db.close().await.unwrap();
+    let db = store
+        .builder(notes(), journal_migrations())
+        .migration_operation(|version| {
+            Ok(NewOperation {
+                kind: "test-publication".into(),
+                data: version.to_be_bytes().to_vec(),
+                started_by: "coven".into(),
+            })
+        })
+        .open()
+        .await
+        .unwrap();
+    let pending = db.operations().await.unwrap().remove(0);
+    assert_eq!(pending.last_step, 1);
+    assert_eq!(pending.data, 2u32.to_be_bytes());
+    assert_eq!(db.schema_version().await.unwrap(), 2);
+    assert_eq!(
+        records(&db).last().unwrap().header.disposition,
+        coven_format::write::WriteDisposition::Migration
+    );
+    db.close().await.unwrap();
+    let db = store
+        .builder(notes(), journal_migrations())
+        .migration_operation(|_| panic!("already committed"))
+        .open()
+        .await
+        .unwrap();
+    assert_eq!(db.operations().await.unwrap()[0].id, pending.id);
     db.close().await.unwrap();
 }

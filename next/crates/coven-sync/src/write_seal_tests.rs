@@ -7,7 +7,7 @@ fn identity(seed: u8) -> MemberKeys {
     bytes.extend([seed; 64]);
     MemberKeys::from_secret_bytes(&bytes).unwrap()
 }
-async fn household(storage: Arc<MemoryStorage>) -> Vec<Device> {
+pub(super) async fn household(storage: Arc<MemoryStorage>) -> Vec<Device> {
     let mut devices = Vec::new();
     for number in 1..=3 {
         let mut device = device(storage.clone(), number).await;

@@ -11,6 +11,9 @@ use std::{path::PathBuf, sync::Arc};
 /// Reading a file failed with a cause the app can distinguish (§20.8).
 #[derive(Debug, thiserror::Error)]
 pub enum FileReadError {
+    /// This file uses a newer coven format (§17.2).
+    #[error("an update is required to read this file")]
+    UpdateRequired,
     /// Required bytes are uncached and the network is unavailable.
     #[error("file {id} is unavailable offline")]
     Offline {

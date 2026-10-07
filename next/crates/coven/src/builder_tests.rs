@@ -199,4 +199,53 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     handle.circles().delete(circle.id).await.unwrap();
     assert!(handle.circles().list().await.unwrap().is_empty());
     handle.close().await.unwrap();
+
+    let updated = || {
+        let mut result = migrations();
+        result.push(
+            Migration::sql(
+                2,
+                "sizes",
+                "CREATE INDEX attachment_sizes ON attachments(size)",
+            )
+            .writes(|_| Ok(())),
+        );
+        result
+    };
+    // The app migrates offline. Opening again resumes the journal committed
+    // with that migration, without an app call to publish its schema.
+    let handle = open().migrations(updated()).open().await.unwrap();
+    handle.get_members().await.unwrap();
+    handle.close().await.unwrap();
+    let database = || {
+        DatabaseBuilder::new(directory.clone())
+            .synced_tables(tables())
+            .migrations(updated())
+            .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
+            .clock(clock.clone())
+    };
+    let db = database().open().await.unwrap();
+    let pending = db.operations().await.unwrap();
+    let migration = pending.iter().find(|r| r.kind == "migrate-schema").unwrap();
+    assert_eq!(migration.last_step, 1);
+    assert!(pending.iter().all(|r| r.failure.is_none()));
+    db.close().await.unwrap();
+    let handle = open()
+        .migrations(updated())
+        .storage(storage)
+        .open()
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(20), handle.get_members())
+        .await
+        .unwrap()
+        .unwrap();
+    handle.close().await.unwrap();
+    let db = database().open().await.unwrap();
+    assert_eq!(
+        db.store_log().await.unwrap().replay.state.schema[&coven_merge::Audience::Store].number,
+        2
+    );
+    assert!(db.operations().await.unwrap().is_empty());
+    db.close().await.unwrap();
 }

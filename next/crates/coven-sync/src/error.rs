@@ -85,7 +85,7 @@ pub enum SyncError {
     Database(#[from] DbError),
     /// A file reference or source needed by the operation could not be used.
     #[error(transparent)]
-    File(#[from] crate::FileReadError),
+    File(crate::FileReadError),
     /// Unlocking or keeping keys failed.
     #[error(transparent)]
     SecureStorage(#[from] KeyError),
@@ -94,7 +94,7 @@ pub enum SyncError {
     Crypto(#[from] CryptoError),
     /// The proposed entry violates its byte format.
     #[error(transparent)]
-    Format(#[from] coven_format::Error),
+    Format(coven_format::Error),
     /// A required key has not arrived or the local key material conflicts.
     #[error(transparent)]
     Key(#[from] MaterialError),
@@ -152,6 +152,27 @@ impl From<SyncError> for SyncFailure {
             SyncError::Stopped(failure) => failure,
             SyncError::Storage(error) => Self::Storage(Arc::new(error)),
             error => Self::Other(Arc::new(error)),
+        }
+    }
+}
+
+impl From<coven_format::Error> for SyncError {
+    fn from(error: coven_format::Error) -> Self {
+        match error {
+            coven_format::Error::UnsupportedVersion(version)
+                if version > coven_format::FORMAT_VERSION =>
+            {
+                Self::Stopped(SyncFailure::UpdateRequired)
+            }
+            error => Self::Format(error),
+        }
+    }
+}
+impl From<crate::FileReadError> for SyncError {
+    fn from(error: crate::FileReadError) -> Self {
+        match error {
+            crate::FileReadError::UpdateRequired => Self::Stopped(SyncFailure::UpdateRequired),
+            error => Self::File(error),
         }
     }
 }

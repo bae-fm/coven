@@ -141,7 +141,10 @@ async fn reload_retries_with_the_stored_copy_when_a_waiting_write_finishes_uploa
     write_rows(&a, 0, 1, 17, Audience::Store).await;
     let expected = tables(&a).await;
     let data = Data::Snapshots(SnapshotTask {
-        job: SnapshotJob::Reload { files: None },
+        job: SnapshotJob::Reload {
+            scope: crate::snapshot_data::ReloadScope::All,
+            files: None,
+        },
         temporary: Vec::new(),
     });
     let id =
@@ -232,7 +235,10 @@ async fn queued_entries_wait_for_reload_and_finishing_a_queued_reset_blocks_new_
     ));
     let queued = a.db.local_store_log().await.unwrap().upload.unwrap();
     let reload = Data::Snapshots(SnapshotTask {
-        job: SnapshotJob::Reload { files: None },
+        job: SnapshotJob::Reload {
+            scope: crate::snapshot_data::ReloadScope::All,
+            files: None,
+        },
         temporary: Vec::new(),
     });
     let pending =

@@ -83,6 +83,9 @@ impl StoreLogSync {
     /// A missing dependency or sealed copy waits solely in storage for a later call.
     pub async fn sync_store_log(&mut self) -> Result<SyncReport, SyncFailure> {
         let mut report = self.step().await.map_err(SyncFailure::from)?;
+        self.schedule_version_changes()
+            .await
+            .map_err(SyncFailure::from)?;
         let snapshots = self.resume_snapshots().await.map_err(SyncFailure::from)?;
         report.damaged_objects.extend(snapshots.damaged_objects);
         let operations = self.operation_report().await.map_err(SyncFailure::from)?;
@@ -427,13 +430,32 @@ impl StoreLogSync {
         let mut operations = self
             .removal_work(&local.log, &entry, &replay, member)
             .await?;
-        if local.log.replay.state.schema != replay.state.schema
-            || local.log.replay.state.format != replay.state.format
-            || local.log.replay.state.resets != replay.state.resets
-        {
+        let before = &local.log.replay.state;
+        let after = &replay.state;
+        let changed: BTreeSet<_> = before
+            .schema
+            .keys()
+            .chain(after.schema.keys())
+            .chain(before.format.keys())
+            .chain(after.format.keys())
+            .chain(before.resets.keys())
+            .chain(after.resets.keys())
+            .filter(|audience| {
+                before.schema.get(*audience) != after.schema.get(*audience)
+                    || before.format.get(*audience) != after.format.get(*audience)
+                    || before.resets.get(*audience) != after.resets.get(*audience)
+            })
+            .cloned()
+            .collect();
+        if !changed.is_empty() {
             operations.push(
                 crate::operation_data::Data::Snapshots(crate::snapshot_data::SnapshotTask {
-                    job: crate::snapshot_data::SnapshotJob::Reload { files: None },
+                    job: crate::snapshot_data::SnapshotJob::Reload {
+                        scope: crate::snapshot_data::ReloadScope::Changed(
+                            changed.into_iter().collect(),
+                        ),
+                        files: None,
+                    },
                     temporary: Vec::new(),
                 })
                 .new_operation("coven")?,
@@ -661,5 +683,7 @@ mod operation_invites;
 #[path = "operation_steps.rs"]
 mod operation_steps;
 
+#[path = "schema_sync.rs"]
+mod schema_sync;
 #[path = "snapshots.rs"]
 mod snapshots;

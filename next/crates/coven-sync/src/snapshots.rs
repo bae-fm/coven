@@ -66,7 +66,10 @@ impl StoreLogSync {
     pub async fn reload_from_snapshots(&mut self) -> Result<SyncReport, SyncError> {
         let mut report = self.resume_snapshots().await?;
         let record = self
-            .start_snapshot_task(SnapshotJob::Reload { files: None })
+            .start_snapshot_task(SnapshotJob::Reload {
+                scope: crate::snapshot_data::ReloadScope::All,
+                files: None,
+            })
             .await?;
         self.drive_snapshot(record.id, &mut report).await?;
         Ok(report)
@@ -132,20 +135,40 @@ impl StoreLogSync {
 
     pub(super) async fn resume_snapshots(&mut self) -> Result<SyncReport, SyncError> {
         let mut report = SyncReport::default();
-        let mut work = Vec::new();
-        for record in self.database.operations().await? {
-            if let Data::Snapshots(task) = Data::read(&record)? {
-                if record.failure.is_none() {
-                    work.push((record, task.job));
+        loop {
+            let mut work = Vec::new();
+            for record in self.database.operations().await? {
+                if let Data::Snapshots(task) = Data::read(&record)? {
+                    if record.failure.is_none() {
+                        work.push((record, task.job));
+                    }
                 }
             }
-        }
-        work.sort_by_key(|(_, job)| !matches!(job, SnapshotJob::Reload { .. }));
-        for (record, job) in work {
-            if matches!(job, SnapshotJob::Write { .. }) && self.pending_reload().await?.is_some() {
-                continue;
+            work.sort_by_key(|(_, job)| match job {
+                SnapshotJob::Write {
+                    trigger: SnapshotTrigger::Raise { .. },
+                    ..
+                } => 0,
+                SnapshotJob::Reload { .. } => 1,
+                _ => 2,
+            });
+            let mut advanced = false;
+            for (record, job) in work {
+                if matches!(
+                    job,
+                    SnapshotJob::Write {
+                        trigger: SnapshotTrigger::Growth | SnapshotTrigger::Requested,
+                        ..
+                    }
+                ) && self.pending_reload().await?.is_some()
+                {
+                    continue;
+                }
+                advanced |= self.drive_snapshot(record.id, &mut report).await?;
             }
-            self.drive_snapshot(record.id, &mut report).await?;
+            if !advanced {
+                break;
+            }
         }
         Ok(report)
     }
@@ -197,14 +220,15 @@ impl StoreLogSync {
         &mut self,
         id: crate::OperationId,
         report: &mut SyncReport,
-    ) -> Result<(), SyncError> {
+    ) -> Result<bool, SyncError> {
         loop {
             let record = self.snapshot_record(id).await?;
             let Data::Snapshots(task) = Data::read(&record)? else {
                 return Err(coven_database::DbError::DamagedDatabase.into());
             };
             match self.snapshot_step(&record, task, report).await? {
-                Progress::Finished(_) => return Ok(()),
+                Progress::Finished(_) => return Ok(true),
+                Progress::Waiting => return Ok(false),
                 Progress::Advanced => (),
                 _ => unreachable!("snapshot steps complete or return a typed failure"),
             }
@@ -224,8 +248,10 @@ impl StoreLogSync {
                 trigger,
                 session,
             } => {
-                if let Some(id) = self.pending_reload().await? {
-                    return Err(SyncError::ReloadPending(id));
+                if !matches!(trigger, SnapshotTrigger::Raise { .. }) {
+                    if let Some(id) = self.pending_reload().await? {
+                        return Err(SyncError::ReloadPending(id));
+                    }
                 }
                 let local = self.database.local_store_log().await?;
                 self.check_stopped(&local, &self.operation_member()?)?;
@@ -239,6 +265,16 @@ impl StoreLogSync {
                         .map_err(|_| coven_database::DbError::DamagedDatabase)?,
                 };
                 let path = snapshot_path(&id)?;
+                if let SnapshotTrigger::Raise { version, ref entry } = trigger {
+                    if entry.is_none() && version.in_place(&local.log.replay.state, &audience) {
+                        self.discard_snapshot(record, task).await?;
+                        self.database.finish_operation(record.id).await?;
+                        return Ok(Progress::Finished(Output::Unit));
+                    }
+                    if record.last_step >= 2 {
+                        return self.raise_snapshot_step(record, task, version, id).await;
+                    }
+                }
                 match record.last_step {
                     0 => {
                         self.clear_snapshot_files(record, &mut task).await?;
@@ -370,21 +406,7 @@ impl StoreLogSync {
         &self,
         log: &StoreLog,
     ) -> Result<BTreeMap<Audience, KeyId>, SyncError> {
-        let member = self.operation_member()?.member_id();
-        let state = &log.replay.state;
-        let mut audiences = BTreeMap::new();
-        if state.members.get(&member).is_none_or(|m| m.removed) {
-            return Err(SyncError::PermissionDenied);
-        }
-        if let Some(store) = &state.store {
-            audiences.insert(Audience::Store, store.key);
-        }
-        for (id, circle) in &state.circles {
-            if !circle.deleted && circle.members.contains(&member) {
-                audiences.insert(Audience::Circle(*id), circle.key);
-            }
-        }
-        Ok(audiences)
+        audiences_for_member(log, &self.operation_member()?.member_id())
     }
 
     pub(super) async fn save_snapshot_task(
@@ -423,6 +445,26 @@ impl StoreLogSync {
         self.save_snapshot_task(record, task, record.last_step)
             .await
     }
+}
+
+pub(super) fn audiences_for_member(
+    log: &StoreLog,
+    member: &coven_crypto::MemberId,
+) -> Result<BTreeMap<Audience, KeyId>, SyncError> {
+    let state = &log.replay.state;
+    let mut audiences = BTreeMap::new();
+    if state.members.get(member).is_none_or(|m| m.removed) {
+        return Err(SyncError::PermissionDenied);
+    }
+    if let Some(store) = &state.store {
+        audiences.insert(Audience::Store, store.key);
+    }
+    for (id, circle) in &state.circles {
+        if !circle.deleted && circle.members.contains(member) {
+            audiences.insert(Audience::Circle(*id), circle.key);
+        }
+    }
+    Ok(audiences)
 }
 
 pub(super) fn snapshot_path(id: &SnapshotId) -> Result<ObjectPath, SyncError> {

@@ -22,9 +22,16 @@ pub(crate) enum SnapshotJob {
         session: Option<UploadSession>,
     },
     Reload {
+        scope: ReloadScope,
         files: Option<ReloadFiles>,
     },
     Retain,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) enum ReloadScope {
+    All,
+    Changed(#[serde(with = "audiences")] Vec<Audience>),
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -111,4 +118,14 @@ pub(crate) struct SavedBoundary {
 pub(crate) enum SnapshotTrigger {
     Growth,
     Requested,
+    Raise {
+        version: RaisedVersion,
+        entry: Option<Vec<u8>>,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum RaisedVersion {
+    Schema(u32),
+    Format(u16),
 }

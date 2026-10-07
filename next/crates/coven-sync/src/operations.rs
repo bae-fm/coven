@@ -95,8 +95,8 @@ struct OperationRun {
 }
 
 impl Operations {
-    /// Compose and start the lifetime owner after the database opens. No key is
-    /// read if the journal is empty; retained failures stay blocked on reopening.
+    /// Compose and start the lifetime owner after the database opens. Schedule
+    /// migration publication on opening; retained failures stay blocked.
     pub fn new(sync: StoreLogSync, files: Files) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
         let (joins, subscription) = watch::channel(Vec::new());
@@ -378,23 +378,56 @@ impl OperationRun {
 
     async fn drive(&mut self) -> Result<(), SyncError> {
         loop {
-            let records = self.sync.operation_records().await?;
+            match self.sync.schedule_version_changes().await {
+                Ok(()) | Err(SyncError::Stopped(SyncFailure::UpdateRequired)) => (),
+                Err(error) => return Err(error),
+            }
+            let records = self
+                .sync
+                .operation_records()
+                .await?
+                .into_iter()
+                .map(|record| Ok((crate::operation_data::Data::read(&record)?, record)))
+                .collect::<Result<Vec<_>, SyncError>>()?;
             let reloading = self.sync.pending_reload().await?.is_some();
             let mut advanced = false;
+            let raising = records.iter().any(|(data, _)| data.raises_version());
             let mut writer = None;
-            for record in &records {
-                let data = crate::operation_data::Data::read(record)?;
-                if data.writes_entry() {
+            for (data, record) in &records {
+                if data.entry()?.is_some() {
                     writer = Some(record.id);
                     break;
                 }
             }
-            for record in records {
-                let data = crate::operation_data::Data::read(&record)?;
+            if writer.is_none() {
+                writer = records
+                    .iter()
+                    .find(|(data, _)| data.writes_entry() && (!raising || data.raises_version()))
+                    .map(|(_, record)| record.id);
+            }
+            let raising_first = records
+                .iter()
+                .any(|(data, record)| Some(record.id) == writer && data.raises_version());
+            for (data, record) in records {
                 if record.failure.is_some() && !self.sync.invite_expired(&data) {
                     continue;
                 }
-                if data.writes_entry() && (reloading || writer != Some(record.id)) {
+                if raising_first
+                    && matches!(
+                        data,
+                        crate::operation_data::Data::Snapshots(
+                            crate::snapshot_data::SnapshotTask {
+                                job: crate::snapshot_data::SnapshotJob::Reload { .. },
+                                ..
+                            }
+                        )
+                    )
+                {
+                    continue;
+                }
+                if data.writes_entry()
+                    && ((reloading && !data.raises_version()) || writer != Some(record.id))
+                {
                     continue;
                 }
                 let step = if matches!(data, crate::operation_data::Data::KeepFile(_)) {
@@ -422,6 +455,13 @@ impl OperationRun {
                         | SyncError::KeyUnavailable(_)
                         | SyncError::ReloadPending(_),
                     ) => (),
+                    Err(SyncError::Stopped(SyncFailure::UpdateRequired)) => {
+                        // The committed operation waits for the next app open;
+                        // an update requirement is not a permanently blocked step.
+                        if let Some(reply) = self.waiters.remove(&record.id) {
+                            let _ = reply.send(Err(SyncFailure::UpdateRequired.into()));
+                        }
+                    }
                     Err(SyncError::Storage(error)) if error.retryable() => {
                         tracing::debug!(operation = record.id.0, error = %error, "operation waiting for storage");
                     }

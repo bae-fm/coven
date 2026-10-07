@@ -2,11 +2,14 @@
 
 use super::*;
 
+use crate::{migration::MigrationOperation, NewOperation};
+
 /// Choices needed to open the database part of a store.
 pub struct DatabaseBuilder {
     directory: StoreDir,
     tables: Option<Vec<SyncedTable>>,
     migrations: Option<Vec<Migration>>,
+    migration_operation: Option<Box<MigrationOperation>>,
     policy: Option<CovenMigrationPolicy>,
     clock: Option<ClockRef>,
     ids: Option<IdSourceRef>,
@@ -19,6 +22,7 @@ impl DatabaseBuilder {
             directory,
             tables: None,
             migrations: None,
+            migration_operation: None,
             policy: None,
             clock: None,
             ids: None,
@@ -34,6 +38,18 @@ impl DatabaseBuilder {
     /// The complete app migration sequence, numbered from one.
     pub fn migrations(mut self, migrations: Vec<Migration>) -> Self {
         self.migrations = Some(migrations);
+        self
+    }
+
+    /// Let sync describe the operation that publishes a breaking migration batch.
+    /// The database commits its step 1 with the schema, converted waiting writes
+    /// and migration write. A factory error rolls all of them back. Standalone
+    /// database users may omit this; the application composition root supplies it.
+    pub fn migration_operation<F>(mut self, operation: F) -> Self
+    where
+        F: Fn(u32) -> Result<NewOperation, DbError> + Send + Sync + 'static,
+    {
+        self.migration_operation = Some(Box::new(operation));
         self
     }
 
@@ -110,6 +126,7 @@ impl DatabaseBuilder {
             &migrations,
             policy,
             Some((settings.device_id, clock.now())),
+            self.migration_operation.as_deref(),
         )?;
         crate::file_removals::FileRemovals::new(&writer, &self.directory, &BTreeSet::new())
             .finish(Ok::<_, DbError>(()))?;
@@ -160,6 +177,7 @@ impl DatabaseBuilder {
             &tables,
             &migrations,
             CovenMigrationPolicy::RefusePending,
+            None,
             None,
         )?;
         let schema = crate::write_schema::WriteSchema::read(&first, tables.clone())?;

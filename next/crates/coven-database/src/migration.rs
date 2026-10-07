@@ -39,6 +39,9 @@ pub struct MigrationOutcome {
     pub change: MigrationChange,
 }
 
+pub(crate) type MigrationOperation =
+    dyn Fn(u32) -> Result<crate::NewOperation, DbError> + Send + Sync;
+
 pub(crate) type WriteConversion =
     dyn Fn(&mut crate::RowChange) -> Result<(), DbError> + Send + Sync;
 
@@ -90,6 +93,7 @@ impl Migration {
         before: &crate::schema::Schema,
         after: &crate::schema::Schema,
         names: &crate::migration_names::MigrationMatch,
+        publication: u32,
     ) -> Result<(), DbError> {
         crate::migration_writes::convert(
             database,
@@ -97,6 +101,7 @@ impl Migration {
             after,
             names,
             self.version,
+            publication,
             self.conversion.as_deref(),
         )
     }

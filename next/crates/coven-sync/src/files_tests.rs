@@ -666,3 +666,26 @@ async fn unused_headers_do_not_displace_recently_read_chunks() {
 
 #[path = "file_keep_tests.rs"]
 mod keeps;
+
+#[tokio::test]
+async fn a_file_from_a_newer_format_requests_an_update() {
+    let f = Fixture::new(
+        Provenance::AppProvided,
+        Uploads::WhenAsked,
+        CacheFill::CacheLazy,
+    )
+    .await;
+    let file = f.uploaded("future", vec![91; CHUNK]).await;
+    let uploaded = file.uploaded().unwrap().unwrap();
+    let path = coven_storage::ObjectPath::file(uploaded.device, uploaded.id);
+    let mut bytes = f.storage.read(&path).await.unwrap();
+    bytes[1..3].copy_from_slice(&(coven_format::FORMAT_VERSION + 1).to_be_bytes());
+    f.storage.delete(&path).await.unwrap();
+    f.storage.create(&path, &bytes).await.unwrap();
+    let error = match f.files.open_file_stream(&file).await {
+        Ok(_) => panic!("future format was accepted"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, FileReadError::UpdateRequired), "{error}");
+    f.close().await;
+}

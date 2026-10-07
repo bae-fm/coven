@@ -28,7 +28,18 @@ impl StoreLogSync {
                 self.clear_snapshot_files(record, &mut task).await?;
                 let local = self.database.local_store_log().await?;
                 self.check_stopped(&local, &self.operation_member()?)?;
-                let audiences = self.snapshot_audiences(&local.log)?;
+                let readable = self.snapshot_audiences(&local.log)?;
+                let mut audiences = readable.clone();
+                let SnapshotJob::Reload { scope, .. } = &task.job else {
+                    unreachable!()
+                };
+                if let ReloadScope::Changed(changed) = scope {
+                    audiences.retain(|audience, _| changed.contains(audience));
+                }
+                if audiences.is_empty() {
+                    self.database.finish_operation(record.id).await?;
+                    return Ok(Progress::Finished(Output::Unit));
+                }
                 let schema = self.database.schema_version().await?;
                 if local
                     .log
@@ -86,13 +97,19 @@ impl StoreLogSync {
                         }
                     }
                 }
-                let positions = files
+                let mut positions = files
                     .snapshots
                     .iter()
                     .map(|snapshot| {
                         SnapshotObjectPrefix::decode(&snapshot.prefix).map(|p| p.writes)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
+                // Unchanged audiences keep their local frontier. Download the
+                // shared headers and any still-unread parts needed to bring
+                // those audiences through the selected snapshots' positions.
+                if audiences.len() < readable.len() {
+                    positions.push(self.database.sync_state(Vec::new()).await?.positions);
+                }
                 let (required, waiting) = self.database.reload_positions().await?;
                 let waiting: BTreeSet<_> = waiting.into_iter().collect();
                 for id in positions.iter().flat_map(|p| &p.0).chain(&required.0) {
@@ -122,7 +139,7 @@ impl StoreLogSync {
                 if unknown_empty && objects.is_empty() {
                     return Err(inconsistent("unreadable snapshot prefixes and missing logs cannot establish an empty audience"));
                 }
-                let readable = audiences.into_keys().collect();
+                let readable = readable.into_keys().collect();
                 let mut replays = ReplayCache::new(&local.log);
                 for (device, highest) in highest {
                     let lowest = if files.empty.is_empty() {
@@ -229,7 +246,10 @@ impl StoreLogSync {
                     Err(coven_database::DbError::StoreLogEntriesChanged) => {
                         // No database state changed: discard this selection and
                         // download against the new replay before trying to commit.
-                        task.job = SnapshotJob::Reload { files: None };
+                        let SnapshotJob::Reload { files, .. } = &mut task.job else {
+                            unreachable!()
+                        };
+                        *files = None;
                         self.save_snapshot_task(record, &task, 0).await?;
                     }
                     Err(
@@ -240,7 +260,10 @@ impl StoreLogSync {
                         // A write assumed to remain queued can finish uploading
                         // during the download. Retry must fetch its stored copy,
                         // rather than repeatedly loading the same stale inputs.
-                        task.job = SnapshotJob::Reload { files: None };
+                        let SnapshotJob::Reload { files, .. } = &mut task.job else {
+                            unreachable!()
+                        };
+                        *files = None;
                         self.save_snapshot_task(record, &task, 0).await?;
                         return Err(error.into());
                     }

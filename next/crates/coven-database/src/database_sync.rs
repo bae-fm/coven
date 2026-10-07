@@ -459,7 +459,7 @@ impl Database {
                         |r| r.get(0),
                     )?,
                     breaking_version: writer.query_row(
-                        "SELECT minimum FROM coven_snapshot_schema WHERE singleton=1",
+                        "SELECT publication FROM coven_snapshot_schema WHERE singleton=1",
                         [],
                         |r| r.get(0),
                     )?,

@@ -47,6 +47,25 @@ pub(crate) fn load<R: Read, W: Read>(
             }
         }
         if let Some(boundaries) = boundaries {
+            if let Some(version) = boundaries
+                .iter()
+                .filter_map(|boundary| match boundary {
+                    crate::WriteBoundary::SchemaChange {
+                        version,
+                        audience: coven_merge::Audience::Store,
+                        ..
+                    } => Some(*version),
+                    _ => None,
+                })
+                .max()
+            {
+                let minimum = database.query_row(
+                    "SELECT minimum FROM coven_snapshot_schema WHERE singleton=1",
+                    [],
+                    |r| r.get(0),
+                )?;
+                crate::migration_writes::advance_version(database, minimum, version)?;
+            }
             database.internal_execute("DELETE FROM coven_applied_boundaries", [])?;
             for boundary in boundaries {
                 boundary.record_inside(database)?;

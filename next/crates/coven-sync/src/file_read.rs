@@ -209,8 +209,14 @@ impl UploadedFile {
             Some(bytes) => bytes.clone(),
             None => fetch(&owner, &file, &path, 0, FILE_HEADER_LEN as u64).await?,
         };
-        let header =
-            FileHeader::decode(&bytes).map_err(|_| FileReadError::Integrity { id: file.id() })?;
+        let header = FileHeader::decode(&bytes).map_err(|error| match error {
+            coven_format::Error::UnsupportedVersion(version)
+                if version > coven_format::FORMAT_VERSION =>
+            {
+                FileReadError::UpdateRequired
+            }
+            _ => FileReadError::Integrity { id: file.id() },
+        })?;
         if header.size() != file.plaintext_size() {
             return Err(FileReadError::Integrity { id: file.id() });
         }

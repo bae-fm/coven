@@ -25,6 +25,9 @@ impl StoreLogSync {
         record: &OperationRecord,
         mut data: Data,
     ) -> Result<Progress, SyncError> {
+        if let Data::PublishSchema { version } = data {
+            return self.schema_publication_step(record, version).await;
+        }
         if let Data::Snapshots(task) = data {
             let mut report = SyncReport::default();
             let result = self.snapshot_step(record, task, &mut report).await;
@@ -310,7 +313,10 @@ impl StoreLogSync {
                     access: work.access.member_access(),
                 }));
             }
-            Data::Revoke { .. } | Data::KeepFile(_) | Data::Snapshots(_) => unreachable!(),
+            Data::Revoke { .. }
+            | Data::KeepFile(_)
+            | Data::Snapshots(_)
+            | Data::PublishSchema { .. } => unreachable!(),
         };
         Ok(Some(match intent {
             Intent::RemoveMember { member, access } => {
@@ -399,7 +405,7 @@ impl StoreLogSync {
                         Some(member.parse()?)
                     }
                     Data::Invite(_) => None,
-                    Data::KeepFile(_) | Data::Snapshots(_) => {
+                    Data::KeepFile(_) | Data::Snapshots(_) | Data::PublishSchema { .. } => {
                         return Err(coven_database::DbError::DamagedDatabase.into())
                     }
                 };

@@ -154,6 +154,7 @@ impl DatabaseConnection {
         migrations: &[Migration],
         policy: CovenMigrationPolicy,
         author: Option<(DeviceId, SystemTime)>,
+        operation: Option<&crate::migration::MigrationOperation>,
     ) -> CovenResult<Vec<MigrationOutcome>> {
         let read_only = author.is_none();
         let supported = validate_versions(migrations)?;
@@ -213,9 +214,22 @@ impl DatabaseConnection {
                 .max()
             {
                 db.internal_execute(
-                    "UPDATE coven_snapshot_schema SET minimum=?1 WHERE singleton=1",
-                    [minimum],
+                    "UPDATE coven_snapshot_schema SET minimum=?1,publication=?2 WHERE singleton=1",
+                    (minimum, supported),
                 )?;
+                if let Some(operation) = operation {
+                    let new = operation(supported)?;
+                    let id = crate::operation::insert(db, &new)?;
+                    crate::operation::advance(
+                        db,
+                        &crate::OperationUpdate {
+                            id,
+                            previous: 0,
+                            last_step: 1,
+                            data: new.data,
+                        },
+                    )?;
+                }
             }
             db.refresh_hidden_rowids()?;
             Ok(outcomes)

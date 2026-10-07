@@ -91,8 +91,13 @@ pub(crate) fn run<'a>(
                 Some(next) => &next.before,
                 None => &final_schema,
             };
-            step.migration
-                .convert_waiting(database, &step.before, after, &step.effects.names)?;
+            step.migration.convert_waiting(
+                database,
+                &step.before,
+                after,
+                &step.effects.names,
+                supported,
+            )?;
         }
     }
     *at = steps.last().expect("pending migrations").migration;
@@ -123,6 +128,7 @@ pub(crate) fn run<'a>(
                 .columns
                 .retain(|(table, _), _| names.tables.contains_key(table));
         }
+        crate::migration_writes::advance_version(database, outcomes[first].version, supported)?;
         finish(
             database,
             tables,

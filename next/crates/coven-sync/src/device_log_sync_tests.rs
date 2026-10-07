@@ -323,6 +323,8 @@ async fn fixed_bytes_survive_restart_and_a_lost_completion_reply() {
 #[path = "write_seal_tests.rs"]
 mod circles;
 
+#[path = "schema_sync_tests.rs"]
+mod schema;
 #[path = "write_upload_tests.rs"]
 mod streams;
 #[path = "write_download_tests.rs"]

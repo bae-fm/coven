@@ -28,6 +28,7 @@ impl CovenBuilder {
         let clock: ClockRef = Arc::new(SystemClock);
         Self {
             database: DatabaseBuilder::new(directory.clone())
+                .migration_operation(coven_sync::StoreLogSync::migration_operation)
                 .id_source(ids.clone())
                 .clock(clock.clone()),
             directory,

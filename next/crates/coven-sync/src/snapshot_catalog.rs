@@ -252,6 +252,9 @@ pub(super) fn snapshot_damage(
         )) => {
             return Err(coven_database::DbError::Snapshot(error).into());
         }
+        SyncError::Database(coven_database::DbError::Snapshot(
+            coven_database::SnapshotError::Format(error),
+        )) => crate::ObjectCheckFailure::Parse(std::sync::Arc::new(error)),
         SyncError::Database(coven_database::DbError::Snapshot(error)) => {
             crate::ObjectCheckFailure::Parse(std::sync::Arc::new(error))
         }

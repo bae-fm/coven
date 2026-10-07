@@ -12,10 +12,16 @@ pub type OperationError = crate::SyncError;
 /// The work retained in an unfinished journal row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OperationKind {
+    /// Run the app migration batch and publish every readable audience.
+    MigrateSchema,
     /// Download an uploaded file and conditionally keep it on this device.
     ChangeFileLocation,
     /// Write, upload and retain one audience snapshot.
     WriteSnapshot,
+    /// Publish a migrated audience snapshot and its schema raise.
+    RaiseSchema,
+    /// Publish an audience snapshot in coven's current format and raise it.
+    RaiseFormat,
     /// Replace readable audiences and replay waiting writes atomically.
     ReloadSnapshots,
     /// Delete objects released by snapshot coverage.

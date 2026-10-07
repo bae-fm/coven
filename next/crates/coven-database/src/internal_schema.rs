@@ -130,9 +130,10 @@ macro_rules! coven_tables {
         $visit!(coven_snapshot_schema, "
             CREATE TABLE coven_snapshot_schema (
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-                minimum INTEGER NOT NULL CHECK(minimum>=0)
+                minimum INTEGER NOT NULL CHECK(minimum>=0),
+                publication INTEGER NOT NULL CHECK(publication>=minimum)
             ) STRICT;
-            INSERT INTO coven_snapshot_schema VALUES(1,0);
+            INSERT INTO coven_snapshot_schema VALUES(1,0,0);
         ");
         $visit!(coven_loaded_audiences, "
             CREATE TABLE coven_loaded_audiences (

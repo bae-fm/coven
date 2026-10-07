@@ -41,13 +41,7 @@ impl StoreLogSync {
                 return Ok(Begun::Value(Output::Report(self.operation_report().await?)))
             }
             Command::Sync => {
-                let mut report = self.step().await?;
-                report
-                    .damaged_objects
-                    .extend(self.resume_snapshots().await?.damaged_objects);
-                let operations = self.operation_report().await?;
-                report.blocked_operations = operations.blocked_operations;
-                report.access_keys_to_delete = operations.access_keys_to_delete;
+                let report = self.sync_store_log().await?;
                 return Ok(Begun::Value(Output::Report(report)));
             }
             Command::Retry(id) => {

@@ -1,5 +1,6 @@
 //! Each operation's retained intent, including the captured file reference for a download.
 
+use crate::snapshot_data::{RaisedVersion, SnapshotJob, SnapshotTask, SnapshotTrigger};
 use crate::{InviteAccess, OperationKind, SyncError};
 use coven_database::{NewOperation, OperationRecord, OperationUpdate};
 use coven_format::{
@@ -88,6 +89,9 @@ pub(crate) enum InviteState {
 
 #[derive(Serialize, Deserialize)]
 pub(crate) enum Data {
+    PublishSchema {
+        version: u32,
+    },
     KeepFile(KeepFileWork),
     Snapshots(crate::snapshot_data::SnapshotTask),
     Entry(EntryWork),
@@ -117,9 +121,17 @@ impl Data {
     }
     pub(crate) fn kind(&self) -> OperationKind {
         match self {
+            Self::PublishSchema { .. } => OperationKind::MigrateSchema,
             Self::KeepFile(_) => OperationKind::ChangeFileLocation,
             Self::Entry(work) => work.intent.kind(),
             Self::Snapshots(task) => match task.job {
+                SnapshotJob::Write {
+                    trigger: SnapshotTrigger::Raise { version, .. },
+                    ..
+                } => match version {
+                    RaisedVersion::Schema(_) => OperationKind::RaiseSchema,
+                    RaisedVersion::Format(_) => OperationKind::RaiseFormat,
+                },
                 crate::snapshot_data::SnapshotJob::Write { .. } => OperationKind::WriteSnapshot,
                 crate::snapshot_data::SnapshotJob::Reload { .. } => OperationKind::ReloadSnapshots,
                 crate::snapshot_data::SnapshotJob::Retain => OperationKind::Retention,
@@ -147,8 +159,11 @@ impl Data {
             data: serde_json::to_vec(self)?,
         })
     }
-    /// Circle deletion commits its row write before the shared entry steps.
+    /// Snapshot publication and circle row deletion precede the shared entry steps.
     pub(crate) fn entry_step_number(&self, step: u32) -> u32 {
+        if self.raises_version() {
+            return step + 2;
+        }
         step + u32::from(matches!(
             self,
             Self::Entry(EntryWork {
@@ -159,6 +174,14 @@ impl Data {
     }
     pub(crate) fn entry(&self) -> Result<Option<StoreLogEntry>, SyncError> {
         let bytes = match self {
+            Self::Snapshots(SnapshotTask {
+                job:
+                    SnapshotJob::Write {
+                        trigger: SnapshotTrigger::Raise { entry, .. },
+                        ..
+                    },
+                ..
+            }) => entry.as_ref(),
             Self::Entry(work) => work.entry.as_ref(),
             Self::Invite(InviteWork {
                 state: InviteState::Approving { entry, .. },
@@ -178,6 +201,14 @@ impl Data {
             .map(|entry| Object::StoreLog(entry).encode())
             .transpose()?;
         match self {
+            Self::Snapshots(SnapshotTask {
+                job:
+                    SnapshotJob::Write {
+                        trigger: SnapshotTrigger::Raise { entry, .. },
+                        ..
+                    },
+                ..
+            }) => *entry = value,
             Self::Entry(work) => work.entry = value,
             Self::Invite(InviteWork {
                 state: InviteState::Approving { entry, .. },
@@ -188,13 +219,27 @@ impl Data {
         Ok(())
     }
     pub(crate) fn writes_entry(&self) -> bool {
+        self.raises_version()
+            || matches!(
+                self,
+                Self::Entry(_)
+                    | Self::Invite(InviteWork {
+                        state: InviteState::Approving { .. },
+                        ..
+                    })
+            )
+    }
+
+    pub(crate) fn raises_version(&self) -> bool {
         matches!(
             self,
-            Self::Entry(_)
-                | Self::Invite(InviteWork {
-                    state: InviteState::Approving { .. },
+            Self::Snapshots(SnapshotTask {
+                job: SnapshotJob::Write {
+                    trigger: SnapshotTrigger::Raise { .. },
                     ..
-                })
+                },
+                ..
+            })
         )
     }
 }
@@ -202,8 +247,11 @@ impl Data {
 impl OperationKind {
     pub(crate) fn name(self) -> &'static str {
         match self {
+            Self::MigrateSchema => "migrate-schema",
             Self::ChangeFileLocation => "change-file-location",
             Self::WriteSnapshot => "write-snapshot",
+            Self::RaiseSchema => "raise-schema",
+            Self::RaiseFormat => "raise-format",
             Self::ReloadSnapshots => "reload-snapshots",
             Self::Retention => "retention",
             Self::RemoveMember => "remove-member",

@@ -441,7 +441,10 @@ async fn waiting_parts_alone_can_trigger_a_snapshot() {
 
 async fn selected_snapshot(device: &mut Device) -> ObjectPath {
     let data = Data::Snapshots(SnapshotTask {
-        job: SnapshotJob::Reload { files: None },
+        job: SnapshotJob::Reload {
+            scope: crate::snapshot_data::ReloadScope::All,
+            files: None,
+        },
         temporary: Vec::new(),
     });
     let id = device
@@ -467,7 +470,9 @@ async fn selected_snapshot(device: &mut Device) -> ObjectPath {
         .find(|r| r.id == id)
         .unwrap();
     let Data::Snapshots(SnapshotTask {
-        job: SnapshotJob::Reload { files: Some(files) },
+        job: SnapshotJob::Reload {
+            files: Some(files), ..
+        },
         ..
     }) = Data::read(&record).unwrap()
     else {
@@ -706,7 +711,10 @@ async fn reload_reselects_after_store_log_changes_and_preserves_interleaved_app_
     upload(&a, &storage).await;
     a.sync.write_snapshot(Audience::Store).await.unwrap();
     let data = Data::Snapshots(SnapshotTask {
-        job: SnapshotJob::Reload { files: None },
+        job: SnapshotJob::Reload {
+            scope: crate::snapshot_data::ReloadScope::All,
+            files: None,
+        },
         temporary: Vec::new(),
     });
     let id =

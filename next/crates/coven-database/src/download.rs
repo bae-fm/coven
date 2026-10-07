@@ -68,6 +68,8 @@ pub enum WriteWait {
     Writes(Vec<WriteId>),
     /// The app must support this schema version.
     SchemaVersion(u32),
+    /// The local breaking migration awaits publication and snapshot reload.
+    SchemaPublication(u32),
     /// The timestamp is more than five minutes ahead of the receiving clock.
     Clock(Timestamp),
 }
@@ -162,6 +164,27 @@ pub(crate) fn prerequisite(
     }
     if header.schema_version > database.schema_version()? {
         return Ok(Some(WriteWait::SchemaVersion(header.schema_version)));
+    }
+    let publication: Option<u32> = database.query_row(
+        "SELECT (SELECT publication FROM coven_snapshot_schema WHERE EXISTS(SELECT 1 FROM coven_store))",
+        [], |r| r.get(0),
+    )?;
+    if let Some(publication) = publication.filter(|version| *version > 0) {
+        let applied = crate::WriteBoundary::load(database)?
+            .into_iter()
+            .filter_map(|b| match b {
+                crate::WriteBoundary::SchemaChange {
+                    version,
+                    audience: Audience::Store,
+                    ..
+                } => Some(version),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        if publication > applied {
+            return Ok(Some(WriteWait::SchemaPublication(publication)));
+        }
     }
     Ok(None)
 }
@@ -299,7 +322,7 @@ pub struct SyncState {
     pub store_log: coven_format::value::EntryPositions,
     /// A queued local write prevents publishing the current fingerprints.
     pub uploads_pending: bool,
-    /// The newest local breaking migration; uploads await its store-log raise.
+    /// The final version of the last breaking migration batch; uploads await its raise.
     pub breaking_version: u32,
     /// Fingerprints may be compared only at the same app schema version.
     pub schema_version: u32,

@@ -20,23 +20,16 @@ pub(crate) fn convert(
     after: &Schema,
     names: &MigrationMatch,
     version: u32,
+    publication: u32,
     conversion: Option<&WriteConversion>,
 ) -> Result<(), DbError> {
-    let waiting = database.query(
-        "SELECT device,number,record FROM coven_uploads WHERE NOT EXISTS(SELECT 1 FROM coven_upload_seals s WHERE s.device=coven_uploads.device AND s.number=coven_uploads.number) ORDER BY device,number", [],
-        |row| Ok((WriteId { device: DeviceId(counter(row.get(0)?)), number: counter(row.get(1)?) }, row.get::<_,Vec<u8>>(2)?)),
-    )?;
-    for (id, bytes) in waiting {
-        let mut record = decode_plaintext(&bytes)?;
-        if record.header.position != id {
-            return Err(DbError::DamagedDatabase);
-        }
+    edit_waiting(database, |record| {
         if record.header.disposition != WriteDisposition::Apply {
-            continue;
+            return Ok(false);
         }
         if record.header.schema_version >= version {
             return Err(DbError::MigrationWriteVersion {
-                write: id,
+                write: record.header.position,
                 schema_version: record.header.schema_version,
                 migration_version: version,
             });
@@ -52,7 +45,47 @@ pub(crate) fn convert(
             }
             record.header.schema_version = version;
         } else {
-            record.header.disposition = WriteDisposition::Lost(version);
+            record.header.disposition = WriteDisposition::Lost(publication);
+        }
+        Ok(true)
+    })
+}
+
+/// Addition-only steps after a converter preserve values but still belong to
+/// the batch's published version. Reload also uses this when another device
+/// coalesced those additions into its breaking batch.
+pub(crate) fn advance_version(
+    database: &DatabaseConnection,
+    minimum: u32,
+    version: u32,
+) -> Result<(), DbError> {
+    edit_waiting(database, |record| {
+        if record.header.disposition != WriteDisposition::Apply
+            || record.header.schema_version < minimum
+            || record.header.schema_version >= version
+        {
+            return Ok(false);
+        }
+        record.header.schema_version = version;
+        Ok(true)
+    })
+}
+
+fn edit_waiting(
+    database: &DatabaseConnection,
+    mut edit: impl FnMut(&mut coven_format::write::WriteRecord) -> Result<bool, DbError>,
+) -> Result<(), DbError> {
+    let waiting = database.query(
+        "SELECT device,number,record FROM coven_uploads WHERE NOT EXISTS(SELECT 1 FROM coven_upload_seals s WHERE s.device=coven_uploads.device AND s.number=coven_uploads.number) ORDER BY device,number", [],
+        |row| Ok((WriteId { device: DeviceId(counter(row.get(0)?)), number: counter(row.get(1)?) }, row.get::<_,Vec<u8>>(2)?)),
+    )?;
+    for (id, bytes) in waiting {
+        let mut record = decode_plaintext(&bytes)?;
+        if record.header.position != id {
+            return Err(DbError::DamagedDatabase);
+        }
+        if !edit(&mut record)? {
+            continue;
         }
         let bytes = crate::write_commit::plaintext(database, WriteEncoder::new(&record)?)?;
         let updated = database.internal_execute(
