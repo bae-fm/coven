@@ -443,7 +443,7 @@ fn key_sql(table: &TableSchema, prefix: &str) -> String {
         .find(|i| i.primary)
         .expect("synced primary index");
     format!(
-        "coven_migration_key({})",
+        "_coven_migration_key({})",
         key_columns(table)
             .iter()
             .zip(&primary.collations)

@@ -69,7 +69,7 @@ impl DatabaseConnection {
             authorization.applying_function(),
         )?;
         connection.create_scalar_function(
-            "coven_loss_order",
+            "_coven_loss_order",
             2,
             FunctionFlags::SQLITE_UTF8
                 | FunctionFlags::SQLITE_DETERMINISTIC
@@ -77,7 +77,7 @@ impl DatabaseConnection {
             |ctx| crate::snapshot_loss::sort_key(ctx.get(0)?, &ctx.get::<Vec<u8>>(1)?),
         )?;
         connection.create_scalar_function(
-            "coven_fingerprint_replace",
+            "_coven_fingerprint_replace",
             3,
             FunctionFlags::SQLITE_UTF8
                 | FunctionFlags::SQLITE_DETERMINISTIC
@@ -89,7 +89,7 @@ impl DatabaseConnection {
             },
         )?;
         connection.create_scalar_function(
-            "coven_migration_key",
+            "_coven_migration_key",
             -1,
             FunctionFlags::SQLITE_UTF8
                 | FunctionFlags::SQLITE_DETERMINISTIC

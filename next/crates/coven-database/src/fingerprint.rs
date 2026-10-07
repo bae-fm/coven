@@ -184,7 +184,7 @@ fn forget(
     key: [u8; 32],
 ) -> Result<(), DbError> {
     let audience = audience_text(audience);
-    database.internal_execute("UPDATE _coven_fingerprint_sums SET sum=coven_fingerprint_replace(sum,(SELECT hash FROM _coven_fingerprint_leaves WHERE audience=?1 AND key=?2),zeroblob(32)) WHERE audience=?1", params![audience,key.as_slice()])?;
+    database.internal_execute("UPDATE _coven_fingerprint_sums SET sum=_coven_fingerprint_replace(sum,(SELECT hash FROM _coven_fingerprint_leaves WHERE audience=?1 AND key=?2),zeroblob(32)) WHERE audience=?1", params![audience,key.as_slice()])?;
     database.internal_execute(
         "DELETE FROM _coven_fingerprint_leaves WHERE audience=?1 AND key=?2",
         params![audience, key.as_slice()],
@@ -265,7 +265,7 @@ fn put(
     // share the enclosing writer transaction, including rollback on either error.
     database.internal_execute(
         "INSERT INTO _coven_fingerprint_sums(audience,sum) VALUES(?1,?3)
-         ON CONFLICT(audience) DO UPDATE SET sum=coven_fingerprint_replace(sum,
+         ON CONFLICT(audience) DO UPDATE SET sum=_coven_fingerprint_replace(sum,
              (SELECT hash FROM _coven_fingerprint_leaves WHERE audience=?1 AND key=?2),excluded.sum)",
         params![audience, key.as_slice(), leaf.as_slice()],
     )?;

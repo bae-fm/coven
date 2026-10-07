@@ -26,7 +26,7 @@ pub(crate) fn visit<E: From<DbError>>(
         &format!("SELECT l.table_name,l.key,l.audience,l.generation,c.column_name,l.value,l.set_by,l.replaced_by
          FROM _coven_lost l LEFT JOIN _coven_columns c ON c.id=l.column_id
          WHERE l.audience=?1 AND {RETAINED}
-         ORDER BY l.table_name,l.key,l.generation,coven_loss_order(c.column_name,l.set_by)"),
+         ORDER BY l.table_name,l.key,l.generation,_coven_loss_order(c.column_name,l.set_by)"),
         [audience_text(audience)],
         |r| visit(read(r).map_err(DbError::from)?),
     )
