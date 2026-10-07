@@ -425,6 +425,12 @@ pub enum DbError {
     /// An applied entry's immutable bytes or author-view check differ on repetition.
     #[error("store-log entry {0:?} has different bytes or author-view check")]
     StoreLogEntryChanged(crate::EntryId),
+    /// A fixed entry must be published before another is made.
+    #[error("store-log entry {0:?} is waiting for publication")]
+    StoreLogUploadPending(crate::EntryId),
+    /// This device has used every store-log number.
+    #[error("store-log entry numbers exhausted")]
+    StoreLogNumberExhausted,
     /// Closing failed for these connections, after every one was tried (§20.1).
     #[error("closing database connections failed: {failures:?}")]
     Closing {

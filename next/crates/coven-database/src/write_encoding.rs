@@ -29,6 +29,32 @@ pub(crate) fn decoded<T>(result: Result<T, coven_format::Error>) -> rusqlite::Re
         .map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, Type::Blob, Box::new(error)))
 }
 
+/// Writes and entries share a clock; fixed local entries count even before upload.
+pub(crate) fn latest_timestamp(
+    database: &crate::sqlite::DatabaseConnection,
+) -> Result<Option<Timestamp>, DbError> {
+    let mut latest = database.query_row("SELECT max(timestamp) FROM coven_writes", [], |row| {
+        row.get::<_, Option<Vec<u8>>>(0)?
+            .map(|bytes| decoded(coven_format::merge_fields::decode_timestamp(&bytes)))
+            .transpose()
+    })?;
+    for timestamp in database.query(
+        "SELECT record FROM coven_store_log UNION ALL SELECT record FROM coven_store_log_uploads",
+        [],
+        |row| {
+            let coven_format::Object::StoreLog(entry) =
+                decoded(coven_format::Object::decode(&row.get::<_, Vec<u8>>(0)?))?
+            else {
+                return Err(rusqlite::Error::InvalidQuery);
+            };
+            Ok(entry.timestamp)
+        },
+    )? {
+        latest = Some(latest.map_or(timestamp, |previous| previous.max(timestamp)));
+    }
+    Ok(latest)
+}
+
 pub(crate) fn timestamp(
     latest: Option<Timestamp>,
     now: SystemTime,

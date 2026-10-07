@@ -99,7 +99,9 @@ Had-read lists store-log entries, not writes. Own-device positions, when
 included, precede the entry. A create-store entry is number 1, has no had-read
 entries, and is authored by the first admin: decoding refuses an admin signing
 key different from the author. It registers the writing device with its supplied
-name. Added devices belong to the author; a new circle's first member is the
+name. The sealed store-log envelope additionally carries the signed creation
+identity specified in Appendix D, D9; after opening it must agree with this frame.
+Added devices belong to the author; a new circle's first member is the
 author. These identities are derived during replay. `MemberRole` is admin 0 or member 1.
 
 | Tag | Change | Fields after tag |

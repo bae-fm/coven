@@ -264,11 +264,19 @@
   | Kind | Object | Prefix | Signature |
   | --- | --- | --- | --- |
   | 32 | Write | `header_key:uuid \| part_keys:[uuid]` | the author's |
-  | 33 | Store log entry | `key:uuid` | the author's |
+  | 33 | Store log entry | `key:uuid \| origin:option<store:uuid, timestamp:Timestamp, author:MemberId>` | the author's |
   | 34 | Snapshot | `audience:Audience \| key:uuid \| writes:WritePositions \| store_log:EntryPositions` | none |
   | 35 | Posted positions | `key:uuid` | none |
   | 36 | Join request | nothing | the requester's |
 
+- A store-log `origin` is `0` for an ordinary entry, or `1` followed by
+  the store id, timestamp and author's public signing key for a create-store
+  entry. No other tag is valid. The complete store-log prefix is 20 or 84
+  bytes including kind and version. The creation signature is checked with
+  this public key before comparing stores in the setup race (§4), without
+  decrypting either store. Its timestamp's device must match the path, whose
+  number is 1. After opening, the origin must equal the creation frame's
+  fields; it is required exactly on create-store entries.
 - A chunk is `length:u32 | nonce:24 bytes | ciphertext | tag:16 bytes`:
   XChaCha20-Poly1305 with a random nonce, under the encryption key derived
   from the named key (D11). `length` is the ciphertext's, which is the

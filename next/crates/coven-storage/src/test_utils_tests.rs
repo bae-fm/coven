@@ -23,6 +23,23 @@ async fn memory_conforms() {
     .unwrap();
 }
 #[tokio::test]
+async fn create_once_accepts_an_occupied_path_without_replacing_it() {
+    let provider = MemoryStorage::new(
+        config(),
+        Arc::new(coven_foundation::clock::FixedClock::new(
+            std::time::SystemTime::UNIX_EPOCH,
+        )),
+    )
+    .unwrap();
+    let path = ObjectPath::store_log(
+        coven_foundation::id_source::DeviceId(1),
+        std::num::NonZeroU64::MIN,
+    );
+    provider.create(&path, b"stored").await.unwrap();
+    provider.create_once(&path, b"retry").await.unwrap();
+    assert_eq!(provider.read(&path).await.unwrap(), b"stored");
+}
+#[tokio::test]
 async fn crash_after_accepted_part_and_dropped_part_resumes() {
     let provider = MemoryStorage::new(
         config(),

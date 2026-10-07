@@ -8,7 +8,19 @@ fn each_single_frame_envelope_authenticates_its_routing_and_signature() {
     for object in test_utils::objects() {
         let (prefix, path) = match &object {
             Object::StoreLog(entry) => (
-                SingleChunkPrefix::StoreLog(key.id()),
+                SingleChunkPrefix::StoreLog {
+                    key: key.id(),
+                    origin: match &entry.change {
+                        crate::store_log::StoreChange::CreateStore { store, .. } => {
+                            Some(StoreOrigin {
+                                store: *store,
+                                timestamp: entry.timestamp,
+                                author: entry.author.clone(),
+                            })
+                        }
+                        _ => None,
+                    },
+                },
                 format!(
                     "store-log/{}/{}",
                     entry.position.device.0, entry.position.number
@@ -26,14 +38,14 @@ fn each_single_frame_envelope_authenticates_its_routing_and_signature() {
         let path = path.as_str();
         let plain = object.encode().unwrap();
         let aad = prefix.encode().unwrap();
-        let seal = |plain: &[u8]| match prefix {
+        let seal = |plain: &[u8]| match &prefix {
             SingleChunkPrefix::JoinRequest => test_utils::invite()
                 .secret
                 .join_request_key()
                 .seal_object_chunk(path, &aad, 0, 0, plain),
             _ => key.derive().seal_object_chunk(path, &aad, 0, 0, plain),
         };
-        let open = |aad: &[u8], chunk: &[u8]| match prefix {
+        let open = |aad: &[u8], chunk: &[u8]| match &prefix {
             SingleChunkPrefix::JoinRequest => test_utils::invite()
                 .secret
                 .join_request_key()
@@ -46,15 +58,17 @@ fn each_single_frame_envelope_authenticates_its_routing_and_signature() {
         hash.update(&before_signature);
         let digest = hash.finish();
         let signature = test_utils::member_keys().sign_object(path, &digest);
-        let object = match prefix {
-            SingleChunkPrefix::StoreLog(key) => SingleChunkObject::StoreLog {
-                key,
+        let object = match &prefix {
+            SingleChunkPrefix::StoreLog { key, origin } => SingleChunkObject::StoreLog {
+                key: *key,
+                origin: origin.clone(),
                 chunk: &chunk,
                 signature,
             },
-            SingleChunkPrefix::PostedPositions(key) => {
-                SingleChunkObject::PostedPositions { key, chunk: &chunk }
-            }
+            SingleChunkPrefix::PostedPositions(key) => SingleChunkObject::PostedPositions {
+                key: *key,
+                chunk: &chunk,
+            },
             SingleChunkPrefix::JoinRequest => SingleChunkObject::JoinRequest {
                 chunk: &chunk,
                 signature,
@@ -67,8 +81,8 @@ fn each_single_frame_envelope_authenticates_its_routing_and_signature() {
         assert_eq!(decoded.signed_bytes().unwrap(), before_signature);
         assert_eq!(open(&aad, decoded.chunk()).unwrap(), plain);
         assert!(matches!(
-            (prefix, Object::decode(&plain).unwrap()),
-            (SingleChunkPrefix::StoreLog(_), Object::StoreLog(_))
+            (&prefix, Object::decode(&plain).unwrap()),
+            (SingleChunkPrefix::StoreLog { .. }, Object::StoreLog(_))
                 | (
                     SingleChunkPrefix::PostedPositions(_),
                     Object::PostedPositions(_)

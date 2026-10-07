@@ -169,6 +169,18 @@ impl StoreKeyring {
             .ok_or(MaterialError::UnknownStoreKey(key))
     }
 
+    /// All held store-key identities, including keys preceding a member's join.
+    pub fn store_key_ids(&self) -> impl Iterator<Item = KeyId> + '_ {
+        self.stores.keys().copied()
+    }
+
+    /// All held keys for a circle, including its earlier membership epochs.
+    pub fn circle_key_ids(&self, circle: CircleId) -> impl Iterator<Item = KeyId> + '_ {
+        self.circles
+            .keys()
+            .filter_map(move |(owner, key)| (*owner == circle).then_some(*key))
+    }
+
     /// An opened circle key by its circle and identity (§14.3).
     pub fn circle_key(&self, circle: CircleId, key: KeyId) -> Result<&CircleKey, MaterialError> {
         self.circles

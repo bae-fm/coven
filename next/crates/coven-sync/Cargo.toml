@@ -9,8 +9,12 @@ coven-crypto.workspace = true
 coven-merge.workspace = true
 coven-format.workspace = true
 coven-database.workspace = true
+coven-storage.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
+coven-storage = { workspace = true, features = ["test-utils"] }
 coven-foundation = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tempfile.workspace = true

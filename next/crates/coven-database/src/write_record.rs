@@ -335,12 +335,7 @@ pub(crate) fn record(
     now: SystemTime,
     changes: BTreeMap<RowId, RowChange>,
 ) -> Result<WriteRecord, DbError> {
-    let latest = database.query_row("SELECT max(timestamp) FROM coven_writes", [], |r| {
-        let applied: Option<Vec<u8>> = r.get(0)?;
-        applied
-            .map(|b| decoded(merge_fields::decode_timestamp(&b)))
-            .transpose()
-    })?;
+    let latest = crate::write_encoding::latest_timestamp(database)?;
     let timestamp = timestamp(latest, now, device)?;
     let mut positions: BTreeMap<DeviceId,u64> = database.query(
         "SELECT device,number FROM coven_positions WHERE device>=x'0000000000000000' ORDER BY device", [],

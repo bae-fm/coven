@@ -49,6 +49,7 @@ mod sqlite;
 mod store_log;
 mod store_log_check;
 mod store_log_tables;
+mod store_log_upload;
 mod user_file;
 mod write;
 mod write_apply;
@@ -88,6 +89,7 @@ pub use store_log::{
     StoreLogState, StoreMember, StoreVersion,
 };
 pub use store_log_check::{ReplayEntry, StoreLogCheck};
+pub use store_log_upload::{LocalStoreLog, SealedStoreLog, StoreLogKeyUpload, StoreLogUpload};
 pub use user_file::{prepare_user_file, PreparedUserFile, UserFile};
 pub use write::SqlContext;
 pub use write_batch::{FileSource, WriteBatch};

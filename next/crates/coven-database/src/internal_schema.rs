@@ -31,6 +31,26 @@ macro_rules! coven_tables {
                    OR (outcome!='beaten' AND beaten_device IS NULL AND beaten_number IS NULL))
             ) STRICT, WITHOUT ROWID;
         ");
+        $visit!(coven_store_log_uploads, "
+            CREATE TABLE coven_store_log_uploads (
+                device BLOB NOT NULL CHECK(length(device)=8),
+                number BLOB NOT NULL CHECK(length(number)=8 AND number>x'0000000000000000'),
+                record BLOB NOT NULL,
+                sealed_bytes BLOB NOT NULL,
+                PRIMARY KEY(device,number)
+            ) STRICT, WITHOUT ROWID;
+            CREATE UNIQUE INDEX coven_one_store_log_upload ON coven_store_log_uploads ((1));
+        ");
+        $visit!(coven_store_log_key_uploads, "
+            CREATE TABLE coven_store_log_key_uploads (
+                device BLOB NOT NULL,
+                number BLOB NOT NULL,
+                path TEXT NOT NULL,
+                bytes BLOB NOT NULL,
+                PRIMARY KEY(device,number,path),
+                FOREIGN KEY(device,number) REFERENCES coven_store_log_uploads(device,number) ON DELETE CASCADE
+            ) STRICT, WITHOUT ROWID;
+        ");
         $visit!(coven_members, "
             CREATE TABLE coven_members (
                 member BLOB PRIMARY KEY NOT NULL CHECK(length(member)=32),

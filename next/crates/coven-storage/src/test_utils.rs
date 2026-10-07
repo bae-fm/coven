@@ -629,14 +629,8 @@ impl Conformance {
         if !self.storage.read(&path).await?.is_empty() {
             return Err(StorageError::Protocol("empty object changed"));
         }
-        if self
-            .storage
-            .create_once(&path, b"different")
-            .await
-            .err()
-            .map(|error| error.failure())
-            != Some(StorageFailure::AlreadyExists)
-        {
+        self.storage.create_once(&path, b"different").await?;
+        if !self.storage.read(&path).await?.is_empty() {
             return Err(StorageError::Protocol("empty immutable object replaced"));
         }
         self.storage.delete(&path).await?;

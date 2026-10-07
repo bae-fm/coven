@@ -365,6 +365,69 @@ impl Database {
         )
     }
 
+    /// Read applied entries and the fixed publication queue under the writer lock.
+    pub async fn local_store_log(&self) -> Result<crate::LocalStoreLog, DbError> {
+        let database = self.clone();
+        finish_blocking(
+            tokio::task::spawn_blocking(move || {
+                let slot = database.inner.read().expect("database lock poisoned");
+                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+                let writer = inner
+                    .writer
+                    .lock()
+                    .expect("writer connection lock poisoned");
+                Ok(crate::LocalStoreLog {
+                    store: inner.directory.id(),
+                    device: inner.device,
+                    log: crate::store_log_tables::read(&writer)?,
+                    upload: crate::store_log_upload::read(&writer)?,
+                })
+            })
+            .await,
+        )
+    }
+
+    /// Fix the next entry's number, stamp, causal past, sealed bytes and sealed-key
+    /// prerequisites together. No storage attempt may precede this commit.
+    /// The callback owns sealing values, receives no database capability, and
+    /// rejects a change or returns the bytes to retain. Failure reserves no number.
+    pub async fn prepare_store_log<F, E>(
+        &self,
+        author: coven_crypto::MemberId,
+        change: coven_format::store_log::StoreChange,
+        seal: F,
+    ) -> Result<crate::EntryId, E>
+    where
+        F: FnOnce(
+                &crate::StoreLog,
+                &coven_format::store_log::StoreLogEntry,
+            ) -> Result<crate::SealedStoreLog, E>
+            + Send
+            + 'static,
+        E: From<DbError> + Send + 'static,
+    {
+        let database = self.clone();
+        finish_blocking(
+            tokio::task::spawn_blocking(move || {
+                let slot = database.inner.read().expect("database lock poisoned");
+                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+                let writer = inner
+                    .writer
+                    .lock()
+                    .expect("writer connection lock poisoned");
+                crate::store_log_upload::prepare(
+                    &writer,
+                    inner.device,
+                    inner.clock.now(),
+                    author,
+                    change,
+                    seal,
+                )
+            })
+            .await,
+        )
+    }
+
     /// Commit one entry, its immutable author-view check, every kept/dropped mark,
     /// and sync's whole replay result in one transaction (§9).
     ///

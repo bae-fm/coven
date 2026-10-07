@@ -19,6 +19,15 @@ impl ObjectPath {
     pub fn store_log(device: DeviceId, number: NonZeroU64) -> Self {
         Self(format!("store-log/{}/{number}", device.0))
     }
+    /// The device and positive entry number of a store-log path.
+    pub fn store_log_position(&self) -> Option<(DeviceId, NonZeroU64)> {
+        let rest = self.0.strip_prefix("store-log/")?;
+        let (device, number) = rest.split_once('/').expect("validated store-log path");
+        Some((
+            DeviceId(device.parse().expect("validated device")),
+            number.parse().expect("validated entry number"),
+        ))
+    }
     /// A snapshot written by a device (§15).
     pub fn snapshot(audience: Audience, device: DeviceId, number: NonZeroU64) -> Self {
         let audience = match audience {

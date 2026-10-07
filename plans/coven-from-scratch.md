@@ -193,6 +193,12 @@
     same moment can both succeed; whichever store's first entry has the
     larger timestamp finds the other's when it next syncs, stops syncing,
     and reports the location taken.
+  - The creation entry's cleartext prefix carries its store id, timestamp,
+    and author's public signing key. Its signature covers this prefix and
+    the ciphertext, bound to the entry path. That lets a racing store check
+    the creation timestamp without possessing the other store's key. Opening
+    the entry also requires these fields to match its encrypted contents
+    ([Appendix D, D9](coven-format.md#d9-sealed-objects)).
   - Its data is all on its devices, so the app sets it up somewhere else,
     and it uploads everything again.
 - S3 has no standard way to make or delete access keys; each S3 provider
@@ -557,6 +563,12 @@ Two mechanisms order writes:
     naming its `coven_lost` row, its `coven_foreign_keys` row and the
     parent, so a lost reference reads as null or the default when its
     parent goes ([§8.4](#84-foreign-keys)).
+- Store-log publication uses `coven_store_log_uploads`: the next local entry's
+  number, canonical plaintext record and complete fixed encrypted, signed bytes.
+  `coven_store_log_key_uploads` holds its prerequisite sealed-key paths and fixed
+  bytes. These contain no unsealed keys. Both commit before the first storage
+  attempt; applying the published entry and its replay removes them atomically
+  ([§9](#9-members-and-roles), [§18](#18-operations)).
 - The store log's effects that the database applies are kept with it:
   - `coven_circles.deleted` records whether each circle is deleted; local
     writes, downloaded writes and row recomputation all read that same fact
@@ -1218,6 +1230,14 @@ Carol's tablet:
   - `coven_store_log`: every entry it has applied, as downloaded and
     checked, its immutable author-view checks, and whether the replay kept
     or dropped it;
+  - `coven_store_log_uploads`: locally authored entries with their numbers,
+    timestamps, recorded past, and encrypted, signed bytes fixed before upload;
+    `coven_store_log_key_uploads`: their sealed-key objects, uploaded first.
+    An entry receives its number when these rows commit. A pending entry is
+    published before another is made, so numbering remains contiguous. Once
+    stored, it is applied through the same replay boundary as a download, and
+    that transaction deletes its queue rows. If publication or its reply fails,
+    the next store-log step sends exactly the recorded bytes;
   - the replay's result: `coven_members` (every member a kept entry
     added, their public keys and role, and whether they were removed),
     `coven_devices` (every device a kept entry added, its member and name,
@@ -4121,6 +4141,22 @@ pub enum StoreKeyUnlockError {
 
 /// Sync or a store-log change failed (§9, §13, §17, §20.5).
 pub enum SyncError {
+    /// The proposed entry violates its byte format.
+    Format(coven_format::Error),
+    /// A required key is absent from custody, or its material conflicts.
+    Key(coven_crypto::MaterialError),
+    /// This install has no member keys in custody.
+    MissingMemberKeys,
+    /// A required sealed key has not arrived; retry after acquiring it.
+    KeyUnavailable(KeyId),
+    /// A key introduction reused an immutable key identity.
+    KeyAlreadyUsed(KeyId),
+    /// Replay already rejects the proposed change in the author's applied view.
+    Rejected(DropReason),
+    /// An object required by the change failed its checks.
+    Damaged(DamagedObject),
+    /// The device must stop syncing: removed, location taken, or update required.
+    Stopped(SyncFailure),
     /// No storage is connected for a call that requires it.
     NoStorage,
     /// The provider refused or failed the call.
@@ -4144,7 +4180,7 @@ pub enum SyncError {
     UpdateRequired,
     /// A restore code could not be decoded (§20.9).
     Code(CodeError),
-    /// A credential update's code names another store (§20.9).
+    /// A create-store entry or credential update names another store (§20.9).
     WrongStore { expected: StoreId, actual: StoreId },
     /// A credential update's code names another member (§20.9).
     WrongMember { expected: MemberId, actual: MemberId },
@@ -4334,6 +4370,8 @@ pub enum SyncStatus {
     Failed { error: SyncFailure },
 }
 
+/// The store-log step fills `damaged_objects` and `dropped_entries`.
+/// The complete sync assembles the other results from their respective steps.
 pub struct SyncReport {
     pub finished_at: SystemTime,
     /// How far this device has applied each other device's log.

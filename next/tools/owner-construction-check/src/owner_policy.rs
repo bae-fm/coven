@@ -203,6 +203,7 @@ pub(crate) const POLICY: Policy = Policy {
     root_owner_types: &[
         "Database",
         "DatabaseReadHandle",
+        "StoreLogSync",
         "CovenHandle",
         "CovenReadHandle",
     ],

@@ -62,9 +62,12 @@ pub fn replay_entry(log: &StoreLog, entry: StoreLogEntry) -> (ReplayEntry, Store
 }
 
 pub(crate) fn had_read(entry: &StoreLogEntry, prior: &StoreLogEntry) -> bool {
-    (entry.position.device == prior.position.device
-        && entry.position.number > prior.position.number)
-        || entry.had_read.covers(prior.position)
+    had_read_position(entry, prior.position)
+}
+
+pub(crate) fn had_read_position(entry: &StoreLogEntry, prior: EntryId) -> bool {
+    (entry.position.device == prior.device && entry.position.number > prior.number)
+        || entry.had_read.covers(prior)
 }
 
 fn settle(

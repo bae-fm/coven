@@ -3,14 +3,32 @@
 use crate::error::{bound, require, Error, Rule};
 use crate::sealed;
 use crate::wire::{Decoder, Encoder, Wire, MAX_OBJECT};
-use coven_crypto::{Signature, SEALED_OBJECT_CHUNK_OVERHEAD};
-use coven_foundation::id_source::KeyId;
+use coven_crypto::{MemberId, Signature, SEALED_OBJECT_CHUNK_OVERHEAD};
+use coven_foundation::id_source::{KeyId, StoreId};
+use coven_merge::Timestamp;
+
+/// Signed creation identity visible to another store racing for this location.
+/// The opener also requires an exact match with the encrypted create-store entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoreOrigin {
+    /// The store whose creation this object records.
+    pub store: StoreId,
+    /// The creation entry's timestamp, including its device id.
+    pub timestamp: Timestamp,
+    /// The creator's signing key, used before either store shares any keys.
+    pub author: MemberId,
+}
 
 /// Cleartext routing fields available before sealing the frame or signing it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SingleChunkPrefix {
     /// Kind 33 and the store key sealing its entry.
-    StoreLog(KeyId),
+    StoreLog {
+        /// The key sealing the entry.
+        key: KeyId,
+        /// Present exactly for a create-store entry.
+        origin: Option<StoreOrigin>,
+    },
     /// Kind 35 and the store key sealing its positions.
     PostedPositions(KeyId),
     /// Kind 36; the invite key is identified by the object's path.
@@ -21,14 +39,23 @@ impl SingleChunkPrefix {
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         let mut out = Encoder::new();
         let kind = match self {
-            Self::StoreLog(_) => 33u8,
+            Self::StoreLog { .. } => 33u8,
             Self::PostedPositions(_) => 35,
             Self::JoinRequest => 36,
         };
         kind.put(&mut out)?;
         crate::FORMAT_VERSION.put(&mut out)?;
         match self {
-            Self::StoreLog(key) | Self::PostedPositions(key) => key.put(&mut out)?,
+            Self::StoreLog { key, origin } => {
+                key.put(&mut out)?;
+                u8::from(origin.is_some()).put(&mut out)?;
+                if let Some(origin) = origin {
+                    origin.store.put(&mut out)?;
+                    origin.timestamp.put(&mut out)?;
+                    origin.author.put(&mut out)?;
+                }
+            }
+            Self::PostedPositions(key) => key.put(&mut out)?,
             Self::JoinRequest => (),
         }
         Ok(out.bytes)
@@ -51,6 +78,8 @@ pub enum SingleChunkObject<'a> {
     StoreLog {
         /// The store key sealing this entry.
         key: KeyId,
+        /// Signed creation identity, absent on all other entries.
+        origin: Option<StoreOrigin>,
         /// Stored nonce, ciphertext and tag, without the length field.
         chunk: &'a [u8],
         /// Signature over the prefix and entire encoded chunk.
@@ -76,8 +105,21 @@ impl<'a> SingleChunkObject<'a> {
     /// Decode exactly one envelope, bounding its length before any allocation.
     pub fn decode(bytes: &'a [u8]) -> Result<Self, Error> {
         let kind = *bytes.first().ok_or(Error::Truncated)?;
+        sealed::prefix(bytes, kind)?;
         let (prefix_length, signature_length) = match kind {
-            33 => (19, 64),
+            33 => (
+                match bytes.get(19).ok_or(Error::Truncated)? {
+                    0 => 20,
+                    1 => 84,
+                    tag => {
+                        return Err(Error::UnknownTag {
+                            field: "store origin",
+                            tag: *tag,
+                        })
+                    }
+                },
+                64,
+            ),
             35 => (19, 0),
             36 => (3, 64),
             tag => {
@@ -87,7 +129,6 @@ impl<'a> SingleChunkObject<'a> {
                 })
             }
         };
-        sealed::prefix(bytes, kind)?;
         let body = bytes.get(prefix_length..).ok_or(Error::Truncated)?;
         let chunk_length = sealed::chunk_length(body, MAX_OBJECT)?;
         let total = chunk_length + signature_length;
@@ -109,10 +150,20 @@ impl<'a> SingleChunkObject<'a> {
         }
         let mut input = Decoder::new(&bytes[3..prefix_length])?;
         let key = KeyId::get(&mut input)?;
+        let origin = if kind == 33 && u8::get(&mut input)? == 1 {
+            Some(StoreOrigin {
+                store: StoreId::get(&mut input)?,
+                timestamp: Timestamp::get(&mut input)?,
+                author: MemberId::get(&mut input)?,
+            })
+        } else {
+            None
+        };
         input.finish()?;
         Ok(if kind == 33 {
             Self::StoreLog {
                 key,
+                origin,
                 chunk,
                 signature: Signature::from_bytes(
                     body[chunk_length..].try_into().expect("64 bytes"),
@@ -126,7 +177,10 @@ impl<'a> SingleChunkObject<'a> {
     /// The routing fields, whose encoding is bound into the chunk's authentication.
     pub fn prefix(&self) -> SingleChunkPrefix {
         match self {
-            Self::StoreLog { key, .. } => SingleChunkPrefix::StoreLog(*key),
+            Self::StoreLog { key, origin, .. } => SingleChunkPrefix::StoreLog {
+                key: *key,
+                origin: origin.clone(),
+            },
             Self::PostedPositions { key, .. } => SingleChunkPrefix::PostedPositions(*key),
             Self::JoinRequest { .. } => SingleChunkPrefix::JoinRequest,
         }

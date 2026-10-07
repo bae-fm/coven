@@ -272,18 +272,13 @@ pub trait Storage: Send + Sync {
         }
     }
 
-    /// Retry an operation's create with the same encrypted bytes (§18).
-    /// Every path has one writer. On Drive a retry looks for this writer's earlier
-    /// copies, keeps the earliest createdTime (ties by id), and deletes later copies.
+    /// Retry an operation's create with its fixed encrypted bytes (§18).
+    /// An occupied single-writer path counts as stored, without a second read.
+    /// On Drive a retry keeps the earliest copy (createdTime, then id) and
+    /// deletes later copies from this writer.
     async fn create_once(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         match self.create(path, bytes).await {
-            Err(error) if error.failure() == crate::StorageFailure::AlreadyExists => {
-                if self.read(path).await? == bytes {
-                    Ok(())
-                } else {
-                    Err(error)
-                }
-            }
+            Err(error) if error.failure() == crate::StorageFailure::AlreadyExists => Ok(()),
             result => result,
         }
     }

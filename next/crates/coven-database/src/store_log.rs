@@ -190,6 +190,7 @@ pub(crate) fn apply(
                 &author_view,
             ),
         )?;
+        crate::store_log_upload::retire(database, entry.position, &bytes)?;
         let previous = crate::store_log_tables::deleted_circles(database)?;
         crate::store_log_tables::replace(database, &replay, &outcomes)?;
         let deleted = crate::store_log_tables::deleted_circles(database)?;
