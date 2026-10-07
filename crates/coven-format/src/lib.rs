@@ -40,7 +40,7 @@ use objects::{JoinRequest, PostedPositions};
 use store_log::StoreLogEntry;
 use wire::{decode_frame, Encoder, Wire, MAX_OBJECT};
 
-/// The single supported plaintext format version (§17.2).
+/// The newest object format written by coven; readers retain older versions (§17.2).
 pub const FORMAT_VERSION: u16 = 1;
 /// The fixed prefix length: kind, format version, payload length.
 pub const FRAME_PREFIX_LEN: usize = 7;

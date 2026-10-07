@@ -102,7 +102,6 @@ impl Generator {
             snapshot: snapshot(30, audience),
         };
         let audience = self.audience();
-        let format = self.pick(2) == 0;
         match self.pick(12) {
             0 => [remove(1, &[0, 1]), remove(2, &[0, 1])],
             1 => [leave(0, 1), leave(0, 2)],
@@ -110,22 +109,13 @@ impl Generator {
             3 => [leave(0, 1), remove(2, &[0, 1])],
             4 => [
                 reset(audience.clone()),
-                raise(format, 2, 30 + self.pick(2) as u64, audience),
+                raise(2, 30 + self.pick(2) as u64, audience),
             ],
-            5 => [
-                raise(format, 2, 30, audience.clone()),
-                raise(format, 2, 31, audience),
-            ],
-            6 => [
-                raise(format, 2, 30, audience.clone()),
-                raise(format, 3, 31, audience),
-            ],
-            7 => [reset(self.audience()), raise(format, 2, 30, audience)],
-            8 => [
-                raise(format, 2, 30, self.audience()),
-                raise(format, 2, 31, audience),
-            ],
-            9 => [delete(0), raise(format, 2, 30, Audience::Circle(circle(0)))],
+            5 => [raise(2, 30, audience.clone()), raise(2, 31, audience)],
+            6 => [raise(2, 30, audience.clone()), raise(3, 31, audience)],
+            7 => [reset(self.audience()), raise(2, 30, audience)],
+            8 => [raise(2, 30, self.audience()), raise(2, 31, audience)],
+            9 => [delete(0), raise(2, 30, Audience::Circle(circle(0)))],
             10 => [rename(0, "Birthdays"), rename(0, "Presents")],
             11 => [rename(0, "Birthdays"), delete(0)],
             _ => unreachable!(),
@@ -140,7 +130,7 @@ impl Generator {
         } else {
             MemberRole::Member
         };
-        match self.pick(14) {
+        match self.pick(13) {
             0 => add(m, role),
             1 => StoreChange::RemoveMember {
                 member: member(m),
@@ -182,11 +172,7 @@ impl Generator {
                 version: self.pick(3) as u32 + 1,
                 snapshot: snapshot(self.pick(5) as u64 + 1, self.audience()),
             },
-            11 => StoreChange::RaiseFormat {
-                version: self.pick(3) as u16 + 1,
-                snapshot: snapshot(self.pick(5) as u64 + 1, self.audience()),
-            },
-            12 => StoreChange::Reset {
+            11 => StoreChange::Reset {
                 snapshot: snapshot(
                     self.pick(5) as u64 + 1,
                     if self.pick(4) == 0 {
@@ -196,7 +182,7 @@ impl Generator {
                     },
                 ),
             },
-            13 => StoreChange::SetAccess {
+            12 => StoreChange::SetAccess {
                 access: coven_format::MemberAccess::S3AccessKey {
                     access_key_id: if self.pick(3) == 0 {
                         "fixture-access-key".into()
@@ -252,7 +238,6 @@ fn input(h: &History) -> Value {
             StoreChange::AddCircleMember { circle, member } => json!({"kind":9,"circle":circle_number(*circle),"member":member_number(member)}),
             StoreChange::RemoveCircleMember { circle, member, .. } => json!({"kind":10,"circle":circle_number(*circle),"member":member_number(member)}),
             StoreChange::RaiseSchema { version, snapshot } => json!({"kind":11,"version":version,"snapshot":{"audience":audience_number(&snapshot.audience),"number":snapshot.number}}),
-            StoreChange::RaiseFormat { version, snapshot } => json!({"kind":12,"version":version,"snapshot":{"audience":audience_number(&snapshot.audience),"number":snapshot.number}}),
             StoreChange::Reset { snapshot } => json!({"kind":13,"snapshot":{"audience":audience_number(&snapshot.audience),"number":snapshot.number}}),
             StoreChange::SetAccess { access } => json!({"kind":14,"member":member_number(&entry.author),"access":serde_json::to_string(access).unwrap()}),
         };
@@ -294,16 +279,6 @@ fn projected(h: &History, replay: &StoreLogReplay) -> Value {
     let mut versions = vec![];
     for (a, v) in &state.schema {
         versions.push(json!([
-            0,
-            audience_number(a),
-            v.number,
-            v.snapshot.number,
-            index(v.entry)
-        ]));
-    }
-    for (a, v) in &state.format {
-        versions.push(json!([
-            1,
             audience_number(a),
             v.number,
             v.snapshot.number,

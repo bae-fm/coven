@@ -107,13 +107,12 @@ macro_rules! coven_tables {
         $visit!(_coven_versions, "
             CREATE TABLE _coven_versions (
                 audience TEXT NOT NULL,
-                kind TEXT NOT NULL CHECK(kind IN ('schema','format')),
                 version INTEGER NOT NULL CHECK(version>0),
                 snapshot_device BLOB NOT NULL CHECK(length(snapshot_device)=8),
                 snapshot_number BLOB NOT NULL CHECK(length(snapshot_number)=8 AND snapshot_number>x'0000000000000000'),
                 entry_device BLOB NOT NULL CHECK(length(entry_device)=8),
                 entry_number BLOB NOT NULL CHECK(length(entry_number)=8),
-                PRIMARY KEY(audience,kind),
+                PRIMARY KEY(audience),
                 FOREIGN KEY(entry_device,entry_number) REFERENCES _coven_store_log(device,number)
             ) STRICT, WITHOUT ROWID;
         ");

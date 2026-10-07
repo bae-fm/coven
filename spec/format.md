@@ -7,7 +7,8 @@
   ([§20.1](coven.md#201-crates)).
 - It is format 1 ([§17.2](coven.md#172-covens-schema)). A
   change to any layout here is a new format version, and older versions'
-  readers stay ([§17.2](coven.md#172-covens-schema)).
+  readers stay. Coven writes the newest format and reads every older one
+  without a store-wide version raise ([§17.2](coven.md#172-covens-schema)).
 - Coven's local `_coven_` tables keep their own encodings, versioned by the
   database's schema; they reuse the primitives of D2, and appear here only
   where they must agree across devices: the fingerprint (D11). Their SQL
@@ -200,10 +201,10 @@
 | 9 | Add circle member | `circle:uuid \| member:MemberId` |
 | 10 | Remove circle member | `circle:uuid \| member:MemberId \| key:uuid` |
 | 11 | Raise schema | `version:u32 \| snapshot:SnapshotId` |
-| 12 | Raise format | `version:u16 \| snapshot:SnapshotId` |
 | 13 | Reset | `snapshot:SnapshotId` |
 | 14 | Set access | `access:MemberAccess` |
 
+- Tag 12 is unused. The other tags retain their numbers.
 - A role is `0` admin or `1` member. `SnapshotId` is
   `audience:Audience | device:DeviceId | number:u64`, its path's parts (D10).
   Its number is positive and belongs to the device's snapshot sequence.

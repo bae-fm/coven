@@ -174,13 +174,6 @@ pub enum StoreChange {
         /// The snapshot whose audience is raised to that schema.
         snapshot: SnapshotId,
     },
-    /// Raise an audience's format version with its replacement snapshot (§17.2).
-    RaiseFormat {
-        /// The new format version.
-        version: u16,
-        /// The snapshot whose audience is raised to that format.
-        snapshot: SnapshotId,
-    },
     /// Reset the store's or a circle's rows to a snapshot (§19.3).
     Reset {
         /// The snapshot and the audience being reset.
@@ -207,10 +200,6 @@ impl StoreChange {
             }
             Self::RaiseSchema { version, snapshot } => {
                 require(*version > 0, "schema version", Rule::Required)?;
-                positive(snapshot.number)
-            }
-            Self::RaiseFormat { version, snapshot } => {
-                require(*version > 0, "format version", Rule::Required)?;
                 positive(snapshot.number)
             }
             Self::Reset { snapshot } => positive(snapshot.number),
@@ -256,7 +245,6 @@ store_changes!(
     9 => AddCircleMember { circle, member },
     10 => RemoveCircleMember { circle, member, key },
     11 => RaiseSchema { version, snapshot },
-    12 => RaiseFormat { version, snapshot },
     13 => Reset { snapshot },
     14 => SetAccess { access },
 );

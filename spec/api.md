@@ -1697,7 +1697,7 @@ pub enum SyncError {
     /// The member's provider account holds the store, so they can't be
     /// removed (§4, §13).
     StoreOwner,
-    /// The store needs a newer schema or format (§17).
+    /// The store needs a newer schema, or an object needs a newer coven (§17).
     UpdateRequired,
     /// A restore code could not be decoded (E9).
     Code(CodeError),
@@ -1813,8 +1813,6 @@ pub enum StoreLogChange {
     RemoveCircleMember { circle: CircleId, member: MemberId },
     /// Raises the schema version of the snapshot's audience (§17.1).
     SchemaChange { version: u32, snapshot: SnapshotId },
-    /// Raises the format version of the snapshot's audience (§17.2).
-    FormatChange { version: u16, snapshot: SnapshotId },
     /// Resets the snapshot's audience to that snapshot (§19.3).
     Reset { snapshot: SnapshotId },
 }
@@ -1963,7 +1961,7 @@ impl StorageSetupError {
 }
 
 pub enum SyncFailure {
-    /// The store's schema or format version is newer than this app (§17).
+    /// The store needs a newer schema, or an object needs a newer coven (§17).
     UpdateRequired,
     /// This device, or its member, was removed from the store (§10).
     Removed,
@@ -2025,8 +2023,6 @@ pub enum OperationKind {
     RevokeAccess,
     /// Migrate the schema, snapshot it and raise the version.
     SchemaChange,
-    /// Migrate the format, snapshot it and raise the version.
-    FormatChange,
     /// Replace this device's synced data from a snapshot.
     ReloadFromSnapshot,
     /// Write a snapshot and delete covered logs and unused files.

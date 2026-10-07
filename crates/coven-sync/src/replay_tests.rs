@@ -242,7 +242,7 @@ fn creation_registers_its_author_and_named_device() {
         assert_eq!(r.state.devices[&DeviceId(0)].member, member(0));
         assert_eq!(r.state.devices[&DeviceId(0)].name, "Ana’s phone");
         assert_eq!(r.state.store.as_ref().unwrap().key, key(1));
-        assert!(r.state.schema.is_empty() && r.state.format.is_empty());
+        assert!(r.state.schema.is_empty());
     });
 }
 

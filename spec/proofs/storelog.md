@@ -37,7 +37,7 @@
 - Two devices receive the same entries, each in a causal order. They end
   with the same members, roles, storage access, devices, circles and circle
   memberships,
-  each audience's schema and format versions, reset snapshots, kept identities,
+  each audience's schema versions, reset snapshots, kept identities,
   and dropped identities. Lean: `storelog_converges`, `reports_converge`.
 - An entry records its signature's author, writing device, had-read set,
   and action. Its identifier is its unique timestamp. Finite histories
@@ -45,11 +45,11 @@
 - The actions are creation, adding or removing a member, changing a role or
   storage access,
   adding or removing a device, making, renaming or deleting a circle,
-  changing its members, raising either version, and resetting an audience.
+  changing its members, raising a schema version, and resetting an audience.
   A raise or reset names a `SnapshotId`: its audience determines which store
   or circle it affects, with no separate audience field. The model abstracts
   the snapshot's device and number to one identity number; versions are keyed
-  by version kind and audience. Lean: `Entry`, `Action`, `SnapshotId`, `State`.
+  by audience. Lean: `Entry`, `Action`, `SnapshotId`, `State`.
 - Storage access is an opaque string in the model; the Rust adapter includes
   its provider-account or S3-key tag. Creation and member additions establish
   it, and a member's own set-access entry replaces it. Removed members retain
@@ -298,7 +298,7 @@
   a concurrent rename or reset loses. Lean: `Examples.circle_deleted`,
   `circle_delete_beats_reset`. Appendix B's `example_14_7` checks the
   associated row deletion and loss of Ana's concurrent note.
-- [§17](../coven.md#17-schema-changes): either version kind can
+- [§17](../coven.md#17-schema-changes): the schema version can
   be raised by an ordinary member; different snapshots for the same
   concurrent raise use the earlier entry and report the other. Identical
   raises keep both identities; a later raise advances the version.
@@ -324,7 +324,7 @@
   identical resets keep both identities; a later causal reset supersedes
   them. Lean: `Examples.store_reset_tie`, `circle_reset_tie`,
   `equal_resets_combine`, `later_reset`.
-- A concurrent reset and schema or format raise of the same audience use
+- A concurrent reset and schema raise of the same audience use
   the earlier entry, even if they name the same snapshot. Both can apply if one has
   read the other. A circle reset and store raise affect different audiences
   and can both apply concurrently. Lean: `Examples.concurrent_reset_and_raise`,

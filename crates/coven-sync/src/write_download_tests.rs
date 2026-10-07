@@ -227,10 +227,23 @@ async fn only_a_newer_format_requires_an_update() {
         .await;
         devices[0].sync.upload_writes().await.unwrap();
         let path = ObjectPath::device_log(DeviceId(1), 1.try_into().unwrap());
-        let mut bytes = storage.read(&path).await.unwrap();
+        let original = storage.read(&path).await.unwrap();
+        let mut bytes = original.clone();
         bytes[2] = version;
         storage.delete(&path).await.unwrap();
         storage.create(&path, &bytes).await.unwrap();
+        sql(
+            &devices[1].db,
+            "INSERT INTO notes VALUES('local','waiting','body')",
+        )
+        .await;
+        let waiting = queued(&devices[1].db).await;
+        let before = devices[1]
+            .db
+            .sync_state(Vec::new())
+            .await
+            .unwrap()
+            .positions;
         let result = devices[1].sync.download_writes().await;
         if version == 2 {
             assert!(matches!(
@@ -240,6 +253,31 @@ async fn only_a_newer_format_requires_an_update() {
         } else {
             assert_eq!(result.unwrap().damaged_objects.len(), 1);
         }
+        assert_eq!(
+            devices[1]
+                .db
+                .sync_state(Vec::new())
+                .await
+                .unwrap()
+                .positions,
+            before
+        );
+        assert_eq!(queued(&devices[1].db).await, waiting);
+        assert_eq!(rows(&devices[1].db).await.len(), 1);
+        assert!(devices[1].db.operations().await.unwrap().is_empty());
+        assert!(storage
+            .list(&ObjectPrefix::snapshots())
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(storage.read(&path).await.unwrap(), bytes);
+        storage.delete(&path).await.unwrap();
+        storage.create(&path, &original).await.unwrap();
+        let report = devices[1].sync.download_writes().await.unwrap();
+        assert!(report.damaged_objects.is_empty());
+        assert!(report.waiting.is_empty());
+        assert_eq!(rows(&devices[1].db).await.len(), 2);
+        assert_eq!(queued(&devices[1].db).await, waiting);
     }
 }
 

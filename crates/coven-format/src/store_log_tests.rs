@@ -174,14 +174,37 @@ fn device_and_circle_creation_encode_no_derived_member() {
 
 #[test]
 fn every_store_log_change_round_trips_with_a_pinned_tag() {
-    for (tag, change) in test_utils::store_changes().into_iter().enumerate() {
+    let changes = test_utils::store_changes();
+    let tags = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14];
+    assert_eq!(changes.len(), tags.len());
+    for (tag, change) in tags.into_iter().zip(changes) {
         let mut entry = test_utils::store_log();
         entry.change = change;
         let object = Object::StoreLog(entry);
         let bytes = object.encode().unwrap();
-        assert_eq!(bytes[75], tag as u8);
+        assert_eq!(bytes[75], tag);
         assert_eq!(Object::decode(&bytes).unwrap(), object);
     }
+}
+
+#[test]
+fn unused_tag_12_is_rejected() {
+    let mut entry = test_utils::store_log();
+    entry.change = StoreChange::Reset {
+        snapshot: test_utils::snapshot_header().id,
+    };
+    let mut bytes = Object::StoreLog(entry).encode().unwrap();
+    bytes[75] = 12;
+    bytes.splice(76..76, 1u16.to_be_bytes());
+    let length = (bytes.len() - crate::FRAME_PREFIX_LEN) as u32;
+    bytes[3..7].copy_from_slice(&length.to_be_bytes());
+    assert_eq!(
+        Object::decode(&bytes),
+        Err(Error::UnknownTag {
+            field: "store change",
+            tag: 12,
+        })
+    );
 }
 
 #[test]
@@ -222,21 +245,15 @@ fn first_entry_and_versions_are_checked() {
         })
     ));
     assert!(Object::StoreLog(entry).encode().is_err());
-    let snapshot = test_utils::snapshot_header().id;
-    for change in [
-        StoreChange::RaiseSchema {
+    let entry = StoreLogEntry {
+        change: StoreChange::RaiseSchema {
             version: 0,
-            snapshot: snapshot.clone(),
+            snapshot: test_utils::snapshot_header().id,
         },
-        StoreChange::RaiseFormat {
-            version: 0,
-            snapshot: snapshot.clone(),
-        },
-    ] {
-        let mut entry = test_utils::store_log();
-        entry.change = change;
-        assert!(Object::decode(&encode_frame(4, &entry).unwrap()).is_err());
-    }
+        ..test_utils::store_log()
+    };
+    assert!(Object::StoreLog(entry.clone()).encode().is_err());
+    assert!(Object::decode(&encode_frame(4, &entry).unwrap()).is_err());
 }
 
 #[test]
@@ -247,39 +264,26 @@ fn raises_name_their_audience_through_the_snapshot_id() {
             device: DeviceId(9),
             number: 11,
         };
-        for (change, prefix) in [
-            (
-                StoreChange::RaiseSchema {
-                    version: 3,
-                    snapshot: snapshot.clone(),
-                },
-                vec![11, 0, 0, 0, 3],
-            ),
-            (
-                StoreChange::RaiseFormat {
-                    version: 3,
-                    snapshot: snapshot.clone(),
-                },
-                vec![12, 0, 3],
-            ),
-        ] {
-            let mut expected = prefix;
-            match audience {
-                Audience::Store => expected.push(0),
-                Audience::Circle(id) => {
-                    expected.push(1);
-                    expected.extend(id.0.as_bytes());
-                }
+        let change = StoreChange::RaiseSchema {
+            version: 3,
+            snapshot,
+        };
+        let mut expected = vec![11, 0, 0, 0, 3];
+        match audience {
+            Audience::Store => expected.push(0),
+            Audience::Circle(id) => {
+                expected.push(1);
+                expected.extend(id.0.as_bytes());
             }
-            expected.extend(9u64.to_be_bytes());
-            expected.extend(11u64.to_be_bytes());
-            let entry = StoreLogEntry {
-                change,
-                ..test_utils::store_log()
-            };
-            let bytes = Object::StoreLog(entry.clone()).encode().unwrap();
-            assert_eq!(&bytes[75..], expected);
-            assert_eq!(Object::decode(&bytes).unwrap(), Object::StoreLog(entry));
         }
+        expected.extend(9u64.to_be_bytes());
+        expected.extend(11u64.to_be_bytes());
+        let entry = StoreLogEntry {
+            change,
+            ..test_utils::store_log()
+        };
+        let bytes = Object::StoreLog(entry.clone()).encode().unwrap();
+        assert_eq!(&bytes[75..], expected);
+        assert_eq!(Object::decode(&bytes).unwrap(), Object::StoreLog(entry));
     }
 }

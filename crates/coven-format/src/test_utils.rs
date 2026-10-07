@@ -443,10 +443,6 @@ pub fn store_changes() -> Vec<StoreChange> {
             version: 2,
             snapshot: snapshot.clone(),
         },
-        StoreChange::RaiseFormat {
-            version: 2,
-            snapshot: snapshot.clone(),
-        },
         StoreChange::Reset {
             snapshot: SnapshotId {
                 audience: Audience::Circle(c),
@@ -476,17 +472,6 @@ pub fn objects() -> Vec<Object> {
             },
             ..store_log()
         }),
-        Object::StoreLog(StoreLogEntry {
-            change: StoreChange::RaiseFormat {
-                version: 2,
-                snapshot: SnapshotId {
-                    audience: Audience::Circle(CircleId(Uuid::from_u128(8))),
-                    device: DeviceId(10),
-                    number: 12,
-                },
-            },
-            ..store_log()
-        }),
         Object::JoinRequest(JoinRequest {
             invite: InviteId(Uuid::from_bytes([0x55; 16])),
             keys: member(),
@@ -508,8 +493,8 @@ pub fn objects() -> Vec<Object> {
         store_changes()
             .into_iter()
             .enumerate()
-            .filter_map(|(tag, change)| {
-                if matches!(tag, 0 | 2 | 11 | 12) {
+            .filter_map(|(index, change)| {
+                if matches!(index, 0 | 2 | 11) {
                     return None;
                 }
                 Some(Object::StoreLog(StoreLogEntry {

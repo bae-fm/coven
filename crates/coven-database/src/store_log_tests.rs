@@ -511,26 +511,6 @@ async fn removed_identities_keys_versions_resets_and_every_drop_reason_round_tri
         .await
         .unwrap();
     expected.entries.push(checked(schema));
-    let format = entry(
-        11,
-        StoreChange::RaiseFormat {
-            version: u16::MAX,
-            snapshot: snapshot.clone(),
-        },
-    );
-    replay.state.format.insert(
-        Audience::Store,
-        StoreVersion {
-            number: u16::MAX,
-            snapshot,
-            entry: format.position,
-        },
-    );
-    replay.entries.insert(format.position, EntryOutcome::Kept);
-    db.apply_store_log(checked(format.clone()), replay.clone())
-        .await
-        .unwrap();
-    expected.entries.push(checked(format));
     for (index, audience) in [Audience::Store, Audience::Circle(circle)]
         .into_iter()
         .enumerate()
@@ -541,7 +521,7 @@ async fn removed_identities_keys_versions_resets_and_every_drop_reason_round_tri
             audience: audience.clone(),
         };
         let reset = entry(
-            index as u64 + 12,
+            index as u64 + 11,
             StoreChange::Reset {
                 snapshot: snapshot.clone(),
             },
@@ -659,26 +639,6 @@ async fn audience_versions_round_trip_and_a_failed_raise_keeps_every_audience() 
         db.apply_store_log(checked(schema), replay.clone())
             .await
             .unwrap();
-        let format = entry(
-            number,
-            StoreChange::RaiseFormat {
-                version: version as u16,
-                snapshot: snapshot.clone(),
-            },
-        );
-        number += 1;
-        replay.state.format.insert(
-            audience,
-            StoreVersion {
-                number: version as u16,
-                snapshot,
-                entry: format.position,
-            },
-        );
-        replay.entries.insert(format.position, EntryOutcome::Kept);
-        db.apply_store_log(checked(format), replay.clone())
-            .await
-            .unwrap();
         assert_eq!(db.store_log().await.unwrap().replay, replay);
     }
     let before = db.store_log().await.unwrap();
@@ -741,7 +701,7 @@ async fn store_facts_have_one_row_and_versions_and_resets_require_snapshots() {
         );
         assert!(
             sql.internal_execute(
-                "INSERT INTO _coven_versions(audience,kind,version) VALUES('store','schema',2)",
+                "INSERT INTO _coven_versions(audience,version) VALUES('store',2)",
                 [],
             )
             .is_err(),

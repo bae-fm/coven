@@ -39,8 +39,7 @@ private def readAction (j : Json) : Except String Action := do
   | 8 => pure (.deleteCircle (← nat j "circle"))
   | 9 => pure (.addToCircle (← nat j "circle") (← nat j "member"))
   | 10 => pure (.removeFromCircle (← nat j "circle") (← nat j "member"))
-  | 11 => pure (.raiseVersion .schema (← nat j "version") (← readSnapshot j))
-  | 12 => pure (.raiseVersion .format (← nat j "version") (← readSnapshot j))
+  | 11 => pure (.raiseSchema (← nat j "version") (← readSnapshot j))
   | 13 => pure (.reset (← readSnapshot j))
   | 14 => pure (.setAccess (← nat j "member") (← j.getObjValAs? String "access"))
   | _ => throw "unknown action"
@@ -56,10 +55,6 @@ private def roleNumber : Role → Nat
 private def audienceNumber : Audience → Nat
   | .store => 0
   | .circle c => c + 1
-
-private def kindNumber : VersionKind → Nat
-  | .schema => 0
-  | .format => 1
 
 private def sorted (xs : List Nat) : List Nat := xs.mergeSort (fun a b => decide (a ≤ b))
 
@@ -85,10 +80,8 @@ private def run (j : Json) : Except String Json := do
   let devices := (byKey r.state.devices).map fun (d, m) => toJson [d, m]
   let circles := (byKey r.state.circles).map fun (c, circle) =>
     Json.arr #[toJson c, toJson circle.name, toJson (sorted circle.members)]
-  let versions := (r.state.versions.map fun ((k, a), v) =>
-    (kindNumber k, audienceNumber a, v)).mergeSort
-      (fun x y => decide (x.1 < y.1 ∨ (x.1 = y.1 ∧ x.2.1 ≤ y.2.1)))
-  let versions := versions.map fun (k, a, v) => toJson [k, a, v.number, v.snapshot, v.entry]
+  let versions := byKey (r.state.versions.map fun (a, v) => (audienceNumber a, v))
+  let versions := versions.map fun (a, v) => toJson [a, v.number, v.snapshot, v.entry]
   let resets := byKey (r.state.resets.map fun (a, s) => (audienceNumber a, s))
   let resets := resets.map fun (a, s) => toJson [a, s]
   pure (Json.mkObj [

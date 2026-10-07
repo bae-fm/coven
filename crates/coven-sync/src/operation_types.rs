@@ -20,8 +20,6 @@ pub enum OperationKind {
     WriteSnapshot,
     /// Publish a migrated audience snapshot and its schema raise.
     RaiseSchema,
-    /// Publish an audience snapshot in coven's current format and raise it.
-    RaiseFormat,
     /// Replace readable audiences and replay waiting writes atomically.
     ReloadSnapshots,
     /// Delete objects released by snapshot coverage.

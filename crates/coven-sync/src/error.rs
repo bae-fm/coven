@@ -139,7 +139,7 @@ pub enum SyncError {
 /// A sync step stopped as a whole (E5).
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum SyncFailure {
-    /// A stored format is newer than this implementation.
+    /// A schema or stored object format is newer than this implementation.
     #[error("an update is required")]
     UpdateRequired,
     /// This device or its member has been removed.

@@ -240,13 +240,6 @@ pub enum StoreLogChange {
         /// The snapshot and its audience.
         snapshot: SnapshotId,
     },
-    /// Raises the snapshot audience’s format version.
-    FormatChange {
-        /// The raised version number.
-        version: u16,
-        /// The snapshot and its audience.
-        snapshot: SnapshotId,
-    },
     /// Resets an audience to the named snapshot.
     Reset {
         /// The snapshot and its audience.
@@ -289,9 +282,6 @@ impl From<&StoreChange> for StoreLogChange {
             }
             StoreChange::RaiseSchema { version, snapshot } => {
                 Self::SchemaChange { version, snapshot }
-            }
-            StoreChange::RaiseFormat { version, snapshot } => {
-                Self::FormatChange { version, snapshot }
             }
             StoreChange::Reset { snapshot } => Self::Reset { snapshot },
         }

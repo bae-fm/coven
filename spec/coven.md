@@ -1182,7 +1182,7 @@ Carol's tablet:
   - Each change is one *entry*: add or remove a member, change a role, add
     or remove a device, make, rename or delete a circle
     ([§14](#14-audiences)) or change its members, raise the store's or a
-    circle's schema or format version, or reset the store or a circle to a
+    circle's schema version, or reset the store or a circle to a
     snapshot ([§15](#15-snapshots)).
   - An entry names the store log entries its author had read, and is
     signed with its author's member key.
@@ -1247,8 +1247,8 @@ Carol's tablet:
     and whether it was removed), `_coven_circles` (every circle a kept
     entry made, its name and current key's id, and whether it was deleted),
     `_coven_circle_members`, `_coven_store` (one row: the store's id, name,
-    and current key's id), `_coven_versions` (one row per audience and
-    schema or format kind: its version, snapshot, and raise entry), and
+    and current key's id), `_coven_versions` (one row per audience:
+    its schema version, snapshot, and raise entry), and
     `_coven_resets` (each audience's reset snapshot).
   - Keys themselves are only ever in key custody
     ([§11](#11-keys)); these tables hold their ids.
@@ -1318,7 +1318,7 @@ Carol's tablet:
     removals of someone from the same circle, since otherwise a key one of
     them made would be sealed to the member the other removed
     ([§13](#13-removing-members-and-devices));
-  - they raise one audience's schema or format to the same version with
+  - they raise one audience's schema to the same version with
     different snapshots, reset the same audience to different snapshots, or
     one resets an audience the other raises to a new version
     ([§17](#17-schema-changes), [§19.3](#193-resetting-a-store)).
@@ -2426,18 +2426,18 @@ Carol's tablet:
 - Every object records the format version it was written in, outside its
   encryption, so an older coven tells a newer object from a damaged one,
   and asks for an update instead of reporting it.
-- A format change works like a breaking change of the app's schema, with
-  coven supplying both parts of the migration.
-  - The first device with the newer coven writes a snapshot in the new
-    format, and records the store's new format version in the store
-    log ([§9](#9-members-and-roles)).
-  - A device with an older coven can't sync until its app ships the newer
-    one; it then reloads from that snapshot.
-  - Its writes still waiting to upload are migrated to the new format.
-  - Writes uploaded in the old format that the change hadn't read are
-    migrated too, so a format change never loses anything.
-- Coven keeps the migrations for every older format, since a device can
-  come back with waiting writes from any of them.
+- A newer coven reads every older format and writes the newest. It keeps
+  every older reader, since a device can return with waiting writes from
+  any of them.
+- A write or store log entry already tried is retried in the format of
+  its first attempt, so re-sealing it reproduces the same bytes under the
+  same nonces ([§6](#6-syncing-writes)); a different format would reuse
+  those nonces for different bytes.
+- An older coven that encounters an object in a newer format asks for an
+  update and waits, as with schema additions. Once updated, it reads that
+  object and continues.
+- Format versions belong to objects. A format change needs no store-log
+  entry, snapshot or reload.
 
 ## 18. Operations
 
@@ -2527,7 +2527,7 @@ Carol's tablet:
   2. upload it sealed to each remaining circle member;
   3. upload the store log entry removing them from the circle, naming the
      new key.
-- A breaking schema or format change ([§17](#17-schema-changes)):
+- A breaking schema change ([§17](#17-schema-changes)):
   1. migrate the database, with its migration write, in one transaction;
   2. upload a snapshot in the new version;
   3. upload the store log entry raising the version.

@@ -46,7 +46,7 @@ def deviceTarget : Action → Option Nat
 def circleTarget : Action → Option Nat
   | .makeCircle c _ | .renameCircle c _ | .deleteCircle c |
     .addToCircle c _ | .removeFromCircle c _ => some c
-  | .reset ⟨.circle c, _⟩ | .raiseVersion _ _ ⟨.circle c, _⟩ => some c
+  | .reset ⟨.circle c, _⟩ | .raiseSchema _ ⟨.circle c, _⟩ => some c
   | _ => none
 
 def sameTarget [DecidableEq α] (a b : Option α) : Bool :=
@@ -90,9 +90,9 @@ def specialConflict (va vb : State) (a b : Action) : Bool :=
     | _, .addToCircle c _ => removesCircleKey a c
     | .removeFromCircle c _, _ => removesCircleKey b c
     | _, .removeFromCircle c _ => removesCircleKey a c
-    | .raiseVersion k v s, .raiseVersion l w t => s.audience == t.audience && k == l && v == w && s != t
+    | .raiseSchema v s, .raiseSchema w t => s.audience == t.audience && v == w && s != t
     | .reset s, .reset t => s.audience == t.audience && s != t
-    | .reset s, .raiseVersion _ _ t | .raiseVersion _ _ t, .reset s => s.audience == t.audience
+    | .reset s, .raiseSchema _ t | .raiseSchema _ t, .reset s => s.audience == t.audience
     | _, _ => false) ||
   (match circleTarget b with | some c => deletesCircle va a c | none => false) ||
   (match circleTarget a with | some c => deletesCircle vb b c | none => false)

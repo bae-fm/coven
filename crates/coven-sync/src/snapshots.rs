@@ -324,7 +324,13 @@ impl StoreLogSync {
                 };
                 let path = snapshot_path(&id)?;
                 if let SnapshotTrigger::Raise { version, ref entry } = trigger {
-                    if entry.is_none() && version.in_place(&local.log.replay.state, &audience) {
+                    if entry.is_none()
+                        && super::schema_sync::schema_in_place(
+                            &local.log.replay.state,
+                            &audience,
+                            version,
+                        )
+                    {
                         self.discard_snapshot(record, task).await?;
                         self.database.finish_operation(record.id).await?;
                         return Ok(Progress::Finished(Output::Unit));

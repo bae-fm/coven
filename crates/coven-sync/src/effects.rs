@@ -37,7 +37,7 @@ pub(crate) fn check(view: &StoreLogState, entry: &StoreLogEntry) -> StoreLogChec
         CreateStore { .. } => view.store.is_none(),
         AddMember { .. } | RemoveMember { .. } | ChangeRole { .. } => admin(view, author),
         SetAccess { .. } | AddDevice { .. } | CreateCircle { .. } => member(view, author).is_some(),
-        RaiseSchema { snapshot, .. } | RaiseFormat { snapshot, .. } => match snapshot.audience {
+        RaiseSchema { snapshot, .. } => match snapshot.audience {
             Audience::Store => member(view, author).is_some(),
             Audience::Circle(circle) => in_circle(view, circle, author),
         },
@@ -129,11 +129,6 @@ pub(crate) fn already_in_place(state: &StoreLogState, entry: &StoreLogEntry) -> 
                 *version < v.number || (*version == v.number && *snapshot == v.snapshot)
             })
         }
-        RaiseFormat { version, snapshot } => {
-            state.format.get(&snapshot.audience).is_some_and(|v| {
-                *version < v.number || (*version == v.number && *snapshot == v.snapshot)
-            })
-        }
         Reset { snapshot } => state.resets.get(&snapshot.audience) == Some(snapshot),
     }
 }
@@ -175,12 +170,10 @@ pub(crate) fn check_effect(
             member: who,
             ..
         } => circle(state, *id).is_some_and(|circle| circle.members.contains(who)),
-        RaiseSchema { snapshot, .. } | RaiseFormat { snapshot, .. } | Reset { snapshot } => {
-            match snapshot.audience {
-                Audience::Store => state.store.is_some(),
-                Audience::Circle(id) => circle(state, id).is_some(),
-            }
-        }
+        RaiseSchema { snapshot, .. } | Reset { snapshot } => match snapshot.audience {
+            Audience::Store => state.store.is_some(),
+            Audience::Circle(id) => circle(state, id).is_some(),
+        },
     };
     if !targets_exist {
         return Err(DropReason::TargetGone);
@@ -345,16 +338,6 @@ pub(crate) fn apply_effect(next: &mut StoreLogState, entry: &StoreLogEntry) {
         }
         RaiseSchema { version, snapshot } => {
             next.schema.insert(
-                snapshot.audience.clone(),
-                StoreVersion {
-                    number: *version,
-                    snapshot: snapshot.clone(),
-                    entry: entry.position,
-                },
-            );
-        }
-        RaiseFormat { version, snapshot } => {
-            next.format.insert(
                 snapshot.audience.clone(),
                 StoreVersion {
                     number: *version,

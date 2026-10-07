@@ -24,9 +24,9 @@ pub(super) fn entries(log: &StoreLog) -> impl Iterator<Item = (&StoreLogEntry, &
         }
         crate::effects::apply_effect(&mut state, &entry.entry);
         match &entry.entry.change {
-            StoreChange::RaiseSchema { snapshot, .. }
-            | StoreChange::RaiseFormat { snapshot, .. }
-            | StoreChange::Reset { snapshot } => Some((&entry.entry, snapshot)),
+            StoreChange::RaiseSchema { snapshot, .. } | StoreChange::Reset { snapshot } => {
+                Some((&entry.entry, snapshot))
+            }
             _ => None,
         }
     })
@@ -68,10 +68,7 @@ impl StoreLogSync {
         let readable = self.snapshot_audiences(log)?;
         let mut saved = Vec::new();
         let boundaries: Vec<_> = entries(log)
-            .filter(|(entry, id)| {
-                readable.contains_key(&id.audience)
-                    && !matches!(entry.change, StoreChange::RaiseFormat { .. })
-            })
+            .filter(|(_, id)| readable.contains_key(&id.audience))
             .collect();
         if boundaries.is_empty() {
             return Ok(saved);

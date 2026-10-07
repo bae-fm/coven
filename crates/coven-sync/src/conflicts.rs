@@ -65,12 +65,10 @@ fn circle_target(change: &StoreChange) -> Option<CircleId> {
         | DeleteCircle { circle }
         | AddCircleMember { circle, .. }
         | RemoveCircleMember { circle, .. } => Some(*circle),
-        RaiseSchema { snapshot, .. } | RaiseFormat { snapshot, .. } | Reset { snapshot } => {
-            match snapshot.audience {
-                Audience::Circle(circle) => Some(circle),
-                Audience::Store => None,
-            }
-        }
+        RaiseSchema { snapshot, .. } | Reset { snapshot } => match snapshot.audience {
+            Audience::Circle(circle) => Some(circle),
+            Audience::Store => None,
+        },
         _ => None,
     }
 }
@@ -167,16 +165,6 @@ fn same_meaning(
                 snapshot: t,
             },
         ) => v == w && s == t,
-        (
-            RaiseFormat {
-                version: v,
-                snapshot: s,
-            },
-            RaiseFormat {
-                version: w,
-                snapshot: t,
-            },
-        ) => v == w && s == t,
         (Reset { snapshot: s }, Reset { snapshot: t }) => s == t,
         _ => false,
     }
@@ -223,25 +211,9 @@ fn special(va: &StoreLogCheck, a: &StoreChange, vb: &StoreLogCheck, b: &StoreCha
                 snapshot: t,
             },
         ) => s.audience == t.audience && v == w && s != t,
-        (
-            RaiseFormat {
-                version: v,
-                snapshot: s,
-            },
-            RaiseFormat {
-                version: w,
-                snapshot: t,
-            },
-        ) => s.audience == t.audience && v == w && s != t,
         (Reset { snapshot: s }, Reset { snapshot: t }) => s.audience == t.audience && s != t,
-        (
-            Reset { snapshot: s },
-            RaiseSchema { snapshot: t, .. } | RaiseFormat { snapshot: t, .. },
-        )
-        | (
-            RaiseSchema { snapshot: t, .. } | RaiseFormat { snapshot: t, .. },
-            Reset { snapshot: s },
-        ) => s.audience == t.audience,
+        (Reset { snapshot: s }, RaiseSchema { snapshot: t, .. })
+        | (RaiseSchema { snapshot: t, .. }, Reset { snapshot: s }) => s.audience == t.audience,
         _ => false,
     };
     keys_and_snapshots

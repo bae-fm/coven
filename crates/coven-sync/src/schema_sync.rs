@@ -11,26 +11,11 @@ use coven_database::{OperationRecord, StoreLogState};
 use coven_format::store_log::{SnapshotId, StoreChange};
 use coven_merge::Audience;
 
-impl RaisedVersion {
-    pub(crate) fn in_place(self, state: &StoreLogState, audience: &Audience) -> bool {
-        match self {
-            Self::Schema(version) => state
-                .schema
-                .get(audience)
-                .is_some_and(|v| v.number >= version),
-            Self::Format(version) => state
-                .format
-                .get(audience)
-                .is_some_and(|v| v.number >= version),
-        }
-    }
-
-    fn change(self, snapshot: SnapshotId) -> StoreChange {
-        match self {
-            Self::Schema(version) => StoreChange::RaiseSchema { version, snapshot },
-            Self::Format(version) => StoreChange::RaiseFormat { version, snapshot },
-        }
-    }
+pub(super) fn schema_in_place(state: &StoreLogState, audience: &Audience, version: u32) -> bool {
+    state
+        .schema
+        .get(audience)
+        .is_some_and(|v| v.number >= version)
 }
 
 impl StoreLogSync {
@@ -54,11 +39,10 @@ impl StoreLogSync {
         if local.log.replay.state.store.is_none() || self.pending_reload().await?.is_some() {
             return Ok(Progress::Waiting);
         }
-        let raised = RaisedVersion::Schema(version);
         if self
             .snapshot_audiences(&local.log)?
             .keys()
-            .any(|a| !raised.in_place(&local.log.replay.state, a))
+            .any(|a| !schema_in_place(&local.log.replay.state, a, version))
         {
             return Ok(Progress::Waiting);
         }
@@ -76,9 +60,6 @@ impl StoreLogSync {
         if local.log.replay.state.store.is_none() {
             return Ok(());
         }
-        // Format one is the initial format, with no predecessor to migrate.
-        // A later format uses the same snapshot/entry operation; its codecs own
-        // both conversion parts, including late writes, rather than marking loss.
         // Intent needs the device's committed membership, not unlocked signing
         // keys. Actual snapshot and entry steps check custody and authority.
         let Some(device) = local.log.replay.state.devices.get(&local.device) else {
@@ -96,6 +77,9 @@ impl StoreLogSync {
             return Ok(());
         }
         crate::write_seal::check_upload_version(&local.log, state.schema_version)?;
+        if state.breaking_version == 0 {
+            return Ok(());
+        }
         let records = self.database.operations().await?;
         let mut pending = Vec::new();
         for record in &records {
@@ -119,36 +103,20 @@ impl StoreLogSync {
         // The store raise releases writes, so publish the readable circles first.
         audiences.sort_by_key(|a| matches!(a, Audience::Store));
         for audience in audiences {
-            let mut versions = Vec::new();
-            if state.breaking_version > 0 {
-                versions.push(RaisedVersion::Schema(state.breaking_version));
-            }
-            if coven_format::FORMAT_VERSION
-                > local
-                    .log
-                    .replay
-                    .state
-                    .format
-                    .get(&audience)
-                    .map_or(1, |v| v.number)
+            let version = state.breaking_version;
+            if !schema_in_place(&local.log.replay.state, &audience, version)
+                && !pending.contains(&(audience.clone(), version))
             {
-                versions.push(RaisedVersion::Format(coven_format::FORMAT_VERSION));
-            }
-            for version in versions {
-                if !version.in_place(&local.log.replay.state, &audience)
-                    && !pending.contains(&(audience.clone(), version))
-                {
-                    self.start_snapshot_task(SnapshotJob::Write {
-                        audience: audience.clone(),
-                        device: local.device,
-                        trigger: SnapshotTrigger::Raise {
-                            version,
-                            entry: None,
-                        },
-                        session: None,
-                    })
-                    .await?;
-                }
+                self.start_snapshot_task(SnapshotJob::Write {
+                    audience,
+                    device: local.device,
+                    trigger: SnapshotTrigger::Raise {
+                        version,
+                        entry: None,
+                    },
+                    session: None,
+                })
+                .await?;
             }
         }
         Ok(())
@@ -158,7 +126,7 @@ impl StoreLogSync {
         &mut self,
         record: &OperationRecord,
         mut task: SnapshotTask,
-        version: RaisedVersion,
+        version: u32,
         snapshot: SnapshotId,
     ) -> Result<Progress, SyncError> {
         let mut data = Data::Snapshots(task.clone());
@@ -186,7 +154,7 @@ impl StoreLogSync {
         if let Some(damaged) = report.damaged_objects.into_iter().next() {
             return Err(damaged.into());
         }
-        if version.in_place(&local.log.replay.state, &snapshot.audience) {
+        if schema_in_place(&local.log.replay.state, &snapshot.audience, version) {
             self.clear_snapshot_files(record, &mut task).await?;
             self.database.finish_operation(record.id).await?;
             return Ok(Progress::Finished(Output::Unit));
@@ -195,7 +163,7 @@ impl StoreLogSync {
         self.database
             .prepare_operation_entry(
                 member.member_id(),
-                version.change(snapshot),
+                StoreChange::RaiseSchema { version, snapshot },
                 move |log, entry| {
                     let sealed = crate::store_log_keys::seal(log, entry, ring.as_ref(), &member)?;
                     data.set_entry(Some(entry.clone()))?;

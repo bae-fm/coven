@@ -244,7 +244,7 @@ theorem effect_references {s t : State} {w : Nat} {e : Entry}
                 rw [(withoutMember_members hn).2] at hq
                 exact hs.circles c circle (lookup_some_mem he) q (List.mem_filter.mp hq).1
           · cases h
-  | raiseVersion kind version snapshot =>
+  | raiseSchema version snapshot =>
       simp only [effect, ha] at h
       split at h
       · cases h; exact ⟨hs.devices, hs.nonempty, hs.circles⟩

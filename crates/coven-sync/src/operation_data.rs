@@ -1,6 +1,6 @@
 //! Each operation's retained intent and completed steps.
 
-use crate::snapshot_data::{RaisedVersion, SnapshotJob, SnapshotTask, SnapshotTrigger};
+use crate::snapshot_data::{SnapshotJob, SnapshotTask, SnapshotTrigger};
 use crate::{InviteAccess, OperationKind, SyncError};
 use coven_database::{NewOperation, OperationRecord, OperationUpdate};
 use coven_format::{
@@ -119,12 +119,9 @@ impl Data {
             Self::Entry(work) => work.intent.kind(),
             Self::Snapshots(task) => match task.job {
                 SnapshotJob::Write {
-                    trigger: SnapshotTrigger::Raise { version, .. },
+                    trigger: SnapshotTrigger::Raise { .. },
                     ..
-                } => match version {
-                    RaisedVersion::Schema(_) => OperationKind::RaiseSchema,
-                    RaisedVersion::Format(_) => OperationKind::RaiseFormat,
-                },
+                } => OperationKind::RaiseSchema,
                 crate::snapshot_data::SnapshotJob::Write {
                     trigger: crate::snapshot_data::SnapshotTrigger::Reset,
                     ..
@@ -273,7 +270,6 @@ impl OperationKind {
             Self::Reset => "reset",
             Self::WriteSnapshot => "write-snapshot",
             Self::RaiseSchema => "raise-schema",
-            Self::RaiseFormat => "raise-format",
             Self::ReloadSnapshots => "reload-snapshots",
             Self::Retention => "retention",
             Self::RemoveMember => "remove-member",

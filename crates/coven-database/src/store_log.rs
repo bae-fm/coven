@@ -61,7 +61,7 @@ pub struct StoreLogReplay {
 
 /// Store-log state, including removed identities needed to check older writes (§10).
 ///
-/// Schema and format versions belong to each audience: the store's versions are
+/// Schema versions belong to each audience: the store's version is
 /// under [`Audience::Store`], and each circle has its own. A version is absent
 /// until a kept raise selects it, as in Appendix C. These are independent of the
 /// local app migration version returned by [`crate::Database::schema_version`].
@@ -76,9 +76,7 @@ pub struct StoreLogState {
     /// Every circle made by a kept entry, including deleted circles.
     pub circles: BTreeMap<CircleId, StoreCircle>,
     /// The selected schema raise per audience; creation itself carries no raise.
-    pub schema: BTreeMap<Audience, StoreVersion<u32>>,
-    /// The selected format raise per audience; creation itself carries no raise.
-    pub format: BTreeMap<Audience, StoreVersion<u16>>,
+    pub schema: BTreeMap<Audience, StoreVersion>,
     /// The last kept reset of each audience (§19.3).
     pub resets: BTreeMap<Audience, SnapshotId>,
 }
@@ -134,9 +132,9 @@ pub struct StoreCircle {
 
 /// A selected version raise and the snapshot it chose (§17).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StoreVersion<N> {
-    /// The raised schema or format version.
-    pub number: N,
+pub struct StoreVersion {
+    /// The raised schema version.
+    pub number: u32,
     /// The snapshot in this version.
     pub snapshot: SnapshotId,
     /// The kept raise that selected it.

@@ -368,13 +368,6 @@ impl StoreLogSync {
         {
             return Err(SyncFailure::Removed.into());
         }
-        if state
-            .format
-            .values()
-            .any(|version| version.number > coven_format::FORMAT_VERSION)
-        {
-            return Err(SyncFailure::UpdateRequired.into());
-        }
         Ok(())
     }
 
@@ -462,13 +455,10 @@ impl StoreLogSync {
             .schema
             .keys()
             .chain(after.schema.keys())
-            .chain(before.format.keys())
-            .chain(after.format.keys())
             .chain(before.resets.keys())
             .chain(after.resets.keys())
             .filter(|audience| {
                 before.schema.get(*audience) != after.schema.get(*audience)
-                    || before.format.get(*audience) != after.format.get(*audience)
                     || before.resets.get(*audience) != after.resets.get(*audience)
             })
             .cloned()

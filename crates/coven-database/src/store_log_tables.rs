@@ -10,11 +10,7 @@ use coven_format::{
 };
 use coven_foundation::id_source::{CircleId, DeviceId, KeyId, StoreId};
 use coven_merge::Audience;
-use rusqlite::{
-    params,
-    types::{FromSql, Type},
-    Row, ToSql,
-};
+use rusqlite::{params, types::Type, Row};
 
 use crate::{
     sqlite::DatabaseConnection,
@@ -194,8 +190,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
         })?
         .into_iter()
         .next();
-    state.schema = read_versions(database, "schema")?;
-    state.format = read_versions(database, "format")?;
+    state.schema = read_versions(database)?;
     state.resets = database
         .query(
             "SELECT audience,snapshot_device,snapshot_number
@@ -218,15 +213,14 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
     Ok(log)
 }
 
-fn read_versions<N: FromSql>(
+fn read_versions(
     database: &DatabaseConnection,
-    kind: &str,
-) -> Result<BTreeMap<Audience, StoreVersion<N>>, DbError> {
+) -> Result<BTreeMap<Audience, StoreVersion>, DbError> {
     Ok(database
         .query(
             "SELECT version,snapshot_device,snapshot_number,entry_device,entry_number,audience
-             FROM _coven_versions WHERE kind=?1",
-            [kind],
+             FROM _coven_versions",
+            [],
             |row| {
                 let audience = audience(&row.get::<_, String>(5)?)?;
                 Ok((
@@ -346,10 +340,7 @@ pub(crate) fn replace(
         )?;
     }
     for (audience, version) in &state.schema {
-        put_version(database, "schema", audience, version)?;
-    }
-    for (audience, version) in &state.format {
-        put_version(database, "format", audience, version)?;
+        put_version(database, audience, version)?;
     }
     for (audience, snapshot) in &state.resets {
         database.internal_execute(
@@ -365,18 +356,16 @@ pub(crate) fn replace(
     Ok(())
 }
 
-fn put_version<N: ToSql>(
+fn put_version(
     database: &DatabaseConnection,
-    kind: &str,
     audience: &Audience,
-    version: &StoreVersion<N>,
+    version: &StoreVersion,
 ) -> Result<(), DbError> {
     database.internal_execute(
-        "INSERT INTO _coven_versions(kind,audience,version,snapshot_device,snapshot_number,
+        "INSERT INTO _coven_versions(audience,version,snapshot_device,snapshot_number,
                                     entry_device,entry_number)
-         VALUES(?1,?2,?3,?4,?5,?6,?7)",
+         VALUES(?1,?2,?3,?4,?5,?6)",
         params![
-            kind,
             audience_text(audience),
             version.number,
             version.snapshot.device.0.to_be_bytes().as_slice(),

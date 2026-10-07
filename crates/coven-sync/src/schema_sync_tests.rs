@@ -596,51 +596,7 @@ async fn reference_checks_do_not_reject_writes_from_before_a_table_rename() {
     assert_eq!(title, "Groceries");
 }
 
-use crate::{
-    operation_data::Data,
-    snapshot_data::{RaisedVersion, SnapshotJob, SnapshotTask, SnapshotTrigger},
-};
-
-#[tokio::test]
-async fn the_current_format_uses_raise_publication_without_losing_waiting_or_late_writes() {
-    let storage = storage();
-    let mut devices = group(storage.clone(), 3).await;
-    seed(&mut devices).await;
-    sql(&devices[1].db, "UPDATE notes SET title='Offline'").await;
-    sql(&devices[2].db, "UPDATE notes SET body='Late'").await;
-    devices[2].sync.upload_writes().await.unwrap();
-    let data = Data::Snapshots(SnapshotTask {
-        job: SnapshotJob::Write {
-            audience: Audience::Store,
-            device: DeviceId(1),
-            trigger: SnapshotTrigger::Raise {
-                version: RaisedVersion::Format(coven_format::FORMAT_VERSION),
-                entry: None,
-            },
-            session: None,
-        },
-        temporary: Vec::new(),
-    });
-    devices[0]
-        .db
-        .start_operation(data.new_operation("coven").unwrap())
-        .await
-        .unwrap();
-    devices[0].log.sync_store_log().await.unwrap();
-    sync_all(&mut devices).await;
-    for device in &devices {
-        let log = device.db.store_log().await.unwrap();
-        assert_eq!(
-            log.replay.state.format[&Audience::Store].number,
-            coven_format::FORMAT_VERSION
-        );
-        assert_eq!(
-            rows(&device.db).await[0],
-            ("42".into(), "Offline".into(), "Late".into())
-        );
-        assert!(device.db.lost_values().await.unwrap().is_empty());
-    }
-}
+use crate::operation_data::Data;
 
 #[tokio::test]
 async fn a_newer_snapshot_format_requires_an_update_and_can_resume_after_replacement() {

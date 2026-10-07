@@ -814,7 +814,8 @@ async fn only_newer_envelopes_require_an_update() {
             } else {
                 object::path(first)
             };
-            let mut bytes = storage.read(&path).await.unwrap();
+            let original = storage.read(&path).await.unwrap();
+            let mut bytes = original.clone();
             bytes[2] = version;
             storage.delete(&path).await.unwrap();
             storage.create(&path, &bytes).await.unwrap();
@@ -825,6 +826,20 @@ async fn only_newer_envelopes_require_an_update() {
             } else {
                 assert_eq!(result.unwrap().damaged_objects[0].path, path.as_str());
             }
+            assert!(b.log().await.entries.is_empty());
+            assert!(b.db.operations().await.unwrap().is_empty());
+            assert!(storage
+                .list(&ObjectPrefix::snapshots())
+                .await
+                .unwrap()
+                .is_empty());
+            assert_eq!(storage.read(&path).await.unwrap(), bytes);
+            storage.delete(&path).await.unwrap();
+            storage.create(&path, &original).await.unwrap();
+            let report = b.sync().await;
+            assert!(report.damaged_objects.is_empty());
+            assert_eq!(b.log().await, a.log().await);
+            assert!(b.db.operations().await.unwrap().is_empty());
         }
     }
 }

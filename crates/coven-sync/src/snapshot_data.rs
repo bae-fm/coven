@@ -120,15 +120,9 @@ pub(crate) enum SnapshotTrigger {
     Requested,
     Reset,
     Raise {
-        version: RaisedVersion,
+        version: u32,
         entry: Option<Vec<u8>>,
     },
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum RaisedVersion {
-    Schema(u32),
-    Format(u16),
 }
 
 /// The journal uses the canonical snapshot path to retain the format's identity.

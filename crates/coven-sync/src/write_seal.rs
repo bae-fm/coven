@@ -91,13 +91,6 @@ pub(crate) fn check_member(
     {
         return Err(SyncFailure::Removed.into());
     }
-    if state
-        .format
-        .values()
-        .any(|v| v.number > coven_format::FORMAT_VERSION)
-    {
-        return Err(SyncFailure::UpdateRequired.into());
-    }
     Ok(())
 }
 
