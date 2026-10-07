@@ -322,8 +322,8 @@ impl Database {
     /// Stream an audience's plaintext snapshot frames from one committed reader
     /// transaction. The consumer can seal and upload each frame as it arrives;
     /// commits on the writer connection continue throughout this call.
-    /// Replayed waiting writes beyond recorded coverage return `ReloadPending` before
-    /// any frame is emitted.
+    /// Applied parts beyond recorded coverage return
+    /// [`crate::SnapshotWriteError::IncompletePositions`] before any frame is emitted.
     pub async fn write_snapshot<F, E>(
         &self,
         id: coven_format::store_log::SnapshotId,
@@ -352,8 +352,8 @@ impl Database {
     /// Load authenticated plaintext supplied by sync, reading at most 64 KiB
     /// at a time. The audience's history, derived visibility, coverage and local
     /// waiting writes commit together; read, format and validation errors roll back.
-    /// `SnapshotError::Writes` refuses a snapshot that cannot causally replay
-    /// the waiting parts, preserving the database and queue.
+    /// Waiting parts whose causal history is absent remain pending until that
+    /// history arrives, independently of their upload progress.
     pub async fn load_snapshot<R>(
         &self,
         expected: coven_format::store_log::SnapshotId,

@@ -25,6 +25,12 @@ const COLUMNS: &str = "SELECT c.table_name,c.column_name FROM coven_columns c
 /// A snapshot failed to read, encode or reach its plaintext consumer.
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotWriteError<E> {
+    /// Applied parts extend beyond the positions this snapshot could record.
+    #[error("snapshot positions do not cover applied writes {writes:?}")]
+    IncompletePositions {
+        /// Writes whose effects would be omitted from the snapshot's positions.
+        writes: Vec<WriteId>,
+    },
     /// Reading the committed database state failed.
     #[error(transparent)]
     Database(#[from] DbError),
@@ -61,7 +67,7 @@ pub(crate) fn write<E>(
         |r| Ok(WriteId { device: DeviceId(counter(r.get(0)?)), number: counter(r.get(1)?) }),
     )?.into_iter().filter(|write| !writes.covers(*write)).collect();
     if !pending.is_empty() {
-        return Err(DbError::ReloadPending { writes: pending }.into());
+        return Err(SnapshotWriteError::IncompletePositions { writes: pending });
     }
     database.for_each(
         "SELECT substr(timestamp,9,8),number FROM coven_writes",

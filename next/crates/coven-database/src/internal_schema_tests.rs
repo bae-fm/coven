@@ -500,6 +500,7 @@ async fn only_the_spec_tables_are_created() {
                 "coven_snapshot_parts",
                 "coven_snapshot_pending",
                 "coven_snapshot_schema",
+                "coven_snapshot_waiting",
                 "coven_store",
                 "coven_store_log",
                 "coven_store_log_key_uploads",

@@ -51,6 +51,7 @@ mod snapshot_error;
 mod snapshot_load;
 mod snapshot_loss;
 mod snapshot_metadata;
+mod snapshot_replay;
 mod snapshot_state;
 mod snapshot_write;
 mod sql;

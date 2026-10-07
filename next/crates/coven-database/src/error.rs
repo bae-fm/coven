@@ -453,8 +453,7 @@ pub enum DbError {
     /// This device has used every store-log number.
     #[error("store-log entry numbers exhausted")]
     StoreLogNumberExhausted,
-    /// Reload coverage must catch up before recording a synced write or
-    /// snapshot (§7.1, §15).
+    /// Reload coverage must catch up before recording a synced write (§7.1, §15).
     #[error("reload is waiting for writes {writes:?}")]
     ReloadPending {
         /// Positions that must be consumed before this operation can continue.

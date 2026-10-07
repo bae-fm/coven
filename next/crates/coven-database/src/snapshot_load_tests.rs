@@ -769,7 +769,7 @@ async fn removing_a_file_in_a_snapshot_discards_bytes_only_after_a_successful_co
 }
 
 #[tokio::test]
-async fn a_snapshot_must_cover_the_causal_past_of_waiting_changes() {
+async fn waiting_changes_replay_after_their_missing_own_predecessor() {
     for (uploaded_sql, waiting_sql) in [
         (
             "UPDATE notes SET title='second'",
@@ -787,25 +787,23 @@ async fn a_snapshot_must_cover_the_causal_past_of_waiting_changes() {
             .unwrap();
         let old = frames(&db, Audience::Store).await.concat();
         sql(&db, uploaded_sql).await.unwrap();
+        let missing = records(&db).pop().unwrap();
         let ready = frames(&db, Audience::Store).await.concat();
         db.inspect_writer(|db| {
             db.internal_execute("DELETE FROM coven_uploads", [])
                 .unwrap()
         });
         sql(&db, waiting_sql).await.unwrap();
-        let before = contents(&db);
+        let waiting = records(&db);
         let expected = frames(&db, Audience::Store).await;
-        let result = db
-            .load_snapshot(id(Audience::Store), Cursor::new(old))
-            .await;
-        assert!(
-            matches!(
-                result,
-                Err(DbError::Snapshot(crate::SnapshotError::Writes { .. }))
-            ),
-            "a waiting change cannot precede its causal past: {result:?}"
-        );
-        assert_eq!(contents(&db), before);
+        for _ in 0..2 {
+            db.load_snapshot(id(Audience::Store), Cursor::new(old.clone()))
+                .await
+                .unwrap();
+            assert_eq!(records(&db), waiting);
+        }
+        db.apply_downloaded(missing.into()).await.unwrap();
+        assert_eq!(frames(&db, Audience::Store).await, expected);
         db.load_snapshot(id(Audience::Store), Cursor::new(ready))
             .await
             .unwrap();
@@ -866,9 +864,7 @@ async fn replay_cannot_advance_common_positions_past_unconsumed_dependencies() {
     assert!(
         matches!(
             result,
-            Err(crate::SnapshotWriteError::Database(
-                DbError::ReloadPending { .. }
-            ))
+            Err(crate::SnapshotWriteError::IncompletePositions { .. })
         ),
         "{result:?}"
     );

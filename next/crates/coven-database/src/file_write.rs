@@ -349,7 +349,8 @@ impl<'a> FileWrite<'a> {
 
     /// Retain originals and owned copies while a current row still names them,
     /// including rows temporarily removed by constraints. Historical generations
-    /// and deleted circles cannot keep a file alive. Audience moves keep its identity.
+    /// and deleted circles cannot keep a file alive. Pending reload parts retain
+    /// their files until applied. Audience moves keep a file's identity.
     pub(crate) fn retain_rows(
         &self,
         keys: BTreeSet<AppKey>,
@@ -358,6 +359,7 @@ impl<'a> FileWrite<'a> {
         let db = self.database;
         let visible = AppView::after(db, self.schema);
         let store = crate::merge_store::MergeStore::new(db, &visible);
+        let mut waiting_files = crate::snapshot_replay::files(db, self.schema, deleted)?;
         for key in keys {
             let Some(file) = &self.schema.declaration(&key.0).files else {
                 continue;
@@ -377,7 +379,7 @@ impl<'a> FileWrite<'a> {
             if identities.is_empty() {
                 continue;
             }
-            let mut retained = BTreeSet::new();
+            let mut retained = waiting_files.remove(&key).unwrap_or_default();
             for (audience, generation) in db.query(
                 "SELECT audience,max(generation) FROM coven_rows
                  WHERE table_name=?1 AND key=?2 GROUP BY audience",

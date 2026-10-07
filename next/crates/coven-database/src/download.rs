@@ -135,7 +135,8 @@ pub(crate) fn apply(
             )));
         }
         let deleted = crate::store_log_tables::deleted_circles(database)?;
-        let affected = apply_opened(database, schema, download, &deleted)?;
+        let mut affected = apply_opened(database, schema, download, &deleted)?;
+        affected.extend(crate::snapshot_replay::apply(database, schema, &deleted)?);
         files.retain_rows(affected, &deleted)?;
         files.before_commit()?;
         Ok(ApplyOutcome::Applied)
@@ -183,11 +184,6 @@ pub(crate) fn apply_opened(
                 });
             }
         } else {
-            let missing =
-                crate::snapshot_coverage::missing_past(database, &part.audience, &record.header)?;
-            if !missing.is_empty() {
-                return Err(crate::SnapshotError::Writes { missing }.into());
-            }
             kept.push(part);
         }
     }

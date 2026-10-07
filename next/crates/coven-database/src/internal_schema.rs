@@ -144,6 +144,14 @@ macro_rules! coven_tables {
                 number BLOB NOT NULL CHECK(length(number)=8 AND number>x'0000000000000000')
             ) STRICT, WITHOUT ROWID;
         ");
+        $visit!(coven_snapshot_waiting, "
+            CREATE TABLE coven_snapshot_waiting (
+                device BLOB NOT NULL CHECK(length(device)=8),
+                number BLOB NOT NULL CHECK(length(number)=8 AND number>x'0000000000000000'),
+                record BLOB NOT NULL,
+                PRIMARY KEY(device,number)
+            ) STRICT;
+        ");
         $visit!(coven_snapshot_parts, "
             CREATE TABLE coven_snapshot_parts (
                 audience TEXT NOT NULL,

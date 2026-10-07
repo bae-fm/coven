@@ -17,12 +17,6 @@ pub enum SnapshotError {
         /// Version prepared on the database connection.
         database: u32,
     },
-    /// Replaying a waiting write would precede causal history absent from this audience.
-    #[error("snapshot needs prior writes {missing:?} before replaying waiting changes")]
-    Writes {
-        /// Causal positions not covered by the snapshot or earlier replayed writes.
-        missing: Vec<coven_merge::WriteId>,
-    },
     /// Store-log entries are not carried by snapshots and must be applied first.
     #[error("snapshot needs store-log entries {missing:?}")]
     StoreLog {

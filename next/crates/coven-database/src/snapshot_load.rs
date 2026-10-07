@@ -5,7 +5,7 @@ use crate::removal_view::DatabaseRemovalView;
 use crate::snapshot_error::{invalid, SnapshotError};
 use crate::snapshot_metadata::SnapshotMetadata;
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::{audience_text, decoded, encoded};
+use crate::write_encoding::{audience_text, encoded};
 use crate::write_rows::AppView;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
@@ -137,30 +137,8 @@ pub(crate) fn load(
         let mut affected = crate::write_apply::WriteApply::new(database, schema, &current, &visible, &visible, &deleted)
             .replace(&old, touched)?;
         crate::snapshot_state::drop_tables(database)?;
-        // Queue records and their original numbers stay in place. Only this
-        // audience's parts are replayed; other audiences kept their histories.
-        database.for_each(
-            "SELECT record FROM coven_uploads ORDER BY device,number",
-            [],
-            |r| {
-                let mut record = decoded(coven_format::write_stream::decode_plaintext(
-                    &r.get::<_, Vec<u8>>(0)?,
-                ))?;
-                record.parts.retain(|part| part.audience == expected.audience);
-                let write = record.header.position;
-                // A queue entry without this audience's part is still a causal
-                // predecessor of later waiting writes. Count that no-op only
-                // when this audience already covers its own prior reads.
-                let replayed = !crate::snapshot_coverage::covers(database, &expected.audience, write)?
-                    && (!record.parts.is_empty()
-                        || crate::snapshot_coverage::missing_past(database, &expected.audience, &record.header)?.is_empty());
-                affected.extend(crate::download::apply_opened(database, schema, record.into(), &deleted)?);
-                if replayed {
-                    crate::snapshot_coverage::replayed(database, &expected.audience, write)?;
-                }
-                Ok::<_, DbError>(())
-            },
-        )?;
+        crate::snapshot_replay::retain_queue(database)?;
+        affected.extend(crate::snapshot_replay::apply(database, schema, &deleted)?);
         // Intermediate replay states may not name a file restored by a later
         // waiting write. Retention follows the final state of this transaction.
         files.retain_rows(affected, &deleted)?;
