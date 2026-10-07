@@ -24,12 +24,16 @@ fn code(store: StoreId) -> RestoreCode {
     }
 }
 
-struct RefusedIdentity;
+struct RefusedIdentity(Option<std::path::PathBuf>);
 impl MemberKeyCustody for RefusedIdentity {
     fn unlock(&self) -> Result<Option<MemberKeys>, KeyError> {
         Ok(None)
     }
     fn persist(&self, _: &MemberKeys) -> Result<(), KeyError> {
+        if let Some(path) = &self.0 {
+            std::fs::remove_file(path).unwrap();
+            std::fs::create_dir(path).unwrap();
+        }
         Err(KeyError::ServiceNotRegistered)
     }
     fn forget(&self) -> Result<(), KeyError> {
@@ -81,7 +85,7 @@ async fn custody_failure_restores_the_prior_keys_without_publishing() {
         id,
         keychain,
         KeyCustody::Custom(custody.clone()),
-        IdentityCustody::Custom(Arc::new(RefusedIdentity)),
+        IdentityCustody::Custom(Arc::new(RefusedIdentity(None))),
     )
     .await;
     let error = publish_bootstrap(&pending, code(id), next, owners, database.clone()).unwrap_err();
@@ -101,12 +105,54 @@ async fn custody_failure_restores_the_prior_keys_without_publishing() {
     assert!(scoped.device_id().unwrap().is_none());
     assert!(scoped.storage_credentials().unwrap().is_none());
     assert!(scoped.synced_restore_code().unwrap().is_none());
+    assert!(StorageSettings::new(pending.directory())
+        .read()
+        .unwrap()
+        .is_none());
     assert!(layout.stores().await.unwrap().is_empty());
     database.close().await.unwrap();
 }
 
 #[tokio::test]
-async fn publication_failure_rolls_back_keys_credentials_and_synced_code() {
+async fn settings_rollback_failure_retains_both_causes_and_restores_other_custody() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = StoreLayout::new(root.path().into());
+    let id = StoreId(UuidIds.new_id());
+    let keychain = Keychain::in_memory("commit-test").unwrap();
+    let custody = Arc::new(InMemoryCustody::<StoreKeyring>::empty());
+    let path = root
+        .path()
+        .join("stores")
+        .join(id.to_string())
+        .join("storage.json");
+    let (pending, owners, database) = prepared(
+        &layout,
+        id,
+        keychain,
+        KeyCustody::Custom(custody.clone()),
+        IdentityCustody::Custom(Arc::new(RefusedIdentity(Some(path)))),
+    )
+    .await;
+    let next = StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap());
+    let error = publish_bootstrap(&pending, code(id), next, owners, database.clone()).unwrap_err();
+    let BootstrapError::Cleanup { operation, cleanup } = error else {
+        panic!("rollback failure was discarded: {error}")
+    };
+    assert!(matches!(
+        *operation,
+        BootstrapError::SecureStorage(KeyError::ServiceNotRegistered)
+    ));
+    assert!(matches!(
+        *cleanup,
+        BootstrapError::Sync(SyncError::Storage(_))
+    ));
+    assert!(custody.unlock().unwrap().is_none());
+    assert!(layout.stores().await.unwrap().is_empty());
+    database.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn publication_failure_rolls_back_settings_and_custody() {
     let root = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(root.path().into());
     let id = StoreId(UuidIds.new_id());
@@ -120,6 +166,11 @@ async fn publication_failure_rolls_back_keys_credentials_and_synced_code() {
         IdentityCustody::Keyring,
     )
     .await;
+    let settings = StorageSettings::new(pending.directory());
+    let old_location = StorageConfig::Dropbox {
+        namespace_id: "previous-location".into(),
+    };
+    settings.commit(&old_location).unwrap();
     let marker = root
         .path()
         .join("stores")
@@ -146,6 +197,7 @@ async fn publication_failure_rolls_back_keys_credentials_and_synced_code() {
     assert!(scoped.storage_credentials().unwrap().is_none());
     assert!(scoped.synced_restore_code().unwrap().is_none());
     assert!(scoped.device_id().unwrap().is_none());
+    assert_eq!(settings.read().unwrap(), Some(old_location));
     assert!(layout.stores().await.unwrap().is_empty());
     database.close().await.unwrap();
 }
@@ -174,11 +226,18 @@ async fn cleanup_failure_returns_the_open_handle_with_its_session_keys() {
         .join(id.to_string())
         .join("bootstrap.sealed");
     std::fs::create_dir(leftover).unwrap();
+    let location = RestoreStorage::decode(code.storage.as_bytes())
+        .unwrap()
+        .location;
     let error = publish_bootstrap(&pending, code, ring, owners, database).unwrap_err();
     let BootstrapError::Published { handle, .. } = error else {
         panic!("expected published handle")
     };
     assert_eq!(layout.stores().await.unwrap().len(), 1);
+    assert_eq!(
+        StorageSettings::new(pending.directory()).read().unwrap(),
+        Some(location)
+    );
     assert_eq!(handle.open_app_data(&sealed, b"test").unwrap(), b"retained");
     handle.read(|_| Ok(())).await.unwrap();
     handle.close().await.unwrap();

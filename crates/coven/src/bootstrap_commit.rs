@@ -1,4 +1,4 @@
-//! Publish custody and the loaded directory as the final bootstrap step.
+//! Publish settings, custody and the loaded directory as the final bootstrap step.
 
 use super::*;
 
@@ -23,10 +23,10 @@ pub(super) fn publish_bootstrap(
         None
     };
     let data = RestoreStorage::decode(code.storage.as_bytes()).map_err(SyncError::from)?;
-    StorageSettings::new(directory.clone())
-        .commit(&data.location)
-        .map_err(SyncError::from)?;
+    let settings = StorageSettings::new(directory.clone());
+    let old_settings = settings.read().map_err(SyncError::from)?;
     let commit = || -> Result<(), BootstrapError> {
+        settings.commit(&data.location).map_err(SyncError::from)?;
         keys.persist(&ring)?;
         identity.persist(&code.member_keys)?;
         keychain.set_device_id(owners.device)?;
@@ -75,6 +75,14 @@ pub(super) fn publish_bootstrap(
                     error =
                         combine::<()>(Err(error), Err(cleanup.into())).expect_err("failed commit");
                 }
+            }
+            let rollback = match old_settings {
+                Some(location) => settings.commit(&location),
+                None => settings.remove(),
+            };
+            if let Err(cleanup) = rollback {
+                error = combine::<()>(Err(error), Err(SyncError::from(cleanup).into()))
+                    .expect_err("failed commit");
             }
             return Err(error);
         }
