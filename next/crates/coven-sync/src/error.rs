@@ -69,6 +69,14 @@ pub enum SyncError {
     /// Store-log and snapshot publication wait for the retained reload (§18).
     #[error("snapshot reload {0:?} must finish before publishing entries or snapshots")]
     ReloadPending(crate::OperationId),
+    /// The reset's shared reload failed and must finish before the reset call can.
+    #[error("recovery operation {operation:?} failed: {failure}")]
+    RecoveryBlocked {
+        /// The failed reload operation.
+        operation: crate::OperationId,
+        /// Its retained cause, also available in the blocked-operation report.
+        failure: String,
+    },
     /// Decoding persisted operation data failed; its cause remains available.
     #[error("invalid operation data: {0}")]
     OperationData(#[from] serde_json::Error),

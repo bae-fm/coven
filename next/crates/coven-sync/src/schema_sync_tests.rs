@@ -308,7 +308,11 @@ async fn a_raise_resumes_after_reopening_at_every_publication_step() {
                 .unwrap();
             device
                 .log
-                .operation_step(&record, crate::operation_data::Data::read(&record).unwrap())
+                .operation_step(
+                    &record,
+                    crate::operation_data::Data::read(&record).unwrap(),
+                    &mut crate::SyncReport::default(),
+                )
                 .await
                 .unwrap();
         }
@@ -510,7 +514,11 @@ async fn concurrent_raises_to_different_versions_are_both_kept() {
             .unwrap();
         devices[1]
             .log
-            .operation_step(&record, crate::operation_data::Data::read(&record).unwrap())
+            .operation_step(
+                &record,
+                crate::operation_data::Data::read(&record).unwrap(),
+                &mut crate::SyncReport::default(),
+            )
             .await
             .unwrap();
     }
@@ -683,7 +691,11 @@ async fn a_migration_waits_for_an_operation_that_already_reserved_the_entry_numb
                 .unwrap();
             device
                 .log
-                .operation_step(&record, Data::read(&record).unwrap())
+                .operation_step(
+                    &record,
+                    Data::read(&record).unwrap(),
+                    &mut crate::SyncReport::default(),
+                )
                 .await
                 .unwrap();
         } else {
@@ -727,5 +739,230 @@ async fn a_migration_waits_for_an_operation_that_already_reserved_the_entry_numb
         );
         operations.close().await.unwrap();
         files.close().await;
+    }
+}
+
+mod recovery {
+    use super::*;
+    use coven_database::{CovenError, DbError};
+    use coven_foundation::files::FileName;
+
+    fn recovery_migrations(convert: bool) -> Vec<Migration> {
+        let mut change =
+            Migration::sql(2, "rename", "ALTER TABLE notes RENAME COLUMN title TO name");
+        if convert {
+            change = change.writes(|row| {
+                row.rename_column("title", "name");
+                Ok(())
+            });
+        }
+        vec![
+            initial(),
+            change,
+            Migration::sql(3, "color", "ALTER TABLE notes ADD COLUMN color TEXT"),
+        ]
+    }
+
+    async fn sealed_bytes(db: &Database) -> Vec<u8> {
+        db.read_oldest_upload(|upload| {
+            let coven_database::WaitingUpload::Sealed { bytes, .. } = upload else {
+                panic!("attempted write must remain sealed")
+            };
+            let mut result = Vec::new();
+            for chunk in bytes {
+                result.extend(chunk?);
+            }
+            Ok::<_, DbError>(result)
+        })
+        .await
+        .unwrap()
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn recovery_converts_old_waiting_writes_and_preserves_attempted_bytes() {
+        for rebuild in [false, true] {
+            for convert in [false, true] {
+                for attempted in [false, true] {
+                    let storage = storage();
+                    let mut devices = group(storage.clone(), 3).await;
+                    seed(&mut devices).await;
+                    // Detect the disagreement before the device authors offline work.
+                    devices[1]
+                        .db
+                        .test_damage_fingerprint(Audience::Store)
+                        .await
+                        .unwrap();
+                    for device in &mut devices {
+                        device.sync.post_positions().await.unwrap();
+                    }
+                    assert_eq!(
+                        devices[1]
+                            .sync
+                            .compare_fingerprints()
+                            .await
+                            .unwrap()
+                            .disagreements
+                            .len(),
+                        2
+                    );
+                    devices[1].clock.set(UNIX_EPOCH + Duration::from_secs(2));
+                    sql(&devices[1].db, "UPDATE notes SET title='Shopping'").await;
+                    let original = devices[1].db.test_queued_writes().await.unwrap().remove(0);
+                    if attempted {
+                        storage
+                            .set_faults(Faults {
+                                fail_next: 1,
+                                ..Faults::none()
+                            })
+                            .await;
+                        assert!(devices[1].sync.upload_writes().await.is_err());
+                    }
+                    let sealed = if attempted {
+                        Some(sealed_bytes(&devices[1].db).await)
+                    } else {
+                        None
+                    };
+                    reopen(
+                        &mut devices[0],
+                        storage.clone(),
+                        vec![SyncedTable::new("notes", RowIdentity::SharedKey)],
+                        recovery_migrations(convert),
+                    )
+                    .await;
+                    devices[0].log.sync_store_log().await.unwrap();
+                    devices[0].sync.upload_writes().await.unwrap();
+                    let device = &mut devices[1];
+                    if rebuild {
+                        let page: i64 = device
+                            .db
+                            .read(|sql| {
+                                Ok(sql.query_row(
+                                    "SELECT rootpage FROM sqlite_schema WHERE name='notes'",
+                                    [],
+                                    |r| r.get(0),
+                                )?)
+                            })
+                            .await
+                            .unwrap();
+                        device.db.close().await.unwrap();
+                        let path = device.directory.database_path();
+                        let mut bytes = std::fs::read(&path).unwrap();
+                        let size = u16::from_be_bytes([bytes[16], bytes[17]]) as usize;
+                        bytes[(page as usize - 1) * size] = 0xff;
+                        std::fs::write(&path, &bytes).unwrap();
+                        let builder = || {
+                            DatabaseBuilder::new(device.directory.clone())
+                                .synced_tables(vec![SyncedTable::new(
+                                    "notes",
+                                    RowIdentity::SharedKey,
+                                )])
+                                .migrations(recovery_migrations(convert))
+                                .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
+                                .clock(device.clock.clone())
+                        };
+                        assert!(matches!(
+                            builder().open().await,
+                            Err(CovenError::Database(DbError::DamagedDatabase))
+                        ));
+                        let lock = device.directory.lock_exclusive().unwrap();
+                        lock.set_device_id(DeviceId(999)).unwrap();
+                        device.db = builder()
+                            .open_reloading_locked(lock, FileName::new("test").unwrap())
+                            .await
+                            .unwrap();
+                        device.sync = DeviceLogSync::new(
+                            storage.clone(),
+                            device.db.clone(),
+                            device.keys.clone(),
+                            device.identity.clone(),
+                        );
+                        device.log = StoreLogSync::new(
+                            storage.clone(),
+                            device.db.clone(),
+                            device.keys.clone(),
+                            device.identity.clone(),
+                            device.clock.clone(),
+                            device.ids.clone(),
+                            device.directory.clone(),
+                        );
+                    } else {
+                        reopen(
+                            device,
+                            storage.clone(),
+                            vec![SyncedTable::new("notes", RowIdentity::SharedKey)],
+                            recovery_migrations(convert),
+                        )
+                        .await;
+                    }
+                    let queue = device.db.test_queued_writes().await.unwrap();
+                    let waiting = queue
+                        .iter()
+                        .find(|w| w.header.position == original.header.position)
+                        .unwrap();
+                    assert_eq!(waiting.header.timestamp, original.header.timestamp);
+                    assert_eq!(waiting.header.had_read, original.header.had_read);
+                    if attempted {
+                        assert_eq!(waiting, &original);
+                        assert_eq!(sealed_bytes(&device.db).await, sealed.unwrap());
+                    } else {
+                        assert_eq!(
+                            waiting.header.disposition,
+                            if convert {
+                                WriteDisposition::Apply
+                            } else {
+                                WriteDisposition::Lost(3)
+                            }
+                        );
+                        assert_eq!(waiting.header.schema_version, if convert { 3 } else { 1 });
+                    }
+                    device.log.sync_store_log().await.unwrap();
+                    device.log.reload_from_snapshots().await.unwrap();
+                    if rebuild {
+                        device
+                            .log
+                            .make_and_upload_entry(StoreChange::AddDevice {
+                                device: DeviceId(999),
+                                name: "Recovered".into(),
+                            })
+                            .await
+                            .unwrap();
+                        device.db.finish_recovery().await.unwrap();
+                    }
+                    reopen(
+                        &mut devices[2],
+                        storage.clone(),
+                        vec![SyncedTable::new("notes", RowIdentity::SharedKey)],
+                        recovery_migrations(convert),
+                    )
+                    .await;
+                    sync_all(&mut devices).await;
+                    let losses = devices[0].db.lost_values().await.unwrap();
+                    assert_eq!(losses.is_empty(), convert && !attempted);
+                    for device in &mut devices {
+                        assert_eq!(
+                            name(&device.db).await,
+                            if convert && !attempted {
+                                "Shopping"
+                            } else {
+                                "Groceries"
+                            }
+                        );
+                        assert_eq!(device.db.lost_values().await.unwrap(), losses);
+                        device.sync.post_positions().await.unwrap();
+                    }
+                    for device in &mut devices {
+                        assert!(device
+                            .sync
+                            .compare_fingerprints()
+                            .await
+                            .unwrap()
+                            .disagreements
+                            .is_empty());
+                        device.db.close().await.unwrap();
+                    }
+                }
+            }
+        }
     }
 }

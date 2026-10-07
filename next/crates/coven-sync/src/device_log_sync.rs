@@ -228,6 +228,9 @@ impl DeviceLogSync {
                     .map_or(0, |p| p.number),
             })
             .collect();
+        let comparison = self.compare_fingerprints().await?;
+        report.disagreements = comparison.disagreements;
+        report.damaged_objects.extend(comparison.damaged_objects);
         Ok(report)
     }
 
@@ -235,6 +238,106 @@ impl DeviceLogSync {
     /// state. Returns false while any local write awaits upload: clipping only
     /// the position would publish fingerprints that still include those writes.
     pub async fn post_positions(&mut self) -> Result<bool, SyncError> {
+        let Some(positions) = self.current_positions().await? else {
+            return Ok(false);
+        };
+        let key = positions
+            .fingerprints
+            .iter()
+            .find(|f| f.audience == Audience::Store)
+            .expect("store fingerprint")
+            .key;
+        let ring = self
+            .store_keys
+            .unlock()?
+            .ok_or(SyncError::KeyUnavailable(key))?;
+        let path = ObjectPath::positions(positions.device);
+        let prefix = SingleChunkPrefix::PostedPositions(key);
+        let sealed = ring.store_key(key)?.derive().seal_object_chunk(
+            path.as_str(),
+            &prefix.encode()?,
+            0,
+            0,
+            &Object::PostedPositions(positions).encode()?,
+        )?;
+        self.storage
+            .replace(&path, &prefix.encode_chunk(&sealed)?)
+            .await?;
+        Ok(true)
+    }
+
+    /// Compare this committed state with every other device's posted state.
+    /// Only equal write positions, store-log positions, schema versions and
+    /// fingerprint keys are comparable. Damage counts as no post (§19.1).
+    /// No database state is changed and no recovery operation is started.
+    pub async fn compare_fingerprints(&mut self) -> Result<SyncReport, SyncError> {
+        let mut report = SyncReport::default();
+        let Some(own) = self.current_positions().await? else {
+            return Ok(report);
+        };
+        let ring = self.store_keys.unlock()?;
+        for object in self.storage.list(&ObjectPrefix::positions()).await? {
+            if object.path.device() == Some(own.device) {
+                continue;
+            }
+            let bytes = match self.storage.read(&object.path).await {
+                Ok(bytes) => bytes,
+                Err(coven_storage::StorageError::NotFound) => {
+                    tracing::debug!(
+                        path = object.path.as_str(),
+                        "positions disappeared after listing"
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let peer = match crate::posted_positions::open(&bytes, &object.path, ring.as_ref()) {
+                Ok(peer) => peer,
+                Err(SyncError::Damaged(object)) => {
+                    report.damaged_objects.push(object);
+                    continue;
+                }
+                Err(SyncError::KeyUnavailable(key)) => {
+                    tracing::debug!(
+                        path = object.path.as_str(),
+                        ?key,
+                        "positions key is unavailable"
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if own.writes != peer.writes
+                || own.store_log != peer.store_log
+                || own.schema_version != peer.schema_version
+            {
+                continue;
+            }
+            for fingerprint in &own.fingerprints {
+                if peer.fingerprints.iter().any(|other| {
+                    other.audience == fingerprint.audience
+                        && other.key == fingerprint.key
+                        && other.bytes != fingerprint.bytes
+                }) {
+                    let mut devices = [own.device, peer.device];
+                    devices.sort();
+                    report.disagreements.push(crate::Disagreement {
+                        devices,
+                        audience: fingerprint.audience.clone(),
+                        positions: own.writes.0.clone(),
+                        store_log: own.store_log.0.clone(),
+                        schema_version: own.schema_version,
+                    });
+                }
+            }
+        }
+        report
+            .disagreements
+            .sort_by(|a, b| (&a.devices, &a.audience).cmp(&(&b.devices, &b.audience)));
+        Ok(report)
+    }
+
+    async fn current_positions(&self) -> Result<Option<PostedPositions>, SyncError> {
         let local = self.database.local_store_log().await?;
         let member = self
             .member_keys
@@ -275,7 +378,7 @@ impl DeviceLogSync {
         let state = self.database.sync_state(hashers).await?;
         crate::write_seal::check_member(&local.log, &member, local.device)?;
         if state.uploads_pending {
-            return Ok(false);
+            return Ok(None);
         }
         if local.log.positions() != state.store_log {
             return Err(DbError::StoreLogEntriesChanged.into());
@@ -292,25 +395,12 @@ impl DeviceLogSync {
                 }
             })
             .collect();
-        let object = Object::PostedPositions(PostedPositions {
+        Ok(Some(PostedPositions {
             device: state.device,
             writes: state.positions,
             store_log: state.store_log,
             schema_version: state.schema_version,
             fingerprints,
-        });
-        let path = ObjectPath::positions(state.device);
-        let prefix = SingleChunkPrefix::PostedPositions(store.key);
-        let sealed = ring.store_key(store.key)?.derive().seal_object_chunk(
-            path.as_str(),
-            &prefix.encode()?,
-            0,
-            0,
-            &object.encode()?,
-        )?;
-        self.storage
-            .replace(&path, &prefix.encode_chunk(&sealed)?)
-            .await?;
-        Ok(true)
+        }))
     }
 }

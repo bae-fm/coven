@@ -108,6 +108,9 @@ pub enum StoreLockError {
     /// An open writer, reader or deletion prevents the requested access.
     #[error("store {0} is already open")]
     AlreadyOpen(StoreId),
+    /// An explicit database recovery has not published its replacement.
+    #[error("store {0} requires open_reloading to finish database recovery")]
+    RecoveryPending(StoreId),
     /// A supplied lock protects a different directory.
     #[error("lock does not protect store {0}")]
     WrongDirectory(StoreId),
@@ -173,6 +176,11 @@ pub(crate) fn acquire(directory: &Path, id: StoreId) -> Result<StoreLock, StoreL
             id,
         },
     })
+}
+
+pub(super) fn exclude_readers(directory: &Path, id: StoreId) -> Result<LockedFile, StoreLockError> {
+    let _layout = lock_layout(directory.parent().expect("store parent"))?;
+    try_lock(&lock_paths(directory, id)[1], id, false)
 }
 
 pub(crate) fn acquire_reader(

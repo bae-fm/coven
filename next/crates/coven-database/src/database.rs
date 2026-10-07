@@ -40,6 +40,8 @@ use crate::{LiveQuery, LostValue, Read, ReconfigurableLiveQuery, SqlReadContext}
 
 #[path = "database_builder.rs"]
 mod builder;
+#[path = "database_recovery.rs"]
+mod recovery;
 #[path = "database_sync.rs"]
 mod sync;
 pub use builder::DatabaseBuilder;
@@ -64,9 +66,38 @@ struct DatabaseInner {
     clock: ClockRef,
     ids: IdSourceRef,
     staging: Mutex<BTreeSet<coven_foundation::files::FileName>>,
+    recovery: Option<coven_foundation::files::DatabaseRecovery>,
 }
 
 impl Database {
+    /// Publish an explicitly recovered database after sync commits its snapshot
+    /// reload. Until then, ordinary writer and reader opens refuse the store.
+    pub async fn finish_recovery(&self) -> Result<(), DbError> {
+        let owner = self.clone();
+        finish_blocking(
+            tokio::task::spawn_blocking(move || {
+                let mut slot = owner.inner.write().expect("database lock poisoned");
+                let inner = slot.as_mut().ok_or(DbError::StoreClosed)?;
+                if let Some(recovery) = &inner.recovery {
+                    let writer = inner
+                        .writer
+                        .lock()
+                        .expect("writer connection lock poisoned");
+                    crate::file_removals::FileRemovals::new(
+                        &writer,
+                        &inner.directory,
+                        &BTreeSet::new(),
+                    )
+                    .finish(Ok::<_, DbError>(()))?;
+                    recovery.finish()?;
+                }
+                inner.recovery = None;
+                Ok(())
+            })
+            .await,
+        )
+    }
+
     /// Open the source selected by a file reference, after checking its row.
     /// No storage operation occurs; nonlocal sources return their location.
     pub async fn open_local_file(

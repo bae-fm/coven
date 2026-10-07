@@ -249,3 +249,307 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     assert!(db.operations().await.unwrap().is_empty());
     db.close().await.unwrap();
 }
+
+mod recovery {
+    use super::*;
+    use coven_storage::Storage;
+
+    fn recovery_tables() -> Vec<SyncedTable> {
+        vec![SyncedTable::new("notes", RowIdentity::SharedKey)]
+    }
+    fn recovery_migrations() -> Vec<Migration> {
+        vec![Migration::sql(1, "notes", "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL); CREATE TABLE scratch(value TEXT)")]
+    }
+
+    #[tokio::test]
+    async fn damaged_database_requires_explicit_reload_and_preserves_readable_waiting_writes() {
+        for readable in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let layout = StoreLayout::new(root.path().into());
+            let app = TestCoven::new();
+            let ids = Arc::new(UuidIds);
+            let directory = app
+                .create_store(&layout, "Recovery", ids.clone())
+                .await
+                .unwrap();
+            let clock = Arc::new(FixedClock::new(UNIX_EPOCH));
+            let storage = Arc::new(
+                MemoryStorage::new(
+                    StorageConfig::S3 {
+                        bucket: "test".into(),
+                        region: "us-east-1".into(),
+                        endpoint: None,
+                        prefix: "recovery".into(),
+                    },
+                    clock.clone(),
+                )
+                .unwrap(),
+            );
+            let member = MemberKeys::generate().unwrap();
+            let identity = Arc::new(InMemoryCustody::new(member.clone()));
+            let key = KeyId(ids.new_id());
+            let keys = Arc::new(InMemoryCustody::new(StoreKeyring::new(
+                StoreKey::generate(key).unwrap(),
+            )));
+            let db = DatabaseBuilder::new(directory.clone())
+                .synced_tables(recovery_tables())
+                .migrations(recovery_migrations())
+                .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
+                .clock(clock.clone())
+                .open()
+                .await
+                .unwrap();
+            let mut sync = StoreLogSync::new(
+                storage.clone(),
+                db.clone(),
+                keys.clone(),
+                identity.clone(),
+                clock.clone(),
+                ids.clone(),
+                directory.clone(),
+            );
+            sync.make_and_upload_entry(StoreChange::CreateStore {
+                store: directory.id(),
+                name: "Recovery".into(),
+                admin: MemberPublicKeys {
+                    signing: member.member_id(),
+                    sealing: member.sealing_public_key(),
+                },
+                access: coven_format::MemberAccess::S3AccessKey {
+                    access_key_id: "owner".into(),
+                },
+                key,
+                device_name: "Original".into(),
+            })
+            .await
+            .unwrap();
+            db.write(|sql| {
+                sql.execute("INSERT INTO notes VALUES('saved','snapshot')", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+            let mut writes = coven_sync::DeviceLogSync::new(
+                storage.clone(),
+                db.clone(),
+                keys.clone(),
+                identity.clone(),
+            );
+            writes.upload_writes().await.unwrap();
+            sync.write_snapshot(Audience::Store).await.unwrap();
+            storage
+                .set_faults(coven_storage::test_utils::Faults {
+                    fail_next: 1,
+                    ..coven_storage::test_utils::Faults::none()
+                })
+                .await;
+            assert!(matches!(
+                sync.make_and_upload_entry(StoreChange::AddDevice {
+                    device: DeviceId(77),
+                    name: "Waiting entry".into(),
+                })
+                .await,
+                Err(SyncError::Storage(_))
+            ));
+            db.write(|sql| {
+                sql.execute("INSERT INTO notes VALUES('waiting','offline')", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+            let files = coven_sync::Files::new(
+                coven_database::FileDatabase::new(db.clone()),
+                directory.clone(),
+                None,
+                clock.clone(),
+                ids.clone(),
+            );
+            let operations = coven_sync::Operations::new(
+                StoreLogSync::disconnected(
+                    db.clone(),
+                    keys.clone(),
+                    identity.clone(),
+                    clock.clone(),
+                    ids.clone(),
+                    directory.clone(),
+                ),
+                files,
+            );
+            let mut pending = Box::pin(operations.create_circle("Waiting operation"));
+            std::future::poll_fn(|cx| {
+                assert!(pending.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            operations.get_members().await.unwrap();
+            drop(pending);
+            operations.close().await.unwrap();
+            let old_device = directory.settings().unwrap().device_id;
+            let scratch: i64 = db
+                .read(|sql| {
+                    Ok(sql.query_row(
+                        "SELECT rootpage FROM sqlite_schema WHERE name='scratch'",
+                        [],
+                        |r| r.get(0),
+                    )?)
+                })
+                .await
+                .unwrap();
+            db.close().await.unwrap();
+            drop(sync);
+            drop(writes);
+            let path = directory.database_path();
+            let mut damaged = std::fs::read(&path).unwrap();
+            if readable {
+                let size = u16::from_be_bytes([damaged[16], damaged[17]]) as usize;
+                damaged[(scratch as usize - 1) * size] = 0xff;
+            } else {
+                damaged[..16].fill(0xff);
+            }
+            std::fs::write(&path, &damaged).unwrap();
+            let builder = || {
+                app.builder(directory.clone())
+                    .synced_tables(recovery_tables())
+                    .migrations(recovery_migrations())
+                    .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
+                    .clock(clock.clone())
+                    .key_custody(KeyCustody::Custom(keys.clone()))
+                    .identity_custody(IdentityCustody::Custom(identity.clone()))
+            };
+            assert!(matches!(
+                builder().open().await,
+                Err(CovenError::Database(DbError::DamagedDatabase))
+            ));
+            assert!(matches!(
+                builder().open_reloading().await,
+                Err(RecoveryError::Sync(SyncError::NoStorage))
+            ));
+            assert_eq!(std::fs::read(&path).unwrap(), damaged);
+            let ring = keys.unlock().unwrap().unwrap();
+            keys.forget().unwrap();
+            assert!(matches!(
+                builder().storage(storage.clone()).open_reloading().await,
+                Err(RecoveryError::NoStoreKeys)
+            ));
+            assert_eq!(std::fs::read(&path).unwrap(), damaged);
+            keys.persist(&ring).unwrap();
+            if readable {
+                let snapshot = storage
+                    .list(&ObjectPrefix::snapshots())
+                    .await
+                    .unwrap()
+                    .remove(0)
+                    .path;
+                let snapshot_bytes = storage.read(&snapshot).await.unwrap();
+                let write = storage
+                    .list(&ObjectPrefix::device_logs())
+                    .await
+                    .unwrap()
+                    .remove(0)
+                    .path;
+                let write_bytes = storage.read(&write).await.unwrap();
+                storage
+                    .corrupt_byte(&snapshot, snapshot_bytes.len() - 1)
+                    .await
+                    .unwrap();
+                storage.delete(&write).await.unwrap();
+                assert!(builder()
+                    .storage(storage.clone())
+                    .open_reloading()
+                    .await
+                    .is_err());
+                assert!(matches!(
+                    builder().open().await,
+                    Err(CovenError::Lock(StoreLockError::RecoveryPending(_)))
+                ));
+                assert!(matches!(
+                    builder().open_read_only().await,
+                    Err(CovenError::Lock(StoreLockError::RecoveryPending(_)))
+                ));
+                storage.delete(&snapshot).await.unwrap();
+                storage
+                    .create_once(&snapshot, &snapshot_bytes)
+                    .await
+                    .unwrap();
+                storage.create_once(&write, &write_bytes).await.unwrap();
+            }
+            let recovered = builder()
+                .storage(storage.clone())
+                .open_reloading()
+                .await
+                .unwrap();
+            let rows = recovered
+                .read(|sql| {
+                    Ok(sql.query("SELECT id FROM notes ORDER BY id", [], |r| {
+                        r.get::<_, String>(0)
+                    })?)
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                rows,
+                if readable {
+                    vec!["saved", "waiting"]
+                } else {
+                    vec!["saved"]
+                }
+            );
+            if readable {
+                recovered.get_members().await.unwrap();
+                assert!(recovered
+                    .get_members()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .flat_map(|member| &member.devices)
+                    .any(|device| *device == DeviceId(77)));
+                assert_eq!(
+                    recovered.circles().list().await.unwrap()[0].name,
+                    "Waiting operation"
+                );
+            }
+            assert_ne!(directory.settings().unwrap().device_id, old_device);
+            let archives: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .filter(|p| {
+                    p.file_name()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .starts_with("damaged-database-")
+                })
+                .collect();
+            assert_eq!(archives.len(), 1);
+            assert_eq!(
+                std::fs::read(archives[0].join("store.db")).unwrap(),
+                damaged
+            );
+            recovered.close().await.unwrap();
+            let db = DatabaseBuilder::new(directory.clone())
+                .synced_tables(recovery_tables())
+                .migrations(recovery_migrations())
+                .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
+                .clock(clock.clone())
+                .open()
+                .await
+                .unwrap();
+            let mut writes = coven_sync::DeviceLogSync::new(
+                storage.clone(),
+                db.clone(),
+                keys.clone(),
+                identity.clone(),
+            );
+            writes.upload_writes().await.unwrap();
+            assert_eq!(
+                storage
+                    .list(&ObjectPrefix::device_logs())
+                    .await
+                    .unwrap()
+                    .len(),
+                if readable { 2 } else { 1 }
+            );
+            db.close().await.unwrap();
+        }
+    }
+}

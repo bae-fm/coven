@@ -47,6 +47,11 @@ impl StoreLogSync {
             Command::Retry(id) => {
                 let record = self.blocked(id).await?;
                 let mut data = Data::read(&record)?;
+                if data.completing_reset(&record) {
+                    if let Some(reload) = self.pending_reload().await? {
+                        self.database.operation_failure(reload, None).await?;
+                    }
+                }
                 let restart = match &mut data {
                     Data::Revoke { result, .. }
                         if matches!(
@@ -105,6 +110,43 @@ impl StoreLogSync {
         let me = member.member_id();
         let state = &local.log.replay.state;
         let intent = match command {
+            Command::Reload => {
+                self.require_member(state, &me)?;
+                let data = Data::Snapshots(crate::snapshot_data::SnapshotTask {
+                    job: crate::snapshot_data::SnapshotJob::Reload {
+                        scope: crate::snapshot_data::ReloadScope::All,
+                        files: None,
+                    },
+                    temporary: Vec::new(),
+                });
+                return Ok(Begun::Operation(
+                    self.database
+                        .start_operation(data.new_operation("reload_from_snapshot")?)
+                        .await?,
+                ));
+            }
+            Command::Reset(audience) => {
+                self.require_reset(state, &audience, &me)?;
+                let method = if audience == coven_merge::Audience::Store {
+                    "reset_store"
+                } else {
+                    "circles.reset"
+                };
+                let data = Data::Snapshots(crate::snapshot_data::SnapshotTask {
+                    job: crate::snapshot_data::SnapshotJob::Write {
+                        audience,
+                        device: local.device,
+                        trigger: crate::snapshot_data::SnapshotTrigger::Reset,
+                        session: None,
+                    },
+                    temporary: Vec::new(),
+                });
+                return Ok(Begun::Operation(
+                    self.database
+                        .start_operation(data.new_operation(method)?)
+                        .await?,
+                ));
+            }
             Command::Members => {
                 return Ok(Begun::Value(Output::Members(
                     state
@@ -281,7 +323,7 @@ impl StoreLogSync {
             Intent::CreateCircle { .. } => "circles.create",
             Intent::AddCircleMember { .. } => "circles.add_member",
             Intent::RemoveCircleMember { .. } => "circles.remove_member",
-            Intent::DeleteCircle { .. } => unreachable!(),
+            Intent::DeleteCircle { .. } | Intent::Reset { .. } => unreachable!(),
         };
         let data = Data::Entry(EntryWork {
             intent,
@@ -320,6 +362,18 @@ impl StoreLogSync {
         }
         self.require_other_admin(state, target)?;
         Ok(access.clone())
+    }
+
+    pub(super) fn require_reset(
+        &self,
+        state: &StoreLogState,
+        audience: &coven_merge::Audience,
+        member: &MemberId,
+    ) -> Result<(), SyncError> {
+        match audience {
+            coven_merge::Audience::Store => self.require_admin(state, member),
+            coven_merge::Audience::Circle(circle) => self.require_circle(state, *circle, member),
+        }
     }
 
     pub(super) fn require_admin(

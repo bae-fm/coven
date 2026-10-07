@@ -118,6 +118,7 @@ pub(crate) struct SavedBoundary {
 pub(crate) enum SnapshotTrigger {
     Growth,
     Requested,
+    Reset,
     Raise {
         version: RaisedVersion,
         entry: Option<Vec<u8>>,
@@ -128,4 +129,25 @@ pub(crate) enum SnapshotTrigger {
 pub(crate) enum RaisedVersion {
     Schema(u32),
     Format(u16),
+}
+
+/// The journal uses the canonical snapshot path to retain the format's identity.
+pub(crate) mod snapshot_id {
+    use super::*;
+    use coven_format::store_log::SnapshotId;
+    pub(crate) fn serialize<S: serde::Serializer>(
+        value: &SnapshotId,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let number = std::num::NonZeroU64::new(value.number)
+            .ok_or_else(|| serde::ser::Error::custom("zero snapshot number"))?;
+        ObjectPath::snapshot(value.audience.clone(), value.device, number).serialize(serializer)
+    }
+    pub(crate) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<SnapshotId, D::Error> {
+        ObjectPath::deserialize(deserializer)?
+            .snapshot_id()
+            .ok_or_else(|| serde::de::Error::custom("not a snapshot path"))
+    }
 }

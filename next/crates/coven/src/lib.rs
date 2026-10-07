@@ -20,7 +20,7 @@ pub use coven_sync::{
     QueuedUpload, RecordedUploadFailure, RowsPinnedLiveQuery, UploadFailure, UploadFailures,
     UploadPhase, UploadQueue, UploadsLiveQuery,
 };
-pub use error::{StoreCreationError, StoreDeletionError};
+pub use error::{RecoveryError, StoreCreationError, StoreDeletionError};
 pub use handle::CovenHandle;
 pub use read_handle::CovenReadHandle;
 
@@ -69,7 +69,7 @@ pub use circles::Circles;
 pub use coven_format::store_log::MemberRole;
 pub use coven_storage::{MemberRemoval, ProviderSignOut, RetainedAccess, RetainedAccessReason};
 pub use coven_sync::{
-    AccessKeyToDelete, BlockedOperation, Circle, CircleError, CircleMemberInfo, Invite,
-    InviteAccess, JoinRequest, MemberInfo, OperationError, OperationId, OperationKind, StartedBy,
-    SyncError, SyncFailure, SyncReport,
+    AccessKeyToDelete, BlockedOperation, Circle, CircleError, CircleMemberInfo, Disagreement,
+    Invite, InviteAccess, JoinRequest, MemberInfo, OperationError, OperationId, OperationKind,
+    StartedBy, SyncError, SyncFailure, SyncReport,
 };

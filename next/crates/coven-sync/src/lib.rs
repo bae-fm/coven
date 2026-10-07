@@ -15,6 +15,7 @@ pub use replay::{replay, replay_entry};
 mod tests;
 
 mod error;
+mod posted_positions;
 mod report;
 mod store_log_keys;
 mod store_log_object;
@@ -23,8 +24,8 @@ pub use coven_database::DropReason;
 pub use device_log_sync::DeviceLogSync;
 pub use error::{SyncError, SyncFailure};
 pub use report::{
-    DamagedObject, DeviceActivity, DroppedEntry, ObjectCheckFailure, StoreLogChange, SyncReport,
-    WaitingWrite,
+    DamagedObject, DeviceActivity, Disagreement, DroppedEntry, ObjectCheckFailure, StoreLogChange,
+    SyncReport, WaitingWrite,
 };
 pub use store_log_sync::StoreLogSync;
 

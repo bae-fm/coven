@@ -4,6 +4,25 @@ use super::{finish_blocking, Database};
 use crate::DbError;
 
 impl Database {
+    /// Inject an agreement fault without changing positions or application rows.
+    /// Recovery tests use the actual incremental sum and production reload path.
+    pub async fn test_damage_fingerprint(
+        &self,
+        audience: coven_merge::Audience,
+    ) -> Result<(), DbError> {
+        let owner = self.clone();
+        finish_blocking(tokio::task::spawn_blocking(move || {
+            let slot = owner.inner.read().expect("database lock poisoned");
+            let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+            let writer = inner.writer.lock().expect("writer lock poisoned");
+            writer.transaction(|db| {
+                db.internal_execute("INSERT INTO coven_fingerprint_sums(audience,sum) VALUES(?1,?2) ON CONFLICT(audience) DO UPDATE SET sum=excluded.sum",
+                    (crate::write_encoding::audience_text(&audience), [37u8;32].as_slice()))?;
+                Ok(())
+            })
+        }).await)
+    }
+
     /// Test transport: read actual queued records without reauthoring their writes.
     pub async fn test_queued_writes(
         &self,

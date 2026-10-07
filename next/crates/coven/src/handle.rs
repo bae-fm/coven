@@ -56,6 +56,14 @@ impl CovenHandle {
     pub async fn confirm_access_key_deleted(&self, key: &str) -> Result<(), SyncError> {
         self.operations.confirm_access_key_deleted(key).await
     }
+    /// Reload this device from snapshots, retaining and replaying its waiting writes (§19.2).
+    pub async fn reload_from_snapshot(&self) -> Result<(), OperationError> {
+        self.operations.reload_from_snapshot().await
+    }
+    /// Reset the store audience from this device as an admin, then reload locally (§19.3).
+    pub async fn reset_store(&self) -> Result<(), SyncError> {
+        self.operations.reset_store().await
+    }
     /// Retry a permanently failed operation from its next unfinished step.
     pub async fn retry_blocked_operation(
         &self,

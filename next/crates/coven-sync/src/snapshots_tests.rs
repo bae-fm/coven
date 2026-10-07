@@ -202,7 +202,11 @@ async fn writing_resumes_after_each_recorded_step_with_identical_ciphertext() {
                     .unwrap();
             assert!(matches!(
                 a.sync
-                    .operation_step(&record, Data::read(&record).unwrap())
+                    .operation_step(
+                        &record,
+                        Data::read(&record).unwrap(),
+                        &mut crate::SyncReport::default()
+                    )
                     .await
                     .unwrap(),
                 Progress::Advanced
@@ -460,7 +464,11 @@ async fn selected_snapshot(device: &mut Device) -> ObjectPath {
         .into_iter()
         .find(|r| r.id == id)
         .unwrap();
-    device.sync.operation_step(&record, data).await.unwrap();
+    device
+        .sync
+        .operation_step(&record, data, &mut crate::SyncReport::default())
+        .await
+        .unwrap();
     let record = device
         .db
         .operations()
@@ -728,7 +736,10 @@ async fn reload_reselects_after_store_log_changes_and_preserves_interleaved_app_
             .into_iter()
             .find(|r| r.id == id)
             .unwrap();
-    a.sync.operation_step(&record, data).await.unwrap();
+    a.sync
+        .operation_step(&record, data, &mut crate::SyncReport::default())
+        .await
+        .unwrap();
     assert!(matches!(
         a.sync
             .make_and_upload_entry(StoreChange::AddDevice {
@@ -757,7 +768,11 @@ async fn reload_reselects_after_store_log_changes_and_preserves_interleaved_app_
             .find(|r| r.id == id)
             .unwrap();
     a.sync
-        .operation_step(&record, Data::read(&record).unwrap())
+        .operation_step(
+            &record,
+            Data::read(&record).unwrap(),
+            &mut crate::SyncReport::default(),
+        )
         .await
         .unwrap();
     let record =

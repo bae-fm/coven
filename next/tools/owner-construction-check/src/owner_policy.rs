@@ -27,11 +27,43 @@ pub(crate) const POLICY: Policy = Policy {
     )),
     composition_roots: &[
         (
+            "crates/coven-foundation/src/files/recovery.rs",
+            "DatabaseRecovery",
+            "check",
+        ),
+        (
             "crates/coven-foundation/src/files/directory.rs",
             "StoreDir",
             "download",
         ),
         ("crates/coven/src/builder.rs", "OpeningStore", "open"),
+        (
+            "crates/coven/src/builder.rs",
+            "OpeningStore",
+            "open_reloading",
+        ),
+        ("crates/coven/src/builder.rs", "OpeningOwners", "sync"),
+        ("crates/coven/src/builder.rs", "OpeningOwners", "handle"),
+        (
+            "crates/coven/src/builder.rs",
+            "CovenBuilder",
+            "open_reloading",
+        ),
+        (
+            "crates/coven-database/src/database_builder.rs",
+            "DatabaseBuilder",
+            "open_reloading_locked",
+        ),
+        (
+            "crates/coven-foundation/src/files/recovery.rs",
+            "DatabaseRecovery",
+            "begin",
+        ),
+        (
+            "crates/coven-foundation/src/files/directory.rs",
+            "StoreDir",
+            "recover_database",
+        ),
         ("crates/coven-sync/src/operations.rs", "Operations", "new"),
         ("crates/coven-sync/src/files_tests.rs", "Fixture", "new"),
         ("crates/coven-sync/src/files_tests.rs", "Fixture", "reopen"),
@@ -95,6 +127,12 @@ pub(crate) const POLICY: Policy = Policy {
     // These methods derive a scoped capability from their injected directory.
     // They do not acquire an unrelated directory or file for another owner.
     capability_factories: &[
+        (
+            "crates/coven-foundation/src/files/directory.rs",
+            "StoreDir",
+            "recover_database",
+            "DatabaseRecovery",
+        ),
         (
             "crates/coven-foundation/src/files/directory.rs",
             "StoreDir",
@@ -180,6 +218,7 @@ pub(crate) const POLICY: Policy = Policy {
         "StoreLock",
         "StoreReadLock",
         "StoreDeletionLock",
+        "DatabaseRecovery",
         "Keychain",
         "StoreKeychain",
         "KeyringCustody",
@@ -204,6 +243,7 @@ pub(crate) const POLICY: Policy = Policy {
         "StoreLock",
         "StoreReadLock",
         "StoreDeletionLock",
+        "DatabaseRecovery",
         "AtomicFile",
         "DownloadFile",
         "FileWriter",

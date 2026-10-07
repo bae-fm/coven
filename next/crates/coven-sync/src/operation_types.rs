@@ -14,6 +14,8 @@ pub type OperationError = crate::SyncError;
 pub enum OperationKind {
     /// Run the app migration batch and publish every readable audience.
     MigrateSchema,
+    /// Snapshot this device and reset one audience to that state.
+    Reset,
     /// Download an uploaded file and conditionally keep it on this device.
     ChangeFileLocation,
     /// Write, upload and retain one audience snapshot.

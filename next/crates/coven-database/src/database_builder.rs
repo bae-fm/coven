@@ -73,13 +73,28 @@ impl DatabaseBuilder {
 
     /// Open one writer under the store lock and four read-only connections.
     pub async fn open(self) -> CovenResult<Database> {
-        finish_blocking(tokio::task::spawn_blocking(move || self.open_graph(None)).await)
+        finish_blocking(tokio::task::spawn_blocking(move || self.open_graph(None, None)).await)
     }
 
     /// Open under a lock already held by the facade while checking restored
     /// device identity. The lock must protect this builder's directory.
     pub async fn open_locked(self, lock: StoreLock) -> CovenResult<Database> {
-        finish_blocking(tokio::task::spawn_blocking(move || self.open_graph(Some(lock))).await)
+        finish_blocking(
+            tokio::task::spawn_blocking(move || self.open_graph(Some(lock), None)).await,
+        )
+    }
+
+    /// Start an explicitly requested replacement, archiving the damaged SQLite
+    /// files and salvaging readable local work. The caller must have checked
+    /// storage and unlocked keys, then reload and call `finish_recovery`.
+    pub async fn open_reloading_locked(
+        self,
+        lock: StoreLock,
+        archive: coven_foundation::files::FileName,
+    ) -> CovenResult<Database> {
+        finish_blocking(
+            tokio::task::spawn_blocking(move || self.open_graph(Some(lock), Some(archive))).await,
+        )
     }
 
     /// Open read-only connections under a shared deletion guard, without
@@ -88,7 +103,11 @@ impl DatabaseBuilder {
         finish_blocking(tokio::task::spawn_blocking(move || self.open_read_graph()).await)
     }
 
-    fn open_graph(self, lock: Option<StoreLock>) -> CovenResult<Database> {
+    fn open_graph(
+        self,
+        lock: Option<StoreLock>,
+        archive: Option<coven_foundation::files::FileName>,
+    ) -> CovenResult<Database> {
         let tables = self.tables.ok_or(CovenError::MissingConfiguration {
             field: "synced_tables",
         })?;
@@ -106,6 +125,13 @@ impl DatabaseBuilder {
             }
             None => self.directory.lock_exclusive()?,
         };
+        let mut recovery = match archive {
+            Some(name) => Some(self.directory.recover_database(&lock, &name)?),
+            None => {
+                self.directory.check_database_recovery()?;
+                None
+            }
+        };
         let settings = lock.settings()?;
         let clock = match self.clock {
             Some(clock) => clock,
@@ -121,15 +147,51 @@ impl DatabaseBuilder {
         let profile = writer.profile_statements();
         writer.check_integrity()?;
         writer.enable_wal()?;
+        let origin = if let Some(recovery) = recovery.as_ref().filter(|r| r.needs_salvage()) {
+            writer.prepare_internal_schema(policy, false)?;
+            let supported = crate::migration::validate_versions(&migrations)?;
+            let waiting_version = match DatabaseConnection::open(
+                recovery.source_database_path(),
+                true,
+                SqlAuthorization::new(&tables),
+            )
+            .and_then(|source| {
+                let version = source.schema_version()?;
+                Ok((source, version))
+            }) {
+                Ok((source, version)) => {
+                    if version > supported {
+                        return Err(crate::MigrationError::SchemaTooNew {
+                            current: version,
+                            supported,
+                        }
+                        .into());
+                    }
+                    super::recovery::salvage(&source, &writer)?;
+                    source.close()?;
+                    Some(version)
+                }
+                Err(error) if super::recovery::damaged(&error) => {
+                    tracing::warn!(%error, "damaged database cannot supply waiting work; archive retained");
+                    None
+                }
+                Err(error) => return Err(error.into()),
+            };
+            crate::migration_run::MigrationOrigin::Snapshot { waiting_version }
+        } else {
+            crate::migration_run::MigrationOrigin::Device(settings.device_id, clock.now())
+        };
         let migrations = writer.prepare_schema(
             &tables,
             &migrations,
             policy,
-            Some((settings.device_id, clock.now())),
+            Some(origin),
             self.migration_operation.as_deref(),
         )?;
-        crate::file_removals::FileRemovals::new(&writer, &self.directory, &BTreeSet::new())
-            .finish(Ok::<_, DbError>(()))?;
+        if recovery.is_none() {
+            crate::file_removals::FileRemovals::new(&writer, &self.directory, &BTreeSet::new())
+                .finish(Ok::<_, DbError>(()))?;
+        }
         let write_schema = crate::write_schema::WriteSchema::read(&writer, tables.clone())?;
         writer.prepare_file_triggers()?;
         let observer = CommitObserver::new();
@@ -143,6 +205,9 @@ impl DatabaseBuilder {
                 true,
                 SqlAuthorization::new(&tables),
             )?));
+        }
+        if let Some(recovery) = &mut recovery {
+            recovery.prepared().map_err(DbError::from)?;
         }
         Ok(Database {
             file_tasks: Arc::new(tokio::sync::RwLock::new(())),
@@ -158,6 +223,7 @@ impl DatabaseBuilder {
                 clock,
                 ids,
                 staging: Mutex::new(BTreeSet::new()),
+                recovery,
             }))),
         })
     }
@@ -169,6 +235,7 @@ impl DatabaseBuilder {
             field: "migrations",
         })?;
         let lock = self.directory.lock_read_only()?;
+        self.directory.check_database_recovery()?;
         let settings = self.directory.settings()?;
         let path = self.directory.database_path();
         let first = DatabaseConnection::open(&path, true, SqlAuthorization::new(&tables))?;

@@ -97,9 +97,20 @@ impl CovenBuilder {
     /// file work. An empty journal needs no keys; resumed steps read keys when
     /// needed. No sync loop starts, and local database calls need no unlocked key.
     pub async fn open(self) -> CovenResult<CovenHandle> {
-        crate::coven::blocking(move || self.open_graph())
+        crate::coven::blocking(move || self.open_graph(false))
             .await?
             .open()
+            .await
+    }
+
+    /// Recover a damaged database from storage, preserving readable waiting work.
+    /// Storage and unlocked keys are required before any database file moves.
+    /// The damaged SQLite files remain in a named archive. An interrupted reload
+    /// must be retried explicitly; ordinary opens refuse its unpublished state.
+    pub async fn open_reloading(self) -> Result<CovenHandle, RecoveryError> {
+        crate::coven::blocking(move || self.open_graph(true))
+            .await?
+            .open_reloading()
             .await
     }
 
@@ -124,7 +135,7 @@ impl CovenBuilder {
         Ok(CovenReadHandle::new(database, keys, files))
     }
 
-    fn open_graph(self) -> CovenResult<OpeningStore> {
+    fn open_graph(self, recovering: bool) -> CovenResult<OpeningStore> {
         let lock = self.directory.lock_exclusive()?;
         let settings = lock.settings()?;
         #[cfg(any(test, feature = "test-utils"))]
@@ -135,7 +146,13 @@ impl CovenBuilder {
         #[cfg(not(any(test, feature = "test-utils")))]
         let keychain = Keychain::registered()?;
         let keychain = Arc::new(StoreKeychain::new(keychain, settings.id));
-        if keychain.device_id()? != Some(settings.device_id) {
+        let new_recovery = recovering
+            && match self.directory.check_database_recovery() {
+                Ok(()) => true,
+                Err(StoreLockError::RecoveryPending(_)) => false,
+                Err(error) => return Err(error.into()),
+            };
+        if new_recovery || keychain.device_id()? != Some(settings.device_id) {
             let device = self.ids.new_device_id();
             lock.set_device_id(device)?;
             keychain.set_device_id(device)?;
@@ -153,14 +170,20 @@ impl CovenBuilder {
         };
         Ok(OpeningStore {
             database: self.database,
-            directory: self.directory,
-            custody: StoreCustody::new(StoreKeys::new(keys.clone()), identity.clone(), keychain),
-            keys,
-            identity,
             lock,
-            clock: self.clock,
-            ids: self.ids,
-            storage: self.storage,
+            owners: OpeningOwners {
+                directory: self.directory,
+                custody: StoreCustody::new(
+                    StoreKeys::new(keys.clone()),
+                    identity.clone(),
+                    keychain,
+                ),
+                keys,
+                identity,
+                clock: self.clock,
+                ids: self.ids,
+                storage: self.storage,
+            },
         })
     }
 
@@ -205,11 +228,15 @@ impl CovenBuilder {
 /// Retains the graph while its asynchronous database opening is in progress.
 struct OpeningStore {
     database: DatabaseBuilder,
+    lock: coven_foundation::files::StoreLock,
+    owners: OpeningOwners,
+}
+
+struct OpeningOwners {
     directory: StoreDir,
     custody: StoreCustody,
     keys: Arc<dyn StoreKeyCustody>,
     identity: Arc<dyn MemberKeyCustody>,
-    lock: coven_foundation::files::StoreLock,
     clock: ClockRef,
     ids: IdSourceRef,
     storage: Option<Arc<dyn coven_storage::Storage>>,
@@ -218,34 +245,87 @@ struct OpeningStore {
 impl OpeningStore {
     async fn open(self) -> CovenResult<CovenHandle> {
         let database = self.database.open_locked(self.lock).await?;
-        let files = coven_sync::Files::new(
-            coven_database::FileDatabase::new(database.clone()),
-            self.directory.clone(),
-            self.storage.clone(),
-            self.clock.clone(),
-            self.ids.clone(),
-        );
-        let sync = match self.storage {
+        let sync = self.owners.sync(database.clone());
+        Ok(self.owners.handle(database, sync))
+    }
+
+    async fn open_reloading(self) -> Result<CovenHandle, RecoveryError> {
+        let storage = self.owners.storage.as_ref().ok_or(SyncError::NoStorage)?;
+        self.owners
+            .keys
+            .unlock()
+            .map_err(CovenError::from)?
+            .ok_or(RecoveryError::NoStoreKeys)?;
+        self.owners
+            .identity
+            .unlock()
+            .map_err(CovenError::from)?
+            .ok_or(SyncError::MissingMemberKeys)?;
+        storage
+            .list(&ObjectPrefix::all())
+            .await
+            .map_err(SyncError::from)?;
+        let archive = coven_foundation::files::FileName::new(self.owners.ids.new_id().to_string())
+            .expect("UUID filename");
+        let database = self
+            .database
+            .open_reloading_locked(self.lock, archive)
+            .await?;
+        let mut sync = self.owners.sync(database.clone());
+        // Store-log replay and snapshot loading remain owned by sync. The new
+        // device identity prevents reuse of numbers the damaged file cannot supply.
+        sync.sync_store_log().await.map_err(SyncError::from)?;
+        sync.reload_from_snapshots().await?;
+        let local = database.local_store_log().await.map_err(CovenError::from)?;
+        if !local.log.replay.state.devices.contains_key(&local.device) {
+            sync.make_and_upload_entry(coven_format::store_log::StoreChange::AddDevice {
+                device: local.device,
+                name: "Recovered device".into(),
+            })
+            .await?;
+        }
+        database.finish_recovery().await.map_err(CovenError::from)?;
+        Ok(self.owners.handle(database, sync))
+    }
+}
+
+impl OpeningOwners {
+    fn sync(&self, database: coven_database::Database) -> coven_sync::StoreLogSync {
+        match &self.storage {
             Some(storage) => coven_sync::StoreLogSync::new(
-                storage,
-                database.clone(),
-                self.keys,
-                self.identity,
-                self.clock,
+                storage.clone(),
+                database,
+                self.keys.clone(),
+                self.identity.clone(),
+                self.clock.clone(),
                 self.ids.clone(),
-                self.directory,
+                self.directory.clone(),
             ),
             None => coven_sync::StoreLogSync::disconnected(
-                database.clone(),
-                self.keys,
-                self.identity,
-                self.clock,
+                database,
+                self.keys.clone(),
+                self.identity.clone(),
+                self.clock.clone(),
                 self.ids.clone(),
-                self.directory,
+                self.directory.clone(),
             ),
-        };
+        }
+    }
+
+    fn handle(
+        self,
+        database: coven_database::Database,
+        sync: coven_sync::StoreLogSync,
+    ) -> CovenHandle {
+        let files = coven_sync::Files::new(
+            coven_database::FileDatabase::new(database.clone()),
+            self.directory,
+            self.storage,
+            self.clock,
+            self.ids,
+        );
         let operations = coven_sync::Operations::new(sync, files.clone());
-        Ok(CovenHandle::new(database, self.custody, operations, files))
+        CovenHandle::new(database, self.custody, operations, files)
     }
 }
 

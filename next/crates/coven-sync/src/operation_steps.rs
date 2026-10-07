@@ -24,17 +24,13 @@ impl StoreLogSync {
         &mut self,
         record: &OperationRecord,
         mut data: Data,
+        report: &mut SyncReport,
     ) -> Result<Progress, SyncError> {
         if let Data::PublishSchema { version } = data {
             return self.schema_publication_step(record, version).await;
         }
         if let Data::Snapshots(task) = data {
-            let mut report = SyncReport::default();
-            let result = self.snapshot_step(record, task, &mut report).await;
-            for damaged in report.damaged_objects {
-                tracing::warn!(path = %damaged.path, failure = %damaged.failure, "snapshot operation passed over a damaged object");
-            }
-            return result;
+            return self.snapshot_step(record, task, report).await;
         }
         if matches!(data, Data::Invite(_)) {
             return self.invite_step(record, data).await;
@@ -73,6 +69,25 @@ impl StoreLogSync {
             unreachable!()
         };
         let output = match &work.intent {
+            Intent::Reset { .. } => {
+                if let Some(id) = self.pending_reload().await? {
+                    let reload = self
+                        .database
+                        .operations()
+                        .await?
+                        .into_iter()
+                        .find(|r| r.id == id)
+                        .ok_or(coven_database::DbError::OperationChanged(id))?;
+                    if let Some(failure) = reload.failure {
+                        return Err(SyncError::RecoveryBlocked {
+                            operation: id,
+                            failure,
+                        });
+                    }
+                    return Ok(Progress::Waiting);
+                }
+                Output::Unit
+            }
             Intent::CreateCircle { circle, .. } => Output::CircleId(*circle),
             Intent::RemoveMember { access, .. } => {
                 if let Some(result) = &work.removal {
@@ -266,6 +281,14 @@ impl StoreLogSync {
                     .advance_operation(data.update(&current, data.entry_step_number(5))?)
                     .await?
             }
+            Some(EntryOutcome::Dropped(_)) if matches!(&data, Data::Entry(work) if matches!(work.intent, Intent::Reset { .. })) =>
+            {
+                // A competing reset settles this request. Reauthoring it after
+                // reading the winner would override §19.3's timestamp choice.
+                self.database
+                    .advance_operation(data.update(&current, data.entry_step_number(5))?)
+                    .await?;
+            }
             Some(EntryOutcome::Dropped(_)) => {
                 data.set_entry(None)?;
                 if let Data::Entry(work) = &mut data {
@@ -319,6 +342,12 @@ impl StoreLogSync {
             | Data::PublishSchema { .. } => unreachable!(),
         };
         Ok(Some(match intent {
+            Intent::Reset { snapshot } => {
+                self.require_reset(state, &snapshot.audience, me)?;
+                StoreChange::Reset {
+                    snapshot: snapshot.clone(),
+                }
+            }
             Intent::RemoveMember { member, access } => {
                 let target = member.parse()?;
                 if effects::member(state, &target).is_none() {

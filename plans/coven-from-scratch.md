@@ -2600,10 +2600,20 @@ Carol's tablet:
 - When only one device is broken, it reloads from the latest snapshot
   ([§15](#15-snapshots)).
   - A damaged database fails to open with an error of its own; reloading
-    then moves the damaged file aside and starts from the snapshot.
+    then moves the damaged SQLite file and its journals aside and starts
+    from the snapshot. An unfinished replacement refuses ordinary opens;
+    another explicit recovery resumes it; the damaged files remain available.
+  - Rebuilding a damaged database takes a fresh device id (§10), because
+    unreadable counters cannot establish which write, entry and snapshot
+    numbers were already used. Readable waiting writes keep their original
+    identities. Reloading in place keeps the device id.
   - A device that opens but disagrees with the others reloads in place.
 - Its own writes still waiting in `coven_uploads`, those it can still
   read, are uploaded after, and merge like any late write.
+  - If recovering also updates the app schema, their unattempted writes
+    are converted or marked lost by the migration's second part, just as
+    on any updating device ([§17.1](#171-host-application)).
+    Already-attempted writes keep their fixed bytes.
 
 ### 19.3 Resetting a store
 
@@ -3188,10 +3198,22 @@ pub enum SettingsError {
 pub enum StoreLockError {
     /// Another handle or process holds the lock.
     AlreadyOpen(StoreId),
+    /// An explicit recovery has not published its replacement database.
+    RecoveryPending(StoreId),
     /// A supplied lock protects a different directory.
     WrongDirectory(StoreId),
     /// Opening or locking the lock file failed.
     File(FileError),
+}
+
+/// Explicit damaged-database recovery failed (§19.2).
+pub enum RecoveryError {
+    /// Opening SQLite, custody or the local directory failed.
+    Local(CovenError),
+    /// Authenticating and loading storage failed.
+    Sync(SyncError),
+    /// Recovery requires unlocked store keys before moving database files.
+    NoStoreKeys,
 }
 
 /// Listing the app's stores failed (§20.1).
@@ -3438,7 +3460,7 @@ impl CovenBuilder {
     /// can still read from the old file, then resumes unfinished operations.
     /// It needs storage and the store key; without either it fails, leaving
     /// the damaged file where it was.
-    pub async fn open_reloading(self) -> CovenResult<CovenHandle>;
+    pub async fn open_reloading(self) -> Result<CovenHandle, RecoveryError>;
 
     /// Opens the store for reading only, alongside a handle that has it open,
     /// for example from another process. Its shared lock prevents deletion
@@ -4338,14 +4360,18 @@ pub enum ObjectCheckFailure {
     Parse(Arc<dyn std::error::Error + Send + Sync>),
 }
 
-/// Another device differs at the same applied write positions (§19.1).
+/// Two devices differ after applying the same history (§19.1).
 pub struct Disagreement {
-    /// The device whose fingerprint differs from this device's.
-    pub device: DeviceId,
+    /// Both devices in id order; neither is presumed correct.
+    pub devices: [DeviceId; 2],
     /// The audience compared.
     pub audience: Audience,
     /// The last applied write of each log included in the comparison.
     pub positions: Vec<WriteId>,
+    /// The common store-log positions.
+    pub store_log: Vec<EntryId>,
+    /// The common app schema version.
+    pub schema_version: u32,
 }
 
 /// This member's store log entry that was dropped during replay (§9).

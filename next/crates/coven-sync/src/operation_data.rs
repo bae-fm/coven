@@ -14,6 +14,10 @@ use std::time::SystemTime;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) enum Intent {
+    Reset {
+        #[serde(with = "crate::snapshot_data::snapshot_id")]
+        snapshot: coven_format::store_log::SnapshotId,
+    },
     RemoveMember {
         member: String,
         access: MemberAccess,
@@ -45,6 +49,7 @@ pub(crate) enum CircleRows {
 impl Intent {
     pub(crate) fn kind(&self) -> OperationKind {
         match self {
+            Self::Reset { .. } => OperationKind::Reset,
             Self::RemoveMember { .. } => OperationKind::RemoveMember,
             Self::CreateCircle { .. } => OperationKind::CreateCircle,
             Self::AddCircleMember { .. } => OperationKind::AddCircleMember,
@@ -132,6 +137,10 @@ impl Data {
                     RaisedVersion::Schema(_) => OperationKind::RaiseSchema,
                     RaisedVersion::Format(_) => OperationKind::RaiseFormat,
                 },
+                crate::snapshot_data::SnapshotJob::Write {
+                    trigger: crate::snapshot_data::SnapshotTrigger::Reset,
+                    ..
+                } => OperationKind::Reset,
                 crate::snapshot_data::SnapshotJob::Write { .. } => OperationKind::WriteSnapshot,
                 crate::snapshot_data::SnapshotJob::Reload { .. } => OperationKind::ReloadSnapshots,
                 crate::snapshot_data::SnapshotJob::Retain => OperationKind::Retention,
@@ -159,19 +168,34 @@ impl Data {
             data: serde_json::to_vec(self)?,
         })
     }
-    /// Snapshot publication and circle row deletion precede the shared entry steps.
+    /// Circle deletion commits its row write and reset publishes its snapshot
+    /// before the shared entry steps.
     pub(crate) fn entry_step_number(&self, step: u32) -> u32 {
         if self.raises_version() {
             return step + 2;
         }
-        step + u32::from(matches!(
-            self,
+        step + match self {
             Self::Entry(EntryWork {
                 intent: Intent::DeleteCircle { .. },
                 ..
-            })
-        ))
+            }) => 1,
+            Self::Entry(EntryWork {
+                intent: Intent::Reset { .. },
+                ..
+            }) => 3,
+            _ => 0,
+        }
     }
+    pub(crate) fn completing_reset(&self, record: &OperationRecord) -> bool {
+        matches!(
+            self,
+            Self::Entry(EntryWork {
+                intent: Intent::Reset { .. },
+                ..
+            })
+        ) && record.last_step >= self.entry_step_number(4)
+    }
+
     pub(crate) fn entry(&self) -> Result<Option<StoreLogEntry>, SyncError> {
         let bytes = match self {
             Self::Snapshots(SnapshotTask {
@@ -222,6 +246,16 @@ impl Data {
         self.raises_version()
             || matches!(
                 self,
+                Self::Snapshots(SnapshotTask {
+                    job: SnapshotJob::Write {
+                        trigger: SnapshotTrigger::Reset,
+                        ..
+                    },
+                    ..
+                })
+            )
+            || matches!(
+                self,
                 Self::Entry(_)
                     | Self::Invite(InviteWork {
                         state: InviteState::Approving { .. },
@@ -248,6 +282,7 @@ impl OperationKind {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::MigrateSchema => "migrate-schema",
+            Self::Reset => "reset",
             Self::ChangeFileLocation => "change-file-location",
             Self::WriteSnapshot => "write-snapshot",
             Self::RaiseSchema => "raise-schema",

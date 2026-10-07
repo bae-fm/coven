@@ -2,16 +2,15 @@
 
 use super::{
     catalog::{inconsistent, snapshot_damage},
-    io, snapshot_path, StoreLogSync,
+    snapshot_path, StoreLogSync,
 };
 use crate::{replay_cache::ReplayCache, snapshot_data::SnapshotTask, SyncError, SyncReport};
 use coven_database::{EntryOutcome, OperationRecord, StoreLog};
 use coven_format::{
-    sealed_single::SingleChunkObject, sealed_snapshot::SnapshotObjectPrefix,
-    store_log::StoreChange, value::WritePositions, write_stream::WriteHeaderFrame, Object,
+    sealed_snapshot::SnapshotObjectPrefix, store_log::StoreChange, value::WritePositions,
+    write_stream::WriteHeaderFrame,
 };
 use coven_foundation::id_source::DeviceId;
-use coven_merge::Audience;
 use coven_storage::{CloudProvider, ObjectPath, ObjectPrefix};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -33,6 +32,13 @@ impl StoreLogSync {
         let mut superseded = Vec::new();
         let mut pinned = BTreeSet::new();
         for pending in self.database.operations().await? {
+            if let crate::operation_data::Data::Entry(crate::operation_data::EntryWork {
+                intent: crate::operation_data::Intent::Reset { snapshot },
+                ..
+            }) = crate::operation_data::Data::read(&pending)?
+            {
+                pinned.insert(snapshot_path(&snapshot)?);
+            }
             if let crate::operation_data::Data::Snapshots(crate::snapshot_data::SnapshotTask {
                 job:
                     crate::snapshot_data::SnapshotJob::Write {
@@ -210,27 +216,8 @@ impl StoreLogSync {
     ) -> Result<(DeviceId, WritePositions), SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let bytes = storage.read(path).await?;
-        let object = SingleChunkObject::decode(&bytes)?;
-        let SingleChunkObject::PostedPositions { key, chunk } = object else {
-            return Err(inconsistent("positions path holds another object"));
-        };
-        let ring = self
-            .store_keys
-            .unlock()?
-            .ok_or(SyncError::KeyUnavailable(key))?;
-        let plaintext = io::key(&ring, &Audience::Store, key)?.open_object_chunk(
-            path.as_str(),
-            &object.prefix().encode()?,
-            0,
-            0,
-            chunk,
-        )?;
-        let Object::PostedPositions(positions) = Object::decode(&plaintext)? else {
-            return Err(inconsistent("posted positions contain another frame"));
-        };
-        if path.device() != Some(positions.device) {
-            return Err(inconsistent("positions path and device differ"));
-        }
+        let ring = self.store_keys.unlock()?;
+        let positions = crate::posted_positions::open(&bytes, path, ring.as_ref())?;
         Ok((positions.device, positions.writes))
     }
 }

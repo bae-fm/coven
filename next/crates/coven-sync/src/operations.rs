@@ -32,6 +32,8 @@ pub(crate) enum Command {
         Vec<coven_database::FileRef>,
         std::collections::HashMap<String, std::path::PathBuf>,
     ),
+    Reload,
+    Reset(coven_merge::Audience),
     RemoveMember(MemberId),
     CreateCircle(String),
     AddCircleMember(CircleId, MemberId),
@@ -92,6 +94,7 @@ struct OperationRun {
     commands: mpsc::UnboundedReceiver<Request>,
     joins: watch::Sender<Vec<JoinRequest>>,
     waiters: BTreeMap<OperationId, Reply>,
+    notices: SyncReport,
 }
 
 impl Operations {
@@ -106,6 +109,7 @@ impl Operations {
             commands: receiver,
             joins,
             waiters: BTreeMap::new(),
+            notices: SyncReport::default(),
         };
         Self {
             inner: Arc::new(RunningOperations {
@@ -187,6 +191,21 @@ impl Operations {
             Output::SignOut(value) => Ok(value),
             _ => unreachable!("device result"),
         }
+    }
+    /// Reload this device in place, keeping waiting uploads and their identities.
+    pub async fn reload_from_snapshot(&self) -> Result<(), OperationError> {
+        self.unit(Command::Reload).await
+    }
+    /// Snapshot and reset the store audience as an admin, including local reload.
+    pub async fn reset_store(&self) -> Result<(), SyncError> {
+        self.unit(Command::Reset(coven_merge::Audience::Store))
+            .await
+    }
+    /// Snapshot and reset a circle as one of its members, including local reload.
+    pub async fn reset_circle(&self, circle: CircleId) -> Result<(), CircleError> {
+        Ok(self
+            .unit(Command::Reset(coven_merge::Audience::Circle(circle)))
+            .await?)
     }
     /// Resume a failed operation from its next uncompleted step.
     pub async fn retry_blocked_operation(
@@ -362,6 +381,9 @@ impl OperationRun {
             }
             if let Some((reply, mut result)) = response {
                 if let Ok(Output::Report(report)) = &mut result {
+                    report
+                        .damaged_objects
+                        .append(&mut self.notices.damaged_objects);
                     match self.sync.operation_report().await {
                         Ok(current) => {
                             report.blocked_operations = current.blocked_operations;
@@ -426,14 +448,17 @@ impl OperationRun {
                     continue;
                 }
                 if data.writes_entry()
-                    && ((reloading && !data.raises_version()) || writer != Some(record.id))
+                    && ((reloading && !data.raises_version() && !data.completing_reset(&record))
+                        || writer != Some(record.id))
                 {
                     continue;
                 }
                 let step = if matches!(data, crate::operation_data::Data::KeepFile(_)) {
                     self.files.keep_step(&record, data).await
                 } else {
-                    self.sync.operation_step(&record, data).await
+                    self.sync
+                        .operation_step(&record, data, &mut self.notices)
+                        .await
                 };
                 match step {
                     Ok(Progress::Waiting) => (),

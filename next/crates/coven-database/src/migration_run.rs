@@ -12,6 +12,14 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::time::SystemTime;
 
+/// Schema reconstruction for a snapshot must not author migration writes.
+/// Readable waiting work still crosses every migration after its source schema.
+#[derive(Clone, Copy)]
+pub(crate) enum MigrationOrigin {
+    Device(DeviceId, SystemTime),
+    Snapshot { waiting_version: Option<u32> },
+}
+
 struct MigrationStep<'a> {
     migration: &'a Migration,
     before: Schema,
@@ -25,7 +33,7 @@ pub(crate) fn run<'a>(
     migrations: &'a [Migration],
     current: u32,
     supported: u32,
-    author: (DeviceId, SystemTime),
+    origin: MigrationOrigin,
     at: &mut &'a Migration,
 ) -> Result<Vec<MigrationOutcome>, DbError> {
     let mut before = Schema::read(database)?;
@@ -84,8 +92,15 @@ pub(crate) fn run<'a>(
         after = &step.before;
     }
     outcomes.reverse();
+    database.batch(&format!("PRAGMA user_version = {}", supported as i32))?;
+    let waiting_version = match origin {
+        MigrationOrigin::Device(..) => Some(current),
+        MigrationOrigin::Snapshot { waiting_version } => waiting_version,
+    };
     for (index, step) in steps.iter().enumerate() {
-        if outcomes[index].change == MigrationChange::Breaking {
+        if outcomes[index].change == MigrationChange::Breaking
+            && waiting_version.is_some_and(|version| step.migration.version > version)
+        {
             *at = step.migration;
             let after = match steps.get(index + 1) {
                 Some(next) => &next.before,
@@ -100,8 +115,32 @@ pub(crate) fn run<'a>(
             )?;
         }
     }
+    if let Some(first) = outcomes.iter().find(|o| {
+        o.change == MigrationChange::Breaking
+            && waiting_version.is_some_and(|version| o.version > version)
+    }) {
+        crate::migration_writes::advance_version(database, first.version, supported)?;
+    }
+    let author = match origin {
+        MigrationOrigin::Device(device, now) => (device, now),
+        MigrationOrigin::Snapshot { .. } => {
+            // Migration SQL creates the app's schema and local tables. Synced
+            // seed rows are replaced by authenticated snapshot contents; they
+            // have no locally authored identity during reconstruction.
+            database.materialize(|db| {
+                db.batch("PRAGMA defer_foreign_keys = ON")?;
+                for table in tables {
+                    db.internal_execute(
+                        &format!("DELETE FROM {}", crate::sql::identifier(&table.name)),
+                        [],
+                    )?;
+                }
+                capture.borrow_mut().discard(db)
+            })?;
+            return Ok(outcomes);
+        }
+    };
     *at = steps.last().expect("pending migrations").migration;
-    database.batch(&format!("PRAGMA user_version = {}", supported as i32))?;
     if let Some(first) = outcomes
         .iter()
         .position(|o| o.change == MigrationChange::Breaking)
@@ -128,7 +167,6 @@ pub(crate) fn run<'a>(
                 .columns
                 .retain(|(table, _), _| names.tables.contains_key(table));
         }
-        crate::migration_writes::advance_version(database, outcomes[first].version, supported)?;
         finish(
             database,
             tables,

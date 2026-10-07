@@ -23,8 +23,27 @@ pub struct SyncReport {
     pub waiting: Vec<WaitingWrite>,
     /// This member's dropped entries in the resulting replay.
     pub dropped_entries: Vec<DroppedEntry>,
-    /// Writes, entries or sealed keys that failed validation, with their storage paths.
+    /// Stored objects that failed validation, including writes, entries, keys,
+    /// snapshots and posted positions, with their storage paths.
     pub damaged_objects: Vec<DamagedObject>,
+    /// Equal positions and schema, but different audience fingerprints (§19.1).
+    /// Reporting a disagreement never starts a reload.
+    pub disagreements: Vec<Disagreement>,
+}
+
+/// Two devices disagree on an audience after applying the same history (§19.1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Disagreement {
+    /// Both devices, in device-id order; neither is presumed correct.
+    pub devices: [DeviceId; 2],
+    /// The audience whose keyed fingerprints differ.
+    pub audience: coven_merge::Audience,
+    /// The common device-log positions.
+    pub positions: Vec<coven_merge::WriteId>,
+    /// The common store-log positions.
+    pub store_log: Vec<EntryId>,
+    /// The common app schema version.
+    pub schema_version: u32,
 }
 
 /// How far the receiving device has applied an authoring device's log (§20.5).

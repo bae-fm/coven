@@ -372,6 +372,17 @@ impl StoreLogSync {
         report: &mut SyncReport,
     ) -> Result<(), SyncError> {
         if let Some(upload) = &local.upload {
+            // Recovery can retain a fixed entry before restoring its past.
+            // Download that past before publishing or replaying the entry.
+            if !object::ready(&local.log, &upload.entry, local.store).map_err(|failure| {
+                SyncError::Damaged(DamagedObject {
+                    path: object::path(upload.entry.position).into(),
+                    failure,
+                })
+            })? {
+                tracing::debug!(entry = ?upload.entry.position, "queued entry waits for its recorded past");
+                return Ok(());
+            }
             if let Some(id) = self.pending_reload().await? {
                 tracing::debug!(?id, "store-log publication waits for snapshot reload");
                 return Ok(());

@@ -332,6 +332,180 @@ mod validation;
 #[path = "write_test_utils.rs"]
 mod writes;
 
+mod agreement {
+    use super::*;
+
+    #[tokio::test]
+    async fn disagreement_names_both_devices_and_only_explicit_reload_clears_it() {
+        for count in [2, 3] {
+            let storage = storage();
+            let mut devices = group(storage.clone(), count).await;
+            sql(
+                &devices[0].db,
+                "INSERT INTO notes VALUES('one','shared','body')",
+            )
+            .await;
+            devices[0].sync.upload_writes().await.unwrap();
+            for device in &mut devices {
+                device.sync.download_writes().await.unwrap();
+                assert!(device.sync.post_positions().await.unwrap());
+            }
+            devices[0]
+                .log
+                .write_snapshot(Audience::Store)
+                .await
+                .unwrap();
+            devices[1]
+                .db
+                .test_damage_fingerprint(Audience::Store)
+                .await
+                .unwrap();
+            devices[1].sync.post_positions().await.unwrap();
+            for (index, device) in devices.iter_mut().enumerate() {
+                let report = device.sync.compare_fingerprints().await.unwrap();
+                assert_eq!(
+                    report.disagreements.len(),
+                    if index == 1 { count as usize - 1 } else { 1 }
+                );
+                for mismatch in report.disagreements {
+                    assert!(mismatch.devices.contains(&DeviceId(2)));
+                    assert!(mismatch.devices.contains(&DeviceId(index as u64 + 1)));
+                    assert_eq!(mismatch.audience, Audience::Store);
+                    assert_eq!(
+                        mismatch.positions,
+                        vec![WriteId {
+                            device: DeviceId(1),
+                            number: 1
+                        }]
+                    );
+                    assert_eq!(mismatch.schema_version, 1);
+                    assert_eq!(
+                        mismatch.store_log,
+                        device.db.store_log().await.unwrap().positions().0
+                    );
+                }
+                assert!(device.db.operations().await.unwrap().is_empty());
+            }
+            // A second check still reports the fault: noticing did not repair it.
+            assert!(!devices[1]
+                .sync
+                .compare_fingerprints()
+                .await
+                .unwrap()
+                .disagreements
+                .is_empty());
+            devices[1].log.reload_from_snapshots().await.unwrap();
+            devices[1].sync.post_positions().await.unwrap();
+            for device in &mut devices {
+                assert!(device
+                    .sync
+                    .compare_fingerprints()
+                    .await
+                    .unwrap()
+                    .disagreements
+                    .is_empty());
+            }
+        }
+    }
+
+    async fn replace_post(storage: &MemoryStorage, device: &Device, post: PostedPositions) {
+        let path = ObjectPath::positions(post.device);
+        let key = KeyId(Uuid::from_u128(1));
+        let prefix = SingleChunkPrefix::PostedPositions(key);
+        let ring = device.keys.unlock().unwrap().unwrap();
+        let chunk = ring
+            .store_key(key)
+            .unwrap()
+            .derive()
+            .seal_object_chunk(
+                path.as_str(),
+                &prefix.encode().unwrap(),
+                0,
+                0,
+                &Object::PostedPositions(post).encode().unwrap(),
+            )
+            .unwrap();
+        storage
+            .replace(&path, &prefix.encode_chunk(&chunk).unwrap())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn comparisons_require_equal_writes_entries_schema_and_keys() {
+        let storage = storage();
+        let mut devices = group(storage.clone(), 2).await;
+        devices[1]
+            .db
+            .test_damage_fingerprint(Audience::Store)
+            .await
+            .unwrap();
+        devices[1].sync.post_positions().await.unwrap();
+        let bad = posted(&storage, &devices[1], 2).await;
+        for dimension in 0..4 {
+            let mut post = bad.clone();
+            match dimension {
+                0 => post.writes.0.push(WriteId {
+                    device: DeviceId(2),
+                    number: 1,
+                }),
+                1 => post.store_log.0[0].number += 1,
+                2 => post.schema_version += 1,
+                3 => post.fingerprints[0].key = KeyId(Uuid::from_u128(2)),
+                _ => unreachable!(),
+            }
+            replace_post(&storage, &devices[1], post).await;
+            assert!(
+                devices[0]
+                    .sync
+                    .compare_fingerprints()
+                    .await
+                    .unwrap()
+                    .disagreements
+                    .is_empty(),
+                "{dimension}"
+            );
+        }
+        replace_post(&storage, &devices[1], bad).await;
+        assert_eq!(
+            devices[0]
+                .sync
+                .compare_fingerprints()
+                .await
+                .unwrap()
+                .disagreements
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn damaged_positions_are_reported_as_not_posted_and_reread() {
+        let storage = storage();
+        let mut devices = group(storage.clone(), 2).await;
+        devices[1].sync.post_positions().await.unwrap();
+        let path = ObjectPath::positions(DeviceId(2));
+        let original = storage.read(&path).await.unwrap();
+        for damaged in [vec![0], {
+            let mut bytes = original.clone();
+            *bytes.last_mut().unwrap() ^= 1;
+            bytes
+        }] {
+            storage.replace(&path, &damaged).await.unwrap();
+            for _ in 0..2 {
+                let report = devices[0].sync.compare_fingerprints().await.unwrap();
+                assert!(report.disagreements.is_empty());
+                assert_eq!(report.damaged_objects.len(), 1);
+                assert_eq!(report.damaged_objects[0].path, path.as_str());
+            }
+        }
+        storage.replace(&path, &original).await.unwrap();
+        let report = devices[0].sync.compare_fingerprints().await.unwrap();
+        assert!(report.damaged_objects.is_empty());
+        assert!(report.disagreements.is_empty());
+    }
+}
+
 #[tokio::test]
 async fn groceries_example_converges_in_every_arrival_order() {
     for order in [

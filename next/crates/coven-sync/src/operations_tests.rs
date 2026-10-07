@@ -88,7 +88,9 @@ async fn step(d: &mut Device, id: OperationId) -> Result<Progress, SyncError> {
             .find(|r| r.id == id)
             .unwrap();
     let data = Data::read(&row)?;
-    d.sync.operation_step(&row, data).await
+    d.sync
+        .operation_step(&row, data, &mut crate::SyncReport::default())
+        .await
 }
 async fn finish(d: &mut Device, id: OperationId) -> Output {
     for _ in 0..30 {
@@ -686,4 +688,33 @@ async fn resumed_removal_uses_the_targets_current_storage_account() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn store_reset_requires_admin_and_circle_reset_requires_membership() {
+    let [a, b, c] = accounts(google()).await;
+    let files = file_owner(&a);
+    let a = Operations::new(a.sync, files);
+    let files = file_owner(&b);
+    let b = Operations::new(b.sync, files);
+    let files = file_owner(&c);
+    let c = Operations::new(c.sync, files);
+    assert!(matches!(
+        c.reset_store().await,
+        Err(SyncError::PermissionDenied)
+    ));
+    let circle = c.create_circle("Gifts").await.unwrap();
+    a.sync_store_log().await.unwrap();
+    assert!(matches!(
+        a.reset_circle(circle).await,
+        Err(CircleError::NotMember(_))
+    ));
+    c.reset_circle(circle).await.unwrap();
+    a.sync_store_log().await.unwrap();
+    a.reset_store().await.unwrap();
+    b.sync_store_log().await.unwrap();
+    c.sync_store_log().await.unwrap();
+    for operations in [a, b, c] {
+        operations.close().await.unwrap();
+    }
 }

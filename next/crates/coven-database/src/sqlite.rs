@@ -148,16 +148,12 @@ impl DatabaseConnection {
         self.batch("PRAGMA synchronous = FULL;")
     }
 
-    pub(crate) fn prepare_schema(
+    /// Initialize the local journal before recovery restores its waiting work.
+    pub(crate) fn prepare_internal_schema(
         &self,
-        tables: &[SyncedTable],
-        migrations: &[Migration],
         policy: CovenMigrationPolicy,
-        author: Option<(DeviceId, SystemTime)>,
-        operation: Option<&crate::migration::MigrationOperation>,
-    ) -> CovenResult<Vec<MigrationOutcome>> {
-        let read_only = author.is_none();
-        let supported = validate_versions(migrations)?;
+        read_only: bool,
+    ) -> CovenResult<()> {
         let internal: i32 = self.query_row("PRAGMA application_id", [], |r| r.get(0))?;
         let internal = internal as u32;
         if internal != internal_schema::VERSION {
@@ -180,6 +176,20 @@ impl DatabaseConnection {
                 source: Box::new(source),
             })?;
         }
+        Ok(())
+    }
+
+    pub(crate) fn prepare_schema(
+        &self,
+        tables: &[SyncedTable],
+        migrations: &[Migration],
+        policy: CovenMigrationPolicy,
+        author: Option<crate::migration_run::MigrationOrigin>,
+        operation: Option<&crate::migration::MigrationOperation>,
+    ) -> CovenResult<Vec<MigrationOutcome>> {
+        let read_only = author.is_none();
+        let supported = validate_versions(migrations)?;
+        self.prepare_internal_schema(policy, read_only)?;
         let current = self.schema_version()?;
         if current > supported {
             return Err(MigrationError::SchemaTooNew { current, supported }.into());
@@ -197,6 +207,10 @@ impl DatabaseConnection {
             .expect("pending migration");
         #[cfg(test)]
         let _profile = self.profile_statements();
+        let publishes = matches!(
+            author,
+            Some(crate::migration_run::MigrationOrigin::Device(..))
+        );
         let result = self.transaction(|db| {
             let outcomes = crate::migration_run::run(
                 db,
@@ -217,7 +231,7 @@ impl DatabaseConnection {
                     "UPDATE coven_snapshot_schema SET minimum=?1,publication=?2 WHERE singleton=1",
                     (minimum, supported),
                 )?;
-                if let Some(operation) = operation {
+                if let Some(operation) = operation.filter(|_| publishes) {
                     let new = operation(supported)?;
                     let id = crate::operation::insert(db, &new)?;
                     crate::operation::advance(

@@ -18,3 +18,18 @@ pub enum StoreDeletionError {
     #[error(transparent)]
     File(#[from] FileError),
 }
+
+/// Explicit damaged-database recovery failed. The source archive is retained
+/// after replacement begins, and ordinary opens refuse an unfinished reload.
+#[derive(Debug, thiserror::Error)]
+pub enum RecoveryError {
+    /// Opening SQLite, local custody or the directory failed.
+    #[error(transparent)]
+    Local(#[from] crate::CovenError),
+    /// The authenticated store log or snapshot could not be loaded.
+    #[error(transparent)]
+    Sync(#[from] crate::SyncError),
+    /// Recovery requires a store key before moving the damaged database.
+    #[error("recovery requires unlocked store keys")]
+    NoStoreKeys,
+}

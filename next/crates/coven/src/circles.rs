@@ -11,6 +11,11 @@ impl<'a> Circles<'a> {
     pub(crate) fn new(operations: &'a coven_sync::Operations) -> Self {
         Self { operations }
     }
+    /// Reset this circle to a snapshot of this device’s state (§19.3).
+    pub async fn reset(&self, circle: CircleId) -> Result<(), CircleError> {
+        self.operations.reset_circle(circle).await
+    }
+
     /// Make a circle with this member as its first member.
     pub async fn create(&self, name: &str) -> Result<CircleId, CircleError> {
         self.operations.create_circle(name).await

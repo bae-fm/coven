@@ -272,7 +272,10 @@ pub(crate) fn authority(
     Ok(device.member.clone())
 }
 
-fn checked<T>(path: &ObjectPath, value: Result<T, coven_format::Error>) -> Result<T, SyncError> {
+pub(crate) fn checked<T>(
+    path: &ObjectPath,
+    value: Result<T, coven_format::Error>,
+) -> Result<T, SyncError> {
     match value {
         Err(coven_format::Error::UnsupportedVersion(version))
             if version > coven_format::FORMAT_VERSION =>
@@ -285,7 +288,7 @@ fn checked<T>(path: &ObjectPath, value: Result<T, coven_format::Error>) -> Resul
 fn parse(error: coven_format::Error) -> ObjectCheckFailure {
     ObjectCheckFailure::Parse(Arc::new(error))
 }
-fn invalid(message: &'static str) -> ObjectCheckFailure {
+pub(crate) fn invalid(message: &'static str) -> ObjectCheckFailure {
     ObjectCheckFailure::Parse(Arc::new(io::Error::new(
         io::ErrorKind::InvalidData,
         message,
