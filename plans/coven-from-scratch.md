@@ -1932,6 +1932,16 @@ Carol's tablet:
     once snapshots cover every part of it.
   - So the app writes throughout; a write made while the reload downloads
     is one more waiting write.
+- A reload also covers the device's already uploaded own writes and their
+  past: its next write implicitly reads every earlier own write ([§7.1](#71-causality)).
+  An audience whose snapshot is not being replaced keeps its current positions
+  when computing the common point, including an audience with no rows.
+- These positions govern device-write logs. Before loading a snapshot, the
+  device has applied at least the store-log positions it names; loading does
+  not replace store-log entries or rewind their applied positions.
+- A snapshot from an older schema can load across additions: SQLite supplies
+  the new columns' defaults. It cannot cross a breaking change, and a newer
+  snapshot waits for the app's schema to update.
 - Loading an audience's snapshot replaces that audience's rows and merge
   records; other audiences keep theirs, and the removal rules run again on
   rows that point at changed ones, as after any write
@@ -2939,8 +2949,6 @@ pub enum DbError {
     /// A downloaded write fails the merge's checks, such as a timestamp no
     /// later than a write it had read; it is never applied (§19.1).
     InvalidWrite { write: WriteId, error: MergeError },
-    /// Reloading must catch up through these known writes before a new synced write (§15).
-    ReloadPending { writes: Vec<WriteId> },
     /// A waiting record or its conversion violates the write format (§20.13).
     WriteFormat(coven_format::Error),
     /// A conversion changed or introduced a reference whose generation it cannot know (§20.13).

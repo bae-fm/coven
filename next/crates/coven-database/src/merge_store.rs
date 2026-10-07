@@ -11,7 +11,7 @@ use coven_merge::{
 };
 use rusqlite::params;
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 struct StoredWrite {
     ordinal: i64,
@@ -102,7 +102,7 @@ pub(crate) struct MergeStore<'a> {
 enum RowValues<'a> {
     App(&'a AppView<'a>),
     Schema(&'a crate::schema::Schema),
-    Snapshot(&'a crate::schema::Schema, &'a Audience),
+    Snapshot(&'a crate::schema::Schema, &'a BTreeSet<Audience>),
 }
 
 impl<'a> MergeStore<'a> {
@@ -134,11 +134,11 @@ impl<'a> MergeStore<'a> {
     pub(crate) fn from_snapshot(
         database: &'a DatabaseConnection,
         schema: &'a crate::schema::Schema,
-        audience: &'a Audience,
+        audiences: &'a BTreeSet<Audience>,
     ) -> Self {
         Self {
             database,
-            values: RowValues::Snapshot(schema, audience),
+            values: RowValues::Snapshot(schema, audiences),
             metadata: WriteMetadata::new(database),
             rows: RefCell::new(BTreeMap::new()),
         }
@@ -181,7 +181,7 @@ impl<'a> MergeStore<'a> {
                         }
                         app.values
                     }
-                    RowValues::Snapshot(_, audience) if *audience == id.audience => {
+                    RowValues::Snapshot(_, audiences) if audiences.contains(&id.audience) => {
                         crate::snapshot_state::values(self.database, id)?
                     }
                     RowValues::Schema(schema) | RowValues::Snapshot(schema, _) => {

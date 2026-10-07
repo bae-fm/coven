@@ -48,10 +48,15 @@ pub(crate) fn begin(
             [&audience],
         )?;
     }
-    database.batch("CREATE TEMP TABLE coven_snapshot_values(table_name TEXT NOT NULL,key BLOB NOT NULL,columns BLOB NOT NULL,matched INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(table_name,key)) WITHOUT ROWID;
+
+    Ok(touched)
+}
+
+pub(crate) fn create_tables(database: &DatabaseConnection) -> Result<(), DbError> {
+    database.batch("CREATE TEMP TABLE coven_snapshot_values(audience TEXT NOT NULL,table_name TEXT NOT NULL,key BLOB NOT NULL,columns BLOB NOT NULL,matched INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(audience,table_name,key)) WITHOUT ROWID;
         CREATE TEMP TABLE coven_snapshot_writes(device BLOB NOT NULL,number BLOB NOT NULL,timestamp BLOB NOT NULL,had_read BLOB NOT NULL,PRIMARY KEY(device,number)) WITHOUT ROWID;
         CREATE TEMP TABLE coven_snapshot_columns(table_name TEXT NOT NULL,column_name TEXT NOT NULL,PRIMARY KEY(table_name,column_name)) WITHOUT ROWID;")?;
-    Ok(touched)
+    Ok(())
 }
 
 pub(crate) fn synced(
@@ -89,11 +94,12 @@ pub(crate) fn synced(
         });
     }
     database.internal_execute(
-        "INSERT INTO temp.coven_snapshot_values(table_name,key,columns) VALUES(?1,?2,?3)",
+        "INSERT INTO temp.coven_snapshot_values(table_name,key,columns,audience) VALUES(?1,?2,?3,?4)",
         params![
             row.row.table,
             row.row.key,
-            encoded(merge_fields::encode_columns(&row.columns))?
+            encoded(merge_fields::encode_columns(&row.columns))?,
+            audience_text(&row.row.audience)
         ],
     )?;
     Ok(())
@@ -229,8 +235,8 @@ pub(crate) fn merged(
     }
     let synced = database
         .query(
-            "SELECT columns FROM temp.coven_snapshot_values WHERE table_name=?1 AND key=?2",
-            params![row.table, row.key],
+            "SELECT columns FROM temp.coven_snapshot_values WHERE table_name=?1 AND key=?2 AND audience=?3",
+            params![row.table, row.key, audience_text(&row.audience)],
             |r| decoded(merge_fields::decode_columns(&r.get::<_, Vec<u8>>(0)?)),
         )?
         .into_iter()
@@ -257,8 +263,8 @@ pub(crate) fn merged(
             return Err(invalid("synced values disagree with merge defaults"));
         }
         database.internal_execute(
-            "UPDATE temp.coven_snapshot_values SET matched=1 WHERE table_name=?1 AND key=?2",
-            params![row.table, row.key],
+            "UPDATE temp.coven_snapshot_values SET matched=1 WHERE table_name=?1 AND key=?2 AND audience=?3",
+            params![row.table, row.key, audience_text(&row.audience)],
         )?;
     } else if synced.is_some() {
         return Err(invalid("hidden merge row also has a synced row"));
@@ -386,8 +392,8 @@ pub(crate) fn values(
     row: &RowId,
 ) -> Result<crate::write_rows::AppValues, DbError> {
     database.query_row(
-        "SELECT columns FROM temp.coven_snapshot_values WHERE table_name=?1 AND key=?2",
-        params![row.table, row.key],
+        "SELECT columns FROM temp.coven_snapshot_values WHERE table_name=?1 AND key=?2 AND audience=?3",
+        params![row.table, row.key, audience_text(&row.audience)],
         |r| {
             Ok(
                 decoded(merge_fields::decode_columns(&r.get::<_, Vec<u8>>(0)?))?

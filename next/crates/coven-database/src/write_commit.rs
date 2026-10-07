@@ -22,7 +22,14 @@ pub(crate) fn commit(
             had_read: record.header.had_read.clone(),
         },
     )?;
-    crate::snapshot_coverage::committed(database, record)?;
+    database.internal_execute(
+        "INSERT INTO coven_positions(device,number) VALUES(?1,?2)
+         ON CONFLICT(device) DO UPDATE SET number=excluded.number",
+        params![
+            record.header.position.device.0.to_be_bytes().as_slice(),
+            record.header.position.number.to_be_bytes().as_slice()
+        ],
+    )?;
     persist(
         database,
         updates,

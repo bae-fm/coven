@@ -335,7 +335,6 @@ pub(crate) fn record(
     now: SystemTime,
     changes: BTreeMap<RowId, RowChange>,
 ) -> Result<WriteRecord, DbError> {
-    crate::snapshot_coverage::require_caught_up(database)?;
     let latest = crate::write_encoding::latest_timestamp(database)?;
     let timestamp = timestamp(latest, now, device)?;
     let mut positions: BTreeMap<DeviceId,u64> = database.query(

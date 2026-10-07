@@ -322,8 +322,6 @@ impl Database {
     /// Stream an audience's plaintext snapshot frames from one committed reader
     /// transaction. The consumer can seal and upload each frame as it arrives;
     /// commits on the writer connection continue throughout this call.
-    /// Applied parts beyond recorded coverage return
-    /// [`crate::SnapshotWriteError::IncompletePositions`] before any frame is emitted.
     pub async fn write_snapshot<F, E>(
         &self,
         id: coven_format::store_log::SnapshotId,
@@ -349,18 +347,24 @@ impl Database {
         )
     }
 
-    /// Load authenticated plaintext supplied by sync, reading at most 64 KiB
-    /// at a time. The audience's history, derived visibility, coverage and local
-    /// waiting writes commit together; read, format and validation errors roll back.
-    /// Waiting parts whose causal history is absent remain pending until that
-    /// history arrives, independently of their upload progress.
-    pub async fn load_snapshot<R>(
+    /// Load authenticated snapshots and gap writes supplied by sync. Snapshot
+    /// frames and write parts are read in chunks of at most 64 KiB; only one
+    /// decoded write is retained at a time. Inputs may arrive in any order.
+    ///
+    /// Replaces the selected audiences and replays uncovered parts and waiting
+    /// uploads in one transaction. Every audience finishes at common positions;
+    /// missing history, read errors and failed checks roll the whole load back.
+    /// Supply each readable audience's parts, including those needed by waiting
+    /// writes and the device's own earlier writes. Other audiences retain their
+    /// merge history. Upload records, numbers and sealed bytes stay unchanged.
+    pub async fn load_snapshots<R, W>(
         &self,
-        expected: coven_format::store_log::SnapshotId,
-        plaintext: R,
+        snapshots: Vec<(coven_format::store_log::SnapshotId, R)>,
+        writes: Vec<crate::DownloadedWriteStream<W>>,
     ) -> Result<(), DbError>
     where
         R: std::io::Read + Send + 'static,
+        W: std::io::Read + Send + 'static,
     {
         let database = self.clone();
         finish_blocking(
@@ -390,9 +394,10 @@ impl Database {
                                 &writer,
                                 reader,
                                 &inner.write_schema,
-                                expected,
-                                plaintext,
+                                snapshots,
+                                writes,
                                 &files,
+                                (inner.device, inner.clock.now()),
                             )
                         })
                     })?;

@@ -19,7 +19,7 @@ pub enum WaitingUpload<'a> {
         header: WriteHeaderFrame,
         /// The exact plaintext header frame, sealed as one chunk.
         header_frame: Vec<u8>,
-        /// Each audience's row stream, in header order, cut into 64 KiB chunks.
+        /// Each audience's record stream, in header order, cut into 64 KiB chunks.
         parts: UploadParts<'a>,
     },
     /// Every attempt must send these already fixed bytes.

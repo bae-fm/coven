@@ -1,5 +1,5 @@
 use crate::file_write::tests::{attach, local_count, owned_paths, tables, SCHEMA};
-use crate::snapshot_write::tests::{frames, id};
+use crate::snapshot_write::tests::{frames, id, load_one, stream};
 use crate::tests::TestStore;
 use crate::write::tests::{count, notes, records, sql, NOTES};
 use crate::{Database, DbError, Provenance, RowIdentity, SyncedTable};
@@ -8,12 +8,14 @@ use coven_merge::Audience;
 use std::io::Cursor;
 
 async fn load(db: &Database, audience: Audience, frames: Vec<Vec<u8>>) {
-    db.load_snapshot(id(audience), Cursor::new(frames.concat()))
+    load_one(db, id(audience), Cursor::new(frames.concat()))
         .await
         .unwrap();
 }
 
-fn contents(db: &Database) -> std::collections::BTreeMap<String, Vec<Vec<crate::types::Value>>> {
+pub(crate) fn contents(
+    db: &Database,
+) -> std::collections::BTreeMap<String, Vec<Vec<crate::types::Value>>> {
     db.inspect_writer(|db| {
         let tables = db
             .query(
@@ -58,67 +60,54 @@ async fn store_at_40_and_circle_at_38_replay_only_the_circles_missing_parts() {
     for _ in 39..=40 {
         sql(&a, "UPDATE notes SET value=value+1").await.unwrap();
     }
-    load(&b, Audience::Store, frames(&a, Audience::Store).await).await;
-    load(&b, circle.clone(), gifts).await;
-    assert_eq!(
-        b.sync_state(vec![]).await.unwrap().positions.0[0].number,
-        38
-    );
-    assert!(matches!(
-        sql(&b, "UPDATE notes SET value=value+1").await,
-        Err(crate::DbError::ReloadPending { .. })
-    ));
-    assert_eq!(
-        crate::snapshot_write::tests::decode(&frames(&b, Audience::Store).await)
-            .0
-            .writes
-            .0[0]
-            .number,
-        40
-    );
-    assert_eq!(
-        crate::snapshot_write::tests::decode(&frames(&b, circle.clone()).await)
-            .0
-            .writes
-            .0[0]
-            .number,
-        38
-    );
-    let values = b
-        .read(|db| {
-            Ok(db.query(
-                "SELECT audience,value FROM notes ORDER BY audience",
-                [],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
-            )?)
-        })
+    let store = frames(&a, Audience::Store).await;
+    let snapshots = || {
+        vec![
+            (id(Audience::Store), Cursor::new(store.concat())),
+            (id(circle.clone()), Cursor::new(gifts.concat())),
+        ]
+    };
+    let original = contents(&b);
+    let writes = records(&a);
+    for supplied in [vec![], vec![stream(&writes[39])], vec![stream(&writes[38])]] {
+        assert!(matches!(
+            b.load_snapshots(snapshots(), supplied).await,
+            Err(crate::DbError::Snapshot(
+                crate::SnapshotError::MissingWrites { .. }
+            ))
+        ));
+        assert_eq!(contents(&b), original);
+    }
+    b.inspect_writer(|db|db.batch("CREATE TABLE store_changes(value INTEGER); CREATE TRIGGER store_change AFTER UPDATE ON notes WHEN new.audience='store' BEGIN INSERT INTO store_changes VALUES(new.value); END").unwrap());
+    let mut query = b.subscribe(|db| {
+        Ok(
+            db.query("SELECT value FROM notes ORDER BY audience", [], |r| {
+                r.get::<_, i64>(0)
+            })?,
+        )
+    });
+    assert!(query.next().await.unwrap().is_empty());
+    // Supply the later write first: the loader chooses causal order.
+    b.load_snapshots(snapshots(), vec![stream(&writes[39]), stream(&writes[38])])
         .await
         .unwrap();
-    assert_eq!(values.iter().map(|(_, n)| *n).collect::<Vec<_>>(), [38, 40]);
-    b.inspect_writer(|db|db.batch("CREATE TABLE store_changes(value INTEGER); CREATE TRIGGER store_change AFTER UPDATE ON notes WHEN new.audience='store' BEGIN INSERT INTO store_changes VALUES(new.value); END").unwrap());
-    b.close().await.unwrap();
-    let b = b_store.schema(tables(), SCHEMA).await.unwrap();
-    for write in records(&a).into_iter().skip(38) {
-        assert_eq!(
-            b.apply_downloaded(write.into()).await.unwrap(),
-            crate::ApplyOutcome::Applied
-        );
-    }
+    assert_eq!(query.next().await.unwrap(), [40, 40]);
+    assert!(!query.is_marked_for_rerun());
     assert_eq!(count(&b, "store_changes"), 0);
-    assert_eq!(
-        b.inspect_writer(|db| db
-            .query_row(
-                "SELECT count(*) FROM coven_snapshot_coverage WHERE writes IS NOT NULL",
-                [],
-                |r| r.get::<_, i64>(0)
-            )
-            .unwrap()),
-        0
-    );
     assert_eq!(
         b.sync_state(vec![]).await.unwrap().positions.0[0].number,
         40
     );
+    for audience in [Audience::Store, circle.clone()] {
+        assert_eq!(
+            frames(&b, audience.clone()).await,
+            frames(&a, audience).await
+        );
+    }
+    sql(&b, "UPDATE notes SET value=41").await.unwrap();
+    let written = records(&b).pop().unwrap();
+    assert_eq!(written.header.had_read.0, [writes[39].header.position]);
+    a.apply_downloaded(written.into()).await.unwrap();
     for audience in [Audience::Store, circle] {
         assert_eq!(
             frames(&b, audience.clone()).await,
@@ -257,8 +246,7 @@ async fn malformed_or_inconsistent_snapshots_roll_back_every_table() {
     inconsistent.extend(encoder.finish().unwrap());
     damaged.push(inconsistent);
     for bytes in damaged {
-        assert!(b
-            .load_snapshot(id(Audience::Store), Cursor::new(bytes))
+        assert!(load_one(&b, id(Audience::Store), Cursor::new(bytes))
             .await
             .is_err());
         assert_eq!(contents(&b), original);
@@ -286,16 +274,6 @@ async fn loading_twice_preserves_values_losses_and_fingerprint() {
         load(&b, Audience::Store, source.clone()).await;
         assert_eq!(frames(&b, Audience::Store).await, source);
         assert_eq!(count(&b, "coven_uploads"), 0);
-        assert_eq!(
-            b.inspect_writer(|db| db
-                .query_row(
-                    "SELECT count(*) FROM coven_snapshot_coverage WHERE writes IS NOT NULL",
-                    [],
-                    |r| r.get::<_, i64>(0),
-                )
-                .unwrap()),
-            0
-        );
     }
     for db in [a, b] {
         db.close().await.unwrap();
@@ -321,6 +299,7 @@ async fn loading_a_parent_snapshot_recomputes_other_audiences_without_rewriting_
         let ids = SequentialIds::new();
         let a_store = TestStore::with_ids(&ids);
         let b_store = TestStore::with_ids(&ids);
+        let c_store = TestStore::with_ids(&ids);
         let a = a_store
             .builder(tables(), migrations())
             .open()
@@ -331,22 +310,45 @@ async fn loading_a_parent_snapshot_recomputes_other_audiences_without_rewriting_
             .open()
             .await
             .unwrap();
+        let c = c_store
+            .builder(tables(), migrations())
+            .open()
+            .await
+            .unwrap();
         sql(&a, "INSERT INTO parents VALUES('parent'),('Inbox')")
             .await
             .unwrap();
         b.apply_downloaded(records(&a).remove(0).into())
             .await
             .unwrap();
-        let before = frames(&a, Audience::Store).await;
+        c.apply_downloaded(records(&a)[0].clone().into())
+            .await
+            .unwrap();
+        sql(&c, "INSERT INTO parents VALUES('reset branch')")
+            .await
+            .unwrap();
+        let before = frames(&c, Audience::Store).await;
         sql(&b,"INSERT INTO children VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','PaReNt')").await.unwrap();
         let history = |db: &Database| {
             db.inspect_writer(|db|db.query("SELECT generation,write_id FROM coven_rows WHERE table_name='children' ORDER BY generation",[],|r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,i64>(1)?))).unwrap())
         };
         let child_history = history(&b);
+        sql(&a, "INSERT INTO parents VALUES('unseen predecessor')")
+            .await
+            .unwrap();
         sql(&a, "DELETE FROM parents WHERE id='parent'")
             .await
             .unwrap();
-        load(&b, Audience::Store, frames(&a, Audience::Store).await).await;
+        let missing = records(&a).into_iter().skip(1).collect::<Vec<_>>();
+        b.load_snapshots(
+            vec![(
+                id(Audience::Store),
+                Cursor::new(frames(&a, Audience::Store).await.concat()),
+            )],
+            missing.iter().map(stream).collect(),
+        )
+        .await
+        .unwrap();
         assert_eq!(history(&b), child_history);
         let visible = b
             .read(|db| {
@@ -364,7 +366,26 @@ async fn loading_a_parent_snapshot_recomputes_other_audiences_without_rewriting_
                 _ => vec![Some("Inbox".into())],
             }
         );
-        load(&b, Audience::Store, before).await;
+        b.apply_reset(
+            crate::EntryId {
+                device: coven_foundation::id_source::DeviceId(99),
+                number: 1,
+            },
+            Audience::Store,
+            crate::snapshot_write::tests::decode(&before).0.writes,
+        )
+        .await
+        .unwrap();
+        b.load_snapshots(
+            vec![(id(Audience::Store), Cursor::new(before.concat()))],
+            missing
+                .iter()
+                .chain(records(&c).iter())
+                .map(stream)
+                .collect(),
+        )
+        .await
+        .unwrap();
         assert_eq!(history(&b), child_history);
         assert_eq!(
             b.read(|db| Ok(
@@ -374,7 +395,7 @@ async fn loading_a_parent_snapshot_recomputes_other_audiences_without_rewriting_
             .unwrap(),
             "PaReNt"
         );
-        for db in [a, b] {
+        for db in [a, b, c] {
             db.close().await.unwrap();
         }
     }
@@ -428,16 +449,16 @@ async fn readers_and_live_queries_observe_only_the_committed_reload() {
     let (release, wait) = std::sync::mpsc::channel();
     let target = b.clone();
     let task = tokio::spawn(async move {
-        target
-            .load_snapshot(
-                id(Audience::Store),
-                GatedRead {
-                    bytes: Cursor::new(snapshot),
-                    started: Some(started),
-                    wait,
-                },
-            )
-            .await
+        load_one(
+            &target,
+            id(Audience::Store),
+            GatedRead {
+                bytes: Cursor::new(snapshot),
+                started: Some(started),
+                wait,
+            },
+        )
+        .await
     });
     tokio::time::timeout(Duration::from_secs(10), notice)
         .await
@@ -520,8 +541,7 @@ async fn older_snapshots_cross_additions_but_not_breaking_schema_changes() {
         .unwrap();
     let before = contents(&b);
     assert!(matches!(
-        b.load_snapshot(id(Audience::Store), Cursor::new(snapshot.concat()))
-            .await,
+        load_one(&b, id(Audience::Store), Cursor::new(snapshot.concat())).await,
         Err(crate::DbError::Snapshot(
             crate::SnapshotError::Schema { .. }
         ))
@@ -553,13 +573,13 @@ async fn input_errors_and_panics_release_the_loading_transaction() {
         .unwrap();
     let before = contents(&db);
     assert!(matches!(
-        db.load_snapshot(id(Audience::Store), Refuse).await,
+        load_one(&db, id(Audience::Store), Refuse).await,
         Err(crate::DbError::Snapshot(crate::SnapshotError::Read(_)))
     ));
     assert_eq!(contents(&db), before);
     let clone = db.clone();
     assert!(
-        tokio::spawn(async move { clone.load_snapshot(id(Audience::Store), Panic).await })
+        tokio::spawn(async move { load_one(&clone, id(Audience::Store), Panic).await })
             .await
             .unwrap_err()
             .is_panic()
@@ -599,14 +619,16 @@ async fn an_empty_loaded_audience_still_limits_later_snapshot_reloads() {
     b.close().await.unwrap();
     let b = b_store.schema(tables(), SCHEMA).await.unwrap();
     sql(&a,"UPDATE notes SET value=3; INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000002','00000000-0000-0000-0000-00000000000a',3)").await.unwrap();
-    load(&b, Audience::Store, frames(&a, Audience::Store).await).await;
-    assert_eq!(b.sync_state(vec![]).await.unwrap().positions.0[0].number, 2);
-    assert_eq!(
-        b.apply_downloaded(records(&a).remove(2).into())
-            .await
-            .unwrap(),
-        crate::ApplyOutcome::Applied
-    );
+    b.load_snapshots(
+        vec![(
+            id(Audience::Store),
+            Cursor::new(frames(&a, Audience::Store).await.concat()),
+        )],
+        vec![stream(&records(&a)[2])],
+    )
+    .await
+    .unwrap();
+    assert_eq!(b.sync_state(vec![]).await.unwrap().positions.0[0].number, 3);
     assert_eq!(frames(&b, circle.clone()).await, frames(&a, circle).await);
     for db in [a, b] {
         db.close().await.unwrap();
@@ -614,7 +636,7 @@ async fn an_empty_loaded_audience_still_limits_later_snapshot_reloads() {
 }
 
 #[tokio::test]
-async fn reloading_an_older_state_waits_for_known_writes_before_authoring_another() {
+async fn reloading_keeps_uploaded_own_history_before_authoring_another() {
     let store = TestStore::new();
     let db = store.schema(notes(), NOTES).await.unwrap();
     sql(&db, "INSERT INTO notes VALUES('n','first','')")
@@ -627,17 +649,12 @@ async fn reloading_an_older_state_waits_for_known_writes_before_authoring_anothe
         db.internal_execute("DELETE FROM coven_uploads", [])
             .unwrap()
     });
-    load(&db, Audience::Store, snapshot).await;
-    assert!(matches!(
-        sql(&db, "UPDATE notes SET title='third'").await,
-        Err(crate::DbError::ReloadPending { .. })
-    ));
-    sql(&db, "INSERT INTO local_rows VALUES('allowed')")
-        .await
-        .unwrap();
-    db.apply_downloaded(uploaded[1].clone().into())
-        .await
-        .unwrap();
+    db.load_snapshots(
+        vec![(id(Audience::Store), Cursor::new(snapshot.concat()))],
+        vec![stream(&uploaded[1])],
+    )
+    .await
+    .unwrap();
     sql(&db, "UPDATE notes SET title='third'").await.unwrap();
     assert_eq!(records(&db)[0].header.position.number, 3);
     db.close().await.unwrap();
@@ -675,11 +692,10 @@ async fn waiting_for_a_snapshot_reader_keeps_the_writer_available() {
         ready.await.unwrap();
     }
     let target = db.clone();
-    let loading = tokio::spawn(async move {
-        target
-            .load_snapshot(id(Audience::Store), Cursor::new(snapshot))
-            .await
-    });
+    let loading =
+        tokio::spawn(
+            async move { load_one(&target, id(Audience::Store), Cursor::new(snapshot)).await },
+        );
     // Every reader is reserved; allow the blocking loader to reach that wait.
     tokio::time::sleep(Duration::from_millis(100)).await;
     let committed = tokio::time::timeout(
@@ -715,7 +731,7 @@ async fn replaying_waiting_files_keeps_the_bytes_used_by_the_final_state() {
     assert_eq!(std::fs::read(&paths[0]).unwrap(), b"second");
     let original = contents(&db);
     for _ in 0..2 {
-        db.load_snapshot(id(Audience::Store), Cursor::new(empty.clone()))
+        load_one(&db, id(Audience::Store), Cursor::new(empty.clone()))
             .await
             .unwrap();
         assert_eq!(local_count(&db, "coven_device_files"), 1);
@@ -728,15 +744,26 @@ async fn replaying_waiting_files_keeps_the_bytes_used_by_the_final_state() {
 
 #[tokio::test]
 async fn removing_a_file_in_a_snapshot_discards_bytes_only_after_a_successful_commit() {
-    let store = TestStore::new();
+    let ids = SequentialIds::new();
+    let store = TestStore::with_ids(&ids);
+    let other = TestStore::with_ids(&ids);
+    let source = other
+        .schema(tables(Provenance::AppProvided), SCHEMA)
+        .await
+        .unwrap();
     let db = store
         .schema(tables(Provenance::AppProvided), SCHEMA)
         .await
         .unwrap();
-    let empty = frames(&db, Audience::Store).await.concat();
     attach(&db, b"keep until commit".to_vec(), true)
         .await
         .unwrap();
+    source
+        .apply_downloaded(records(&db)[0].clone().into())
+        .await
+        .unwrap();
+    sql(&source, "DELETE FROM files").await.unwrap();
+    let empty = frames(&source, Audience::Store).await.concat();
     db.inspect_writer(|sql| {
         sql.internal_execute("DELETE FROM coven_uploads", [])
             .unwrap()
@@ -744,28 +771,27 @@ async fn removing_a_file_in_a_snapshot_discards_bytes_only_after_a_successful_co
     let paths = owned_paths(&store);
     let before = contents(&db);
     let truncated = empty[..empty.len() - 1].to_vec();
-    assert!(db
-        .load_snapshot(id(Audience::Store), Cursor::new(truncated))
+    assert!(load_one(&db, id(Audience::Store), Cursor::new(truncated))
         .await
         .is_err());
     assert_eq!(contents(&db), before);
     assert_eq!(std::fs::read(&paths[0]).unwrap(), b"keep until commit");
     db.inspect_writer(|sql| sql.batch("CREATE TEMP TRIGGER refuse_forgetting_file BEFORE DELETE ON coven_device_files BEGIN SELECT RAISE(ABORT,'keep bytes'); END").unwrap());
     assert!(matches!(
-        db.load_snapshot(id(Audience::Store), Cursor::new(empty.clone()))
-            .await,
+        load_one(&db, id(Audience::Store), Cursor::new(empty.clone())).await,
         Err(DbError::Sqlite(_))
     ));
     assert_eq!(contents(&db), before);
     assert_eq!(std::fs::read(&paths[0]).unwrap(), b"keep until commit");
     db.inspect_writer(|sql| sql.batch("DROP TRIGGER refuse_forgetting_file").unwrap());
-    db.load_snapshot(id(Audience::Store), Cursor::new(empty))
+    load_one(&db, id(Audience::Store), Cursor::new(empty))
         .await
         .unwrap();
     assert_eq!(local_count(&db, "coven_device_files"), 0);
     assert_eq!(local_count(&db, "coven_file_removals"), 0);
     assert!(owned_paths(&store).is_empty());
     db.close().await.unwrap();
+    source.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -797,14 +823,16 @@ async fn waiting_changes_replay_after_their_missing_own_predecessor() {
         let waiting = records(&db);
         let expected = frames(&db, Audience::Store).await;
         for _ in 0..2 {
-            db.load_snapshot(id(Audience::Store), Cursor::new(old.clone()))
-                .await
-                .unwrap();
+            db.load_snapshots(
+                vec![(id(Audience::Store), Cursor::new(old.clone()))],
+                vec![stream(&missing)],
+            )
+            .await
+            .unwrap();
             assert_eq!(records(&db), waiting);
         }
-        db.apply_downloaded(missing.into()).await.unwrap();
         assert_eq!(frames(&db, Audience::Store).await, expected);
-        db.load_snapshot(id(Audience::Store), Cursor::new(ready))
+        load_one(&db, id(Audience::Store), Cursor::new(ready))
             .await
             .unwrap();
         assert_eq!(frames(&db, Audience::Store).await, expected);
@@ -813,66 +841,42 @@ async fn waiting_changes_replay_after_their_missing_own_predecessor() {
 }
 
 #[tokio::test]
-async fn replay_cannot_advance_common_positions_past_unconsumed_dependencies() {
-    const SCHEMA: &str = "CREATE TABLE notes(id TEXT NOT NULL,audience TEXT NOT NULL,value INTEGER NOT NULL,PRIMARY KEY(id,audience))";
-    let tables = || {
-        vec![SyncedTable::new("notes", RowIdentity::SharedKey)
-            .key_columns(["id", "audience"])
-            .audience_column("audience")]
-    };
+async fn an_edit_after_reload_reads_the_generation_from_the_newer_snapshot() {
     let ids = SequentialIds::new();
     let a_store = TestStore::with_ids(&ids);
     let b_store = TestStore::with_ids(&ids);
-    let a = a_store.schema(tables(), SCHEMA).await.unwrap();
-    let b = b_store.schema(tables(), SCHEMA).await.unwrap();
+    let a = a_store.schema(notes(), NOTES).await.unwrap();
+    let b = b_store.schema(notes(), NOTES).await.unwrap();
     let circle = Audience::Circle(CircleId(uuid::Uuid::from_u128(10)));
-    sql(&a, "INSERT INTO notes VALUES('store','store',1),('circle','00000000-0000-0000-0000-00000000000a',1)").await.unwrap();
-    let gifts = frames(&a, circle.clone()).await;
-    sql(&a, "UPDATE notes SET value=2").await.unwrap();
-    let writes = records(&a);
-    for write in &writes {
-        b.apply_downloaded(write.clone().into()).await.unwrap();
-    }
-    sql(&b, "UPDATE notes SET value=3 WHERE id='store'")
+    let empty = frames(&a, circle.clone()).await.concat();
+    sql(
+        &a,
+        "INSERT INTO notes VALUES('n','born after circle snapshot','')",
+    )
+    .await
+    .unwrap();
+    b.load_snapshots(
+        vec![
+            (id(circle), Cursor::new(empty)),
+            (
+                id(Audience::Store),
+                Cursor::new(frames(&a, Audience::Store).await.concat()),
+            ),
+        ],
+        vec![stream(&records(&a)[0])],
+    )
+    .await
+    .unwrap();
+    sql(&b, "UPDATE notes SET title='edited after reload'")
         .await
         .unwrap();
-    let waiting = records(&b).pop().unwrap();
-    load(&b, Audience::Store, frames(&a, Audience::Store).await).await;
-    load(&b, circle.clone(), gifts).await;
+    let edited = records(&b).pop().unwrap();
+    assert_eq!(edited.header.had_read.0, [records(&a)[0].header.position]);
+    a.apply_downloaded(edited.into()).await.unwrap();
     assert_eq!(
-        b.sync_state(vec![]).await.unwrap().positions.0,
-        vec![writes[0].header.position]
+        frames(&b, Audience::Store).await,
+        frames(&a, Audience::Store).await
     );
-    assert_eq!(
-        crate::snapshot_write::tests::decode(&frames(&b, circle.clone()).await)
-            .0
-            .writes
-            .0,
-        vec![writes[0].header.position]
-    );
-    // Replacing Store again replays this queue entry above the common
-    // frontier. Its effects must not escape through an incomplete snapshot.
-    load(&b, Audience::Store, frames(&a, Audience::Store).await).await;
-    let emitted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let output = emitted.clone();
-    let result = b
-        .write_snapshot(id(Audience::Store), move |_| {
-            output.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Ok::<_, std::convert::Infallible>(())
-        })
-        .await;
-    assert!(
-        matches!(
-            result,
-            Err(crate::SnapshotWriteError::IncompletePositions { .. })
-        ),
-        "{result:?}"
-    );
-    assert_eq!(emitted.load(std::sync::atomic::Ordering::Relaxed), 0);
-    b.apply_downloaded(writes[1].clone().into()).await.unwrap();
-    a.apply_downloaded(waiting.clone().into()).await.unwrap();
-    b.apply_downloaded(waiting.into()).await.unwrap();
-    assert_eq!(frames(&b, circle.clone()).await, frames(&a, circle).await);
     for db in [a, b] {
         db.close().await.unwrap();
     }

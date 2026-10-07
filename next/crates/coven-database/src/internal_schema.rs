@@ -132,32 +132,9 @@ macro_rules! coven_tables {
             ) STRICT;
             INSERT INTO coven_snapshot_schema VALUES(1,0);
         ");
-        $visit!(coven_snapshot_coverage, "
-            CREATE TABLE coven_snapshot_coverage (
-                audience TEXT PRIMARY KEY NOT NULL,
-                writes BLOB
-            ) STRICT, WITHOUT ROWID;
-        ");
-        $visit!(coven_snapshot_pending, "
-            CREATE TABLE coven_snapshot_pending (
-                device BLOB PRIMARY KEY NOT NULL CHECK(length(device)=8),
-                number BLOB NOT NULL CHECK(length(number)=8 AND number>x'0000000000000000')
-            ) STRICT, WITHOUT ROWID;
-        ");
-        $visit!(coven_snapshot_waiting, "
-            CREATE TABLE coven_snapshot_waiting (
-                device BLOB NOT NULL CHECK(length(device)=8),
-                number BLOB NOT NULL CHECK(length(number)=8 AND number>x'0000000000000000'),
-                record BLOB NOT NULL,
-                PRIMARY KEY(device,number)
-            ) STRICT;
-        ");
-        $visit!(coven_snapshot_parts, "
-            CREATE TABLE coven_snapshot_parts (
-                audience TEXT NOT NULL,
-                device BLOB NOT NULL CHECK(length(device)=8),
-                number BLOB NOT NULL CHECK(length(number)=8),
-                PRIMARY KEY(audience,device,number)
+        $visit!(coven_loaded_audiences, "
+            CREATE TABLE coven_loaded_audiences (
+                audience TEXT PRIMARY KEY NOT NULL
             ) STRICT, WITHOUT ROWID;
         ");
         $visit!(coven_excluded_writes, "

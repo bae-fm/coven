@@ -12,6 +12,7 @@ mod database;
 mod declaration;
 mod dismissal;
 mod download;
+mod download_stream;
 mod error;
 mod excluded_write;
 mod file_authorization;
@@ -51,9 +52,9 @@ mod snapshot_error;
 mod snapshot_load;
 mod snapshot_loss;
 mod snapshot_metadata;
-mod snapshot_replay;
 mod snapshot_state;
 mod snapshot_write;
+mod snapshot_writes;
 mod sql;
 mod sql_value;
 mod sqlite;
@@ -80,6 +81,7 @@ pub use coven_merge::WriteId;
 pub use database::{Database, DatabaseBuilder, DatabaseReadHandle};
 pub use declaration::{CacheFill, FileDecl, Provenance, RowIdentity, SyncedTable, Uploads};
 pub use download::{ApplyOutcome, DownloadedPart, DownloadedWrite, SyncState, WriteWait};
+pub use download_stream::{DownloadedPartStream, DownloadedWriteStream};
 pub use error::{
     CovenError, CovenMigrationError, CovenResult, DbError, MigrationError, SchemaError,
 };

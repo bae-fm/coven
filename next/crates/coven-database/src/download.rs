@@ -103,44 +103,53 @@ pub(crate) fn apply(
         if positions.covers(header.position) {
             return Ok(ApplyOutcome::AlreadyApplied);
         }
-        let mut missing: Vec<_> = header
-            .had_read
-            .0
-            .iter()
-            .copied()
-            .filter(|id| !positions.covers(*id))
-            .collect();
-        if header.position.number > 1 {
-            let prior = WriteId {
-                number: header.position.number - 1,
-                ..header.position
-            };
-            if !positions.covers(prior) {
-                missing.push(prior);
-            }
-        }
-        if !missing.is_empty() {
-            return Ok(ApplyOutcome::Waiting(WriteWait::Writes(missing)));
-        }
-        let milliseconds = match now.duration_since(UNIX_EPOCH) {
-            Ok(elapsed) => elapsed.as_millis(),
-            Err(_) => 0,
-        };
-        if u128::from(header.timestamp.milliseconds()) > milliseconds + 300_000 {
-            return Ok(ApplyOutcome::Waiting(WriteWait::Clock(header.timestamp)));
-        }
-        if header.schema_version > database.schema_version()? {
-            return Ok(ApplyOutcome::Waiting(WriteWait::SchemaVersion(
-                header.schema_version,
-            )));
+        if let Some(wait) = prerequisite(database, now, header)? {
+            return Ok(ApplyOutcome::Waiting(wait));
         }
         let deleted = crate::store_log_tables::deleted_circles(database)?;
-        let mut affected = apply_opened(database, schema, download, &deleted)?;
-        affected.extend(crate::snapshot_replay::apply(database, schema, &deleted)?);
+        let affected = apply_opened(database, schema, download, &deleted)?;
         files.retain_rows(affected, &deleted)?;
         files.before_commit()?;
         Ok(ApplyOutcome::Applied)
     })
+}
+
+pub(crate) fn prerequisite(
+    database: &DatabaseConnection,
+    now: SystemTime,
+    header: &WriteHeader,
+) -> Result<Option<WriteWait>, DbError> {
+    let positions = positions(database)?;
+    let mut missing: Vec<_> = header
+        .had_read
+        .0
+        .iter()
+        .copied()
+        .filter(|id| !positions.covers(*id))
+        .collect();
+    if header.position.number > 1 {
+        let prior = WriteId {
+            number: header.position.number - 1,
+            ..header.position
+        };
+        if !positions.covers(prior) {
+            missing.push(prior);
+        }
+    }
+    if !missing.is_empty() {
+        return Ok(Some(WriteWait::Writes(missing)));
+    }
+    let milliseconds = match now.duration_since(UNIX_EPOCH) {
+        Ok(elapsed) => elapsed.as_millis(),
+        Err(_) => 0,
+    };
+    if u128::from(header.timestamp.milliseconds()) > milliseconds + 300_000 {
+        return Ok(Some(WriteWait::Clock(header.timestamp)));
+    }
+    if header.schema_version > database.schema_version()? {
+        return Ok(Some(WriteWait::SchemaVersion(header.schema_version)));
+    }
+    Ok(None)
 }
 
 pub(crate) fn apply_opened(
@@ -165,9 +174,6 @@ pub(crate) fn apply_opened(
     let store = MergeStore::new(database, &visible);
     let mut kept = Vec::new();
     for part in record.parts {
-        if crate::snapshot_coverage::covers(database, &part.audience, record.header.position)? {
-            continue;
-        }
         let cause = match record.header.disposition {
             WriteDisposition::Migration => continue,
             WriteDisposition::Lost(version) => Some(LostWriteCause::SchemaChange(version)),

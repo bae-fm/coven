@@ -66,6 +66,39 @@ pub(crate) fn decode(frames: &[Vec<u8>]) -> (SnapshotHeader, Vec<SnapshotRecord>
     (decoder.header().clone(), records)
 }
 
+pub(crate) fn stream(
+    record: &coven_format::write::WriteRecord,
+) -> crate::DownloadedWriteStream<std::io::Cursor<Vec<u8>>> {
+    let encoder = coven_format::write_stream::WriteEncoder::new(record).unwrap();
+    crate::DownloadedWriteStream {
+        header: encoder.header().clone(),
+        parts: (0..record.parts.len())
+            .map(|index| {
+                let bytes = encoder
+                    .part_chunks(index)
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+                    .concat();
+                crate::DownloadedPartStream::Opened(std::io::Cursor::new(bytes))
+            })
+            .collect(),
+    }
+}
+
+pub(crate) async fn load_one<R: std::io::Read + Send + 'static>(
+    database: &Database,
+    expected: SnapshotId,
+    plaintext: R,
+) -> Result<(), crate::DbError> {
+    database
+        .load_snapshots(
+            vec![(expected, plaintext)],
+            Vec::<crate::DownloadedWriteStream<std::io::Cursor<Vec<u8>>>>::new(),
+        )
+        .await
+}
+
 #[tokio::test]
 async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
     let ids = SequentialIds::new();
@@ -598,10 +631,13 @@ async fn excluded_snapshots_keep_only_undismissed_cells_and_rows() {
 
 async fn assert_loaded_losses(source: &Database, target: &Database) {
     let snapshot = frames(source, Audience::Store).await;
-    target
-        .load_snapshot(id(Audience::Store), std::io::Cursor::new(snapshot.concat()))
-        .await
-        .unwrap();
+    load_one(
+        target,
+        id(Audience::Store),
+        std::io::Cursor::new(snapshot.concat()),
+    )
+    .await
+    .unwrap();
     assert_eq!(frames(target, Audience::Store).await, snapshot);
     let loaded = target.lost_values().await.unwrap();
     let expected = source.lost_values().await.unwrap();
