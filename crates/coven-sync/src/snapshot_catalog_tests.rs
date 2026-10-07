@@ -126,7 +126,7 @@ async fn unsigned_snapshot_cannot_replace_rows_or_authorize_log_deletion() {
 
 #[tokio::test]
 async fn another_members_snapshot_signatures_never_authorize_selection_loading_or_retention() {
-    for (prefix_owner, object_owner) in [(false, false), (false, true), (true, false)] {
+    for object_owner in [false, true] {
         let storage = snapshot_storage();
         let mut a = notes_device(storage.clone(), 1).await;
         a.create(key(1)).await;
@@ -145,7 +145,7 @@ async fn another_members_snapshot_signatures_never_authorize_selection_loading_o
         let forged = signed_snapshot(
             &unsigned,
             &path,
-            if prefix_owner { &a.member } else { &other },
+            &other,
             if object_owner { &a.member } else { &other },
         );
         storage.delete(&path).await.unwrap();
@@ -229,7 +229,7 @@ async fn another_members_snapshot_signatures_never_authorize_selection_loading_o
 }
 
 #[tokio::test]
-async fn coverage_checks_verify_the_prefix_in_one_range_without_an_audience_key() {
+async fn coverage_checks_read_exactly_the_signed_prefix_without_an_audience_key() {
     let storage = snapshot_storage();
     let mut a = notes_device(storage.clone(), 1).await;
     a.create(key(1)).await;
@@ -251,16 +251,18 @@ async fn coverage_checks_verify_the_prefix_in_one_range_without_an_audience_key(
         .damaged_objects
         .is_empty());
     let ranges = storage.ranges().await;
-    assert_eq!(ranges.len() - before, 1);
+    assert_eq!(ranges.len() - before, 4);
     assert_eq!(ranges[before].start(), 0);
-    assert_eq!(
-        ranges[before].end(),
-        object
-            .size
-            .min(SnapshotObjectPrefix::MAX_SIGNED_LENGTH as u64)
-    );
     let bytes = storage.read(&object.path).await.unwrap();
     let length = SnapshotObjectPrefix::length(&bytes).unwrap();
+    assert_eq!(
+        ranges[before..]
+            .iter()
+            .map(|range| range.len())
+            .sum::<u64>(),
+        (length + 64) as u64
+    );
+    assert_eq!(ranges.last().unwrap().end(), (length + 64) as u64);
     storage.corrupt_byte(&object.path, length).await.unwrap();
     let report = a.sync.reload_deleted_history().await.unwrap();
     assert_eq!(report.damaged_objects.len(), 1);
@@ -268,6 +270,87 @@ async fn coverage_checks_verify_the_prefix_in_one_range_without_an_audience_key(
         report.damaged_objects[0].failure,
         crate::ObjectCheckFailure::Signature(_)
     ));
+}
+
+#[tokio::test]
+async fn signed_coverage_does_not_require_opening_the_body_but_loading_does() {
+    let storage = snapshot_storage();
+    let mut a = notes_device(storage.clone(), 1).await;
+    a.create(key(1)).await;
+    write_rows(&a, 0, 1, 17, Audience::Store).await;
+    upload(&a, &storage).await;
+    let id = a.sync.write_snapshot(Audience::Store).await.unwrap();
+    let object = storage
+        .list(&ObjectPrefix::snapshots())
+        .await
+        .unwrap()
+        .remove(0);
+    let original = storage.read(&object.path).await.unwrap();
+    let unsigned = unsigned_snapshot(&a, id).await;
+    let wrong_body_signature = signed_snapshot(&unsigned, &object.path, &a.member, &member(2));
+    storage.delete(&object.path).await.unwrap();
+    storage
+        .create(&object.path, &wrong_body_signature)
+        .await
+        .unwrap();
+    assert!(a
+        .sync
+        .write_snapshots()
+        .await
+        .unwrap()
+        .damaged_objects
+        .is_empty());
+    a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+    assert!(a
+        .sync
+        .run_retention()
+        .await
+        .unwrap()
+        .damaged_objects
+        .is_empty());
+    assert!(storage
+        .list(&ObjectPrefix::device_logs())
+        .await
+        .unwrap()
+        .is_empty());
+    let mut b = notes_device(storage.clone(), 2).await;
+    add_device(&mut b).await;
+    assert!(b.sync.reload_from_snapshots().await.is_err());
+    assert!(tables(&b).await.is_empty());
+    storage.delete(&object.path).await.unwrap();
+    storage.create(&object.path, &original).await.unwrap();
+    b.sync.reload_from_snapshots().await.unwrap();
+    assert_eq!(tables(&a).await, tables(&b).await);
+}
+
+#[tokio::test]
+async fn a_truncated_body_does_not_erase_signed_required_history() {
+    let storage = snapshot_storage();
+    let mut a = notes_device(storage.clone(), 1).await;
+    a.create(key(1)).await;
+    write_rows(&a, 0, 1, 17, Audience::Store).await;
+    upload(&a, &storage).await;
+    a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    assert!(storage
+        .list(&ObjectPrefix::device_logs())
+        .await
+        .unwrap()
+        .is_empty());
+    let object = storage
+        .list(&ObjectPrefix::snapshots())
+        .await
+        .unwrap()
+        .remove(0);
+    let mut bytes = storage.read(&object.path).await.unwrap();
+    bytes.truncate(SnapshotObjectPrefix::length(&bytes).unwrap() + 64);
+    storage.delete(&object.path).await.unwrap();
+    storage.create(&object.path, &bytes).await.unwrap();
+    let mut b = notes_device(storage.clone(), 2).await;
+    add_device(&mut b).await;
+    assert!(b.sync.reload_deleted_history().await.is_err());
+    assert!(tables(&b).await.is_empty());
+    assert!(b.sync.pending_reload().await.unwrap().is_some());
 }
 
 #[tokio::test]

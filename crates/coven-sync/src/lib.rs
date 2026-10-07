@@ -3,8 +3,10 @@
 mod conflicts;
 mod device_log_sync;
 mod effects;
+mod pass_reads;
 mod replay;
 mod replay_cache;
+mod stream_input;
 mod write_object;
 mod write_seal;
 

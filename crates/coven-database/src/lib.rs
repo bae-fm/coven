@@ -108,7 +108,7 @@ pub use migration_change::{ChangeOp, ColumnChange, RowChange};
 pub use read::{Read, SqlReadContext};
 pub use row_key::RowKey;
 pub use snapshot_error::SnapshotError;
-pub use snapshot_reload::{SnapshotInspection, SnapshotReload, SnapshotSource};
+pub use snapshot_reload::{SnapshotReload, SnapshotSource};
 pub use snapshot_write::SnapshotWriteError;
 pub use store_log::{
     DropReason, EntryOutcome, StoreCircle, StoreDevice, StoreIdentity, StoreLog, StoreLogReplay,

@@ -57,7 +57,7 @@ impl Database {
     }
 
     /// Run the snapshot loader's format, schema and merge checks in a transaction
-    /// that always rolls back. Sync uses this before selecting a stored candidate;
+    /// that always rolls back. Sync uses this for loading and file-reference checks;
     /// a damaged snapshot cannot leave rows, metadata or observations behind.
     /// Supply its authenticated sealed prefix alongside the opened plaintext.
     pub async fn validate_snapshot<R: std::io::Read + Send + 'static>(
@@ -65,18 +65,18 @@ impl Database {
         id: coven_format::store_log::SnapshotId,
         prefix: coven_format::sealed_snapshot::SnapshotObjectPrefix,
         input: R,
-    ) -> Result<crate::SnapshotInspection, DbError> {
+    ) -> Result<
+        std::collections::BTreeSet<(
+            coven_foundation::id_source::DeviceId,
+            coven_foundation::id_source::FileId,
+        )>,
+        DbError,
+    > {
         self.call(move |inner| {
             inner.with_writer(|writer| {
                 writer.read_transaction(|| {
                     crate::snapshot_state::create_tables(writer)?;
-                    let (header, _) = crate::snapshot_load::read(
-                        writer,
-                        &inner.write_schema,
-                        &id,
-                        prefix,
-                        input,
-                    )?;
+                    crate::snapshot_load::read(writer, &inner.write_schema, &id, prefix, input)?;
                     let files =
                         super::file_retention::snapshot_references(writer, &inner.write_schema)
                             .map_err(|error| match error {
@@ -85,7 +85,7 @@ impl Database {
                                 ),
                                 error => error,
                             })?;
-                    Ok(crate::SnapshotInspection { header, files })
+                    Ok(files)
                 })
             })
         })

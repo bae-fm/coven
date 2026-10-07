@@ -24,9 +24,40 @@ pub struct SnapshotObjectPrefix {
     pub store_log: EntryPositions,
 }
 impl SnapshotObjectPrefix {
-    /// Largest prefix plus its signature: a circle audience, key, two maximal
-    /// position lists and 64 signature bytes. Bounds a single ranged read.
-    pub const MAX_SIGNED_LENGTH: usize = 36 + 2 * (4 + MAX_ITEMS * 16) + 64;
+    /// Next exclusive read boundary while fetching a signed prefix. Start with
+    /// no bytes and append exactly the requested range until this equals the
+    /// buffer length. Counts are bounded before reading their lists; these
+    /// unverified routing fields only delimit reads and confer no authority.
+    pub fn read_length(bytes: &[u8]) -> Result<usize, Error> {
+        if bytes.len() < 4 {
+            return Ok(4);
+        }
+        let writes = Self::routing_length(bytes)?;
+        if bytes.len() < writes + 4 {
+            return Ok(writes + 4);
+        }
+        let entries = positions_end(bytes, writes)?;
+        if bytes.len() < entries + 4 {
+            return Ok(entries + 4);
+        }
+        Ok(positions_end(bytes, entries)? + 64)
+    }
+
+    /// Encoded plaintext size from a listing, excluding the prefix, both
+    /// signatures and per-chunk overhead. This checks the possible partition;
+    /// it does not authenticate the body or validate its plaintext frames.
+    pub fn plaintext_length(&self, object_length: u64) -> Result<u64, Error> {
+        let sealed = object_length
+            .checked_sub(self.encode()?.len() as u64 + 128)
+            .ok_or(Error::Truncated)?;
+        let overhead = (4 + SEALED_OBJECT_CHUNK_OVERHEAD) as u64;
+        let full = CHUNK_SIZE as u64 + overhead;
+        require(sealed > 0, "snapshot chunks", Rule::Required)?;
+        let chunks = sealed.div_ceil(full);
+        let last = sealed - (chunks - 1) * full;
+        require(last > overhead, "snapshot final chunk length", Rule::Chunk)?;
+        Ok(sealed - chunks * overhead)
+    }
 
     /// Encode kind 34, version, audience, key and both counted position lists.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {

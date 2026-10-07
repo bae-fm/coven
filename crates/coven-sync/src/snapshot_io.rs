@@ -100,3 +100,25 @@ pub(super) async fn range(
     }
     Ok(bytes)
 }
+
+/// Snapshot loading writes retained plaintext; reference checking sends it
+/// directly to the database's rollback-only validator.
+pub(super) trait SnapshotSink: Send {
+    fn chunk(
+        &mut self,
+        bytes: Vec<u8>,
+    ) -> impl std::future::Future<Output = Result<(), SyncError>> + Send;
+}
+impl SnapshotSink for coven_foundation::files::FileWriter {
+    async fn chunk(&mut self, bytes: Vec<u8>) -> Result<(), SyncError> {
+        Ok(self.append(&bytes).await?)
+    }
+}
+impl SnapshotSink for tokio::sync::mpsc::Sender<Vec<u8>> {
+    async fn chunk(&mut self, bytes: Vec<u8>) -> Result<(), SyncError> {
+        // A schema/format refusal can end validation before transfer. The caller
+        // awaits both results and never uses references from a failed check.
+        let _ = self.send(bytes).await;
+        Ok(())
+    }
+}

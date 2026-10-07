@@ -1948,6 +1948,9 @@ Carol's tablet:
   its latest snapshot add up to more bytes than that snapshot, or than
   1 MiB while the audience has none.
   - Both sizes count encoded plaintext, before sealing adds chunk overhead.
+    The latest snapshot's size follows from its listed object size and D9's
+    fixed chunk layout. Choosing it and checking growth read only its signed
+    prefix; they do not decrypt or validate its rows.
 - The *latest* snapshot of an audience is the one covering the most writes,
   counted over every log; a tie goes to the smaller path.
 - Until an audience has a snapshot, a new device reads every log from the
@@ -2010,6 +2013,12 @@ Carol's tablet:
   30 days.
   - Every device means every device the store log has and hasn't removed;
     one that has never posted counts as having read nothing.
+  - Coverage needs only the write header's part audiences, authenticated by
+    its store-key encryption and bound to its path and prefix. Retention
+    reads that section by range, without reading parts or checking the
+    whole-object author signature. These fields describe the object being
+    deleted; they grant no author authority and apply no rows. Loading a
+    write still checks its complete signature (§6).
 - A write waiting for store-log entries or a key copy holds retention back.
   This is not damaged data and does not fail the sync pass. Deletion is
   reconsidered after those inputs arrive, under the same coverage rules.
@@ -2220,6 +2229,13 @@ Carol's tablet:
 - An uploaded file is deleted once no synced row in any kept snapshot or
   log write refers to it as uploaded. Local rows, waiting writes and
   unfinished upload publication also protect the file.
+  - Check local protection first. If it protects every eligible listed
+    file, no snapshot rows or log parts need reading for file retention.
+  - Otherwise stream the necessary retained data into the database's
+    reference checks, with complete object authentication before deletion.
+    Keep checked references and metadata for the current pass so an object
+    already read for loading or retention is not downloaded again. Do not
+    stage retained objects in temporary files for this check.
 - Its storage path and uploaded row reference carry the uploader's device
   id, so ownership remains known after the last reference disappears.
 - If retained data belongs to an unreadable audience, uses an excluded key,

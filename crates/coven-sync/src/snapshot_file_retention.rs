@@ -1,16 +1,13 @@
 //! Prove absence across retained data before deleting an uploader's files.
 
 use super::{catalog::snapshot_damage, StoreLogSync};
-use crate::{replay_cache::ReplayCache, snapshot_data::SnapshotTask, SyncError, SyncResults};
-use coven_database::OperationRecord;
+use crate::{replay_cache::ReplayCache, SyncError, SyncResults};
 use coven_storage::{ObjectPath, ObjectPrefix};
 use std::collections::{BTreeMap, BTreeSet};
 
 impl StoreLogSync {
     pub(super) async fn retain_uploaded_files(
         &self,
-        record: &OperationRecord,
-        task: &mut SnapshotTask,
         report: &mut SyncResults,
     ) -> Result<(), SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
@@ -40,6 +37,34 @@ impl StoreLogSync {
                 };
                 references.insert(ObjectPath::file(device, id));
             }
+        }
+        let mut paths: BTreeSet<_> = objects.into_iter().map(|object| object.path).collect();
+        let mut unused = BTreeMap::new();
+        for upload in protected.uploads.into_iter().filter(|upload| upload.unused) {
+            let identity = upload
+                .identity
+                .ok_or(coven_database::DbError::DamagedDatabase)?;
+            let (id, _) = crate::files::file_upload::decode_identity(identity.as_bytes())?;
+            let coven_database::FileLocation::OnDevice(device) = upload.file.location() else {
+                return Err(coven_database::DbError::DamagedDatabase.into());
+            };
+            let path = ObjectPath::file(device, id);
+            paths.insert(path.clone());
+            unused.insert(path, upload.id);
+        }
+        let mut eligible = BTreeSet::new();
+        for path in paths {
+            let device = path
+                .device()
+                .ok_or(coven_database::DbError::DamagedDatabase)?;
+            if self.can_delete_device(&local.log, local.device, device)?
+                && !references.contains(&path)
+            {
+                eligible.insert(path);
+            }
+        }
+        if eligible.is_empty() {
+            return Ok(());
         }
         let mut audiences = BTreeSet::new();
         for object in storage.list(&ObjectPrefix::snapshots()).await? {
@@ -71,8 +96,7 @@ impl StoreLogSync {
                 return Ok(());
             }
             for candidate in candidates.candidates {
-                let file = self.reserve_snapshot_file(record, task).await?;
-                match self.open_snapshot(&candidate, &file).await {
+                match self.snapshot_file_references(&candidate).await {
                     Ok(files) => references.extend(
                         files
                             .into_iter()
@@ -95,29 +119,32 @@ impl StoreLogSync {
                 }
             }
         }
+        eligible.retain(|path| !references.contains(path));
+        if eligible.is_empty() {
+            return Ok(());
+        }
         let mut replays = ReplayCache::new(&local.log);
         for object in storage.list(&ObjectPrefix::device_logs()).await? {
-            let saved = match self
-                .open_snapshot_write(&object, &local.log, &mut replays, &readable, record, task)
+            if eligible.iter().all(|path| references.contains(path)) {
+                return Ok(());
+            }
+            let files = match self
+                .retained_write_references(&object, &local.log, &mut replays, &readable)
                 .await
             {
-                Ok(saved) => saved,
+                Ok(Some(files)) => files,
+                Ok(None) => {
+                    tracing::debug!(
+                        path = object.path.as_str(),
+                        "unreadable or unsupported retained write prevents proving file absence"
+                    );
+                    return Ok(());
+                }
                 Err(error) if super::retention::waiting(&object.path, &error) => return Ok(()),
                 Err(error) => {
                     snapshot_damage(report, &object.path, error)?;
                     return Ok(());
                 }
-            };
-            let Some(files) = self
-                .database
-                .write_file_references(self.open_saved_write(&saved)?)
-                .await?
-            else {
-                tracing::debug!(
-                    path = object.path.as_str(),
-                    "unreadable retained write prevents proving file absence"
-                );
-                return Ok(());
             };
             references.extend(
                 files
@@ -125,27 +152,8 @@ impl StoreLogSync {
                     .map(|(device, id)| ObjectPath::file(device, id)),
             );
         }
-        let mut paths: BTreeSet<_> = objects.into_iter().map(|object| object.path).collect();
-        let mut unused = BTreeMap::new();
-        for upload in protected.uploads.into_iter().filter(|upload| upload.unused) {
-            let identity = upload
-                .identity
-                .ok_or(coven_database::DbError::DamagedDatabase)?;
-            let (id, _) = crate::files::file_upload::decode_identity(identity.as_bytes())?;
-            let coven_database::FileLocation::OnDevice(device) = upload.file.location() else {
-                return Err(coven_database::DbError::DamagedDatabase.into());
-            };
-            let path = ObjectPath::file(device, id);
-            paths.insert(path.clone());
-            unused.insert(path, upload.id);
-        }
-        for path in paths {
-            let device = path
-                .device()
-                .ok_or(coven_database::DbError::DamagedDatabase)?;
-            if self.can_delete_device(&local.log, local.device, device)?
-                && !references.contains(&path)
-            {
+        for path in eligible {
+            if !references.contains(&path) {
                 // Idempotent deletion also confirms absence after a lost reply.
                 storage.delete(&path).await?;
                 if let Some(id) = unused.get(&path) {
@@ -154,5 +162,53 @@ impl StoreLogSync {
             }
         }
         Ok(())
+    }
+
+    async fn retained_write_references(
+        &self,
+        object: &coven_storage::StoredObject,
+        log: &coven_database::StoreLog,
+        replays: &mut ReplayCache<'_>,
+        readable: &BTreeSet<coven_merge::Audience>,
+    ) -> Result<Option<crate::pass_reads::FileReferences>, SyncError> {
+        if let Some(files) = self.reads.files(object) {
+            return Ok(files);
+        }
+        let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
+        let ring = self.store_keys.unlock()?;
+        let opened = crate::write_object::open(storage, object, ring.as_ref(), &self.reads).await?;
+        let ring = ring.as_ref().expect("opened header has its store key");
+        crate::write_object::require_history(log, &opened.header.header)?;
+        let author = crate::write_object::authority(log, replays, &opened.header.header)
+            .map_err(|failure| crate::write_object::damaged(&object.path, failure))?;
+        let mut opens = crate::write_object::parts(
+            &opened,
+            ring,
+            log,
+            replays,
+            &self.operation_member()?.member_id(),
+        )?;
+        for (opens, part) in opens.iter_mut().zip(&opened.header.parts) {
+            *opens &= readable.contains(&part.audience);
+        }
+        if opens.contains(&false) {
+            self.reads.keep_files(object, None);
+            return Ok(None);
+        }
+        let (mut sink, input) =
+            crate::stream_input::ChannelParts::new(opened.header.clone(), &opens);
+        let transfer = async {
+            let result =
+                crate::write_object::finish(storage, object, ring, &author, opened, &mut sink)
+                    .await;
+            drop(sink);
+            result
+        };
+        let (transferred, checked) =
+            tokio::join!(transfer, self.database.write_file_references(input));
+        transferred?;
+        let files = checked?;
+        self.reads.keep_files(object, files.clone());
+        Ok(files)
     }
 }

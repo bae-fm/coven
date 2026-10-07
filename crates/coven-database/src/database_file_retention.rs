@@ -1,7 +1,7 @@
 //! File references used to prove that storage deletion cannot strand a row.
 
 use super::Database;
-use crate::{DbError, DownloadedPart, DownloadedWriteStream, FileUpload};
+use crate::{DbError, DownloadedPartStream, DownloadedWriteStream, FileUpload};
 use coven_format::{file_reference::UploadedFileReference, value::Value, write::RowChange};
 use coven_foundation::id_source::{DeviceId, FileId};
 use coven_merge::{ColumnValue, Operation};
@@ -89,23 +89,39 @@ impl Database {
         .await
     }
 
-    /// Find declared uploaded references in one authenticated write. A skipped
-    /// part returns `None`: sync cannot prove file absence without that audience.
+    /// Stream declared uploaded references from checked plaintext. The caller
+    /// must authenticate the complete object before using this result. A skipped
+    /// part or unsupported schema returns `None`: neither can prove file absence.
     pub async fn write_file_references<R: std::io::Read + Send + 'static>(
         &self,
         write: DownloadedWriteStream<R>,
     ) -> Result<Option<BTreeSet<(DeviceId, FileId)>>, DbError> {
         self.call(move |inner| {
             let mut references = BTreeSet::new();
-            for part in write.read()?.parts {
-                match part {
-                    DownloadedPart::Skipped(_) => return Ok(None),
-                    DownloadedPart::Opened(part) => {
-                        for row in part.rows {
-                            retain_change(&inner.write_schema, &row, &mut references)?;
-                        }
+            write.header.encode()?;
+            if !inner
+                .write_schema
+                .versions
+                .contains(&write.header.header.schema_version)
+            {
+                return Ok(None);
+            }
+            if write.header.parts.len() != write.parts.len() {
+                return Err(crate::SnapshotError::Inconsistent(
+                    "write stream count differs from its header",
+                )
+                .into());
+            }
+            for (header, part) in write.header.parts.into_iter().zip(write.parts) {
+                let DownloadedPartStream::Opened(input) = part else {
+                    return Ok(None);
+                };
+                crate::download_stream::read_part(input, header, &write.header.header, |frame| {
+                    if let coven_format::dismissal::WriteFrame::Change(row) = frame {
+                        retain_change(&inner.write_schema, &row, &mut references)?;
                     }
-                }
+                    Ok::<_, DbError>(())
+                })?;
             }
             Ok(Some(references))
         })

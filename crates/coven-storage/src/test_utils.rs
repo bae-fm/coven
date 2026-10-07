@@ -102,6 +102,7 @@ struct State {
     retained_access: BTreeMap<String, Vec<RetainedAccess>>,
     faults: Faults,
     ranges: Vec<ByteRange>,
+    reads: Vec<(ObjectPath, u64, u64)>,
     sent_bytes: u64,
     largest_part: usize,
     held_listing: Option<HeldRequest>,
@@ -164,6 +165,7 @@ impl MemoryStorage {
                 retained_access: BTreeMap::new(),
                 faults: Faults::none(),
                 ranges: Vec::new(),
+                reads: Vec::new(),
                 sent_bytes: 0,
                 largest_part: 0,
                 held_listing: None,
@@ -253,6 +255,10 @@ impl MemoryStorage {
     /// Successful ranged requests, in order.
     pub async fn ranges(&self) -> Vec<ByteRange> {
         self.state.lock().await.ranges.clone()
+    }
+    /// Successful reads as (path, offset, byte count), including whole objects.
+    pub async fn reads(&self) -> Vec<(ObjectPath, u64, u64)> {
+        self.state.lock().await.reads.clone()
     }
     /// Part bytes with successful replies and their largest buffer, across sessions.
     pub async fn transferred(&self) -> (u64, usize) {
@@ -486,13 +492,14 @@ impl Storage for MemoryStorage {
     }
     async fn read(&self, path: &ObjectPath) -> Result<Vec<u8>, StorageError> {
         self.before().await?;
-        self.state
-            .lock()
-            .await
+        let mut state = self.state.lock().await;
+        let bytes = state
             .objects
             .get(path)
             .map(|object| object.bytes.clone())
-            .ok_or(StorageError::NotFound)
+            .ok_or(StorageError::NotFound)?;
+        state.reads.push((path.clone(), 0, bytes.len() as u64));
+        Ok(bytes)
     }
     async fn read_range(
         &self,
@@ -503,6 +510,7 @@ impl Storage for MemoryStorage {
         let mut state = self.state.lock().await;
         let bytes = range.select(&state.objects.get(path).ok_or(StorageError::NotFound)?.bytes)?;
         state.ranges.push(range);
+        state.reads.push((path.clone(), range.start(), range.len()));
         Ok(bytes)
     }
     async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {

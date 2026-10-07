@@ -59,14 +59,3 @@ impl<R, W> SnapshotReload<R, W> {
         }
     }
 }
-
-/// A validated snapshot's header and declared file references.
-pub struct SnapshotInspection {
-    /// Header metadata, including positions from the authenticated sealed prefix.
-    pub header: coven_format::snapshot::SnapshotHeader,
-    /// Uploaded files named by its synced rows.
-    pub files: std::collections::BTreeSet<(
-        coven_foundation::id_source::DeviceId,
-        coven_foundation::id_source::FileId,
-    )>,
-}

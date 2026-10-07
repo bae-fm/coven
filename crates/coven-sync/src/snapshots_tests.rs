@@ -705,8 +705,7 @@ async fn a_snapshot_exceeding_the_transfer_memory_budget_streams_in_bounded_requ
         .ranges()
         .await
         .iter()
-        .all(|range| range.end() - range.start()
-            <= coven_format::sealed_snapshot::SnapshotObjectPrefix::MAX_SIGNED_LENGTH as u64));
+        .all(|range| range.end() - range.start() <= 65536 + 44));
 }
 
 #[tokio::test]
@@ -788,4 +787,168 @@ async fn reload_reselects_after_store_log_changes_and_preserves_interleaved_app_
     a.sync.sync_store_log().await.unwrap();
     assert_eq!(a.db.test_queued_writes().await.unwrap(), waiting);
     assert_eq!(tables(&a).await.len(), 2);
+}
+
+#[tokio::test]
+async fn idle_pass_reads_only_snapshot_prefixes_and_log_headers() {
+    let storage = snapshot_storage();
+    let mut a = notes_device(storage.clone(), 1).await;
+    a.create(key(1)).await;
+    let mut b = notes_device(storage.clone(), 2).await;
+    add_device(&mut b).await;
+    let mut c = notes_device(storage.clone(), 3).await;
+    add_device(&mut c).await;
+    for device in [&mut a, &mut b, &mut c] {
+        device.sync().await;
+    }
+    for (i, device) in [&a, &b, &c].into_iter().enumerate() {
+        for batch in 0..10 {
+            write_rows(device, i * 1000 + batch * 100, 100, 1024, Audience::Store).await;
+        }
+        upload(device, &storage).await;
+    }
+    for device in [&mut a, &mut b, &mut c] {
+        device.writes().download_writes().await.unwrap();
+        device.sync.write_snapshot(Audience::Store).await.unwrap();
+    }
+    let mut bounds = std::collections::BTreeMap::new();
+    for object in storage.list(&ObjectPrefix::snapshots()).await.unwrap() {
+        let bytes = storage.read(&object.path).await.unwrap();
+        bounds.insert(
+            object.path,
+            (coven_format::sealed_snapshot::SnapshotObjectPrefix::length(&bytes).unwrap() + 64)
+                as u64,
+        );
+    }
+    for object in storage.list(&ObjectPrefix::device_logs()).await.unwrap() {
+        let bytes = storage.read(&object.path).await.unwrap();
+        let prefix = coven_format::sealed_write::WriteObjectPrefix::length(&bytes).unwrap();
+        let header =
+            coven_format::sealed_write::WriteObjectPrefix::header_chunk_length(&bytes[prefix..])
+                .unwrap();
+        bounds.insert(object.path, (prefix + header) as u64);
+    }
+    assert_eq!(bounds.len(), 33);
+    let files = crate::Files::new(
+        coven_database::FileDatabase::new(a.db.clone()),
+        a.directory.clone(),
+        Some(storage.clone()),
+        a.clock.clone(),
+        a.sync.ids.clone(),
+        crate::TransferLimits::default(),
+    );
+    let writes = a.writes();
+    let operations = crate::Operations::new(a.sync, files.clone(), writes, a.clock.clone());
+    let mut excess_reads = 0;
+    for pass in 0..2 {
+        let start = storage.reads().await.len();
+        let report = operations.sync().await.unwrap();
+        assert!(report.damaged_objects.is_empty(), "{report:?}");
+        let reads = storage.reads().await;
+        let reads = &reads[start..];
+        let bytes: u64 = reads.iter().map(|(_, _, size)| size).sum();
+        eprintln!(
+            "idle pass {pass}: {bytes} storage bytes, {} reads",
+            reads.len()
+        );
+        let excess: Vec<_> = reads
+            .iter()
+            .filter(|(path, offset, size)| bounds.get(path).is_some_and(|end| offset + size > *end))
+            .collect();
+        excess_reads += excess.len();
+        let mut through = std::collections::BTreeMap::new();
+        for (path, offset, size) in reads {
+            if bounds.contains_key(path) {
+                let next = through.entry(path).or_insert(0);
+                assert_eq!(*offset, *next, "repeated or skipped bytes in {path:?}");
+                *next += size;
+            }
+        }
+        for (path, size) in through {
+            assert_eq!(size, bounds[path]);
+        }
+    }
+    assert_eq!(excess_reads, 0, "snapshot bodies or log parts were read");
+    operations.close().await.unwrap();
+    files.close().await;
+}
+
+#[tokio::test]
+async fn a_pass_reuses_loaded_snapshot_and_write_references() {
+    for deleted_history in [false, true] {
+        let storage = snapshot_storage();
+        let mut a = notes_device(storage.clone(), 1).await;
+        a.create(key(1)).await;
+        let mut b = notes_device(storage.clone(), 2).await;
+        add_device(&mut b).await;
+        write_rows(&b, 0, 10, 1024, Audience::Store).await;
+        upload(&b, &storage).await;
+        if deleted_history {
+            b.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+            b.sync.write_snapshot(Audience::Store).await.unwrap();
+            assert!(storage
+                .list(&ObjectPrefix::device_logs())
+                .await
+                .unwrap()
+                .is_empty());
+        }
+        let objects = storage
+            .list(&if deleted_history {
+                ObjectPrefix::snapshots()
+            } else {
+                ObjectPrefix::device_logs()
+            })
+            .await
+            .unwrap();
+        assert_eq!(objects.len(), 1);
+        // This device owns an unreferenced upload, so retention must prove
+        // absence across the object the pass is about to load.
+        let orphan = ObjectPath::file(
+            a.device().await,
+            coven_foundation::id_source::FileId(uuid::Uuid::from_u128(999)),
+        );
+        storage.create(&orphan, b"orphan").await.unwrap();
+        let files = crate::Files::new(
+            coven_database::FileDatabase::new(a.db.clone()),
+            a.directory.clone(),
+            Some(storage.clone()),
+            a.clock.clone(),
+            a.sync.ids.clone(),
+            crate::TransferLimits::default(),
+        );
+        let writes = a.writes();
+        let database = a.db.clone();
+        let operations = crate::Operations::new(a.sync, files.clone(), writes, a.clock.clone());
+        let start = storage.reads().await.len();
+        let report = operations.sync().await.unwrap();
+        assert!(report.damaged_objects.is_empty(), "{report:?}");
+        assert!(report.blocked_operations.is_empty(), "{report:?}");
+        let reads = storage.reads().await;
+        let object = &objects[0];
+        let bytes: u64 = reads[start..]
+            .iter()
+            .filter(|(path, _, _)| path == &object.path)
+            .map(|(_, _, size)| size)
+            .sum();
+        assert_eq!(
+            bytes, object.size,
+            "each object is read once, including its prefix/header"
+        );
+        assert!(storage
+            .list(&ObjectPrefix::files())
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            database
+                .read(|sql| Ok(
+                    sql.query_row("SELECT count(*) FROM notes", [], |row| row.get::<_, i64>(0))?
+                ))
+                .await
+                .unwrap(),
+            10
+        );
+        operations.close().await.unwrap();
+        files.close().await;
+    }
 }

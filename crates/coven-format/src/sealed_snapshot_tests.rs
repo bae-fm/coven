@@ -7,6 +7,78 @@ use coven_crypto::StoreKey;
 use coven_foundation::id_source::{IdSource, UuidIds};
 
 #[test]
+fn listed_snapshot_size_recovers_plaintext_at_chunk_boundaries() {
+    let prefix = SnapshotObjectPrefix {
+        audience: Audience::Store,
+        key: KeyId(uuid::Uuid::from_bytes([1; 16])),
+        writes: crate::test_utils::snapshot_header().writes,
+        store_log: crate::test_utils::snapshot_header().store_log,
+    };
+    let key = StoreKey::generate(prefix.key).unwrap().derive();
+    let clear = prefix.encode().unwrap();
+    for size in [
+        1,
+        CHUNK_SIZE - 1,
+        CHUNK_SIZE,
+        CHUNK_SIZE + 1,
+        CHUNK_SIZE * 3,
+    ] {
+        let mut layout = SnapshotObjectLayout::new();
+        let mut stored = clear.len() + 128;
+        for chunk in vec![7; size].chunks(CHUNK_SIZE) {
+            let bytes = key
+                .seal_object_chunk("snapshots/store/1/1", &clear, 0, layout.index(), chunk)
+                .unwrap();
+            stored += layout.encode_chunk(&bytes).unwrap().len();
+        }
+        assert_eq!(prefix.plaintext_length(stored as u64).unwrap(), size as u64);
+    }
+    for section in (0..=44).chain((CHUNK_SIZE + 45)..=(CHUNK_SIZE + 88)) {
+        assert!(prefix
+            .plaintext_length((clear.len() + 128 + section) as u64)
+            .is_err());
+    }
+    assert!(prefix.plaintext_length(0).is_err());
+}
+
+#[test]
+fn prefix_read_boundaries_stop_at_the_signature_and_bound_each_count() {
+    for audience in [
+        Audience::Store,
+        Audience::Circle(coven_crypto::CircleId(uuid::Uuid::from_u128(1))),
+    ] {
+        let prefix = SnapshotObjectPrefix {
+            audience,
+            key: KeyId(uuid::Uuid::nil()),
+            writes: crate::test_utils::snapshot_header().writes,
+            store_log: crate::test_utils::snapshot_header().store_log,
+        };
+        let mut signed = prefix.encode().unwrap();
+        signed.extend([0; 64]);
+        let mut read = Vec::new();
+        loop {
+            let end = SnapshotObjectPrefix::read_length(&read).unwrap();
+            if end == read.len() {
+                break;
+            }
+            assert!(end <= signed.len());
+            read.extend_from_slice(&signed[read.len()..end]);
+        }
+        assert_eq!(read, signed);
+        let first = SnapshotObjectPrefix::routing_length(&signed).unwrap();
+        let second = positions_end(&signed, first).unwrap();
+        for offset in [first, second] {
+            let mut bad = signed[..offset + 4].to_vec();
+            bad[offset..].copy_from_slice(&u32::MAX.to_be_bytes());
+            assert!(matches!(
+                SnapshotObjectPrefix::read_length(&bad),
+                Err(Error::Limit { .. })
+            ));
+        }
+    }
+}
+
+#[test]
 fn sealed_snapshot_has_its_own_kind_outside_the_plaintext_frames() {
     let prefix = SnapshotObjectPrefix {
         audience: Audience::Store,

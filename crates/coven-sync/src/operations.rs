@@ -505,6 +505,7 @@ impl OperationRun {
     }
 
     async fn sync_pass(&mut self) -> Result<SyncResults, SyncError> {
+        let _reads = self.sync.begin_pass(&mut self.writes);
         let mut report = self.sync.sync_store_log().await?;
         self.drive().await?;
         // A blocked reload leaves its operation visible, without publishing a

@@ -1,12 +1,8 @@
 //! Keep shared device-log downloads on disk until an atomic snapshot reload.
 
 use super::{io, StoreLogSync};
-use crate::{
-    replay_cache::ReplayCache,
-    snapshot_data::{SavedWrite, SnapshotTask},
-    SyncError,
-};
-use coven_database::{OperationRecord, StoreLog};
+use crate::{replay_cache::ReplayCache, snapshot_data::SavedWrite, SyncError};
+use coven_database::StoreLog;
 use coven_format::{
     write::WriteHeader,
     write_stream::{PartDecoder, WriteHeaderFrame},
@@ -23,9 +19,11 @@ impl StoreLogSync {
     ) -> Result<WriteHeaderFrame, SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let ring = self.store_keys.unlock()?;
-        Ok(crate::write_object::open(storage, object, ring.as_ref())
-            .await?
-            .header)
+        Ok(
+            crate::write_object::open(storage, object, ring.as_ref(), &self.reads)
+                .await?
+                .header,
+        )
     }
 
     pub(super) async fn open_snapshot_write(
@@ -34,30 +32,13 @@ impl StoreLogSync {
         log: &StoreLog,
         replays: &mut ReplayCache<'_>,
         readable: &BTreeSet<Audience>,
-        record: &OperationRecord,
-        task: &mut SnapshotTask,
+        names: &mut impl Iterator<Item = String>,
     ) -> Result<SavedWrite, SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let ring = self.store_keys.unlock()?;
-        let opened = crate::write_object::open(storage, object, ring.as_ref()).await?;
+        let opened = crate::write_object::open(storage, object, ring.as_ref(), &self.reads).await?;
         let ring = ring.as_ref().expect("opened header has its store key");
-        let missing: Vec<_> = opened
-            .header
-            .header
-            .store_log_read
-            .0
-            .iter()
-            .copied()
-            .filter(|id| !log.replay.entries.contains_key(id))
-            .collect();
-        if !missing.is_empty() {
-            return Err(coven_database::DbError::Snapshot(
-                coven_database::SnapshotError::WriteWaiting(coven_database::WriteWait::StoreLog(
-                    missing,
-                )),
-            )
-            .into());
-        }
+        crate::write_object::require_history(log, &opened.header.header)?;
         let author = crate::write_object::authority(log, replays, &opened.header.header)
             .map_err(|failure| crate::write_object::damaged(&object.path, failure))?;
         let eligible = crate::write_object::parts(
@@ -71,7 +52,7 @@ impl StoreLogSync {
         let mut targets = Vec::new();
         for (part, eligible) in opened.header.parts.iter().zip(eligible) {
             if eligible && readable.contains(&part.audience) {
-                let name = self.reserve_snapshot_file(record, task).await?;
+                let name = names.next().expect("reserved log part files");
                 let writer = self
                     .directory
                     .file(
@@ -87,11 +68,24 @@ impl StoreLogSync {
             }
         }
         let header = opened.header.encode()?;
-        let mut sink = SnapshotWriteParts {
+        let primary = SnapshotWriteParts {
             header: opened.header.header.clone(),
             targets,
         };
-        crate::write_object::finish(storage, object, ring, &author, opened, &mut sink).await?;
+        let opens = files.iter().map(Option::is_some).collect::<Vec<_>>();
+        let (references, input) =
+            crate::stream_input::ChannelParts::new(opened.header.clone(), &opens);
+        let transfer = async {
+            let mut sink = crate::stream_input::WithReferences {
+                primary,
+                references,
+            };
+            crate::write_object::finish(storage, object, ring, &author, opened, &mut sink).await
+        };
+        let (transferred, checked) =
+            tokio::join!(transfer, self.database.write_file_references(input));
+        transferred?;
+        self.reads.keep_files(object, checked?);
         Ok(SavedWrite {
             header,
             parts: files,

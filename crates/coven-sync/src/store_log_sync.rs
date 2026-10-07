@@ -28,6 +28,7 @@ use std::time::UNIX_EPOCH;
 /// Calls require exclusive access so one install never authors or applies two
 /// entries concurrently through this owner. The database also checks stale replay.
 pub struct StoreLogSync {
+    reads: crate::pass_reads::PassReads,
     storage: Option<Arc<dyn Storage>>,
     database: Database,
     store_keys: Arc<dyn StoreKeyCustody>,
@@ -49,6 +50,7 @@ impl StoreLogSync {
         directory: coven_foundation::files::StoreDir,
     ) -> Self {
         Self {
+            reads: crate::pass_reads::PassReads::default(),
             storage: Some(storage),
             database,
             store_keys,
@@ -69,6 +71,7 @@ impl StoreLogSync {
         directory: coven_foundation::files::StoreDir,
     ) -> Self {
         Self {
+            reads: crate::pass_reads::PassReads::default(),
             storage: None,
             database,
             store_keys,
@@ -79,9 +82,20 @@ impl StoreLogSync {
         }
     }
 
+    /// Share metadata and checked references with device-log downloads until
+    /// this pass ends. Standalone calls retain their own scoped reads.
+    pub(crate) fn begin_pass(
+        &self,
+        writes: &mut crate::DeviceLogSync,
+    ) -> crate::pass_reads::ReadScope {
+        writes.share_reads(self.reads.clone());
+        self.reads.enter()
+    }
+
     /// Publish entries, replay downloads, acquire keys and resume snapshot work.
     /// A missing dependency or sealed copy waits solely in storage for a later call.
     pub async fn sync_store_log(&mut self) -> Result<SyncResults, SyncFailure> {
+        let _reads = self.reads.enter();
         let mut report = self.step().await.map_err(SyncFailure::from)?;
         self.schedule_version_changes()
             .await

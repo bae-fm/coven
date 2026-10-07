@@ -271,7 +271,21 @@ async fn a_file_named_only_by_a_retained_log_write_stays_until_that_log_goes() {
     .unwrap();
     upload(&a, &storage).await;
     assert!(a.db.retained_files().await.unwrap().references.is_empty());
+    let objects = storage.list(&ObjectPrefix::device_logs()).await.unwrap();
+    let start = storage.reads().await.len();
     a.sync.run_retention().await.unwrap();
+    let reads = storage.reads().await;
+    for object in objects {
+        let bytes: u64 = reads[start..]
+            .iter()
+            .filter(|(path, _, _)| path == &object.path)
+            .map(|(_, _, bytes)| bytes)
+            .sum();
+        assert!(
+            bytes <= object.size,
+            "retention must reuse the opened log header"
+        );
+    }
     assert!(storage.read(&path).await.is_ok());
     a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
     a.sync.write_snapshot(Audience::Store).await.unwrap();

@@ -54,39 +54,20 @@ impl<R: Read> DownloadedWriteStream<R> {
             }
             crate::download_stage::begin(database)?;
             let deleted = crate::store_log_tables::deleted_circles(database)?;
-            let mut chunk = [0; CHUNK_SIZE];
             for (header, stream) in self.header.parts.into_iter().zip(self.parts) {
-                let DownloadedPartStream::Opened(mut input) = stream else {
+                let DownloadedPartStream::Opened(input) = stream else {
                     continue;
                 };
                 let audience = header.audience.clone();
-                let mut left = header.plaintext_length;
-                let mut decoder = PartDecoder::new(header)?;
-                while left > 0 {
-                    let length = left.min(CHUNK_SIZE as u64) as usize;
-                    input
-                        .read_exact(&mut chunk[..length])
-                        .map_err(SnapshotError::Read)?;
-                    for frame in decoder.chunk(&chunk[..length])? {
-                        crate::download_stage::frame(
-                            database,
-                            schema,
-                            &self.header.header,
-                            &audience,
-                            frame,
-                        )?;
-                    }
-                    left -= length as u64;
-                }
-                decoder.finish()?;
-                loop {
-                    match input.read(&mut chunk[..1]) {
-                        Ok(0) => break,
-                        Ok(_) => return Err(coven_format::Error::TrailingBytes.into()),
-                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                        Err(error) => return Err(SnapshotError::Read(error).into()),
-                    }
-                }
+                read_part(input, header, &self.header.header, |frame| {
+                    crate::download_stage::frame(
+                        database,
+                        schema,
+                        &self.header.header,
+                        &audience,
+                        frame,
+                    )
+                })?;
             }
             authenticate()?;
             crate::download_stage::finish(
@@ -109,9 +90,8 @@ impl<R: Read> DownloadedWriteStream<R> {
             ));
         }
         let mut parts = Vec::new();
-        let mut chunk = [0; CHUNK_SIZE];
         for (header, stream) in self.header.parts.into_iter().zip(self.parts) {
-            let mut input = match stream {
+            let input = match stream {
                 DownloadedPartStream::Opened(input) => input,
                 DownloadedPartStream::Skipped => {
                     parts.push(DownloadedPart::Skipped(header.audience));
@@ -119,35 +99,15 @@ impl<R: Read> DownloadedWriteStream<R> {
                 }
             };
             let audience = header.audience.clone();
-            let mut left = header.plaintext_length;
-            let mut decoder = PartDecoder::new(header)?;
             let mut rows = Vec::new();
             let mut dismissals = Vec::new();
-            while left > 0 {
-                let length = left.min(CHUNK_SIZE as u64) as usize;
-                input
-                    .read_exact(&mut chunk[..length])
-                    .map_err(SnapshotError::Read)?;
-                for frame in decoder.chunk(&chunk[..length])? {
-                    match frame {
-                        WriteFrame::Change(row) => rows.push(row),
-                        WriteFrame::Dismissal(dismissal) => {
-                            dismissal.validate_past(&self.header.header)?;
-                            dismissals.push(dismissal);
-                        }
-                    }
+            read_part(input, header, &self.header.header, |frame| {
+                match frame {
+                    WriteFrame::Change(row) => rows.push(row),
+                    WriteFrame::Dismissal(dismissal) => dismissals.push(dismissal),
                 }
-                left -= length as u64;
-            }
-            decoder.finish()?;
-            loop {
-                match input.read(&mut chunk[..1]) {
-                    Ok(0) => break,
-                    Ok(_) => return Err(coven_format::Error::TrailingBytes.into()),
-                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(error) => return Err(SnapshotError::Read(error)),
-                }
-            }
+                Ok::<_, SnapshotError>(())
+            })?;
             parts.push(DownloadedPart::Opened(WritePart {
                 audience,
                 rows,
@@ -158,5 +118,40 @@ impl<R: Read> DownloadedWriteStream<R> {
             header: self.header.header,
             parts,
         })
+    }
+}
+
+/// Decode and validate one part without collecting its row frames. Every
+/// consumer checks the same chunk lengths, record counts, ordering and EOF.
+pub(crate) fn read_part<R: Read, E: From<SnapshotError> + From<coven_format::Error>>(
+    mut input: R,
+    header: coven_format::write_stream::PartHeader,
+    write: &coven_format::write::WriteHeader,
+    mut consume: impl FnMut(WriteFrame) -> Result<(), E>,
+) -> Result<(), E> {
+    let mut left = header.plaintext_length;
+    let mut decoder = PartDecoder::new(header)?;
+    let mut chunk = [0; CHUNK_SIZE];
+    while left > 0 {
+        let length = left.min(CHUNK_SIZE as u64) as usize;
+        input
+            .read_exact(&mut chunk[..length])
+            .map_err(SnapshotError::Read)?;
+        for frame in decoder.chunk(&chunk[..length])? {
+            if let WriteFrame::Dismissal(dismissal) = &frame {
+                dismissal.validate_past(write)?;
+            }
+            consume(frame)?;
+        }
+        left -= length as u64;
+    }
+    decoder.finish()?;
+    loop {
+        match input.read(&mut chunk[..1]) {
+            Ok(0) => return Ok(()),
+            Ok(_) => return Err(coven_format::Error::TrailingBytes.into()),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(SnapshotError::Read(error).into()),
+        }
     }
 }

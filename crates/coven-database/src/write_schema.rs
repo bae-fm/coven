@@ -10,6 +10,9 @@ use std::collections::BTreeMap;
 
 pub(crate) struct WriteSchema {
     pub(crate) schema: Schema,
+    /// Versions whose row layout the declarations can interpret. Breaking
+    /// migrations change this range only while opening the database.
+    pub(crate) versions: std::ops::RangeInclusive<u32>,
     pub(crate) declarations: Vec<SyncedTable>,
     pub(crate) rules: BTreeMap<String, TableRules>,
 }
@@ -41,6 +44,11 @@ impl WriteSchema {
         }
         let result = Self {
             schema,
+            versions: db.query_row(
+                "SELECT minimum FROM _coven_snapshot_schema WHERE singleton=1",
+                [],
+                |r| r.get(0),
+            )?..=db.schema_version()?,
             declarations,
             rules,
         };

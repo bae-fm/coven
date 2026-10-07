@@ -59,12 +59,11 @@ pub(crate) fn load<R: Read, W: Read>(
                 })
                 .max()
             {
-                let minimum = database.query_row(
-                    "SELECT minimum FROM _coven_snapshot_schema WHERE singleton=1",
-                    [],
-                    |r| r.get(0),
+                crate::migration_writes::advance_version(
+                    database,
+                    *schema.versions.start(),
+                    version,
                 )?;
-                crate::migration_writes::advance_version(database, minimum, version)?;
             }
             database.internal_execute("DELETE FROM _coven_applied_boundaries", [])?;
             for boundary in boundaries {
@@ -132,7 +131,7 @@ pub(crate) fn read(
     prefix: coven_format::sealed_snapshot::SnapshotObjectPrefix,
     mut input: impl Read,
 ) -> Result<(SnapshotHeader, BTreeSet<RowId>), DbError> {
-    let local_version = database.schema_version()?;
+    let local_version = *schema.versions.end();
     let mut touched = crate::snapshot_state::begin(database, &expected.audience)?;
     let metadata = SnapshotMetadata::new(database);
     let mut decoder = SnapshotChunkDecoder::new(prefix);
@@ -155,7 +154,7 @@ pub(crate) fn read(
             let record = record.map_err(SnapshotError::Format)?;
             if !checked_header {
                 if let Some(header) = decoder.header() {
-                    check_header(database, expected, header)?;
+                    check_header(database, schema, expected, header)?;
                     checked_header = true;
                 }
             }
@@ -253,7 +252,7 @@ pub(crate) fn read(
     let header = decoder
         .header()
         .ok_or_else(|| invalid("snapshot has no header"))?;
-    check_header(database, expected, header)?;
+    check_header(database, schema, expected, header)?;
     if let Some(pending) = excluded {
         finish_excluded(database, pending)?;
     }
@@ -267,6 +266,7 @@ pub(crate) fn read(
 
 fn check_header(
     database: &DatabaseConnection,
+    schema: &WriteSchema,
     expected: &SnapshotId,
     header: &SnapshotHeader,
 ) -> Result<(), DbError> {
@@ -275,16 +275,10 @@ fn check_header(
             "snapshot identity differs from the requested object",
         ));
     }
-    let local = database.schema_version()?;
-    let minimum: u32 = database.query_row(
-        "SELECT minimum FROM _coven_snapshot_schema WHERE singleton=1",
-        [],
-        |r| r.get(0),
-    )?;
-    if header.schema_version > local || header.schema_version < minimum {
+    if !schema.versions.contains(&header.schema_version) {
         return Err(SnapshotError::Schema {
             snapshot: header.schema_version,
-            database: local,
+            database: *schema.versions.end(),
         }
         .into());
     }

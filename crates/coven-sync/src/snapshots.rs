@@ -8,9 +8,7 @@ use crate::{
     SyncError, SyncResults,
 };
 use coven_database::{OperationRecord, StoreLog};
-use coven_format::{
-    sealed_snapshot::SnapshotObjectPrefix, store_log::SnapshotId, value::WritePositions,
-};
+use coven_format::{store_log::SnapshotId, value::WritePositions};
 use coven_foundation::id_source::{DeviceId, KeyId};
 use coven_merge::Audience;
 use coven_storage::{ObjectPath, ObjectPrefix};
@@ -39,6 +37,7 @@ impl StoreLogSync {
     /// The reload authenticates the complete snapshot and its intervening writes
     /// before its atomic database replacement (§15, §19.1).
     pub(crate) async fn reload_deleted_history(&mut self) -> Result<SyncResults, SyncError> {
+        let _reads = self.reads.enter();
         let mut report = SyncResults::default();
         let local = self.database.local_store_log().await?;
         let state = self.database.sync_state(Vec::new()).await?;
@@ -77,10 +76,11 @@ impl StoreLogSync {
     }
 
     /// Resume retained snapshot work, then write each readable audience whose
-    /// encoded parts since its latest valid snapshot exceed that snapshot's
+    /// encoded parts since its latest signed snapshot prefix exceed the listed
     /// plaintext size, or 1 MiB when it has none (§15). Returns damaged objects
     /// passed over during selection. Uploads always use the recorded disk bytes.
     pub async fn write_snapshots(&mut self) -> Result<SyncResults, SyncError> {
+        let _reads = self.reads.enter();
         let mut report = self.resume_snapshots().await?;
         if let Some(id) = self.pending_reload().await? {
             return Err(SyncError::ReloadPending(id));
@@ -105,6 +105,7 @@ impl StoreLogSync {
     /// device writes, preserving queued plaintext, write numbers and key ids (§15).
     /// Joining, missing-history recovery and explicit recovery call this method.
     pub async fn reload_from_snapshots(&mut self) -> Result<SyncResults, SyncError> {
+        let _reads = self.reads.enter();
         let mut report = self.resume_snapshots().await?;
         let record = self
             .start_snapshot_task(SnapshotJob::Reload {
@@ -119,6 +120,7 @@ impl StoreLogSync {
     /// Delete covered logs, this device's superseded snapshots, and eligible
     /// unreferenced uploaded files under §§15 and 16.5. No timer is installed.
     pub async fn run_retention(&mut self) -> Result<SyncResults, SyncError> {
+        let _reads = self.reads.enter();
         let mut report = self.resume_snapshots().await?;
         let record = self.start_snapshot_task(SnapshotJob::Retain).await?;
         self.drive_snapshot(record.id, &mut report).await?;
@@ -129,6 +131,7 @@ impl StoreLogSync {
     /// Reset and schema-change operations record the returned identity only
     /// after this durable publication has completed.
     pub async fn write_snapshot(&mut self, audience: Audience) -> Result<SnapshotId, SyncError> {
+        let _reads = self.reads.enter();
         self.resume_snapshots().await?;
         if let Some(id) = self.pending_reload().await? {
             return Err(SyncError::ReloadPending(id));
@@ -175,6 +178,7 @@ impl StoreLogSync {
     }
 
     pub(super) async fn resume_snapshots(&mut self) -> Result<SyncResults, SyncError> {
+        let _reads = self.reads.enter();
         let mut report = SyncResults::default();
         loop {
             let mut work = Vec::new();
@@ -290,6 +294,7 @@ impl StoreLogSync {
         mut task: SnapshotTask,
         report: &mut SyncResults,
     ) -> Result<Progress, SyncError> {
+        let _reads = self.reads.enter();
         match task.job.clone() {
             SnapshotJob::Write {
                 audience,
@@ -335,13 +340,13 @@ impl StoreLogSync {
                             let candidates = self
                                 .current_snapshot_candidates(&audience, &local.log, report)
                                 .await?;
-                            let latest = self
-                                .choose_snapshot(candidates.candidates, record, &mut task, report)
-                                .await?;
-                            let (positions, threshold) = match latest {
+                            let (positions, threshold) = match candidates.candidates.first() {
                                 Some(latest) => (
-                                    SnapshotObjectPrefix::decode(&latest.prefix)?.writes,
-                                    io::SnapshotInput::open(&self.directory, &latest.file)?.size(),
+                                    latest.prefix.writes.clone(),
+                                    crate::write_object::checked(
+                                        &latest.object.path,
+                                        latest.prefix.plaintext_length(latest.object.size),
+                                    )?,
                                 ),
                                 None => (WritePositions(Vec::new()), 1024 * 1024),
                             };
@@ -380,7 +385,6 @@ impl StoreLogSync {
                                     .map(|p| u128::from(p.plaintext_length))
                                     .sum::<u128>();
                             }
-                            self.clear_snapshot_files(record, &mut task).await?;
                             if bytes <= u128::from(threshold) {
                                 self.database.finish_operation(record.id).await?;
                                 return Ok(Progress::Finished(Output::Unit));
@@ -393,7 +397,10 @@ impl StoreLogSync {
                             .unlock()?
                             .ok_or(SyncError::KeyUnavailable(key_id))?;
                         let key = io::key(&ring, &audience, key_id)?;
-                        let name = self.reserve_snapshot_file(record, &mut task).await?;
+                        let name = self
+                            .reserve_snapshot_files(record, &mut task, 1)
+                            .await?
+                            .remove(0);
                         self.seal_snapshot(id, key_id, key, &member, &path, &name)
                             .await?;
                         self.save_snapshot_task(record, &task, 1).await?;
@@ -444,8 +451,7 @@ impl StoreLogSync {
                                 .await?;
                             return Ok(Progress::Advanced);
                         }
-                        self.retain_snapshot_objects(record, &mut task, report)
-                            .await?;
+                        self.retain_snapshot_objects(report).await?;
                         self.clear_snapshot_files(record, &mut task).await?;
                         self.database.finish_operation(record.id).await?;
                         return Ok(Progress::Finished(Output::Unit));
@@ -458,9 +464,7 @@ impl StoreLogSync {
             }
             SnapshotJob::Retain => {
                 self.clear_snapshot_files(record, &mut task).await?;
-                self.retain_snapshot_objects(record, &mut task, report)
-                    .await?;
-                self.clear_snapshot_files(record, &mut task).await?;
+                self.retain_snapshot_objects(report).await?;
                 self.database.finish_operation(record.id).await?;
                 return Ok(Progress::Finished(Output::Unit));
             }
@@ -487,16 +491,23 @@ impl StoreLogSync {
         Ok(())
     }
 
-    pub(super) async fn reserve_snapshot_file(
+    /// Reserve a download batch before creating any file. A reload records its
+    /// candidate names and log-part names once each, independent of log count.
+    pub(super) async fn reserve_snapshot_files(
         &self,
         record: &OperationRecord,
         task: &mut SnapshotTask,
-    ) -> Result<String, SyncError> {
-        let name = format!("snapshot-{}-{}", record.id.0, task.temporary.len());
-        task.temporary.push(name.clone());
-        self.save_snapshot_task(record, task, record.last_step)
-            .await?;
-        Ok(name)
+        count: usize,
+    ) -> Result<Vec<String>, SyncError> {
+        let names: Vec<_> = (task.temporary.len()..task.temporary.len() + count)
+            .map(|index| format!("snapshot-{}-{index}", record.id.0))
+            .collect();
+        task.temporary.extend(names.iter().cloned());
+        if count > 0 {
+            self.save_snapshot_task(record, task, record.last_step)
+                .await?;
+        }
+        Ok(names)
     }
 
     pub(super) async fn clear_snapshot_files(

@@ -2,12 +2,9 @@
 
 use super::{io, StoreLogSync};
 use crate::write_object::{checked, damaged};
-use crate::{
-    snapshot_data::{SavedSnapshot, SnapshotTask},
-    SyncError, SyncResults,
-};
+use crate::{snapshot_data::SavedSnapshot, SyncError, SyncResults};
 use coven_crypto::{MemberId, ObjectHasher, Signature};
-use coven_database::{EntryOutcome, OperationRecord, StoreLog};
+use coven_database::{EntryOutcome, StoreLog};
 use coven_format::sealed_snapshot::{SnapshotObjectLayout, SnapshotObjectPrefix};
 use coven_merge::Audience;
 use coven_storage::{ObjectPath, ObjectPrefix, StoredObject};
@@ -135,13 +132,26 @@ impl StoreLogSync {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let path = &object.path;
         let author = crate::object_author::member(log, path)?;
-        let length = object
-            .size
-            .min(SnapshotObjectPrefix::MAX_SIGNED_LENGTH as u64) as usize;
-        if length == 0 {
-            return checked(path, Err(coven_format::Error::Truncated));
-        }
-        let bytes = io::range(storage, path, 0, length).await?;
+        let bytes = match self.reads.metadata(object) {
+            Some(bytes) => bytes,
+            None => {
+                let mut bytes = Vec::new();
+                loop {
+                    let end = checked(path, SnapshotObjectPrefix::read_length(&bytes))?;
+                    if end as u64 > object.size {
+                        return checked(path, Err(coven_format::Error::Truncated));
+                    }
+                    if bytes.len() == end {
+                        break;
+                    }
+                    bytes.extend(
+                        io::range(storage, path, bytes.len() as u64, end - bytes.len()).await?,
+                    );
+                }
+                self.reads.keep_metadata(object, bytes.clone());
+                bytes
+            }
+        };
         let length = checked(path, SnapshotObjectPrefix::length(&bytes))?;
         let signed = checked(
             path,
@@ -170,15 +180,14 @@ impl StoreLogSync {
         })
     }
 
-    pub(super) async fn choose_snapshot(
+    pub(super) async fn load_snapshot(
         &self,
         candidates: Vec<Candidate>,
-        record: &OperationRecord,
-        task: &mut SnapshotTask,
+        files: &mut impl Iterator<Item = String>,
         report: &mut SyncResults,
     ) -> Result<Option<SavedSnapshot>, SyncError> {
         for candidate in candidates {
-            let file = self.reserve_snapshot_file(record, task).await?;
+            let file = files.next().expect("reserved snapshot candidates");
             match self.open_snapshot(&candidate, &file).await {
                 Ok(_) => {
                     return Ok(Some(SavedSnapshot {
@@ -208,13 +217,67 @@ impl StoreLogSync {
         &self,
         candidate: &Candidate,
         file: &str,
-    ) -> Result<
-        BTreeSet<(
-            coven_foundation::id_source::DeviceId,
-            coven_foundation::id_source::FileId,
-        )>,
-        SyncError,
-    > {
+    ) -> Result<(), SyncError> {
+        let mut writer = self
+            .directory
+            .file(
+                coven_foundation::files::FileArea::AppProvided,
+                &io::name(file)?,
+            )
+            .create_writer(self.directory.lock_read_only()?)?;
+        self.stream_snapshot(candidate, &mut writer).await?;
+        writer.finish().await?;
+        let files = self
+            .database
+            .validate_snapshot(
+                candidate
+                    .object
+                    .path
+                    .snapshot_id()
+                    .expect("checked snapshot path"),
+                candidate.prefix.clone(),
+                io::SnapshotInput::open(&self.directory, file)?,
+            )
+            .await?;
+        self.reads.keep_files(&candidate.object, Some(files));
+        Ok(())
+    }
+
+    pub(super) async fn snapshot_file_references(
+        &self,
+        candidate: &Candidate,
+    ) -> Result<crate::pass_reads::FileReferences, SyncError> {
+        if let Some(Some(files)) = self.reads.files(&candidate.object) {
+            return Ok(files);
+        }
+        let (mut send, input) = crate::stream_input::StreamInput::channel();
+        let transfer = async {
+            let result = self.stream_snapshot(candidate, &mut send).await;
+            drop(send);
+            result
+        };
+        let check = self.database.validate_snapshot(
+            candidate
+                .object
+                .path
+                .snapshot_id()
+                .expect("checked snapshot path"),
+            candidate.prefix.clone(),
+            input,
+        );
+        let (transferred, checked) = tokio::join!(transfer, check);
+        transferred?;
+        let files = checked?;
+        self.reads
+            .keep_files(&candidate.object, Some(files.clone()));
+        Ok(files)
+    }
+
+    async fn stream_snapshot(
+        &self,
+        candidate: &Candidate,
+        sink: &mut impl io::SnapshotSink,
+    ) -> Result<(), SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let ring = self
             .store_keys
@@ -223,13 +286,6 @@ impl StoreLogSync {
         let key = io::key(&ring, &candidate.prefix.audience, candidate.prefix.key)?;
         let prefix = candidate.prefix.encode()?;
         let path = &candidate.object.path;
-        let mut writer = self
-            .directory
-            .file(
-                coven_foundation::files::FileArea::AppProvided,
-                &io::name(file)?,
-            )
-            .create_writer(self.directory.lock_read_only()?)?;
         let mut hash = ObjectHasher::new();
         hash.update(&prefix);
         hash.update(candidate.signature.as_bytes());
@@ -254,7 +310,7 @@ impl StoreLogSync {
             let index = layout.index();
             let sealed = layout.decode_chunk(&piece)?;
             let plaintext = key.open_object_chunk(path.as_str(), &prefix, 0, index, sealed)?;
-            writer.append(&plaintext).await?;
+            sink.chunk(plaintext).await?;
             offset += length as u64;
         }
         if offset != end {
@@ -264,17 +320,7 @@ impl StoreLogSync {
         candidate
             .author
             .verify_object(path.as_str(), &hash.finish(), &signature)?;
-        writer.finish().await?;
-        let inspection = self
-            .database
-            .validate_snapshot(
-                path.snapshot_id()
-                    .ok_or_else(|| inconsistent("snapshot has another path layout"))?,
-                candidate.prefix.clone(),
-                io::SnapshotInput::open(&self.directory, file)?,
-            )
-            .await?;
-        Ok(inspection.files)
+        Ok(())
     }
 }
 

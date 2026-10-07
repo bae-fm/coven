@@ -70,10 +70,23 @@ impl StoreLogSync {
                 };
                 let mut highest = BTreeMap::new();
                 let mut unknown_empty = false;
+                let mut catalogs = Vec::new();
                 for audience in audiences.keys() {
-                    let candidates = self
-                        .current_snapshot_candidates(audience, &local.log, report)
-                        .await?;
+                    catalogs.push((
+                        audience,
+                        self.current_snapshot_candidates(audience, &local.log, report)
+                            .await?,
+                    ));
+                }
+                let count = catalogs
+                    .iter()
+                    .map(|(_, catalog)| catalog.candidates.len())
+                    .sum();
+                let mut names = self
+                    .reserve_snapshot_files(record, &mut task, count)
+                    .await?
+                    .into_iter();
+                for (audience, candidates) in catalogs {
                     for id in &candidates.required_positions.0 {
                         highest
                             .entry(id.device)
@@ -82,7 +95,7 @@ impl StoreLogSync {
                     }
                     let unreadable_prefix = candidates.unreadable_prefix;
                     match self
-                        .choose_snapshot(candidates.candidates, record, &mut task, report)
+                        .load_snapshot(candidates.candidates, &mut names, report)
                         .await?
                     {
                         Some(snapshot) => files.snapshots.push(snapshot),
@@ -141,6 +154,7 @@ impl StoreLogSync {
                 }
                 let readable = readable.into_keys().collect();
                 let mut replays = ReplayCache::new(&local.log);
+                let mut needed = Vec::new();
                 for (device, highest) in highest {
                     let lowest = if files.empty.is_empty() {
                         positions
@@ -158,17 +172,7 @@ impl StoreLogSync {
                             continue;
                         }
                         match objects.get(&id) {
-                            Some(object) => files.writes.push(
-                                self.open_snapshot_write(
-                                    object,
-                                    &local.log,
-                                    &mut replays,
-                                    &readable,
-                                    record,
-                                    &mut task,
-                                )
-                                .await?,
-                            ),
+                            Some(object) => needed.push(object),
                             None if positions.iter().any(|p| p.covers(id)) => {
                                 files.absent.push((device, number))
                             }
@@ -182,6 +186,26 @@ impl StoreLogSync {
                             }
                         }
                     }
+                }
+                let mut count = 0;
+                for object in &needed {
+                    count += self.open_write_header(object).await?.parts.len();
+                }
+                let mut names = self
+                    .reserve_snapshot_files(record, &mut task, count)
+                    .await?
+                    .into_iter();
+                for object in needed {
+                    files.writes.push(
+                        self.open_snapshot_write(
+                            object,
+                            &local.log,
+                            &mut replays,
+                            &readable,
+                            &mut names,
+                        )
+                        .await?,
+                    );
                 }
                 let SnapshotJob::Reload { files: saved, .. } = &mut task.job else {
                     unreachable!()

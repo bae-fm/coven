@@ -25,6 +25,7 @@ mod upload;
 /// by the opening composition root. Calls on one owner are serialized by `&mut
 /// self`; each step completes its database work before returning.
 pub struct DeviceLogSync {
+    reads: crate::pass_reads::PassReads,
     storage: Option<Arc<dyn Storage>>,
     database: Database,
     store_keys: Arc<dyn StoreKeyCustody>,
@@ -40,6 +41,7 @@ impl DeviceLogSync {
         member_keys: Arc<dyn MemberKeyCustody>,
     ) -> Self {
         Self {
+            reads: crate::pass_reads::PassReads::default(),
             storage: Some(storage),
             database,
             store_keys,
@@ -54,6 +56,7 @@ impl DeviceLogSync {
         member_keys: Arc<dyn MemberKeyCustody>,
     ) -> Self {
         Self {
+            reads: crate::pass_reads::PassReads::default(),
             storage: None,
             database,
             store_keys,
@@ -63,6 +66,10 @@ impl DeviceLogSync {
 
     pub(crate) fn set_storage(&mut self, storage: Option<Arc<dyn Storage>>) {
         self.storage = storage;
+    }
+
+    pub(crate) fn share_reads(&mut self, reads: crate::pass_reads::PassReads) {
+        self.reads = reads;
     }
 
     /// Publish queued writes in number order, fixing the sealing keys before the first
@@ -132,6 +139,7 @@ impl DeviceLogSync {
     /// advance. Damage blocks that device's successors, while independent devices
     /// continue. A later call rereads damaged objects and retains waiting start times.
     pub async fn download_writes(&mut self) -> Result<SyncResults, SyncError> {
+        let _reads = self.reads.enter();
         let local = self.database.local_store_log().await?;
         let state = self.database.sync_state(Vec::new()).await?;
         let member = self

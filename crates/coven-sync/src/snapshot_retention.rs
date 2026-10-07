@@ -4,12 +4,9 @@ use super::{
     catalog::{inconsistent, snapshot_damage},
     snapshot_path, StoreLogSync,
 };
-use crate::{replay_cache::ReplayCache, snapshot_data::SnapshotTask, SyncError, SyncResults};
-use coven_database::{EntryOutcome, OperationRecord, StoreLog};
-use coven_format::{
-    sealed_snapshot::SnapshotObjectPrefix, store_log::StoreChange, value::WritePositions,
-    write_stream::WriteHeaderFrame,
-};
+use crate::{SyncError, SyncResults};
+use coven_database::{EntryOutcome, StoreLog};
+use coven_format::{store_log::StoreChange, value::WritePositions};
 use coven_foundation::id_source::DeviceId;
 use coven_storage::{CloudProvider, ObjectPath, ObjectPrefix};
 use std::{
@@ -20,8 +17,6 @@ use std::{
 impl StoreLogSync {
     pub(super) async fn retain_snapshot_objects(
         &self,
-        record: &OperationRecord,
-        task: &mut SnapshotTask,
         report: &mut SyncResults,
     ) -> Result<(), SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
@@ -70,26 +65,20 @@ impl StoreLogSync {
                 .iter()
                 .map(|c| (c.object.path.clone(), c.prefix.writes.clone()))
                 .collect();
-            let candidates = candidates
-                .into_iter()
-                .filter(|c| {
-                    super::boundaries::allows(
-                        &local.log,
-                        &c.object
-                            .path
-                            .snapshot_id()
-                            .expect("validated snapshot path"),
-                        &c.prefix,
-                    )
-                })
-                .collect();
-            if let Some(chosen) = self
-                .choose_snapshot(candidates, record, task, report)
-                .await?
-            {
-                let prefix = SnapshotObjectPrefix::decode(&chosen.prefix)?;
+            let chosen = candidates.into_iter().find(|c| {
+                super::boundaries::allows(
+                    &local.log,
+                    &c.object
+                        .path
+                        .snapshot_id()
+                        .expect("validated snapshot path"),
+                    &c.prefix,
+                )
+            });
+            if let Some(chosen) = chosen {
+                let prefix = chosen.prefix;
                 for (path, positions) in older {
-                    if path != chosen.path
+                    if path != chosen.object.path
                         && path.device() == Some(local.device)
                         && !pinned.contains(&path)
                         && positions.0.iter().all(|id| prefix.writes.covers(*id))
@@ -101,7 +90,6 @@ impl StoreLogSync {
             }
         }
         let positions = self.retention_positions(&local.log, report).await?;
-        let mut replays = ReplayCache::new(&local.log);
         for object in storage.list(&ObjectPrefix::device_logs()).await? {
             let id = object
                 .path
@@ -110,18 +98,14 @@ impl StoreLogSync {
             if !self.can_delete_device(&local.log, local.device, id.device)? {
                 continue;
             }
-            let saved = match self
-                .open_snapshot_write(&object, &local.log, &mut replays, &readable, record, task)
-                .await
-            {
-                Ok(saved) => saved,
+            let header = match self.open_write_header(&object).await {
+                Ok(header) => header,
                 Err(error) if waiting(&object.path, &error) => return Ok(()),
                 Err(error) => {
                     snapshot_damage(report, &object.path, error)?;
                     continue;
                 }
             };
-            let header = WriteHeaderFrame::decode(&saved.header)?;
             let covered = header
                 .parts
                 .iter()
@@ -146,7 +130,7 @@ impl StoreLogSync {
         for path in superseded {
             storage.delete(&path).await?;
         }
-        self.retain_uploaded_files(record, task, report).await
+        self.retain_uploaded_files(report).await
     }
 
     pub(super) fn can_delete_device(

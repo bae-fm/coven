@@ -351,8 +351,10 @@
     separate label distinguishes this message from a whole-object digest.
   - Verify it before using any prefix field to choose a snapshot, establish
     required history, or decide retention coverage, including reset and
-    version-raise boundaries. It can be checked from one bounded ranged read;
-    encrypted chunks and their keys are unnecessary.
+    version-raise boundaries. Bounded ranged reads fetch the routing bytes,
+    counted positions and prefix signature without fetching encrypted chunks;
+    their keys are unnecessary. Unverified counts may delimit these reads,
+    subject to D2's bounds, but no prefix field has authority until verified.
   - The final signature uses `coven/object-signature/v1` as below, hashing
     every preceding byte, including `prefix_signature`. Verify it when loading,
     before applying any snapshot data.
@@ -385,6 +387,12 @@
     part keys for a migration write.
   - A write's parts' chunk counts come from its header; a device that
     can't open a part still finds its end.
+- A snapshot's plaintext length is determined by its listed object length.
+  Subtract the cleartext prefix length and both 64-byte signatures to get
+  `s`, the sealed section length. With `c = 65536 + 44`, it has
+  `n = ceil(s / c)` chunks and `s - 44*n` plaintext bytes. Require `s > 0`
+  and a final chunk of 45 through `c` bytes. This computes a size without
+  opening the section; loading still checks every chunk and the end frame.
 - Each chunk's associated data binds, as in D11's context encoding, the
   label `coven/object-chunk/v1`, the object's path, its whole cleartext
   `kind | version | prefix`, the section and the chunk's index in it.

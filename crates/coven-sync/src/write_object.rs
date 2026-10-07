@@ -58,34 +58,53 @@ pub(crate) async fn open(
     storage: &dyn coven_storage::Storage,
     object: &StoredObject,
     ring: Option<&StoreKeyring>,
+    reads: &crate::pass_reads::PassReads,
 ) -> Result<OpenedWrite, SyncError> {
-    let mut bytes = piece(storage, object, 0, 23).await?;
+    let bytes = match reads.metadata(object) {
+        Some(bytes) => bytes,
+        None => {
+            let bytes = read_header(storage, object).await?;
+            reads.keep_metadata(object, bytes.clone());
+            bytes
+        }
+    };
     let prefix_length = checked(&object.path, WriteObjectPrefix::length(&bytes))?;
-    if prefix_length > 23 {
-        bytes.extend(piece(storage, object, 23, prefix_length - 23).await?);
-    }
-    let prefix = checked(&object.path, WriteObjectPrefix::decode(&bytes))?;
+    let (aad, bytes) = bytes.split_at(prefix_length);
+    let prefix = checked(&object.path, WriteObjectPrefix::decode(aad))?;
     let mut hash = ObjectHasher::new();
-    hash.update(&bytes);
-    let aad = bytes;
-    let mut bytes = piece(storage, object, prefix_length as u64, 4).await?;
-    let length = checked(&object.path, WriteObjectPrefix::header_chunk_length(&bytes))?;
-    bytes.extend(piece(storage, object, prefix_length as u64 + 4, length - 4).await?);
-    hash.update(&bytes);
-    let sealed = checked(&object.path, WriteObjectPrefix::header_chunk(&bytes))?;
+    hash.update(aad);
+    hash.update(bytes);
+    let sealed = checked(&object.path, WriteObjectPrefix::header_chunk(bytes))?;
     let key = crate::write_seal::derive(
         ring.ok_or(SyncError::KeyUnavailable(prefix.store_key))?,
         &coven_merge::Audience::Store,
         prefix.store_key,
     )?;
     let plain = key
-        .open_object_chunk(object.path.as_str(), &aad, 0, 0, sealed)
+        .open_object_chunk(object.path.as_str(), aad, 0, 0, sealed)
         .map_err(|e| damaged(&object.path, ObjectCheckFailure::Decryption(e)))?;
     let header = checked(&object.path, WriteHeaderFrame::decode(&plain))?;
     if crate::write_seal::path(header.header.position) != object.path {
         return Err(damaged(
             &object.path,
             invalid("write position disagrees with path"),
+        ));
+    }
+    let expected = checked(
+        &object.path,
+        coven_format::sealed_write::sealed_length(
+            plain.len(),
+            &header
+                .parts
+                .iter()
+                .map(|part| part.plaintext_length)
+                .collect::<Vec<_>>(),
+        ),
+    )?;
+    if expected != object.size {
+        return Err(damaged(
+            &object.path,
+            invalid("listed write size differs from its header"),
         ));
     }
     let layout = checked(
@@ -100,8 +119,34 @@ pub(crate) async fn open(
         prefix,
         layout,
         hash,
-        offset: (prefix_length + length) as u64,
+        offset: (prefix_length + bytes.len()) as u64,
     })
+}
+
+async fn read_header(
+    storage: &dyn coven_storage::Storage,
+    object: &StoredObject,
+) -> Result<Vec<u8>, SyncError> {
+    let mut bytes = piece(storage, object, 0, 23).await?;
+    let prefix_length = checked(&object.path, WriteObjectPrefix::length(&bytes))?;
+    if prefix_length > bytes.len() {
+        bytes.extend(
+            piece(
+                storage,
+                object,
+                bytes.len() as u64,
+                prefix_length - bytes.len(),
+            )
+            .await?,
+        );
+    }
+    bytes.extend(piece(storage, object, prefix_length as u64, 4).await?);
+    let length = checked(
+        &object.path,
+        WriteObjectPrefix::header_chunk_length(&bytes[prefix_length..]),
+    )?;
+    bytes.extend(piece(storage, object, bytes.len() as u64, length - 4).await?);
+    Ok(bytes)
 }
 
 pub(crate) fn parts(
@@ -230,6 +275,30 @@ fn key_audience_contains(
                     _ => false,
                 }
         })
+}
+
+/// Reload and retention require the header's declared store-log history before
+/// checking its author. Ordinary downloads instead report this as a wait.
+pub(crate) fn require_history(
+    log: &StoreLog,
+    header: &coven_format::write::WriteHeader,
+) -> Result<(), SyncError> {
+    let missing: Vec<_> = header
+        .store_log_read
+        .0
+        .iter()
+        .copied()
+        .filter(|id| !log.replay.entries.contains_key(id))
+        .collect();
+    if !missing.is_empty() {
+        return Err(coven_database::DbError::Snapshot(
+            coven_database::SnapshotError::WriteWaiting(coven_database::WriteWait::StoreLog(
+                missing,
+            )),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 pub(crate) fn authority(

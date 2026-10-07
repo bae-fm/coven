@@ -564,26 +564,36 @@ async fn concurrent_raises_to_different_versions_are_both_kept() {
 }
 
 #[tokio::test]
-async fn a_migrated_device_waits_to_judge_old_writes_until_its_raise_is_applied() {
+async fn reference_checks_do_not_reject_writes_from_before_a_table_rename() {
     let storage = storage();
     let mut devices = group(storage.clone(), 2).await;
     seed(&mut devices).await;
-    update(&mut devices[0], storage, true, true).await;
     sql(&devices[1].db, "UPDATE notes SET title='Unseen'").await;
     devices[1].sync.upload_writes().await.unwrap();
+    reopen(
+        &mut devices[0],
+        storage,
+        vec![SyncedTable::new("entries", RowIdentity::SharedKey)],
+        vec![
+            initial(),
+            Migration::sql(2, "rename", "ALTER TABLE notes RENAME TO entries"),
+        ],
+    )
+    .await;
     let report = devices[0].sync.download_writes().await.unwrap();
     assert!(report.damaged_objects.is_empty(), "{report:?}");
     assert_eq!(report.waiting.len(), 1);
-    assert_eq!(name(&devices[0].db).await, "Groceries");
     devices[0].log.sync_store_log().await.unwrap();
-    assert!(devices[0]
-        .sync
-        .download_writes()
-        .await
-        .unwrap()
-        .waiting
-        .is_empty());
+    let report = devices[0].sync.download_writes().await.unwrap();
+    assert!(report.damaged_objects.is_empty(), "{report:?}");
+    assert!(report.waiting.is_empty(), "{report:?}");
     assert_eq!(devices[0].db.lost_values().await.unwrap().len(), 1);
+    let title: String = devices[0]
+        .db
+        .read(|sql| Ok(sql.query_row("SELECT title FROM entries WHERE id='42'", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    assert_eq!(title, "Groceries");
 }
 
 use crate::{

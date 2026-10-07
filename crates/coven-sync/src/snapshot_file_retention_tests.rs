@@ -138,3 +138,61 @@ async fn deleting_an_unused_publication_retires_its_queue() {
     assert!(!queue[0].stored && !queue[0].unused);
     f.close().await;
 }
+
+#[tokio::test]
+async fn locally_protected_files_need_only_snapshot_prefixes() {
+    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let (mut sync, _) = sync(&f).await;
+    f.uploaded("kept", vec![32; CHUNK]).await;
+    sync.write_snapshot(Audience::Store).await.unwrap();
+    let object = f
+        .storage
+        .list(&ObjectPrefix::snapshots())
+        .await
+        .unwrap()
+        .remove(0);
+    let bytes = f.storage.read(&object.path).await.unwrap();
+    let prefix = coven_format::sealed_snapshot::SnapshotObjectPrefix::length(&bytes).unwrap() + 64;
+    let start = f.storage.reads().await.len();
+    sync.run_retention().await.unwrap();
+    let reads = f.storage.reads().await;
+    assert_eq!(
+        reads[start..]
+            .iter()
+            .filter(|(path, _, _)| path == &object.path)
+            .map(|(_, _, bytes)| bytes)
+            .sum::<u64>(),
+        prefix as u64
+    );
+    f.close().await;
+}
+
+#[tokio::test]
+async fn a_damaged_snapshot_cannot_prove_file_absence() {
+    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let (mut sync, _) = sync(&f).await;
+    let kept = f.uploaded("kept", vec![32; CHUNK]).await;
+    sync.write_snapshot(Audience::Store).await.unwrap();
+    let orphan = ObjectPath::file(
+        kept.uploaded().unwrap().unwrap().device,
+        coven_foundation::id_source::FileId(uuid::Uuid::from_u128(999)),
+    );
+    f.storage.create(&orphan, b"orphan").await.unwrap();
+    let snapshot = f
+        .storage
+        .list(&ObjectPrefix::snapshots())
+        .await
+        .unwrap()
+        .remove(0);
+    f.storage
+        .corrupt_byte(&snapshot.path, snapshot.size as usize - 1)
+        .await
+        .unwrap();
+    let report = sync.run_retention().await.unwrap();
+    assert!(report
+        .damaged_objects
+        .iter()
+        .any(|object| object.path == snapshot.path.as_str()));
+    assert!(f.storage.read(&orphan).await.is_ok());
+    f.close().await;
+}
