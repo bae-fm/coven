@@ -74,6 +74,7 @@ pub enum BootstrapError {
 /// transfers run here: snapshots and device logs load through the snapshot owner.
 pub async fn restore_from_code(
     code: &str,
+    device_name: &str,
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
     coven_migration_policy: CovenMigrationPolicy,
@@ -89,7 +90,10 @@ pub async fn restore_from_code(
     cancel: &watch::Receiver<bool>,
 ) -> Result<StoreDir, BootstrapError> {
     check_cancel(cancel)?;
-    let request = BootstrapRequest::Restore(coven_sync::read_restore_code(code)?);
+    let request = BootstrapRequest::Restore {
+        code: coven_sync::read_restore_code(code)?,
+        name: device_name.into(),
+    };
     bootstrap_device(
         request,
         synced_tables,
@@ -115,6 +119,7 @@ pub async fn restore_from_code(
 /// Restore from the one discoverable iCloud code. Multiple stores require the
 /// app to choose an explicit code; this call never selects one arbitrarily.
 pub async fn restore_from_keychain(
+    device_name: &str,
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
     coven_migration_policy: CovenMigrationPolicy,
@@ -135,7 +140,10 @@ pub async fn restore_from_keychain(
         return Ok(None);
     };
     bootstrap_device(
-        BootstrapRequest::Restore(code),
+        BootstrapRequest::Restore {
+            code,
+            name: device_name.into(),
+        },
         synced_tables,
         migrations,
         coven_migration_policy,
@@ -220,7 +228,7 @@ fn keychain_code(keychain: &Keychain) -> Result<Option<RestoreCode>, BootstrapEr
 }
 
 enum BootstrapRequest {
-    Restore(RestoreCode),
+    Restore { code: RestoreCode, name: String },
     Join { code: InviteCode, name: String },
 }
 
@@ -249,7 +257,7 @@ async fn bootstrap_device(
         return Err(BootstrapError::EphemeralCustody);
     }
     let (id, name) = match &request {
-        BootstrapRequest::Restore(code) => (code.store, &code.name),
+        BootstrapRequest::Restore { code, .. } => (code.store, &code.name),
         BootstrapRequest::Join { code, .. } => (code.store, &code.name),
     };
     status("Preparing this device");
@@ -314,7 +322,7 @@ async fn prepare_and_load(
     let directory = pending.directory();
     let file = directory.owned_file(StoreFile::Bootstrap);
     let (member, data, device_name, mut admission) = match request {
-        BootstrapRequest::Restore(code) => {
+        BootstrapRequest::Restore { code, name } => {
             let mut data =
                 RestoreStorage::decode(code.storage.as_bytes()).map_err(SyncError::from)?;
             if matches!(data.credentials, StorageCredentials::OAuth(_)) {
@@ -325,7 +333,7 @@ async fn prepare_and_load(
             (
                 code.member_keys.clone(),
                 data,
-                "Restored device",
+                name.as_str(),
                 Admission::Restoring,
             )
         }

@@ -136,7 +136,7 @@ replay checks only authority, existence, remaining admins, and conflicts. -/
 theorem effect_references {s t : State} {w : Nat} {e : Entry}
     (hs : References s) (h : effect s w e = some t) : References t := by
   cases ha : e.action with
-  | create =>
+  | create access =>
       simp only [effect, ha] at h
       split at h
       · cases h
@@ -148,10 +148,17 @@ theorem effect_references {s t : State} {w : Nat} {e : Entry}
           simp [member, lookup]
         · simp [State.empty]
         · simp [State.empty]
-  | addMember m role =>
+  | addMember m role access =>
       simp only [effect, ha] at h
       split at h
-      · cases h; exact hs.putMembers m role
+      · cases h
+        have hh := hs.putMembers m role
+        exact ⟨hh.devices, hh.nonempty, hh.circles⟩
+      · cases h
+  | setAccess m access =>
+      simp only [effect, ha] at h
+      split at h
+      · cases h; exact ⟨hs.devices, hs.nonempty, hs.circles⟩
       · cases h
   | changeRole m role =>
       simp only [effect, ha] at h

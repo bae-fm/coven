@@ -182,3 +182,8 @@ import CovenStorelog
 #print axioms CovenStorelog.Examples.derived_circle_deletion_beats_raise
 #print axioms CovenStorelog.Examples.explicit_circle_deletion_beats_raise
 #print axioms CovenStorelog.circle_raise_authority
+
+#print axioms CovenStorelog.Action.isCreation_true
+#print axioms CovenStorelog.Examples.access_examples_valid
+#print axioms CovenStorelog.Examples.replacement_then_removal
+#print axioms CovenStorelog.Examples.removal_defeats_access

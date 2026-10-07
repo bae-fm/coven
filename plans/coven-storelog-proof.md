@@ -35,19 +35,25 @@
 ### C2 The claim and the model
 
 - Two devices receive the same entries, each in a causal order. They end
-  with the same members, roles, devices, circles and circle memberships,
+  with the same members, roles, storage access, devices, circles and circle
+  memberships,
   each audience's schema and format versions, reset snapshots, kept identities,
   and dropped identities. Lean: `storelog_converges`, `reports_converge`.
 - An entry records its signature's author, writing device, had-read set,
   and action. Its identifier is its unique timestamp. Finite histories
   are numbered from zero without changing timestamp order.
-- The actions are creation, adding or removing a member, changing a role,
+- The actions are creation, adding or removing a member, changing a role or
+  storage access,
   adding or removing a device, making, renaming or deleting a circle,
   changing its members, raising either version, and resetting an audience.
   A raise or reset names a `SnapshotId`: its audience determines which store
   or circle it affects, with no separate audience field. The model abstracts
   the snapshot's device and number to one identity number; versions are keyed
   by version kind and audience. Lean: `Entry`, `Action`, `SnapshotId`, `State`.
+- Storage access is an opaque string in the model; the Rust adapter includes
+  its provider-account or S3-key tag. Creation and member additions establish
+  it, and a member's own set-access entry replaces it. Removed members' access
+  remains available for revocation. Lean: `Action.setAccess`, `State.access`.
 - A store removal also carries the names of the circles whose keys it
   replaced, as recorded when it was made
   ([§13](coven-from-scratch.md#13-removing-members-and-devices)). Replaying
@@ -88,7 +94,7 @@
   apply a rename to Gifts. Lean: `Examples.outsider_cannot_manage`.
 - The conflict predicates implement the cases in [§9](coven-from-scratch.md#9-members-and-roles):
   - different statements about the same member or device; a device entry
-    is also about its owner;
+    is also about its owner, and set-access is about its author;
   - a store addition against a store removal;
   - different names for one circle;
   - deleting a circle against changing it, raising its version, or resetting it;
@@ -265,6 +271,9 @@
   stays dropped when its opponent drops. Lean: `Examples.opening_log`,
   `equal_adds_combine`, `Gifts.carol_stays`, `CircleDeletion.earlier_rotation_applies`,
   `three_admins`, `dropped_removal_allows_phone`, `losing_removal_discards_add`.
+- A causal access replacement supplies a later removal's access record. A
+  concurrent removal defeats the replacement and retains the previous access.
+  Lean: `Examples.replacement_then_removal`, `removal_defeats_access`.
 - [§12.2](coven-from-scratch.md#122-adding-a-person): Ana approves Carol's
   join request, seals the key to her, then publishes the addition.
   Publication requires the matching seal; sealing requires approval.
@@ -349,7 +358,9 @@
 - Correspondence between these Lean functions and Rust is not proved.
   `next/scripts/check.sh` builds `storelogRunner` and runs Rust's generated
   differential test against its `resolve`, comparing state, kept entries,
-  and dropped entries. The histories include concurrent key replacements
+  and dropped entries. State includes the current access of active and removed
+  members; generated histories include access updates and repeated access values.
+  The histories include concurrent key replacements
   and resets against version raises, in both timestamp orders, for the store
   and circles. The comparison includes each audience's selected versions and
   snapshots; generated histories also cover different versions of one audience,

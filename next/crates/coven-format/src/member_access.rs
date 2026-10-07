@@ -1,4 +1,4 @@
-//! The storage account carried by member additions (Appendix D6).
+//! The storage account carried by member additions and access updates (Appendix D6).
 
 use crate::wire::{Decoder, Encoder, Wire};
 use crate::Error;
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 pub enum MemberAccess {
     /// The member's provider account email.
     ProviderAccount(String),
-    /// An S3 key the admin made in the provider console.
+    /// An S3 key made in the provider console.
     S3AccessKey {
         /// Public identifier; never the secret access key.
         access_key_id: String,

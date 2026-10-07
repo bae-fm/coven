@@ -35,12 +35,7 @@ impl StoreLogSync {
         if matches!(data, Data::Invite(_)) {
             return self.invite_step(record, data).await;
         }
-        if let Data::Revoke {
-            member,
-            access,
-            result,
-        } = &data
-        {
+        if let Data::Revoke { member, result } = &data {
             if let Some(result) = result {
                 if let MemberRemoval::AccessRemains { shares } = result {
                     return Err(SyncError::AccessRemains(shares.clone()));
@@ -49,14 +44,13 @@ impl StoreLogSync {
                 self.database.finish_operation(record.id).await?;
                 return Ok(Progress::Finished(Output::Removal(result)));
             }
-            let result = self.revoke_access(record.id, access).await?;
+            let result = self.revoke_member_access(record.id, member).await?;
             let key = match &result {
                 MemberRemoval::DeleteAccessKey { access_key_id } => Some(access_key_id.clone()),
                 _ => None,
             };
             data = Data::Revoke {
                 member: member.clone(),
-                access: access.clone(),
                 result: Some(result),
             };
             self.save_access_result(record, &data, 1, key).await?;
@@ -89,14 +83,14 @@ impl StoreLogSync {
                 Output::Unit
             }
             Intent::CreateCircle { circle, .. } => Output::CircleId(*circle),
-            Intent::RemoveMember { access, .. } => {
+            Intent::RemoveMember { member } => {
                 if let Some(result) = &work.removal {
                     if let MemberRemoval::AccessRemains { shares } = result {
                         return Err(SyncError::AccessRemains(shares.clone()));
                     }
                     Output::Removal(result.clone())
                 } else {
-                    let result = self.revoke_access(record.id, access).await?;
+                    let result = self.revoke_member_access(record.id, member).await?;
                     let key = match &result {
                         MemberRemoval::DeleteAccessKey { access_key_id } => {
                             Some(access_key_id.clone())
@@ -348,12 +342,12 @@ impl StoreLogSync {
                     snapshot: snapshot.clone(),
                 }
             }
-            Intent::RemoveMember { member, access } => {
+            Intent::RemoveMember { member } => {
                 let target = member.parse()?;
                 if effects::member(state, &target).is_none() {
                     return Ok(None);
                 }
-                *access = self.removal_access(local, me, &target)?;
+                self.check_removal(local, me, &target)?;
                 StoreChange::RemoveMember {
                     circle_keys: state
                         .circles
@@ -449,6 +443,26 @@ impl StoreLogSync {
             None => self.database.advance_operation(update).await?,
         }
         Ok(())
+    }
+
+    async fn revoke_member_access(
+        &self,
+        operation: OperationId,
+        member: &str,
+    ) -> Result<MemberRemoval, SyncError> {
+        // A queued removal may be completed by another entry before it resumes.
+        // The replay retains removed members and their last effective access.
+        let local = self.database.local_store_log().await?;
+        let member: MemberId = member.parse()?;
+        let access = &local
+            .log
+            .replay
+            .state
+            .members
+            .get(&member)
+            .ok_or(coven_database::DbError::DamagedDatabase)?
+            .access;
+        self.revoke_access(operation, access).await
     }
 
     pub(super) async fn revoke_access(
@@ -547,18 +561,9 @@ impl StoreLogSync {
                 .find(|e| e.entry.position == *id)
                 .expect("replayed entry");
             if let StoreChange::RemoveMember { member, .. } = &entry.entry.change {
-                let access = replay
-                    .state
-                    .members
-                    .get(member)
-                    .or_else(|| previous.replay.state.members.get(member))
-                    .ok_or(coven_database::DbError::DamagedDatabase)?
-                    .access
-                    .clone();
                 operations.push(
                     Data::Revoke {
                         member: member.to_string(),
-                        access,
                         result: None,
                     }
                     .new_operation("coven")?,

@@ -39,7 +39,7 @@ fn member_target<'a>(entry: &'a StoreLogEntry, view: &'a StoreLogCheck) -> Optio
         | ChangeRole { member, .. }
         | AddCircleMember { member, .. }
         | RemoveCircleMember { member, .. } => Some(member),
-        AddDevice { .. } => Some(&entry.author),
+        SetAccess { .. } | AddDevice { .. } => Some(&entry.author),
         RemoveDevice { .. } => match view {
             StoreLogCheck::DeviceOwner(owner) => Some(owner),
             _ => unreachable!("authorized device removal has an observed owner"),
@@ -91,6 +91,7 @@ fn same_meaning(
     use StoreChange::*;
     match (&a.change, &b.change) {
         (CreateStore { .. }, CreateStore { .. }) => true,
+        (SetAccess { access: x }, SetAccess { access: y }) => a.author == b.author && x == y,
         (
             AddMember {
                 keys: m, role: r, ..

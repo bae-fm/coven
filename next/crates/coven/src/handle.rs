@@ -40,7 +40,8 @@ impl CovenHandle {
         self.codes.restore_code().await
     }
 
-    /// Commit a replacement S3 key and return the updated restore code (§20.9).
+    /// Commit a replacement S3 key, publish its id and return the updated code (§20.9).
+    /// A publication failure retains the credentials; retry with the same key.
     pub async fn replace_access_key(
         &self,
         access_key_id: String,
@@ -344,12 +345,12 @@ impl CovenHandle {
     pub async fn close(&self) -> Result<(), DbError> {
         let handle = self.clone();
         crate::coven::completion(tokio::spawn(async move {
+            handle.codes.close().await;
             match handle.operations.close().await {
                 Ok(()) | Err(SyncError::Database(DbError::StoreClosed)) => (),
                 Err(error) => return Err(DbError::OperationWorker(Box::new(error))),
             }
             handle.files.close().await;
-            handle.codes.close().await;
             let custody = handle.custody.clone();
             crate::coven::blocking(move || {
                 custody.lock().expect("custody lock poisoned").take();

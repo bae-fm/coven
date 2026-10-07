@@ -453,6 +453,11 @@ pub fn store_changes() -> Vec<StoreChange> {
                 ..snapshot.clone()
             },
         },
+        StoreChange::SetAccess {
+            access: crate::MemberAccess::S3AccessKey {
+                access_key_id: "replacement-key".into(),
+            },
+        },
     ]
 }
 /// Every independently decoded ordinary object kind.

@@ -246,3 +246,47 @@ fn circle_raise_authority_uses_membership_in_the_authors_view() {
         });
     }
 }
+
+#[test]
+fn access_updates_are_member_authored_and_causal_replacements_keep_the_latest() {
+    let mut h = household(Member, Member).prefix(3);
+    for name in ["first", "first", "second"] {
+        h.all(
+            1,
+            1,
+            StoreChange::SetAccess {
+                access: coven_format::MemberAccess::S3AccessKey {
+                    access_key_id: name.into(),
+                },
+            },
+        );
+    }
+    h.all(
+        3,
+        3,
+        StoreChange::SetAccess {
+            access: coven_format::MemberAccess::ProviderAccount("outsider@example.com".into()),
+        },
+    );
+    h.all(0, 0, remove(1, &[]));
+    h.all(
+        1,
+        1,
+        StoreChange::SetAccess {
+            access: coven_format::MemberAccess::S3AccessKey {
+                access_key_id: "after-removal".into(),
+            },
+        },
+    );
+    h.every_order(|r| {
+        let target = &r.state.members[&member(1)];
+        assert!(target.removed);
+        assert_eq!(
+            target.access,
+            coven_format::MemberAccess::S3AccessKey {
+                access_key_id: "second".into(),
+            }
+        );
+        assert_eq!(h.drops(r), [6, 8]);
+    });
+}

@@ -96,6 +96,11 @@ pub enum StoreChange {
         /// The initial role.
         role: MemberRole,
     },
+    /// Record the author's current storage access, used by a later removal (§9).
+    SetAccess {
+        /// The author's provider account or public S3 key id; no credentials.
+        access: crate::MemberAccess,
+    },
     /// Remove a member, replace their audience keys and delete circles left empty (§13).
     RemoveMember {
         /// The removed member.
@@ -209,7 +214,8 @@ impl StoreChange {
                 positive(snapshot.number)
             }
             Self::Reset { snapshot } => positive(snapshot.number),
-            Self::AddMember { .. }
+            Self::SetAccess { .. }
+            | Self::AddMember { .. }
             | Self::ChangeRole { .. }
             | Self::RemoveDevice { .. }
             | Self::DeleteCircle { .. }
@@ -252,6 +258,7 @@ store_changes!(
     11 => RaiseSchema { version, snapshot },
     12 => RaiseFormat { version, snapshot },
     13 => Reset { snapshot },
+    14 => SetAccess { access },
 );
 
 /// One store-log entry. Its eventual signature establishes who authored it (§9).

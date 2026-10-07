@@ -9,8 +9,8 @@ set_option maxHeartbeats 16000000
 from Gifts while her tablet removes Ana from the store. Both had read Gifts
 with two members. -/
 def history : Log
-  | 0 => entry 0 0 [] .create
-  | 1 => entry 0 0 [0] (.addMember 1 .admin)
+  | 0 => entry 0 0 [] (.create "initial")
+  | 1 => entry 0 0 [0] (.addMember 1 .admin "initial")
   | 2 => entry 1 1 [0, 1] (.addDevice 1 1)
   | 3 => entry 0 0 [0, 1, 2] (.makeCircle 0 "Gifts")
   | 4 => entry 0 0 [0, 1, 2, 3] (.addToCircle 0 1)
@@ -43,8 +43,8 @@ theorem earlier_rotation_applies : EveryOrder history 7 (List.range 7) (fun r =>
 removes him from the store. In Ana's view the removal takes the circle's
 only member, so it deletes the circle, and it beats the rename. -/
 def alone : Log
-  | 0 => entry 0 0 [] .create
-  | 1 => entry 0 0 [0] (.addMember 1 .member)
+  | 0 => entry 0 0 [] (.create "initial")
+  | 1 => entry 0 0 [0] (.addMember 1 .member "initial")
   | 2 => entry 1 1 [0, 1] (.addDevice 1 1)
   | 3 => entry 1 1 [0, 1, 2] (.makeCircle 0 "Ben's notes")
   | 4 => entry 1 1 [0, 1, 2, 3] (.renameCircle 0 "Journal")

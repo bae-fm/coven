@@ -47,6 +47,7 @@ pub use coven_database::{
     Uploads, UserFile, WriteBatch, WriteId,
 };
 pub use coven_format::value::EntryId;
+pub use coven_format::MemberAccess;
 pub use coven_foundation::clock::{Clock, ClockRef, SystemClock};
 pub use coven_foundation::files::FileError as DiskError;
 pub use coven_foundation::files::{
@@ -76,6 +77,6 @@ pub use coven_format::store_log::MemberRole;
 pub use coven_storage::{MemberRemoval, ProviderSignOut, RetainedAccess, RetainedAccessReason};
 pub use coven_sync::{
     AccessKeyToDelete, BlockedOperation, Circle, CircleError, CircleMemberInfo, Disagreement,
-    Invite, InviteAccess, JoinRequest, MemberInfo, OperationError, OperationId, OperationKind,
-    StartedBy, SyncError, SyncFailure, SyncReport,
+    DroppedEntry, Invite, InviteAccess, JoinRequest, MemberInfo, OperationError, OperationId,
+    OperationKind, StartedBy, StoreLogChange, SyncError, SyncFailure, SyncReport,
 };

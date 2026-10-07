@@ -36,7 +36,7 @@ pub(crate) fn check(view: &StoreLogState, entry: &StoreLogEntry) -> StoreLogChec
     let allowed = match &entry.change {
         CreateStore { .. } => view.store.is_none(),
         AddMember { .. } | RemoveMember { .. } | ChangeRole { .. } => admin(view, author),
-        AddDevice { .. } | CreateCircle { .. } => member(view, author).is_some(),
+        SetAccess { .. } | AddDevice { .. } | CreateCircle { .. } => member(view, author).is_some(),
         RaiseSchema { snapshot, .. } | RaiseFormat { snapshot, .. } => match snapshot.audience {
             Audience::Store => member(view, author).is_some(),
             Audience::Circle(circle) => in_circle(view, circle, author),
@@ -108,6 +108,7 @@ pub(crate) fn already_in_place(state: &StoreLogState, entry: &StoreLogEntry) -> 
         AddMember { keys, role, .. } => {
             member(state, &keys.signing).is_some_and(|m| m.role == *role)
         }
+        SetAccess { access } => member(state, &entry.author).is_some_and(|m| m.access == *access),
         ChangeRole { member: id, role } => member(state, id).is_some_and(|m| m.role == *role),
         RemoveMember { member: id, .. } => member(state, id).is_none(),
         AddDevice { device: id, .. } => {
@@ -146,6 +147,7 @@ pub(crate) fn check_effect(
     let targets_exist = match &entry.change {
         CreateStore { .. } => state.store.is_none(),
         AddMember { .. } => state.store.is_some(),
+        SetAccess { .. } => member(state, &entry.author).is_some(),
         RemoveMember { member: id, .. } | ChangeRole { member: id, .. } => {
             member(state, id).is_some()
         }
@@ -275,6 +277,12 @@ pub(crate) fn apply_effect(next: &mut StoreLogState, entry: &StoreLogEntry) {
                     circle.key = replacement.key;
                 }
             }
+        }
+        SetAccess { access } => {
+            next.members
+                .get_mut(&entry.author)
+                .expect("checked author")
+                .access = access.clone();
         }
         ChangeRole { member: id, role } => {
             next.members.get_mut(id).expect("checked member").role = *role;

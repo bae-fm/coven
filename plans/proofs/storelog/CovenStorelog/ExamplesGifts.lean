@@ -9,9 +9,9 @@ set_option maxHeartbeats 16000000
 from the store. The removal's circle-key list is empty: its view of Gifts
 contains Ana alone. -/
 def history : Log
-  | 0 => entry 0 0 [] .create
-  | 1 => entry 0 0 [0] (.addMember 1 .member)
-  | 2 => entry 0 0 [0, 1] (.addMember 2 .member)
+  | 0 => entry 0 0 [] (.create "initial")
+  | 1 => entry 0 0 [0] (.addMember 1 .member "initial")
+  | 2 => entry 0 0 [0, 1] (.addMember 2 .member "initial")
   | 3 => entry 0 0 [0, 1, 2] (.makeCircle 0 "Gifts")
   | 4 => entry 0 4 [0, 1, 2, 3] (.addToCircle 0 1)
   | 5 => entry 0 4 [0, 1, 2, 3, 4] (.addToCircle 0 2)

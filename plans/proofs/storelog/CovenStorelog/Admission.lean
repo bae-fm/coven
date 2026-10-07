@@ -33,6 +33,7 @@ inductive JoinEvent where
 structure Admission where
   request : JoinRequest
   role : Role
+  access : String
   author : Nat
   device : Nat
   past : List Nat
@@ -40,7 +41,7 @@ structure Admission where
   deriving DecidableEq, Repr
 
 def Admission.entry (a : Admission) : Entry :=
-  ⟨a.author, a.device, a.past, .addMember a.request.member a.role⟩
+  ⟨a.author, a.device, a.past, .addMember a.request.member a.role a.access⟩
 
 /-- Only a seal for this person and this key allows publication. Requests,
 approval, and sealing are outside the store log; publication creates its add.
@@ -84,7 +85,7 @@ theorem dropped_join_declined (r : Result) (addition : Nat) (h : addition ∈ r.
 
 namespace Examples
 
-def carolAdmission : Admission := ⟨⟨12, 2, "Carol's phone"⟩, .member, 0, 0, [0, 1, 2, 3], 1⟩
+def carolAdmission : Admission := ⟨⟨12, 2, "Carol's phone"⟩, .member, "initial", 0, 0, [0, 1, 2, 3], 1⟩
 
 theorem seal_then_entry :
     joinRun carolAdmission [.approve, .publish] .requested = none ∧

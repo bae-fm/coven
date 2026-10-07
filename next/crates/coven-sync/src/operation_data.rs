@@ -20,7 +20,6 @@ pub(crate) enum Intent {
     },
     RemoveMember {
         member: String,
-        access: MemberAccess,
     },
     CreateCircle {
         circle: CircleId,
@@ -103,7 +102,6 @@ pub(crate) enum Data {
     Invite(InviteWork),
     Revoke {
         member: String,
-        access: MemberAccess,
         result: Option<MemberRemoval>,
     },
 }

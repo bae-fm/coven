@@ -20,15 +20,15 @@ theorem causalCheck_sound (M : Log) {seen L : List Nat}
 
 def validCheck (M : Log) (n : Nat) : Bool :=
   let all := List.range n
-  (M 0).action == .create && all.all (fun w =>
+  (M 0).action.isCreation && all.all (fun w =>
     (M w).past.all (fun a => a < w && (M a).past.all (fun b => b ∈ (M w).past)) &&
     (all.all (fun a => !(a < w && (M a).device == (M w).device) || a ∈ (M w).past)) &&
-    ((M w).action != .create || w == 0) && (w == 0 || 0 ∈ (M w).past))
+    (!(M w).action.isCreation || w == 0) && (w == 0 || 0 ∈ (M w).past))
 
 theorem validCheck_sound (M : Log) (n : Nat) (h : validCheck M n = true) : Valid M n := by
   simp only [validCheck, Bool.and_eq_true, beq_iff_eq, List.all_eq_true,
     List.mem_range, Bool.or_eq_true, Bool.not_eq_true', Bool.and_eq_false_iff,
-    decide_eq_false_iff_not, decide_eq_true_eq, beq_eq_false_iff_ne, bne_iff_ne] at h
+    decide_eq_false_iff_not, decide_eq_true_eq, beq_eq_false_iff_ne] at h
   refine ⟨?_, ?_, ?_, h.1, ?_, ?_⟩
   · intro w hw a ha
     exact ((h.2 w hw).1.1.1 a (by simpa [hadRead] using ha)).1

@@ -135,6 +135,11 @@ pub enum StoreLogChange {
         /// The chosen role.
         role: MemberRole,
     },
+    /// Records the author's storage access.
+    SetAccess {
+        /// The provider account or public S3 key id.
+        access: coven_format::MemberAccess,
+    },
     /// Adds a device belonging to the author.
     AddDevice {
         /// The affected device.
@@ -220,6 +225,7 @@ impl From<&StoreChange> for StoreLogChange {
             },
             StoreChange::RemoveMember { member, .. } => Self::RemoveMember { member },
             StoreChange::ChangeRole { member, role } => Self::SetMemberRole { member, role },
+            StoreChange::SetAccess { access } => Self::SetAccess { access },
             StoreChange::AddDevice { device, .. } => Self::AddDevice { device },
             StoreChange::RemoveDevice { device } => Self::RemoveDevice { device },
             StoreChange::CreateCircle { circle, name, .. } => Self::CreateCircle { circle, name },

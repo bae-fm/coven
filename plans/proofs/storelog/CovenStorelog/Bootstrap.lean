@@ -48,17 +48,17 @@ theorem scan_root_suffix (M : Log) (views : Nat → State) {todo : List Nat} {r 
                     simpa [hw.2] using hd
 
 theorem scan_root (M : Log) (views : Nat → State) (todo drops : List Nat)
-    (hroot : (M 0).action = .create) (hv : views 0 = State.empty)
+    {access : String} (hroot : (M 0).action = .create access) (hv : views 0 = State.empty)
     (ht : ∀ w ∈ todo, w ≠ 0 ∧ pairConflict M views w 0 = false) (hd : 0 ∉ drops) :
     RootPass (scan M views (0 :: todo) ⟨State.empty, [], drops⟩) := by
   have hs := scan_root_suffix M views (r := ⟨{ State.empty with
-    created := true, members := [((M 0).author, .admin)],
+    created := true, members := [((M 0).author, .admin)], access := [((M 0).author, access)],
     devices := [((M 0).device, (M 0).author)] }, [0], drops⟩) ht rfl hd
   simpa [scan, hd, hv, hroot, authorized, alreadyInPlace, checkedEffect, effect,
     State.empty, safe, hasAdmin, admin, lookup] using hs
 
 theorem settleN_created (M : Log) (views : Nat → State) (todo : List Nat)
-    (hroot : (M 0).action = .create) (hv : views 0 = State.empty)
+    {access : String} (hroot : (M 0).action = .create access) (hv : views 0 = State.empty)
     (ht : ∀ w ∈ todo, w ≠ 0 ∧ pairConflict M views w 0 = false)
     {fuel : Nat} {drops : List Nat} {out : Result} (hd : 0 ∉ drops)
     (h : settleN M views (0 :: todo) fuel drops = some out) : out.state.created = true := by
@@ -98,7 +98,8 @@ theorem resolve_created (M : Log) (n : Nat) (S : EntrySet) (hv : Valid M n)
       rw [he] at hs
       unfold resolve materialize
       rw [he]
-      exact settleN_created M _ _ hv.root hview htodo (drops := []) (by simp) hs
+      obtain ⟨access, hroot⟩ := Action.isCreation_true _ |>.mp hv.root
+      exact settleN_created M _ _ hroot hview htodo (drops := []) (by simp) hs
 
 theorem admin_invariant (M : Log) (n : Nat) (S : EntrySet) (hv : Valid M n)
     (hn : 0 < n) (hr : S 0 = true) : ∃ m, admin (resolve M n S).state m = true := by

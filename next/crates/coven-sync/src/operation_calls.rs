@@ -194,6 +194,21 @@ impl StoreLogSync {
                         .collect(),
                 )));
             }
+            Command::SetAccess(access) => {
+                // Publish a previously reserved attempt and read concurrent removals
+                // before deciding whether this key still needs a new entry.
+                let report = self.step().await?;
+                if let Some(damaged) = report.damaged_objects.into_iter().next() {
+                    return Err(damaged.into());
+                }
+                let latest = self.database.local_store_log().await?;
+                self.require_member(&latest.log.replay.state, &me)?;
+                if latest.log.replay.state.members[&me].access != access {
+                    self.make_and_upload_entry(StoreChange::SetAccess { access })
+                        .await?;
+                }
+                return Ok(Begun::Value(Output::Unit));
+            }
             Command::SetRole(target, role) => {
                 self.require_admin(state, &me)?;
                 self.require_member(state, &target)?;
@@ -240,10 +255,9 @@ impl StoreLogSync {
                 return Ok(Begun::Value(Output::SignOut(signout)));
             }
             Command::RemoveMember(target) => {
-                let access = self.removal_access(&local, &me, &target)?;
+                self.check_removal(&local, &me, &target)?;
                 Intent::RemoveMember {
                     member: target.to_string(),
-                    access,
                 }
             }
             Command::CreateCircle(name) => {
@@ -343,12 +357,12 @@ impl StoreLogSync {
             .ok_or(SyncError::MissingMemberKeys)
     }
 
-    pub(super) fn removal_access(
+    pub(super) fn check_removal(
         &self,
         local: &LocalStoreLog,
         author: &MemberId,
         target: &MemberId,
-    ) -> Result<coven_format::MemberAccess, SyncError> {
+    ) -> Result<(), SyncError> {
         let state = &local.log.replay.state;
         self.require_admin(state, author)?;
         self.require_member(state, target)?;
@@ -361,7 +375,7 @@ impl StoreLogSync {
             return Err(SyncError::StoreOwner);
         }
         self.require_other_admin(state, target)?;
-        Ok(access.clone())
+        Ok(())
     }
 
     pub(super) fn require_reset(

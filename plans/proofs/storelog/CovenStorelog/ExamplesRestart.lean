@@ -8,11 +8,11 @@ set_option maxHeartbeats 8000000
 /-- Ana and Ben start as admins. Ben has two registered devices. Three
 concurrent entries add Carol as admin, demote Ben, and remove Ana. -/
 def losingRemoval : Log
-  | 0 => entry 0 0 [] .create
-  | 1 => entry 0 0 [0] (.addMember 1 .admin)
+  | 0 => entry 0 0 [] (.create "initial")
+  | 1 => entry 0 0 [0] (.addMember 1 .admin "initial")
   | 2 => entry 1 1 [0, 1] (.addDevice 1 1)
   | 3 => entry 1 4 [0, 1, 2] (.addDevice 1 4)
-  | 4 => entry 0 0 [0, 1, 2, 3] (.addMember 2 .admin)
+  | 4 => entry 0 0 [0, 1, 2, 3] (.addMember 2 .admin "initial")
   | 5 => entry 1 1 [0, 1, 2, 3] (.changeRole 1 .member)
   | _ => entry 1 4 [0, 1, 2, 3] (.removeMember 0 [])
 
@@ -46,6 +46,7 @@ theorem second_pass_drops_removal :
       .complete ⟨{
         created := true
         members := [(1, .member), (0, .admin)]
+        access := [(1, "initial"), (0, "initial")]
         devices := [(4, 1), (1, 1), (0, 0)]
         circles := [], versions := [], resets := [] }, [5, 3, 2, 1, 0], [6, 4]⟩ := by decide
 

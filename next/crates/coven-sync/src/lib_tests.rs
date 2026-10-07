@@ -138,7 +138,7 @@ impl Generator {
         } else {
             MemberRole::Member
         };
-        match self.pick(13) {
+        match self.pick(14) {
             0 => add(m, role),
             1 => StoreChange::RemoveMember {
                 member: member(m),
@@ -194,6 +194,15 @@ impl Generator {
                     },
                 ),
             },
+            13 => StoreChange::SetAccess {
+                access: coven_format::MemberAccess::S3AccessKey {
+                    access_key_id: if self.pick(3) == 0 {
+                        "fixture-access-key".into()
+                    } else {
+                        format!("key-{}", self.pick(3))
+                    },
+                },
+            },
             _ => unreachable!(),
         }
     }
@@ -224,8 +233,8 @@ fn input(h: &History) -> Value {
     let entries: Vec<_> = h.entries.iter().enumerate().map(|(i,entry)| {
         let past: Vec<_> = h.entries[..i].iter().enumerate().filter_map(|(j,e)| crate::replay::had_read(entry,e).then_some(j)).collect();
         let action = match &entry.change {
-            StoreChange::CreateStore { .. } => json!({"kind":0}),
-            StoreChange::AddMember { keys, role, .. } => json!({"kind":1,"member":member_number(&keys.signing),"role":role_number(*role)}),
+            StoreChange::CreateStore { access, .. } => json!({"kind":0,"access":serde_json::to_string(access).unwrap()}),
+            StoreChange::AddMember { keys, role, access } => json!({"kind":1,"member":member_number(&keys.signing),"role":role_number(*role),"access":serde_json::to_string(access).unwrap()}),
             StoreChange::RemoveMember { member, circle_keys, .. } => json!({"kind":2,"member":member_number(member),"circles":circle_keys.iter().map(|k| circle_number(k.circle)).collect::<Vec<_>>()}),
             StoreChange::ChangeRole { member, role } => json!({"kind":3,"member":member_number(member),"role":role_number(*role)}),
             StoreChange::AddDevice { device, .. } => json!({"kind":4,"member":member_number(&entry.author),"device":device.0}),
@@ -243,6 +252,7 @@ fn input(h: &History) -> Value {
             StoreChange::RaiseSchema { version, snapshot } => json!({"kind":11,"version":version,"snapshot":{"audience":audience_number(&snapshot.audience),"number":snapshot.number}}),
             StoreChange::RaiseFormat { version, snapshot } => json!({"kind":12,"version":version,"snapshot":{"audience":audience_number(&snapshot.audience),"number":snapshot.number}}),
             StoreChange::Reset { snapshot } => json!({"kind":13,"snapshot":{"audience":audience_number(&snapshot.audience),"number":snapshot.number}}),
+            StoreChange::SetAccess { access } => json!({"kind":14,"member":member_number(&entry.author),"access":serde_json::to_string(access).unwrap()}),
         };
         json!({"author":member_number(&entry.author),"device":entry.position.device.0,"past":past,"action":action})
     }).collect();
@@ -257,6 +267,12 @@ fn projected(h: &History, replay: &StoreLogReplay) -> Value {
         .filter_map(|(id, m)| (!m.removed).then_some([member_number(id), role_number(m.role)]))
         .collect();
     members.sort();
+    let mut access: Vec<_> = state
+        .members
+        .iter()
+        .map(|(id, m)| (member_number(id), serde_json::to_string(&m.access).unwrap()))
+        .collect();
+    access.sort();
     let devices: Vec<_> = state
         .devices
         .iter()
@@ -303,7 +319,7 @@ fn projected(h: &History, replay: &StoreLogReplay) -> Value {
         .enumerate()
         .filter_map(|(i, e)| (replay.entries[&e.position] == EntryOutcome::Kept).then_some(i))
         .collect();
-    json!({"created":state.store.is_some(),"members":members,"devices":devices,"circles":circles,"versions":versions,"resets":resets,"kept":kept,"dropped":h.drops(replay)})
+    json!({"created":state.store.is_some(),"members":members,"access":access,"devices":devices,"circles":circles,"versions":versions,"resets":resets,"kept":kept,"dropped":h.drops(replay)})
 }
 
 #[test]

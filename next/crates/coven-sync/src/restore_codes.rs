@@ -22,6 +22,7 @@ struct RestoreCodesInner {
     keychain: Arc<StoreKeychain>,
     settings: StorageSettings,
     storage: Option<Arc<dyn Storage>>,
+    operations: crate::Operations,
 }
 
 impl RestoreCodes {
@@ -33,6 +34,7 @@ impl RestoreCodes {
         keychain: Arc<StoreKeychain>,
         settings: StorageSettings,
         storage: Option<Arc<dyn Storage>>,
+        operations: crate::Operations,
     ) -> Self {
         Self {
             inner: Arc::new(tokio::sync::Mutex::new(Some(RestoreCodesInner {
@@ -41,6 +43,7 @@ impl RestoreCodes {
                 keychain,
                 settings,
                 storage,
+                operations,
             }))),
         }
     }
@@ -52,7 +55,10 @@ impl RestoreCodes {
         Ok(owner.code().await?.to_text()?.to_string())
     }
 
-    /// Install a manually supplied S3 key and return its new restore code.
+    /// Install a manually supplied S3 key, publish its id, then return the code.
+    /// Requires connected storage. Credentials remain committed if publication
+    /// fails: the remote entry may already exist. Retry with the same key to
+    /// finish publication; queued entry bytes and numbers are reused.
     pub async fn replace_access_key(
         &self,
         access_key_id: String,
@@ -62,14 +68,19 @@ impl RestoreCodes {
         crate::files::join(tokio::spawn(async move {
             let guard = inner.lock().await;
             let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
+            owner.storage.as_ref().ok_or(SyncError::NoStorage)?;
             let mut code = owner.code().await?;
             let mut data = RestoreStorage::decode(code.storage.as_bytes())?;
             data.credentials = StorageCredentials::S3(S3Credentials {
-                access_key_id,
+                access_key_id: access_key_id.clone(),
                 secret_access_key,
             });
             code.storage = data.encode()?;
             owner.install(&code).await?;
+            owner
+                .operations
+                .set_access(coven_format::MemberAccess::S3AccessKey { access_key_id })
+                .await?;
             Ok(code.to_text()?.to_string())
         }))
         .await

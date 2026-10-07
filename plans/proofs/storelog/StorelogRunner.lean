@@ -28,8 +28,8 @@ private def readSnapshot (j : Json) : Except String SnapshotId := do
 
 private def readAction (j : Json) : Except String Action := do
   match ← nat j "kind" with
-  | 0 => pure .create
-  | 1 => pure (.addMember (← nat j "member") (← readRole j))
+  | 0 => pure (.create (← j.getObjValAs? String "access"))
+  | 1 => pure (.addMember (← nat j "member") (← readRole j) (← j.getObjValAs? String "access"))
   | 2 => pure (.removeMember (← nat j "member") (← j.getObjValAs? (List Nat) "circles"))
   | 3 => pure (.changeRole (← nat j "member") (← readRole j))
   | 4 => pure (.addDevice (← nat j "member") (← nat j "device"))
@@ -42,6 +42,7 @@ private def readAction (j : Json) : Except String Action := do
   | 11 => pure (.raiseVersion .schema (← nat j "version") (← readSnapshot j))
   | 12 => pure (.raiseVersion .format (← nat j "version") (← readSnapshot j))
   | 13 => pure (.reset (← readSnapshot j))
+  | 14 => pure (.setAccess (← nat j "member") (← j.getObjValAs? String "access"))
   | _ => throw "unknown action"
 
 private def readEntry (j : Json) : Except String Entry := do
@@ -69,7 +70,7 @@ private def run (j : Json) : Except String Json := do
   let entries ← (← j.getObjValAs? (Array Json) "entries").mapM readEntry
   -- Log is a total function. Valid and resolve inspect only the finite
   -- prefix, except Valid's root check for an empty history; extend it by creation.
-  let M : Log := fun w => entries[w]?.getD ⟨0, 0, [], .create⟩
+  let M : Log := fun w => entries[w]?.getD ⟨0, 0, [], .create "unused"⟩
   if !validCheck M entries.size then throw "history violates Valid"
   let views := authorViews M entries.size
   for i in List.range entries.size do
@@ -80,6 +81,7 @@ private def run (j : Json) : Except String Json := do
     | _ => pure ()
   let r := resolve M entries.size (fun _ => true)
   let members := (byKey r.state.members).map fun (m, role) => toJson [m, roleNumber role]
+  let access := (byKey r.state.access).map fun (m, a) => Json.arr #[toJson m, toJson a]
   let devices := (byKey r.state.devices).map fun (d, m) => toJson [d, m]
   let circles := (byKey r.state.circles).map fun (c, circle) =>
     Json.arr #[toJson c, toJson circle.name, toJson (sorted circle.members)]
@@ -90,7 +92,7 @@ private def run (j : Json) : Except String Json := do
   let resets := byKey (r.state.resets.map fun (a, s) => (audienceNumber a, s))
   let resets := resets.map fun (a, s) => toJson [a, s]
   pure (Json.mkObj [
-    ("created", toJson r.state.created), ("members", toJson members),
+    ("created", toJson r.state.created), ("members", toJson members), ("access", toJson access),
     ("devices", toJson devices), ("circles", toJson circles),
     ("versions", toJson versions), ("resets", toJson resets),
     ("kept", toJson (sorted r.kept)), ("dropped", toJson (sorted r.dropped))])

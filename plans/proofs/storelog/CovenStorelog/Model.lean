@@ -27,8 +27,9 @@ structure SnapshotId where
   deriving DecidableEq, Repr
 
 inductive Action where
-  | create
-  | addMember (member : Nat) (role : Role)
+  | create (access : String)
+  | addMember (member : Nat) (role : Role) (access : String)
+  | setAccess (member : Nat) (access : String)
   | removeMember (member : Nat) (circleKeys : List Nat)
   | changeRole (member : Nat) (role : Role)
   | addDevice (member device : Nat)
@@ -41,6 +42,15 @@ inductive Action where
   | raiseVersion (kind : VersionKind) (version : Nat) (snapshot : SnapshotId)
   | reset (snapshot : SnapshotId)
   deriving DecidableEq, Repr
+
+/-- The creation tag, independently of its initial access. -/
+def Action.isCreation : Action → Bool
+  | .create _ => true
+  | _ => false
+
+theorem Action.isCreation_true (a : Action) :
+    a.isCreation = true ↔ ∃ access, a = .create access := by
+  cases a <;> simp [Action.isCreation]
 
 structure Entry where
   author : Nat
@@ -67,8 +77,8 @@ structure Valid (M : Log) (n : Nat) : Prop where
   past_closed : ∀ w, w < n → Closed M (hadRead M w)
   own_past : ∀ a b, a < b → b < n → (M a).device = (M b).device →
     hadRead M b a = true
-  root : (M 0).action = .create
-  only_root : ∀ w, w < n → (M w).action = .create → w = 0
+  root : (M 0).action.isCreation = true
+  only_root : ∀ w, w < n → (M w).action.isCreation = true → w = 0
   read_root : ∀ w, 0 < w → w < n → hadRead M w 0 = true
 
 inductive CausalOrder (M : Log) : List Nat → Prop where
@@ -90,13 +100,14 @@ structure Version where
 structure State where
   created : Bool
   members : List (Nat × Role)
+  access : List (Nat × String)
   devices : List (Nat × Nat)
   circles : List (Nat × Circle)
   versions : List ((VersionKind × Audience) × Version)
   resets : List (Audience × Nat)
   deriving DecidableEq, Repr
 
-def State.empty : State := ⟨false, [], [], [], [], []⟩
+def State.empty : State := ⟨false, [], [], [], [], [], []⟩
 
 def lookup [DecidableEq α] : List (α × β) → α → Option β
   | [], _ => none
@@ -124,9 +135,9 @@ def safe (s : State) : Bool := !s.created || hasAdmin s
 rule. The writing device is not a second authority check. -/
 def authorized (s : State) (e : Entry) : Bool :=
   match e.action with
-  | .create => !s.created
-  | .addMember _ _ | .removeMember _ _ | .changeRole _ _ => admin s e.author
-  | .addDevice m _ => member s e.author && e.author == m
+  | .create _ => !s.created
+  | .addMember _ _ _ | .removeMember _ _ | .changeRole _ _ => admin s e.author
+  | .setAccess m _ | .addDevice m _ => member s e.author && e.author == m
   | .removeDevice m d => lookup s.devices d == some m &&
       member s e.author && (e.author == m || admin s e.author)
   | .makeCircle _ _ | .raiseVersion _ _ ⟨.store, _⟩ => member s e.author
@@ -138,8 +149,9 @@ def authorized (s : State) (e : Entry) : Bool :=
 
 def alreadyInPlace (s : State) (e : Entry) : Bool :=
   match e.action with
-  | .create => s.created
-  | .addMember m r | .changeRole m r => lookup s.members m == some r
+  | .create _ => s.created
+  | .addMember m r _ | .changeRole m r => lookup s.members m == some r
+  | .setAccess m access => member s m && lookup s.access m == some access
   | .removeMember m _ => !member s m
   | .addDevice m d => lookup s.devices d == some m
   | .removeDevice _ d => (lookup s.devices d).isNone
@@ -167,11 +179,16 @@ def audienceExists (s : State) : Audience → Bool
 /-- Realize a change after the authority and already-in-place checks. -/
 def effect (s : State) (w : Nat) (e : Entry) : Option State := do
   match e.action with
-  | .create =>
+  | .create access =>
       if s.created then none else some { State.empty with
-        created := true, members := [(e.author, .admin)], devices := [(e.device, e.author)] }
-  | .addMember m r =>
-      if s.created then some { s with members := put s.members m r } else none
+        created := true, members := [(e.author, .admin)], access := [(e.author, access)],
+        devices := [(e.device, e.author)] }
+  | .addMember m r access =>
+      if s.created then some { s with
+        members := put s.members m r
+        access := put s.access m access } else none
+  | .setAccess m access =>
+      if member s m then some { s with access := put s.access m access } else none
   | .removeMember m _ =>
       if member s m then some { s with
         members := erase s.members m

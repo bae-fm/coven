@@ -8,14 +8,14 @@ set_option maxHeartbeats 16000000
 
 /-- Ana creates, adds Ben, Ben registers, Ana adds Carol, Carol registers. -/
 def household (ben carol : Role) : Log
-  | 0 => entry 0 0 [] .create
-  | 1 => entry 0 0 [0] (.addMember 1 ben)
+  | 0 => entry 0 0 [] (.create "initial")
+  | 1 => entry 0 0 [0] (.addMember 1 ben "initial")
   | 2 => entry 1 1 [0, 1] (.addDevice 1 1)
-  | 3 => entry 0 0 [0, 1, 2] (.addMember 2 carol)
+  | 3 => entry 0 0 [0, 1, 2] (.addMember 2 carol "initial")
   | _ => entry 2 2 [0, 1, 2, 3] (.addDevice 2 2)
 
 def both : Log
-  | 4 => entry 0 0 [0, 1, 2, 3] (.addMember 3 .member)
+  | 4 => entry 0 0 [0, 1, 2, 3] (.addMember 3 .member "initial")
   | 5 => entry 1 1 [0, 1, 2, 3] (.changeRole 2 .admin)
   | w => household .admin .member w
 
@@ -35,15 +35,15 @@ def mutualRemovals : Log
   | w => household .admin .member w
 
 def carol : Log
-  | 3 => entry 0 0 [0, 1, 2] (.addMember 3 .member)
-  | 4 => entry 0 0 [0, 1, 2, 3] (.addMember 2 .member)
+  | 3 => entry 0 0 [0, 1, 2] (.addMember 3 .member "initial")
+  | 4 => entry 0 0 [0, 1, 2, 3] (.addMember 2 .member "initial")
   | 5 => entry 1 1 [0, 1, 2, 3] (.removeMember 3 [])
   | 6 => entry 2 2 [0, 1, 2, 3, 4] (.addDevice 2 2)
   | w => household .admin .member w
 
 def equalAdds : Log
-  | 3 => entry 0 0 [0, 1, 2] (.addMember 3 .member)
-  | 4 => entry 1 1 [0, 1, 2] (.addMember 3 .member)
+  | 3 => entry 0 0 [0, 1, 2] (.addMember 3 .member "initial")
+  | 4 => entry 1 1 [0, 1, 2] (.addMember 3 .member "initial")
   | w => household .admin .member w
 
 def threeRemovals : Log
@@ -64,8 +64,8 @@ def removalAndPhone : Log
 
 /-- §9's opening log: Ben registers his phone while Ana's iPad promotes him. -/
 def openingLog : Log
-  | 0 => entry 0 0 [] .create
-  | 1 => entry 0 0 [0] (.addMember 1 .member)
+  | 0 => entry 0 0 [] (.create "initial")
+  | 1 => entry 0 0 [0] (.addMember 1 .member "initial")
   | 2 => entry 1 1 [0, 1] (.addDevice 1 2)
   | _ => entry 0 3 [0, 1] (.changeRole 1 .admin)
 
@@ -152,6 +152,29 @@ theorem removed_author_view :
 theorem dropped_removal_allows_phone : EveryOrder removalAndPhone 7 (List.range 7) (fun r =>
     lookup r.state.members 1 = some .admin ∧ member r.state 0 = false ∧
     lookup r.state.devices 5 = some 1 ∧ r.dropped = [5]) := by
+  apply every_order; decide
+
+/-- A member's own access update supplies a later removal's access record. -/
+def replacedAccess : Log
+  | 3 => entry 1 1 [0, 1, 2] (.setAccess 1 "replacement")
+  | 4 => entry 0 0 [0, 1, 2, 3] (.removeMember 1 [])
+  | w => household .member .member w
+
+def concurrentAccessRemoval : Log
+  | 4 => entry 0 0 [0, 1, 2] (.removeMember 1 [])
+  | w => replacedAccess w
+
+theorem access_examples_valid : validCheck replacedAccess 5 = true ∧
+    validCheck concurrentAccessRemoval 5 = true := by decide
+
+theorem replacement_then_removal : EveryOrder replacedAccess 5 (List.range 5) (fun r =>
+    member r.state 1 = false ∧ lookup r.state.access 1 = some "replacement" ∧
+    r.dropped = []) := by
+  apply every_order; decide
+
+theorem removal_defeats_access : EveryOrder concurrentAccessRemoval 5 (List.range 5) (fun r =>
+    member r.state 1 = false ∧ lookup r.state.access 1 = some "initial" ∧
+    r.dropped = [3]) := by
   apply every_order; decide
 
 end CovenStorelog.Examples

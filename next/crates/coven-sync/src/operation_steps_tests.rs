@@ -179,3 +179,37 @@ async fn restarted_circle_deletion_deletes_rows_that_arrived_during_its_first_at
     b.sync().await;
     assert_eq!(count(&b).await, 0);
 }
+
+#[tokio::test]
+async fn resumed_removal_uses_access_from_the_kept_remote_removal() {
+    let storage = storage();
+    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
+    let mut b = device(storage.clone(), 2, member(2), store(1)).await;
+    let mut c = device(storage.clone(), 3, member(3), store(1)).await;
+    a.create(key(1)).await;
+    a.add(&b.member, MemberRole::Member).await;
+    a.add(&c.member, MemberRole::Admin).await;
+    b.sync().await;
+    c.sync().await;
+    let waiting = begin(&mut a, Command::RemoveMember(b.member.member_id())).await;
+    b.sync
+        .make_and_upload_entry(StoreChange::SetAccess {
+            access: coven_format::MemberAccess::S3AccessKey {
+                access_key_id: "replacement-key".into(),
+            },
+        })
+        .await
+        .unwrap();
+    c.sync().await;
+    let removal = begin(&mut c, Command::RemoveMember(b.member.member_id())).await;
+    finish(&mut c, removal).await;
+    assert!(matches!(finish(&mut a, waiting).await,
+        Output::Removal(MemberRemoval::DeleteAccessKey { access_key_id }) if access_key_id == "replacement-key"));
+    assert_eq!(
+        a.db.access_keys_to_delete().await.unwrap(),
+        [AccessKeyToDelete {
+            access_key_id: "replacement-key".into(),
+            member: Some(b.member.member_id()),
+        }]
+    );
+}

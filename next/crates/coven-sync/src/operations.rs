@@ -41,6 +41,7 @@ pub(crate) enum Command {
     DeleteCircle(CircleId),
     RenameCircle(CircleId, String),
     SetRole(MemberId, MemberRole),
+    SetAccess(coven_format::MemberAccess),
     RemoveDevice(DeviceId),
     Members,
     Circles,
@@ -175,6 +176,14 @@ impl Operations {
         role: MemberRole,
     ) -> Result<(), SyncError> {
         self.unit(Command::SetRole(member.clone(), role)).await
+    }
+    /// Publish the current member's storage access before returning a replacement
+    /// restore code. A failed publication retains its fixed bytes for explicit retry.
+    pub(crate) async fn set_access(
+        &self,
+        access: coven_format::MemberAccess,
+    ) -> Result<(), SyncError> {
+        self.unit(Command::SetAccess(access)).await
     }
     /// Remove the member, rotate their audience keys and settle storage access.
     pub async fn remove_member(&self, member: &MemberId) -> Result<MemberRemoval, SyncError> {

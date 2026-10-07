@@ -4426,6 +4426,8 @@ pub enum StoreLogChange {
     RemoveMember { member: MemberId },
     /// Sets the member's role.
     SetMemberRole { member: MemberId, role: MemberRole },
+    /// Records the entry author’s current storage access (§9).
+    SetAccess { access: MemberAccess },
     /// Adds a device belonging to the entry's author (§10).
     AddDevice { device: DeviceId },
     /// Removes a device.
@@ -5052,7 +5054,9 @@ impl CovenHandle {
     /// provider's console, records the new key's id in the store log (§9),
     /// and returns their new restore code, for their other devices to scan
     /// and for them to write down. They delete the old key in the console
-    /// (§13).
+    /// (§13). Requires connected storage. If publication fails, the call
+    /// returns the failure and retains the new credentials: the remote entry
+    /// may already exist. Retry with the same key to finish publication.
     pub async fn replace_access_key(
         &self,
         access_key_id: String,
@@ -5164,8 +5168,8 @@ pub enum ProviderSignOut {
     keys or credentials. Dropping a waiting future leaves its encrypted work
     for explicit retry. Publication has no cancellable await after its final
     cancellation check.
-  - Restore registers the name `Restored device`; joining uses the supplied
-    device name. Every installation receives its own device id.
+  - Restore and joining register the supplied device name. Every installation
+    receives its own device id.
   - The singular keychain call returns an ambiguity error if several stores
     are discoverable; it never chooses one arbitrarily.
   - Bootstrap reads snapshots and logs through their owners and does not run
@@ -5343,6 +5347,7 @@ pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError>;
 /// or typed. `oauth_tokens` is the provider sign-in, when `needs_oauth`.
 pub async fn restore_from_code(
     code: &str,
+    device_name: &str,
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
     coven_migration_policy: CovenMigrationPolicy,
@@ -5362,6 +5367,7 @@ pub async fn restore_from_code(
 /// which holds what a restore code holds (§12.1). `None` when the keychain
 /// holds no store.
 pub async fn restore_from_keychain(
+    device_name: &str,
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
     coven_migration_policy: CovenMigrationPolicy,
@@ -5470,6 +5476,7 @@ let tokens = if info.needs_oauth {
 };
 let store_dir = restore_from_code(
     &scanned,
+    "Ana’s laptop",
     &tables(),
     &migrations(),
     CovenMigrationPolicy::ApplyPending,

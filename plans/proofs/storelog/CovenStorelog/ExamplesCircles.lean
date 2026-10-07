@@ -21,7 +21,7 @@ def deletion (change : Action) : Log
   | w => gifts w
 
 def circleRotation : Log
-  | 5 => entry 0 0 (List.range 5) (.addMember 2 .member)
+  | 5 => entry 0 0 (List.range 5) (.addMember 2 .member "initial")
   | 6 => entry 0 0 (List.range 6) (.addToCircle 0 2)
   | 7 => entry 1 1 (List.range 6) (.removeFromCircle 0 0)
   | w => gifts w
@@ -52,7 +52,7 @@ def carolsCircles : Log
 /-- Removing Carol rotates Gifts' key and defeats Ben's concurrent add
 of Dan, even though Ana has never been a member of Gifts. -/
 def removeCarolAndAddDan : Log
-  | 7 => entry 0 0 (List.range 7) (.addMember 3 .member)
+  | 7 => entry 0 0 (List.range 7) (.addMember 3 .member "initial")
   | 8 => entry 1 1 (List.range 8) (.addToCircle 0 3)
   | 9 => entry 0 0 (List.range 8) (.removeMember 2 [0])
   | w => carolsCircles w

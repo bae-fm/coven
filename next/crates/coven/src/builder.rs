@@ -333,21 +333,22 @@ impl OpeningOwners {
         database: coven_database::Database,
         sync: coven_sync::StoreLogSync,
     ) -> CovenHandle {
-        let codes = coven_sync::RestoreCodes::new(
-            database.clone(),
-            self.identity.clone(),
-            self.keychain,
-            coven_storage::StorageSettings::new(self.directory.clone()),
-            self.storage.clone(),
-        );
         let files = coven_sync::Files::new(
             coven_database::FileDatabase::new(database.clone()),
-            self.directory,
-            self.storage,
+            self.directory.clone(),
+            self.storage.clone(),
             self.clock,
             self.ids,
         );
         let operations = coven_sync::Operations::new(sync, files.clone());
+        let codes = coven_sync::RestoreCodes::new(
+            database.clone(),
+            self.identity,
+            self.keychain,
+            coven_storage::StorageSettings::new(self.directory),
+            self.storage,
+            operations.clone(),
+        );
         CovenHandle::new(database, self.custody, operations, files, codes)
     }
 }

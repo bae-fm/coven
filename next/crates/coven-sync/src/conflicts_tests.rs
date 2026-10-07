@@ -260,3 +260,81 @@ fn deleting_a_circle_defeats_its_concurrent_raise() {
         }
     }
 }
+
+#[test]
+fn concurrent_member_removal_defeats_access_replacement_in_every_arrival_order() {
+    for removal_first in [false, true] {
+        let mut h = household(Admin, Admin).prefix(3);
+        let replacement = (
+            1,
+            1,
+            StoreChange::SetAccess {
+                access: coven_format::MemberAccess::S3AccessKey {
+                    access_key_id: "replacement".into(),
+                },
+            },
+        );
+        let removal = (0, 0, remove(1, &[]));
+        for (author, device, change) in if removal_first {
+            [removal, replacement]
+        } else {
+            [replacement, removal]
+        } {
+            h.push(author, device, &[0, 1, 2], change);
+        }
+        h.every_order(|r| {
+            assert!(r.state.members[&member(1)].removed);
+            assert_eq!(
+                r.state.members[&member(1)].access,
+                coven_format::MemberAccess::S3AccessKey {
+                    access_key_id: "fixture-access-key".into(),
+                }
+            );
+            assert_eq!(h.drops(r), [if removal_first { 4 } else { 3 }]);
+        });
+    }
+}
+
+#[test]
+fn access_entries_conflict_by_member_and_combine_only_equal_access() {
+    for same_member in [false, true] {
+        for same_access in [false, true] {
+            let mut h = household(Admin, Admin);
+            h.push(
+                1,
+                1,
+                &[0, 1, 2, 3, 4],
+                StoreChange::SetAccess {
+                    access: coven_format::MemberAccess::ProviderAccount("first@example.com".into()),
+                },
+            );
+            let second_member = if same_member { 1 } else { 2 };
+            h.push(
+                second_member,
+                4,
+                &[0, 1, 2, 3, 4],
+                StoreChange::SetAccess {
+                    access: coven_format::MemberAccess::ProviderAccount(if same_access {
+                        "first@example.com".into()
+                    } else {
+                        "second@example.com".into()
+                    }),
+                },
+            );
+            h.every_order(|r| {
+                assert_eq!(
+                    h.drops(r),
+                    if same_member && !same_access {
+                        vec![6]
+                    } else {
+                        vec![]
+                    }
+                );
+                assert_eq!(
+                    r.state.members[&member(1)].access,
+                    coven_format::MemberAccess::ProviderAccount("first@example.com".into())
+                );
+            });
+        }
+    }
+}

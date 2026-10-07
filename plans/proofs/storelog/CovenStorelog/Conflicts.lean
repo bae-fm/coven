@@ -4,7 +4,7 @@ namespace CovenStorelog
 
 def priority : Action → Nat
   | .removeMember _ _ | .removeDevice _ _ | .deleteCircle _ | .removeFromCircle _ _ => 0
-  | .addMember _ .admin | .changeRole _ .admin => 2
+  | .addMember _ .admin _ | .changeRole _ .admin => 2
   | _ => 1
 
 def before (M : Log) (a b : Nat) : Bool :=
@@ -35,7 +35,7 @@ theorem before_asymm (M : Log) {a b : Nat} (h : before M a b = true) :
     simp [before_irrefl] at this
 
 def memberTarget : Action → Option Nat
-  | .addMember m _ | .removeMember m _ | .changeRole m _ |
+  | .addMember m _ _ | .setAccess m _ | .removeMember m _ | .changeRole m _ |
     .addDevice m _ | .removeDevice m _ | .addToCircle _ m | .removeFromCircle _ m => some m
   | _ => none
 
@@ -56,7 +56,9 @@ def sameTarget [DecidableEq α] (a b : Option α) : Bool :=
 
 def sameMeaning (a b : Entry) : Bool :=
   match a.action, b.action with
-  | .addMember m r, .changeRole n s | .changeRole m r, .addMember n s => m == n && r == s
+  | .addMember m r _, .changeRole n s | .changeRole m r, .addMember n s _ => m == n && r == s
+  | .create _, .create _ => true
+  | .addMember m r _, .addMember n s _ => m == n && r == s
   | .makeCircle c x, .makeCircle d y => c == d && x == y && a.author == b.author
   | _, _ => a.action == b.action
 
@@ -86,7 +88,7 @@ def circleName : Action → Option (Nat × String)
 
 def specialConflict (va vb : State) (a b : Action) : Bool :=
   (match a, b with
-    | .addMember _ _, .removeMember _ _ | .removeMember _ _, .addMember _ _ => true
+    | .addMember _ _ _, .removeMember _ _ | .removeMember _ _, .addMember _ _ _ => true
     | .removeMember _ _, .removeMember _ _ => true
     | .addToCircle c _, _ => removesCircleKey b c
     | _, .addToCircle c _ => removesCircleKey a c

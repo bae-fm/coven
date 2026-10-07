@@ -26,7 +26,7 @@ pub(crate) const POLICY: Policy = Policy {
         &["coven_tables"],
     )),
     composition_roots: &[
-        ("crates/coven/src/bootstrap_tests.rs", "Owner", "new"),
+        ("crates/coven/tests/fixtures/bootstrap.rs", "Owner", "new"),
         (
             "crates/coven/src/bootstrap.rs",
             "<free>",
