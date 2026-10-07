@@ -27,12 +27,7 @@ fn deletion_holds_only_a_sibling_lock_and_removes_it_after_the_directory() {
     assert_eq!(contents, ["cache", "files", "settings.json"]);
     lock.remove_directory().unwrap();
     assert!(!path.exists());
-    assert_eq!(
-        std::fs::read_dir(root.path().join("stores"))
-            .unwrap()
-            .count(),
-        0
-    );
+    assert_eq!(store_entries(&root.path().join("stores")), 0);
 }
 
 #[test]
@@ -144,12 +139,7 @@ fn deletion_requires_the_lock_and_retries_an_unpublished_directory() {
         .unwrap();
     assert!(store.lock_for_deletion().unwrap().is_none());
     assert!(!destination.exists());
-    assert_eq!(
-        std::fs::read_dir(root.path().join("stores"))
-            .unwrap()
-            .count(),
-        0
-    );
+    assert_eq!(store_entries(&root.path().join("stores")), 0);
 }
 
 #[test]
@@ -211,12 +201,7 @@ fn deletion_retries_when_only_some_lock_files_remain_before_id_reuse() {
             .remove_directory()
             .unwrap();
         assert!(store.lock_for_deletion().unwrap().is_none());
-        assert_eq!(
-            std::fs::read_dir(root.path().join("stores"))
-                .unwrap()
-                .count(),
-            0
-        );
+        assert_eq!(store_entries(&root.path().join("stores")), 0);
         let replacement = layout
             .create_store_dir(id, "replacement", &UuidIds)
             .unwrap();

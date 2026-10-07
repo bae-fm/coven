@@ -157,7 +157,7 @@ fn try_lock(path: &Path, id: StoreId, shared: bool) -> Result<LockedFile, StoreL
 // acquisition, creation, and lock-file removal across processes, so no caller
 // can hold an unlinked lock while another locks a new file at the same path.
 pub(crate) fn lock_layout(root: &Path) -> Result<LockedFile, FileError> {
-    let path = root.with_file_name(".coven-stores.lock");
+    let path = root.join(".coven-stores.lock");
     let file = open_lock(&path)?;
     file.lock()
         .map_err(|source| FileError::at("lock store layout", &path, source))?;
@@ -275,6 +275,15 @@ pub(crate) fn for_deletion(
         },
         _readers: try_lock(&readers, id, false)?,
     }))
+}
+
+/// Entries in a stores directory besides the layout lock, for tests.
+#[cfg(test)]
+pub(crate) fn store_entries(root: &Path) -> usize {
+    std::fs::read_dir(root)
+        .unwrap()
+        .filter(|entry| entry.as_ref().unwrap().file_name() != ".coven-stores.lock")
+        .count()
 }
 
 #[cfg(test)]

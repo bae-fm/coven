@@ -24,12 +24,7 @@ fn creation_never_overwrites_a_store_or_even_an_empty_directory() {
         Err(StoreCreationError::AlreadyExists(_))
     ));
     // Both refused publications remove their unpublished stages.
-    assert_eq!(
-        fs::read_dir(directory.path().join("stores"))
-            .unwrap()
-            .count(),
-        2
-    );
+    assert_eq!(lock::store_entries(&directory.path().join("stores")), 2);
 }
 
 #[test]
@@ -106,12 +101,7 @@ fn concurrent_creation_of_the_same_id_publishes_exactly_one_store() {
             .len(),
         1
     );
-    assert_eq!(
-        fs::read_dir(directory.path().join("stores"))
-            .unwrap()
-            .count(),
-        1
-    );
+    assert_eq!(lock::store_entries(&directory.path().join("stores")), 1);
 }
 
 #[cfg(unix)]
