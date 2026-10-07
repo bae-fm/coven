@@ -1,7 +1,10 @@
 use super::*;
 use crate::test_utils::{Conformance, Faults, MemoryStorage};
 use coven_crypto::SecretText;
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    sync::atomic::{AtomicU64, Ordering},
+};
 #[derive(Default)]
 struct Shares {
     granted: std::collections::BTreeSet<String>,
@@ -18,6 +21,7 @@ struct Bridge {
     non_owner: bool,
     listed: Option<Vec<StoredObject>>,
     uploads: tokio::sync::Mutex<BTreeMap<String, UploadSession>>,
+    next_upload: Arc<AtomicU64>,
 }
 fn config() -> StorageConfig {
     StorageConfig::CloudKit {
@@ -36,6 +40,7 @@ impl Bridge {
             non_owner: false,
             listed: None,
             uploads: tokio::sync::Mutex::new(BTreeMap::new()),
+            next_upload: Arc::new(AtomicU64::new(1)),
         }
     }
     fn recipient(&self, email: &str) -> Self {
@@ -47,6 +52,7 @@ impl Bridge {
             non_owner: true,
             listed: None,
             uploads: tokio::sync::Mutex::new(BTreeMap::new()),
+            next_upload: self.next_upload.clone(),
         }
     }
     async fn authorize(&self) -> Result<(), StorageError> {
@@ -185,7 +191,7 @@ impl CloudKitOps for Bridge {
         self.authorize().await?;
         let session = self.memory.begin_upload(path, total).await?;
         let mut uploads = self.uploads.lock().await;
-        let id = uploads.len().to_string();
+        let id = self.next_upload.fetch_add(1, Ordering::Relaxed).to_string();
         let part_size = session.part_size();
         uploads.insert(id.clone(), session);
         Ok(CloudKitUpload {
@@ -639,4 +645,35 @@ async fn bridge_retained_grants_reach_the_owner() {
         panic!("native retained access discarded")
     };
     assert_eq!(shares, [retained]);
+}
+
+#[tokio::test]
+async fn forgotten_native_sessions_cannot_abort_their_replacements() {
+    let bridge = Arc::new(Bridge::new(
+        MemoryStorage::new(
+            config(),
+            Arc::new(coven_foundation::clock::FixedClock::new(
+                std::time::SystemTime::UNIX_EPOCH,
+            )),
+        )
+        .unwrap(),
+    ));
+    let storage = CloudKitStorage::new(config(), bridge.clone()).unwrap();
+    let path = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    let expired = storage.begin_upload(&path, 4).await.unwrap();
+    storage.abort_upload(&expired).await.unwrap();
+    bridge.uploads.lock().await.clear();
+    let mut next = storage.restart_upload(&expired).await.unwrap();
+    assert_ne!(
+        storage.id(&expired).unwrap().as_str(),
+        storage.id(&next).unwrap().as_str()
+    );
+    storage.abort_upload(&expired).await.unwrap();
+    storage.upload_part(&mut next, b"data").await.unwrap();
+    storage.finish_upload(&mut next).await.unwrap();
+    storage.abort_upload(&expired).await.unwrap();
+    assert_eq!(storage.read(&path).await.unwrap(), b"data");
 }
