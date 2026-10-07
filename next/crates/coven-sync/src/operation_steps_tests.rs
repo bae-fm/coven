@@ -181,7 +181,7 @@ async fn restarted_circle_deletion_deletes_rows_that_arrived_during_its_first_at
 }
 
 #[tokio::test]
-async fn resumed_removal_uses_access_from_the_kept_remote_removal() {
+async fn resumed_removal_lists_original_and_replaced_access() {
     let storage = storage();
     let mut a = device(storage.clone(), 1, member(1), store(1)).await;
     let mut b = device(storage.clone(), 2, member(2), store(1)).await;
@@ -207,9 +207,245 @@ async fn resumed_removal_uses_access_from_the_kept_remote_removal() {
         Output::Removal(MemberRemoval::DeleteAccessKey { access_key_id }) if access_key_id == "replacement-key"));
     assert_eq!(
         a.db.access_keys_to_delete().await.unwrap(),
-        [AccessKeyToDelete {
-            access_key_id: "replacement-key".into(),
+        ["fixture-access-key", "replacement-key"].map(|key| AccessKeyToDelete {
+            access_key_id: key.into(),
             member: Some(b.member.member_id()),
+        })
+    );
+}
+
+#[tokio::test]
+async fn late_access_survives_restart_and_cannot_revive_confirmed_keys() {
+    for creator in [false, true] {
+        let storage = storage();
+        let mut a = device(storage.clone(), 1, member(1), store(1)).await;
+        let mut b = device(storage.clone(), 2, member(2), store(1)).await;
+        a.create(key(1)).await;
+        a.add(&b.member, MemberRole::Admin).await;
+        b.sync().await;
+        let (target, observer) = if creator {
+            (&mut a, &mut b)
+        } else {
+            (&mut b, &mut a)
+        };
+        let removal = begin(observer, Command::RemoveMember(target.member.member_id())).await;
+        step(observer, removal).await.unwrap();
+        let replacement = StoreChange::SetAccess {
+            access: coven_format::MemberAccess::S3AccessKey {
+                access_key_id: "late-key".into(),
+            },
+        };
+        let entry = target
+            .sync
+            .make_and_upload_entry(replacement.clone())
+            .await
+            .unwrap();
+        let path = object::path(entry);
+        let bytes = storage.read(&path).await.unwrap();
+        storage.delete(&path).await.unwrap();
+        finish(observer, removal).await;
+        assert_eq!(
+            observer.db.access_keys_to_delete().await.unwrap(),
+            [AccessKeyToDelete {
+                access_key_id: "fixture-access-key".into(),
+                member: Some(target.member.member_id()),
+            }]
+        );
+        observer
+            .db
+            .confirm_access_key_deleted("fixture-access-key".into())
+            .await
+            .unwrap();
+        observer.restart(storage.clone()).await;
+        storage.create(&path, &bytes).await.unwrap();
+        observer.sync().await;
+        assert!(matches!(
+            observer.log().await.replay.entries[&entry],
+            coven_database::EntryOutcome::Dropped(_)
+        ));
+        let records = observer.db.operations().await.unwrap();
+        assert_eq!(records.len(), 1);
+        observer.restart(storage.clone()).await;
+        finish(observer, records[0].id).await;
+        assert_eq!(
+            observer.db.access_keys_to_delete().await.unwrap(),
+            [AccessKeyToDelete {
+                access_key_id: "late-key".into(),
+                member: Some(target.member.member_id()),
+            }]
+        );
+        observer
+            .db
+            .confirm_access_key_deleted("late-key".into())
+            .await
+            .unwrap();
+        // This device has not read its removal and repeats its recorded key.
+        target
+            .sync
+            .make_and_upload_entry(replacement)
+            .await
+            .unwrap();
+        observer.sync().await;
+        for record in observer.db.operations().await.unwrap() {
+            finish(observer, record.id).await;
+        }
+        assert!(observer
+            .db
+            .access_keys_to_delete()
+            .await
+            .unwrap()
+            .is_empty());
+        observer.restart(storage.clone()).await;
+        observer.sync().await;
+        assert!(observer
+            .db
+            .access_keys_to_delete()
+            .await
+            .unwrap()
+            .is_empty());
+    }
+}
+
+#[tokio::test]
+async fn removal_revokes_accounts_in_dropped_additions_and_access_updates() {
+    let storage = google();
+    let [mut a, mut b, _c] = accounts(storage.clone()).await;
+    let removal = begin(&mut a, Command::RemoveMember(b.member.member_id())).await;
+    step(&mut a, removal).await.unwrap();
+    for account in ["replacement@example.com", "addition@example.com"] {
+        storage.grant_access(account).await.unwrap();
+    }
+    let replacement = b
+        .sync
+        .make_and_upload_entry(StoreChange::SetAccess {
+            access: coven_format::MemberAccess::ProviderAccount("replacement@example.com".into()),
+        })
+        .await
+        .unwrap();
+    let addition = b
+        .sync
+        .make_and_upload_entry(StoreChange::AddMember {
+            keys: public(&b.member),
+            role: MemberRole::Member,
+            access: coven_format::MemberAccess::ProviderAccount("addition@example.com".into()),
+        })
+        .await
+        .unwrap();
+    finish(&mut a, removal).await;
+    for entry in [replacement, addition] {
+        assert!(matches!(
+            a.log().await.replay.entries[&entry],
+            coven_database::EntryOutcome::Dropped(_)
+        ));
+    }
+    for account in [
+        "ben@example.com",
+        "replacement@example.com",
+        "addition@example.com",
+    ] {
+        let recipient = MemoryStorage::for_recipient(&storage, account).unwrap();
+        assert!(matches!(recipient.list(&ObjectPrefix::all()).await,
+            Err(error) if error.failure() == StorageFailure::PermissionDenied));
+    }
+    assert!(MemoryStorage::for_recipient(&storage, "cat@example.com")
+        .unwrap()
+        .list(&ObjectPrefix::all())
+        .await
+        .is_ok());
+}
+
+#[tokio::test]
+async fn a_retained_grant_on_old_access_blocks_removal_until_explicit_retry() {
+    let storage = google();
+    let [mut a, mut b, _c] = accounts(storage.clone()).await;
+    storage
+        .grant_access("replacement@example.com")
+        .await
+        .unwrap();
+    b.sync
+        .make_and_upload_entry(StoreChange::SetAccess {
+            access: coven_format::MemberAccess::ProviderAccount("replacement@example.com".into()),
+        })
+        .await
+        .unwrap();
+    a.sync().await;
+    let shares = vec![coven_storage::RetainedAccess {
+        provider_id: "inherited-old-account".into(),
+        reason: coven_storage::RetainedAccessReason::Inherited,
+    }];
+    storage
+        .set_retained_access("ben@example.com", shares.clone())
+        .await;
+    let files = file_owner(&a);
+    let operations = Operations::new(a.sync, files);
+    assert_eq!(
+        operations
+            .remove_member(&b.member.member_id())
+            .await
+            .unwrap(),
+        MemberRemoval::AccessRemains { shares }
+    );
+    assert!(
+        MemoryStorage::for_recipient(&storage, "replacement@example.com")
+            .unwrap()
+            .list(&ObjectPrefix::all())
+            .await
+            .is_err()
+    );
+    let report = operations.report().await.unwrap();
+    assert_eq!(report.blocked_operations.len(), 1);
+    storage
+        .set_retained_access("ben@example.com", Vec::new())
+        .await;
+    operations
+        .retry_blocked_operation(report.blocked_operations[0].id)
+        .await
+        .unwrap();
+    assert!(MemoryStorage::for_recipient(&storage, "ben@example.com")
+        .unwrap()
+        .list(&ObjectPrefix::all())
+        .await
+        .is_err());
+    operations.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn another_invites_revocation_cannot_revive_a_confirmed_key() {
+    let storage = storage();
+    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
+    a.create(key(1)).await;
+    let mut invites = Vec::new();
+    for _ in 0..2 {
+        let operation = begin(
+            &mut a,
+            Command::Invite(
+                MemberRole::Member,
+                InviteAccess::S3AccessKey {
+                    access_key_id: "invited-key".into(),
+                    secret_access_key: coven_crypto::SecretText::new("secret".into()),
+                },
+            ),
+        )
+        .await;
+        let Output::Invite(invite) = finish(&mut a, operation).await else {
+            panic!("invite result")
+        };
+        invites.push(invite);
+    }
+    let first = begin(&mut a, Command::Cancel(invites[0].id)).await;
+    finish(&mut a, first).await;
+    assert_eq!(
+        a.db.access_keys_to_delete().await.unwrap(),
+        [AccessKeyToDelete {
+            access_key_id: "invited-key".into(),
+            member: None,
         }]
     );
+    a.db.confirm_access_key_deleted("invited-key".into())
+        .await
+        .unwrap();
+    a.restart(storage.clone()).await;
+    let second = begin(&mut a, Command::Cancel(invites[1].id)).await;
+    finish(&mut a, second).await;
+    assert!(a.db.access_keys_to_delete().await.unwrap().is_empty());
 }

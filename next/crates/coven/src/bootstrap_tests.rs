@@ -646,8 +646,8 @@ async fn approval_during_a_log_listing_is_not_mistaken_for_decline() {
 }
 
 #[tokio::test]
-async fn replacing_access_and_removal_use_the_winning_replays_key() {
-    for concurrent in [false, true] {
+async fn removal_lists_every_recorded_key_including_a_dropped_replacement() {
+    for concurrent in [true, false] {
         let owner = Owner::new(CloudProvider::S3, false).await;
         let invite = owner.invite().await;
         let install = Installation::new();
@@ -765,10 +765,10 @@ async fn replacing_access_and_removal_use_the_winning_replays_key() {
                 .await
                 .unwrap()
                 .access_keys_to_delete,
-            [AccessKeyToDelete {
-                access_key_id: expected_key.into(),
-                member: Some(member)
-            }]
+            ["invited-key", "new-member-key"].map(|key| AccessKeyToDelete {
+                access_key_id: key.into(),
+                member: Some(member.clone())
+            })
         );
         handle.close().await.unwrap();
         owner.close().await;

@@ -234,7 +234,8 @@ impl StoreLogSync {
                     _ => None,
                 };
                 work.state = InviteState::Settled;
-                self.save_access_result(record, &data, 5, key).await?;
+                self.save_access_result(record, &data, 5, key.into_iter().collect())
+                    .await?;
                 Ok(Progress::Advanced)
             }
             InviteState::Settled => {

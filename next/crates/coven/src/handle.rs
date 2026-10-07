@@ -42,6 +42,7 @@ impl CovenHandle {
 
     /// Commit a replacement S3 key, publish its id and return the updated code (§20.9).
     /// A publication failure retains the credentials; retry with the same key.
+    /// Removal lists this key for deletion even if replay drops its access entry.
     pub async fn replace_access_key(
         &self,
         access_key_id: String,
@@ -69,7 +70,9 @@ impl CovenHandle {
     ) -> Result<(), SyncError> {
         self.operations.set_member_role(member, role).await
     }
-    /// Remove a member, rotate keys and settle their storage access.
+    /// Remove a member, rotate keys and revoke every recorded access (§13).
+    /// The result describes current access and any retained grants; the sync
+    /// report lists all recorded S3 keys until each deletion is confirmed.
     pub async fn remove_member(&self, member: &MemberId) -> Result<MemberRemoval, SyncError> {
         self.operations.remove_member(member).await
     }

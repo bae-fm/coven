@@ -44,16 +44,12 @@ impl StoreLogSync {
                 self.database.finish_operation(record.id).await?;
                 return Ok(Progress::Finished(Output::Removal(result)));
             }
-            let result = self.revoke_member_access(record.id, member).await?;
-            let key = match &result {
-                MemberRemoval::DeleteAccessKey { access_key_id } => Some(access_key_id.clone()),
-                _ => None,
-            };
+            let (result, keys) = self.revoke_member_access(record.id, member).await?;
             data = Data::Revoke {
                 member: member.clone(),
                 result: Some(result),
             };
-            self.save_access_result(record, &data, 1, key).await?;
+            self.save_access_result(record, &data, 1, keys).await?;
             return Ok(Progress::Advanced);
         }
         if record.last_step < data.entry_step_number(5) {
@@ -90,15 +86,9 @@ impl StoreLogSync {
                     }
                     Output::Removal(result.clone())
                 } else {
-                    let result = self.revoke_member_access(record.id, member).await?;
-                    let key = match &result {
-                        MemberRemoval::DeleteAccessKey { access_key_id } => {
-                            Some(access_key_id.clone())
-                        }
-                        _ => None,
-                    };
+                    let (result, keys) = self.revoke_member_access(record.id, member).await?;
                     work.removal = Some(result);
-                    self.save_access_result(record, &data, 6, key).await?;
+                    self.save_access_result(record, &data, 6, keys).await?;
                     return Ok(Progress::Advanced);
                 }
             }
@@ -414,33 +404,35 @@ impl StoreLogSync {
         record: &OperationRecord,
         data: &Data,
         step: u32,
-        key: Option<String>,
+        keys: Vec<String>,
     ) -> Result<(), SyncError> {
         let update = data.update(record, step)?;
-        match key {
-            Some(access_key_id) => {
-                let member = match data {
-                    Data::Revoke { member, .. } => Some(member.parse()?),
-                    Data::Entry(work) => {
-                        let Intent::RemoveMember { member, .. } = &work.intent else {
-                            return Err(coven_database::DbError::DamagedDatabase.into());
-                        };
-                        Some(member.parse()?)
-                    }
-                    Data::Invite(_) => None,
-                    Data::KeepFile(_) | Data::Snapshots(_) | Data::PublishSchema { .. } => {
-                        return Err(coven_database::DbError::DamagedDatabase.into())
-                    }
-                };
-                let key = AccessKeyToDelete {
+        if keys.is_empty() {
+            self.database.advance_operation(update).await?;
+        } else {
+            let member = match data {
+                Data::Revoke { member, .. } => Some(member.parse()?),
+                Data::Entry(work) => {
+                    let Intent::RemoveMember { member, .. } = &work.intent else {
+                        return Err(coven_database::DbError::DamagedDatabase.into());
+                    };
+                    Some(member.parse()?)
+                }
+                Data::Invite(_) => None,
+                Data::KeepFile(_) | Data::Snapshots(_) | Data::PublishSchema { .. } => {
+                    return Err(coven_database::DbError::DamagedDatabase.into())
+                }
+            };
+            let keys = keys
+                .into_iter()
+                .map(|access_key_id| AccessKeyToDelete {
                     access_key_id,
-                    member,
-                };
-                self.database
-                    .record_access_key_deletion(update, key)
-                    .await?
-            }
-            None => self.database.advance_operation(update).await?,
+                    member: member.clone(),
+                })
+                .collect();
+            self.database
+                .record_access_key_deletions(update, keys)
+                .await?
         }
         Ok(())
     }
@@ -449,12 +441,12 @@ impl StoreLogSync {
         &self,
         operation: OperationId,
         member: &str,
-    ) -> Result<MemberRemoval, SyncError> {
-        // A queued removal may be completed by another entry before it resumes.
-        // The replay retains removed members and their last effective access.
+    ) -> Result<(MemberRemoval, Vec<String>), SyncError> {
+        // Replay decides membership, but dropping an access entry cannot undo
+        // its provider grant. Revoke every recorded access, including late entries.
         let local = self.database.local_store_log().await?;
         let member: MemberId = member.parse()?;
-        let access = &local
+        let current = &local
             .log
             .replay
             .state
@@ -462,7 +454,44 @@ impl StoreLogSync {
             .get(&member)
             .ok_or(coven_database::DbError::DamagedDatabase)?
             .access;
-        self.revoke_access(operation, access).await
+        let mut accesses = Vec::new();
+        for entry in &local.log.entries {
+            if let Some((target, access)) = recorded_access(&entry.entry) {
+                if *target == member && !accesses.iter().any(|a| same_access(a, access)) {
+                    accesses.push(access.clone());
+                }
+            }
+        }
+        let mut keys = Vec::new();
+        let mut retained = Vec::new();
+        let mut current_result = None;
+        for access in accesses {
+            let result = self.revoke_access(operation, &access).await?;
+            match &result {
+                MemberRemoval::DeleteAccessKey { access_key_id } => {
+                    keys.push(access_key_id.clone())
+                }
+                MemberRemoval::AccessRemains { shares } => {
+                    for share in shares {
+                        if !retained.contains(share) {
+                            retained.push(share.clone());
+                        }
+                    }
+                }
+                _ => (),
+            }
+            if same_access(current, &access) {
+                current_result = Some(result);
+            }
+        }
+        // The app call describes the replay's current access; its report contains
+        // every S3 key. Retained grants from any account block the whole operation.
+        let result = if retained.is_empty() {
+            current_result.ok_or(coven_database::DbError::DamagedDatabase)?
+        } else {
+            MemberRemoval::AccessRemains { shares: retained }
+        };
+        Ok((result, keys))
     }
 
     pub(super) async fn revoke_access(
@@ -515,8 +544,8 @@ impl StoreLogSync {
             .await?)
     }
 
-    /// Record owner-side access work in the very transaction applying a kept
-    /// removal. Later replay drops cannot erase an already initiated revocation.
+    /// Record access work atomically with a kept removal or a later access entry
+    /// for a removed member. Dropping either entry cannot undo provider access.
     pub(super) async fn removal_work(
         &self,
         previous: &StoreLog,
@@ -536,18 +565,20 @@ impl StoreLogSync {
         if !self.owns_storage(&log, &member.member_id()) {
             return Ok(Vec::new());
         }
-        let reserved: Vec<_> = self
-            .database
-            .operations()
-            .await?
+        let records = self.database.operations().await?;
+        let data = records
             .iter()
-            .map(|r| Data::read(r)?.entry())
-            .collect::<Result<Vec<_>, SyncError>>()?
+            .map(Data::read)
+            .collect::<Result<Vec<_>, _>>()?;
+        let reserved: Vec<_> = data
+            .iter()
+            .map(Data::entry)
+            .collect::<Result<Vec<_>, _>>()?
             .into_iter()
             .flatten()
             .map(|e| e.position)
             .collect();
-        let mut operations = Vec::new();
+        let mut targets = std::collections::BTreeSet::new();
         for (id, outcome) in &replay.entries {
             if *outcome != EntryOutcome::Kept
                 || previous.replay.entries.get(id) == Some(outcome)
@@ -561,9 +592,33 @@ impl StoreLogSync {
                 .find(|e| e.entry.position == *id)
                 .expect("replayed entry");
             if let StoreChange::RemoveMember { member, .. } = &entry.entry.change {
+                targets.insert(member.clone());
+            }
+        }
+        if let Some((target, _)) = recorded_access(&incoming.entry) {
+            if replay.state.members.get(target).is_some_and(|m| m.removed) {
+                targets.insert(target.clone());
+            }
+        }
+        let mut operations = Vec::new();
+        for target in targets {
+            let target = target.to_string();
+            // Unfinished revocations read the full committed log when they run.
+            // A step whose result is already fixed cannot absorb a later access.
+            let pending = data.iter().any(|data| match data {
+                Data::Revoke {
+                    member,
+                    result: None,
+                } => *member == target,
+                Data::Entry(work) if work.removal.is_none() => {
+                    matches!(&work.intent, Intent::RemoveMember { member } if *member == target)
+                }
+                _ => false,
+            });
+            if !pending {
                 operations.push(
                     Data::Revoke {
-                        member: member.to_string(),
+                        member: target,
                         result: None,
                     }
                     .new_operation("coven")?,
@@ -571,5 +626,17 @@ impl StoreLogSync {
             }
         }
         Ok(operations)
+    }
+}
+
+/// An addition's access belongs to its named member; an update's to its signer.
+fn recorded_access(
+    entry: &coven_format::store_log::StoreLogEntry,
+) -> Option<(&MemberId, &MemberAccess)> {
+    match &entry.change {
+        StoreChange::CreateStore { admin, access, .. } => Some((&admin.signing, access)),
+        StoreChange::AddMember { keys, access, .. } => Some((&keys.signing, access)),
+        StoreChange::SetAccess { access } => Some((&entry.author, access)),
+        _ => None,
     }
 }

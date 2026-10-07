@@ -254,12 +254,12 @@ impl Database {
         )
     }
 
-    /// Persist a public S3 key id until the app confirms deletion. This is
-    /// committed with the operation step, so a crash cannot lose the instruction.
-    pub async fn record_access_key_deletion(
+    /// Persist public S3 key ids with their operation step. Previously confirmed
+    /// ids remain confirmed even when another entry or invitation names them.
+    pub async fn record_access_key_deletions(
         &self,
         update: OperationUpdate,
-        key: crate::AccessKeyToDelete,
+        keys: Vec<crate::AccessKeyToDelete>,
     ) -> Result<(), DbError> {
         let owner = self.clone();
         finish_blocking(tokio::task::spawn_blocking(move || {
@@ -267,7 +267,9 @@ impl Database {
             let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
             let writer = inner.writer.lock().expect("writer lock poisoned");
             writer.transaction(|db| {
-                db.internal_execute("INSERT INTO coven_access_keys_to_delete(access_key_id,member) VALUES(?1,?2) ON CONFLICT(access_key_id) DO UPDATE SET member=excluded.member WHERE excluded.member IS NOT NULL", (key.access_key_id, key.member.map(|m| m.to_bytes().to_vec())))?;
+                for key in keys {
+                    db.internal_execute("INSERT INTO coven_access_keys_to_delete(access_key_id,member) VALUES(?1,?2) ON CONFLICT(access_key_id) DO UPDATE SET member=excluded.member WHERE excluded.member IS NOT NULL", (key.access_key_id, key.member.map(|m| m.to_bytes().to_vec())))?;
+                }
                 crate::operation::advance(db, &update)
             })
         }).await)
@@ -282,7 +284,7 @@ impl Database {
                 let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
                 let writer = inner.writer.lock().expect("writer lock poisoned");
                 writer.query(
-                    "SELECT access_key_id,member FROM coven_access_keys_to_delete ORDER BY access_key_id",
+                    "SELECT access_key_id,member FROM coven_access_keys_to_delete WHERE confirmed=0 ORDER BY access_key_id",
                     [],
                     |r| Ok(crate::AccessKeyToDelete {
                         access_key_id: r.get(0)?,
@@ -294,7 +296,8 @@ impl Database {
         )
     }
 
-    /// Acknowledge an S3 key deletion. Repeating confirmation is harmless.
+    /// Remember an S3 key deletion, including confirmation before its notice.
+    /// Repeating confirmation or replaying an access entry cannot revive it.
     pub async fn confirm_access_key_deleted(&self, key: String) -> Result<(), DbError> {
         let owner = self.clone();
         finish_blocking(
@@ -304,7 +307,7 @@ impl Database {
                 let writer = inner.writer.lock().expect("writer lock poisoned");
                 writer.transaction(|db| {
                     db.internal_execute(
-                        "DELETE FROM coven_access_keys_to_delete WHERE access_key_id=?1",
+                        "INSERT INTO coven_access_keys_to_delete(access_key_id,confirmed) VALUES(?1,1) ON CONFLICT(access_key_id) DO UPDATE SET confirmed=1",
                         [key],
                     )?;
                     Ok(())

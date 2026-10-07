@@ -1641,10 +1641,25 @@ Carol's tablet:
     and the circles whose keys it replaced, which must be exactly the
     circles they shared with others in the author's view, or the replay
     drops the entry ([§9](#9-members-and-roles));
-  - the storage access their invite granted is taken back: the store's
-    folder is unshared from their account, by the store owner's device
-    when it applies the removal, or on S3 coven tells the admin to delete
-    their key in the provider's console ([§12.2](#122-adding-a-person)).
+  - their recorded storage access is taken back: the store's folder is
+    unshared from each provider account, by the store owner's device,
+    or on S3 coven tells the admin to delete every recorded key in the
+    provider's console ([§12.2](#122-adding-a-person)).
+- Taking back a removed member's access covers every access recorded for
+  them in any entry the store log holds, kept or dropped: create-store and
+  add-member entries naming them, and set-access entries signed by them.
+  Dropping an entry does not undo the provider access it records.
+  - Every distinct S3 key id goes into `access_keys_to_delete` until the
+    admin confirms its deletion. A replacement concurrent with removal
+    therefore lists both the old and the new key, even though removal
+    defeats the set-access entry in replay.
+  - Every provider account is revoked using the existing owner, shared-account
+    and retained-grant rules ([§20.9](#209-members-and-devices)).
+  - Applying a later access entry for a removed member records its revocation
+    work in the same transaction, even when that entry is dropped and the
+    removal's original operation has finished.
+  - An invite's recorded access is treated the same way when the invite is
+    cancelled, declined or expires; its S3 key remains listed until confirmed.
 - What the entry names is fixed when the removal starts, from the member
   list the device has then; if the replay drops the entry, the removal
   starts over against the new list ([§18](#18-operations)).
@@ -1655,7 +1670,9 @@ Carol's tablet:
   `SyncError::StoreOwner`.
 - On S3, a key the admin must delete is shown in the sync status until
   the admin confirms it's gone ([§20.5](#205-storage-and-sync)), however
-  the removal or expiry that needs it came about.
+  the removal or expiry that needs it came about. The device retains the
+  confirmation by key id: another entry, invite, retry or restart cannot
+  bring that deletion notice back.
 - So a removed member's copies of the old store and circle keys read
   nothing written after the removal, even if they regain read access.
 - The removing device makes a new key for a circle its member isn't in,
@@ -4569,7 +4586,8 @@ pub struct AccessKeyToDelete {
 }
 
 // These notices live in the device-local coven_access_keys_to_delete table,
-// outside the operation journal, until confirm_access_key_deleted removes them.
+// outside the operation journal. confirm_access_key_deleted marks the key as
+// confirmed; reports omit it, and later records cannot make it pending again.
 
 pub struct WaitingWrite {
     pub write: WriteId,
@@ -5057,6 +5075,8 @@ impl CovenHandle {
     /// (§13). Requires connected storage. If publication fails, the call
     /// returns the failure and retains the new credentials: the remote entry
     /// may already exist. Retry with the same key to finish publication.
+    /// Member removal lists every recorded key until confirmed deleted,
+    /// including this key if replay drops its set-access entry (§13).
     pub async fn replace_access_key(
         &self,
         access_key_id: String,
@@ -5077,8 +5097,10 @@ impl CovenHandle {
     pub async fn confirm_access_key_deleted(&self, access_key_id: &str) -> Result<(), SyncError>;
 
     /// Removes a member and all their devices, rotates the store key, and
-    /// revokes their storage access; on S3 the result says to delete their
-    /// key in the provider's console (§13).
+    /// revokes all their recorded storage access (§13). The result describes
+    /// their current replayed access, with retained grants from any recorded
+    /// account. On S3, access_keys_to_delete lists every recorded key until
+    /// confirmed deleted, including keys in dropped entries.
     pub async fn remove_member(&self, member: &MemberId) -> Result<MemberRemoval, SyncError>;
 
     /// Removes a device. The provider can't cut off one device alone, so the

@@ -99,7 +99,8 @@ pub struct StoreIdentity {
 pub struct StoreMember {
     /// The public key used to seal store and circle keys to this member.
     pub sealing: SealingPublicKey,
-    /// The provider account or S3 key id from this member’s addition.
+    /// Current access selected by replay. Revocation also reads dropped and
+    /// superseded access from [`StoreLog::entries`] (§13).
     pub access: coven_format::MemberAccess,
     /// The member's role, retained when removed.
     pub role: MemberRole,

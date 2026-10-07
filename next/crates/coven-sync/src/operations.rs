@@ -185,7 +185,9 @@ impl Operations {
     ) -> Result<(), SyncError> {
         self.unit(Command::SetAccess(access)).await
     }
-    /// Remove the member, rotate their audience keys and settle storage access.
+    /// Remove the member, rotate audience keys and revoke every recorded access.
+    /// Returns current access's result, or retained grants from any account.
+    /// The sync report lists all recorded S3 keys until confirmed deleted.
     pub async fn remove_member(&self, member: &MemberId) -> Result<MemberRemoval, SyncError> {
         match self.call(Command::RemoveMember(member.clone())).await {
             Ok(Output::Removal(value)) => Ok(value),

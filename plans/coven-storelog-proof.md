@@ -52,8 +52,10 @@
   by version kind and audience. Lean: `Entry`, `Action`, `SnapshotId`, `State`.
 - Storage access is an opaque string in the model; the Rust adapter includes
   its provider-account or S3-key tag. Creation and member additions establish
-  it, and a member's own set-access entry replaces it. Removed members' access
-  remains available for revocation. Lean: `Action.setAccess`, `State.access`.
+  it, and a member's own set-access entry replaces it. Removed members retain
+  their current replayed access. Revocation separately covers every recorded
+  access, including dropped entries (§13), and is outside this replay model.
+  Lean: `Action.setAccess`, `State.access`.
 - A store removal also carries the names of the circles whose keys it
   replaced, as recorded when it was made
   ([§13](coven-from-scratch.md#13-removing-members-and-devices)). Replaying
@@ -271,7 +273,7 @@
   stays dropped when its opponent drops. Lean: `Examples.opening_log`,
   `equal_adds_combine`, `Gifts.carol_stays`, `CircleDeletion.earlier_rotation_applies`,
   `three_admins`, `dropped_removal_allows_phone`, `losing_removal_discards_add`.
-- A causal access replacement supplies a later removal's access record. A
+- A causal access replacement supplies a later removal's replayed access record. A
   concurrent removal defeats the replacement and retains the previous access.
   Lean: `Examples.replacement_then_removal`, `removal_defeats_access`.
 - [§12.2](coven-from-scratch.md#122-adding-a-person): Ana approves Carol's

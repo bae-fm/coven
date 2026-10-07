@@ -59,6 +59,7 @@ impl RestoreCodes {
     /// Requires connected storage. Credentials remain committed if publication
     /// fails: the remote entry may already exist. Retry with the same key to
     /// finish publication; queued entry bytes and numbers are reused.
+    /// A removal records this key for deletion even if its entry loses in replay.
     pub async fn replace_access_key(
         &self,
         access_key_id: String,

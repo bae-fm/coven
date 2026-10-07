@@ -372,7 +372,8 @@ macro_rules! coven_tables {
         $visit!(coven_access_keys_to_delete, "
             CREATE TABLE coven_access_keys_to_delete (
                 access_key_id TEXT PRIMARY KEY NOT NULL,
-                member BLOB
+                member BLOB,
+                confirmed INTEGER NOT NULL DEFAULT 0 CHECK(confirmed IN (0,1))
             );
         ");
         $visit!(coven_file_uploads, "

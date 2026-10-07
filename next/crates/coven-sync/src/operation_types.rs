@@ -40,7 +40,7 @@ pub enum OperationKind {
     DeleteCircle,
     /// Share storage and settle an invitation.
     Invite,
-    /// The owner's device revokes access after applying a kept removal.
+    /// The owner's device revokes recorded access after removal or a later access entry.
     RevokeAccess,
 }
 
