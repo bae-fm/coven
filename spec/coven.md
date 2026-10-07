@@ -1513,6 +1513,15 @@ Carol's tablet:
 
 ## 12. Joining and restore
 
+- Restore and join take the app's configured, layout-scoped builder and return
+  the open store ([E10](api.md#e10-joining-and-restore)). The app supplies its
+  opening choices once; session-only key custody stays with that handle.
+- An unfinished installation is hidden from listings and refused by ordinary
+  opens. It stays at its permanent path while loading. Only after loading does
+  coven commit final keys and credentials and publish it, without closing or
+  moving the database. Cancellation closes it and removes its local work;
+  dropping a waiting join preserves its encrypted request for an explicit retry.
+
 ### 12.1 A person's new device
 
 - A person's new device needs their *restore code*, which holds:

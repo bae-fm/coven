@@ -1,13 +1,13 @@
 //! New-device composition roots. Sync owns admission and loading; foundation
 //! owns unpublished directories and crypto owns final key custody (§12, E10).
 
-use crate::*;
+use super::*;
 use coven_crypto::custody::{InMemoryCustody, Keychain, StoreKeychain};
-use coven_database::DatabaseBuilder;
+use coven_database::Database;
 use coven_format::codes::{InviteCode, RestoreCode};
 use coven_foundation::files::{BootstrapDirectoryError, BootstrapStore, StoreFile};
 use coven_storage::{
-    InviteStorage, OAuthTokens, RestoreStorage, Storage, StorageCredentials, StorageSettings,
+    InviteStorage, OAuthTokens, RestoreStorage, StorageCredentials, StorageSettings,
 };
 use coven_sync::{JoiningIdentity, StoreLogSync};
 use std::{sync::Arc, time::Duration};
@@ -41,10 +41,6 @@ pub enum BootstrapError {
     /// Final custody could not be read or written.
     #[error(transparent)]
     SecureStorage(#[from] KeyError),
-    /// Returning a directory cannot retain a session-only custody value. Use
-    /// Custom with an app-retained InMemoryCustody for an in-memory installation.
-    #[error("bootstrap requires retained custody; use Custom for shared in-memory custody")]
-    EphemeralCustody,
     /// The singular keychain API cannot choose among several stores.
     #[error("keychain contains multiple stores: {0:?}")]
     MultipleStores(Vec<StoreId>),
@@ -57,60 +53,39 @@ pub enum BootstrapError {
         #[source]
         cleanup: Box<BootstrapError>,
     },
-    /// The loaded store is published; its final cleanup failed. Custody remains
-    /// committed and this directory can be opened.
-    #[error("store {store:?} is published; final cleanup failed: {source}")]
+    /// The loaded store is published; confirming durability or final cleanup
+    /// failed. Custody remains committed and the handle retains session-only keys.
+    #[error("store is published; final durability or cleanup failed: {source}")]
     Published {
-        /// The directory that can already be opened.
-        store: StoreDir,
+        /// The open store, including its session-only custody.
+        handle: CovenHandle,
         /// Failure after publication.
         #[source]
         source: Box<BootstrapError>,
     },
 }
 
-/// Restore this person's store on a new device, registering a fresh device id.
-/// OAuth providers use this device's supplied tokens or browser sign-in. No file
-/// transfers run here: snapshots and device logs load through the snapshot owner.
+/// Restore this person's store on a new device, returning its open handle.
+/// The builder supplies all opening choices. OAuth providers use supplied
+/// tokens or the builder's browser sign-in client.
 pub async fn restore_from_code(
+    builder: CovenBuilder,
     code: &str,
     device_name: &str,
-    synced_tables: &[SyncedTable],
-    migrations: &[Migration],
-    coven_migration_policy: CovenMigrationPolicy,
-    key_custody: KeyCustody,
-    identity_custody: IdentityCustody,
     oauth_tokens: Option<OAuthTokens>,
-    layout: &StoreLayout,
-    oauth_clients: Arc<OAuthClients>,
-    cloudkit_ops: Option<Arc<dyn CloudKitOps>>,
-    clock: ClockRef,
-    ids: IdSourceRef,
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
-) -> Result<StoreDir, BootstrapError> {
+) -> Result<CovenHandle, BootstrapError> {
     check_cancel(cancel)?;
-    let request = BootstrapRequest::Restore {
-        code: coven_sync::read_restore_code(code)?,
-        name: device_name.into(),
-    };
     bootstrap_device(
-        request,
-        synced_tables,
-        migrations,
-        coven_migration_policy,
-        key_custody,
-        identity_custody,
+        builder,
+        BootstrapRequest::Restore {
+            code: coven_sync::read_restore_code(code)?,
+            name: device_name.into(),
+        },
         oauth_tokens,
-        layout,
-        oauth_clients,
-        cloudkit_ops,
-        clock,
-        ids,
         on_status,
         cancel,
-        Keychain::registered()?,
-        None,
     )
     .await?
     .ok_or_else(|| SyncError::MissingMemberKeys.into())
@@ -119,92 +94,51 @@ pub async fn restore_from_code(
 /// Restore from the one discoverable iCloud code. Multiple stores require the
 /// app to choose an explicit code; this call never selects one arbitrarily.
 pub async fn restore_from_keychain(
+    builder: CovenBuilder,
     device_name: &str,
-    synced_tables: &[SyncedTable],
-    migrations: &[Migration],
-    coven_migration_policy: CovenMigrationPolicy,
-    key_custody: KeyCustody,
-    identity_custody: IdentityCustody,
     oauth_tokens: Option<OAuthTokens>,
-    layout: &StoreLayout,
-    oauth_clients: Arc<OAuthClients>,
-    cloudkit_ops: Option<Arc<dyn CloudKitOps>>,
-    clock: ClockRef,
-    ids: IdSourceRef,
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
-) -> Result<Option<StoreDir>, BootstrapError> {
+) -> Result<Option<CovenHandle>, BootstrapError> {
     check_cancel(cancel)?;
-    let keychain = Keychain::registered()?;
-    let Some(code) = keychain_code(&keychain)? else {
+    let Some(code) = keychain_code(builder.keychain()?.as_ref())? else {
         return Ok(None);
     };
     bootstrap_device(
+        builder,
         BootstrapRequest::Restore {
             code,
             name: device_name.into(),
         },
-        synced_tables,
-        migrations,
-        coven_migration_policy,
-        key_custody,
-        identity_custody,
         oauth_tokens,
-        layout,
-        oauth_clients,
-        cloudkit_ops,
-        clock,
-        ids,
         on_status,
         cancel,
-        keychain,
-        None,
     )
     .await
 }
 
 /// Accept provider access, retain one signed request across restarts, and wait
-/// for approval. Request deletion returns None; a provider refusal is an error.
-/// Explicit cancellation removes the unpublished installation. Dropping the
-/// future preserves it for a subsequent call with the same invite and name.
+/// for approval. Returns the open store, or None when declined or expired.
+/// Cancellation removes the unpublished installation; dropping the future
+/// preserves it for a subsequent call with the same invite and device name.
 pub async fn join_with_invite(
+    builder: CovenBuilder,
     code: &str,
     device_name: &str,
-    synced_tables: &[SyncedTable],
-    migrations: &[Migration],
-    coven_migration_policy: CovenMigrationPolicy,
-    key_custody: KeyCustody,
-    identity_custody: IdentityCustody,
     oauth_tokens: Option<OAuthTokens>,
-    layout: &StoreLayout,
-    oauth_clients: Arc<OAuthClients>,
-    cloudkit_ops: Option<Arc<dyn CloudKitOps>>,
-    clock: ClockRef,
-    ids: IdSourceRef,
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
-) -> Result<Option<StoreDir>, BootstrapError> {
+) -> Result<Option<CovenHandle>, BootstrapError> {
     check_cancel(cancel)?;
     bootstrap_device(
+        builder,
         BootstrapRequest::Join {
             code: coven_sync::read_invite_code(code)?,
             name: device_name.into(),
         },
-        synced_tables,
-        migrations,
-        coven_migration_policy,
-        key_custody,
-        identity_custody,
         oauth_tokens,
-        layout,
-        oauth_clients,
-        cloudkit_ops,
-        clock,
-        ids,
         on_status,
         cancel,
-        Keychain::registered()?,
-        None,
     )
     .await
 }
@@ -227,67 +161,59 @@ fn keychain_code(keychain: &Keychain) -> Result<Option<RestoreCode>, BootstrapEr
     Ok(Some(code))
 }
 
-pub(crate) enum BootstrapRequest {
+enum BootstrapRequest {
     Restore { code: RestoreCode, name: String },
     Join { code: InviteCode, name: String },
 }
 
-pub(crate) async fn bootstrap_device(
+async fn bootstrap_device(
+    mut builder: CovenBuilder,
     request: BootstrapRequest,
-    tables: &[SyncedTable],
-    migrations: &[Migration],
-    policy: CovenMigrationPolicy,
-    key_custody: KeyCustody,
-    identity_custody: IdentityCustody,
     tokens: Option<OAuthTokens>,
-    layout: &StoreLayout,
-    oauth: Arc<OAuthClients>,
-    cloudkit: Option<Arc<dyn CloudKitOps>>,
-    clock: ClockRef,
-    ids: IdSourceRef,
     status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
-    keychain: Arc<Keychain>,
-    supplied_storage: Option<Arc<dyn Storage>>,
-) -> Result<Option<StoreDir>, BootstrapError> {
+) -> Result<Option<CovenHandle>, BootstrapError> {
     check_cancel(cancel)?;
-    if matches!(key_custody, KeyCustody::InMemory(_))
-        || matches!(identity_custody, IdentityCustody::InMemory(_))
-    {
-        return Err(BootstrapError::EphemeralCustody);
-    }
+    let keychain = builder.keychain()?;
     let (id, name) = match &request {
         BootstrapRequest::Restore { code, .. } => (code.store, &code.name),
         BootstrapRequest::Join { code, .. } => (code.store, &code.name),
     };
     status("Preparing this device");
-    let pending = layout.begin_bootstrap(id, name, ids.as_ref())?;
-    let result = prepare_and_load(
-        &pending,
-        &request,
-        tables,
-        migrations,
-        policy,
-        tokens,
-        oauth,
-        cloudkit,
-        clock,
-        ids,
-        &status,
-        cancel,
-        supplied_storage,
-    )
-    .await;
+    let pending = builder
+        .layout
+        .begin_bootstrap(id, name, builder.ids.as_ref())?;
+    let result = prepare_and_load(&mut builder, &pending, &request, tokens, &status, cancel).await;
     match result {
-        Ok(Some((code, ring))) => {
+        Ok(Some((code, ring, database))) => {
             status("Keeping keys and credentials");
-            if let Err(error) = check_cancel(cancel) {
-                return cleanup(&pending, Err(error));
+            let result = check_cancel(cancel).and_then(|()| {
+                let owners = builder.owners(
+                    pending.directory(),
+                    Arc::new(StoreKeychain::new(keychain, id)),
+                )?;
+                // No await separates final custody, publication and the handle.
+                commit::publish_bootstrap(&pending, code, ring, owners, database.clone())
+            });
+            match result {
+                Ok(handle) => Ok(Some(handle)),
+                Err(error @ BootstrapError::Published { .. }) => Err(error),
+                Err(error) => {
+                    let result = combine(
+                        Err(error),
+                        database
+                            .close()
+                            .await
+                            .map_err(CovenError::from)
+                            .map_err(BootstrapError::from),
+                    );
+                    if matches!(result, Err(BootstrapError::Cancelled)) {
+                        cleanup(&pending, result)
+                    } else {
+                        result
+                    }
+                }
             }
-            // Publication is the commit point. There are no cancellable awaits
-            // between final custody writes, rollback and directory publication.
-            commit::publish_bootstrap(pending, code, ring, key_custody, identity_custody, keychain)
-                .map(Some)
         }
         Ok(None) => cleanup(&pending, Ok(None)),
         Err(BootstrapError::Cancelled) => cleanup(&pending, Err(BootstrapError::Cancelled)),
@@ -305,20 +231,13 @@ enum Admission<'a> {
 }
 
 async fn prepare_and_load(
+    builder: &mut CovenBuilder,
     pending: &BootstrapStore,
     request: &BootstrapRequest,
-    tables: &[SyncedTable],
-    migrations: &[Migration],
-    policy: CovenMigrationPolicy,
     tokens: Option<OAuthTokens>,
-    oauth: Arc<OAuthClients>,
-    cloudkit: Option<Arc<dyn CloudKitOps>>,
-    clock: ClockRef,
-    ids: IdSourceRef,
     status: &impl Fn(&str),
     cancel: &watch::Receiver<bool>,
-    supplied_storage: Option<Arc<dyn Storage>>,
-) -> Result<Option<(RestoreCode, StoreKeyring)>, BootstrapError> {
+) -> Result<Option<(RestoreCode, StoreKeyring, Database)>, BootstrapError> {
     let directory = pending.directory();
     let file = directory.owned_file(StoreFile::Bootstrap);
     let (member, data, device_name, mut admission) = match request {
@@ -327,7 +246,13 @@ async fn prepare_and_load(
                 RestoreStorage::decode(code.storage.as_bytes()).map_err(SyncError::from)?;
             if matches!(data.credentials, StorageCredentials::OAuth(_)) {
                 data.credentials = StorageCredentials::OAuth(
-                    sign_in(data.location.provider(), tokens, &oauth, cancel).await?,
+                    sign_in(
+                        data.location.provider(),
+                        tokens,
+                        builder.oauth.as_ref(),
+                        cancel,
+                    )
+                    .await?,
                 );
             }
             (
@@ -339,23 +264,24 @@ async fn prepare_and_load(
         }
         BootstrapRequest::Join { code, name } => {
             let identity = JoiningIdentity::prepare(&file, code, name)?;
-            let (invitation, credentials) = match InviteStorage::decode(code.storage.as_bytes())
-                .map_err(SyncError::from)?
-            {
-                InviteStorage::S3 {
-                    invitation,
-                    credentials,
-                } => (invitation, StorageCredentials::S3(credentials)),
-                InviteStorage::Account(invitation) => {
-                    let provider = invitation.location().provider();
-                    let credentials = if provider == CloudProvider::CloudKit {
-                        StorageCredentials::CloudKit
-                    } else {
-                        StorageCredentials::OAuth(sign_in(provider, tokens, &oauth, cancel).await?)
-                    };
-                    (invitation, credentials)
-                }
-            };
+            let (invitation, credentials) =
+                match InviteStorage::decode(code.storage.as_bytes()).map_err(SyncError::from)? {
+                    InviteStorage::S3 {
+                        invitation,
+                        credentials,
+                    } => (invitation, StorageCredentials::S3(credentials)),
+                    InviteStorage::Account(invitation) => {
+                        let provider = invitation.location().provider();
+                        let credentials = if provider == CloudProvider::CloudKit {
+                            StorageCredentials::CloudKit
+                        } else {
+                            StorageCredentials::OAuth(
+                                sign_in(provider, tokens, builder.oauth.as_ref(), cancel).await?,
+                            )
+                        };
+                        (invitation, credentials)
+                    }
+                };
             (
                 identity.member_keys(),
                 RestoreStorage {
@@ -373,41 +299,42 @@ async fn prepare_and_load(
     };
     check_cancel(cancel)?;
     let settings = directory.settings().map_err(CovenError::from)?;
-    let storage = match supplied_storage {
+    let storage = match &builder.storage {
         Some(storage) => {
             if storage.config() != data.location {
                 return Err(SyncError::Storage(StorageError::InvitationMismatch).into());
             }
-            storage
+            storage.clone()
         }
-        None => crate::connection::connect(
-            &data,
-            settings.device_id,
-            cloudkit,
-            clock.clone(),
-            ids.clone(),
-        )
-        .await
-        .map_err(SyncError::from)?,
+        None => {
+            let connector = builder.connector.get_or_insert_with(|| {
+                Arc::new(coven_storage::providers::ProviderConnector::new(
+                    builder.clock.clone(),
+                    builder.ids.clone(),
+                    builder.cloudkit.clone(),
+                ))
+            });
+            connector
+                .connect(
+                    data.location.clone(),
+                    data.credentials.clone(),
+                    settings.device_id,
+                )
+                .await
+                .map_err(SyncError::from)?
+        }
     };
     let ring: Arc<dyn StoreKeyCustody> = Arc::new(InMemoryCustody::<StoreKeyring>::empty());
     let identity: Arc<dyn MemberKeyCustody> = Arc::new(InMemoryCustody::new(member.clone()));
-    let database = DatabaseBuilder::new(directory.clone())
-        .migration_operation(StoreLogSync::migration_operation)
-        .synced_tables(tables.to_vec())
-        .migrations(migrations.to_vec())
-        .coven_migration_policy(policy)
-        .clock(clock.clone())
-        .id_source(ids.clone())
-        .open()
-        .await?;
+    builder.storage = Some(storage.clone());
+    let database = builder.database(directory.clone())?.open().await?;
     let mut sync = StoreLogSync::new(
         storage,
         database.clone(),
         ring.clone(),
         identity,
-        clock,
-        ids,
+        builder.clock.clone(),
+        builder.ids.clone(),
         directory,
     );
     let loading = async {
@@ -450,36 +377,47 @@ async fn prepare_and_load(
         result = loading => result,
     };
     drop(sync);
-    let closed = database
-        .close()
-        .await
-        .map_err(CovenError::from)
-        .map_err(BootstrapError::from);
-    let loaded = combine(result, closed)?;
-    if !loaded {
-        return Ok(None);
+    let result = result.and_then(|loaded| {
+        if !loaded {
+            return Ok(None);
+        }
+        let ring = ring.unlock()?.ok_or(SyncError::MissingMemberKeys)?;
+        Ok(Some((
+            RestoreCode {
+                store: settings.id,
+                name: settings.name,
+                member_keys: member,
+                storage: data.encode().map_err(SyncError::from)?,
+            },
+            ring,
+        )))
+    });
+    match result {
+        Ok(Some((code, ring))) => Ok(Some((code, ring, database))),
+        result => {
+            let closed = database
+                .close()
+                .await
+                .map_err(CovenError::from)
+                .map_err(BootstrapError::from);
+            combine(result.map(|_| None), closed)
+        }
     }
-    let ring = ring.unlock()?.ok_or(SyncError::MissingMemberKeys)?;
-    Ok(Some((
-        RestoreCode {
-            store: settings.id,
-            name: settings.name,
-            member_keys: member,
-            storage: data.encode().map_err(SyncError::from)?,
-        },
-        ring,
-    )))
 }
 
 async fn sign_in(
     provider: CloudProvider,
     tokens: Option<OAuthTokens>,
-    oauth: &OAuthClients,
+    oauth: Option<&OAuthClients>,
     cancel: &watch::Receiver<bool>,
 ) -> Result<OAuthTokens, BootstrapError> {
     match tokens {
         Some(tokens) => Ok(tokens),
-        None => match oauth.authorize(provider, cancel.clone()).await {
+        None => match oauth
+            .ok_or(OAuthError::Unavailable(provider))?
+            .authorize(provider, cancel.clone())
+            .await
+        {
             Err(OAuthError::Cancelled) => Err(BootstrapError::Cancelled),
             result => Ok(result?),
         },

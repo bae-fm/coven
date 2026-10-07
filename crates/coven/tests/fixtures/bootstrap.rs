@@ -234,6 +234,17 @@ impl Installation {
         }
     }
 
+    fn builder(&self, owner: &Owner, storage: Arc<MemoryStorage>) -> CovenBuilder {
+        Coven::builder(self.layout.clone())
+            .with_keychain(self.keychain.clone())
+            .synced_tables(tables())
+            .migrations(migrations())
+            .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
+            .clock(owner.clock.clone())
+            .storage(storage.clone())
+            .storage_connector(storage)
+    }
+
     async fn run(
         &self,
         owner: &Owner,
@@ -241,26 +252,29 @@ impl Installation {
         storage: Arc<MemoryStorage>,
         cancel: &watch::Receiver<bool>,
         status: impl Fn(&str),
-    ) -> Result<Option<StoreDir>, BootstrapError> {
+    ) -> Result<Option<CovenHandle>, BootstrapError> {
         bootstrap_device(
+            self.builder(owner, storage),
             request,
-            &tables(),
-            &migrations(),
-            CovenMigrationPolicy::ApplyPending,
-            KeyCustody::Keyring,
-            IdentityCustody::Keyring,
             Some(tokens("joining-token")),
-            &self.layout,
-            Arc::new(OAuthClients::new(None, None, None, owner.clock.clone())),
-            None,
-            owner.clock.clone(),
-            Arc::new(UuidIds),
             status,
             cancel,
-            self.keychain.clone(),
-            Some(storage),
         )
         .await
+    }
+
+    async fn restore(&self, owner: &Owner) -> CovenHandle {
+        let (_, cancel) = watch::channel(false);
+        restore_from_code(
+            self.builder(owner, owner.storage.clone()),
+            &owner.code.to_text().unwrap(),
+            "Ana’s laptop",
+            Some(tokens("joining-token")),
+            |_| {},
+            &cancel,
+        )
+        .await
+        .unwrap()
     }
 
     fn restore_request(owner: &Owner) -> BootstrapRequest {
@@ -296,14 +310,14 @@ impl Installation {
     }
 
     async fn handle(&self, directory: StoreDir, owner: &Owner) -> CovenHandle {
-        Coven::builder(directory)
+        Coven::builder(self.layout.clone())
             .with_keychain(self.keychain.clone())
             .synced_tables(tables())
             .migrations(migrations())
             .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
             .clock(owner.clock.clone())
             .storage(owner.storage.clone())
-            .open()
+            .open(directory.id())
             .await
             .unwrap()
     }

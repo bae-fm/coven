@@ -87,14 +87,14 @@ list stay local to the device.
 ```rust
 use coven::{Coven, CovenMigrationPolicy, Migration, RowIdentity, SyncedTable};
 
-let handle = Coven::builder(store_dir, config)
+let handle = Coven::builder(layout.clone())
     .synced_tables(vec![
         SyncedTable::new("todos", RowIdentity::IndependentUuid),
         SyncedTable::new("todo_attachments", RowIdentity::IndependentUuid),
     ])
     .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
     .migrations(vec![Migration::sql(1, "initial", MY_SCHEMA)])
-    .open()?;
+    .open(store_dir.id()).await?;
 ```
 
 The identity argument states what equal ids mean across devices. Use

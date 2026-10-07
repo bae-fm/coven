@@ -20,6 +20,12 @@ pub struct CovenHandle {
     custody: Arc<Mutex<Option<StoreCustody>>>,
 }
 
+impl std::fmt::Debug for CovenHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CovenHandle").finish_non_exhaustive()
+    }
+}
+
 impl CovenHandle {
     pub(crate) fn new(
         database: Database,

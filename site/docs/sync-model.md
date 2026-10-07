@@ -88,7 +88,7 @@ cannot happen, because the only connection that can write is the one capture
 is attached to.
 
 The host opens the store once through
-`Coven::builder(store_dir, config).synced_tables(...).coven_migration_policy(...).migrations(...).open()`, declaring
+`Coven::builder(layout.clone()).synced_tables(...).coven_migration_policy(...).migrations(...).open(store_dir.id()).await`, declaring
 its [synced tables](/docs/local-data), and from then on runs all its writes
 through `handle.write(...)`. The writer connection lives on one dedicated
 thread (an actor). Each host transaction gets a SQLite session attached to every
@@ -130,7 +130,7 @@ cannot bypass capture because it cannot write at all.
   closure see the same snapshot. A `read` after an awaited `write` sees that
   committed data.
 - **From a second process (or a second handle)**:
-  `Coven::builder(store_dir, config).synced_tables(...).migrations(...).open_read_only()` returns a
+  `Coven::builder(layout.clone()).synced_tables(...).migrations(...).open_read_only(store_dir.id()).await` returns a
   [`CovenReadHandle`](rustdoc:struct:coven::CovenReadHandle) — a same-store
   reader for something like a macOS File Provider extension that must serve
   reads while the app holds the full handle open. It takes no store lock

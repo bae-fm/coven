@@ -74,12 +74,12 @@ shared root secret and never reused across stores.
 [`CovenBuilder::key_custody`](rustdoc:method:coven::CovenBuilder::key_custody):
 
 ```rust
-Coven::builder(store_dir, config)
+Coven::builder(layout.clone())
     .key_custody(coven::KeyCustody::Keyring)   // the default
     .synced_tables(tables)
     .coven_migration_policy(coven::CovenMigrationPolicy::ApplyPending)
     .migrations(migrations)
-    .open()?;
+    .open(store_dir.id()).await?;
 ```
 
 - [`KeyCustody::Keyring`](rustdoc:enum:coven::KeyCustody) — the OS keyring,
@@ -88,9 +88,7 @@ Coven::builder(store_dir, config)
   a memorized [`Passphrase`](rustdoc:struct:coven::Passphrase) wraps the
   master keyring; the wrapped blob is a file in the store directory
   (`master.keyring`), not a keyring entry.
-- [`KeyCustody::InMemory`](rustdoc:enum:coven::KeyCustody) — a
-  [`MasterKeyring`](rustdoc:struct:coven::MasterKeyring) supplied for this
-  session and never persisted by coven.
+- [`KeyCustody::InMemory`](rustdoc:enum:coven::KeyCustody) — empty session custody, filled as keys are opened and retained by the returned handle.
 - [`KeyCustody::Custom`](rustdoc:enum:coven::KeyCustody) — a host's own
   [`MasterKeyCustody`](rustdoc:trait:coven::MasterKeyCustody) implementation
   (`unlock` / `persist` / `forget`).
@@ -100,12 +98,12 @@ builder, with
 [`CovenBuilder::identity_custody`](rustdoc:method:coven::CovenBuilder::identity_custody):
 
 ```rust
-Coven::builder(store_dir, config)
+Coven::builder(layout.clone())
     .identity_custody(coven::IdentityCustody::Keyring)   // the default
     .synced_tables(tables)
     .coven_migration_policy(coven::CovenMigrationPolicy::ApplyPending)
     .migrations(migrations)
-    .open()?;
+    .open(store_dir.id()).await?;
 ```
 
 Its presets mirror the master key's:
@@ -114,9 +112,7 @@ default),
 [`IdentityCustody::Passphrase`](rustdoc:enum:coven::IdentityCustody) (the
 same envelope format, wrapped in a file inside the store directory —
 `identity.envelope` — alongside `master.keyring`),
-[`IdentityCustody::InMemory`](rustdoc:enum:coven::IdentityCustody) (a
-[`UserKeypair`](rustdoc:struct:coven::UserKeypair) supplied for this session,
-never persisted by coven), and
+[`IdentityCustody::InMemory`](rustdoc:enum:coven::IdentityCustody) (empty session custody, filled by initialization, restore or join), and
 [`IdentityCustody::Custom`](rustdoc:enum:coven::IdentityCustody) (a host's
 own [`DeviceIdentityCustody`](rustdoc:trait:coven::DeviceIdentityCustody)
 implementation).

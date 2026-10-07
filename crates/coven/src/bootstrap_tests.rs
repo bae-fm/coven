@@ -1,16 +1,16 @@
 use super::*;
 use coven_crypto::custody::KeyringCustody;
-use coven_database::{Database, FileDatabase};
+use coven_database::{DatabaseBuilder, FileDatabase};
 use coven_format::{
     store_log::{MemberPublicKeys, StoreChange},
     MemberAccess,
 };
 use coven_storage::{
     test_utils::{Faults, MemoryStorage},
-    ObjectPath, ObjectPrefix, S3Credentials, StorageFailure,
+    ObjectPath, ObjectPrefix, S3Credentials, Storage, StorageFailure,
 };
 use coven_sync::{DeviceLogSync, Files, Operations};
-use std::time::UNIX_EPOCH;
+use std::{num::NonZeroUsize, time::UNIX_EPOCH};
 
 // Include the installation fixtures in this test module so their retained
 // database, storage and custody dependencies stay private.
@@ -20,18 +20,18 @@ include!("../tests/fixtures/bootstrap.rs");
 async fn restore_loads_snapshots_and_later_writes_with_identical_fingerprints() {
     let owner = Owner::new(CloudProvider::S3, true).await;
     let install = Installation::new();
-    let (_, cancel) = watch::channel(false);
-    let directory = install
-        .run(
-            &owner,
-            Installation::restore_request(&owner),
-            owner.storage.clone(),
-            &cancel,
-            |_| {},
-        )
-        .await
-        .unwrap()
-        .unwrap();
+    let handle = install.restore(&owner).await;
+    let directory = install.layout.store_dir(&owner.directory.id());
+    assert_eq!(
+        handle.restore_code().await.unwrap(),
+        owner.code.to_text().unwrap().as_str()
+    );
+    let synced = keychain_code(&install.keychain).unwrap().unwrap();
+    assert_eq!(
+        synced.to_text().unwrap().as_str(),
+        handle.restore_code().await.unwrap()
+    );
+    handle.close().await.unwrap();
     assert_ne!(
         directory.settings().unwrap().device_id,
         owner.directory.settings().unwrap().device_id
@@ -65,17 +65,6 @@ async fn restore_loads_snapshots_and_later_writes_with_identical_fingerprints() 
         .unwrap()
         .is_none());
     db.close().await.unwrap();
-    let handle = install.handle(directory, &owner).await;
-    assert_eq!(
-        handle.restore_code().await.unwrap(),
-        owner.code.to_text().unwrap().as_str()
-    );
-    let synced = keychain_code(&install.keychain).unwrap().unwrap();
-    assert_eq!(
-        synced.to_text().unwrap().as_str(),
-        handle.restore_code().await.unwrap()
-    );
-    handle.close().await.unwrap();
     owner.close().await;
 }
 
@@ -116,8 +105,7 @@ async fn join_accepts_provider_access_and_approval_then_loads_the_store() {
         })
         .await
         .unwrap();
-        let directory = result.unwrap().unwrap();
-        let handle = install.handle(directory, &owner).await;
+        let handle = result.unwrap().unwrap();
         let restored =
             coven_sync::read_restore_code(&handle.restore_code().await.unwrap()).unwrap();
         assert_eq!(restored.member_keys.member_id(), member);
@@ -208,7 +196,8 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
     })
     .await
     .unwrap();
-    let directory = result.unwrap().unwrap();
+    let handle = result.unwrap().unwrap();
+    let directory = install.layout.store_dir(&owner.directory.id());
     assert_eq!(directory.settings().unwrap().device_id, device);
     assert_eq!(
         keychain_code(&install.keychain)
@@ -218,6 +207,7 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
             .member_id(),
         request.member
     );
+    handle.close().await.unwrap();
     owner.close().await;
 }
 
@@ -259,7 +249,7 @@ async fn declined_and_expired_requests_finish_without_committing_custody() {
         assert!(!install
             .root
             .path()
-            .join("stores/.coven-bootstrap")
+            .join("stores")
             .join(owner.directory.id().to_string())
             .exists());
         owner.close().await;
@@ -328,7 +318,7 @@ async fn cancellation_while_waiting_removes_every_local_installation_value() {
     assert!(!install
         .root
         .path()
-        .join("stores/.coven-bootstrap")
+        .join("stores")
         .join(owner.directory.id().to_string())
         .exists());
     owner.operations.cancel_invite(&invite.id).await.unwrap();
@@ -366,7 +356,7 @@ async fn cancellation_during_restore_and_before_publication_keeps_final_custody_
         assert!(!install
             .root
             .path()
-            .join("stores/.coven-bootstrap")
+            .join("stores")
             .join(owner.directory.id().to_string())
             .exists());
         owner.close().await;
@@ -417,19 +407,8 @@ async fn restore_codes_track_s3_keys_and_oauth_credentials_in_synced_custody() {
     for provider in [CloudProvider::S3, CloudProvider::GoogleDrive] {
         let owner = Owner::new(provider, false).await;
         let install = Installation::new();
-        let (_, cancel) = watch::channel(false);
-        let directory = install
-            .run(
-                &owner,
-                Installation::restore_request(&owner),
-                owner.storage.clone(),
-                &cancel,
-                |_| {},
-            )
-            .await
-            .unwrap()
-            .unwrap();
-        let handle = install.handle(directory.clone(), &owner).await;
+        let handle = install.restore(&owner).await;
+        let directory = install.layout.store_dir(&owner.directory.id());
         let before = handle.restore_code().await.unwrap();
         let info = decode_code_info(&before).unwrap();
         assert_eq!(info.kind, CodeKind::Restore);
@@ -492,13 +471,13 @@ async fn restore_codes_track_s3_keys_and_oauth_credentials_in_synced_custody() {
         ));
         assert_eq!(handle.restore_code().await.unwrap(), after.as_str());
         handle.close().await.unwrap();
-        let handle = Coven::builder(directory)
+        let handle = Coven::builder(install.layout.clone())
             .with_keychain(install.keychain.clone())
             .synced_tables(tables())
             .migrations(migrations())
             .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
             .clock(owner.clock.clone())
-            .open()
+            .open(directory.id())
             .await
             .unwrap();
         assert_eq!(handle.restore_code().await.unwrap(), after.as_str());
@@ -674,8 +653,7 @@ async fn removal_lists_every_recorded_key_including_a_dropped_replacement() {
         })
         .await
         .unwrap();
-        let directory = result.unwrap().unwrap();
-        let handle = install.handle(directory.clone(), &owner).await;
+        let handle = result.unwrap().unwrap();
         let replace = || {
             handle.replace_access_key(
                 "new-member-key".into(),
@@ -779,19 +757,8 @@ async fn removal_lists_every_recorded_key_including_a_dropped_replacement() {
 async fn failed_access_publication_retains_credentials_and_retry_finishes_once() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let install = Installation::new();
-    let (_, cancel) = watch::channel(false);
-    let directory = install
-        .run(
-            &owner,
-            Installation::restore_request(&owner),
-            owner.storage.clone(),
-            &cancel,
-            |_| {},
-        )
-        .await
-        .unwrap()
-        .unwrap();
-    let handle = install.handle(directory.clone(), &owner).await;
+    let handle = install.restore(&owner).await;
+    let directory = install.layout.store_dir(&owner.directory.id());
     owner
         .storage
         .set_faults(Faults {
@@ -840,12 +807,12 @@ async fn failed_access_publication_retains_credentials_and_retry_finishes_once()
         1
     );
     handle.close().await.unwrap();
-    let disconnected = Coven::builder(directory)
+    let disconnected = Coven::builder(install.layout.clone())
         .with_keychain(install.keychain.clone())
         .synced_tables(tables())
         .migrations(migrations())
         .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
-        .open()
+        .open(directory.id())
         .await
         .unwrap();
     assert!(matches!(
@@ -857,4 +824,169 @@ async fn failed_access_publication_retains_credentials_and_retry_finishes_once()
     assert_eq!(disconnected.restore_code().await.unwrap(), retained);
     disconnected.close().await.unwrap();
     owner.close().await;
+}
+
+#[tokio::test]
+async fn restores_return_session_keys_and_builder_choices_without_reopening() {
+    for from_keychain in [false, true] {
+        for passphrase in [false, true] {
+            let owner = Owner::new(CloudProvider::S3, false).await;
+            let install = Installation::new();
+            let (_, cancel) = watch::channel(false);
+            let builder = install
+                .builder(&owner, owner.storage.clone())
+                .max_concurrent_uploads(NonZeroUsize::new(3).unwrap())
+                .max_concurrent_downloads(NonZeroUsize::new(4).unwrap())
+                .key_custody(if passphrase {
+                    KeyCustody::Passphrase(Passphrase::new("store password".into()))
+                } else {
+                    KeyCustody::InMemory
+                })
+                .identity_custody(if passphrase {
+                    IdentityCustody::Passphrase(Passphrase::new("identity password".into()))
+                } else {
+                    IdentityCustody::InMemory
+                });
+            let handle = if from_keychain {
+                let scoped = StoreKeychain::new(install.keychain.clone(), owner.directory.id());
+                scoped
+                    .set_synced_restore_code(&SecretBytes::new(
+                        owner.code.to_bytes().unwrap().to_vec(),
+                    ))
+                    .unwrap();
+                restore_from_keychain(builder, "Laptop", None, |_| {}, &cancel)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            } else {
+                restore_from_code(
+                    builder,
+                    &owner.code.to_text().unwrap(),
+                    "Laptop",
+                    None,
+                    |_| {},
+                    &cancel,
+                )
+                .await
+                .unwrap()
+            };
+            assert_eq!(handle.transfer_limits().uploads.get(), 3);
+            assert_eq!(handle.transfer_limits().downloads.get(), 4);
+            assert_eq!(
+                handle.restore_code().await.unwrap(),
+                owner.code.to_text().unwrap().as_str()
+            );
+            let sealed = handle
+                .seal_app_data(b"session", b"notes/new")
+                .await
+                .unwrap();
+            assert_eq!(
+                handle.open_app_data(&sealed, b"notes/new").unwrap(),
+                b"session"
+            );
+            handle
+                .write(|sql| {
+                    sql.execute(
+                        "INSERT INTO notes VALUES('new',?1)",
+                        params![b"new".to_vec()],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            assert_eq!(install.layout.stores().await.unwrap().len(), 1);
+            let directory = install.layout.store_dir(&owner.directory.id());
+            assert!(matches!(
+                directory.lock_exclusive(),
+                Err(StoreLockError::AlreadyOpen(_))
+            ));
+            let member = coven_sync::read_restore_code(&handle.restore_code().await.unwrap())
+                .unwrap()
+                .member_keys
+                .member_id();
+            assert_eq!(member, owner.member.member_id());
+            handle.close().await.unwrap();
+            if passphrase {
+                // The same files remain usable at their permanent paths after publication.
+                let reopened = install
+                    .builder(&owner, owner.storage.clone())
+                    .key_custody(KeyCustody::Passphrase(Passphrase::new(
+                        "store password".into(),
+                    )))
+                    .identity_custody(IdentityCustody::Passphrase(Passphrase::new(
+                        "identity password".into(),
+                    )))
+                    .open(directory.id())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    reopened.open_app_data(&sealed, b"notes/new").unwrap(),
+                    b"session"
+                );
+                reopened.close().await.unwrap();
+            }
+            owner.close().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn joining_retains_the_approved_member_in_session_custody() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let (_, cancel) = watch::channel(false);
+    let builder = install
+        .builder(&owner, owner.recipient())
+        .key_custody(KeyCustody::InMemory)
+        .identity_custody(IdentityCustody::InMemory);
+    let joining = join_with_invite(builder, &invite.code, "New phone", None, |_| {}, &cancel);
+    let mut requests = owner.operations.subscribe_join_requests();
+    let approve = async {
+        let request = next_request(&mut requests).await;
+        install.absent(owner.directory.id()).await;
+        owner
+            .operations
+            .approve_join_request(&request)
+            .await
+            .unwrap();
+        request.member
+    };
+    let (handle, member) = tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::join!(joining, approve)
+    })
+    .await
+    .unwrap();
+    let handle = handle.unwrap().unwrap();
+    assert_eq!(
+        coven_sync::read_restore_code(&handle.restore_code().await.unwrap())
+            .unwrap()
+            .member_keys
+            .member_id(),
+        member
+    );
+    let sealed = handle.seal_app_data(b"joined", b"notes/new").await.unwrap();
+    assert_eq!(
+        handle.open_app_data(&sealed, b"notes/new").unwrap(),
+        b"joined"
+    );
+    handle.close().await.unwrap();
+    owner.close().await;
+}
+
+#[tokio::test]
+async fn missing_keychain_code_returns_none_without_creating_a_store() {
+    let install = Installation::new();
+    let (_, cancel) = watch::channel(false);
+    let result = restore_from_keychain(
+        Coven::builder(install.layout.clone()).with_keychain(install.keychain.clone()),
+        "Laptop",
+        None,
+        |_| {},
+        &cancel,
+    )
+    .await
+    .unwrap();
+    assert!(result.is_none());
+    assert!(install.layout.stores().await.unwrap().is_empty());
 }

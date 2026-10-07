@@ -136,7 +136,7 @@ pub struct StoreInfo {
     pub name: String,
 }
 
-/// The choices collected before opening a store (E1).
+/// The opening choices for stores under one layout (E1).
 pub struct CovenBuilder { /* private fields */ }
 
 /// A shared handle to the open store and its running work (§20.2).
@@ -554,6 +554,8 @@ pub enum StoreLockError {
     AlreadyOpen(StoreId),
     /// An explicit recovery has not published its replacement database.
     RecoveryPending(StoreId),
+    /// An unfinished installation must be resumed with restore or join.
+    BootstrapPending(StoreId),
     /// A supplied lock protects a different directory.
     WrongDirectory(StoreId),
     /// Opening or locking the lock file failed.
@@ -719,6 +721,11 @@ pub struct KeyId(pub Uuid);
 /// Called once at startup, before any store opens.
 pub fn set_keyring_service(name: impl Into<String>) -> Result<(), KeyError>;
 
+impl StoreDir {
+    /// The store identified by this directory.
+    pub fn id(&self) -> StoreId;
+}
+
 impl StoreLayout {
     /// The stores under `app_dir`, one directory each.
     pub fn new(app_dir: PathBuf) -> Self;
@@ -742,9 +749,8 @@ impl Coven {
         ids: IdSourceRef,
     ) -> Result<StoreDir, StoreCreationError>;
 
-    /// Starts opening the store in `store_dir`, with the settings coven keeps
-    /// there.
-    pub fn builder(store_dir: StoreDir) -> CovenBuilder;
+    /// Collects the choices for opening, restoring or joining a store in this layout.
+    pub fn builder(layout: StoreLayout) -> CovenBuilder;
 
     /// Deletes a closed store from this device: every keychain entry coven
     /// holds for it, including the named host secrets, then its directory.
@@ -807,34 +813,36 @@ impl CovenBuilder {
     /// file work. An empty journal needs no keys; resumed steps read keys when
     /// needed. Local database calls need no unlocked key. Opening does not start
     /// the sync loop; `connect_sync` starts it.
-    pub async fn open(self) -> CovenResult<CovenHandle>;
+    pub async fn open(self, store: StoreId) -> CovenResult<CovenHandle>;
 
     /// Opens a store whose database is damaged (§19.2): moves the damaged
     /// file aside, loads the latest snapshot, and queues the waiting writes it
     /// can still read from the old file, then resumes unfinished operations.
     /// It needs storage and the store key; without either it fails, leaving
     /// the damaged file where it was.
-    pub async fn open_reloading(self) -> Result<CovenHandle, RecoveryError>;
+    pub async fn open_reloading(self, store: StoreId) -> Result<CovenHandle, RecoveryError>;
 
     /// Opens the store for reading only, alongside a handle that has it open,
     /// for example from another process. Its shared lock prevents deletion
     /// while its read connections and local cache connection remain open.
     /// It runs no migration and refuses a database whose schema is newer than
     /// its migrations or whose coven tables need migrating.
-    pub async fn open_read_only(self) -> CovenResult<CovenReadHandle>;
+    pub async fn open_read_only(self, store: StoreId) -> CovenResult<CovenReadHandle>;
 }
 
 pub enum KeyCustody {
     Keyring,
     Passphrase(Passphrase),
-    InMemory(StoreKeyring),
+    /// Starts empty; opening keys keeps them only for this handle’s session.
+    InMemory,
     Custom(Arc<dyn StoreKeyCustody>),
 }
 
 pub enum IdentityCustody {
     Keyring,
     Passphrase(Passphrase),
-    InMemory(MemberKeys),
+    /// Starts empty; initialization, restore or join fills this session’s custody.
+    InMemory,
     Custom(Arc<dyn MemberKeyCustody>),
 }
 
@@ -863,11 +871,11 @@ coven::set_keyring_service("com.example.notes")?;
 let layout = StoreLayout::new(app_dir);
 let store_dir = Coven::create_store(&layout, "Household", Arc::new(UuidIds)).await?;
 
-let handle = Coven::builder(store_dir)
+let handle = Coven::builder(layout.clone())
     .synced_tables(tables())                        // E2
     .migrations(migrations())                       // E13
     .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
-    .open()
+    .open(store_dir.id())
     .await?;
 ```
 
@@ -2527,27 +2535,31 @@ pub enum ProviderSignOut {
   ([§12.1](coven.md#121-a-persons-new-device)).
 - An admin adds a person with an invite, and approves their join request
   ([§12.2](coven.md#122-adding-a-person)).
-- Each call that opens the store on a new device makes the store
-  directory outside the visible store listing, loads the store, commits keys
-  and credentials, and publishes the directory, which the app then opens.
-  Custody or publication failures roll back final custody; rollback failures
-  retain both causes. Errors after publication identify the usable directory
-  and retain its committed custody.
-- Each takes the same tables, migrations and custody choices as the
-  builder, and `cancel`, which stops it.
-  - Session-only `InMemory` values cannot survive a call returning only a
-    directory. These calls refuse them; an app retaining memory custody
-    supplies `Custom(Arc<InMemoryCustody<_>>)` to both bootstrap and opening.
-  - Cancellation removes the unpublished directory and does not commit final
-    keys or credentials. Dropping a waiting future leaves its encrypted work
-    for explicit retry. Publication has no cancellable await after its final
-    cancellation check.
+- Each call takes the app's layout-scoped `CovenBuilder`, plus its code,
+  device name, OAuth tokens, status callback and cancellation receiver, and
+  returns the open `CovenHandle`. There is no second app-side open.
+  - The builder supplies tables, migrations, custody, clock, id source,
+    provider clients and file-transfer limits once. Session-only `InMemory`
+    custody lives with the returned handle.
+  - An unfinished store is created at its permanent path with a durable
+    `.coven-bootstrap` marker. Listings hide it and ordinary opens refuse it.
+    Bootstrap holds its own directory capability and opens the database once;
+    publication removes the marker without moving open database or custody files.
+  - Keys and credentials enter final custody only after the store loads.
+    Custody or publication failures roll back final custody; rollback failures
+    retain both causes. Errors after publication carry the open handle,
+    including its session-only keys, and retain committed custody.
+  - Cancellation closes the loading database and removes the unpublished store
+    without committing final keys or credentials. Dropping a waiting future
+    retains encrypted work for explicit retry. There is no cancellable await
+    between the final cancellation check, custody commitment, publication and
+    returning the handle.
   - Restore and joining register the supplied device name. Every installation
-    receives its own device id.
+    receives its own device id; resuming a pending join keeps that id.
   - The singular keychain call returns an ambiguity error if several stores
     are discoverable; it never chooses one arbitrarily.
-  - Bootstrap reads snapshots and logs through their owners and does not run
-    the concurrent file-transfer queue, so it takes no file-transfer limits.
+  - Loading uses snapshots and logs through their owners. The file-transfer
+    queue starts with the returned handle and uses the builder's limits.
 
 ```rust
 /// A one-time invite's UUID, also naming its join-request object (§12.2).
@@ -2602,14 +2614,13 @@ pub enum BootstrapError {
     SecureStorage(KeyError),
     /// Provider admission, signed membership or snapshot loading failed.
     Sync(SyncError),
-    /// A directory-only result cannot retain session-only custody.
-    EphemeralCustody,
     /// The app must select a code explicitly when several stores are available.
     MultipleStores(Vec<StoreId>),
     /// Cleanup failed too; neither failure is hidden.
     Cleanup { operation: Box<BootstrapError>, cleanup: Box<BootstrapError> },
-    /// The store is published and usable, but final cleanup failed.
-    Published { store: StoreDir, source: Box<BootstrapError> },
+    /// Publication took effect, but durability or cleanup failed. The handle
+    /// retains the loaded store and its session-only keys.
+    Published { handle: CovenHandle, source: Box<BootstrapError> },
 }
 
 /// Provider sign-in tokens, held as secrets rather than printed (E10).
@@ -2720,42 +2731,24 @@ pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError>;
 /// Opens the store on a new device from the person's restore code, scanned
 /// or typed. `oauth_tokens` is the provider sign-in, when `needs_oauth`.
 pub async fn restore_from_code(
+    builder: CovenBuilder,
     code: &str,
     device_name: &str,
-    synced_tables: &[SyncedTable],
-    migrations: &[Migration],
-    coven_migration_policy: CovenMigrationPolicy,
-    key_custody: KeyCustody,
-    identity_custody: IdentityCustody,
     oauth_tokens: Option<OAuthTokens>,
-    layout: &StoreLayout,
-    oauth_clients: Arc<OAuthClients>,
-    cloudkit_ops: Option<Arc<dyn CloudKitOps>>,
-    clock: ClockRef,
-    ids: IdSourceRef,
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
-) -> Result<StoreDir, BootstrapError>;
+) -> Result<CovenHandle, BootstrapError>;
 
 /// Opens the store on a new Apple device from the iCloud Keychain item,
 /// which holds what a restore code holds (§12.1). `None` when the keychain
 /// holds no store.
 pub async fn restore_from_keychain(
+    builder: CovenBuilder,
     device_name: &str,
-    synced_tables: &[SyncedTable],
-    migrations: &[Migration],
-    coven_migration_policy: CovenMigrationPolicy,
-    key_custody: KeyCustody,
-    identity_custody: IdentityCustody,
     oauth_tokens: Option<OAuthTokens>,
-    layout: &StoreLayout,
-    oauth_clients: Arc<OAuthClients>,
-    cloudkit_ops: Option<Arc<dyn CloudKitOps>>,
-    clock: ClockRef,
-    ids: IdSourceRef,
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
-) -> Result<Option<StoreDir>, BootstrapError>;
+) -> Result<Option<CovenHandle>, BootstrapError>;
 
 /// Completes the provider's recipient acceptance using the encrypted invite
 /// code before sending the join request. CloudKit acceptance runs through the
@@ -2768,22 +2761,13 @@ pub async fn restore_from_keychain(
 /// the store. Picks up where it left off after a restart. Returns `None`
 /// when the request is declined or the invite expires.
 pub async fn join_with_invite(
+    builder: CovenBuilder,
     code: &str,
     device_name: &str,
-    synced_tables: &[SyncedTable],
-    migrations: &[Migration],
-    coven_migration_policy: CovenMigrationPolicy,
-    key_custody: KeyCustody,
-    identity_custody: IdentityCustody,
     oauth_tokens: Option<OAuthTokens>,
-    layout: &StoreLayout,
-    oauth_clients: Arc<OAuthClients>,
-    cloudkit_ops: Option<Arc<dyn CloudKitOps>>,
-    clock: ClockRef,
-    ids: IdSourceRef,
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
-) -> Result<Option<StoreDir>, BootstrapError>;
+) -> Result<Option<CovenHandle>, BootstrapError>;
 
 impl OAuthClients {
     /// Sets client ids (None for providers the app does not offer) and the sign-in clock.
@@ -2848,30 +2832,23 @@ let tokens = if info.needs_oauth {
 } else {
     None
 };
-let store_dir = restore_from_code(
+let builder = Coven::builder(layout.clone())
+    .synced_tables(tables())
+    .migrations(migrations())
+    .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
+    .oauth_clients(oauth_clients.clone())
+    .apply_cloudkit_ops(cloudkit_ops.clone())
+    .clock(clock.clone())
+    .id_source(ids.clone());
+let handle = restore_from_code(
+    builder,
     &scanned,
     "Ana’s laptop",
-    &tables(),
-    &migrations(),
-    CovenMigrationPolicy::ApplyPending,
-    KeyCustody::Keyring,
-    IdentityCustody::Keyring,
     tokens,
-    &layout,
-    oauth_clients.clone(),
-    cloudkit_ops.clone(),
-    clock.clone(),
-    ids.clone(),
     |step| show_step(step),
     &cancel_rx,
 )
 .await?;
-let handle = Coven::builder(store_dir)
-    .synced_tables(tables())
-    .migrations(migrations())
-    .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
-    .open()
-    .await?;
 ```
 
 Example, Ana adding Carol. On Ana's phone:
@@ -2904,26 +2881,22 @@ On Carol's phone:
 
 ```rust
 let tokens = oauth_clients.authorize(CloudProvider::GoogleDrive, cancel_rx.clone()).await?;
+let builder = Coven::builder(layout.clone())
+    .synced_tables(tables())
+    .migrations(migrations())
+    .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
+    .oauth_clients(oauth_clients.clone());
 match join_with_invite(
+    builder,
     &scanned,
     "Carol's phone",
-    &tables(),
-    &migrations(),
-    CovenMigrationPolicy::ApplyPending,
-    KeyCustody::Keyring,
-    IdentityCustody::Keyring,
     Some(tokens),
-    &layout,
-    oauth_clients.clone(),
-    cloudkit_ops.clone(),
-    clock.clone(),
-    ids.clone(),
     |step| show_step(step),
     &cancel_rx,
 )
 .await?
 {
-    Some(store_dir) => open_store(store_dir),
+    Some(handle) => show_store(handle),
     None => show_declined(),
 }
 ```

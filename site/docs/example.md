@@ -49,7 +49,7 @@ CREATE TABLE todos (
 ) STRICT;
 ";
 
-let handle = Coven::builder(store_dir, config)
+let handle = Coven::builder(layout.clone())
     .synced_tables(vec![
         SyncedTable::new("workspaces", RowIdentity::IndependentUuid),
         SyncedTable::new("lists", RowIdentity::IndependentUuid).gated_by("shared"),
@@ -58,7 +58,7 @@ let handle = Coven::builder(store_dir, config)
     ])
     .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
     .migrations(vec![Migration::sql(1, "initial", SCHEMA)])
-    .open()?;
+    .open(store_dir.id()).await?;
 ```
 
 Every synced table is declared `STRICT`, carries an `id` text primary key at

@@ -12,8 +12,10 @@ use std::sync::Arc;
 
 /// The choices collected before opening a store (E1).
 pub struct CovenBuilder {
-    database: DatabaseBuilder,
-    directory: StoreDir,
+    tables: Option<Vec<SyncedTable>>,
+    migrations: Option<Vec<Migration>>,
+    policy: Option<CovenMigrationPolicy>,
+    layout: StoreLayout,
     ids: IdSourceRef,
     clock: ClockRef,
     storage: Option<Arc<dyn coven_storage::Storage>>,
@@ -28,15 +30,14 @@ pub struct CovenBuilder {
 }
 
 impl CovenBuilder {
-    pub(crate) fn new(directory: StoreDir) -> Self {
+    pub(crate) fn new(layout: StoreLayout) -> Self {
         let ids: IdSourceRef = Arc::new(UuidIds);
         let clock: ClockRef = Arc::new(SystemClock);
         Self {
-            database: DatabaseBuilder::new(directory.clone())
-                .migration_operation(coven_sync::StoreLogSync::migration_operation)
-                .id_source(ids.clone())
-                .clock(clock.clone()),
-            directory,
+            tables: None,
+            migrations: None,
+            policy: None,
+            layout,
             ids,
             clock,
             storage: None,
@@ -53,30 +54,28 @@ impl CovenBuilder {
 
     /// The tables that sync (E2). Required.
     pub fn synced_tables(mut self, tables: Vec<SyncedTable>) -> Self {
-        self.database = self.database.synced_tables(tables);
+        self.tables = Some(tables);
         self
     }
     /// The app's schema migrations, numbered from 1 with no gaps (E13).
     /// Required.
     pub fn migrations(mut self, migrations: Vec<Migration>) -> Self {
-        self.database = self.database.migrations(migrations);
+        self.migrations = Some(migrations);
         self
     }
     /// Whether opening may migrate coven's own tables to this version of
     /// coven (§17.2). Required by `open`.
     pub fn coven_migration_policy(mut self, policy: CovenMigrationPolicy) -> Self {
-        self.database = self.database.coven_migration_policy(policy);
+        self.policy = Some(policy);
         self
     }
     /// The wall clock that timestamps use (§7.2). Defaults to the system clock.
     pub fn clock(mut self, clock: ClockRef) -> Self {
-        self.database = self.database.clock(clock.clone());
         self.clock = clock;
         self
     }
     /// The source of new ids (§20.2). Defaults to `UuidIds`, random UUIDs.
     pub fn id_source(mut self, ids: IdSourceRef) -> Self {
-        self.database = self.database.id_source(ids.clone());
         self.ids = ids;
         self
     }
@@ -132,8 +131,8 @@ impl CovenBuilder {
     /// Opening runs migrations and resumes unfinished operations and committed
     /// file work. An empty journal needs no keys; resumed steps read keys when
     /// needed. No sync loop starts, and local database calls need no unlocked key.
-    pub async fn open(self) -> CovenResult<CovenHandle> {
-        crate::coven::blocking(move || self.open_graph(false))
+    pub async fn open(self, store: StoreId) -> CovenResult<CovenHandle> {
+        crate::coven::blocking(move || self.open_graph(store, false))
             .await?
             .open()
             .await
@@ -143,8 +142,8 @@ impl CovenBuilder {
     /// Storage and unlocked keys are required before any database file moves.
     /// The damaged SQLite files remain in a named archive. An interrupted reload
     /// must be retried explicitly; ordinary opens refuse its unpublished state.
-    pub async fn open_reloading(self) -> Result<CovenHandle, RecoveryError> {
-        crate::coven::blocking(move || self.open_graph(true))
+    pub async fn open_reloading(self, store: StoreId) -> Result<CovenHandle, RecoveryError> {
+        crate::coven::blocking(move || self.open_graph(store, true))
             .await?
             .open_reloading()
             .await
@@ -154,13 +153,13 @@ impl CovenBuilder {
     /// Its shared lock protects both read connections and local cache metadata.
     /// It runs no migration and refuses a database whose schema is newer or
     /// whose coven tables need migrating.
-    pub async fn open_read_only(self) -> CovenResult<CovenReadHandle> {
-        let directory = self.directory.clone();
+    pub async fn open_read_only(self, store: StoreId) -> CovenResult<CovenReadHandle> {
+        let directory = self.layout.store_dir(&store);
         let ids = self.ids.clone();
         let clock = self.clock.clone();
         let storage = self.storage.clone();
         let limits = self.limits;
-        let (database, keys) = crate::coven::blocking(move || self.read_graph()).await?;
+        let (database, keys) = crate::coven::blocking(move || self.read_graph(store)).await?;
         let database = database.open_read_only().await?;
         let files = coven_sync::Files::new(
             coven_database::FileDatabase::read_only(database.clone()),
@@ -173,19 +172,47 @@ impl CovenBuilder {
         Ok(CovenReadHandle::new(database, keys, files))
     }
 
-    fn open_graph(self, recovering: bool) -> CovenResult<OpeningStore> {
-        let lock = self.directory.lock_exclusive()?;
-        let settings = lock.settings()?;
+    fn database(&self, directory: StoreDir) -> CovenResult<DatabaseBuilder> {
+        let tables = self
+            .tables
+            .clone()
+            .ok_or(CovenError::MissingConfiguration {
+                field: "synced_tables",
+            })?;
+        let migrations = self
+            .migrations
+            .clone()
+            .ok_or(CovenError::MissingConfiguration {
+                field: "migrations",
+            })?;
+        let mut database = DatabaseBuilder::new(directory)
+            .migration_operation(coven_sync::StoreLogSync::migration_operation)
+            .synced_tables(tables)
+            .migrations(migrations)
+            .clock(self.clock.clone())
+            .id_source(self.ids.clone());
+        if let Some(policy) = self.policy {
+            database = database.coven_migration_policy(policy);
+        }
+        Ok(database)
+    }
+
+    fn keychain(&self) -> Result<Arc<Keychain>, KeyError> {
         #[cfg(any(test, feature = "test-utils"))]
-        let keychain = match self.keychain {
-            Some(keychain) => keychain,
-            None => Keychain::registered()?,
-        };
-        #[cfg(not(any(test, feature = "test-utils")))]
-        let keychain = Keychain::registered()?;
-        let keychain = Arc::new(StoreKeychain::new(keychain, settings.id));
+        if let Some(keychain) = &self.keychain {
+            return Ok(keychain.clone());
+        }
+        Keychain::registered()
+    }
+
+    fn open_graph(self, store: StoreId, recovering: bool) -> CovenResult<OpeningStore> {
+        let directory = self.layout.store_dir(&store);
+        let database = self.database(directory.clone())?;
+        let lock = directory.lock_exclusive()?;
+        let settings = lock.settings()?;
+        let keychain = Arc::new(StoreKeychain::new(self.keychain()?, settings.id));
         let new_recovery = recovering
-            && match self.directory.check_database_recovery() {
+            && match directory.check_database_recovery() {
                 Ok(()) => true,
                 Err(StoreLockError::RecoveryPending(_)) => false,
                 Err(error) => return Err(error.into()),
@@ -195,49 +222,53 @@ impl CovenBuilder {
             lock.set_device_id(device)?;
             keychain.set_device_id(device)?;
         }
-        let keys = Self::make_keys(self.keys, &self.directory, settings.id, keychain.clone());
-        let identity = Self::make_identity(
-            self.identity,
-            &self.directory,
-            settings.id,
-            keychain.clone(),
-        );
-        let device = lock.settings()?.device_id;
         Ok(OpeningStore {
-            database: self.database,
+            database,
             lock,
-            owners: OpeningOwners {
-                directory: self.directory,
-                custody: StoreCustody::new(
-                    StoreKeys::new(keys.clone()),
-                    identity.clone(),
-                    keychain.clone(),
-                ),
-                keychain,
-                connector: match self.connector {
-                    Some(connector) => connector,
-                    None => Arc::new(coven_storage::providers::ProviderConnector::new(
-                        self.clock.clone(),
-                        self.ids.clone(),
-                        self.cloudkit,
-                    )),
-                },
-                oauth: self.oauth,
-                limits: self.limits,
-                device,
-                initial_name: settings.name,
-                keys,
-                identity,
-                clock: self.clock,
-                ids: self.ids,
-                storage: self
-                    .storage
-                    .map(|storage| Arc::new(coven_storage::StorageConnection::new(storage))),
-            },
+            owners: self.owners(directory, keychain)?,
         })
     }
 
-    pub(crate) fn make_identity(
+    fn owners(
+        self,
+        directory: StoreDir,
+        keychain: Arc<StoreKeychain>,
+    ) -> CovenResult<OpeningOwners> {
+        let settings = directory.settings()?;
+        let keys = Self::make_keys(self.keys, &directory, settings.id, keychain.clone());
+        let identity =
+            Self::make_identity(self.identity, &directory, settings.id, keychain.clone());
+        Ok(OpeningOwners {
+            directory,
+            custody: StoreCustody::new(
+                StoreKeys::new(keys.clone()),
+                identity.clone(),
+                keychain.clone(),
+            ),
+            keychain,
+            connector: match self.connector {
+                Some(connector) => connector,
+                None => Arc::new(coven_storage::providers::ProviderConnector::new(
+                    self.clock.clone(),
+                    self.ids.clone(),
+                    self.cloudkit,
+                )),
+            },
+            oauth: self.oauth,
+            limits: self.limits,
+            device: settings.device_id,
+            initial_name: settings.name,
+            keys,
+            identity,
+            clock: self.clock,
+            ids: self.ids,
+            storage: self
+                .storage
+                .map(|storage| Arc::new(coven_storage::StorageConnection::new(storage))),
+        })
+    }
+
+    fn make_identity(
         custody: IdentityCustody,
         directory: &StoreDir,
         id: StoreId,
@@ -250,25 +281,20 @@ impl CovenBuilder {
                 directory.owned_file(StoreFile::MemberKeys),
                 id,
             )),
-            IdentityCustody::InMemory(keys) => Arc::new(InMemoryCustody::new(keys)),
+            IdentityCustody::InMemory => Arc::new(InMemoryCustody::empty()),
             IdentityCustody::Custom(keys) => keys,
         }
     }
 
-    fn read_graph(self) -> CovenResult<(DatabaseBuilder, StoreKeys)> {
-        #[cfg(any(test, feature = "test-utils"))]
-        let keychain = match self.keychain {
-            Some(keychain) => keychain,
-            None => Keychain::registered()?,
-        };
-        #[cfg(not(any(test, feature = "test-utils")))]
-        let keychain = Keychain::registered()?;
-        let keychain = Arc::new(StoreKeychain::new(keychain, self.directory.id()));
-        let keys = Self::make_keys(self.keys, &self.directory, self.directory.id(), keychain);
-        Ok((self.database, StoreKeys::new(keys)))
+    fn read_graph(self, store: StoreId) -> CovenResult<(DatabaseBuilder, StoreKeys)> {
+        let directory = self.layout.store_dir(&store);
+        let database = self.database(directory.clone())?;
+        let keychain = Arc::new(StoreKeychain::new(self.keychain()?, store));
+        let keys = Self::make_keys(self.keys, &directory, store, keychain);
+        Ok((database, StoreKeys::new(keys)))
     }
 
-    pub(crate) fn make_keys(
+    fn make_keys(
         custody: KeyCustody,
         directory: &StoreDir,
         id: StoreId,
@@ -281,7 +307,7 @@ impl CovenBuilder {
                 directory.owned_file(StoreFile::StoreKeys),
                 id,
             )),
-            KeyCustody::InMemory(keys) => Arc::new(InMemoryCustody::new(keys)),
+            KeyCustody::InMemory => Arc::new(InMemoryCustody::empty()),
             KeyCustody::Custom(keys) => keys,
         }
     }
@@ -456,3 +482,7 @@ impl OpeningOwners {
 #[cfg(test)]
 #[path = "builder_tests.rs"]
 mod tests;
+
+#[path = "bootstrap.rs"]
+mod bootstrap;
+pub use bootstrap::{join_with_invite, restore_from_code, restore_from_keychain, BootstrapError};

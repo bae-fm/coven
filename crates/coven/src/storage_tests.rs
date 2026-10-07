@@ -41,10 +41,15 @@ impl Fixture {
             )
             .await
             .unwrap();
-        let handle = builder(&app, directory.clone(), clock.clone(), storage.clone())
-            .open()
-            .await
-            .unwrap();
+        let handle = builder(
+            &app,
+            StoreLayout::new(root.path().into()),
+            clock.clone(),
+            storage.clone(),
+        )
+        .open(directory.id())
+        .await
+        .unwrap();
         handle.initialize_identity().unwrap();
         Self {
             app,
@@ -74,11 +79,11 @@ impl Fixture {
 
 fn builder(
     app: &TestCoven,
-    directory: StoreDir,
+    layout: StoreLayout,
     clock: Arc<FixedClock>,
     storage: Arc<dyn StorageConnector>,
 ) -> CovenBuilder {
-    app.builder(directory)
+    app.builder(layout)
         .clock(clock)
         .storage_connector(storage)
         .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
@@ -219,11 +224,11 @@ async fn setup_network_failure_preserves_keys_and_connection_then_retry_succeeds
     f.handle.close().await.unwrap();
     let reopened = builder(
         &f.app,
-        f.directory.clone(),
+        StoreLayout::new(f._root.path().into()),
         f.clock.clone(),
         f.storage.clone(),
     )
-    .open()
+    .open(f.directory.id())
     .await
     .unwrap();
     assert!(matches!(
@@ -396,11 +401,16 @@ async fn moving_storage_retries_a_partial_copy_before_committing_the_new_locatio
             .unwrap(),
     );
     let locations = Arc::new(Locations(vec![f.storage.clone(), destination.clone()]));
-    let handle = builder(&f.app, f.directory.clone(), f.clock.clone(), locations)
-        .storage(f.storage.clone())
-        .open()
-        .await
-        .unwrap();
+    let handle = builder(
+        &f.app,
+        StoreLayout::new(f._root.path().into()),
+        f.clock.clone(),
+        locations,
+    )
+    .storage(f.storage.clone())
+    .open(f.directory.id())
+    .await
+    .unwrap();
     let before = handle.restore_code().await.unwrap();
     destination
         .set_faults(Faults {
@@ -538,12 +548,12 @@ async fn moving_storage_waits_for_file_publication_before_copying_history() {
         *prefix = "destination".into();
         let destination = Arc::new(MemoryStorage::new(config.clone(), f.clock.clone()).unwrap()
             .with_transfer_limits(1024 * 1024, 65536).unwrap());
-        let handle = builder(&f.app, f.directory.clone(), f.clock.clone(), Arc::new(Locations(vec![f.storage.clone(), destination.clone()])))
+        let handle = builder(&f.app, StoreLayout::new(f._root.path().into()), f.clock.clone(), Arc::new(Locations(vec![f.storage.clone(), destination.clone()])))
             .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey),
                 SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new("files", Provenance::AppProvided, Uploads::WhenAttached, CacheFill::CacheLazy))])
             .migrations(vec![Migration::sql(1, "notes", "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,body TEXT NOT NULL)"),
                 Migration::sql(2, "files", "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)")])
-            .open().await.unwrap();
+            .open(f.directory.id()).await.unwrap();
         handle.setup_s3_storage(f.storage.config(), "Test device", "member-key".into(), SecretText::new("secret".into())).await.unwrap();
         status(&handle, |s| matches!(s, SyncStatus::Synced(_))).await;
         handle.stop_sync();
@@ -620,7 +630,7 @@ async fn custody_failure_rolls_back_credentials_and_the_reserved_creation_requir
     f.handle.close().await.unwrap();
     let handle = builder(
         &f.app,
-        f.directory.clone(),
+        StoreLayout::new(f._root.path().into()),
         f.clock.clone(),
         f.storage.clone(),
     )
@@ -628,7 +638,7 @@ async fn custody_failure_rolls_back_credentials_and_the_reserved_creation_requir
         keys: std::sync::Mutex::new(None),
         refuse: AtomicBool::new(true),
     })))
-    .open()
+    .open(f.directory.id())
     .await
     .unwrap();
     let setup = |key: &str| {

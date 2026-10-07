@@ -3,18 +3,16 @@
 use super::*;
 
 pub(super) fn publish_bootstrap(
-    pending: BootstrapStore,
+    pending: &BootstrapStore,
     code: RestoreCode,
     ring: StoreKeyring,
-    keys: KeyCustody,
-    identity: IdentityCustody,
-    keychain: Arc<Keychain>,
-) -> Result<StoreDir, BootstrapError> {
+    owners: OpeningOwners,
+    database: Database,
+) -> Result<CovenHandle, BootstrapError> {
     let directory = pending.directory();
-    let settings = directory.settings().map_err(CovenError::from)?;
-    let keychain = Arc::new(StoreKeychain::new(keychain, code.store));
-    let keys = CovenBuilder::make_keys(keys, &directory, code.store, keychain.clone());
-    let identity = CovenBuilder::make_identity(identity, &directory, code.store, keychain.clone());
+    let keys = &owners.keys;
+    let identity = &owners.identity;
+    let keychain = &owners.keychain;
     let old_keys = keys.unlock()?;
     let old_identity = identity.unlock()?;
     let old_device = keychain.device_id()?;
@@ -28,20 +26,20 @@ pub(super) fn publish_bootstrap(
     StorageSettings::new(directory.clone())
         .commit(&data.location)
         .map_err(SyncError::from)?;
-    let commit = || -> Result<StoreDir, BootstrapError> {
+    let commit = || -> Result<(), BootstrapError> {
         keys.persist(&ring)?;
         identity.persist(&code.member_keys)?;
-        keychain.set_device_id(settings.device_id)?;
-        coven_sync::commit_restore_code(&keychain, &code)?;
+        keychain.set_device_id(owners.device)?;
+        coven_sync::commit_restore_code(keychain, &code)?;
         Ok(pending.publish()?)
     };
-    let result = match commit() {
-        Ok(published) => published,
+    let publication_error = match commit() {
+        Ok(()) => None,
         Err(
             error @ BootstrapError::Directory(BootstrapDirectoryError::Create(
                 coven_foundation::files::StoreCreationError::Published { .. },
             )),
-        ) => return Err(error),
+        ) => Some(error),
         Err(mut error) => {
             // Attempt every rollback even if an earlier one fails. A failure is
             // returned to this initiator; no background repair is installed.
@@ -81,14 +79,23 @@ pub(super) fn publish_bootstrap(
             return Err(error);
         }
     };
-    result
+    let sync = owners.sync(database.clone());
+    let handle = owners.handle(database, sync);
+    let cleanup = directory
         .owned_file(StoreFile::Bootstrap)
         .remove()
-        .map_err(|error| BootstrapError::Published {
-            store: result.clone(),
-            source: Box::new(SyncError::Disk(error).into()),
-        })?;
-    Ok(result)
+        .map_err(|error| BootstrapError::from(SyncError::Disk(error)));
+    let result = match publication_error {
+        Some(error) => combine(Err(error), cleanup),
+        None => cleanup,
+    };
+    match result {
+        Ok(()) => Ok(handle),
+        Err(source) => Err(BootstrapError::Published {
+            handle,
+            source: Box::new(source),
+        }),
+    }
 }
 
 #[cfg(test)]

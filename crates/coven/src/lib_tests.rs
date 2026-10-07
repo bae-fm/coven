@@ -7,7 +7,8 @@ use std::{
 
 struct Device {
     app: TestCoven,
-    directory: StoreDir,
+    layout: StoreLayout,
+    store: StoreId,
     handle: CovenHandle,
     storage: Arc<MemoryStorage>,
 }
@@ -33,12 +34,12 @@ fn migrations() -> Vec<Migration> {
 }
 fn builder(
     app: &TestCoven,
-    directory: StoreDir,
+    layout: StoreLayout,
     clock: ClockRef,
     ids: IdSourceRef,
     storage: Arc<MemoryStorage>,
 ) -> CovenBuilder {
-    app.builder(directory)
+    app.builder(layout)
         .synced_tables(tables())
         .migrations(migrations())
         .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
@@ -76,12 +77,12 @@ impl Network {
         );
         let handle = builder(
             &app,
-            directory.clone(),
+            StoreLayout::new(root.path().join("0")),
             clock.clone(),
             ids.clone(),
             storage.clone(),
         )
-        .open()
+        .open(directory.id())
         .await
         .unwrap();
         handle.initialize_identity().unwrap();
@@ -94,13 +95,15 @@ impl Network {
             )
             .await
             .unwrap();
+        let initial_layout = StoreLayout::new(root.path().join("0"));
         let mut network = Self {
             root,
             clock,
             ids,
             devices: vec![Device {
                 app,
-                directory,
+                layout: initial_layout,
+                store: directory.id(),
                 handle,
                 storage,
             }],
@@ -129,17 +132,18 @@ impl Network {
         let storage = Arc::new(self.devices[0].storage.for_device());
         let (_, cancel) = tokio::sync::watch::channel(false);
         let name = format!("Device {index}");
-        let tables = tables();
-        let migrations = migrations();
-        let joining = app.open_code(
+        let joining = join_with_invite(
+            builder(
+                &app,
+                layout.clone(),
+                self.clock.clone(),
+                self.ids.clone(),
+                storage.clone(),
+            ),
             &invite.code,
             &name,
-            &tables,
-            &migrations,
-            &layout,
-            storage.clone(),
-            self.clock.clone(),
-            self.ids.clone(),
+            None,
+            |_| {},
             &cancel,
         );
         let mut requests = owner.subscribe_join_requests();
@@ -152,22 +156,14 @@ impl Network {
             };
             owner.approve_join_request(&request).await.unwrap();
         };
-        let (directory, ()) = tokio::join!(joining, approve);
-        let directory = directory.unwrap().unwrap();
-        let handle = builder(
-            &app,
-            directory.clone(),
-            self.clock.clone(),
-            self.ids.clone(),
-            storage.clone(),
-        )
-        .open()
-        .await
-        .unwrap();
+        let (handle, ()) = tokio::join!(joining, approve);
+        let handle = handle.unwrap().unwrap();
+        let store = decode_code_info(&invite.code).unwrap().store_id;
         handle.connect_sync().await.unwrap();
         self.devices.push(Device {
             app,
-            directory,
+            layout,
+            store,
             handle,
             storage,
         });
@@ -251,13 +247,13 @@ impl Network {
             device.handle.close().await.unwrap();
             device.handle = builder(
                 &device.app,
-                device.directory.clone(),
+                device.layout.clone(),
                 self.clock.clone(),
                 self.ids.clone(),
                 device.storage.clone(),
             )
             .migrations(changed.clone())
-            .open()
+            .open(device.store)
             .await
             .unwrap();
             device.handle.connect_sync().await.unwrap();

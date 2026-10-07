@@ -95,11 +95,36 @@ impl FileName {
 pub struct StoreDir {
     path: PathBuf,
     id: StoreId,
+    bootstrap: Option<std::sync::Arc<super::bootstrap::BootstrapLease>>,
 }
 
 impl StoreDir {
     pub(crate) fn new(path: PathBuf, id: StoreId) -> Self {
-        Self { path, id }
+        Self {
+            path,
+            id,
+            bootstrap: None,
+        }
+    }
+
+    pub(super) fn bootstrapping(
+        path: PathBuf,
+        id: StoreId,
+        lease: std::sync::Arc<super::bootstrap::BootstrapLease>,
+    ) -> Self {
+        Self {
+            path,
+            id,
+            bootstrap: Some(lease),
+        }
+    }
+
+    fn check_published(&self) -> Result<(), StoreLockError> {
+        let bootstrapping = self.bootstrap.as_ref().is_some_and(|lease| lease.is_held());
+        if !bootstrapping && super::bootstrap::is_pending(&self.path)? {
+            return Err(StoreLockError::BootstrapPending(self.id));
+        }
+        Ok(())
     }
 
     /// The store identified by this directory.
@@ -137,20 +162,26 @@ impl StoreDir {
     /// Take the exclusive OS lock for a writable open. The returned guard must
     /// outlive every writable owner and its database connections.
     pub fn lock_exclusive(&self) -> Result<StoreLock, StoreLockError> {
-        lock::acquire(&self.path, self.id)
+        let guard = lock::acquire(&self.path, self.id)?;
+        self.check_published()?;
+        Ok(guard)
     }
 
     /// Prevent deletion while reading, alongside other readers and the writer.
     /// The guard must outlive every open file and database connection it protects.
     pub fn lock_read_only(&self) -> Result<StoreReadLock, StoreLockError> {
-        lock::acquire_reader(&self.path, self.id)
+        let guard = lock::acquire_reader(&self.path, self.id)?;
+        self.check_published()?;
+        Ok(guard)
     }
 
     /// Lock an existing store or a directory left by an interrupted deletion.
     /// An absent store with leftover locks can finish their removal on retry.
     /// No directory is created by this call.
     pub fn lock_for_deletion(&self) -> Result<Option<StoreDeletionLock>, StoreLockError> {
-        lock::for_deletion(&self.path, self.id)
+        let guard = lock::for_deletion(&self.path, self.id)?;
+        self.check_published()?;
+        Ok(guard)
     }
 
     /// Check that a supplied lock protects this exact store directory.

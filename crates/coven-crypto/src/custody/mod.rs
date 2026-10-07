@@ -45,8 +45,8 @@ pub enum KeyCustody {
     Keyring,
     /// A file sealed with a key derived from this passphrase.
     Passphrase(Passphrase),
-    /// Keys supplied for this session only.
-    InMemory(StoreKeyring),
+    /// Keys retained for this session only; starts empty.
+    InMemory,
     /// The app's own store for opened keys.
     Custom(Arc<dyn StoreKeyCustody>),
 }
@@ -57,8 +57,8 @@ pub enum IdentityCustody {
     Keyring,
     /// A file sealed with a key derived from this passphrase.
     Passphrase(Passphrase),
-    /// Member keys supplied for this session only.
-    InMemory(MemberKeys),
+    /// Member keys retained for this session only; starts empty.
+    InMemory,
     /// The app's own store for member keys.
     Custom(Arc<dyn MemberKeyCustody>),
 }
@@ -68,7 +68,7 @@ impl std::fmt::Debug for KeyCustody {
         f.write_str(match self {
             Self::Keyring => "KeyCustody::Keyring",
             Self::Passphrase(_) => "KeyCustody::Passphrase([REDACTED])",
-            Self::InMemory(_) => "KeyCustody::InMemory([REDACTED])",
+            Self::InMemory => "KeyCustody::InMemory",
             Self::Custom(_) => "KeyCustody::Custom(..)",
         })
     }
@@ -79,7 +79,7 @@ impl std::fmt::Debug for IdentityCustody {
         f.write_str(match self {
             Self::Keyring => "IdentityCustody::Keyring",
             Self::Passphrase(_) => "IdentityCustody::Passphrase([REDACTED])",
-            Self::InMemory(_) => "IdentityCustody::InMemory([REDACTED])",
+            Self::InMemory => "IdentityCustody::InMemory",
             Self::Custom(_) => "IdentityCustody::Custom(..)",
         })
     }

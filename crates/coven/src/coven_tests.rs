@@ -1,8 +1,8 @@
 use crate::*;
 use std::sync::Arc;
 
-fn builder(app: &TestCoven, directory: StoreDir) -> CovenBuilder {
-    app.builder(directory)
+fn builder(app: &TestCoven, layout: StoreLayout) -> CovenBuilder {
+    app.builder(layout)
         .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
         .migrations(vec![Migration::sql(
             1,
@@ -34,17 +34,26 @@ async fn application_lifecycle_two_stores_lock_read_only_live_query_and_reopen()
             .collect::<Vec<_>>(),
         [&"Household", &"Work"]
     );
-    let a = builder(&app, first.clone()).open().await.unwrap();
-    let b = builder(&app, second.clone()).open().await.unwrap();
+    let a = builder(&app, layout.clone())
+        .open(first.id())
+        .await
+        .unwrap();
+    let b = builder(&app, layout.clone())
+        .open(second.id())
+        .await
+        .unwrap();
     assert!(matches!(
-        builder(&app, first.clone()).open().await,
+        builder(&app, layout.clone()).open(first.id()).await,
         Err(CovenError::Lock(StoreLockError::AlreadyOpen(_)))
     ));
     assert!(matches!(
         app.delete_store(&first, &[]).await,
         Err(StoreDeletionError::Lock(StoreLockError::AlreadyOpen(_)))
     ));
-    let reader = builder(&app, first.clone()).open_read_only().await.unwrap();
+    let reader = builder(&app, layout.clone())
+        .open_read_only(first.id())
+        .await
+        .unwrap();
     let mut live = a.subscribe(|sql| {
         Ok(
             sql.query("SELECT title FROM notes ORDER BY title", [], |r| {
@@ -109,7 +118,10 @@ async fn application_lifecycle_two_stores_lock_read_only_live_query_and_reopen()
         Err(StoreDeletionError::Lock(StoreLockError::AlreadyOpen(_)))
     ));
     reader.close().await.unwrap();
-    let a = builder(&app, first.clone()).open().await.unwrap();
+    let a = builder(&app, layout.clone())
+        .open(first.id())
+        .await
+        .unwrap();
     assert_eq!(
         a.read(|sql| Ok(sql.query_row("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?))
             .await
@@ -144,7 +156,10 @@ async fn host_secrets_identity_and_failed_deletion_survive_reopen() {
         .seal_app_data(key_id, b"store secret", b"row/1")
         .unwrap();
     app.keep_store_keys(&directory, &keys).unwrap();
-    let handle = builder(&app, directory.clone()).open().await.unwrap();
+    let handle = builder(&app, layout.clone())
+        .open(directory.id())
+        .await
+        .unwrap();
     let member = handle.initialize_identity().unwrap();
     assert!(matches!(
         handle.initialize_identity(),
@@ -156,7 +171,10 @@ async fn host_secrets_identity_and_failed_deletion_survive_reopen() {
         Err(KeyError::SecretName(SecretNameError::Reserved))
     ));
     handle.close().await.unwrap();
-    let handle = builder(&app, directory.clone()).open().await.unwrap();
+    let handle = builder(&app, layout.clone())
+        .open(directory.id())
+        .await
+        .unwrap();
     assert!(matches!(
         handle.initialize_identity(),
         Err(IdentityError::AlreadyInitialized)
@@ -195,7 +213,10 @@ async fn host_secrets_identity_and_failed_deletion_survive_reopen() {
         )
         .await
         .unwrap();
-    let replacement = builder(&app, directory).open().await.unwrap();
+    let replacement = builder(&app, layout.clone())
+        .open(directory.id())
+        .await
+        .unwrap();
     assert_eq!(replacement.host_secret("token").unwrap(), None);
     assert!(matches!(
         replacement.open_app_data(&sealed, b"row/1"),
@@ -237,11 +258,11 @@ async fn a_breaking_migration_converts_the_waiting_write() {
     };
     let table = || vec![SyncedTable::new("attachments", RowIdentity::SharedKey)];
     let handle = app
-        .builder(directory.clone())
+        .builder(layout.clone())
         .synced_tables(table())
         .migrations(vec![first()])
         .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
-        .open()
+        .open(directory.id())
         .await
         .unwrap();
     handle
@@ -267,11 +288,11 @@ async fn a_breaking_migration_converts_the_waiting_write() {
         Ok(())
     });
     let handle = app
-        .builder(directory)
+        .builder(layout.clone())
         .synced_tables(table())
         .migrations(vec![first(), migration])
         .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
-        .open()
+        .open(directory.id())
         .await
         .unwrap();
     {

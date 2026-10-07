@@ -189,8 +189,8 @@ fn custody_debug_never_prints_secrets() {
         format!("{:?}", phrase()),
         format!("{:?}", KeyCustody::Passphrase(phrase())),
         format!("{:?}", IdentityCustody::Passphrase(phrase())),
-        format!("{:?}", KeyCustody::InMemory(keys())),
-        format!("{:?}", IdentityCustody::InMemory(member())),
+        format!("{:?}", KeyCustody::InMemory),
+        format!("{:?}", IdentityCustody::InMemory),
         format!("{:?}", InMemoryCustody::new(keys())),
         format!(
             "{:?}",

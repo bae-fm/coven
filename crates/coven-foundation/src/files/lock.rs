@@ -111,6 +111,9 @@ pub enum StoreLockError {
     /// An explicit database recovery has not published its replacement.
     #[error("store {0} requires open_reloading to finish database recovery")]
     RecoveryPending(StoreId),
+    /// An unfinished new-device installation must be resumed with its code.
+    #[error("store {0} requires restore or join to finish bootstrap")]
+    BootstrapPending(StoreId),
     /// A supplied lock protects a different directory.
     #[error("lock does not protect store {0}")]
     WrongDirectory(StoreId),

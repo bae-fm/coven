@@ -92,7 +92,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     db.close().await.unwrap();
     drop(sync);
     let open = || {
-        app.builder(directory.clone())
+        app.builder(layout.clone())
             .synced_tables(tables())
             .migrations(migrations())
             .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
@@ -100,7 +100,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
             .identity_custody(IdentityCustody::Custom(identity.clone()))
             .clock(clock.clone())
     };
-    let handle = open().open().await.unwrap();
+    let handle = open().open(directory.id()).await.unwrap();
     handle.set_uploads_paused(true);
     handle
         .write_with_files(
@@ -133,7 +133,11 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     handle.get_members().await.unwrap(); // The preceding call's intent has committed.
     drop(waiting);
     handle.close().await.unwrap();
-    let handle = open().storage(storage.clone()).open().await.unwrap();
+    let handle = open()
+        .storage(storage.clone())
+        .open(directory.id())
+        .await
+        .unwrap();
     let mut uploads = handle.subscribe_uploads();
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         loop {
@@ -214,7 +218,11 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     };
     // The app migrates offline. Opening again resumes the journal committed
     // with that migration, without an app call to publish its schema.
-    let handle = open().migrations(updated()).open().await.unwrap();
+    let handle = open()
+        .migrations(updated())
+        .open(directory.id())
+        .await
+        .unwrap();
     handle.get_members().await.unwrap();
     handle.close().await.unwrap();
     let database = || {
@@ -233,7 +241,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     let handle = open()
         .migrations(updated())
         .storage(storage)
-        .open()
+        .open(directory.id())
         .await
         .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(20), handle.get_members())
@@ -410,7 +418,7 @@ mod recovery {
             }
             std::fs::write(&path, &damaged).unwrap();
             let builder = || {
-                app.builder(directory.clone())
+                app.builder(layout.clone())
                     .synced_tables(recovery_tables())
                     .migrations(recovery_migrations())
                     .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
@@ -419,18 +427,21 @@ mod recovery {
                     .identity_custody(IdentityCustody::Custom(identity.clone()))
             };
             assert!(matches!(
-                builder().open().await,
+                builder().open(directory.id()).await,
                 Err(CovenError::Database(DbError::DamagedDatabase))
             ));
             assert!(matches!(
-                builder().open_reloading().await,
+                builder().open_reloading(directory.id()).await,
                 Err(RecoveryError::Sync(SyncError::NoStorage))
             ));
             assert_eq!(std::fs::read(&path).unwrap(), damaged);
             let ring = keys.unlock().unwrap().unwrap();
             keys.forget().unwrap();
             assert!(matches!(
-                builder().storage(storage.clone()).open_reloading().await,
+                builder()
+                    .storage(storage.clone())
+                    .open_reloading(directory.id())
+                    .await,
                 Err(RecoveryError::NoStoreKeys)
             ));
             assert_eq!(std::fs::read(&path).unwrap(), damaged);
@@ -457,15 +468,15 @@ mod recovery {
                 storage.delete(&write).await.unwrap();
                 assert!(builder()
                     .storage(storage.clone())
-                    .open_reloading()
+                    .open_reloading(directory.id())
                     .await
                     .is_err());
                 assert!(matches!(
-                    builder().open().await,
+                    builder().open(directory.id()).await,
                     Err(CovenError::Lock(StoreLockError::RecoveryPending(_)))
                 ));
                 assert!(matches!(
-                    builder().open_read_only().await,
+                    builder().open_read_only(directory.id()).await,
                     Err(CovenError::Lock(StoreLockError::RecoveryPending(_)))
                 ));
                 storage.delete(&snapshot).await.unwrap();
@@ -477,7 +488,7 @@ mod recovery {
             }
             let recovered = builder()
                 .storage(storage.clone())
-                .open_reloading()
+                .open_reloading(directory.id())
                 .await
                 .unwrap();
             let rows = recovered

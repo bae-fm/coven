@@ -83,6 +83,10 @@ impl StoreLayout {
                     continue;
                 }
             };
+            if super::bootstrap::is_pending(&path)? {
+                tracing::debug!(path = %path.display(), "store is awaiting bootstrap publication");
+                continue;
+            }
             match settings::read(&path, id) {
                 Ok(settings) => stores.push(StoreInfo {
                     id,
@@ -141,7 +145,14 @@ impl StoreLayout {
         ids: &dyn IdSource,
         initialize: impl FnOnce(&crate::files::StoreSettings) -> Result<(), E>,
     ) -> Result<StoreDir, StoreCreationError<E>> {
-        crate::files::creation::create(&self.app_dir.join("stores"), id, name, ids, initialize)
+        crate::files::creation::create(
+            &self.app_dir.join("stores"),
+            id,
+            name,
+            ids,
+            initialize,
+            false,
+        )
     }
 }
 

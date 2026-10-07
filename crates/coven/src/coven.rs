@@ -28,9 +28,9 @@ impl Coven {
         .await
     }
 
-    /// Starts opening the store in `store_dir`, with the settings coven keeps there.
-    pub fn builder(store_dir: StoreDir) -> CovenBuilder {
-        CovenBuilder::new(store_dir)
+    /// Configure opening, restoring or joining a store under this layout.
+    pub fn builder(layout: StoreLayout) -> CovenBuilder {
+        CovenBuilder::new(layout)
     }
 
     /// Deletes a closed store from this device: every keychain entry coven

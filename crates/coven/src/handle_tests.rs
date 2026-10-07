@@ -10,8 +10,8 @@ use std::sync::{
     Arc, Mutex,
 };
 
-fn builder(app: &TestCoven, directory: StoreDir) -> CovenBuilder {
-    app.builder(directory)
+fn builder(app: &TestCoven, layout: StoreLayout) -> CovenBuilder {
+    app.builder(layout)
         .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
         .migrations(vec![Migration::sql(
             1,
@@ -39,7 +39,10 @@ async fn kept_keys_open_old_values_across_reopen_and_forgetting_preserves_identi
     keys.insert_store_key(StoreKey::generate(KeyId(ids.new_id())).unwrap())
         .unwrap();
     app.keep_store_keys(&directory, &keys).unwrap();
-    let handle = builder(&app, directory.clone()).open().await.unwrap();
+    let handle = builder(&app, layout.clone())
+        .open(directory.id())
+        .await
+        .unwrap();
     assert!(matches!(
         handle.seal_app_data(b"new", b"notes/a").await,
         Err(CovenError::Seal(SealError::NoCurrentStoreKey))
@@ -55,9 +58,12 @@ async fn kept_keys_open_old_values_across_reopen_and_forgetting_preserves_identi
         Err(SealError::Crypto(CryptoError::Authentication))
     ));
     handle.close().await.unwrap();
-    let handle = builder(&app, directory.clone()).open().await.unwrap();
-    let reader = builder(&app, directory.clone())
-        .open_read_only()
+    let handle = builder(&app, layout.clone())
+        .open(directory.id())
+        .await
+        .unwrap();
+    let reader = builder(&app, layout.clone())
+        .open_read_only(directory.id())
         .await
         .unwrap();
     assert_eq!(
@@ -156,10 +162,10 @@ async fn opening_and_sql_do_not_unlock_custody_and_callback_failures_roll_back()
         keys: Mutex::new(None),
         unlocks: AtomicUsize::new(0),
     });
-    let handle = builder(&app, directory)
+    let handle = builder(&app, layout.clone())
         .key_custody(KeyCustody::Custom(keys.clone()))
         .identity_custody(IdentityCustody::Custom(identity.clone()))
-        .open()
+        .open(directory.id())
         .await
         .unwrap();
     let failed: CovenResult<()> = handle
@@ -216,7 +222,10 @@ async fn cancelling_the_close_caller_still_closes_all_clones() {
         .create_store(&layout, "closing", Arc::new(UuidIds))
         .await
         .unwrap();
-    let handle = builder(&app, directory.clone()).open().await.unwrap();
+    let handle = builder(&app, layout.clone())
+        .open(directory.id())
+        .await
+        .unwrap();
     let mut live = handle.subscribe(|_| Ok(()));
     live.next().await.unwrap();
     // Polling starts closing; dropping only the caller must not cancel it.
@@ -243,12 +252,15 @@ async fn cancelling_the_close_caller_still_closes_all_clones() {
         handle.host_secret("token"),
         Err(KeyError::StoreClosed)
     ));
-    let reopened = builder(&app, directory).open().await.unwrap();
+    let reopened = builder(&app, layout.clone())
+        .open(directory.id())
+        .await
+        .unwrap();
     reopened.close().await.unwrap();
 }
 
-fn key_builder(app: &TestCoven, directory: &StoreDir) -> CovenBuilder {
-    app.builder(directory.clone())
+fn key_builder(app: &TestCoven, layout: StoreLayout) -> CovenBuilder {
+    app.builder(layout.clone())
         .synced_tables(Vec::new())
         .migrations(Vec::new())
         .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
@@ -309,7 +321,10 @@ async fn app_data_uses_the_replayed_key_and_opens_both_generations() {
     let mut keys = old_keys.clone();
     keys.insert_store_key(new_key).unwrap();
     app.keep_store_keys(&directory, &keys).unwrap();
-    let handle = key_builder(&app, &directory).open().await.unwrap();
+    let handle = key_builder(&app, layout.clone())
+        .open(directory.id())
+        .await
+        .unwrap();
     assert!(matches!(
         handle.seal_app_data(b"unselected", b"notes/a").await,
         Err(CovenError::Seal(SealError::NoCurrentStoreKey))
@@ -333,7 +348,10 @@ async fn app_data_uses_the_replayed_key_and_opens_both_generations() {
         },
     )
     .await;
-    let handle = key_builder(&app, &directory).open().await.unwrap();
+    let handle = key_builder(&app, layout.clone())
+        .open(directory.id())
+        .await
+        .unwrap();
     let sealed_old = handle
         .seal_app_data(b"old value", b"notes/a")
         .await
@@ -385,7 +403,10 @@ async fn app_data_uses_the_replayed_key_and_opens_both_generations() {
     )
     .await;
     app.keep_store_keys(&directory, &keys).unwrap();
-    let handle = key_builder(&app, &directory).open().await.unwrap();
+    let handle = key_builder(&app, layout.clone())
+        .open(directory.id())
+        .await
+        .unwrap();
     let sealed_new = handle
         .seal_app_data(b"new value", b"notes/a")
         .await
@@ -401,8 +422,8 @@ async fn app_data_uses_the_replayed_key_and_opens_both_generations() {
             Err(SealError::Crypto(CryptoError::Authentication))
         ));
     }
-    let reader = key_builder(&app, &directory)
-        .open_read_only()
+    let reader = key_builder(&app, layout.clone())
+        .open_read_only(directory.id())
         .await
         .unwrap();
     assert_eq!(

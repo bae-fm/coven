@@ -18,15 +18,16 @@ async fn transfer_limits_bound_requests_and_an_active_batch_keeps_its_limit() {
         let memory = Arc::new(MemoryStorage::new(StorageConfig::S3 {
             bucket: "files".into(), region: "test".into(), endpoint: None, prefix: "store".into(),
         }, clock.clone()).unwrap().with_transfer_limits(1024 * 1024, 65536).unwrap());
-        let directory = app.create_store(&StoreLayout::new(root.path().into()), "Files", Arc::new(UuidIds)).await.unwrap();
-        let handle = app.builder(directory).clock(clock).storage_connector(memory.clone())
+        let layout = StoreLayout::new(root.path().into());
+        let directory = app.create_store(&layout, "Files", Arc::new(UuidIds)).await.unwrap();
+        let handle = app.builder(layout).clock(clock).storage_connector(memory.clone())
             .max_concurrent_uploads(NonZeroUsize::new(2).unwrap())
             .max_concurrent_downloads(NonZeroUsize::new(2).unwrap())
             .synced_tables(vec![SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
                 "files", Provenance::AppProvided, Uploads::WhenAsked, CacheFill::CacheLazy,
             ))])
             .migrations(vec![Migration::sql(1, "files", "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)")])
-            .coven_migration_policy(CovenMigrationPolicy::ApplyPending).open().await.unwrap();
+            .coven_migration_policy(CovenMigrationPolicy::ApplyPending).open(directory.id()).await.unwrap();
         handle.initialize_identity().unwrap();
         handle.setup_s3_storage(memory.config(), "Test device", "key".into(), SecretText::new("secret".into())).await.unwrap();
         let mut status = handle.subscribe_sync_status();
@@ -127,8 +128,8 @@ CREATE TABLE thumbnails(id TEXT NOT NULL PRIMARY KEY,note_id TEXT NOT NULL REFER
 CREATE TABLE tags(id TEXT NOT NULL PRIMARY KEY);
 CREATE TABLE note_tags(note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,PRIMARY KEY(note_id,tag_id));";
 
-fn builder(app: &TestCoven, directory: StoreDir, ids: IdSourceRef) -> CovenBuilder {
-    app.builder(directory)
+fn builder(app: &TestCoven, layout: StoreLayout, ids: IdSourceRef) -> CovenBuilder {
+    app.builder(layout)
         .synced_tables(tables())
         .migrations(vec![Migration::sql(1, "initial", SCHEMA)])
         .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
@@ -145,8 +146,8 @@ async fn originals_owned_copies_ranges_references_and_deletion_use_the_app_api()
         .create_store(&layout, "Household", ids.clone())
         .await
         .unwrap();
-    let handle = builder(&app, directory.clone(), ids.clone())
-        .open()
+    let handle = builder(&app, layout.clone(), ids.clone())
+        .open(directory.id())
         .await
         .unwrap();
     let note_id = ids.new_id().to_string();
@@ -242,8 +243,8 @@ async fn originals_owned_copies_ranges_references_and_deletion_use_the_app_api()
     assert_eq!(reference.audience(), Audience::Store);
     let old_stream = handle.open_file_stream(&reference).await.unwrap();
     assert_eq!(old_stream.read_at(2, 4).await.unwrap(), b"umbn");
-    let readonly = builder(&app, directory.clone(), ids.clone())
-        .open_read_only()
+    let readonly = builder(&app, layout.clone(), ids.clone())
+        .open_read_only(directory.id())
         .await
         .unwrap();
     assert_eq!(readonly.read_file(&reference).await.unwrap(), b"thumbnail");
@@ -304,8 +305,8 @@ async fn a_restored_install_gets_a_new_id_before_its_first_write() {
         .create_store(&layout, "restored", ids.clone())
         .await
         .unwrap();
-    let handle = builder(&original, directory.clone(), ids.clone())
-        .open()
+    let handle = builder(&original, layout.clone(), ids.clone())
+        .open(directory.id())
         .await
         .unwrap();
     let note = ids.new_id().to_string();
@@ -337,8 +338,8 @@ async fn a_restored_install_gets_a_new_id_before_its_first_write() {
     handle.close().await.unwrap();
     // Backup bytes survive, but the new installation has no device-only entry.
     let restored = TestCoven::new();
-    let handle = builder(&restored, directory.clone(), ids.clone())
-        .open()
+    let handle = builder(&restored, layout.clone(), ids.clone())
+        .open(directory.id())
         .await
         .unwrap();
     assert!(matches!(
@@ -363,7 +364,10 @@ async fn a_restored_install_gets_a_new_id_before_its_first_write() {
     assert_ne!(old.location(), new.location());
     assert_eq!(handle.read_file(&new).await.unwrap(), b"new");
     handle.close().await.unwrap();
-    let handle = builder(&restored, directory, ids).open().await.unwrap();
+    let handle = builder(&restored, layout.clone(), ids)
+        .open(directory.id())
+        .await
+        .unwrap();
     assert_eq!(
         handle
             .file_ref("thumbnails", thumbnail.as_str())
@@ -396,9 +400,9 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         .with_transfer_limits(65536, 65536)
         .unwrap(),
     );
-    let handle = builder(&app, directory.clone(), ids.clone())
+    let handle = builder(&app, layout.clone(), ids.clone())
         .storage(storage.clone())
-        .open()
+        .open(directory.id())
         .await
         .unwrap();
     handle.set_uploads_paused(true);
@@ -442,9 +446,9 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         .await
         .unwrap();
     assert_eq!(pins.next().await.unwrap(), vec![Some(true), None]);
-    let readonly = builder(&app, directory.clone(), ids)
+    let readonly = builder(&app, layout.clone(), ids)
         .storage(storage)
-        .open_read_only()
+        .open_read_only(directory.id())
         .await
         .unwrap();
     let stream = readonly.open_file_stream(&file).await.unwrap();

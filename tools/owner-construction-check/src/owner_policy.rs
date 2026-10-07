@@ -27,7 +27,6 @@ pub(crate) const POLICY: Policy = Policy {
     )),
     composition_roots: &[
         ("crates/coven/src/lib_tests.rs", "Network", "new"),
-        ("crates/coven/src/test_utils.rs", "TestCoven", "open_code"),
         ("crates/coven/src/storage_tests.rs", "Fixture", "new"),
         (
             "crates/coven-storage/src/providers/connector.rs",
@@ -60,7 +59,6 @@ pub(crate) const POLICY: Policy = Policy {
             "<free>",
             "publish_bootstrap",
         ),
-        ("crates/coven/src/connection.rs", "<free>", "connect"),
         (
             "crates/coven-foundation/src/files/bootstrap.rs",
             "<free>",
@@ -134,6 +132,14 @@ pub(crate) const POLICY: Policy = Policy {
         ("crates/coven/src/builder.rs", "CovenBuilder", "new"),
         ("crates/coven/src/builder.rs", "CovenBuilder", "open"),
         ("crates/coven/src/builder.rs", "CovenBuilder", "open_graph"),
+        ("crates/coven/src/builder.rs", "CovenBuilder", "database"),
+        ("crates/coven/src/builder.rs", "CovenBuilder", "keychain"),
+        ("crates/coven/src/builder.rs", "CovenBuilder", "owners"),
+        (
+            "crates/coven/src/bootstrap.rs",
+            "<free>",
+            "bootstrap_device",
+        ),
         ("crates/coven/src/builder.rs", "CovenBuilder", "read_graph"),
         (
             "crates/coven/src/builder.rs",
@@ -187,12 +193,6 @@ pub(crate) const POLICY: Policy = Policy {
             "crates/coven-foundation/src/files/bootstrap.rs",
             "BootstrapStore",
             "directory",
-            "StoreDir",
-        ),
-        (
-            "crates/coven-foundation/src/files/bootstrap.rs",
-            "BootstrapStore",
-            "publish",
             "StoreDir",
         ),
         (

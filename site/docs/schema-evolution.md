@@ -15,7 +15,7 @@ A database newer than the registered ladder is refused with
 [`MigrationError::SchemaTooNew`](rustdoc:enum:coven::MigrationError).
 
 ```rust
-let handle = Coven::builder(store_dir, config)
+let handle = Coven::builder(layout.clone())
     .synced_tables(synced_tables)
     .coven_migration_policy(coven::CovenMigrationPolicy::ApplyPending)
     .migrations(vec![
@@ -30,7 +30,7 @@ let handle = Coven::builder(store_dir, config)
                 },
             )]),
     ])
-    .open()?;
+    .open(store_dir.id()).await?;
 ```
 
 `Migration::sql` runs a SQL batch; `Migration::run` accepts a callback for data

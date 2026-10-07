@@ -5,9 +5,7 @@
 //! crates that own them. Opening resumes unfinished operations and committed
 //! file work without starting a sync loop; an empty journal needs no unlocked keys.
 
-mod bootstrap;
 mod builder;
-mod connection;
 mod coven;
 mod error;
 mod handle;
@@ -15,8 +13,8 @@ mod read_handle;
 #[cfg(any(test, feature = "test-utils"))]
 mod test_utils;
 
-pub use bootstrap::{join_with_invite, restore_from_code, restore_from_keychain, BootstrapError};
 pub use builder::CovenBuilder;
+pub use builder::{join_with_invite, restore_from_code, restore_from_keychain, BootstrapError};
 pub use coven::Coven;
 pub use coven_sync::{decode_code_info, CodeError, CodeInfo, CodeKind};
 pub use coven_sync::{

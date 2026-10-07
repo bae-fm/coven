@@ -104,6 +104,7 @@ pub(crate) fn create<E: std::error::Error + Send + Sync + 'static>(
     name: &str,
     ids: &dyn IdSource,
     initialize: impl FnOnce(&StoreSettings) -> Result<(), E>,
+    unpublished: bool,
 ) -> Result<StoreDir, StoreCreationError<E>> {
     create_directory_tree(root)
         .map_err(|source| FileError::at("create stores directory", root, source))?;
@@ -137,6 +138,9 @@ pub(crate) fn create<E: std::error::Error + Send + Sync + 'static>(
     let prepare = directory::initialize(stage.path(), &settings)
         .map_err(StoreCreationError::from)
         .and_then(|()| {
+            if unpublished {
+                super::atomic_file::replace(&super::bootstrap::marker(stage.path()), b"")?;
+            }
             initialize(&settings)
                 .map_err(|source| StoreCreationError::Initialization { id, source })
         })
@@ -162,8 +166,14 @@ pub(crate) fn create<E: std::error::Error + Send + Sync + 'static>(
     // temporary sibling could ever reuse that name.
     let _unpublished_path = stage.keep();
     #[cfg(unix)]
-    crate::files::atomic_file::sync_directory(&root)
-        .map_err(|source| StoreCreationError::Published { id, source })?;
+    crate::files::atomic_file::sync_directory(&root).map_err(|source| {
+        if unpublished {
+            // The marker still hides this directory; it has not published a store.
+            FileError::at("sync unpublished store directory", &root, source).into()
+        } else {
+            StoreCreationError::Published { id, source }
+        }
+    })?;
     Ok(StoreDir::new(destination, id))
 }
 
