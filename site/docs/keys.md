@@ -187,7 +187,7 @@ silently open there. The sealed payload records the key generation it was
 sealed under, so it stays openable across any number of later
 [rotations](/docs/sharing#revocation-is-key-rotation).
 [`SealError::Locked`](rustdoc:enum:coven::SealError) if the store has no
-established master key — the same gate `connect_sync` applies before it
+established master key — the same gate `start_sync` applies before it
 seals cloud traffic.
 
 ## Host secrets

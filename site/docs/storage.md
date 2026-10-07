@@ -405,8 +405,10 @@ format and therefore require the whole-object materialization path.
 
 ## Lifecycle
 
-`handle.connect_sync(...)` builds the cloud home from the current config and
-spawns the sync loop when a provider is configured. `handle.stop_sync()` drops
-the loop, and `handle.start_sync()` starts it again. Because the config is read
-fresh each operation, swapping providers is a config change followed by a
-stop/start, with no app restart.
+`handle.start_sync().await` builds a provider client when absent, reading the
+stored location and custody credentials and refreshing expired tokens, then
+starts the sync loop. Repeating it while running keeps the same client and loop.
+`handle.stop_sync()` finishes the active pass and file transfers, drops unlocked
+keys and the provider client, and reports `Stopped`. The next start reads custody
+again. `handle.disconnect_storage().await` also removes this device's storage
+credentials and reports `Disconnected`; storage's contents are untouched.

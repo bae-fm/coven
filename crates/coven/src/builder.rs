@@ -235,11 +235,13 @@ impl CovenBuilder {
         keychain: Arc<StoreKeychain>,
     ) -> CovenResult<OpeningOwners> {
         let settings = directory.settings()?;
+        let has_storage_credentials = keychain.storage_credentials()?.is_some();
         let keys = Self::make_keys(self.keys, &directory, settings.id, keychain.clone());
         let identity =
             Self::make_identity(self.identity, &directory, settings.id, keychain.clone());
         Ok(OpeningOwners {
             directory,
+            has_storage_credentials,
             custody: StoreCustody::new(
                 StoreKeys::new(keys.clone()),
                 identity.clone(),
@@ -327,6 +329,7 @@ struct OpeningStore {
 }
 
 struct OpeningOwners {
+    has_storage_credentials: bool,
     initial_name: String,
     limits: TransferLimits,
     keychain: Arc<StoreKeychain>,
@@ -455,6 +458,9 @@ impl OpeningOwners {
             database.sync_changes(),
             self.clock.clone(),
             self.storage,
+            self.connector.clone(),
+            self.device,
+            self.has_storage_credentials,
         );
         let storage = Arc::new(crate::storage::StorageConnections::new(
             codes.clone(),

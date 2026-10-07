@@ -34,6 +34,7 @@ async fn transfer_limits_bound_requests_and_an_active_batch_keeps_its_limit() {
         status.wait_for(|s| matches!(s, SyncStatus::Synced(_))).await.unwrap();
         handle.stop_sync();
         status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
+        handle.unlock_store_key().await.unwrap();
         handle.set_uploads_paused(true);
         handle.write_with_files(|batch| {
             for id in 0..4 {
@@ -76,11 +77,11 @@ async fn transfer_limits_bound_requests_and_an_active_batch_keeps_its_limit() {
         memory.reset_request_peak();
         handle.pin(&uploaded, &|_| {}).await.unwrap();
         assert_eq!(memory.peak_requests(), 1, "the subsequent pin captures the changed limit");
-        handle.disconnect_sync();
-        status.wait_for(|s| matches!(s, SyncStatus::Disconnected)).await.unwrap();
+        handle.stop_sync();
+        status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
         memory.set_faults(Faults::none()).await;
         memory.set_online(false);
-        handle.connect_sync().await.unwrap();
+        handle.start_sync().await.unwrap();
         status.wait_for(|s| matches!(s, SyncStatus::Offline)).await.unwrap();
         memory.set_online(true);
         handle.evict_file(&uploaded[0]).await.unwrap();

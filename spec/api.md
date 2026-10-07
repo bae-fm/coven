@@ -812,7 +812,8 @@ impl CovenBuilder {
     /// Opening runs migrations and resumes unfinished operations and committed
     /// file work. An empty journal needs no keys; resumed steps read keys when
     /// needed. Local database calls need no unlocked key. Opening does not start
-    /// the sync loop; `connect_sync` starts it.
+    /// the sync loop; `start_sync` starts it. A store with storage set up
+    /// opens as `Stopped`; otherwise its status is `Disconnected`.
     pub async fn open(self, store: StoreId) -> CovenResult<CovenHandle>;
 
     /// Opens a store whose database is damaged (§19.2): moves the damaged
@@ -1435,6 +1436,14 @@ while let Ok(values) = lost.next().await {
   - A fingerprint disagreement is reported without an automatic reload (§19.1).
 - A device that isn't connected still reads and writes
   ([§3](coven.md#3-guarantees)); its writes wait in `_coven_uploads`.
+- `start_sync` builds the provider client if absent, reading credentials from
+  custody and refreshing expired tokens, then starts the loop. Starting an
+  already running loop, or a store with no storage set up, does nothing.
+- `stop_sync` finishes the active pass and file transfers, then drops the keys
+  sync unlocked and all workers' references to the provider client. Credentials
+  and the storage location remain available for the next `start_sync`.
+- `disconnect_storage` also removes this device's storage credentials. It leaves
+  storage's contents untouched; syncing requires storage setup again.
 
 ```rust
 /// The provider holding a store (§4).
@@ -1857,25 +1866,21 @@ impl CovenHandle {
     /// Whether key custody holds the store key: `Available` or `Locked`.
     pub fn store_key_state(&self) -> Result<StoreKeyState, KeyError>;
 
-    /// Disconnects and removes this device's storage credentials. If removing
-    /// them fails, the connection stays.
+    /// Finishes the active pass, removes this device's storage credentials and
+    /// drops the provider client. If removing credentials fails, the connection
+    /// and loop state stay. Storage's contents are untouched.
     pub async fn disconnect_storage(&self) -> Result<(), SyncError>;
 
-    /// Connects to the configured storage with the credentials and keys this
-    /// device holds, and starts syncing.
-    pub async fn connect_sync(&self) -> Result<(), SyncError>;
-
-    /// Starts syncing again after `stop_sync`. Does nothing with no storage
-    /// connected.
+    /// Starts syncing, building the provider client if absent from the configured
+    /// location and custody credentials, refreshing tokens as needed. Reads keys
+    /// from custody. Does nothing if already running or no storage is set up.
     pub async fn start_sync(&self) -> Result<(), SyncError>;
 
-    /// Stops syncing after the sync in progress, keeping the connection.
-    /// Keys the sync had unlocked are dropped from memory, and read again
-    /// from custody on the next start.
+    /// Finishes the active pass and file transfers, then drops unlocked keys and
+    /// the provider client. Keeps credentials and location for the next start.
+    /// Completion publishes `Stopped`, or `Disconnected` if no storage is set up;
+    /// a failure to release storage publishes `Failed`.
     pub fn stop_sync(&self);
-
-    /// Stops syncing and drops the connection.
-    pub fn disconnect_sync(&self);
 
     /// Syncs now instead of at the next idle tick. While idle, coven syncs
     /// every 30 seconds, and at once after a local write.
@@ -1893,13 +1898,13 @@ impl CovenHandle {
 }
 
 pub enum SyncStatus {
-    /// No storage is connected.
+    /// No storage is set up on this device.
     Disconnected,
-    /// Storage is connected and syncing is stopped.
+    /// Storage is set up and syncing is stopped; no provider client is required.
     Stopped,
     /// Storage hasn't been reached since connecting.
     Offline,
-    /// A sync is running.
+    /// The initial sync is queued or a sync is running.
     Syncing,
     /// The last sync finished.
     Synced(SyncReport),

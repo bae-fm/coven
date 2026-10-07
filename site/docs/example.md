@@ -193,7 +193,7 @@ let connected = handle
 ```
 
 Persist the returned cloud-home config only after setup succeeds. Existing
-stores reconnect their already-committed config with `connect_sync`. Which rows
+stores reconnect their already-committed config with `start_sync`. Which rows
 carry blobs is declared on the synced tables passed to `open` (see
 [Attachments](#attachments)), not here.
 
@@ -209,46 +209,37 @@ every write without checking.
 
 ## React to remote changes
 
-The host reads the current `SyncLoopStatus` through
-`handle.subscribe_sync_status()`. The watch receiver immediately contains the
-current value and may coalesce intermediate values. A successful cycle's
-`row_changes` is therefore a refresh hint: re-read the named rows instead of
-treating it as a complete event history.
+The host reads the current `SyncStatus` through
+`handle.subscribe_sync_status()`. The receiver immediately contains the current
+value and may coalesce intermediate values. A successful pass's `row_changes`
+is a refresh hint: re-read the named rows instead of treating it as a complete
+history.
 
 ```rust
 let mut status = handle.subscribe_sync_status();
-tokio::spawn(async move {
-    while status.changed().await.is_ok() {
-        match status.borrow_and_update().clone() {
-            coven::SyncLoopStatus::Synchronized(cycle) => {
-                if let Some(changes) = cycle.row_changes {
-                    // Re-read the tables and rows named by this refresh hint.
-                }
-                if let Some(message) = cycle.alerts.primary_message() {
-                    // Show the warning for this successful cycle.
-                }
-            }
-            coven::SyncLoopStatus::Failed { error } => {
-                // Show the whole-cycle failure.
-            }
-            coven::SyncLoopStatus::Blocked { success, operations } => {
-                // Refresh from success, then show the prerequisite each operation names.
-            }
-            coven::SyncLoopStatus::Disconnected | coven::SyncLoopStatus::Stopped => {
-                // Show that no cloud sync is running.
-            }
-            coven::SyncLoopStatus::Offline
-            | coven::SyncLoopStatus::CheckingStorage
-            | coven::SyncLoopStatus::Publishing => {}
+loop {
+    match &*status.borrow_and_update() {
+        coven::SyncStatus::Synced(report) => {
+            // Refresh views and show waiting writes or blocked operations.
         }
+        coven::SyncStatus::Failed { error } => {
+            // Show the failure and its typed cause.
+        }
+        coven::SyncStatus::Disconnected | coven::SyncStatus::Stopped => {
+            // Show that syncing is stopped.
+        }
+        coven::SyncStatus::Offline | coven::SyncStatus::Syncing => {}
     }
-});
+    if status.changed().await.is_err() {
+        break;
+    }
+}
 ```
 
-`Offline` is reserved for provider and network transport failures. A remote
-blob that fails its signed content hash, or a local cache destination that
-cannot be written, remains failed or held work and does not report a lost
-connection.
+`Disconnected` means no storage is set up. `Stopped` means storage is configured
+but the loop is stopped, including immediately after opening a store.
+`Offline` means a network failure before the current client has reached storage;
+a failed pass after successful contact reports `Failed`.
 
 For write-specific UI, `handle.pending_writes()` lists every unpublished write
 with affected table/primary-key identities. `handle.write_status(&write_id)` and

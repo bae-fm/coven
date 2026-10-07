@@ -290,8 +290,8 @@ failure state; it does not make a committed row apply wait for a cache download.
 Join and restore have their own required blob work before returning a store;
 see [Bootstrap](/docs/bootstrap).
 
-A provider or network failure while reading a candidate or blob is a transport
-failure and drives `SyncLoopStatus::Offline`. A verified blob whose plaintext
+A network failure before the current provider client has reached storage reports
+`SyncStatus::Offline`; a failed pass after successful contact reports `Failed`. A verified blob whose plaintext
 does not match its signed hash is invalid content, and failure to create or
 write its local cache destination is a local filesystem failure. Those two
 categories hold or fail the affected work without changing the loop to
@@ -361,75 +361,46 @@ snapshot tails are described in [Schema evolution](/docs/schema-evolution).
 
 ## Lifecycle
 
-`CovenHandle` owns the sync lifecycle. The host calls
-`handle.connect_sync()` once a provider is connected; the handle builds the
-[cloud home](/docs/storage) and, if sync is enabled, spawns the loop.
-`handle.stop_sync()` stops the loop after the in-flight cycle but keeps the
-installed manager so `handle.start_sync()` can resume it;
-`handle.disconnect_sync()` additionally drops the manager and its cloud
-home. `handle.is_syncing()` reports whether the loop thread is running, and
-`handle.sync_now()` asks the loop to run a cycle now.
+`CovenHandle` owns the sync lifecycle. `handle.start_sync().await` builds the
+provider client when absent, using custody credentials and refreshing expired
+tokens, then starts the loop. Repeating the call while running keeps the same
+client and loop. With no storage set up, starting does nothing.
 
-The keys the loop signs and encrypts with are resolved from custody at each
-sync start: the OS keyring by default, or whatever preset the store's
-[`key_custody`](rustdoc:method:coven::CovenBuilder::key_custody) selected
-before `open()` — see [Keys](/docs/keys) for the presets and what each one
-protects against. Either way, the host names its keyring service once at
-startup with
-[`set_keyring_service`](rustdoc:fn:coven::set_keyring_service), which also
-installs the platform keyring store (apple-native on macOS and iOS,
-android-native on Android, windows-native on Windows, and Secret Service on
-Linux). There is no environment-variable or dev-mode key path.
+`handle.stop_sync()` finishes the active pass and file transfers before dropping
+unlocked keys and every worker's provider reference. It preserves the stored
+location and credentials for the next start. `handle.disconnect_storage().await`
+also removes this device's storage credentials; a custody failure preserves the
+connection and loop state. Neither call deletes remote contents.
 
-The loop runs on a dedicated OS thread with its own current-thread tokio runtime.
-Database access goes through async calls on the `Database` handle, so the loop
-holds nothing tied to a thread; the dedicated thread is for stack size
-(aws-sdk-s3's endpoint resolution recurses deeply enough to overflow the default
-secondary-thread stack in debug builds). The loop stores the current
-[`SyncLoopStatus`](rustdoc:enum:coven::SyncLoopStatus) in a watch channel; the
-host observes it with
+The keys the loop signs and encrypts with come from the builder's key and identity
+custody. Opening a store does not start syncing. Storage setup starts the loop;
+unlocking a store key keeps the connection stopped. `handle.sync_now()` requests
+a pass while running, as does a local write; the idle interval is 30 seconds.
+
+Observe the current status through
 [`CovenHandle::subscribe_sync_status`](rustdoc:method:coven::CovenHandle::subscribe_sync_status):
 
 ```rust
-pub enum SyncLoopStatus {
+pub enum SyncStatus {
     Disconnected,
     Stopped,
     Offline,
-    CheckingStorage,
-    Publishing,
-    Synchronized(SyncLoopSuccess),
-    Blocked { success: SyncLoopSuccess, operations: Vec<BlockedOperation> },
-    Failed { error: SyncLoopFailure },
+    Syncing,
+    Synced(SyncReport),
+    Failed { error: SyncFailure },
 }
 ```
 
-The handle publishes the connection's own transitions on the same channel: the
-stream starts `Disconnected`, installing a connection publishes `Offline` until
-a provider operation succeeds, `stop_sync` publishes `Stopped`, and every
-disconnect publishes `Disconnected`. The loop publishes the rest.
+`Disconnected` means no storage is set up on this device. A configured store
+opens as `Stopped`, whether a provider client exists yet or not. Stopping reports
+`Stopped` only after releasing the client; failure to release it reports `Failed`.
+`Offline` means a network failure before the current client has reached storage.
+Once any provider operation succeeds, a later failed pass reports `Failed`.
 
-The receiver immediately contains the current value and survives loop restarts.
-Intermediate values may be coalesced, so `Synchronized.row_changes` is a refresh
-hint rather than a complete event stream. `Failed` preserves the typed cause
-of a whole-cycle failure and its display message. `Synchronized` and `Blocked` carry
-[`SyncLoopSuccess`](rustdoc:struct:coven::SyncLoopSuccess), including alerts,
-device activity, and applied row changes. `Blocked` names host writes, Circle
-operations, and reclaim operations whose typed prerequisites prevent progress.
-
-## Backoff
-
-A failing cycle should slow its retries, and a healthy one should not delay
-a fresh edit. One exponential formula (`30s · 2^n`) drives the
-cycle wait. A successful cycle
-waits the base 30 seconds before the next run; each consecutive failure doubles
-the wait (60s, 120s, 240s), capped at 300 seconds. A success resets the count,
-and `sync_now` preempts the wait.
-
-Provider and network transport errors leave writes retryable, set `Offline`,
-and recover through the loop. Remote content mismatch and local blob-filesystem
-errors are not connectivity failures; they remain typed failed or held work. A
-write whose own package, blob state, or Store protocol state is invalid is
-durable `Blocked` and requires `retry_blocked_write` after repair or
-`discard_blocked_write`; reconnect does not silently requeue it. The
-newer-schema package hold requires an app upgrade, and membership rejection means
-the device is no longer a write-capable member.
+The receiver immediately contains the current value and survives starts and
+stops. Intermediate values may be coalesced, so `SyncReport.row_changes` is a
+refresh hint. `Failed` preserves the typed cause of a whole-pass failure;
+`Synced` carries the report, including waiting writes, damaged objects, device
+activity and blocked operations. Removal, a location taken by another store,
+or a required update stops further passes; other pass failures retry on the idle
+interval or an explicit request.

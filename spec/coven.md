@@ -2790,11 +2790,21 @@ Carol's tablet:
   - the builder's `open`;
   - the calls that open a store on a new device: `restore_from_code`,
     `restore_from_keychain` and `join_with_invite`;
+  - provider connection construction for starting sync, storage setup and key
+    unlocking, through the connector supplied at opening;
   - the test fixtures that build the same graph.
 - Each long-lived task has one *lifetime authority*, the only owner that
   may start it, and that stops it when it is dropped.
 - E.g. only the sync owner starts the sync loop, so closing the store stops
   it, and nothing else can leave one running.
+- Opening leaves configured storage `Stopped`, or `Disconnected` when none is
+  set up. `start_sync` asks the injected provider connector to build a client
+  when absent, using custody credentials refreshed as needed, then starts the
+  loop. Repeated starts keep the running loop and client.
+- `stop_sync` finishes the active pass and file transfers before releasing
+  unlocked keys and every worker's provider reference. It retains the location
+  and custody credentials for the next start. `disconnect_storage` also forgets
+  this device's storage credentials, leaving remote contents untouched (E5).
 - An owner never hands out what it holds, by returning it or by a public
   field; callers ask it to do the work.
 - E.g. nothing outside coven-database gets the SQLite connection; it asks

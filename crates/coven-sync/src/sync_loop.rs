@@ -2,21 +2,21 @@
 
 use crate::{Operations, SyncError, SyncFailure, SyncReport};
 use coven_database::{DatabaseChanges, DbError};
-use coven_foundation::clock::ClockRef;
-use coven_storage::{Storage, StorageConnection, StorageFailure};
+use coven_foundation::{clock::ClockRef, id_source::DeviceId};
+use coven_storage::{providers::StorageConnector, Storage, StorageConnection, StorageFailure};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{mpsc, oneshot, watch};
 
 /// Current connection and synchronization state (E5).
 #[derive(Debug)]
 pub enum SyncStatus {
-    /// No provider is connected.
+    /// No storage is set up on this device.
     Disconnected,
-    /// A provider is connected and synchronization is stopped.
+    /// Storage is set up and synchronization is stopped; a client may be absent.
     Stopped,
     /// Storage has not been reached since connecting.
     Offline,
-    /// One complete pass is running.
+    /// The initial pass is queued or a pass is running.
     Syncing,
     /// The last pass completed.
     Synced(SyncReport),
@@ -36,11 +36,6 @@ pub struct SyncLoop {
 }
 
 enum SyncCommand {
-    Connect {
-        storage: Arc<StorageConnection>,
-        start: bool,
-        reply: Reply,
-    },
     Setup {
         storage: Arc<StorageConnection>,
         access: coven_format::MemberAccess,
@@ -56,7 +51,7 @@ enum SyncCommand {
     Start(Reply),
     ForgetKeys(Reply),
     Stop,
-    Disconnect(Option<Reply>),
+    ForgetStorage(Reply),
     Now,
     Close(Reply),
 }
@@ -70,21 +65,29 @@ struct SyncRun {
     commands: mpsc::UnboundedReceiver<SyncCommand>,
     status: watch::Sender<SyncStatus>,
     connection: Option<Arc<StorageConnection>>,
+    connector: Arc<dyn StorageConnector>,
+    device: DeviceId,
+    configured: bool,
     started: bool,
 }
 
 impl SyncLoop {
     /// Compose beside operations and database at opening. Opening a store never
     /// starts synchronization, even when its provider has already been supplied.
+    /// Credential presence distinguishes configured storage without a live client.
     pub fn new(
         operations: Operations,
         codes: crate::RestoreCodes,
         changes: DatabaseChanges,
         clock: ClockRef,
         connection: Option<Arc<StorageConnection>>,
+        connector: Arc<dyn StorageConnector>,
+        device: DeviceId,
+        has_storage_credentials: bool,
     ) -> Self {
+        let configured = connection.is_some() || has_storage_credentials;
         let (commands, receiver) = mpsc::unbounded_channel();
-        let (status, subscription) = watch::channel(if connection.is_some() {
+        let (status, subscription) = watch::channel(if configured {
             SyncStatus::Stopped
         } else {
             SyncStatus::Disconnected
@@ -98,6 +101,9 @@ impl SyncLoop {
                 commands: receiver,
                 status,
                 connection,
+                connector,
+                device,
+                configured,
                 started: false,
             }
             .run(),
@@ -106,20 +112,6 @@ impl SyncLoop {
             commands,
             status: subscription,
         }
-    }
-
-    /// Connect the supplied provider after its credentials and keys have been
-    /// checked. Replacing a connection waits for the active pass to finish.
-    pub async fn connect(&self, storage: Arc<dyn Storage>, start: bool) -> Result<(), SyncError> {
-        let (reply, result) = oneshot::channel();
-        self.commands
-            .send(SyncCommand::Connect {
-                storage: Arc::new(StorageConnection::new(storage)),
-                start,
-                reply,
-            })
-            .map_err(|_| DbError::StoreClosed)?;
-        result.await.map_err(|_| DbError::StoreClosed)?
     }
 
     /// Finish setup under this loop's connection lifetime, then start syncing.
@@ -156,7 +148,8 @@ impl SyncLoop {
         result.await.map_err(|_| DbError::StoreClosed)?
     }
 
-    /// Start the connected store; an absent connection is a no-op.
+    /// Start configured storage, reconstructing an absent client from custody.
+    /// Repeated starts and stores without configured storage are no-ops.
     pub async fn start(&self) -> Result<(), SyncError> {
         let (reply, result) = oneshot::channel();
         self.commands
@@ -175,22 +168,19 @@ impl SyncLoop {
         result.await.map_err(|_| DbError::StoreClosed)?
     }
 
-    /// Finish the active pass and keep the idle connection. Each step's unlocked
-    /// keys are scoped to that step and have been dropped when the pass returns.
+    /// Finish the active pass and transfers, then release every worker's provider
+    /// reference. Unlocked keys are scoped to work and dropped before it returns.
+    /// Credentials remain in custody for the next start; failures publish Failed.
     pub fn stop(&self) {
         let _ = self.commands.send(SyncCommand::Stop);
     }
 
-    /// Finish the active pass and release every worker's provider reference.
-    pub fn disconnect(&self) {
-        let _ = self.commands.send(SyncCommand::Disconnect(None));
-    }
-
-    /// Disconnect after the active pass and wait until collaborators have released storage.
-    pub async fn disconnect_wait(&self) -> Result<(), SyncError> {
+    /// Finish the active pass, forget credentials, and release storage. A failed
+    /// custody removal preserves the connection and loop state.
+    pub async fn forget_storage(&self) -> Result<(), SyncError> {
         let (reply, result) = oneshot::channel();
         self.commands
-            .send(SyncCommand::Disconnect(Some(reply)))
+            .send(SyncCommand::ForgetStorage(reply))
             .map_err(|_| DbError::StoreClosed)?;
         result.await.map_err(|_| DbError::StoreClosed)?
     }
@@ -216,6 +206,91 @@ impl SyncLoop {
 }
 
 impl SyncRun {
+    /// Reconstruct a configured provider through the injected connector. Callers
+    /// serialize this with stop, setup and credential removal in the command loop.
+    async fn connect(&mut self) -> Result<(), SyncError> {
+        self.codes.refresh_if_expired(self.clock.now()).await?;
+        let data = self.codes.connection().await?.ok_or(SyncError::NoStorage)?;
+        let storage = self
+            .connector
+            .connect(data.location, data.credentials, self.device)
+            .await?;
+        let connection = Arc::new(StorageConnection::new(storage));
+        self.operations
+            .set_storage(Some(connection.clone()))
+            .await?;
+        self.connection = Some(connection);
+        Ok(())
+    }
+
+    async fn release_connection(&mut self) -> Result<(), SyncError> {
+        self.operations.set_storage(None).await?;
+        self.connection = None;
+        Ok(())
+    }
+
+    fn publish_stopped(&self, result: Result<(), SyncError>) -> Result<(), SyncError> {
+        match result {
+            Ok(()) => {
+                self.status.send_replace(if self.configured {
+                    SyncStatus::Stopped
+                } else {
+                    SyncStatus::Disconnected
+                });
+                Ok(())
+            }
+            Err(error) => {
+                let error = SyncFailure::from(error);
+                self.status.send_replace(SyncStatus::Failed {
+                    error: error.clone(),
+                });
+                Err(error.into())
+            }
+        }
+    }
+
+    async fn setup(
+        &mut self,
+        storage: Arc<StorageConnection>,
+        access: coven_format::MemberAccess,
+        device_name: String,
+        connection: coven_storage::RestoreStorage,
+        store_name: String,
+    ) -> Result<(), SyncError> {
+        // Relocation needs the old provider even when stop has released it.
+        let reconnect = self.configured
+            && self.connection.is_none()
+            && self
+                .codes
+                .connection()
+                .await?
+                .ok_or(SyncError::NoStorage)?
+                .location
+                != connection.location;
+        if reconnect {
+            self.connect().await?;
+        }
+        let result = async {
+            let commit = self.codes.prepare_setup(connection, store_name).await?;
+            self.operations
+                .setup_storage(storage, access, device_name, commit)
+                .await
+        }
+        .await;
+        if let Err(operation) = result {
+            if reconnect {
+                if let Err(cleanup) = self.release_connection().await {
+                    return self.publish_stopped(Err(SyncError::Cleanup {
+                        operation: Box::new(operation),
+                        cleanup: Box::new(cleanup),
+                    }));
+                }
+            }
+            return Err(operation);
+        }
+        Ok(())
+    }
+
     async fn run(mut self) {
         let mut delay = self.clock.sleep(Duration::from_secs(30));
         let mut pending = false;
@@ -227,85 +302,73 @@ impl SyncRun {
                         None => break,
                         Some(SyncCommand::Close(reply)) => {
                             self.started = false;
-                            self.status.send_replace(if self.connection.is_some() { SyncStatus::Stopped } else { SyncStatus::Disconnected });
-                            let _ = reply.send(Ok(()));
+                            let result = self.release_connection().await;
+                            let result = self.publish_stopped(result);
+                            let _ = reply.send(result);
                             break;
-                        }
-                        Some(SyncCommand::Connect { storage, start, reply }) => {
-                            let result = async {
-                                self.operations.check_sync_keys().await?;
-                                self.operations.set_storage(Some(storage.clone())).await
-                            }.await;
-                            match result {
-                                Ok(()) => {
-                                    self.connection = Some(storage);
-                                    self.started = start;
-                                    pending = start;
-                                    self.status.send_replace(if start { SyncStatus::Offline } else { SyncStatus::Stopped });
-                                    let _ = reply.send(Ok(()));
-                                }
-                                Err(error) => { let _ = reply.send(Err(error)); }
-                            }
                         }
                         Some(SyncCommand::Setup { storage, access, device_name, connection, store_name, reply }) => {
                             // Acquire custody only after this command owns the loop.
                             // A queued setup must not hold the lock a running pass
                             // needs before it can finish and receive this command.
-                            let result = async {
-                                let commit = self.codes.prepare_setup(connection, store_name).await?;
-                                self.operations.setup_storage(storage.clone(), access, device_name, commit).await
-                            }.await;
+                            let result = self.setup(storage.clone(), access, device_name, connection, store_name).await;
                             if result.is_ok() {
-                                self.connection = Some(storage); self.started = true; pending = true;
-                                self.status.send_replace(SyncStatus::Stopped);
+                                self.connection = Some(storage); self.configured = true;
+                                self.started = true; pending = true;
+                                self.status.send_replace(SyncStatus::Syncing);
                             }
                             let _ = reply.send(result);
                         }
                         Some(SyncCommand::Unlock { storage, reply }) => {
                             let result = self.operations.unlock_storage(storage.clone()).await;
                             if result.is_ok() {
-                                self.connection = Some(storage); self.started = false; pending = false;
+                                self.connection = Some(storage); self.configured = true; self.started = false; pending = false;
                                 self.status.send_replace(SyncStatus::Stopped);
                             }
                             let _ = reply.send(result);
                         }
                         Some(SyncCommand::Start(reply)) => {
-                            let result = if self.connection.is_some() && !self.started {
-                                match self.operations.check_sync_keys().await {
-                                    Ok(()) => { self.started = true; pending = true; Ok(()) }
-                                    Err(error) => Err(error),
+                            let result = if self.configured && !self.started {
+                                let result = async {
+                                    self.operations.check_sync_keys().await?;
+                                    if self.connection.is_none() {
+                                        self.connect().await?;
+                                    }
+                                    Ok(())
+                                }.await;
+                                if result.is_ok() {
+                                    self.started = true; pending = true;
+                                    self.status.send_replace(SyncStatus::Syncing);
                                 }
+                                result
                             } else { Ok(()) };
                             let _ = reply.send(result);
                         }
                         Some(SyncCommand::Stop) => {
                             self.started = false;
                             pending = false;
-                            self.status.send_replace(if self.connection.is_some() { SyncStatus::Stopped } else { SyncStatus::Disconnected });
+                            let result = self.release_connection().await;
+                            // No waiter exists for stop; the watch channel carries failure.
+                            let _ = self.publish_stopped(result);
                         }
                         Some(SyncCommand::ForgetKeys(reply)) => {
                             let result = self.operations.forget_store_keys().await;
-                            if result.is_ok() {
+                            let result = if result.is_ok() {
                                 self.started = false; self.connection = None; pending = false;
-                                self.status.send_replace(SyncStatus::Disconnected);
-                            }
+                                self.publish_stopped(result)
+                            } else { result };
                             let _ = reply.send(result);
                         }
-                        Some(SyncCommand::Disconnect(reply)) => {
-                            self.started = false;
-                            pending = false;
-                            match self.operations.set_storage(None).await {
-                                Ok(()) => {
-                                    self.connection = None;
-                                    self.status.send_replace(SyncStatus::Disconnected);
-                                    if let Some(reply) = reply { let _ = reply.send(Ok(())); }
-                                }
-                                Err(error) => {
-                                    let error = SyncFailure::from(error);
-                                    self.status.send_replace(SyncStatus::Failed { error: error.clone() });
-                                    if let Some(reply) = reply { let _ = reply.send(Err(error.into())); }
-                                }
-                            }
+                        Some(SyncCommand::ForgetStorage(reply)) => {
+                            let result = async {
+                                self.codes.forget_credentials().await?;
+                                self.configured = false;
+                                self.started = false;
+                                pending = false;
+                                let result = self.release_connection().await;
+                                self.publish_stopped(result)
+                            }.await;
+                            let _ = reply.send(result);
                         }
                         Some(SyncCommand::Now) => { pending |= self.started; }
                     }

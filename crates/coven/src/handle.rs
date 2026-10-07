@@ -97,26 +97,21 @@ impl CovenHandle {
     pub fn store_key_state(&self) -> Result<StoreKeyState, KeyError> {
         self.storage.key_state()
     }
-    /// Remove credentials, then finish the current pass and disconnect.
+    /// Finish the active pass, forget credentials, then release the provider.
+    /// A custody failure preserves the current connection and loop state.
     pub async fn disconnect_storage(&self) -> Result<(), SyncError> {
         self.storage.disconnect().await
     }
-    /// Connect using this device's configured provider and start the loop.
-    pub async fn connect_sync(&self) -> Result<(), SyncError> {
-        self.storage.connect().await
-    }
-
-    /// Start synchronization on the connected store. Without storage this is a no-op.
+    /// Start syncing, building an absent client from custody credentials and
+    /// refreshing expired tokens. Already running or unconfigured stores do nothing.
     pub async fn start_sync(&self) -> Result<(), SyncError> {
         self.sync.start().await
     }
-    /// Finish the active pass and stop, retaining the idle connection.
+    /// Finish the active pass and transfers, then drop unlocked keys and the
+    /// provider client. Completion publishes Stopped, or Disconnected without
+    /// configured storage; release failures publish Failed.
     pub fn stop_sync(&self) {
         self.sync.stop();
-    }
-    /// Finish the active pass and release the connection.
-    pub fn disconnect_sync(&self) {
-        self.sync.disconnect();
     }
     /// Request a pass immediately while started.
     pub fn sync_now(&self) {

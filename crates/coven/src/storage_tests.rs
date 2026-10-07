@@ -9,6 +9,7 @@ struct Fixture {
     app: TestCoven,
     handle: CovenHandle,
     storage: Arc<MemoryStorage>,
+    connector: Arc<TrackingConnector>,
     clock: Arc<FixedClock>,
     directory: StoreDir,
     _root: tempfile::TempDir,
@@ -41,11 +42,18 @@ impl Fixture {
             )
             .await
             .unwrap();
+        let connector = Arc::new(TrackingConnector {
+            storage: storage.clone(),
+            clients: std::sync::Mutex::new(Vec::new()),
+            credentials: std::sync::Mutex::new(Vec::new()),
+            refuse: AtomicBool::new(false),
+            held: tokio::sync::Mutex::new(None),
+        });
         let handle = builder(
             &app,
             StoreLayout::new(root.path().into()),
             clock.clone(),
-            storage.clone(),
+            connector.clone(),
         )
         .open(directory.id())
         .await
@@ -55,6 +63,7 @@ impl Fixture {
             app,
             handle,
             storage,
+            connector,
             clock,
             directory,
             _root: root,
@@ -75,6 +84,234 @@ impl Fixture {
     fn advance(&self, duration: Duration) {
         self.clock.set(self.clock.now() + duration);
     }
+}
+
+struct TrackingConnector {
+    storage: Arc<MemoryStorage>,
+    clients: std::sync::Mutex<Vec<std::sync::Weak<dyn Storage>>>,
+    credentials: std::sync::Mutex<Vec<StorageCredentials>>,
+    refuse: AtomicBool,
+    held: tokio::sync::Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
+}
+
+#[async_trait::async_trait]
+impl StorageConnector for TrackingConnector {
+    async fn connect(
+        &self,
+        config: StorageConfig,
+        credentials: coven_storage::StorageCredentials,
+        device: DeviceId,
+    ) -> Result<Arc<dyn Storage>, StorageError> {
+        if let Some((entered, resume)) = self.held.lock().await.take() {
+            entered.send(()).unwrap();
+            resume.await.unwrap();
+        }
+        if self.refuse.swap(false, Ordering::SeqCst) {
+            return Err(StorageError::Injected(StorageFailure::Authentication));
+        }
+        self.credentials.lock().unwrap().push(credentials.clone());
+        let client = self.storage.connect(config, credentials, device).await?;
+        self.clients.lock().unwrap().push(Arc::downgrade(&client));
+        Ok(client)
+    }
+}
+
+#[tokio::test]
+async fn stopping_releases_the_provider_and_start_rebuilds_it_once() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced(_))).await;
+    f.handle.start_sync().await.unwrap();
+    assert_eq!(f.connector.clients.lock().unwrap().len(), 1);
+    f.handle.stop_sync();
+    status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
+    assert!(f.connector.clients.lock().unwrap()[0].upgrade().is_none());
+    let mut code = coven_sync::read_restore_code(&f.handle.restore_code().await.unwrap()).unwrap();
+    let mut data = RestoreStorage::decode(code.storage.as_bytes()).unwrap();
+    data.credentials = StorageCredentials::S3(S3Credentials {
+        access_key_id: "replacement".into(),
+        secret_access_key: SecretText::new("replacement secret".into()),
+    });
+    code.storage = data.encode().unwrap();
+    f.handle
+        .update_credentials(&code.to_text().unwrap())
+        .await
+        .unwrap();
+    f.handle.start_sync().await.unwrap();
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced(_))).await;
+    f.handle.start_sync().await.unwrap();
+    assert_eq!(f.connector.clients.lock().unwrap().len(), 2);
+    let credentials = f.connector.credentials.lock().unwrap()[1].clone();
+    let StorageCredentials::S3(keys) = credentials else {
+        panic!("S3 credentials")
+    };
+    assert_eq!(keys.access_key_id, "replacement");
+    assert_eq!(keys.secret_access_key.as_str(), "replacement secret");
+    f.handle.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_failed_start_preserves_stopped_storage_and_can_be_retried() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced(_))).await;
+    f.handle.stop_sync();
+    status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
+    f.connector.refuse.store(true, Ordering::SeqCst);
+    assert!(matches!(f.handle.start_sync().await,
+        Err(SyncError::Storage(error)) if error.failure() == StorageFailure::Authentication));
+    assert!(matches!(
+        &*f.handle.subscribe_sync_status().borrow(),
+        SyncStatus::Stopped
+    ));
+    assert!(f.connector.clients.lock().unwrap()[0].upgrade().is_none());
+    f.app.fail_next_keychain_operation();
+    assert!(matches!(
+        f.handle.start_sync().await,
+        Err(SyncError::SecureStorage(_))
+    ));
+    assert!(matches!(
+        &*f.handle.subscribe_sync_status().borrow(),
+        SyncStatus::Stopped
+    ));
+    f.handle.start_sync().await.unwrap();
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced(_))).await;
+    f.handle.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn stop_queued_during_cancelled_start_releases_the_new_client() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced(_))).await;
+    f.handle.stop_sync();
+    status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
+    let (entered, entering) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    *f.connector.held.lock().await = Some((entered, resumed));
+    let mut subscription = f.handle.subscribe_sync_status();
+    subscription.borrow_and_update();
+    {
+        let start = f.handle.start_sync();
+        tokio::pin!(start);
+        tokio::select! {
+            result = &mut start => panic!("start completed while provider construction was held: {result:?}"),
+            _ = entering => {}
+        }
+        f.handle.stop_sync();
+    }
+    resume.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            subscription.changed().await.unwrap();
+            if matches!(&*subscription.borrow_and_update(), SyncStatus::Stopped) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(f.connector.clients.lock().unwrap().len(), 2);
+    assert!(f
+        .connector
+        .clients
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|client| client.upgrade().is_none()));
+    f.handle.start_sync().await.unwrap();
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced(_))).await;
+    f.handle.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn unconfigured_and_forgotten_storage_stay_disconnected_on_start() {
+    let f = Fixture::new().await;
+    f.handle.stop_sync();
+    f.handle.start_sync().await.unwrap();
+    assert!(matches!(
+        &*f.handle.subscribe_sync_status().borrow(),
+        SyncStatus::Disconnected
+    ));
+    assert!(f.connector.clients.lock().unwrap().is_empty());
+    f.setup().await.unwrap();
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced(_))).await;
+    f.handle.disconnect_storage().await.unwrap();
+    f.handle.start_sync().await.unwrap();
+    assert!(matches!(
+        &*f.handle.subscribe_sync_status().borrow(),
+        SyncStatus::Disconnected
+    ));
+    assert!(f.connector.clients.lock().unwrap()[0].upgrade().is_none());
+    assert!(matches!(
+        f.handle.restore_code().await,
+        Err(SyncError::NoStorage)
+    ));
+    f.handle.close().await.unwrap();
+    let handle = builder(
+        &f.app,
+        StoreLayout::new(f._root.path().into()),
+        f.clock.clone(),
+        f.connector.clone(),
+    )
+    .open(f.directory.id())
+    .await
+    .unwrap();
+    handle.start_sync().await.unwrap();
+    assert!(matches!(
+        &*handle.subscribe_sync_status().borrow(),
+        SyncStatus::Disconnected
+    ));
+    handle.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn disconnect_waits_for_the_active_pass_and_custody_failure_keeps_sync_running() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced(_))).await;
+    f.app.fail_next_keychain_operation();
+    assert!(matches!(
+        f.handle.disconnect_storage().await,
+        Err(SyncError::SecureStorage(_))
+    ));
+    assert!(matches!(
+        &*f.handle.subscribe_sync_status().borrow(),
+        SyncStatus::Synced(_)
+    ));
+    let code = f.handle.restore_code().await.unwrap();
+    let (entered, entering) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    f.storage
+        .hold_next_listing(ObjectPrefix::device_logs(), entered, resumed)
+        .await;
+    f.handle.sync_now();
+    entering.await.unwrap();
+    let disconnect = f.handle.disconnect_storage();
+    tokio::pin!(disconnect);
+    tokio::select! {
+        result = &mut disconnect => panic!("disconnect completed during a pass: {result:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+    }
+    assert_eq!(f.handle.restore_code().await.unwrap(), code);
+    assert!(f.connector.clients.lock().unwrap()[0].upgrade().is_some());
+    resume.send(()).unwrap();
+    disconnect.await.unwrap();
+    assert!(matches!(
+        &*f.handle.subscribe_sync_status().borrow(),
+        SyncStatus::Disconnected
+    ));
+    assert!(f.connector.clients.lock().unwrap()[0].upgrade().is_none());
+    assert!(matches!(
+        f.handle.restore_code().await,
+        Err(SyncError::NoStorage)
+    ));
+    f.handle.close().await.unwrap();
 }
 
 fn builder(
@@ -233,9 +470,9 @@ async fn setup_network_failure_preserves_keys_and_connection_then_retry_succeeds
     .unwrap();
     assert!(matches!(
         &*reopened.subscribe_sync_status().borrow(),
-        SyncStatus::Disconnected
+        SyncStatus::Stopped
     ));
-    reopened.connect_sync().await.unwrap();
+    reopened.start_sync().await.unwrap();
     status(&reopened, |s| matches!(s, SyncStatus::Synced(_))).await;
     reopened.close().await.unwrap();
 }
@@ -265,9 +502,9 @@ async fn probing_and_unlocking_preserve_the_requested_connection_lifetime() {
         SyncStatus::Stopped
     ));
     f.handle.forget_store_keys().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Disconnected)).await;
+    status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     assert_eq!(f.handle.store_key_state().unwrap(), StoreKeyState::Locked);
-    assert!(f.handle.connect_sync().await.is_err());
+    assert!(f.handle.start_sync().await.is_err());
     let opened = f.handle.unlock_store_key().await.unwrap();
     assert_eq!(opened.key_state, StoreKeyState::Available);
     assert!(matches!(
@@ -284,12 +521,12 @@ async fn reconnect_is_offline_until_reached_and_stop_and_close_finish_the_active
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced(_))).await;
-    f.handle.disconnect_sync();
-    status(&f.handle, |s| matches!(s, SyncStatus::Disconnected)).await;
+    f.handle.stop_sync();
+    status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     f.storage.set_online(false);
     let mut requests = f.storage.subscribe_requests();
     let before = f.storage.request_count();
-    f.handle.connect_sync().await.unwrap();
+    f.handle.start_sync().await.unwrap();
     requests.wait_for(|n| *n > before).await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Offline)).await;
     f.storage.set_online(true);
@@ -331,7 +568,7 @@ async fn reconnect_is_offline_until_reached_and_stop_and_close_finish_the_active
     }
     let before = f.storage.request_count();
     f.advance(Duration::from_secs(60));
-    assert!(f.handle.connect_sync().await.is_err());
+    assert!(f.handle.start_sync().await.is_err());
     assert_eq!(f.storage.request_count(), before);
 }
 
@@ -407,7 +644,6 @@ async fn moving_storage_retries_a_partial_copy_before_committing_the_new_locatio
         f.clock.clone(),
         locations,
     )
-    .storage(f.storage.clone())
     .open(f.directory.id())
     .await
     .unwrap();
@@ -428,6 +664,10 @@ async fn moving_storage_retries_a_partial_copy_before_committing_the_new_locatio
         .await
         .is_err());
     assert_eq!(handle.restore_code().await.unwrap(), before);
+    assert!(matches!(
+        &*handle.subscribe_sync_status().borrow(),
+        SyncStatus::Stopped
+    ));
     handle
         .setup_s3_storage(
             config.clone(),
@@ -461,14 +701,14 @@ async fn a_first_pass_that_reaches_storage_then_loses_network_is_failed() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced(_))).await;
-    f.handle.disconnect_sync();
-    status(&f.handle, |s| matches!(s, SyncStatus::Disconnected)).await;
+    f.handle.stop_sync();
+    status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     let (listed, listing) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
     f.storage
         .hold_next_listing(ObjectPrefix::device_logs(), listed, resumed)
         .await;
-    f.handle.connect_sync().await.unwrap();
+    f.handle.start_sync().await.unwrap();
     listing.await.unwrap();
     f.storage.set_online(false);
     resume.send(()).unwrap();
@@ -504,7 +744,7 @@ async fn forgetting_keys_finishes_the_active_pass_before_removing_custody() {
     resume.send(()).unwrap();
     forget.await.unwrap();
     assert_eq!(f.handle.store_key_state().unwrap(), StoreKeyState::Locked);
-    status(&f.handle, |s| matches!(s, SyncStatus::Disconnected)).await;
+    status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     f.handle.close().await.unwrap();
 }
 
@@ -558,6 +798,7 @@ async fn moving_storage_waits_for_file_publication_before_copying_history() {
         status(&handle, |s| matches!(s, SyncStatus::Synced(_))).await;
         handle.stop_sync();
         status(&handle, |s| matches!(s, SyncStatus::Stopped)).await;
+        handle.unlock_store_key().await.unwrap();
         let (started, uploading) = tokio::sync::oneshot::channel();
         let (resume, resumed) = tokio::sync::oneshot::channel();
         f.storage.hold_next_creation(ObjectPrefix::files(), started, resumed).await;
@@ -581,6 +822,7 @@ async fn moving_storage_waits_for_file_publication_before_copying_history() {
         assert_eq!(destination.list(&ObjectPrefix::files()).await.unwrap().len(), 1);
         handle.stop_sync();
         status(&handle, |s| matches!(s, SyncStatus::Stopped)).await;
+        handle.unlock_store_key().await.unwrap();
         destination.set_faults(Faults { drop_part: true, ..Faults::none() }).await;
         handle.write_with_files(|batch| {
             batch.put_file("files", "partial", vec![91; 1024 * 1024 + 7]);

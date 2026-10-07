@@ -217,27 +217,6 @@ impl StorageConnections {
         self.codes.connection().await
     }
 
-    pub(crate) async fn connect(self: &Arc<Self>) -> Result<(), SyncError> {
-        let owner = self.clone();
-        crate::coven::completion(tokio::spawn(async move {
-            let _call = owner.calls.lock().await;
-            owner.check_open()?;
-            let data = match owner.connection().await? {
-                Some(data) => data,
-                None if !matches!(&*owner.sync.subscribe().borrow(), SyncStatus::Disconnected) => {
-                    return owner.sync.start().await
-                }
-                None => return Err(SyncError::NoStorage),
-            };
-            let storage = owner
-                .connector
-                .connect(data.location, data.credentials, owner.device)
-                .await?;
-            owner.sync.connect(storage, true).await
-        }))
-        .await
-    }
-
     pub(crate) async fn unlock(self: &Arc<Self>) -> Result<ConnectedStorage, StoreKeyUnlockError> {
         let owner = self.clone();
         crate::coven::completion(tokio::spawn(async move {
@@ -267,8 +246,7 @@ impl StorageConnections {
         crate::coven::completion(tokio::spawn(async move {
             let _call = owner.calls.lock().await;
             owner.check_open()?;
-            owner.codes.forget_credentials().await?;
-            owner.sync.disconnect_wait().await
+            owner.sync.forget_storage().await
         }))
         .await
     }

@@ -130,7 +130,7 @@ The cloud becomes the sync medium. Devices push sealed, signed objects and
 pull each other's; it only ever holds ciphertext.
 
 ```rust
-handle.connect_sync(Some(key)).await?;
+handle.start_sync().await?;
 ```
 
 </div>

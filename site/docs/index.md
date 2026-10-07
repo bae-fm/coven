@@ -181,7 +181,7 @@ Reads begin when awaited; subscriptions begin when their `next()` is awaited.
 
 Everything else follows the same ownership boundary: `handle.write_with_blobs`
 commits a row and its file bytes in one transaction, `handle.pending_writes` reconstructs
-unpublished writes after restart, `handle.connect_sync` starts the background
+unpublished writes after restart, `handle.start_sync` starts the background
 loop, `handle.subscribe_sync_status` exposes its current state, and
 `handle.start_device_pairing()` returns the one code an existing device displays
 while it receives and approves the joining device's signed identity over the LAN.

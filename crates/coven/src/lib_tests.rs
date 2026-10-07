@@ -159,7 +159,7 @@ impl Network {
         let (handle, ()) = tokio::join!(joining, approve);
         let handle = handle.unwrap().unwrap();
         let store = decode_code_info(&invite.code).unwrap().store_id;
-        handle.connect_sync().await.unwrap();
+        handle.start_sync().await.unwrap();
         self.devices.push(Device {
             app,
             layout,
@@ -256,7 +256,7 @@ impl Network {
             .open(device.store)
             .await
             .unwrap();
-            device.handle.connect_sync().await.unwrap();
+            device.handle.start_sync().await.unwrap();
         }
         self.quiet().await;
     }
