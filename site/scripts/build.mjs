@@ -5,17 +5,17 @@ import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 
 const siteDir = dirname(dirname(fileURLToPath(import.meta.url)))
-const repoRoot = resolve(siteDir, '..')
+const workspace = resolve(siteDir, '../next')
 const execFileAsync = promisify(execFile)
 const { stdout: cargoMetadata } = await execFileAsync(
     'cargo',
     ['metadata', '--format-version', '1', '--no-deps'],
-    { cwd: repoRoot },
+    { cwd: workspace },
 )
 const rustdocSource = resolve(JSON.parse(cargoMetadata).target_directory, 'doc')
 const rustdocPublic = resolve(siteDir, 'public/rustdoc')
 
-await run('cargo', ['doc', '--no-deps', '--all-features'], repoRoot)
+await run('cargo', ['doc', '--no-deps', '--all-features'], workspace)
 await rm(rustdocPublic, { recursive: true, force: true })
 await cp(rustdocSource, rustdocPublic, { recursive: true })
 await run('npx', ['vitepress', 'build'], siteDir)

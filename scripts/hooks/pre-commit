@@ -44,43 +44,23 @@ restage_and_fail_if_changed() {
     fi
 }
 
-run_check "restricted-path Rust visibility" scripts/check-rust-visibility.sh || {
-    echo "Move the item under its owner and use private or pub(super) access"
+# next/ holds the implementation; formatting, clippy and the checker's rules
+# run before every commit (§21.4).
+run_check "cargo fmt" bash -c 'cd next && cargo fmt --all' || {
+    echo "cargo fmt failed"
     exit 1
 }
-
-run_check "owner construction boundaries" scripts/check-owner-boundaries.sh || {
-    echo "Inject retained owners; construct the owner graph only at approved roots"
-    exit 1
-}
-
-run_check "cargo fmt" cargo fmt --all || { echo "cargo fmt failed"; exit 1; }
 restage_and_fail_if_changed "cargo fmt"
 
-run_check "cargo clippy" cargo clippy --all-targets --all-features -- -D warnings || {
-    echo "Fix the warnings above and try again"
+run_check "formatting, clippy and the checker" next/scripts/check-fast.sh || {
+    echo "Fix the findings above and try again"
     exit 1
 }
-
-# next/ is a workspace of its own with its own fast checks (§21.4):
-# formatting, clippy, and the checker's rules.
-if echo "$CHANGED_FILES" | grep -q '^next/'; then
-    run_check "next: cargo fmt" bash -c 'cd next && cargo fmt --all' || {
-        echo "cargo fmt failed in next/"
-        exit 1
-    }
-    restage_and_fail_if_changed "cargo fmt (next/)"
-
-    run_check "next: formatting, clippy and the checker" next/scripts/check-fast.sh || {
-        echo "Fix the findings above and try again"
-        exit 1
-    }
-fi
 
 # Full test runs are periodic, not per-commit: CI runs the complete suite on
 # three platforms at every push. Set COVEN_HOOK_TESTS=1 to run it locally too.
 if [ "${COVEN_HOOK_TESTS:-0}" = "1" ]; then
-    run_check "cargo test" cargo test --all-features || {
+    run_check "cargo test" bash -c 'cd next && cargo test --all-features' || {
         echo "Tests failed"
         exit 1
     }
