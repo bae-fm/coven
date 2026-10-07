@@ -24,7 +24,7 @@ async fn transfer_limits_bound_requests_and_an_active_batch_keeps_its_limit() {
             .max_concurrent_uploads(NonZeroUsize::new(2).unwrap())
             .max_concurrent_downloads(NonZeroUsize::new(2).unwrap())
             .synced_tables(vec![SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
-                "files", Provenance::AppProvided, Uploads::WhenAsked, CacheFill::CacheLazy,
+                "files", Provenance::AppProvided, CacheFill::CacheLazy,
             ))])
             .migrations(vec![Migration::sql(1, "files", "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)")])
             .coven_migration_policy(CovenMigrationPolicy::ApplyPending).open(directory.id()).await.unwrap();
@@ -45,9 +45,6 @@ async fn transfer_limits_bound_requests_and_an_active_batch_keeps_its_limit() {
             for id in 0..4 { sql.execute("INSERT INTO files(id) VALUES(?1)", [id.to_string()])?; }
             Ok(())
         }).await.unwrap();
-        let mut files = Vec::new();
-        for id in 0..4 { files.push(handle.file_ref("files", id.to_string().as_str()).await.unwrap()); }
-        handle.upload_files(&files).await.unwrap();
         memory.set_faults(Faults { delay: Duration::from_millis(100), ..Faults::none() }).await;
         memory.reset_request_peak();
         let mut requests = memory.subscribe_requests();
@@ -104,7 +101,6 @@ fn tables() -> Vec<SyncedTable> {
             .carries_files(FileDecl::new(
                 "attachments",
                 Provenance::UserProvided,
-                Uploads::WhenAsked,
                 CacheFill::CacheLazy,
             )),
         SyncedTable::new("thumbnails", RowIdentity::IndependentUuid)
@@ -112,7 +108,6 @@ fn tables() -> Vec<SyncedTable> {
             .carries_files(FileDecl::new(
                 "thumbnails",
                 Provenance::AppProvided,
-                Uploads::WhenAttached,
                 CacheFill::CacheEager,
             )),
         SyncedTable::new("tags", RowIdentity::SharedKey),
@@ -447,6 +442,13 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         .await
         .unwrap();
     assert_eq!(pins.next().await.unwrap(), vec![Some(true), None]);
+    assert_eq!(
+        handle
+            .file_ref("thumbnails", thumbnail.as_str())
+            .await
+            .unwrap(),
+        file
+    );
     let readonly = builder(&app, layout.clone(), ids)
         .storage(storage)
         .open_read_only(directory.id())
@@ -456,33 +458,13 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
     assert_eq!(stream.read_at(1234, 37).await.unwrap(), vec![42; 37]);
     handle.evict_file(&file).await.unwrap();
     assert_eq!(pins.next().await.unwrap(), vec![Some(false), None]);
-    let row = thumbnail.clone();
-    let mut locations = handle.subscribe(move |sql| {
-        Ok(
-            sql.query_row("SELECT location FROM thumbnails WHERE id=?1", [&row], |r| {
-                r.get::<_, String>(0)
-            })?,
-        )
-    });
-    assert!(locations.next().await.unwrap().starts_with("uploaded "));
-    handle
-        .keep_files_on_this_device(
-            std::slice::from_ref(&file),
-            &std::collections::HashMap::new(),
-        )
-        .await
-        .unwrap();
-    let location = tokio::time::timeout(std::time::Duration::from_secs(10), locations.next())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(!location.starts_with("uploaded "));
-    let kept = handle
-        .file_ref("thumbnails", thumbnail.as_str())
-        .await
-        .unwrap();
-    assert!(matches!(kept.location(), FileLocation::OnDevice(_)));
-    assert_eq!(handle.read_file(&kept).await.unwrap(), vec![42; 200_000]);
+    assert_eq!(
+        handle
+            .file_ref("thumbnails", thumbnail.as_str())
+            .await
+            .unwrap(),
+        file
+    );
     handle.close().await.unwrap();
     assert!(matches!(
         app.delete_store(&directory, &[]).await,

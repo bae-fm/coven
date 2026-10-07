@@ -42,7 +42,7 @@ pub use coven_database::{
     MigrationError, MigrationOutcome, Params, PreparedUserFile, Provenance, Read,
     ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent, RemovalRule, Replacement, Row,
     RowChange, RowIdentity, RowKey, SchemaError, SqlContext, SqlReadContext, SyncedTable, ToSql,
-    Uploads, UserFile, WriteBatch, WriteId,
+    UserFile, WriteBatch, WriteId,
 };
 pub use coven_format::value::EntryId;
 pub use coven_format::MemberAccess;

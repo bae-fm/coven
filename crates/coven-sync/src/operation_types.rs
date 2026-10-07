@@ -16,8 +16,6 @@ pub enum OperationKind {
     MigrateSchema,
     /// Snapshot this device and reset one audience to that state.
     Reset,
-    /// Download an uploaded file and conditionally keep it on this device.
-    ChangeFileLocation,
     /// Write, upload and retain one audience snapshot.
     WriteSnapshot,
     /// Publish a migrated audience snapshot and its schema raise.

@@ -1,4 +1,4 @@
-//! Each operation's retained intent, including the captured file reference for a download.
+//! Each operation's retained intent and completed steps.
 
 use crate::snapshot_data::{RaisedVersion, SnapshotJob, SnapshotTask, SnapshotTrigger};
 use crate::{InviteAccess, OperationKind, SyncError};
@@ -96,7 +96,6 @@ pub(crate) enum Data {
     PublishSchema {
         version: u32,
     },
-    KeepFile(KeepFileWork),
     Snapshots(crate::snapshot_data::SnapshotTask),
     Entry(EntryWork),
     Invite(InviteWork),
@@ -104,14 +103,6 @@ pub(crate) enum Data {
         member: String,
         result: Option<MemberRemoval>,
     },
-}
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct KeepFileWork {
-    // Encoded FileRef contains its file key, like the private operation record.
-    pub(crate) reference: Vec<u8>,
-    // A changed row ends this intent permanently, including explicit retries.
-    pub(crate) obsolete: bool,
 }
 
 impl Data {
@@ -125,7 +116,6 @@ impl Data {
     pub(crate) fn kind(&self) -> OperationKind {
         match self {
             Self::PublishSchema { .. } => OperationKind::MigrateSchema,
-            Self::KeepFile(_) => OperationKind::ChangeFileLocation,
             Self::Entry(work) => work.intent.kind(),
             Self::Snapshots(task) => match task.job {
                 SnapshotJob::Write {
@@ -281,7 +271,6 @@ impl OperationKind {
         match self {
             Self::MigrateSchema => "migrate-schema",
             Self::Reset => "reset",
-            Self::ChangeFileLocation => "change-file-location",
             Self::WriteSnapshot => "write-snapshot",
             Self::RaiseSchema => "raise-schema",
             Self::RaiseFormat => "raise-format",

@@ -12,7 +12,6 @@ fn tables() -> Vec<SyncedTable> {
         SyncedTable::new("attachments", RowIdentity::SharedKey).carries_files(FileDecl::new(
             "attachments",
             Provenance::AppProvided,
-            Uploads::WhenAsked,
             CacheFill::CacheLazy,
         )),
     ]
@@ -116,10 +115,9 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         .await
         .unwrap();
     let local = handle.file_ref("attachments", "shared").await.unwrap();
-    handle
-        .upload_files(std::slice::from_ref(&local))
-        .await
-        .unwrap();
+    let queued = handle.subscribe_uploads().next().await.unwrap();
+    assert_eq!(queued.files.len(), 1);
+    assert_eq!(queued.files[0].file, local);
     let members = handle.get_members().await.unwrap();
     assert_eq!(members.len(), 1);
     assert!(members[0].is_self);
@@ -158,8 +156,8 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     assert_eq!(stream.read_at(70_000, 37).await.unwrap(), vec![42; 37]);
     assert_eq!(storage.request_count(), requests);
     assert!(matches!(
-        handle.upload_files(&[local]).await,
-        Err(OperationError::Database(DbError::FileRefChanged { .. }))
+        handle.read_file(&local).await,
+        Err(FileReadError::Database(DbError::FileRefChanged { .. }))
     ));
     assert!(matches!(
         handle.retry_blocked_operation(OperationId(-1)).await,

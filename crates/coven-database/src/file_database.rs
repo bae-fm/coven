@@ -15,8 +15,6 @@ use std::time::SystemTime;
 
 #[path = "file_cache.rs"]
 mod cache;
-#[path = "file_keep.rs"]
-mod keep;
 
 #[derive(Clone)]
 enum FileDatabaseAccess {
@@ -138,32 +136,6 @@ impl FileDatabase {
                     }
                 }
                 Ok(files)
-            })
-        })
-        .await
-    }
-    /// Queue every requested current local file atomically. An uploaded reference is a no-op.
-    pub async fn enqueue(&self, files: &[FileRef], now: SystemTime) -> Result<(), DbError> {
-        self.require_writer()?;
-        let files = files.to_vec();
-        self.run(move |db, schema, _, device| {
-            db.transaction(|db| {
-                for file in files {
-                    file_ref::validate(db, schema, &file)?;
-                    match file.location() {
-                        crate::FileLocation::Uploaded => {}
-                        crate::FileLocation::OnDevice(found) if found == device => {
-                            file_queue::enqueue(db, schema, &file, now)?
-                        }
-                        crate::FileLocation::OnDevice(_) => {
-                            return Err(DbError::FileBytesRequired {
-                                table: file.table().into(),
-                                key: file.key().clone(),
-                            })
-                        }
-                    }
-                }
-                Ok(())
             })
         })
         .await

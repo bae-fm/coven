@@ -941,26 +941,17 @@ pub enum CacheFill {
     CacheLazy,
 }
 
-pub enum Uploads {
-    /// A file starts uploading once the write attaching it commits; a later
-    /// write marks it uploaded once it is stored (§16.5).
-    WhenAttached,
-    /// A file stays on the device that attached it until the app uploads it
-    /// (§16.1).
-    WhenAsked,
-}
-
-/// One table's file columns, namespace, kind, upload and cache choices (§16, E2).
+/// One table's file columns, namespace, kind and cache choice (§16, E2).
 pub struct FileDecl { /* private fields */ }
 
 impl FileDecl {
     /// Declares the file a table's rows carry: its namespace, which groups
-    /// files in the cache, each with its own budget (E8), its kind, when
-    /// it is uploaded, and when devices download it.
+    /// files in the cache, each with its own budget (E8), its kind, and when
+    /// devices download it. Every attached file is queued for upload as the
+    /// attaching write commits, including while storage is disconnected.
     pub fn new(
         namespace: impl Into<String>,
         provenance: Provenance,
-        uploads: Uploads,
         fill: CacheFill,
     ) -> Self;
 
@@ -977,7 +968,8 @@ impl FileDecl {
 
     /// The column holding where the file is, which coven fills in:
     /// `uploaded` with the file's id and key, or the id of the device that
-    /// has it (§16.1, §16.2). Read it through `FileRef::location`.
+    /// attached it, while waiting to upload (§16.1, §16.2). Read it through
+    /// `FileRef::location`.
     /// Must allow NULL; app SQL cannot assign it. Defaults to `location`.
     pub fn with_location_column(self, column: impl Into<String>) -> Self;
 
@@ -996,11 +988,11 @@ fn tables() -> Vec<SyncedTable> {
         // Descendants of notes. Each attachment carries the user's own file.
         SyncedTable::new("attachments", RowIdentity::IndependentUuid)
             .audience_from("note_id")
-            .carries_files(FileDecl::new("attachments", Provenance::UserProvided, Uploads::WhenAsked, CacheFill::CacheLazy)),
+            .carries_files(FileDecl::new("attachments", Provenance::UserProvided, CacheFill::CacheLazy)),
         // A thumbnail the app makes, in the note's audience.
         SyncedTable::new("thumbnails", RowIdentity::IndependentUuid)
             .audience_from("note_id")
-            .carries_files(FileDecl::new("thumbnails", Provenance::AppProvided, Uploads::WhenAttached, CacheFill::CacheEager)),
+            .carries_files(FileDecl::new("thumbnails", Provenance::AppProvided, CacheFill::CacheEager)),
         // In the store, with keys from the tag's name.
         SyncedTable::new("tags", RowIdentity::SharedKey),
         // A shared key over two columns, which includes note_id (§14.1).
@@ -1705,14 +1697,6 @@ pub enum SyncError {
     WrongStore { expected: StoreId, actual: StoreId },
     /// A credential update's code names another member (E9).
     WrongMember { expected: MemberId, actual: MemberId },
-    /// Reading a file needed by an operation failed (§16.1).
-    File(FileReadError),
-    /// A user-provided download destination already exists (§16.1).
-    DestinationExists { path: PathBuf },
-    /// A user-provided file has no destination in the keep call.
-    DestinationRequired { id: String },
-    /// Multiple requested files name the same download destination.
-    DestinationRepeated { path: PathBuf },
     /// Circle membership is required by this operation.
     CircleNotMember(CircleId),
     /// The circle has been deleted or does not exist.
@@ -2039,8 +2023,6 @@ pub enum OperationKind {
     ReloadFromSnapshot,
     /// Write a snapshot and delete covered logs and unused files.
     Snapshot,
-    /// Upload a file or keep it on this device.
-    ChangeFileLocation,
     /// Grant access, approve or decline a join, and settle the invite.
     Invite,
     /// Snapshot and reset an audience (§19.3).
@@ -2055,8 +2037,7 @@ pub enum StartedBy {
     Coven,
 }
 
-/// Operation calls retain the same typed causes as sync calls, including file
-/// failures before an upload is accepted into its queue (§18, E7).
+/// Operation calls retain the same typed causes as sync calls (§18).
 pub type OperationError = SyncError;
 
 impl CovenHandle {
@@ -2098,11 +2079,11 @@ pub struct BlockedOperation {
   audience ([§14.2](coven.md#142-moving-rows)).
   - The write commits at once on this device; its moved rows' uploaded
     files stay where they are ([§16.1](coven.md#161-kinds-and-where-files-are)).
-- Uploading a file, and keeping an uploaded file on one device, change
-  where it is ([§16.1](coven.md#161-kinds-and-where-files-are)). Uploading records
-  it in the file queue; keeping it on one device records an operation
-  ([§18.1](coven.md#181-operations)). Both calls return after recording the work,
-  which finishes whenever storage can be reached.
+- Files enter the upload queue as the attaching write commits, including
+  with no storage connected. Once stored, a file's where-column changes from
+  the attaching device's id to `uploaded` ([§16.1](coven.md#161-kinds-and-where-files-are)).
+  Pinning and the cache keep uploaded files on a device without changing
+  that column.
 - Upload attempts read the source again, checking its size and whole-file
   content hash before transfer, and the first-read hash of each plaintext
   chunk before encryption. A changed user original reports `UserFileChanged`;
@@ -2138,19 +2119,6 @@ pub enum RecordedUploadFailure {
 pub type UploadFailures = Vec<(FileRef, Arc<UploadFailure>)>;
 
 impl CovenHandle {
-    /// Uploads files that are on this device, then marks them uploaded.
-    pub async fn upload_files(&self, files: &[FileRef]) -> Result<(), OperationError>;
-
-    /// Downloads uploaded files to this device and marks them as on this
-    /// device; the uploaded copies are deleted once unused. `destinations`
-    /// maps each user-provided file's id to the path it is written to, which
-    /// must not already exist.
-    pub async fn keep_files_on_this_device(
-        &self,
-        files: &[FileRef],
-        destinations: &HashMap<String, PathBuf>,
-    ) -> Result<(), OperationError>;
-
     /// A live query over the upload queue: every file waiting to upload, with
     /// its progress. The first result is the current state.
     pub fn subscribe_uploads(&self) -> UploadsLiveQuery;
@@ -2208,10 +2176,6 @@ pub enum DrainOutcome {
 Example:
 
 ```rust
-// Upload a note's attachment, which is on this device.
-let attachment = handle.file_ref("attachments", attachment_id.as_str()).await?;
-handle.upload_files(&[attachment]).await?;
-
 let mut uploads = handle.subscribe_uploads();
 loop {
     let state = uploads.next().await?;
@@ -2284,7 +2248,7 @@ impl CovenHandle {
     pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError>;
 
     /// Makes sure a file's bytes are on this device: an uploaded file is
-    /// downloaded into the cache, and one kept on this device is checked.
+    /// downloaded into the cache, and one waiting to upload here is checked.
     pub async fn ensure_file_on_device(&self, file: &FileRef) -> Result<(), FileReadError>;
 
     /// The path, size and modification time coven recorded for a row's
@@ -2315,7 +2279,7 @@ impl CovenHandle {
     pub fn subscribe_rows_pinned(&self, table: &str, keys: Vec<RowKey>) -> RowsPinnedLiveQuery;
 
     /// Removes an uploaded file's copies from the cache, pinned or not. Never
-    /// touches a file kept on this device, or storage; a later read
+    /// touches a file waiting to upload, or storage; a later read
     /// downloads it again.
     pub async fn evict_file(&self, file: &FileRef) -> Result<(), FileReadError>;
 
@@ -2350,7 +2314,7 @@ pub enum FileLocation {
     /// The where-column holds `uploaded <device id> <file id> <key in lowercase hex>`
     /// (Appendix D12); the reference retains both privately.
     Uploaded,
-    /// Only on the named device.
+    /// Waiting to upload on the device that attached it.
     OnDevice(DeviceId),
 }
 

@@ -3,7 +3,7 @@
 use crate::{
     files::file_error::*,
     files::{Files, FilesInner},
-    OperationError,
+    SyncError,
 };
 use coven_crypto::{FileKey, SecretBytes, FILE_CHUNK_TAG_LEN};
 use coven_database::{DbError, FileRef, FileUpload, LocalFileStream};
@@ -137,28 +137,6 @@ impl UploadsLiveQuery {
     }
 }
 impl Files {
-    /// Record requests and return after the queue commits. Network work never
-    /// delays the attaching application write or this durable acceptance.
-    pub async fn upload_files(&self, files: &[FileRef]) -> Result<(), OperationError> {
-        self.inner.check_open()?;
-        for file in files {
-            self.inner.database.validate(file).await?;
-            if matches!(file.location(), coven_database::FileLocation::OnDevice(_)) {
-                self.inner
-                    .database
-                    .open_local(file)
-                    .await
-                    .map_err(FileReadError::from)?;
-            }
-        }
-        self.inner
-            .database
-            .enqueue(files, self.inner.clock.now())
-            .await?;
-        self.inner.notify();
-        self.inner.wake.notify_one();
-        Ok(())
-    }
     /// Observe queue and transfer changes without polling.
     pub fn subscribe_uploads(&self) -> UploadsLiveQuery {
         UploadsLiveQuery {
@@ -170,9 +148,19 @@ impl Files {
     }
 }
 impl FilesInner {
-    pub(crate) async fn drain_uploads(&self, force: bool) -> Result<DrainOutcome, DbError> {
+    pub(crate) async fn drain_uploads(&self, force: bool) -> Result<DrainOutcome, SyncError> {
         let _guard = self.drain.lock().await;
         self.check_open()?;
+        // set_storage holds the same guard, so this connection remains in place
+        // throughout the drain. Disconnected files wait without failed attempts.
+        if self
+            .storage
+            .read()
+            .expect("storage lock poisoned")
+            .is_none()
+        {
+            return Err(SyncError::NoStorage);
+        }
         if self.paused() {
             return Ok(DrainOutcome::Paused);
         }

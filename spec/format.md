@@ -494,7 +494,9 @@
     without the rest.
 - The file's key and id are in its row's where-column, which coven writes
   as the text `uploaded <device id> <file id> <key in lowercase hex>`, or the decimal
-  id of the device that has it ([§16.1](coven.md#161-kinds-and-where-files-are)).
+  id of the device that attached it while it waits to upload
+  ([§16.1](coven.md#161-kinds-and-where-files-are)). A file moves only from
+  that device id to `uploaded`; pinning and caching do not change this value.
 
 ### D13 Codes
 

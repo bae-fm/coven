@@ -353,7 +353,7 @@ mod memory {
         let tables = || {
             let mut declarations = references();
             declarations[1] = declarations[1].clone().carries_files(crate::FileDecl::new(
-                "linked-files", crate::Provenance::AppProvided, crate::Uploads::WhenAsked, crate::CacheFill::CacheLazy,
+                "linked-files", crate::Provenance::AppProvided, crate::CacheFill::CacheLazy,
             ).with_id_column("file"));
             declarations
         };

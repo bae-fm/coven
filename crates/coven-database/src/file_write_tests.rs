@@ -12,7 +12,6 @@ pub(crate) fn tables(kind: Provenance) -> Vec<SyncedTable> {
         SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
             "files",
             kind,
-            Uploads::WhenAsked,
             CacheFill::CacheLazy,
         )),
     ]
@@ -566,13 +565,8 @@ async fn shared_triggers_cannot_write_managed_columns_and_allowed_inserts_can_at
 async fn shared_bytes_last_until_the_final_row_deletion_commits() {
     let store = TestStore::new();
     let declaration = SyncedTable::new("files", RowIdentity::SharedKey).carries_files(
-        FileDecl::new(
-            "files",
-            Provenance::AppProvided,
-            Uploads::WhenAsked,
-            CacheFill::CacheLazy,
-        )
-        .with_id_column("file"),
+        FileDecl::new("files", Provenance::AppProvided, CacheFill::CacheLazy)
+            .with_id_column("file"),
     );
     let schema = "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEXT,size INTEGER,hash BLOB,location TEXT)";
     let db = store.schema(vec![declaration], schema).await.unwrap();
@@ -631,7 +625,6 @@ async fn a_move_preserves_the_owned_copy_and_a_panicking_write_removes_new_bytes
         .carries_files(FileDecl::new(
             "files",
             Provenance::AppProvided,
-            Uploads::WhenAsked,
             CacheFill::CacheLazy,
         ));
     let schema = "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT,audience TEXT NOT NULL)";

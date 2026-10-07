@@ -320,10 +320,7 @@ impl StoreLogSync {
                     access: work.access.member_access(),
                 }));
             }
-            Data::Revoke { .. }
-            | Data::KeepFile(_)
-            | Data::Snapshots(_)
-            | Data::PublishSchema { .. } => unreachable!(),
+            Data::Revoke { .. } | Data::Snapshots(_) | Data::PublishSchema { .. } => unreachable!(),
         };
         Ok(Some(match intent {
             Intent::Reset { snapshot } => {
@@ -419,7 +416,7 @@ impl StoreLogSync {
                     Some(member.parse()?)
                 }
                 Data::Invite(_) => None,
-                Data::KeepFile(_) | Data::Snapshots(_) | Data::PublishSchema { .. } => {
+                Data::Snapshots(_) | Data::PublishSchema { .. } => {
                     return Err(coven_database::DbError::DamagedDatabase.into())
                 }
             };

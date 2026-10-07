@@ -1,5 +1,4 @@
 use super::*;
-use coven_foundation::clock::Clock;
 
 async fn post(device: &Device, storage: &Arc<MemoryStorage>) {
     assert!(crate::DeviceLogSync::new(
@@ -160,7 +159,7 @@ async fn removed_member_logs_belong_to_the_store_owner_and_stay_on_google_drive(
 
 #[tokio::test]
 async fn a_file_named_only_by_a_retained_log_write_stays_until_that_log_goes() {
-    use coven_database::{CacheFill, FileDatabase, FileDecl, Provenance, Uploads};
+    use coven_database::{CacheFill, FileDatabase, FileDecl, Provenance};
     let storage = snapshot_storage();
     let mut a = device(storage.clone(), 1, member(1), store(1)).await;
     a.db.close().await.unwrap();
@@ -169,7 +168,6 @@ async fn a_file_named_only_by_a_retained_log_write_stays_until_that_log_goes() {
             .carries_files(FileDecl::new(
                 "files",
                 Provenance::AppProvided,
-                Uploads::WhenAsked,
                 CacheFill::CacheLazy,
             ))])
         .migrations(vec![Migration::sql(
@@ -204,11 +202,6 @@ async fn a_file_named_only_by_a_retained_log_write_stays_until_that_log_goes() {
     )
     .await
     .unwrap();
-    let file = a.db.file_ref("files", "one").await.unwrap();
-    FileDatabase::new(a.db.clone())
-        .enqueue(&[file], a.clock.now())
-        .await
-        .unwrap();
     files.retry_uploads_now().await.unwrap();
     let uploaded =
         a.db.file_ref("files", "one")

@@ -9,7 +9,6 @@ fn declaration() -> FileDecl {
     FileDecl::new(
         "attachments",
         Provenance::AppProvided,
-        Uploads::WhenAttached,
         CacheFill::CacheEager,
     )
 }
@@ -36,7 +35,6 @@ async fn default_and_custom_file_columns_are_checked_on_the_synced_table() {
             FileDecl::new(
                 "originals",
                 Provenance::UserProvided,
-                Uploads::WhenAsked,
                 CacheFill::CacheLazy,
             )
             .with_id_column("FILE")

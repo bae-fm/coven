@@ -213,14 +213,7 @@ async fn unguarded_shared_triggers_are_schema_errors() {
 
 #[tokio::test]
 async fn file_declarations_check_every_named_column_and_accept_custom_names() {
-    let file = || {
-        FileDecl::new(
-            "audio",
-            Provenance::UserProvided,
-            Uploads::WhenAsked,
-            CacheFill::CacheLazy,
-        )
-    };
+    let file = || FileDecl::new("audio", Provenance::UserProvided, CacheFill::CacheLazy);
     let store = TestStore::new();
     let error = store
         .schema(

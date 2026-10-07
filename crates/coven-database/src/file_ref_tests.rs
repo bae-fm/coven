@@ -6,7 +6,6 @@ fn tables(kind: Provenance) -> Vec<SyncedTable> {
         SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
             "files",
             kind,
-            Uploads::WhenAsked,
             CacheFill::CacheLazy,
         )),
     ]
@@ -99,8 +98,7 @@ async fn uploaded_locations_retain_the_key_identity_and_refuse_malformed_encodin
     let device_ref = db.file_ref("files", "7").await.unwrap();
     let id = uuid::Uuid::from_u128(7);
     let location = format!("uploaded 1 {id} {}", "ab".repeat(32));
-    // A committed uploaded-row fixture; file transfer and location-changing
-    // operations belong to sync, not this database test.
+    // A committed uploaded-row fixture; transfer completion is exercised by sync.
     db.commit_writer(|sql| {
         sql.internal_execute("UPDATE files SET location=?1", [location])
             .unwrap()
@@ -314,16 +312,11 @@ async fn custom_columns_and_inherited_audience_are_read_together_with_composite_
                 .key_columns(["note_id", "name"])
                 .audience_from("note_id")
                 .carries_files(
-                    FileDecl::new(
-                        "files",
-                        Provenance::AppProvided,
-                        Uploads::WhenAsked,
-                        CacheFill::CacheLazy,
-                    )
-                    .with_id_column("TOKEN")
-                    .with_size_column("BYTES")
-                    .with_hash_column("DIGEST")
-                    .with_location_column("WHERE_AT"),
+                    FileDecl::new("files", Provenance::AppProvided, CacheFill::CacheLazy)
+                        .with_id_column("TOKEN")
+                        .with_size_column("BYTES")
+                        .with_hash_column("DIGEST")
+                        .with_location_column("WHERE_AT"),
                 ),
         ]
     };

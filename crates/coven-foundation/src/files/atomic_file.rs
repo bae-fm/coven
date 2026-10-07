@@ -76,12 +76,6 @@ impl AtomicFile {
         Self { path }
     }
 
-    pub(super) fn publish(&self, destination: &Path) -> Result<(), FileError> {
-        rename_new(&self.path, destination)
-            .map_err(|source| FileError::at("publish download", destination, source))?;
-        sync_publication(destination)
-    }
-
     pub(super) fn exists(&self) -> Result<bool, FileError> {
         match fs::symlink_metadata(&self.path) {
             Ok(_) => Ok(true),

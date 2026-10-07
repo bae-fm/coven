@@ -237,66 +237,59 @@ impl tokio::io::AsyncRead for CrashingReader {
 }
 
 #[tokio::test]
-async fn a_downloaded_location_change_releases_this_devices_owned_copy() {
+async fn a_downloaded_upload_releases_this_devices_owned_copy() {
     use coven_format::value::{Value, WritePositions};
-    use coven_foundation::id_source::DeviceId;
     use coven_merge::{Operation, Timestamp, WriteId};
-    for uploaded in [false, true] {
-        let store = TestStore::new();
-        let db = store
-            .schema(tables(Provenance::AppProvided), SCHEMA)
-            .await
-            .unwrap();
-        attach(&db, b"original".to_vec(), true).await.unwrap();
-        let mut record = crate::write::tests::records(&db).remove(0);
-        let original = record.header.position;
-        let other = DeviceId(original.device.0.wrapping_add(1));
-        record.header.position = WriteId {
-            device: other,
-            number: 1,
-        };
-        record.header.had_read = WritePositions(vec![original]);
-        record.header.timestamp =
-            Timestamp::new(record.header.timestamp.milliseconds() + 1, 0, other).unwrap();
-        let row = &mut record.parts[0].rows[0];
-        let Operation::Insert(mut columns) = row.change.operation.clone() else {
-            panic!("insert");
-        };
-        columns.retain(|name, _| name != "title");
-        row.old = columns
-            .iter()
-            .map(|(name, value)| (name.clone(), value.value.clone()))
-            .collect();
-        columns.get_mut("location").unwrap().value = Value::Text(if uploaded {
-            format!(
-                "uploaded 1 {} {}",
-                uuid::Uuid::from_u128(7),
-                "ab".repeat(32)
-            )
-        } else {
-            other.0.to_string()
-        });
-        row.change.operation = Operation::Update(columns);
-        row.change.generation = 1;
-        let reference = db.file_ref("files", "7").await.unwrap();
-        db.apply_downloaded(record.into()).await.unwrap();
-        assert_eq!(local_count(&db, "_coven_device_files"), 0);
-        assert_eq!(local_count(&db, "_coven_file_removals"), 0);
-        assert!(owned_paths(&store).is_empty());
-        assert!(matches!(
-            db.write(move |sql| sql.validate_file_ref(&reference)).await,
-            Err(DbError::FileRefChanged { .. })
-        ));
-        assert_eq!(
-            db.file_ref("files", "7").await.unwrap().location(),
-            if uploaded {
-                FileLocation::Uploaded
-            } else {
-                FileLocation::OnDevice(other)
-            }
-        );
-        db.close().await.unwrap();
-    }
+    let store = TestStore::new();
+    let db = store
+        .schema(tables(Provenance::AppProvided), SCHEMA)
+        .await
+        .unwrap();
+    attach(&db, b"original".to_vec(), true).await.unwrap();
+    let mut record = crate::write::tests::records(&db).remove(0);
+    let original = record.header.position;
+    record.header.position = WriteId {
+        device: original.device,
+        number: original.number + 1,
+    };
+    record.header.had_read = WritePositions(vec![original]);
+    record.header.timestamp = Timestamp::new(
+        record.header.timestamp.milliseconds() + 1,
+        0,
+        original.device,
+    )
+    .unwrap();
+    let row = &mut record.parts[0].rows[0];
+    let Operation::Insert(mut columns) = row.change.operation.clone() else {
+        panic!("insert");
+    };
+    columns.retain(|name, _| name != "title");
+    row.old = columns
+        .iter()
+        .map(|(name, value)| (name.clone(), value.value.clone()))
+        .collect();
+    columns.get_mut("location").unwrap().value = Value::Text(format!(
+        "uploaded {} {} {}",
+        original.device.0,
+        uuid::Uuid::from_u128(7),
+        "ab".repeat(32)
+    ));
+    row.change.operation = Operation::Update(columns);
+    row.change.generation = 1;
+    let reference = db.file_ref("files", "7").await.unwrap();
+    db.apply_downloaded(record.into()).await.unwrap();
+    assert_eq!(local_count(&db, "_coven_device_files"), 0);
+    assert_eq!(local_count(&db, "_coven_file_removals"), 0);
+    assert!(owned_paths(&store).is_empty());
+    assert!(matches!(
+        db.write(move |sql| sql.validate_file_ref(&reference)).await,
+        Err(DbError::FileRefChanged { .. })
+    ));
+    assert_eq!(
+        db.file_ref("files", "7").await.unwrap().location(),
+        FileLocation::Uploaded
+    );
+    db.close().await.unwrap();
 }
 
 #[tokio::test]

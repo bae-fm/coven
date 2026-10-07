@@ -43,12 +43,7 @@ fn path(file: &FileRef) -> ObjectPath {
 
 #[tokio::test]
 async fn an_excluded_snapshot_prevents_proving_file_absence() {
-    let f = Fixture::new(
-        Provenance::AppProvided,
-        Uploads::WhenAsked,
-        CacheFill::CacheLazy,
-    )
-    .await;
+    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     let mut sync = sync(&f).await;
     let file = f.uploaded("old", vec![31; CHUNK]).await;
     sync.write_snapshot(Audience::Store).await.unwrap();
@@ -93,12 +88,7 @@ async fn an_excluded_snapshot_prevents_proving_file_absence() {
 
 #[tokio::test]
 async fn file_references_survive_in_waiting_writes_and_kept_snapshots() {
-    let f = Fixture::new(
-        Provenance::AppProvided,
-        Uploads::WhenAsked,
-        CacheFill::CacheLazy,
-    )
-    .await;
+    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     let mut sync = sync(&f).await;
     let old = f.uploaded("old", vec![31; CHUNK]).await;
     let kept = f.uploaded("kept", vec![32; CHUNK]).await;
@@ -133,12 +123,7 @@ async fn file_references_survive_in_waiting_writes_and_kept_snapshots() {
 
 #[tokio::test]
 async fn deleting_an_unused_publication_retires_its_queue() {
-    let f = Fixture::new(
-        Provenance::AppProvided,
-        Uploads::WhenAsked,
-        CacheFill::CacheLazy,
-    )
-    .await;
+    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     let mut sync = sync(&f).await;
     super::uploads::unused_upload(&f).await;
     sync.run_retention().await.unwrap();
@@ -148,6 +133,12 @@ async fn deleting_an_unused_publication_retires_its_queue() {
         .await
         .unwrap()
         .is_empty());
-    assert!(f.files.inner.database.uploads().await.unwrap().is_empty());
+    let queue = f.files.inner.database.uploads().await.unwrap();
+    assert_eq!(queue.len(), 1);
+    assert_eq!(
+        queue[0].file,
+        f.database.file_ref("files", "old").await.unwrap()
+    );
+    assert!(!queue[0].stored && !queue[0].unused);
     f.close().await;
 }

@@ -32,24 +32,6 @@ pub enum SyncError {
         #[source]
         cleanup: Box<SyncError>,
     },
-    /// A user-selected download path already has a filesystem entry.
-    #[error("download destination already exists: {}", path.display())]
-    DestinationExists {
-        /// The path that was refused, never replaced.
-        path: std::path::PathBuf,
-    },
-    /// Keeping a user-provided file requires its destination path.
-    #[error("file {id} requires a download destination")]
-    DestinationRequired {
-        /// The file id used as the destinations map key.
-        id: String,
-    },
-    /// Two requested files cannot both own one download destination.
-    #[error("download destination is repeated: {}", path.display())]
-    DestinationRepeated {
-        /// The repeated destination.
-        path: std::path::PathBuf,
-    },
     /// Reading a snapshot stream failed.
     #[error(transparent)]
     SnapshotIo(#[from] std::io::Error),
@@ -114,9 +96,6 @@ pub enum SyncError {
     /// The local database failed.
     #[error(transparent)]
     Database(#[from] DbError),
-    /// A file reference or source needed by the operation could not be used.
-    #[error(transparent)]
-    File(crate::FileReadError),
     /// Unlocking or keeping keys failed.
     #[error(transparent)]
     SecureStorage(#[from] KeyError),
@@ -196,14 +175,6 @@ impl From<coven_format::Error> for SyncError {
                 Self::Stopped(SyncFailure::UpdateRequired)
             }
             error => Self::Format(error),
-        }
-    }
-}
-impl From<crate::FileReadError> for SyncError {
-    fn from(error: crate::FileReadError) -> Self {
-        match error {
-            crate::FileReadError::UpdateRequired => Self::Stopped(SyncFailure::UpdateRequired),
-            error => Self::File(error),
         }
     }
 }

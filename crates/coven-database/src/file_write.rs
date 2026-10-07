@@ -476,93 +476,7 @@ impl<'a> FileWrite<'a> {
         reference: &crate::FileRef,
         location: &coven_crypto::SecretText,
     ) -> Result<(), DbError> {
-        self.set_location(reference, location.as_str())?;
-        let (key, _) = file_row::lookup(
-            self.database,
-            self.schema,
-            reference.table(),
-            reference.key(),
-        )?;
-        self.database.internal_execute(
-            "DELETE FROM _coven_file_chunks WHERE table_name=?1 AND key=?2 AND column_name=?3",
-            (&key.0, &key.1, reference.column()),
-        )?;
-        Ok(())
-    }
-
-    pub(crate) fn keep_file(
-        &self,
-        reference: &crate::FileRef,
-        name: &FileName,
-        prepared: Option<PreparedUserFile>,
-    ) -> Result<(), DbError> {
-        crate::file_ref::validate(self.database, self.schema, reference)?;
-        let (_, file) = file_row::declaration(self.schema, reference.table())?;
-        let (key, values) = file_row::lookup(
-            self.database,
-            self.schema,
-            reference.table(),
-            reference.key(),
-        )?;
-        match (file.provenance.clone(), prepared) {
-            (Provenance::AppProvided, None) => {
-                let reader = self
-                    .directory
-                    .file(coven_foundation::files::FileArea::AppProvided, name)
-                    .open_reader()?;
-                let mut hasher = crate::file_hashes::FileHasher::new();
-                reader.scan(|bytes| hasher.update(bytes))?;
-                let hashes = hasher.finish();
-                if reader.size() != reference.plaintext_size()
-                    || hashes.content != reference.content_hash()
-                {
-                    return Err(DbError::FileAttachmentChanged {
-                        table: reference.table().into(),
-                        key: reference.key().clone(),
-                    });
-                }
-                self.forget_owned(&key, &file.id)?;
-                self.database.internal_execute(
-                    "INSERT INTO _coven_device_files(table_name,key,column_name,identity,path,chunk_size) VALUES(?1,?2,?3,?4,?5,?6)",
-                    (&key.0, &key.1, &file.id, file_row::identity(file, &values)?, name.as_str(), coven_format::file::DEFAULT_CHUNK_SIZE),
-                )?;
-                hashes.record(
-                    self.database,
-                    &key,
-                    &file.id,
-                    &file_row::identity(file, &values)?.ok_or(DbError::DamagedDatabase)?,
-                    reference.plaintext_size(),
-                )?;
-            }
-            (Provenance::UserProvided, Some(prepared)) => {
-                prepared.observed.validate()?;
-                file_row::check_size(&values, file, prepared.observed.size())?;
-                if prepared.hashes.content != reference.content_hash() {
-                    return Err(DbError::FileAttachmentChanged {
-                        table: reference.table().into(),
-                        key: reference.key().clone(),
-                    });
-                }
-                self.database.internal_execute(
-                    "INSERT INTO _coven_user_files(table_name,key,column_name,identity,path,size,modified_at,chunk_size) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
-                     ON CONFLICT(table_name,key,column_name) DO UPDATE SET identity=excluded.identity,path=excluded.path,size=excluded.size,modified_at=excluded.modified_at,chunk_size=excluded.chunk_size",
-                    rusqlite::params![&key.0, &key.1, &file.id, file_row::identity(file, &values)?, crate::user_file::encode_path(prepared.observed.path()), prepared.observed.size().to_be_bytes().as_slice(), crate::user_file::encode_time(prepared.observed.modified_at()), coven_format::file::DEFAULT_CHUNK_SIZE],
-                )?;
-                prepared.hashes.record(
-                    self.database,
-                    &key,
-                    &file.id,
-                    &file_row::identity(file, &values)?.ok_or(DbError::DamagedDatabase)?,
-                    prepared.observed.size(),
-                )?;
-                self.originals.borrow_mut().push(prepared);
-            }
-            _ => return Err(DbError::DamagedDatabase),
-        }
-        self.set_location(reference, &self.device.0.to_string())
-    }
-
-    fn set_location(&self, reference: &crate::FileRef, location: &str) -> Result<(), DbError> {
+        let location = location.as_str();
         crate::file_ref::validate(self.database, self.schema, reference)?;
         let (table, file) = file_row::declaration(self.schema, reference.table())?;
         let (key, mut expected) = file_row::lookup(
@@ -604,6 +518,10 @@ impl<'a> FileWrite<'a> {
                 key: reference.key().clone(),
             });
         }
+        self.database.internal_execute(
+            "DELETE FROM _coven_file_chunks WHERE table_name=?1 AND key=?2 AND column_name=?3",
+            (&key.0, &key.1, reference.column()),
+        )?;
         Ok(())
     }
 

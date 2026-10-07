@@ -307,7 +307,7 @@ async fn deletion_and_reversal_commit_marks_and_visible_rows_together() {
 #[tokio::test]
 async fn circle_deletion_commits_file_removal_with_the_entry_and_rolls_both_back() {
     use crate::file_write::tests::owned_paths;
-    use crate::{CacheFill, FileDecl, Provenance, Uploads};
+    use crate::{CacheFill, FileDecl, Provenance};
 
     let store = TestStore::new();
     let circle = CircleId(uuid::Uuid::from_u128(2));
@@ -316,7 +316,6 @@ async fn circle_deletion_commits_file_removal_with_the_entry_and_rolls_both_back
         .carries_files(FileDecl::new(
             "files",
             Provenance::AppProvided,
-            Uploads::WhenAsked,
             CacheFill::CacheLazy,
         ));
     let db = store

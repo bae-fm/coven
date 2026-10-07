@@ -1,6 +1,6 @@
 //! Durable file upload facts; provider session bytes remain opaque to SQLite.
 
-use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError, FileRef, Uploads};
+use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError, FileRef};
 use coven_crypto::SecretBytes;
 use coven_format::file::FileHeader;
 use std::time::SystemTime;
@@ -10,7 +10,7 @@ use std::time::SystemTime;
 pub struct FileUpload {
     /// Local queue identity, stable across retries.
     pub id: i64,
-    /// The exact row version requested for upload.
+    /// The exact row version queued by its attaching write.
     pub file: FileRef,
     /// When this device queued the file.
     pub queued_at: SystemTime,
@@ -32,7 +32,7 @@ pub struct FileUpload {
     pub unused: bool,
 }
 
-pub(crate) fn enqueue(
+fn enqueue(
     db: &DatabaseConnection,
     schema: &WriteSchema,
     file: &FileRef,
@@ -80,12 +80,6 @@ pub(crate) fn attached(
     now: SystemTime,
 ) -> Result<(), DbError> {
     for (table, key) in keys {
-        let Some(file) = &schema.declaration(&table).files else {
-            continue;
-        };
-        if file.uploads != Uploads::WhenAttached {
-            continue;
-        }
         match crate::file_ref::read(
             db,
             schema,

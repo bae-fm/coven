@@ -4,8 +4,6 @@
 mod file_cache;
 #[path = "file_error.rs"]
 mod file_error;
-#[path = "file_keep.rs"]
-mod file_keep;
 #[path = "file_read.rs"]
 mod file_read;
 #[path = "file_upload.rs"]
@@ -87,7 +85,7 @@ impl Drop for FileWorker {
     }
 }
 impl Files {
-    /// Compose the file owner. Storage may be absent for device-local use.
+    /// Compose the file owner. Storage may be absent while uploads wait.
     pub fn new(
         database: FileDatabase,
         directory: StoreDir,
@@ -139,8 +137,12 @@ impl Files {
                 }
                 let Some(owner) = weak.upgrade() else { break };
                 let work = async {
-                    if let Err(error) = owner.drain_uploads(false).await {
-                        tracing::error!(?error, "upload queue failed");
+                    match owner.drain_uploads(false).await {
+                        Ok(_) => (),
+                        Err(SyncError::NoStorage) => {
+                            tracing::debug!("file uploads waiting for storage");
+                        }
+                        Err(error) => tracing::error!(?error, "upload queue failed"),
                     }
                     owner.fill_eager().await;
                 };
@@ -186,17 +188,7 @@ impl Files {
     }
     /// Retry all waiting files now; no timer or implicit retry is installed.
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError> {
-        self.inner.check_open()?;
-        if self
-            .inner
-            .storage
-            .read()
-            .expect("storage lock poisoned")
-            .is_none()
-        {
-            return Err(SyncError::NoStorage);
-        }
-        Ok(self.inner.drain_uploads(true).await?)
+        self.inner.drain_uploads(true).await
     }
     /// Pause between confirmed parts, preserving the current provider session.
     pub fn set_uploads_paused(&self, paused: bool) {

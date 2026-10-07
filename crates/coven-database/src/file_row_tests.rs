@@ -98,13 +98,8 @@ async fn invalid_file_lookups_report_the_declaration_and_key_shape() {
 async fn invalid_original_rows_report_id_size_and_attachment_changes() {
     let store = TestStore::new();
     let declaration = SyncedTable::new("files", RowIdentity::SharedKey).carries_files(
-        FileDecl::new(
-            "files",
-            Provenance::UserProvided,
-            Uploads::WhenAsked,
-            CacheFill::CacheLazy,
-        )
-        .with_id_column("file"),
+        FileDecl::new("files", Provenance::UserProvided, CacheFill::CacheLazy)
+            .with_id_column("file"),
     );
     let db = store.schema(vec![declaration], "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEXT,size INTEGER,hash BLOB,location TEXT)").await.unwrap();
     let original = tempfile::NamedTempFile::new().unwrap();

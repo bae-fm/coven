@@ -115,21 +115,11 @@ pub enum CacheFill {
     CacheLazy,
 }
 
-/// When a file becomes eligible for upload.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Uploads {
-    /// As soon as a write attaches it.
-    WhenAttached,
-    /// Only when the app requests upload.
-    WhenAsked,
-}
-
 /// A table's file columns and declared file choices (§16, E2).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileDecl {
     pub(crate) namespace: String,
     pub(crate) provenance: Provenance,
-    pub(crate) uploads: Uploads,
     pub(crate) fill: CacheFill,
     pub(crate) id: String,
     pub(crate) size: String,
@@ -139,17 +129,12 @@ pub struct FileDecl {
 }
 
 impl FileDecl {
-    /// Declare a file namespace, origin, upload policy and cache policy.
-    pub fn new(
-        namespace: impl Into<String>,
-        provenance: Provenance,
-        uploads: Uploads,
-        fill: CacheFill,
-    ) -> Self {
+    /// Declare a file namespace, origin and cache policy.
+    /// Every attached file is queued for upload in the attaching write.
+    pub fn new(namespace: impl Into<String>, provenance: Provenance, fill: CacheFill) -> Self {
         Self {
             namespace: namespace.into(),
             provenance,
-            uploads,
             fill,
             id: "id".into(),
             size: "size".into(),

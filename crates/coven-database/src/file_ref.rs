@@ -49,9 +49,7 @@ impl FileRef {
         self.version.hash
     }
     /// Check an open file against these captured facts in bounded chunks.
-    /// This does not validate the current row; callers do that separately when
-    /// attaching bytes. Recovery and cleanup can check an obsolete reference.
-    pub fn matches_content(&self, reader: &FileReader) -> Result<bool, ObservationError> {
+    fn matches_content(&self, reader: &FileReader) -> Result<bool, ObservationError> {
         if reader.size() != self.plaintext_size() {
             return Ok(false);
         }

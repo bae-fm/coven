@@ -2054,8 +2054,6 @@ Carol's tablet:
   - which column holds where the file is, which coven fills in
     ([§16.1](#161-kinds-and-where-files-are));
   - the file's kind, user-provided or app-provided;
-  - whether a file is uploaded when it is attached, or only when the app
-    asks;
   - whether devices download an uploaded file as soon as its row arrives,
     or on first read.
 
@@ -2072,49 +2070,29 @@ Carol's tablet:
   owns them.
 - The first read records both the whole-file content hash and a SHA-256
   hash of each plaintext chunk at the file's chunk size: when preparing a
-  user-provided original, or staging an app-provided file. Keeping an
-  uploaded file on this device records chunk hashes from the checked
-  plaintext too, so it can later be uploaded again. These hashes stay
-  local; they are not part of the storage format.
+  user-provided original, or staging an app-provided file. These hashes
+  stay local; they are not part of the storage format.
 - The app can hand them over as a stream, so a large file never has to fit
   in memory.
 - Every row of a synced table syncs, but each file is in one of two
   places:
   - *uploaded*: stored encrypted, and read the same way on every device;
-  - *on one device*: only on the device that has it, as the user's
-    original or coven's own copy, and never uploaded.
+  - *waiting to upload*: on the device that attached it, as the user's
+    original or coven's own copy, until storage is connected and the upload
+    succeeds.
 - The row's where-column says which: `uploaded`, with the file's id and
-  key, or the id of the device that has it.
+  key, or the id of the device that attached it while it waits to upload.
   - So every device knows where each file is, and can say so.
   - Reading a file that is on another device fails with an error of its
     own, naming that device.
-- E.g. Ana imports 2 TB of music on her laptop, into a table whose files
-  upload only when the app asks:
-  - every album syncs to her phone, which shows them as on her laptop;
-  - she uploads twenty albums, which then play on her phone too.
-- Uploading a file stores it ([§16.5](#165-uploads-and-deletion)), then
-  writes `uploaded` to its row.
+- Every attached file enters the upload queue in the write that attaches it,
+  even with no storage connected. Uploading stores it
+  ([§16.5](#165-uploads-and-deletion)), then writes `uploaded` to its row.
+  This is the file's only location transition; pinning and the cache decide
+  which devices keep uploaded bytes locally.
   - A user-provided original stays where it is.
   - From then on every device reads the uploaded copy, the one it came
     from included; coven never reads the original again.
-- Keeping an uploaded file on one device downloads it there first, then
-  writes that device's id to its row.
-  - A user-provided file is written to a path the user picks, which must
-    not already exist; an app-provided one goes into coven's own folder.
-  - A user-provided download is written and synced to a temporary file in
-    the destination's directory, checked against the row's size and content
-    hash, then published by a no-replace rename. The same rename primitive
-    publishes store directories: `renameat_with` with `NOREPLACE` on Unix,
-    `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING` on Windows. A filesystem
-    that refuses it fails the operation with that error; there is no fallback.
-  - After a crash, if the temporary file is gone and the destination exists,
-    that destination is the operation's file exactly when its size and content
-    hash match the captured row's; otherwise the operation fails with
-    `DestinationExists`. If both names exist, the destination is another file
-    and also fails with `DestinationExists`.
-  - The uploaded copy is then deleted like any unused file.
-- A device copy that its row no longer names, because another device's
-  later write moved the file, is deleted once that write applies here.
 - A row with no file has NULL in its hash and where-columns, so both
   must allow NULL; the app never writes them, and coven fills them in the
   write that attaches a file.
@@ -2127,16 +2105,6 @@ Carol's tablet:
   - So coven refuses a foreign key with set null or set default on any of
     the four, checked when the database opens and after migrating: its
     action would change one column alone ([§8.4](#84-foreign-keys)).
-- Concurrent changes to where a file is follow [§8.2](#82-concurrent-writes-to-one-row):
-  the later write wins.
-  - E.g. an album is uploaded; at 10:00 Ana's laptop keeps it on the
-    laptop, while her phone, offline, keeps it on the phone at 10:05.
-  - Both download it first; the phone's later write wins, so every device
-    shows the album on the phone, and the uploaded copy goes once nothing
-    refers to it as uploaded.
-  - An uploaded copy stays while any write still refers to it as uploaded
-    ([§16.5](#165-uploads-and-deletion)), so the winner always finds the
-    file where its row says.
 - An uploaded file is encrypted with a key of its own, which travels in
   its row's where-column, inside the row's encrypted writes, so only the
   row's readers can read it ([§16.2](#162-storage-and-naming)).
@@ -2206,7 +2174,8 @@ Carol's tablet:
 
 ### 16.5 Uploads and deletion
 
-- A file waits in a local upload queue until it is stored.
+- The attaching write queues each file atomically with its row. It waits
+  there until storage is connected and the upload succeeds.
 - The queue retains its captured size, content hash and chunk hashes, and
   fixes its independent id and key before the first upload attempt. It
   keeps no encrypted copy.
@@ -2256,7 +2225,7 @@ Carol's tablet:
   files; none of it syncs:
   - `_coven_user_files`: each user-provided file's path, size and
     modification time and upload chunk size, by its row and column;
-  - `_coven_device_files`: each app-provided file this device keeps, and
+  - `_coven_device_files`: each app-provided file waiting to upload, and
     where in coven's own folder, with its upload chunk size;
   - `_coven_file_chunks`: plaintext chunk hashes recorded with the local
     source, retained until it is uploaded or its local file facts go;
@@ -2276,13 +2245,7 @@ Carol's tablet:
   - `_coven_cache`: each cached file or chunk, its namespace, size, when it
     was last read, and whether it is pinned;
   - `_coven_cache_budgets`: each namespace's budget;
-  - `_coven_file_removals`: unused local copies waiting to be deleted, and
-    names reserved by unfinished downloads. A download records its operation
-    id and, for a user-provided file, its destination, temporary sibling and
-    captured file reference. Publication consumes the sibling; the write
-    accepting the user destination removes its reservation, and coven never
-    deletes that accepted original. Abandoned downloads use the same size
-    and content-hash check to recognize a published copy before deleting it.
+  - `_coven_file_removals`: unused local copies waiting to be deleted.
 - The bytes themselves are files in the store's directory: coven's own
   copies, and the cache.
 - A file's bytes are written and synced to disk before the row that names
@@ -2294,9 +2257,6 @@ Carol's tablet:
   - the write that lets bytes go records them there in its transaction;
   - after a write commits or fails, and when the database opens, coven
     deletes the unused bytes `_coven_file_removals` names, then their records.
-    Names still owned by unfinished operations are retained. A stale or
-    discarded download releases its names for deletion in the transaction
-    recording that decision.
   - A deletion that fails stays recorded and is tried again then; the
     write that let the bytes go stays committed, and reports the failure.
 
@@ -2506,8 +2466,6 @@ Carol's tablet:
 - The app call that starts an operation returns once it finishes or fails
   for good; without storage it waits. Dropping the call doesn't stop the
   operation.
-  - File upload and keep calls in E7 return after recording their work;
-    a later permanent failure is reported through E6.
 - Steps are ordered so other devices never see a half-done operation.
 - Anything another device reads, such as a store log entry, is uploaded
   last, after everything it refers to.
@@ -2563,11 +2521,6 @@ Carol's tablet:
   1. commit the write deleting its rows, recording the operation in the
      same transaction;
   2. upload the entry deleting the circle, after the write.
-- Changing where a file is ([§16.1](#161-kinds-and-where-files-are)):
-  1. upload it, or download it to the device keeping it;
-  2. write its row's file columns, checking the row still has that file;
-     if it doesn't, the operation stops for good, and what step 1 made is
-     deleted like any unused copy.
 - Inviting a person ([§12.2](#122-adding-a-person)):
   1. share the storage with their account, or record the S3 key the admin
      made in the provider's console, and record the invite;

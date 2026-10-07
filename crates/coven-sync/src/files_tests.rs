@@ -1,7 +1,7 @@
 use super::*;
 use coven_database::{
     CacheFill, CovenMigrationPolicy, Database, DatabaseBuilder, FileDecl, FileRef, Migration,
-    Provenance, RowIdentity, SyncedTable, Uploads,
+    Provenance, RowIdentity, SyncedTable,
 };
 use coven_foundation::{
     clock::FixedClock,
@@ -25,7 +25,7 @@ struct Fixture {
     declarations: Vec<SyncedTable>,
 }
 impl Fixture {
-    async fn new(provenance: Provenance, uploads: Uploads, fill: CacheFill) -> Self {
+    async fn new(provenance: Provenance, fill: CacheFill) -> Self {
         let root = tempfile::tempdir().unwrap();
         let ids: IdSourceRef = Arc::new(UuidIds);
         let clock: ClockRef = Arc::new(FixedClock::new(
@@ -37,11 +37,10 @@ impl Fixture {
             .unwrap();
         let declarations = vec![
             SyncedTable::new("files", RowIdentity::SharedKey)
-                .carries_files(FileDecl::new("files", provenance, uploads, fill)),
+                .carries_files(FileDecl::new("files", provenance, fill)),
             SyncedTable::new("other", RowIdentity::SharedKey).carries_files(FileDecl::new(
                 "other",
                 Provenance::AppProvided,
-                Uploads::WhenAsked,
                 CacheFill::CacheLazy,
             )),
         ];
@@ -139,14 +138,6 @@ impl Fixture {
             .unwrap();
         self.database.file_ref("files", id).await.unwrap()
     }
-    async fn enqueue(&self, file: &FileRef) {
-        self.files
-            .inner
-            .database
-            .enqueue(std::slice::from_ref(file), self.clock.now())
-            .await
-            .unwrap();
-    }
     async fn drain(&self) {
         self.files.inner.state.lock().unwrap().paused = false;
         let result = self.files.retry_uploads_now().await.unwrap();
@@ -155,8 +146,7 @@ impl Fixture {
         }
     }
     async fn uploaded(&self, id: &str, bytes: Vec<u8>) -> FileRef {
-        let file = self.attach("files", id, bytes).await;
-        self.enqueue(&file).await;
+        self.attach("files", id, bytes).await;
         self.drain().await;
         let file = self.database.file_ref("files", id).await.unwrap();
         assert_eq!(file.location(), coven_database::FileLocation::Uploaded);
@@ -178,12 +168,7 @@ fn builder(
 
 #[tokio::test]
 async fn ranges_authenticate_cache_batch_and_fail_offline() {
-    let f = Fixture::new(
-        Provenance::AppProvided,
-        Uploads::WhenAsked,
-        CacheFill::CacheLazy,
-    )
-    .await;
+    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     let bytes = (0..CHUNK * 40 + 31)
         .map(|i| (i % 251) as u8)
         .collect::<Vec<_>>();
@@ -243,20 +228,10 @@ async fn ranges_authenticate_cache_batch_and_fail_offline() {
 
 #[tokio::test]
 async fn budgets_pins_eviction_and_second_device_reads() {
-    let f = Fixture::new(
-        Provenance::AppProvided,
-        Uploads::WhenAsked,
-        CacheFill::CacheLazy,
-    )
-    .await;
+    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     let bytes = vec![51; CHUNK * 3 + 21];
     let file = f.uploaded("first", bytes.clone()).await;
-    let second = Fixture::new(
-        Provenance::AppProvided,
-        Uploads::WhenAsked,
-        CacheFill::CacheLazy,
-    )
-    .await;
+    let second = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     for write in f.database.test_queued_writes().await.unwrap() {
         second
             .database
@@ -309,19 +284,9 @@ async fn budgets_pins_eviction_and_second_device_reads() {
 
 #[tokio::test]
 async fn eager_commit_observation_handles_download_apply() {
-    let a = Fixture::new(
-        Provenance::AppProvided,
-        Uploads::WhenAsked,
-        CacheFill::CacheLazy,
-    )
-    .await;
+    let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     let file = a.uploaded("eager", vec![72; CHUNK * 2]).await;
-    let b = Fixture::new(
-        Provenance::AppProvided,
-        Uploads::WhenAsked,
-        CacheFill::CacheEager,
-    )
-    .await;
+    let b = Fixture::new(Provenance::AppProvided, CacheFill::CacheEager).await;
     b.files.close().await;
     let files = Files::new(
         FileDatabase::new(b.database.clone()),
@@ -362,15 +327,10 @@ async fn eager_commit_observation_handles_download_apply() {
 
 #[tokio::test]
 async fn eviction_uses_chunk_recency_and_keeps_namespace_budgets_independent() {
-    let f = Fixture::new(
-        Provenance::AppProvided,
-        Uploads::WhenAsked,
-        CacheFill::CacheLazy,
-    )
-    .await;
+    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     let file = f.uploaded("one", vec![67; CHUNK * 4]).await;
-    let other = f.attach("other", "other", vec![68; CHUNK]).await;
-    f.enqueue(&other).await;
+    f.attach("other", "other", vec![68; CHUNK]).await;
+
     f.drain().await;
     let other = f.database.file_ref("other", "other").await.unwrap();
     f.files.read_file(&other).await.unwrap();
@@ -422,12 +382,7 @@ async fn eviction_uses_chunk_recency_and_keeps_namespace_budgets_independent() {
 
 #[tokio::test]
 async fn sequential_reading_starts_read_ahead_and_streams_a_whole_hash_check() {
-    let f = Fixture::new(
-        Provenance::AppProvided,
-        Uploads::WhenAsked,
-        CacheFill::CacheLazy,
-    )
-    .await;
+    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     let bytes = vec![69; CHUNK * 40];
     let file = f.uploaded("ahead", bytes.clone()).await;
     let stream = f.files.open_file_stream(&file).await.unwrap();
@@ -461,12 +416,7 @@ async fn sequential_reading_starts_read_ahead_and_streams_a_whole_hash_check() {
 
 #[tokio::test]
 async fn cancelling_a_pin_releases_partial_budget_exemptions() {
-    let mut f = Fixture::new(
-        Provenance::AppProvided,
-        Uploads::WhenAsked,
-        CacheFill::CacheLazy,
-    )
-    .await;
+    let mut f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     let file = f.uploaded("cancel-pin", vec![70; CHUNK * 40]).await;
     f.storage
         .set_faults(coven_storage::test_utils::Faults {
@@ -506,12 +456,7 @@ mod uploads;
 
 #[tokio::test]
 async fn opening_a_file_respects_a_zero_cache_budget_including_empty_files() {
-    let f = Fixture::new(
-        Provenance::AppProvided,
-        Uploads::WhenAsked,
-        CacheFill::CacheLazy,
-    )
-    .await;
+    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     f.files.set_cache_budget("files", 0).await.unwrap();
     for bytes in [Vec::new(), vec![71; CHUNK]] {
         let id = format!("length-{}", bytes.len());
@@ -540,19 +485,9 @@ async fn opening_a_file_respects_a_zero_cache_budget_including_empty_files() {
 
 #[tokio::test]
 async fn whole_reads_and_pins_check_the_row_hash_after_authenticating_chunks() {
-    let a = Fixture::new(
-        Provenance::AppProvided,
-        Uploads::WhenAsked,
-        CacheFill::CacheLazy,
-    )
-    .await;
+    let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     a.uploaded("hash", vec![73; CHUNK * 2]).await;
-    let b = Fixture::new(
-        Provenance::AppProvided,
-        Uploads::WhenAsked,
-        CacheFill::CacheLazy,
-    )
-    .await;
+    let b = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     for mut write in a.database.test_queued_writes().await.unwrap() {
         for part in &mut write.parts {
             for row in &mut part.rows {
@@ -591,12 +526,7 @@ async fn whole_reads_and_pins_check_the_row_hash_after_authenticating_chunks() {
 
 #[tokio::test]
 async fn pinning_preserves_cached_tail_chunks_while_assembling_the_whole_file() {
-    let f = Fixture::new(
-        Provenance::AppProvided,
-        Uploads::WhenAsked,
-        CacheFill::CacheLazy,
-    )
-    .await;
+    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     let file = f.uploaded("cached-tail", vec![74; CHUNK * 4]).await;
     f.files
         .set_cache_budget("files", 15 + 2 * (CHUNK as u64 + 16))
@@ -622,12 +552,7 @@ async fn pinning_preserves_cached_tail_chunks_while_assembling_the_whole_file() 
 
 #[tokio::test]
 async fn unused_headers_do_not_displace_recently_read_chunks() {
-    let f = Fixture::new(
-        Provenance::AppProvided,
-        Uploads::WhenAsked,
-        CacheFill::CacheLazy,
-    )
-    .await;
+    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     let old = f.uploaded("old-header", vec![75]).await;
     f.files.open_file_stream(&old).await.unwrap();
     let recent = f.uploaded("recent", vec![76; CHUNK]).await;
@@ -669,17 +594,9 @@ async fn unused_headers_do_not_displace_recently_read_chunks() {
     f.close().await;
 }
 
-#[path = "file_keep_tests.rs"]
-mod keeps;
-
 #[tokio::test]
 async fn a_file_from_a_newer_format_requests_an_update() {
-    let f = Fixture::new(
-        Provenance::AppProvided,
-        Uploads::WhenAsked,
-        CacheFill::CacheLazy,
-    )
-    .await;
+    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     let file = f.uploaded("future", vec![91; CHUNK]).await;
     let uploaded = file.uploaded().unwrap().unwrap();
     let path = coven_storage::ObjectPath::file(uploaded.device, uploaded.id);
@@ -697,19 +614,9 @@ async fn a_file_from_a_newer_format_requests_an_update() {
 
 #[tokio::test]
 async fn a_sync_preserves_eager_cancellation_and_retries_network_failures() {
-    let a = Fixture::new(
-        Provenance::AppProvided,
-        Uploads::WhenAsked,
-        CacheFill::CacheLazy,
-    )
-    .await;
+    let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     let file = a.uploaded("eager", vec![72; CHUNK * 2]).await;
-    let b = Fixture::new(
-        Provenance::AppProvided,
-        Uploads::WhenAsked,
-        CacheFill::CacheEager,
-    )
-    .await;
+    let b = Fixture::new(Provenance::AppProvided, CacheFill::CacheEager).await;
     b.files
         .set_storage(Some(a.storage.clone()), std::future::ready(Ok(())))
         .await
@@ -754,4 +661,80 @@ async fn a_sync_preserves_eager_cancellation_and_retries_network_failures() {
     assert!(b.files.inner.database.missing_bytes(&second).await.unwrap() > 0);
     b.close().await;
     a.close().await;
+}
+
+#[tokio::test]
+async fn waiting_files_name_the_attaching_device_until_its_automatic_upload() {
+    for provenance in [Provenance::AppProvided, Provenance::UserProvided] {
+        let a = Fixture::new(provenance.clone(), CacheFill::CacheLazy).await;
+        let b = Fixture::new(provenance.clone(), CacheFill::CacheLazy).await;
+        a.files
+            .set_storage(None, std::future::ready(Ok(())))
+            .await
+            .unwrap();
+        a.files.set_uploads_paused(false);
+        let local = match provenance {
+            Provenance::AppProvided => a.attach("files", "waiting", b"content".to_vec()).await,
+            Provenance::UserProvided => a.original("waiting", b"content").await,
+        };
+        let coven_database::FileLocation::OnDevice(device) = local.location() else {
+            panic!("attachment must wait on its device")
+        };
+        assert!(matches!(
+            a.files.sync_files().await,
+            Err(SyncError::NoStorage)
+        ));
+        let queued = a.files.inner.database.uploads().await.unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].file, local);
+        assert_eq!(queued[0].attempts, 0);
+        assert!(queued[0].last_attempt_at.is_none());
+        assert!(queued[0].failure.is_none());
+        assert!(queued[0].identity.is_none());
+        for write in a.database.test_queued_writes().await.unwrap() {
+            b.database.apply_downloaded(write.into()).await.unwrap();
+        }
+        let remote = b.database.file_ref("files", "waiting").await.unwrap();
+        assert_eq!(remote.location(), local.location());
+        assert!(matches!(b.files.read_file(&remote).await,
+            Err(FileReadError::OnOtherDevice { device: owner, .. }) if owner == device));
+        assert!(b.files.inner.database.uploads().await.unwrap().is_empty());
+        let mut uploads = a.files.subscribe_uploads();
+        a.files
+            .set_storage(Some(a.storage.clone()), std::future::ready(Ok(())))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while !uploads.next().await.unwrap().files.is_empty() {}
+        })
+        .await
+        .unwrap();
+        for write in a.database.test_queued_writes().await.unwrap() {
+            b.database.apply_downloaded(write.into()).await.unwrap();
+        }
+        b.files
+            .set_storage(Some(a.storage.clone()), std::future::ready(Ok(())))
+            .await
+            .unwrap();
+        let uploaded = b.database.file_ref("files", "waiting").await.unwrap();
+        assert_eq!(uploaded.location(), coven_database::FileLocation::Uploaded);
+        assert_eq!(b.files.read_file(&uploaded).await.unwrap(), b"content");
+        assert!(b.files.inner.database.uploads().await.unwrap().is_empty());
+        b.files
+            .pin(std::slice::from_ref(&uploaded), &|_| {})
+            .await
+            .unwrap();
+        b.files
+            .unpin(std::slice::from_ref(&uploaded))
+            .await
+            .unwrap();
+        b.files.evict_file(&uploaded).await.unwrap();
+        assert_eq!(
+            b.database.file_ref("files", "waiting").await.unwrap(),
+            uploaded
+        );
+        assert_eq!(b.files.read_file(&uploaded).await.unwrap(), b"content");
+        b.close().await;
+        a.close().await;
+    }
 }

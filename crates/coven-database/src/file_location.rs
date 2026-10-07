@@ -5,12 +5,12 @@ use coven_crypto::SecretText;
 use coven_format::value::Value;
 use coven_foundation::id_source::DeviceId;
 
-/// Where a row's file is kept (§16.1).
+/// Whether a row's file is waiting to upload or already stored (§16.1).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FileLocation {
     /// Stored encrypted under the file's own id and key.
     Uploaded,
-    /// Only on the named device.
+    /// Waiting to upload on the device that attached it.
     OnDevice(DeviceId),
 }
 

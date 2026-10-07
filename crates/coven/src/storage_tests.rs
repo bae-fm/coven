@@ -790,7 +790,7 @@ async fn moving_storage_waits_for_file_publication_before_copying_history() {
             .with_transfer_limits(1024 * 1024, 65536).unwrap());
         let handle = builder(&f.app, StoreLayout::new(f._root.path().into()), f.clock.clone(), Arc::new(Locations(vec![f.storage.clone(), destination.clone()])))
             .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey),
-                SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new("files", Provenance::AppProvided, Uploads::WhenAttached, CacheFill::CacheLazy))])
+                SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new("files", Provenance::AppProvided, CacheFill::CacheLazy))])
             .migrations(vec![Migration::sql(1, "notes", "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,body TEXT NOT NULL)"),
                 Migration::sql(2, "files", "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)")])
             .open(f.directory.id()).await.unwrap();

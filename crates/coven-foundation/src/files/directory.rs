@@ -210,28 +210,6 @@ impl StoreDir {
         };
         AtomicFile::new(self.path.join(area).join(&name.0))
     }
-
-    /// Disk work for a journal-owned download. User files stage beside their
-    /// destination, so atomic publication never crosses filesystems.
-    pub fn download(
-        &self,
-        location: &super::DownloadLocation,
-    ) -> Result<super::DownloadFile, StoreLockError> {
-        let (staged, destination) = match location {
-            super::DownloadLocation::AppProvided(name) => {
-                (self.file(FileArea::AppProvided, name), None)
-            }
-            super::DownloadLocation::UserProvided { path, name } => (
-                AtomicFile::new(path.with_file_name(format!(".coven-download-{}", name.as_str()))),
-                Some(path.clone()),
-            ),
-        };
-        Ok(super::DownloadFile::new(
-            staged,
-            destination,
-            self.lock_read_only()?,
-        ))
-    }
 }
 
 pub(crate) fn initialize(

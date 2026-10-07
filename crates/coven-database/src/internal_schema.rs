@@ -356,12 +356,7 @@ macro_rules! coven_tables {
         $visit!(_coven_file_removals, "
             CREATE TABLE _coven_file_removals (
                 path TEXT NOT NULL,
-                area TEXT NOT NULL DEFAULT 'files' CHECK(area IN ('files','cache','user')),
-                destination BLOB,
-                reference BLOB,
-                operation INTEGER REFERENCES _coven_operations(id) ON DELETE SET NULL,
-                CHECK((area='user')=(destination IS NOT NULL)),
-                CHECK((area='user')=(reference IS NOT NULL)),
+                area TEXT NOT NULL DEFAULT 'files' CHECK(area IN ('files','cache')),
                 PRIMARY KEY(area,path)
             ) STRICT, WITHOUT ROWID;
         ");

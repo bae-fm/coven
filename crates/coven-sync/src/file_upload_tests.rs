@@ -1,7 +1,7 @@
 use super::{Fixture, CHUNK};
 use crate::files::file_error::*;
 use crate::files::file_upload::*;
-use coven_database::{CacheFill, FileLocation, Provenance, Uploads};
+use coven_database::{CacheFill, FileLocation, Provenance};
 use coven_storage::{test_utils::Faults, Storage};
 use coven_storage::{ObjectPath, UploadSession};
 use std::time::Duration;
@@ -12,8 +12,7 @@ async fn same_size_edits_with_restored_mtime_send_no_changed_chunks() {
         // A resumed part begins inside chunk zero. Even a change in the part
         // already sent must prevent re-encrypting that chunk with its old nonce.
         for resume in [None, Some(false), Some(true)] {
-            let mut f =
-                Fixture::new(provenance.clone(), Uploads::WhenAsked, CacheFill::CacheLazy).await;
+            let mut f = Fixture::new(provenance.clone(), CacheFill::CacheLazy).await;
             let bytes = vec![41; CHUNK * 2];
             let file = match provenance {
                 Provenance::UserProvided => f.original("changed-during-upload", &bytes).await,
@@ -42,7 +41,7 @@ async fn same_size_edits_with_restored_mtime_send_no_changed_chunks() {
                     paths[0].clone()
                 }
             };
-            f.enqueue(&file).await;
+
             if resume.is_some() {
                 f.storage
                     .set_faults(Faults {
@@ -134,14 +133,9 @@ async fn same_size_edits_with_restored_mtime_send_no_changed_chunks() {
 
 #[tokio::test]
 async fn an_upload_reader_retains_the_store_after_its_database_closes() {
-    let f = Fixture::new(
-        Provenance::AppProvided,
-        Uploads::WhenAsked,
-        CacheFill::CacheLazy,
-    )
-    .await;
-    let file = f.attach("files", "held", vec![45; CHUNK * 2]).await;
-    f.enqueue(&file).await;
+    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    f.attach("files", "held", vec![45; CHUNK * 2]).await;
+
     let mut item = f.files.inner.database.uploads().await.unwrap().remove(0);
     f.files.inner.fix_identity(&mut item).await.unwrap();
     f.storage
@@ -173,14 +167,9 @@ async fn an_upload_reader_retains_the_store_after_its_database_closes() {
 
 #[tokio::test]
 async fn a_single_request_reports_uploading_while_storage_is_pending() {
-    let f = Fixture::new(
-        Provenance::AppProvided,
-        Uploads::WhenAsked,
-        CacheFill::CacheLazy,
-    )
-    .await;
-    let file = f.attach("files", "single", vec![44; 19]).await;
-    f.enqueue(&file).await;
+    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    f.attach("files", "single", vec![44; 19]).await;
+
     f.storage
         .set_faults(Faults {
             delay: Duration::from_millis(200),
@@ -214,19 +203,18 @@ async fn bounded_uploads_from_originals_and_owned_copies_publish_after_storage()
             } else {
                 Provenance::AppProvided
             },
-            Uploads::WhenAsked,
             CacheFill::CacheLazy,
         )
         .await;
         let bytes = (0..8 * 1024 * 1024 + 19)
             .map(|i| (i % 251) as u8)
             .collect::<Vec<_>>();
-        let file = if original {
+        if original {
             f.original("large", &bytes).await
         } else {
             f.attach("files", "large", bytes.clone()).await
         };
-        f.enqueue(&file).await;
+
         assert_ne!(
             f.database
                 .file_ref("files", "large")
@@ -254,15 +242,10 @@ async fn bounded_uploads_from_originals_and_owned_copies_publish_after_storage()
 
 #[tokio::test]
 async fn a_reopened_upload_refuses_a_changed_original_without_a_copy() {
-    let mut f = Fixture::new(
-        Provenance::UserProvided,
-        Uploads::WhenAsked,
-        CacheFill::CacheLazy,
-    )
-    .await;
+    let mut f = Fixture::new(Provenance::UserProvided, CacheFill::CacheLazy).await;
     let bytes = vec![93; CHUNK * 3 + 18];
     let file = f.original("recording", &bytes).await;
-    f.enqueue(&file).await;
+
     let mut item = f.files.inner.database.uploads().await.unwrap().remove(0);
     f.files.inner.fix_identity(&mut item).await.unwrap();
     let identity = item.identity.as_ref().unwrap().as_bytes().to_vec();
@@ -306,16 +289,10 @@ async fn a_reopened_upload_refuses_a_changed_original_without_a_copy() {
 #[tokio::test]
 async fn recorded_sessions_continue_or_restart_with_the_same_encrypted_bytes() {
     for expire in [false, true] {
-        let mut f = Fixture::new(
-            Provenance::AppProvided,
-            Uploads::WhenAsked,
-            CacheFill::CacheLazy,
-        )
-        .await;
-        let file = f
-            .attach("files", "recording", vec![94; CHUNK * 5 + 18])
+        let mut f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+        f.attach("files", "recording", vec![94; CHUNK * 5 + 18])
             .await;
-        f.enqueue(&file).await;
+
         let mut item = f.files.inner.database.uploads().await.unwrap().remove(0);
         f.files.inner.state.lock().unwrap().paused = false;
         f.storage
@@ -375,14 +352,9 @@ async fn recorded_sessions_continue_or_restart_with_the_same_encrypted_bytes() {
 
 #[tokio::test]
 async fn lost_completion_reply_resumes_the_published_object() {
-    let mut f = Fixture::new(
-        Provenance::AppProvided,
-        Uploads::WhenAsked,
-        CacheFill::CacheLazy,
-    )
-    .await;
+    let mut f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     let file = f.attach("files", "one", vec![43; CHUNK * 2]).await;
-    f.enqueue(&file).await;
+
     f.storage
         .set_faults(Faults {
             lose_completion_reply: true,
@@ -420,8 +392,8 @@ async fn lost_completion_reply_resumes_the_published_object() {
 }
 
 pub(super) async fn unused_upload(f: &Fixture) {
-    let old = f.attach("files", "old", vec![33; 19]).await;
-    f.enqueue(&old).await;
+    f.attach("files", "old", vec![33; 19]).await;
+
     let (started, receiving) = tokio::sync::oneshot::channel();
     let (release, resume) = tokio::sync::oneshot::channel();
     f.storage
@@ -444,18 +416,15 @@ pub(super) async fn unused_upload(f: &Fixture) {
     assert_eq!(f.database.file_ref("files", "old").await.unwrap(), new);
     assert_eq!(f.database.test_queued_writes().await.unwrap().len(), writes);
     let queue = f.files.inner.database.uploads().await.unwrap();
-    assert_eq!(queue.len(), 1);
+    assert_eq!(queue.len(), 2);
     assert!(queue[0].stored && queue[0].unused);
+    assert_eq!(queue[1].file, new);
+    assert!(!queue[1].stored && !queue[1].unused);
 }
 
 #[tokio::test]
 async fn replaced_rows_leave_a_stored_unused_copy_and_no_uploaded_write() {
-    let f = Fixture::new(
-        Provenance::AppProvided,
-        Uploads::WhenAsked,
-        CacheFill::CacheLazy,
-    )
-    .await;
+    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     unused_upload(&f).await;
     assert_eq!(
         f.storage
@@ -469,13 +438,8 @@ async fn replaced_rows_leave_a_stored_unused_copy_and_no_uploaded_write() {
 }
 
 #[tokio::test]
-async fn when_attached_starts_after_commit_and_checks_changed_originals() {
-    let f = Fixture::new(
-        Provenance::AppProvided,
-        Uploads::WhenAttached,
-        CacheFill::CacheEager,
-    )
-    .await;
+async fn attaching_starts_upload_after_commit_and_checks_changed_originals() {
+    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheEager).await;
     f.files.set_uploads_paused(false);
     let mut uploads = f.files.subscribe_uploads();
     f.attach("files", "one", vec![14; CHUNK]).await;
@@ -506,14 +470,9 @@ async fn when_attached_starts_after_commit_and_checks_changed_originals() {
     .await
     .unwrap();
     f.close().await;
-    let f = Fixture::new(
-        Provenance::UserProvided,
-        Uploads::WhenAsked,
-        CacheFill::CacheLazy,
-    )
-    .await;
-    let file = f.original("changed", b"original").await;
-    f.enqueue(&file).await;
+    let f = Fixture::new(Provenance::UserProvided, CacheFill::CacheLazy).await;
+    f.original("changed", b"original").await;
+
     std::fs::write(f.root.path().join("changed"), b"replacement").unwrap();
     let mut item = f.files.inner.database.uploads().await.unwrap().remove(0);
     assert!(matches!(

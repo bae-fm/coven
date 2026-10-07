@@ -87,7 +87,7 @@ pub use coven_merge::WriteId;
 pub use database::file_database::{CacheReservation, FileDatabase};
 pub use database::file_retention::FileRetention;
 pub use database::{Database, DatabaseBuilder, DatabaseReadHandle};
-pub use declaration::{CacheFill, FileDecl, Provenance, RowIdentity, SyncedTable, Uploads};
+pub use declaration::{CacheFill, FileDecl, Provenance, RowIdentity, SyncedTable};
 pub use download::{ApplyOutcome, DownloadedPart, DownloadedWrite, SyncState, WriteWait};
 pub use download_stream::{DownloadedPartStream, DownloadedWriteStream};
 pub use error::{
