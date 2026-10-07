@@ -2425,14 +2425,11 @@ Carol's tablet:
   2. once an admin approves the request, seal the store key to them, then
      write the store log entry adding them;
   3. on decline or expiry, take back the access instead.
-- Uploading a large file in parts ([§16.5](#165-uploads-and-deletion)):
-  1. start the provider's upload session, and record it in the
-     operation's row;
-  2. send each part, recording the last one stored;
-  3. finish the session.
-- Uploading a write, or a file small enough for one request, is not an
-  operation: it waits in its queue until stored, and starts over if
-  interrupted ([§6](#6-syncing-writes), [§16.5](#165-uploads-and-deletion)).
+- Uploading a write or a file is not an operation: it waits in its queue
+  until stored ([§6](#6-syncing-writes), [§16.5](#165-uploads-and-deletion)).
+  - A large file's provider session is recorded in its queue row, with the
+    last part stored, so after a crash it continues from there
+    ([§16.6](#166-what-a-device-keeps-about-files)).
 
 ### 18.2 Example
 
@@ -4500,8 +4497,6 @@ pub enum OperationKind {
     ChangeFileLocation,
     /// Grant access, approve or decline a join, and settle the invite.
     Invite,
-    /// Upload a file in parts using a recorded provider session.
-    MultipartUpload,
     /// Snapshot and reset an audience (§19.3).
     Reset,
 }
