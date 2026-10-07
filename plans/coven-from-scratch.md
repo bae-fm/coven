@@ -1795,11 +1795,16 @@ Carol's tablet:
   can't read ([§7.1](#71-causality)).
   - A device has applied every entry the write had read, so it knows each
     part's key; it skips a part only when it isn't in that key's audience.
-- A part sealed with a key whose entry the replay drops counts on no
-  device: every device records it lost, whether or not it holds the key.
+- A part sealed with a dropped removal's key counts like any other part:
+  the members that removal left out get the key ([§11](#11-keys)), and a
+  device in the key's audience waits for its copy before applying the
+  part, as it waits for any write it hasn't got.
   - E.g. Ana removes Ben and makes key K2, and her devices write with it;
-    then Ben's earlier, concurrent removal of Ana wins. Carol holds K2 but
-    Ben doesn't; neither applies those parts, so they agree.
+    then Ben's earlier, concurrent removal of Ana wins. Carol holds K2;
+    Ben, still a member, gets K2 from whichever device holding it sees the
+    drop first, then applies those parts, so they agree.
+  - So nothing a device has applied is ever taken back because its key's
+    entry was dropped.
 - All members can see that a circle exists, who writes to it, when, and how
   much.
 
