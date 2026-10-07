@@ -148,6 +148,16 @@ pub struct StoredObject {
 /// caller; no hidden background work repairs failed operations.
 #[async_trait]
 pub trait Storage: Send + Sync {
+    /// Install a member's replacement S3 key after credential custody commits.
+    /// Other provider kinds refuse this operation without changing sign-in state.
+    async fn set_s3_credentials(
+        &self,
+        _credentials: crate::S3Credentials,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::InvalidConfiguration(
+            "provider does not use S3 keys",
+        ))
+    }
     /// This provider's nonsecret location settings.
     fn config(&self) -> StorageConfig;
     /// Largest complete encrypted body sent in one request, in bytes. Larger

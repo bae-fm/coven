@@ -48,8 +48,15 @@ fn only_restore_codes_sync_and_stores_can_be_discovered_without_ids() {
     store_custody.persist(&keys).unwrap();
     member_custody.persist(&member).unwrap();
     a.set_host_secret("api-token", "local secret").unwrap();
+    a.set_storage_credentials(&SecretBytes::new(b"device credentials".to_vec()))
+        .unwrap();
     assert!(fake.synced_restore_codes().unwrap().is_empty());
-    for name in [STORE_KEYS_ENTRY, MEMBER_KEYS_ENTRY, "api-token"] {
+    for name in [
+        STORE_KEYS_ENTRY,
+        MEMBER_KEYS_ENTRY,
+        CREDENTIALS_ENTRY,
+        "api-token",
+    ] {
         assert!(fake
             .read(EntryScope::DeviceOnly, &a.account(name))
             .unwrap()
@@ -200,6 +207,7 @@ fn host_names_cannot_collide_with_coven_or_another_store() {
         (STORE_KEYS_ENTRY, SecretNameError::Reserved),
         (MEMBER_KEYS_ENTRY, SecretNameError::Reserved),
         (RESTORE_CODE_ENTRY, SecretNameError::Reserved),
+        (CREDENTIALS_ENTRY, SecretNameError::Reserved),
     ] {
         assert_eq!(validate_host_name(name), Err(expected));
         assert!(matches!(
@@ -301,6 +309,9 @@ fn deletion_checks_all_names_then_removes_only_this_stores_entries() {
         store.set_device_id(DeviceId(42)).unwrap();
         store.write(STORE_KEYS_ENTRY, b"store keys").unwrap();
         store.write(MEMBER_KEYS_ENTRY, b"member keys").unwrap();
+        store
+            .set_storage_credentials(&SecretBytes::new(b"credentials".to_vec()))
+            .unwrap();
         store.set_host_secret("token", "token").unwrap();
         store
             .set_synced_restore_code(&SecretBytes::new(b"restore".to_vec()))
@@ -320,6 +331,7 @@ fn deletion_checks_all_names_then_removes_only_this_stores_entries() {
         DEVICE_ID_ENTRY,
         STORE_KEYS_ENTRY,
         MEMBER_KEYS_ENTRY,
+        CREDENTIALS_ENTRY,
         "token",
     ] {
         assert!(first.read(name).unwrap().is_none());

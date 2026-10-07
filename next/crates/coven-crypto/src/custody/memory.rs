@@ -8,6 +8,13 @@ pub struct InMemoryCustody<T> {
 }
 
 impl<T: Clone> InMemoryCustody<T> {
+    /// Start without keys; bootstrap fills custody only after opening sealed keys.
+    pub fn empty() -> Self {
+        Self {
+            secret: Mutex::new(None),
+        }
+    }
+
     /// Retain the supplied keys for this session (§20.1).
     pub fn new(secret: T) -> Self {
         Self {

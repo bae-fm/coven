@@ -8,55 +8,94 @@ use crate::files::{directory, lock, FileError, SettingsError, StoreDir, StoreSet
 use crate::id_source::{IdSource, StoreId};
 
 /// A store creation failure, with publication and rollback failures explicit.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum StoreCreationError<E = std::convert::Infallible> {
     /// Keeping state outside the directory failed before publication. The id
     /// lets the caller remove any externally retained state before retrying.
-    #[error("initializing store {id} failed: {source}")]
     Initialization {
         /// The unpublished store.
         id: StoreId,
         /// The initializer's typed failure.
-        #[source]
         source: E,
     },
     /// Removing externally initialized state after an unpublished failure also failed.
-    #[error("{operation}; removing external initialization failed: {cleanup}")]
     InitializationCleanup {
         /// The original creation failure.
         operation: Box<StoreCreationError<E>>,
         /// The external cleanup failure.
-        #[source]
         cleanup: E,
     },
     /// A directory or file already occupies this store's id. It is untouched.
-    #[error("store {0} already exists on this device")]
     AlreadyExists(StoreId),
     /// An operation failed before publication.
-    #[error("create store: {0}")]
-    File(#[from] FileError),
+    File(FileError),
     /// Writing the new device's settings failed before publication.
-    #[error("create store settings: {0}")]
-    Settings(#[from] SettingsError),
+    Settings(SettingsError),
     /// The entire store is visible, but the parent directory could not be
     /// synced. The caller can identify and reopen the published store.
-    #[error("store {id} was published, but its directory could not be synced: {source}")]
     Published {
         /// The store that is already visible.
         id: StoreId,
         /// The durability error.
-        #[source]
         source: io::Error,
     },
     /// Removing the unpublished directory also failed.
-    #[error("{operation}; removing unpublished directory failed: {cleanup}")]
     Rollback {
         /// The original creation failure.
-        #[source]
         operation: Box<StoreCreationError<E>>,
         /// The error removing the directory.
         cleanup: io::Error,
     },
+}
+
+// Deriving recursive generic error bounds would require Self: Error while
+// proving that same implementation. Keep the bound on the initializer's cause.
+impl<E: std::fmt::Display> std::fmt::Display for StoreCreationError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Initialization { id, source } => {
+                write!(f, "initializing store {id} failed: {source}")
+            }
+            Self::InitializationCleanup { operation, cleanup } => write!(
+                f,
+                "{operation}; removing external initialization failed: {cleanup}"
+            ),
+            Self::AlreadyExists(id) => write!(f, "store {id} already exists on this device"),
+            Self::File(error) => write!(f, "create store: {error}"),
+            Self::Settings(error) => write!(f, "create store settings: {error}"),
+            Self::Published { id, source } => write!(
+                f,
+                "store {id} was published, but its directory could not be synced: {source}"
+            ),
+            Self::Rollback { operation, cleanup } => write!(
+                f,
+                "{operation}; removing unpublished directory failed: {cleanup}"
+            ),
+        }
+    }
+}
+impl<E: std::error::Error + 'static> std::error::Error for StoreCreationError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Initialization { source, .. } => Some(source),
+            Self::InitializationCleanup { cleanup, .. } => Some(cleanup),
+            Self::AlreadyExists(_) => None,
+            Self::File(error) => Some(error),
+            Self::Settings(error) => Some(error),
+            Self::Published { source, .. } => Some(source),
+            Self::Rollback { operation, .. } => Some(operation.as_ref()),
+        }
+    }
+}
+impl<E> From<FileError> for StoreCreationError<E> {
+    fn from(error: FileError) -> Self {
+        Self::File(error)
+    }
+}
+impl<E> From<SettingsError> for StoreCreationError<E> {
+    fn from(error: SettingsError) -> Self {
+        Self::Settings(error)
+    }
 }
 
 pub(crate) fn create<E: std::error::Error + Send + Sync + 'static>(
@@ -129,12 +168,12 @@ pub(crate) fn create<E: std::error::Error + Send + Sync + 'static>(
 }
 
 #[cfg(windows)]
-fn create_directory_tree(path: &Path) -> io::Result<()> {
+pub(crate) fn create_directory_tree(path: &Path) -> io::Result<()> {
     fs::create_dir_all(path)
 }
 
 #[cfg(unix)]
-fn create_directory_tree(path: &Path) -> io::Result<()> {
+pub(crate) fn create_directory_tree(path: &Path) -> io::Result<()> {
     create_directory_tree_with_sync(path, &crate::files::atomic_file::sync_directory)
 }
 

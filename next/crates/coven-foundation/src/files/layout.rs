@@ -104,6 +104,18 @@ impl StoreLayout {
         StoreDir::new(self.app_dir.join("stores").join(id.to_string()), *id)
     }
 
+    /// Reserve a hidden, restartable new-device store. A second attempt for the
+    /// same id cannot run until the returned lease is dropped. Ordinary store
+    /// listings exclude it until `BootstrapStore::publish` succeeds.
+    pub fn begin_bootstrap(
+        &self,
+        id: StoreId,
+        name: &str,
+        ids: &dyn IdSource,
+    ) -> Result<super::BootstrapStore, super::BootstrapDirectoryError> {
+        super::bootstrap::reserve_bootstrap_directory(&self.app_dir.join("stores"), id, name, ids)
+    }
+
     /// Make and publish one store directory and its settings, with a fresh
     /// device id from `ids`. The facade supplies a new store id for creation,
     /// or the existing store id for restore and join. The app never supplies a

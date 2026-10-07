@@ -698,3 +698,8 @@ mod operation_steps;
 mod schema_sync;
 #[path = "snapshots.rs"]
 mod snapshots;
+
+#[path = "bootstrap.rs"]
+mod bootstrap;
+
+pub use bootstrap::JoinOutcome;

@@ -48,6 +48,7 @@ fn validate_service(name: &str) -> Result<(), KeyError> {
 
 const RESTORE_CODE_ENTRY: &str = "restore-code";
 const DEVICE_ID_ENTRY: &str = "device-id";
+const CREDENTIALS_ENTRY: &str = "storage-credentials";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) enum EntryScope {
@@ -282,6 +283,31 @@ impl StoreKeychain {
         self.remove(DEVICE_ID_ENTRY)
     }
 
+    /// Provider-encoded credentials. Public storage settings never contain them.
+    pub fn storage_credentials(&self) -> Result<Option<SecretBytes>, KeyError> {
+        self.read(CREDENTIALS_ENTRY)
+    }
+
+    /// Commit provider-encoded credentials in this device's keychain scope.
+    pub fn set_storage_credentials(&self, bytes: &SecretBytes) -> Result<(), KeyError> {
+        self.write(CREDENTIALS_ENTRY, bytes.as_bytes())
+    }
+
+    /// Remove this device's provider credentials; an absent entry succeeds.
+    pub fn delete_storage_credentials(&self) -> Result<(), KeyError> {
+        self.remove(CREDENTIALS_ENTRY)
+    }
+
+    /// Whether this backend supports iCloud restore-code publication. The memory
+    /// backend models Apple keychains on every test platform.
+    pub fn supports_synced_restore_codes(&self) -> bool {
+        match &self.keychain.backend {
+            Backend::Native(_) => cfg!(any(target_os = "macos", target_os = "ios")),
+            #[cfg(any(test, feature = "test-utils"))]
+            Backend::Memory(_) => true,
+        }
+    }
+
     /// Remove every coven entry and each named app secret. Validate all names
     /// before deleting anything. Repeating after a failure is safe.
     pub fn delete_store_entries(&self, host_secret_names: &[&str]) -> Result<(), KeyError> {
@@ -292,6 +318,7 @@ impl StoreKeychain {
             STORE_KEYS_ENTRY,
             MEMBER_KEYS_ENTRY,
             DEVICE_ID_ENTRY,
+            CREDENTIALS_ENTRY,
         ]) {
             self.remove(name)?;
         }
@@ -391,6 +418,7 @@ fn validate_host_name(name: &str) -> Result<(), SecretNameError> {
         MEMBER_KEYS_ENTRY,
         RESTORE_CODE_ENTRY,
         DEVICE_ID_ENTRY,
+        CREDENTIALS_ENTRY,
     ]
     .contains(&name)
     {

@@ -5,6 +5,7 @@ use crate::sqlite::DatabaseConnection;
 use crate::{DbError, MigrationError};
 use rusqlite::{Params, Row};
 use std::cell::RefCell;
+use std::sync::Arc;
 
 /// Whether a writable open may migrate coven's internal schema.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -48,11 +49,14 @@ pub(crate) type WriteConversion =
 type MigrationBody = dyn Fn(&MigrationContext<'_>) -> Result<(), DbError> + Send + Sync;
 
 /// One numbered change to the app's database.
+/// Clones retain the same callbacks so bootstrap can borrow the app's migration
+/// declarations while its database owns them across asynchronous loading.
+#[derive(Clone)]
 pub struct Migration {
     pub(crate) version: u32,
     pub(crate) name: &'static str,
-    body: Box<MigrationBody>,
-    conversion: Option<Box<WriteConversion>>,
+    body: Arc<MigrationBody>,
+    conversion: Option<Arc<WriteConversion>>,
 }
 
 impl Migration {
@@ -72,7 +76,7 @@ impl Migration {
         Self {
             version,
             name,
-            body: Box::new(f),
+            body: Arc::new(f),
             conversion: None,
         }
     }
@@ -83,7 +87,7 @@ impl Migration {
     where
         F: Fn(&mut crate::RowChange) -> Result<(), DbError> + Send + Sync + 'static,
     {
-        self.conversion = Some(Box::new(f));
+        self.conversion = Some(Arc::new(f));
         self
     }
 

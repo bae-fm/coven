@@ -21,6 +21,8 @@ pub enum StoreFile {
     StoreKeys,
     /// coven-crypto's passphrase-sealed member key pairs (§20.1).
     MemberKeys,
+    /// Encrypted joining identity and fixed request, interpreted by coven-sync.
+    Bootstrap,
 }
 
 /// The two places coven keeps file bytes inside a store (§20.1).
@@ -163,6 +165,7 @@ impl StoreDir {
             StoreFile::StorageSettings => "storage.json",
             StoreFile::StoreKeys => "store-keys.sealed",
             StoreFile::MemberKeys => "member-keys.sealed",
+            StoreFile::Bootstrap => "bootstrap.sealed",
         };
         AtomicFile::new(self.path.join(name))
     }

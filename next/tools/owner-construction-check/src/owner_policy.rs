@@ -26,6 +26,38 @@ pub(crate) const POLICY: Policy = Policy {
         &["coven_tables"],
     )),
     composition_roots: &[
+        ("crates/coven/src/bootstrap_tests.rs", "Owner", "new"),
+        (
+            "crates/coven/src/bootstrap.rs",
+            "<free>",
+            "restore_from_code",
+        ),
+        (
+            "crates/coven/src/bootstrap.rs",
+            "<free>",
+            "restore_from_keychain",
+        ),
+        (
+            "crates/coven/src/bootstrap.rs",
+            "<free>",
+            "join_with_invite",
+        ),
+        (
+            "crates/coven/src/bootstrap.rs",
+            "<free>",
+            "prepare_and_load",
+        ),
+        (
+            "crates/coven/src/bootstrap_commit.rs",
+            "<free>",
+            "publish_bootstrap",
+        ),
+        ("crates/coven/src/connection.rs", "<free>", "connect"),
+        (
+            "crates/coven-foundation/src/files/bootstrap.rs",
+            "<free>",
+            "reserve_bootstrap_directory",
+        ),
         (
             "crates/coven-foundation/src/files/recovery.rs",
             "DatabaseRecovery",
@@ -97,6 +129,11 @@ pub(crate) const POLICY: Policy = Policy {
             "open_read_only",
         ),
         ("crates/coven/src/builder.rs", "CovenBuilder", "make_keys"),
+        (
+            "crates/coven/src/builder.rs",
+            "CovenBuilder",
+            "make_identity",
+        ),
         ("crates/coven/src/coven.rs", "Coven", "builder"),
         ("crates/coven/src/coven.rs", "Coven", "create_store"),
         ("crates/coven/src/coven.rs", "Coven", "delete_store"),
@@ -127,6 +164,24 @@ pub(crate) const POLICY: Policy = Policy {
     // These methods derive a scoped capability from their injected directory.
     // They do not acquire an unrelated directory or file for another owner.
     capability_factories: &[
+        (
+            "crates/coven-foundation/src/files/layout.rs",
+            "StoreLayout",
+            "begin_bootstrap",
+            "BootstrapStore",
+        ),
+        (
+            "crates/coven-foundation/src/files/bootstrap.rs",
+            "BootstrapStore",
+            "directory",
+            "StoreDir",
+        ),
+        (
+            "crates/coven-foundation/src/files/bootstrap.rs",
+            "BootstrapStore",
+            "publish",
+            "StoreDir",
+        ),
         (
             "crates/coven-foundation/src/files/directory.rs",
             "StoreDir",
@@ -210,6 +265,7 @@ pub(crate) const POLICY: Policy = Policy {
         "IdSourceRef",
         "UuidIds",
         "StoreLayout",
+        "BootstrapStore",
         "StoreDir",
         "AtomicFile",
         "DownloadFile",
@@ -239,6 +295,7 @@ pub(crate) const POLICY: Policy = Policy {
         "CloudKitOps",
     ],
     construction_only_capability_types: &[
+        "BootstrapStore",
         "StoreDir",
         "StoreLock",
         "StoreReadLock",
@@ -283,6 +340,7 @@ pub(crate) const POLICY: Policy = Policy {
         "DatabaseReadHandle",
         "StoreLogSync",
         "DeviceLogSync",
+        "RestoreCodes",
         "CovenHandle",
         "CovenReadHandle",
         "Files",
@@ -528,6 +586,7 @@ const CAPABILITIES: Capabilities = Capabilities {
             "crates/coven-database/src/database_snapshots.rs",
             "crates/coven-database/src/database_file_retention.rs",
             "crates/coven-sync/src/operations.rs",
+            "crates/coven-sync/src/restore_codes.rs",
             "crates/coven-database/src/database_sync.rs",
             "crates/coven-database/src/file_staging.rs",
             "crates/coven-database/src/file_database.rs",

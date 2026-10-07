@@ -15,7 +15,7 @@ coven-database.workspace = true
 coven-storage.workspace = true
 coven-sync.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "sync"] }
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 
 [dev-dependencies]
 coven-storage = { workspace = true, features = ["test-utils"] }

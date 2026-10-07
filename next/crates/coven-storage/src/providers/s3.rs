@@ -16,12 +16,34 @@ use std::fmt;
 /// S3 and compatible endpoints, using only object operations and manually supplied keys.
 pub struct S3Storage {
     client: Client,
+    credentials: SigningCredentials,
     config: StorageConfig,
     bucket: String,
     prefix: String,
     ids: IdSourceRef,
 }
 struct SigningClock(ClockRef);
+#[derive(Clone)]
+struct SigningCredentials(std::sync::Arc<std::sync::RwLock<aws_credential_types::Credentials>>);
+impl fmt::Debug for SigningCredentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SigningCredentials([REDACTED])")
+    }
+}
+impl aws_credential_types::provider::ProvideCredentials for SigningCredentials {
+    fn provide_credentials<'a>(
+        &'a self,
+    ) -> aws_credential_types::provider::future::ProvideCredentials<'a>
+    where
+        Self: 'a,
+    {
+        aws_credential_types::provider::future::ProvideCredentials::ready(Ok(self
+            .0
+            .read()
+            .expect("S3 credentials lock poisoned")
+            .clone()))
+    }
+}
 impl fmt::Debug for SigningClock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("SigningClock")
@@ -58,16 +80,14 @@ impl S3Storage {
         {
             return Err(StorageError::InvalidConfiguration("empty S3 key"));
         }
+        let credentials = SigningCredentials(std::sync::Arc::new(std::sync::RwLock::new(
+            aws_credentials(credentials),
+        )));
         let mut builder = aws_sdk_s3::config::Builder::new()
             .behavior_version_latest()
             .region(Region::new(region.clone()))
-            .credentials_provider(aws_credential_types::Credentials::new(
-                credentials.access_key_id,
-                credentials.secret_access_key.as_str(),
-                None,
-                None,
-                "coven",
-            ))
+            .credentials_provider(credentials.clone())
+            .identity_cache(aws_sdk_s3::config::IdentityCache::no_cache())
             .time_source(SigningClock(clock))
             .force_path_style(true)
             .retry_config(aws_sdk_s3::config::retry::RetryConfig::disabled())
@@ -79,6 +99,7 @@ impl S3Storage {
         let client = Client::from_conf(builder.build());
         Ok(Self {
             client,
+            credentials,
             bucket: bucket.clone(),
             prefix: prefix.clone(),
             config,
@@ -189,6 +210,18 @@ impl S3Storage {
 
 #[async_trait]
 impl Storage for S3Storage {
+    async fn set_s3_credentials(&self, credentials: S3Credentials) -> Result<(), StorageError> {
+        if credentials.access_key_id.is_empty() || credentials.secret_access_key.as_str().is_empty()
+        {
+            return Err(StorageError::InvalidConfiguration("empty S3 key"));
+        }
+        *self
+            .credentials
+            .0
+            .write()
+            .expect("S3 credentials lock poisoned") = aws_credentials(credentials);
+        Ok(())
+    }
     fn config(&self) -> StorageConfig {
         self.config.clone()
     }
@@ -532,6 +565,16 @@ impl Storage for S3Storage {
             Err(error) => Err(s3_error(error)),
         }
     }
+}
+
+fn aws_credentials(credentials: S3Credentials) -> aws_credential_types::Credentials {
+    aws_credential_types::Credentials::new(
+        credentials.access_key_id,
+        credentials.secret_access_key.as_str(),
+        None,
+        None,
+        "coven",
+    )
 }
 
 fn s3_error<E>(error: SdkError<E>) -> StorageError

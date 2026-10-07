@@ -14,6 +14,7 @@
 
 /// `(source file, type, method)`: a method that builds owners (§21.2), such
 /// as the builder's `open` or a test fixture that builds the same graph.
+/// `<free>` in the type position names a free function such as restore bootstrap.
 pub(crate) type CompositionRoot = (&'static str, &'static str, &'static str);
 
 /// `(service, authority)`: the one owner that may build a service it replaces
@@ -189,7 +190,9 @@ impl Policy {
             .flat_map(|(row, names)| names.iter().map(move |name| (row, *name)))
             .collect::<Vec<_>>();
         for (_, owner, _) in self.composition_roots {
-            named.push(("composition_roots", *owner));
+            if *owner != "<free>" {
+                named.push(("composition_roots", *owner));
+            }
         }
         for (service, authority) in self.lifetime_authorities {
             named.push(("lifetime_authorities", service));

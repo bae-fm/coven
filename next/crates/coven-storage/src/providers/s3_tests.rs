@@ -701,3 +701,35 @@ async fn recovered_parts_cannot_exceed_the_recordings_part_size() {
     assert_eq!(upload.confirmed_bytes(), 0);
     UploadSession::decode(upload.encode().unwrap().as_bytes()).unwrap();
 }
+
+#[tokio::test]
+async fn replacement_key_signs_the_next_request_on_the_existing_client() {
+    let signatures = Arc::new(Mutex::new(Vec::new()));
+    let captured = signatures.clone();
+    let server = TestServer::new(Router::new().fallback(move |headers: HeaderMap| {
+        captured
+            .lock()
+            .unwrap()
+            .push(headers["authorization"].to_str().unwrap().to_owned());
+        async {
+            response(
+                200,
+                "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>",
+            )
+        }
+    }))
+    .await;
+    let storage = provider(&server.url);
+    storage.list(&ObjectPrefix::all()).await.unwrap();
+    storage
+        .set_s3_credentials(S3Credentials {
+            access_key_id: "replacement".into(),
+            secret_access_key: SecretText::new("replacement-secret".into()),
+        })
+        .await
+        .unwrap();
+    storage.list(&ObjectPrefix::all()).await.unwrap();
+    let signatures = signatures.lock().unwrap();
+    assert!(signatures[0].contains("Credential=access/"));
+    assert!(signatures[1].contains("Credential=replacement/"));
+}

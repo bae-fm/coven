@@ -142,7 +142,11 @@ fn open_lock(path: &Path) -> Result<File, FileError> {
         .map_err(|source| FileError::at("open store lock", path, source))
 }
 
-fn try_lock(path: &Path, id: StoreId, shared: bool) -> Result<LockedFile, StoreLockError> {
+pub(crate) fn try_lock(
+    path: &Path,
+    id: StoreId,
+    shared: bool,
+) -> Result<LockedFile, StoreLockError> {
     let file = open_lock(path)?;
     let result = if shared {
         file.try_lock_shared()

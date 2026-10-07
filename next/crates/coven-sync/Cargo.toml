@@ -16,6 +16,7 @@ coven-storage.workspace = true
 thiserror.workspace = true
 hex.workspace = true
 tracing.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 coven-database = { workspace = true, features = ["test-utils"] }

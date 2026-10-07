@@ -104,6 +104,13 @@ struct State {
     ranges: Vec<ByteRange>,
     sent_bytes: u64,
     largest_part: usize,
+    held_listing: Option<HeldListing>,
+}
+
+struct HeldListing {
+    prefix: ObjectPrefix,
+    listed: tokio::sync::oneshot::Sender<()>,
+    resume: tokio::sync::oneshot::Receiver<()>,
 }
 
 /// Clones share a provider's durable objects and sessions across simulated crashes.
@@ -125,6 +132,7 @@ pub struct MemoryStorage {
     account: Account,
     clock: ClockRef,
     tokens: Arc<Mutex<Option<OAuthTokens>>>,
+    s3_key: Arc<Mutex<Option<S3Credentials>>>,
     state: Arc<Mutex<State>>,
 }
 impl MemoryStorage {
@@ -139,6 +147,7 @@ impl MemoryStorage {
             requests: Arc::new(tokio::sync::watch::channel(0).0),
             clock,
             tokens: Arc::new(Mutex::new(None)),
+            s3_key: Arc::new(Mutex::new(None)),
             account: Account::Owner,
             state: Arc::new(Mutex::new(State {
                 objects: BTreeMap::new(),
@@ -150,6 +159,7 @@ impl MemoryStorage {
                 ranges: Vec::new(),
                 sent_bytes: 0,
                 largest_part: 0,
+                held_listing: None,
             })),
         })
     }
@@ -170,6 +180,7 @@ impl MemoryStorage {
             account: Account::Recipient(email.to_ascii_lowercase()),
             clock: owner.clock.clone(),
             tokens: Arc::new(Mutex::new(None)),
+            s3_key: Arc::new(Mutex::new(None)),
             state: owner.state.clone(),
         })
     }
@@ -193,6 +204,14 @@ impl MemoryStorage {
     /// Every attempted provider request, including injected failures.
     pub fn request_count(&self) -> u64 {
         *self.requests.borrow()
+    }
+    /// The most recently installed S3 access-key id, without exposing its secret.
+    pub async fn s3_access_key_id(&self) -> Option<String> {
+        self.s3_key
+            .lock()
+            .await
+            .as_ref()
+            .map(|key| key.access_key_id.clone())
     }
     /// Successful ranged requests, in order.
     pub async fn ranges(&self) -> Vec<ByteRange> {
@@ -219,6 +238,22 @@ impl MemoryStorage {
     /// Set faults absolutely, so repeating the command has the same effect.
     pub async fn set_faults(&self, faults: Faults) {
         self.state.lock().await.faults = faults;
+    }
+    /// Hold one listing's reply after taking its snapshot. The test is notified
+    /// when the result is fixed, and can mutate remote state before releasing it.
+    pub async fn hold_next_listing(
+        &self,
+        prefix: ObjectPrefix,
+        listed: tokio::sync::oneshot::Sender<()>,
+        resume: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let mut state = self.state.lock().await;
+        assert!(state.held_listing.is_none(), "a listing is already held");
+        state.held_listing = Some(HeldListing {
+            prefix,
+            listed,
+            resume,
+        });
     }
     /// Model native grants that remain until the owner changes them in the provider.
     pub async fn set_retained_access(&self, account: &str, shares: Vec<RetainedAccess>) {
@@ -290,6 +325,16 @@ impl MemoryStorage {
 
 #[async_trait]
 impl Storage for MemoryStorage {
+    async fn set_s3_credentials(&self, credentials: S3Credentials) -> Result<(), StorageError> {
+        if self.config.provider() != CloudProvider::S3
+            || credentials.access_key_id.is_empty()
+            || credentials.secret_access_key.as_str().is_empty()
+        {
+            return Err(StorageError::InvalidConfiguration("invalid S3 key"));
+        }
+        *self.s3_key.lock().await = Some(credentials);
+        Ok(())
+    }
     fn config(&self) -> StorageConfig {
         self.config.clone()
     }
@@ -367,10 +412,8 @@ impl Storage for MemoryStorage {
     }
     async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
         self.before().await?;
-        Ok(self
-            .state
-            .lock()
-            .await
+        let mut state = self.state.lock().await;
+        let objects = state
             .objects
             .iter()
             .filter(|(path, _)| prefix.contains(path))
@@ -379,7 +422,26 @@ impl Storage for MemoryStorage {
                 size: object.bytes.len() as u64,
                 stored_at: object.stored_at,
             })
-            .collect())
+            .collect();
+        let hold = if state
+            .held_listing
+            .as_ref()
+            .is_some_and(|held| &held.prefix == prefix)
+        {
+            state.held_listing.take()
+        } else {
+            None
+        };
+        drop(state);
+        if let Some(held) = hold {
+            held.listed
+                .send(())
+                .map_err(|_| StorageError::Protocol("listing observer dropped"))?;
+            held.resume
+                .await
+                .map_err(|_| StorageError::Protocol("listing release dropped"))?;
+        }
+        Ok(objects)
     }
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         self.before().await?;

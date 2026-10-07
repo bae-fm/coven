@@ -604,3 +604,22 @@ fn trait_fakes_are_allowed_only_in_roots_and_test_code() {
         assert_eq!(violations.len(), 2, "{attribute}: {violations:?}");
     }
 }
+
+#[test]
+fn named_free_roots_construct_capabilities_without_authorizing_other_functions() {
+    let policy = Policy {
+        composition_roots: &[("crates/coven/src/bootstrap.rs", "<free>", "restore")],
+        construction_only_capability_types: &["Keychain"],
+        ..Policy::EMPTY
+    };
+    let files = [RustFile::fixture(
+        "crates/coven/src/bootstrap.rs",
+        r#"
+        fn restore() { let _ = Keychain::new(); }
+        fn unrelated() { let _ = Keychain::new(); }
+    "#,
+    )];
+    let violations = find_capability_construction_violations(&files, &policy);
+    assert_eq!(violations.len(), 1, "{violations:?}");
+    assert_eq!(violations[0].line, 3);
+}

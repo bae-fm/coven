@@ -27,7 +27,7 @@ pub use report::{
     DamagedObject, DeviceActivity, Disagreement, DroppedEntry, ObjectCheckFailure, StoreLogChange,
     SyncReport, WaitingWrite,
 };
-pub use store_log_sync::StoreLogSync;
+pub use store_log_sync::{JoinOutcome, StoreLogSync};
 
 mod operation_types;
 pub use operation_types::*;
@@ -41,5 +41,13 @@ pub use files::{
     UploadFailures, UploadPhase, UploadQueue, UploadsLiveQuery,
 };
 
+mod joining_identity;
 mod recorded_upload;
 mod snapshot_data;
+pub use joining_identity::JoiningIdentity;
+mod codes;
+pub use codes::{
+    decode_code_info, read_invite_code, read_restore_code, CodeError, CodeInfo, CodeKind,
+};
+mod restore_codes;
+pub use restore_codes::{commit_restore_code, RestoreCodes};

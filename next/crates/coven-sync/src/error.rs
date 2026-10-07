@@ -9,6 +9,26 @@ use std::sync::Arc;
 /// A synchronization request failed; its durable queue, if any, remains retryable.
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
+    /// A credential update does not contain a valid restore code.
+    #[error(transparent)]
+    Code(#[from] crate::CodeError),
+    /// A credential update names a different person.
+    #[error("restore code belongs to {actual}, expected {expected}")]
+    WrongMember {
+        /// The current member.
+        expected: coven_crypto::MemberId,
+        /// The member named by the code.
+        actual: coven_crypto::MemberId,
+    },
+    /// Rollback failed too; neither failure is hidden.
+    #[error("{operation}; rollback failed: {cleanup}")]
+    Cleanup {
+        /// The original failure.
+        operation: Box<SyncError>,
+        /// Failure restoring the original state.
+        #[source]
+        cleanup: Box<SyncError>,
+    },
     /// A user-selected download path already has a filesystem entry.
     #[error("download destination already exists: {}", path.display())]
     DestinationExists {

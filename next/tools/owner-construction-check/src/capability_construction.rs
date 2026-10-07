@@ -332,7 +332,18 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
 
     fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
         if !is_test_only(&node.attrs) {
-            let scope = ConstructionScope::Factory(self.factory_results(&node.sig));
+            let rooted = self
+                .policy
+                .composition_roots
+                .iter()
+                .any(|(path, owner, name)| {
+                    *path == self.path && *owner == "<free>" && node.sig.ident == *name
+                });
+            let scope = if rooted {
+                ConstructionScope::CompositionRoot
+            } else {
+                ConstructionScope::Factory(self.factory_results(&node.sig))
+            };
             let previous = std::mem::replace(&mut self.scope, scope);
             self.bind_inputs(&node.sig);
             visit::visit_item_fn(self, node);

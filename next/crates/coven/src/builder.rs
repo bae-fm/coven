@@ -158,16 +158,12 @@ impl CovenBuilder {
             keychain.set_device_id(device)?;
         }
         let keys = Self::make_keys(self.keys, &self.directory, settings.id, keychain.clone());
-        let identity: Arc<dyn MemberKeyCustody> = match self.identity {
-            IdentityCustody::Keyring => Arc::new(KeyringCustody::new(keychain.clone())),
-            IdentityCustody::Passphrase(secret) => Arc::new(PassphraseCustody::new(
-                secret,
-                self.directory.owned_file(StoreFile::MemberKeys),
-                settings.id,
-            )),
-            IdentityCustody::InMemory(keys) => Arc::new(InMemoryCustody::new(keys)),
-            IdentityCustody::Custom(keys) => keys,
-        };
+        let identity = Self::make_identity(
+            self.identity,
+            &self.directory,
+            settings.id,
+            keychain.clone(),
+        );
         Ok(OpeningStore {
             database: self.database,
             lock,
@@ -176,8 +172,9 @@ impl CovenBuilder {
                 custody: StoreCustody::new(
                     StoreKeys::new(keys.clone()),
                     identity.clone(),
-                    keychain,
+                    keychain.clone(),
                 ),
+                keychain,
                 keys,
                 identity,
                 clock: self.clock,
@@ -185,6 +182,24 @@ impl CovenBuilder {
                 storage: self.storage,
             },
         })
+    }
+
+    pub(crate) fn make_identity(
+        custody: IdentityCustody,
+        directory: &StoreDir,
+        id: StoreId,
+        keychain: Arc<StoreKeychain>,
+    ) -> Arc<dyn MemberKeyCustody> {
+        match custody {
+            IdentityCustody::Keyring => Arc::new(KeyringCustody::new(keychain.clone())),
+            IdentityCustody::Passphrase(secret) => Arc::new(PassphraseCustody::new(
+                secret,
+                directory.owned_file(StoreFile::MemberKeys),
+                id,
+            )),
+            IdentityCustody::InMemory(keys) => Arc::new(InMemoryCustody::new(keys)),
+            IdentityCustody::Custom(keys) => keys,
+        }
     }
 
     fn read_graph(self) -> CovenResult<(DatabaseBuilder, StoreKeys)> {
@@ -200,7 +215,7 @@ impl CovenBuilder {
         Ok((self.database, StoreKeys::new(keys)))
     }
 
-    fn make_keys(
+    pub(crate) fn make_keys(
         custody: KeyCustody,
         directory: &StoreDir,
         id: StoreId,
@@ -235,6 +250,7 @@ struct OpeningStore {
 struct OpeningOwners {
     directory: StoreDir,
     custody: StoreCustody,
+    keychain: Arc<StoreKeychain>,
     keys: Arc<dyn StoreKeyCustody>,
     identity: Arc<dyn MemberKeyCustody>,
     clock: ClockRef,
@@ -317,6 +333,13 @@ impl OpeningOwners {
         database: coven_database::Database,
         sync: coven_sync::StoreLogSync,
     ) -> CovenHandle {
+        let codes = coven_sync::RestoreCodes::new(
+            database.clone(),
+            self.identity.clone(),
+            self.keychain,
+            coven_storage::StorageSettings::new(self.directory.clone()),
+            self.storage.clone(),
+        );
         let files = coven_sync::Files::new(
             coven_database::FileDatabase::new(database.clone()),
             self.directory,
@@ -325,7 +348,7 @@ impl OpeningOwners {
             self.ids,
         );
         let operations = coven_sync::Operations::new(sync, files.clone());
-        CovenHandle::new(database, self.custody, operations, files)
+        CovenHandle::new(database, self.custody, operations, files, codes)
     }
 }
 

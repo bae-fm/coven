@@ -113,6 +113,19 @@ fn declared_methods(
     }
 
     impl Visit<'_> for MethodCollector<'_> {
+        fn visit_item_fn(&mut self, node: &syn::ItemFn) {
+            if self.include_tests || !is_test_only(&node.attrs) {
+                self.methods.insert(
+                    (
+                        self.path.to_string(),
+                        "<free>".into(),
+                        node.sig.ident.to_string(),
+                    ),
+                    node.sig.clone(),
+                );
+                visit::visit_item_fn(self, node);
+            }
+        }
         fn visit_item_mod(&mut self, node: &syn::ItemMod) {
             if self.include_tests || !is_test_only(&node.attrs) {
                 visit::visit_item_mod(self, node);
@@ -192,6 +205,18 @@ fn composition_root_guards_can_name_test_fixture_methods() {
         "open".into()
     )));
     assert!(declared_methods(&files, false).is_empty());
+}
+
+#[test]
+fn composition_root_guards_resolve_free_functions() {
+    let path = "crates/coven/src/bootstrap.rs";
+    let files = [RustFile::fixture(
+        path,
+        "fn restore() {} #[cfg(test)] fn fixture() {}",
+    )];
+    let methods = declared_methods(&files, false);
+    assert!(methods.contains_key(&(path.into(), "<free>".into(), "restore".into())));
+    assert!(!methods.contains_key(&(path.into(), "<free>".into(), "fixture".into())));
 }
 
 fn invalid_capability_factories(files: &[RustFile], policy: &Policy) -> Vec<String> {

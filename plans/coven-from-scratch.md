@@ -1582,6 +1582,20 @@ Carol's tablet:
   - her store key sealed to her, then the store log entry adding her:
     she's in;
   - her request deleted with no key sealed to her: declined or expired.
+  - It reads the store log again after observing a deleted request: approval
+    may have happened after its preceding listing. Sealed keys without an
+    effective membership entry keep it waiting; a dropped membership entry
+    reaches the app with its replay reason.
+- Before sending, Carol's phone keeps its new member keys and exact request
+  bytes in its unpublished local directory, encrypted with the invite secret
+  and bound to the store and invite. Restarting with the same invite and
+  device name reuses them and the device id. These are not final key custody.
+  - It records the publication attempt before issuing it. If the attempt's
+    reply is lost and neither a request nor sealed keys exist on retry, it
+    treats the invite as settled. Recreating that request could revive an
+    invite the admin already declined. An admin can issue another invite.
+  - Provider permission failures reach the app even when revocation followed
+    decline or expiry; an unreadable request is not an absent request.
 - The entry adding Carol records how she reaches storage, her provider
   account or the id of the S3 key made for her, so any admin can take it
   back later ([§13](#13-removing-members-and-devices)).
@@ -5047,7 +5061,8 @@ impl CovenHandle {
 
     /// On a device that already has the store open: takes the storage
     /// credentials from a new restore code of this member's, and keeps
-    /// everything else.
+    /// everything else. A disconnected handle keeps them for its next
+    /// connection; a connected handle also replaces its provider's credentials.
     pub async fn update_credentials(&self, code: &str) -> Result<(), SyncError>;
 
     /// Changes a member's role, as an admin (§9).
@@ -5135,10 +5150,26 @@ pub enum ProviderSignOut {
 - An admin adds a person with an invite, and approves their join request
   ([§12.2](#122-adding-a-person)).
 - Each call that opens the store on a new device makes the store
-  directory, puts the keys in custody, loads the store, and returns the
-  store's directory, which the app then opens.
+  directory outside the visible store listing, loads the store, commits keys
+  and credentials, and publishes the directory, which the app then opens.
+  Custody or publication failures roll back final custody; rollback failures
+  retain both causes. Errors after publication identify the usable directory
+  and retain its committed custody.
 - Each takes the same tables, migrations and custody choices as the
   builder, and `cancel`, which stops it.
+  - Session-only `InMemory` values cannot survive a call returning only a
+    directory. These calls refuse them; an app retaining memory custody
+    supplies `Custom(Arc<InMemoryCustody<_>>)` to both bootstrap and opening.
+  - Cancellation removes the unpublished directory and does not commit final
+    keys or credentials. Dropping a waiting future leaves its encrypted work
+    for explicit retry. Publication has no cancellable await after its final
+    cancellation check.
+  - Restore registers the name `Restored device`; joining uses the supplied
+    device name. Every installation receives its own device id.
+  - The singular keychain call returns an ambiguity error if several stores
+    are discoverable; it never chooses one arbitrarily.
+  - Bootstrap reads snapshots and logs through their owners and does not run
+    the concurrent file-transfer queue, so it takes no file-transfer limits.
 
 ```rust
 /// A one-time invite's UUID, also naming its join-request object (§12.2).
@@ -5183,16 +5214,24 @@ pub enum BootstrapError {
     Cancelled,
     /// The code cannot be used.
     Code(CodeError),
-    /// Creating the local store directory failed.
-    CreateStore(StoreCreationError),
+    /// Preparing, publishing or removing the unpublished directory failed.
+    Directory(BootstrapDirectoryError),
     /// Loading or opening the store failed.
     Store(CovenError),
     /// Provider sign-in failed.
     OAuth(OAuthError),
     /// Reading or keeping credentials or identity keys failed.
     SecureStorage(KeyError),
-    /// Opening the member's sealed store key failed.
-    Unlock(StoreKeyUnlockError),
+    /// Provider admission, signed membership or snapshot loading failed.
+    Sync(SyncError),
+    /// A directory-only result cannot retain session-only custody.
+    EphemeralCustody,
+    /// The app must select a code explicitly when several stores are available.
+    MultipleStores(Vec<StoreId>),
+    /// Cleanup failed too; neither failure is hidden.
+    Cleanup { operation: Box<BootstrapError>, cleanup: Box<BootstrapError> },
+    /// The store is published and usable, but final cleanup failed.
+    Published { store: StoreDir, source: Box<BootstrapError> },
 }
 
 /// Provider sign-in tokens, held as secrets rather than printed (§20.10).
@@ -5311,7 +5350,10 @@ pub async fn restore_from_code(
     identity_custody: IdentityCustody,
     oauth_tokens: Option<OAuthTokens>,
     layout: &StoreLayout,
-    /* transfer limits, OAuth clients, CloudKit calls, clock, id source */
+    oauth_clients: Arc<OAuthClients>,
+    cloudkit_ops: Option<Arc<dyn CloudKitOps>>,
+    clock: ClockRef,
+    ids: IdSourceRef,
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<StoreDir, BootstrapError>;
@@ -5327,7 +5369,10 @@ pub async fn restore_from_keychain(
     identity_custody: IdentityCustody,
     oauth_tokens: Option<OAuthTokens>,
     layout: &StoreLayout,
-    /* transfer limits, OAuth clients, CloudKit calls, clock, id source */
+    oauth_clients: Arc<OAuthClients>,
+    cloudkit_ops: Option<Arc<dyn CloudKitOps>>,
+    clock: ClockRef,
+    ids: IdSourceRef,
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Option<StoreDir>, BootstrapError>;
@@ -5352,7 +5397,10 @@ pub async fn join_with_invite(
     identity_custody: IdentityCustody,
     oauth_tokens: Option<OAuthTokens>,
     layout: &StoreLayout,
-    /* transfer limits, OAuth clients, CloudKit calls, clock, id source */
+    oauth_clients: Arc<OAuthClients>,
+    cloudkit_ops: Option<Arc<dyn CloudKitOps>>,
+    clock: ClockRef,
+    ids: IdSourceRef,
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Option<StoreDir>, BootstrapError>;
@@ -5429,7 +5477,6 @@ let store_dir = restore_from_code(
     IdentityCustody::Keyring,
     tokens,
     &layout,
-    transfer_limits,
     oauth_clients.clone(),
     cloudkit_ops.clone(),
     clock.clone(),
@@ -5486,7 +5533,6 @@ match join_with_invite(
     IdentityCustody::Keyring,
     Some(tokens),
     &layout,
-    transfer_limits,
     oauth_clients.clone(),
     cloudkit_ops.clone(),
     clock.clone(),
