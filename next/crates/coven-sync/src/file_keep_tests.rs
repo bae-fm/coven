@@ -81,7 +81,8 @@ async fn keeping_both_kinds_resumes_after_every_step_and_changes_other_devices()
                 assert!(
                     matches!(peer.files.read_file(&remote).await, Err(FileReadError::OnOtherDevice { device: other, .. }) if other == device)
                 );
-                let path = coven_storage::ObjectPath::file(file.uploaded().unwrap().unwrap().0);
+                let uploaded = file.uploaded().unwrap().unwrap();
+                let path = coven_storage::ObjectPath::file(uploaded.device, uploaded.id);
                 assert!(!f.storage.read(&path).await.unwrap().is_empty());
                 peer.close().await;
                 f.close().await;
@@ -134,10 +135,12 @@ async fn changed_rows_permanently_abandon_downloads_and_preserve_uploads() {
             .await
             .unwrap();
         assert!(f.database.operations().await.unwrap().is_empty());
+        let uploaded = file.uploaded().unwrap().unwrap();
         assert!(!f
             .storage
             .read(&coven_storage::ObjectPath::file(
-                file.uploaded().unwrap().unwrap().0
+                uploaded.device,
+                uploaded.id,
             ))
             .await
             .unwrap()
@@ -192,6 +195,7 @@ fn operation_owner(f: &Fixture) -> crate::Operations {
         Arc::new(InMemoryCustody::new(MemberKeys::generate().unwrap())),
         f.clock.clone(),
         f.ids.clone(),
+        f.directory.clone(),
     );
     crate::Operations::new(sync, f.files.clone())
 }

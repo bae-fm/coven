@@ -12,11 +12,13 @@ use coven_merge::{Audience, WriteId};
 use rusqlite::params;
 
 /// Coverage of applied store-log boundaries, in application order.
-pub(crate) enum WriteBoundary {
+pub enum WriteBoundary {
     /// An applied breaking schema change excludes uncovered older-schema writes.
     SchemaChange {
         /// The version reached by the change.
         version: u32,
+        /// Audience whose schema was raised.
+        audience: Audience,
         /// Writes included in its snapshot.
         included: WritePositions,
     },
@@ -33,26 +35,34 @@ pub(crate) enum WriteBoundary {
 
 impl WriteBoundary {
     pub(crate) fn record(&self, database: &DatabaseConnection) -> Result<bool, DbError> {
+        database.transaction(|database| self.record_inside(database))
+    }
+
+    pub(crate) fn record_inside(&self, database: &DatabaseConnection) -> Result<bool, DbError> {
         let (cause, audience, included) = match self {
-            Self::SchemaChange { version, included } => {
-                (LostWriteCause::SchemaChange(*version), None, included)
-            }
+            Self::SchemaChange {
+                version,
+                audience,
+                included,
+            } => (
+                LostWriteCause::SchemaChange(*version),
+                audience_text(audience),
+                included,
+            ),
             Self::Reset {
                 entry,
                 audience,
                 included,
             } => (
                 LostWriteCause::Reset(*entry),
-                Some(audience_text(audience)),
+                audience_text(audience),
                 included,
             ),
         };
-        database.transaction(|database| {
-            Ok(database.internal_execute(
-                "INSERT INTO coven_applied_boundaries(cause,audience,included) VALUES(?1,?2,?3) ON CONFLICT(cause) DO NOTHING",
+        Ok(database.internal_execute(
+                "INSERT INTO coven_applied_boundaries(cause,audience,included) VALUES(?1,?2,?3) ON CONFLICT(cause,audience) DO NOTHING",
                 params![encoded(merge_fields::encode_lost_write_cause(&cause))?, audience, encoded(merge_fields::encode_write_positions(included))?],
             )? != 0)
-        })
     }
 
     pub(crate) fn load(database: &DatabaseConnection) -> Result<Vec<Self>, DbError> {
@@ -63,20 +73,21 @@ impl WriteBoundary {
                 let cause = decoded(merge_fields::decode_lost_write_cause(
                     &row.get::<_, Vec<u8>>(0)?,
                 ))?;
-                let audience: Option<String> = row.get(1)?;
+                let audience: String = row.get(1)?;
                 let included = decoded(merge_fields::decode_write_positions(
                     &row.get::<_, Vec<u8>>(2)?,
                 ))?;
                 match (cause, audience) {
-                    (LostWriteCause::SchemaChange(version), None) => {
-                        Ok(Self::SchemaChange { version, included })
-                    }
-                    (LostWriteCause::Reset(entry), Some(text)) => Ok(Self::Reset {
+                    (LostWriteCause::SchemaChange(version), text) => Ok(Self::SchemaChange {
+                        version,
+                        audience: crate::write_encoding::audience(&text)?,
+                        included,
+                    }),
+                    (LostWriteCause::Reset(entry), text) => Ok(Self::Reset {
                         entry,
                         audience: crate::write_encoding::audience(&text)?,
                         included,
                     }),
-                    _ => Err(rusqlite::Error::InvalidQuery),
                 }
             },
         )
@@ -88,7 +99,12 @@ impl WriteBoundary {
         part: &WritePart,
     ) -> Option<LostWriteCause> {
         match self {
-            Self::SchemaChange { version, included } => (header.schema_version < *version
+            Self::SchemaChange {
+                version,
+                audience,
+                included,
+            } => (part.audience == *audience
+                && header.schema_version < *version
                 && !included.covers(header.position))
             .then_some(LostWriteCause::SchemaChange(*version)),
             Self::Reset {

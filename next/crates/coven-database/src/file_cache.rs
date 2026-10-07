@@ -3,9 +3,9 @@
 use crate::{sqlite::DatabaseConnection, DbError, FileRef};
 use coven_foundation::files::{FileArea, FileName, StoreDir};
 
-fn id(file: &FileRef) -> Result<String, DbError> {
+pub(super) fn id(file: &FileRef) -> Result<String, DbError> {
     file.uploaded()?
-        .map(|(id, _)| id.to_string())
+        .map(|reference| format!("{}/{}", reference.device.0, reference.id))
         .ok_or(DbError::FileBytesRequired {
             table: file.table().into(),
             key: file.key().clone(),

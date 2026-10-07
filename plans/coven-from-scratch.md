@@ -1902,6 +1902,7 @@ Carol's tablet:
 - A device writes one for an audience once that audience's parts after
   its latest snapshot add up to more bytes than that snapshot, or than
   1 MiB while the audience has none.
+  - Both sizes count encoded plaintext, before sealing adds chunk overhead.
 - The *latest* snapshot of an audience is the one covering the most writes,
   counted over every log; a tie goes to the smaller path.
 - Until an audience has a snapshot, a new device reads every log from the
@@ -1966,11 +1967,16 @@ Carol's tablet:
     one that has never posted counts as having read nothing.
 - A device deletes a snapshot of its own once a newer one of the same
   audience covers everything it covers.
+  - A snapshot named by a kept reset or version-raise entry that changes
+    the replayed state stays: new devices need its authenticated coverage
+    to judge late writes and select a snapshot following that boundary.
   - Each device deletes its own log objects.
   - A removed device's are deleted by another device of the same member,
     since they were uploaded with that member's account.
   - A removed member's are deleted by a device of the member whose provider
     account holds the store.
+    On S3, where access-key ids do not identify their account, the member
+    recorded by the kept creation entry performs this deletion.
   - On Google Drive only an uploader can delete their files, so a removed
     member's just leave the store's folder, and stay in their own account.
   - A device that never comes back keeps its covered log objects until it
@@ -2100,7 +2106,7 @@ Carol's tablet:
   writes like any other.
 - Every device checks a downloaded file against it.
 - Uploading a file picks a random id and a random key for it, stores it
-  encrypted at `files/<id>`, and writes both into its row's where-column.
+  encrypted at `files/<device>/<id>`, and writes both into its row's where-column.
   - The provider sees only a random name, never a hash of the content.
   - Each upload is a copy of its own: identical files attached to two
     rows are stored twice, and deleting one never touches the other.
@@ -2171,8 +2177,14 @@ Carol's tablet:
 - The write that marks a file uploaded is made only once the file is
   stored, so no device ever sees a row whose uploaded file isn't there
   yet, and no write ever waits for a file.
-- An uploaded file is deleted once nothing in the latest snapshot or the
-  writes after it refers to it as uploaded.
+- An uploaded file is deleted once no synced row in any kept snapshot or
+  log write refers to it as uploaded. Local rows, waiting writes and
+  unfinished upload publication also protect the file.
+- Its storage path and uploaded row reference carry the uploader's device
+  id, so ownership remains known after the last reference disappears.
+- If retained data belongs to an unreadable audience, uses an excluded key,
+  or fails validation,
+  a device cannot prove file absence and leaves uploaded files in storage.
 - Uploaded files are deleted by the same devices as logs
   ([§15](#15-snapshots)).
 - Deleting a row deletes only coven's copies of its file, never a
@@ -2543,6 +2555,9 @@ Carol's tablet:
     one; the device reads it again on every sync, in case the failure was
     passing.
   - A damaged snapshot is passed over for the next latest, or the logs.
+    Readable cleartext positions still require that history; they never
+    authorize applying it. Missing required logs fail the reload without
+    changing the database, rather than silently loading less history.
   - A damaged positions object counts as not posted.
 - A damaged local database, found by SQLite's integrity check when the
   database opens.
@@ -2801,7 +2816,7 @@ impl ObjectPath {
     /// A sealed circle key for a member (§14.3).
     pub fn circle_key(circle: CircleId, key: KeyId, member: &MemberId) -> Self;
     /// An uploaded file's encrypted bytes, under its random id (§16.2).
-    pub fn file(id: FileId) -> Self;
+    pub fn file(device: DeviceId, id: FileId) -> Self;
     /// An encrypted join request under its invite id (§12.2).
     pub fn join_request(invite: InviteId) -> Self;
     /// Parses a listed or recorded path, refusing paths outside the store's layout.
@@ -2810,7 +2825,7 @@ impl ObjectPath {
     pub fn as_str(&self) -> &str;
     /// Whether this is a posted-positions path, the only kind that may be replaced.
     pub fn is_replaceable(&self) -> bool;
-    /// The device named by a log, snapshot or positions path.
+    /// The device named by a log, snapshot, file or positions path.
     pub fn device(&self) -> Option<DeviceId>;
 }
 
@@ -4902,7 +4917,7 @@ impl FileRef {
 }
 
 pub enum FileLocation {
-    /// The where-column holds `uploaded <file id> <key in lowercase hex>`
+    /// The where-column holds `uploaded <device id> <file id> <key in lowercase hex>`
     /// (Appendix D12); the reference retains both privately.
     Uploaded,
     /// Only on the named device.

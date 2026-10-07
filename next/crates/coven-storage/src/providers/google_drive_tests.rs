@@ -337,9 +337,10 @@ async fn missing_session_and_destination_is_expired() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::file(coven_foundation::id_source::FileId(uuid::Uuid::from_bytes(
-        [0xff; 16],
-    )));
+    let path = ObjectPath::file(
+        coven_foundation::id_source::DeviceId(31),
+        coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xff; 16])),
+    );
     let mut upload = storage.begin_upload(&path, 4).await.unwrap();
     state.lock().unwrap().uploads.clear();
     assert!(matches!(
@@ -379,9 +380,10 @@ async fn session_reopens_and_only_uploader_deletes() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::file(coven_foundation::id_source::FileId(uuid::Uuid::from_bytes(
-        [0xcc; 16],
-    )));
+    let path = ObjectPath::file(
+        coven_foundation::id_source::DeviceId(31),
+        coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xcc; 16])),
+    );
     let mut upload = storage
         .begin_upload(&path, 8 * 1024 * 1024 + 1)
         .await
@@ -417,9 +419,10 @@ async fn two_uploads_cannot_publish_different_bytes_at_one_path() {
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
     let first = provider(&server.url);
     let second = provider(&server.url);
-    let path = ObjectPath::file(coven_foundation::id_source::FileId(uuid::Uuid::from_bytes(
-        [0xdd; 16],
-    )));
+    let path = ObjectPath::file(
+        coven_foundation::id_source::DeviceId(31),
+        coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xdd; 16])),
+    );
     let mut a = first.begin_upload(&path, 1).await.unwrap();
     let mut b = second.begin_upload(&path, 1).await.unwrap();
     first.upload_part(&mut a, b"a").await.unwrap();
@@ -432,9 +435,10 @@ async fn interrupted_part_continues_at_the_confirmed_byte() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::file(coven_foundation::id_source::FileId(uuid::Uuid::from_bytes(
-        [0xee; 16],
-    )));
+    let path = ObjectPath::file(
+        coven_foundation::id_source::DeviceId(31),
+        coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xee; 16])),
+    );
     let total = 8 * 1024 * 1024 + 1;
     let mut upload = storage.begin_upload(&path, total).await.unwrap();
     let recorded = upload.encode().unwrap();

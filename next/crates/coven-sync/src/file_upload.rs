@@ -5,14 +5,14 @@ use crate::{
     files::{join, Files, FilesInner},
     OperationError,
 };
-use coven_crypto::{ContentHasher, FileKey, SecretBytes, SecretText};
+use coven_crypto::{ContentHasher, FileKey, SecretBytes};
 use coven_database::{DbError, FileRef, FileUpload};
 use coven_format::file::FileHeader;
 use coven_foundation::{
     files::{FileArea, FileName, FileReader, ObservationError, StoreReadLock},
     id_source::FileId,
 };
-use coven_storage::{ObjectPath, StorageError, UploadSession};
+use coven_storage::{ObjectPath, UploadSession};
 use std::{
     sync::Arc,
     time::{Duration, SystemTime},
@@ -240,7 +240,8 @@ impl FilesInner {
         }
         let fixed = item.fixed.as_ref().expect("prepared bytes");
         let (id, key) = decode_identity(fixed.identity.as_bytes()).map_err(FileReadError::from)?;
-        let path = ObjectPath::file(id);
+        let device = upload_device(item)?;
+        let path = ObjectPath::file(device, id);
         if !item.stored {
             let storage = self
                 .storage
@@ -281,56 +282,28 @@ impl FilesInner {
                 );
                 storage.create_once(&path, &bytes).await?;
             } else {
-                let mut session = match &item.session {
-                    Some(bytes) => {
-                        let mut session = UploadSession::decode(bytes.as_bytes())?;
-                        if session.path() != &path || session.total_bytes() != total {
-                            return Err(StorageError::SessionMismatch.into());
-                        }
-                        match storage.resume_upload(&mut session).await {
-                            Ok(()) => {}
-                            Err(StorageError::SessionExpired) => {
-                                session = storage.restart_upload(&session).await?
-                            }
-                            Err(error) => return Err(error.into()),
-                        }
-                        session
-                    }
-                    None => storage.begin_upload(&path, total).await?,
-                };
-                self.database
-                    .record_session(item.id, session.encode()?)
-                    .await
-                    .map_err(FileReadError::from)?;
-                while !session.is_complete() && session.confirmed_bytes() < total {
-                    if self.paused() {
-                        return Ok(false);
-                    }
-                    let offset = session.confirmed_bytes();
-                    let length = (session.part_size() as u64 - offset % session.part_size() as u64)
-                        .min(total - offset) as usize;
-                    self.phase(
-                        item.id,
-                        UploadPhase::Uploading {
-                            bytes_sent: offset,
-                            bytes_total: total,
-                        },
-                    );
-                    let bytes = reader.read_at(offset, length, &row_id).await?;
-                    storage.upload_part(&mut session, &bytes).await?;
-                    self.database
-                        .record_session(item.id, session.encode()?)
-                        .await
-                        .map_err(FileReadError::from)?;
-                }
-                if self.paused() {
+                let session = item
+                    .session
+                    .as_ref()
+                    .map(|bytes| UploadSession::decode(bytes.as_bytes()))
+                    .transpose()?;
+                let uploaded = crate::recorded_upload::upload(
+                    storage.as_ref(),
+                    &path,
+                    total,
+                    session,
+                    &mut FileTransfer {
+                        owner: self,
+                        item,
+                        reader,
+                        row_id,
+                        total,
+                    },
+                )
+                .await?;
+                if !uploaded {
                     return Ok(false);
                 }
-                storage.finish_upload(&mut session).await?;
-                self.database
-                    .record_session(item.id, session.encode()?)
-                    .await
-                    .map_err(FileReadError::from)?;
             }
             self.database
                 .record_stored(item.id)
@@ -338,10 +311,8 @@ impl FilesInner {
                 .map_err(FileReadError::from)?;
         }
         self.phase(item.id, UploadPhase::Stored);
-        let location = SecretText::new(format!(
-            "uploaded {id} {}",
-            hex::encode(key.to_secret_bytes().as_bytes())
-        ));
+        let location =
+            coven_format::file_reference::UploadedFileReference { device, id, key }.encode();
         let changed = self
             .database
             .finish_upload(item.id, &item.file, location)
@@ -358,7 +329,8 @@ impl FilesInner {
         let source = self.database.open_local(&item.file).await?;
         let id = FileId(self.ids.new_id());
         let key = FileKey::generate()?;
-        let path = ObjectPath::file(id);
+        let device = upload_device(item)?;
+        let path = ObjectPath::file(device, id);
         let name = FileName::new(self.ids.new_id().to_string()).expect("UUID file name");
         let reservation = self.database.reserve_upload_bytes(name.clone()).await?;
         let file = self.directory.file(FileArea::AppProvided, &name);
@@ -419,7 +391,7 @@ impl FilesInner {
         Ok(())
     }
 }
-pub(super) fn decode_identity(bytes: &[u8]) -> Result<(FileId, FileKey), DbError> {
+pub(crate) fn decode_identity(bytes: &[u8]) -> Result<(FileId, FileKey), DbError> {
     if bytes.len() != 68 {
         return Err(DbError::DamagedDatabase);
     }
@@ -481,5 +453,47 @@ fn in_backoff(item: &FileUpload, now: SystemTime) -> bool {
     match now.duration_since(last) {
         Ok(elapsed) => elapsed < Duration::from_secs(seconds),
         Err(_) => true,
+    }
+}
+
+struct FileTransfer<'a> {
+    owner: &'a FilesInner,
+    item: &'a FileUpload,
+    reader: Arc<SpoolReader>,
+    row_id: String,
+    total: u64,
+}
+impl crate::recorded_upload::UploadSource for FileTransfer<'_> {
+    type Error = UploadFailure;
+    async fn read(&mut self, offset: u64, length: usize) -> Result<Vec<u8>, UploadFailure> {
+        self.owner.phase(
+            self.item.id,
+            UploadPhase::Uploading {
+                bytes_sent: offset,
+                bytes_total: self.total,
+            },
+        );
+        Ok(self.reader.read_at(offset, length, &self.row_id).await?)
+    }
+    async fn save(&mut self, session: UploadSession) -> Result<(), UploadFailure> {
+        self.owner
+            .database
+            .record_session(self.item.id, session.encode()?)
+            .await?;
+        Ok(())
+    }
+    fn keep_going(&self) -> bool {
+        !self.owner.paused()
+    }
+}
+
+pub(super) fn upload_device(
+    item: &FileUpload,
+) -> Result<coven_foundation::id_source::DeviceId, UploadFailure> {
+    match item.file.location() {
+        coven_database::FileLocation::OnDevice(device) => Ok(device),
+        coven_database::FileLocation::Uploaded => {
+            Err(FileReadError::Database(DbError::DamagedDatabase).into())
+        }
     }
 }

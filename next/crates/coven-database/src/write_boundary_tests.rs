@@ -6,6 +6,43 @@ use coven_foundation::id_source::{DeviceId, SequentialIds};
 use coven_merge::{Audience, WriteId};
 
 #[tokio::test]
+async fn schema_boundaries_are_independent_for_each_audience() {
+    let store = TestStore::new();
+    let db = store.schema(notes(), NOTES).await.unwrap();
+    sql(&db, "INSERT INTO notes VALUES('n','title','body')")
+        .await
+        .unwrap();
+    let record = records(&db).remove(0);
+    let circle = Audience::Circle(coven_foundation::id_source::CircleId(
+        uuid::Uuid::from_u128(1),
+    ));
+    let boundary = crate::WriteBoundary::SchemaChange {
+        audience: circle.clone(),
+        version: 2,
+        included: WritePositions(Vec::new()),
+    };
+    assert!(boundary
+        .excludes(&record.header, &record.parts[0])
+        .is_none());
+    let mut part = record.parts[0].clone();
+    part.audience = circle.clone();
+    assert!(matches!(
+        boundary.excludes(&record.header, &part),
+        Some(coven_format::snapshot_rows::LostWriteCause::SchemaChange(2))
+    ));
+    assert!(db
+        .apply_breaking_change(circle, 2, WritePositions(Vec::new()))
+        .await
+        .unwrap());
+    assert!(db
+        .apply_breaking_change(Audience::Store, 2, WritePositions(Vec::new()))
+        .await
+        .unwrap());
+    assert_eq!(count(&db, "coven_applied_boundaries"), 2);
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn reset_successors_can_read_post_reset_writes_from_another_device() {
     let ids = SequentialIds::new();
     let stores = [
@@ -105,7 +142,7 @@ async fn repeated_boundaries_keep_their_original_coverage_and_application_order(
                     .unwrap());
             } else {
                 assert!(db
-                    .apply_breaking_change(2, WritePositions(vec![]))
+                    .apply_breaking_change(coven_merge::Audience::Store, 2, WritePositions(vec![]))
                     .await
                     .unwrap());
             }
@@ -122,7 +159,11 @@ async fn repeated_boundaries_keep_their_original_coverage_and_application_order(
             .await
             .unwrap());
         assert!(!db
-            .apply_breaking_change(2, WritePositions(vec![writes[1].header.position]))
+            .apply_breaking_change(
+                coven_merge::Audience::Store,
+                2,
+                WritePositions(vec![writes[1].header.position])
+            )
             .await
             .unwrap());
         db.apply_downloaded(writes[1].clone().into()).await.unwrap();

@@ -1,4 +1,4 @@
-//! Read-view replays retained for one device-log download step (§9, §10, §14.4).
+//! Read-view replays retained while opening writes against one store log (§9, §10, §14.4).
 
 use coven_database::{StoreLog, StoreLogReplay};
 use coven_format::value::{EntryId, EntryPositions};

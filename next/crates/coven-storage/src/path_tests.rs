@@ -2,7 +2,7 @@ use super::*;
 #[test]
 fn file_names_are_random_ids_and_snapshots_name_their_audience() {
     for path in [
-        "files/00112233-4455-6677-8899-aabbccddeeff",
+        "files/31/00112233-4455-6677-8899-aabbccddeeff",
         "snapshots/store/42/3",
         "snapshots/00112233-4455-6677-8899-aabbccddeeff/42/3",
     ] {
@@ -51,9 +51,10 @@ fn every_layout_round_trips_without_aliases() {
         ObjectPath::store_key(key, &member),
         ObjectPath::circle_key(CircleId(id), key, &member),
         ObjectPath::join_request(InviteId(id)),
-        ObjectPath::file(coven_foundation::id_source::FileId(uuid::Uuid::from_bytes(
-            [0xab; 16],
-        ))),
+        ObjectPath::file(
+            coven_foundation::id_source::DeviceId(31),
+            coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xab; 16])),
+        ),
     ] {
         assert_eq!(ObjectPath::parse(path.as_str()).unwrap(), path);
         let json = serde_json::to_vec(&path).unwrap();
@@ -130,7 +131,7 @@ fn appendix_d_paths_include_snapshot_audience_and_random_file_id() {
     for path in [
         "snapshots/store/42/3",
         "snapshots/abababab-abab-abab-abab-abababababab/42/3",
-        "files/abababab-abab-abab-abab-abababababab",
+        "files/31/abababab-abab-abab-abab-abababababab",
     ] {
         assert!(ObjectPath::parse(path).is_ok(), "{path}");
     }

@@ -27,6 +27,18 @@ pub enum SyncError {
         /// The repeated destination.
         path: std::path::PathBuf,
     },
+    /// Reading a snapshot stream failed.
+    #[error(transparent)]
+    SnapshotIo(#[from] std::io::Error),
+    /// Recorded snapshot bytes disappeared or changed on disk.
+    #[error(transparent)]
+    SnapshotFile(#[from] coven_foundation::files::ObservationError),
+    /// Keeping a snapshot file failed.
+    #[error(transparent)]
+    Disk(#[from] coven_foundation::files::FileError),
+    /// The store could not be retained during snapshot work.
+    #[error(transparent)]
+    Lock(#[from] coven_foundation::files::StoreLockError),
     /// This call requires connected storage; durable work remains queued.
     #[error("storage is not connected")]
     NoStorage,
@@ -54,6 +66,9 @@ pub enum SyncError {
     /// The requested journal row is not a blocked operation.
     #[error("operation {0:?} is not blocked")]
     NotBlocked(crate::OperationId),
+    /// Store-log and snapshot publication wait for the retained reload (§18).
+    #[error("snapshot reload {0:?} must finish before publishing entries or snapshots")]
+    ReloadPending(crate::OperationId),
     /// Decoding persisted operation data failed; its cause remains available.
     #[error("invalid operation data: {0}")]
     OperationData(#[from] serde_json::Error),

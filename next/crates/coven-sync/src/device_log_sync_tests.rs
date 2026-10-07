@@ -77,6 +77,7 @@ async fn device(storage: Arc<MemoryStorage>, number: u64) -> Device {
         identity.clone(),
         clock.clone(),
         ids.clone(),
+        directory.clone(),
     );
     Device {
         sync,

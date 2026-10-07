@@ -24,6 +24,30 @@ impl ObjectPath {
             number.parse().expect("validated write number"),
         ))
     }
+    /// The identity carried by a device-log path.
+    pub fn write_id(&self) -> Option<coven_merge::WriteId> {
+        self.write_position()
+            .map(|(device, number)| coven_merge::WriteId {
+                device,
+                number: number.get(),
+            })
+    }
+    /// The identity carried by a snapshot path.
+    pub fn snapshot_id(&self) -> Option<coven_format::store_log::SnapshotId> {
+        let rest = self.0.strip_prefix("snapshots/")?;
+        let (audience, rest) = rest.split_once('/').expect("validated snapshot path");
+        let (device, number) = rest.split_once('/').expect("validated snapshot path");
+        let audience = if audience == "store" {
+            Audience::Store
+        } else {
+            Audience::Circle(CircleId(audience.parse().expect("validated circle")))
+        };
+        Some(coven_format::store_log::SnapshotId {
+            audience,
+            device: DeviceId(device.parse().expect("validated device")),
+            number: number.parse().expect("validated number"),
+        })
+    }
     /// A device's create-once store log entry (§9).
     pub fn store_log(device: DeviceId, number: NonZeroU64) -> Self {
         Self(format!("store-log/{}/{number}", device.0))
@@ -58,8 +82,8 @@ impl ObjectPath {
         Self(format!("keys/circles/{circle}/{key}/{member}"))
     }
     /// Encrypted file bytes named by a random UUID (§16.2).
-    pub fn file(name: FileId) -> Self {
-        Self(format!("files/{name}"))
+    pub fn file(device: DeviceId, name: FileId) -> Self {
+        Self(format!("files/{}/{name}", device.0))
     }
     /// An encrypted join request under its invite id (§12.2).
     pub fn join_request(invite: InviteId) -> Self {
@@ -84,7 +108,7 @@ impl ObjectPath {
     pub fn device(&self) -> Option<DeviceId> {
         let parts: Vec<_> = self.0.split('/').collect();
         match parts.as_slice() {
-            ["devices" | "store-log", device, _]
+            ["devices" | "store-log" | "files", device, _]
             | ["positions", device]
             | ["snapshots", _, device, _] => {
                 Some(DeviceId(device.parse().expect("validated device id")))
@@ -133,7 +157,7 @@ impl TryFrom<String> for ObjectPath {
             ["keys", "circles", circle, key, member] => {
                 canonical_uuid(circle) && canonical_uuid(key) && member.parse::<MemberId>().is_ok()
             }
-            ["files", name] => canonical_uuid(name),
+            ["files", device, name] => decimal(device, false) && canonical_uuid(name),
             ["join-requests", invite] => canonical_uuid(invite),
             _ => false,
         };
@@ -177,6 +201,14 @@ impl ObjectPrefix {
     pub fn snapshots() -> Self {
         Self("snapshots/".into())
     }
+    /// Snapshots of one audience, across all devices.
+    pub fn audience_snapshots(audience: &Audience) -> Self {
+        let audience = match audience {
+            Audience::Store => "store".to_owned(),
+            Audience::Circle(id) => id.to_string(),
+        };
+        Self(format!("snapshots/{audience}/"))
+    }
     /// Every stored file.
     pub fn files() -> Self {
         Self("files/".into())
@@ -213,7 +245,7 @@ pub(crate) fn validate_directory(value: &str) -> Result<(), StorageError> {
     let valid = match parts.as_slice() {
         ["devices" | "store-log" | "positions" | "snapshots" | "keys" | "files"
         | "join-requests"] => true,
-        ["devices" | "store-log", device] => decimal(device, false),
+        ["devices" | "store-log" | "files", device] => decimal(device, false),
         ["snapshots", audience] => *audience == "store" || canonical_uuid(audience),
         ["snapshots", audience, device] => {
             (*audience == "store" || canonical_uuid(audience)) && decimal(device, false)

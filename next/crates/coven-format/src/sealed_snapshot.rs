@@ -50,6 +50,23 @@ impl SnapshotObjectPrefix {
         positions_end(bytes, entries)
     }
 
+    /// Bytes required by the next prefix-only read. Repeating this with those
+    /// bytes reaches the exact prefix length without reading encrypted chunks.
+    pub fn needed_prefix_length(bytes: &[u8]) -> Result<usize, Error> {
+        if bytes.len() < 4 {
+            return Ok(4);
+        }
+        let routing = Self::routing_length(bytes)?;
+        if bytes.len() < routing + 4 {
+            return Ok(routing + 4);
+        }
+        let entries = positions_end(bytes, routing)?;
+        if bytes.len() < entries + 4 {
+            return Ok(entries + 4);
+        }
+        positions_end(bytes, entries)
+    }
+
     /// Decode exactly the prefix, checking both lists fit before allocation.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let length = Self::length(bytes)?;

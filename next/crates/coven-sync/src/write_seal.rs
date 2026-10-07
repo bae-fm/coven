@@ -20,9 +20,14 @@ pub(crate) fn derive(
     audience: &Audience,
     key: KeyId,
 ) -> Result<DerivedKeys, SyncError> {
-    Ok(match audience {
-        Audience::Store => ring.store_key(key)?.derive(),
-        Audience::Circle(circle) => ring.circle_key(*circle, key)?.derive(),
+    let derived = match audience {
+        Audience::Store => ring.store_key(key).map(|key| key.derive()),
+        Audience::Circle(circle) => ring.circle_key(*circle, key).map(|key| key.derive()),
+    };
+    derived.map_err(|error| match error {
+        coven_crypto::MaterialError::UnknownStoreKey(_)
+        | coven_crypto::MaterialError::UnknownCircleKey { .. } => SyncError::KeyUnavailable(key),
+        error => error.into(),
     })
 }
 

@@ -71,7 +71,8 @@ async fn store_at_40_and_circle_at_38_replay_only_the_circles_missing_parts() {
     let writes = records(&a);
     for supplied in [vec![], vec![stream(&writes[39])], vec![stream(&writes[38])]] {
         assert!(matches!(
-            b.load_snapshots(snapshots(), supplied).await,
+            b.load_snapshots(crate::SnapshotReload::new(snapshots(), supplied))
+                .await,
             Err(crate::DbError::Snapshot(
                 crate::SnapshotError::MissingWrites { .. }
             ))
@@ -88,9 +89,12 @@ async fn store_at_40_and_circle_at_38_replay_only_the_circles_missing_parts() {
     });
     assert!(query.next().await.unwrap().is_empty());
     // Supply the later write first: the loader chooses causal order.
-    b.load_snapshots(snapshots(), vec![stream(&writes[39]), stream(&writes[38])])
-        .await
-        .unwrap();
+    b.load_snapshots(crate::SnapshotReload::new(
+        snapshots(),
+        vec![stream(&writes[39]), stream(&writes[38])],
+    ))
+    .await
+    .unwrap();
     assert_eq!(query.next().await.unwrap(), [40, 40]);
     assert!(!query.is_marked_for_rerun());
     assert_eq!(count(&b, "store_changes"), 0);
@@ -335,13 +339,13 @@ async fn loading_a_parent_snapshot_recomputes_other_audiences_without_rewriting_
             .await
             .unwrap();
         let missing = records(&a).into_iter().skip(1).collect::<Vec<_>>();
-        b.load_snapshots(
+        b.load_snapshots(crate::SnapshotReload::new(
             vec![(
                 id(Audience::Store),
                 Cursor::new(frames(&a, Audience::Store).await.concat()),
             )],
             missing.iter().map(stream).collect(),
-        )
+        ))
         .await
         .unwrap();
         assert_eq!(history(&b), child_history);
@@ -371,14 +375,14 @@ async fn loading_a_parent_snapshot_recomputes_other_audiences_without_rewriting_
         )
         .await
         .unwrap();
-        b.load_snapshots(
+        b.load_snapshots(crate::SnapshotReload::new(
             vec![(id(Audience::Store), Cursor::new(before.concat()))],
             missing
                 .iter()
                 .chain(records(&c).iter())
                 .map(stream)
                 .collect(),
-        )
+        ))
         .await
         .unwrap();
         assert_eq!(history(&b), child_history);
@@ -614,13 +618,13 @@ async fn an_empty_loaded_audience_still_limits_later_snapshot_reloads() {
     b.close().await.unwrap();
     let b = b_store.schema(tables(), SCHEMA).await.unwrap();
     sql(&a,"UPDATE notes SET value=3; INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000002','00000000-0000-0000-0000-00000000000a',3)").await.unwrap();
-    b.load_snapshots(
+    b.load_snapshots(crate::SnapshotReload::new(
         vec![(
             id(Audience::Store),
             Cursor::new(frames(&a, Audience::Store).await.concat()),
         )],
         vec![stream(&records(&a)[2])],
-    )
+    ))
     .await
     .unwrap();
     assert_eq!(b.sync_state(vec![]).await.unwrap().positions.0[0].number, 3);
@@ -644,10 +648,10 @@ async fn reloading_keeps_uploaded_own_history_before_authoring_another() {
         db.internal_execute("DELETE FROM coven_uploads", [])
             .unwrap()
     });
-    db.load_snapshots(
+    db.load_snapshots(crate::SnapshotReload::new(
         vec![(id(Audience::Store), Cursor::new(snapshot.concat()))],
         vec![stream(&uploaded[1])],
-    )
+    ))
     .await
     .unwrap();
     sql(&db, "UPDATE notes SET title='third'").await.unwrap();
@@ -818,10 +822,10 @@ async fn waiting_changes_replay_after_their_missing_own_predecessor() {
         let waiting = records(&db);
         let expected = frames(&db, Audience::Store).await;
         for _ in 0..2 {
-            db.load_snapshots(
+            db.load_snapshots(crate::SnapshotReload::new(
                 vec![(id(Audience::Store), Cursor::new(old.clone()))],
                 vec![stream(&missing)],
-            )
+            ))
             .await
             .unwrap();
             assert_eq!(records(&db), waiting);
@@ -850,7 +854,7 @@ async fn an_edit_after_reload_reads_the_generation_from_the_newer_snapshot() {
     )
     .await
     .unwrap();
-    b.load_snapshots(
+    b.load_snapshots(crate::SnapshotReload::new(
         vec![
             (id(circle), Cursor::new(empty)),
             (
@@ -859,7 +863,7 @@ async fn an_edit_after_reload_reads_the_generation_from_the_newer_snapshot() {
             ),
         ],
         vec![stream(&records(&a)[0])],
-    )
+    ))
     .await
     .unwrap();
     sql(&b, "UPDATE notes SET title='edited after reload'")

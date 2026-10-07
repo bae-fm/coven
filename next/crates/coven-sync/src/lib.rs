@@ -1,10 +1,11 @@
-//! Store-log replay, keys, file transfers and durable operations (§§9–18).
+//! Device logs, store-log replay, keys, snapshots, files and durable operations (§§6–18).
 
 mod conflicts;
 mod device_log_sync;
 mod effects;
 mod replay;
 mod replay_cache;
+mod write_object;
 mod write_seal;
 
 pub use replay::{replay, replay_entry};
@@ -38,3 +39,6 @@ pub use files::{
     PinProgress, QueuedUpload, RecordedUploadFailure, RowsPinnedLiveQuery, UploadFailure,
     UploadFailures, UploadPhase, UploadQueue, UploadsLiveQuery,
 };
+
+mod recorded_upload;
+mod snapshot_data;

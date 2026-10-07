@@ -1,6 +1,6 @@
 use super::*;
 
-const PATH: &str = "files/11111111-1111-1111-1111-111111111111";
+const PATH: &str = "files/1/11111111-1111-1111-1111-111111111111";
 
 fn example(size: usize, chunk_size: u32) -> (FileKey, Vec<u8>, Vec<u8>) {
     let key = FileKey::from_bytes([0x77; 32]);
@@ -145,7 +145,7 @@ fn range_reads_fetch_and_open_only_the_covering_chunks() {
     assert!(object
         .read_range(
             &key,
-            "files/22222222-2222-2222-2222-222222222222",
+            "files/1/22222222-2222-2222-2222-222222222222",
             4097..8191
         )
         .is_err());

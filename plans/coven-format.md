@@ -337,7 +337,7 @@
 | `positions/<device>` | A device's posted positions, replaced as they advance |
 | `keys/store/<key>/<member>` | A store key sealed to a member |
 | `keys/circles/<circle>/<key>/<member>` | A circle key sealed to a member |
-| `files/<file>` | An uploaded file |
+| `files/<device>/<file>` | An uploaded file |
 | `join-requests/<invite>` | A join request |
 
 - A device id and `n` are decimal, with no leading zeros; `n` is at least 1.
@@ -423,7 +423,7 @@
 
 ### D12 Files
 
-- An uploaded file at `files/<file>` is:
+- An uploaded file at `files/<device>/<file>` is:
 
   ```
   kind:u8 (38) | version:u16 | chunk_size:u32 | size:u64 | chunks
@@ -440,7 +440,7 @@
   - Chunk `i` starts at `15 + i × (chunk_size + 16)`, so any range is read
     without the rest.
 - The file's key and id are in its row's where-column, which coven writes
-  as the text `uploaded <file id> <key in lowercase hex>`, or the decimal
+  as the text `uploaded <device id> <file id> <key in lowercase hex>`, or the decimal
   id of the device that has it ([§16.1](coven-from-scratch.md#161-kinds-and-where-files-are)).
 
 ### D13 Codes

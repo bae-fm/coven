@@ -640,12 +640,15 @@ async fn applied_schema_boundaries_exclude_only_uncovered_older_writes() {
         let db = open(&store).await;
         let included = WritePositions(included);
         assert!(db
-            .apply_breaking_change(version, included.clone())
+            .apply_breaking_change(coven_merge::Audience::Store, version, included.clone())
             .await
             .unwrap());
         db.close().await.unwrap();
         let db = open(&store).await;
-        assert!(!db.apply_breaking_change(version, included).await.unwrap());
+        assert!(!db
+            .apply_breaking_change(coven_merge::Audience::Store, version, included)
+            .await
+            .unwrap());
         assert_eq!(
             db.apply_downloaded(initial.clone().into()).await.unwrap(),
             ApplyOutcome::Applied

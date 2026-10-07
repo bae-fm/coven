@@ -195,100 +195,6 @@ impl Database {
         )
     }
 
-    /// Stream an audience's plaintext snapshot frames from one committed reader
-    /// transaction. The consumer can seal and upload each frame as it arrives;
-    /// commits on the writer connection continue throughout this call.
-    pub async fn write_snapshot<F, E>(
-        &self,
-        id: coven_format::store_log::SnapshotId,
-        emit: F,
-    ) -> Result<(), crate::SnapshotWriteError<E>>
-    where
-        F: FnMut(Vec<u8>) -> Result<(), E> + Send + 'static,
-        E: Send + 'static,
-    {
-        let database = self.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = database.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let reader = inner.readers.acquire_reader();
-                reader.with_reader(|reader| {
-                    reader.read_transaction(|| {
-                        crate::snapshot_write::write(reader, &inner.write_schema, id, emit)
-                    })
-                })
-            })
-            .await,
-        )
-    }
-
-    /// Load authenticated snapshots and gap writes supplied by sync. Snapshot
-    /// frames and write parts are read in chunks of at most 64 KiB; only one
-    /// decoded write is retained at a time. Inputs may arrive in any order.
-    ///
-    /// Replaces the selected audiences and replays uncovered parts and waiting
-    /// uploads in one transaction. Every audience finishes at common positions;
-    /// missing history, read errors and failed checks roll the whole load back.
-    /// Supply each readable audience's parts, including those needed by waiting
-    /// writes and the device's own earlier writes. Other audiences retain their
-    /// merge history. Upload records, numbers and sealed bytes stay unchanged.
-    pub async fn load_snapshots<R, W>(
-        &self,
-        snapshots: Vec<(coven_format::store_log::SnapshotId, R)>,
-        writes: Vec<crate::DownloadedWriteStream<W>>,
-    ) -> Result<(), DbError>
-    where
-        R: std::io::Read + Send + 'static,
-        W: std::io::Read + Send + 'static,
-    {
-        let database = self.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let slot = database.inner.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                // Reserve a reader before locking the writer: snapshot consumers
-                // may be waiting for a commit before releasing their readers.
-                let reader = inner.readers.acquire_reader();
-                let writer = inner
-                    .writer
-                    .lock()
-                    .expect("writer connection lock poisoned");
-                let files = crate::file_write::FileWrite::new(
-                    &writer,
-                    &inner.directory,
-                    &inner.write_schema,
-                    inner.device,
-                    &inner.staging,
-                    Vec::new(),
-                );
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    reader.with_reader(|reader| {
-                        reader.read_transaction(|| {
-                            inner.write_schema.prepare(reader)?;
-                            crate::snapshot_load::load(
-                                &writer,
-                                reader,
-                                &inner.write_schema,
-                                snapshots,
-                                writes,
-                                &files,
-                                (inner.device, inner.clock.now()),
-                            )
-                        })
-                    })?;
-                    files.finish(Ok(()))
-                }));
-                drop(writer);
-                match result {
-                    Ok(result) => result,
-                    Err(panic) => std::panic::resume_unwind(panic),
-                }
-            })
-            .await,
-        )
-    }
-
     /// Read only the oldest waiting write, streaming plaintext parts or its
     /// already fixed sealed bytes. The callback runs in a committed reader
     /// transaction; its result is `None` when the queue is empty.
@@ -337,10 +243,12 @@ impl Database {
     /// Loading the snapshot's rows is a separate operation.
     pub async fn apply_breaking_change(
         &self,
+        audience: coven_merge::Audience,
         version: u32,
         included: coven_format::value::WritePositions,
     ) -> Result<bool, DbError> {
         self.apply_boundary(crate::write_boundary::WriteBoundary::SchemaChange {
+            audience,
             version,
             included,
         })

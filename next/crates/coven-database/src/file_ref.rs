@@ -70,30 +70,13 @@ impl FileRef {
     /// Returns None for a device-local file; this never consults key custody.
     pub fn uploaded(
         &self,
-    ) -> Result<Option<(coven_foundation::id_source::FileId, coven_crypto::FileKey)>, DbError> {
+    ) -> Result<Option<coven_format::file_reference::UploadedFileReference>, DbError> {
         let StoredLocation::Uploaded(text) = &self.version.location else {
             return Ok(None);
         };
-        let (id, key) = text
-            .as_str()
-            .strip_prefix("uploaded ")
-            .and_then(|v| v.split_once(' '))
-            .ok_or(DbError::DamagedDatabase)?;
-        let id = coven_foundation::id_source::FileId(
-            uuid::Uuid::parse_str(id).map_err(|_| DbError::DamagedDatabase)?,
-        );
-        let mut bytes = [0; 32];
-        for (i, pair) in key.as_bytes().chunks_exact(2).enumerate() {
-            let digit = |b: u8| {
-                if b.is_ascii_digit() {
-                    b - b'0'
-                } else {
-                    b - b'a' + 10
-                }
-            };
-            bytes[i] = digit(pair[0]) * 16 + digit(pair[1]);
-        }
-        Ok(Some((id, coven_crypto::FileKey::from_bytes(bytes))))
+        Ok(Some(
+            coven_format::file_reference::UploadedFileReference::decode(text.as_str())?,
+        ))
     }
     /// Encode captured facts for a device-local journal. Contains the uploaded
     /// file key; callers must keep these bytes private, like the database itself.

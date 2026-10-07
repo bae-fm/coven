@@ -25,6 +25,14 @@ impl StoreLogSync {
         record: &OperationRecord,
         mut data: Data,
     ) -> Result<Progress, SyncError> {
+        if let Data::Snapshots(task) = data {
+            let mut report = SyncReport::default();
+            let result = self.snapshot_step(record, task, &mut report).await;
+            for damaged in report.damaged_objects {
+                tracing::warn!(path = %damaged.path, failure = %damaged.failure, "snapshot operation passed over a damaged object");
+            }
+            return result;
+        }
         if matches!(data, Data::Invite(_)) {
             return self.invite_step(record, data).await;
         }
@@ -98,6 +106,9 @@ impl StoreLogSync {
             // Fresh authoring always uses the latest available replay. No entry
             // number or replacement key id survives a dropped attempt's restart.
             self.step().await?;
+            if self.pending_reload().await?.is_some() {
+                return Ok(Progress::Waiting);
+            }
             let local = self.database.local_store_log().await?;
             let Some(change) = self.operation_change(&local, &member.member_id(), &mut data)?
             else {
@@ -295,7 +306,7 @@ impl StoreLogSync {
                     access: work.access.member_access(),
                 }));
             }
-            Data::Revoke { .. } | Data::KeepFile(_) => unreachable!(),
+            Data::Revoke { .. } | Data::KeepFile(_) | Data::Snapshots(_) => unreachable!(),
         };
         Ok(Some(match intent {
             Intent::RemoveMember { member, access } => {
@@ -384,7 +395,7 @@ impl StoreLogSync {
                         Some(member.parse()?)
                     }
                     Data::Invite(_) => None,
-                    Data::KeepFile(_) => {
+                    Data::KeepFile(_) | Data::Snapshots(_) => {
                         return Err(coven_database::DbError::DamagedDatabase.into())
                     }
                 };

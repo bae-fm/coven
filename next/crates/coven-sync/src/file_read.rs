@@ -200,8 +200,9 @@ impl UploadedFile {
             directory.lock_read_only()
         }))
         .await?;
-        let (id, key) = file.uploaded()?.ok_or(DbError::DamagedDatabase)?;
-        let path = ObjectPath::file(id);
+        let coven_format::file_reference::UploadedFileReference { device, id, key } =
+            file.uploaded()?.ok_or(DbError::DamagedDatabase)?;
+        let path = ObjectPath::file(device, id);
         let _guard = owner.cache.lock().await;
         let cached = owner.database.cached(&file, -1).await?;
         let bytes = match &cached {

@@ -13,7 +13,6 @@ use coven_format::snapshot::{SnapshotHeader, SnapshotRecord};
 use coven_format::snapshot_rows::LostWrite;
 use coven_format::snapshot_stream::SnapshotChunkDecoder;
 use coven_format::store_log::SnapshotId;
-use coven_format::value::WritePositions;
 use coven_format::write_stream::{PartHeader, WriteHeaderFrame};
 use coven_merge::RowId;
 use rusqlite::params;
@@ -24,18 +23,45 @@ pub(crate) fn load<R: Read, W: Read>(
     database: &DatabaseConnection,
     before: &DatabaseConnection,
     schema: &WriteSchema,
-    snapshots: Vec<(SnapshotId, R)>,
-    writes: Vec<crate::DownloadedWriteStream<W>>,
+    reload: crate::SnapshotReload<R, W>,
     files: &crate::file_write::FileWrite<'_>,
     author: (coven_foundation::id_source::DeviceId, std::time::SystemTime),
 ) -> Result<(), DbError> {
     database.transaction(|database| {
+        let crate::SnapshotReload {
+            snapshots,
+            writes,
+            absent,
+            boundaries,
+            expected_entries,
+            operation,
+        } = reload;
+        if let Some(expected) = expected_entries {
+            let current = database.query(
+                "SELECT device,number FROM coven_store_log ORDER BY device,number",
+                [],
+                |row| crate::store_log_tables::entry_id(row, 0),
+            )?;
+            if current != expected {
+                return Err(DbError::StoreLogEntriesChanged);
+            }
+        }
+        if let Some(boundaries) = boundaries {
+            database.internal_execute("DELETE FROM coven_applied_boundaries", [])?;
+            for boundary in boundaries {
+                boundary.record_inside(database)?;
+            }
+        }
         if snapshots.is_empty() {
             return Err(invalid("reload has no snapshots"));
         }
         let mut selected = BTreeSet::new();
-        for (id, _) in &snapshots {
-            if !selected.insert(id.audience.clone()) {
+        for source in &snapshots {
+            let audience = match source {
+                crate::SnapshotSource::Stored { id, .. } => &id.audience,
+                crate::SnapshotSource::Empty(audience) => audience,
+            };
+            if !selected.insert(audience.clone()) {
                 return Err(invalid("reload repeats an audience"));
             }
         }
@@ -48,10 +74,18 @@ pub(crate) fn load<R: Read, W: Read>(
             DatabaseRemovalView::new(before, &old_store, schema, &visible, &empty, &deleted, None)?;
         crate::snapshot_state::create_tables(database)?;
         let mut touched = BTreeSet::new();
-        for (expected, input) in snapshots {
-            let (positions, rows) = read(database, schema, &expected, input)?;
-            coverage.loaded(expected.audience, positions);
-            touched.extend(rows);
+        for source in snapshots {
+            match source {
+                crate::SnapshotSource::Stored { id, input } => {
+                    let (header, rows) = read(database, schema, &id, input)?;
+                    coverage.loaded(id.audience, header.writes);
+                    touched.extend(rows);
+                }
+                crate::SnapshotSource::Empty(audience) => {
+                    touched.extend(crate::snapshot_state::begin(database, &audience)?);
+                    coverage.loaded(audience, coven_format::value::WritePositions(Vec::new()));
+                }
+            }
         }
         let current = MergeStore::from_snapshot(database, &schema.schema, &selected);
         let mut affected = crate::write_apply::WriteApply::new(
@@ -60,21 +94,24 @@ pub(crate) fn load<R: Read, W: Read>(
         .replace(&old, touched)?;
         crate::snapshot_state::drop_tables(database)?;
         affected.extend(crate::snapshot_writes::apply(
-            database, schema, author.1, writes, coverage, &deleted,
+            database, schema, author.1, writes, absent, coverage, &deleted,
         )?);
         // Retention sees the final state, including every replayed waiting write.
         files.retain_rows(affected, &deleted)?;
         files.before_commit()?;
+        if let Some(operation) = operation {
+            crate::operation::advance(database, &operation)?;
+        }
         Ok(())
     })
 }
 
-fn read(
+pub(crate) fn read(
     database: &DatabaseConnection,
     schema: &WriteSchema,
     expected: &SnapshotId,
     mut input: impl Read,
-) -> Result<(WritePositions, BTreeSet<RowId>), DbError> {
+) -> Result<(SnapshotHeader, BTreeSet<RowId>), DbError> {
     let local_version = database.schema_version()?;
     let mut touched = crate::snapshot_state::begin(database, &expected.audience)?;
     let metadata = SnapshotMetadata::new(database);
@@ -204,7 +241,7 @@ fn read(
     crate::snapshot_state::finish(database)?;
     database
         .batch("DELETE FROM temp.coven_snapshot_writes; DELETE FROM temp.coven_snapshot_columns")?;
-    Ok((header.writes.clone(), touched))
+    Ok((header.clone(), touched))
 }
 
 fn check_header(

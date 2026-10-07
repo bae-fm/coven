@@ -72,6 +72,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         identity.clone(),
         clock.clone(),
         ids.clone(),
+        directory.clone(),
     );
     sync.make_and_upload_entry(StoreChange::CreateStore {
         store: directory.id(),

@@ -33,6 +33,7 @@ async fn household(storage: Arc<MemoryStorage>) -> Vec<Device> {
             device.identity.clone(),
             device.clock.clone(),
             device.ids.clone(),
+            device.directory.clone(),
         );
         devices.push(device);
     }
@@ -127,9 +128,16 @@ async fn unreadable_circle_parts_are_skipped_but_missing_members_keys_wait() {
     let report = devices[1].sync.download_writes().await.unwrap();
     assert_eq!(report.waiting.len(), 1, "{report:?}");
     assert!(rows(&devices[1].db).await.is_empty());
+    assert!(matches!(
+        devices[1].log.reload_from_snapshots().await,
+        Err(SyncError::KeyUnavailable(_))
+    ));
     let report = devices[2].sync.download_writes().await.unwrap();
     assert!(report.waiting.is_empty());
     assert!(report.damaged_objects.is_empty());
+    assert_eq!(rows(&devices[2].db).await.len(), 1);
+    assert_eq!(count(&devices[2].db).await, 0);
+    devices[2].log.reload_from_snapshots().await.unwrap();
     assert_eq!(rows(&devices[2].db).await.len(), 1);
     assert_eq!(count(&devices[2].db).await, 0);
     devices[1].log.sync_store_log().await.unwrap();
@@ -365,6 +373,10 @@ async fn dropped_removal_parts(
         );
         assert!(rows(&ben.db).await.is_empty());
         assert_eq!(count(&ben.db).await, 0);
+        assert!(matches!(
+            ben.log.reload_from_snapshots().await,
+            Err(SyncError::KeyUnavailable(_))
+        ));
         assert!(ben.sync.post_positions().await.unwrap());
         assert!(!posted(&storage, ben, 2).await.writes.covers(writes[0]));
     }
@@ -395,6 +407,9 @@ async fn dropped_removal_parts(
         assert_eq!(rows(&device.db).await, expected);
         assert_eq!(count(&device.db).await, 1);
         assert!(device.db.lost_values().await.unwrap().is_empty());
+        device.log.reload_from_snapshots().await.unwrap();
+        assert_eq!(rows(&device.db).await, expected);
+        assert_eq!(count(&device.db).await, 1);
         assert!(device.sync.post_positions().await.unwrap());
     }
     let ben = posted(&storage, ben, 2).await;

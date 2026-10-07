@@ -98,7 +98,7 @@ async fn uploaded_locations_retain_the_key_identity_and_refuse_malformed_encodin
     attach(&db, b"original".to_vec(), true).await;
     let device_ref = db.file_ref("files", "7").await.unwrap();
     let id = uuid::Uuid::from_u128(7);
-    let location = format!("uploaded {id} {}", "ab".repeat(32));
+    let location = format!("uploaded 1 {id} {}", "ab".repeat(32));
     // A committed uploaded-row fixture; file transfer and location-changing
     // operations belong to sync, not this database test.
     db.commit_writer(|sql| {
@@ -124,7 +124,7 @@ async fn uploaded_locations_retain_the_key_identity_and_refuse_malformed_encodin
     db.commit_writer(|sql| {
         sql.internal_execute(
             "UPDATE files SET location=?1",
-            [format!("uploaded {id} {}", "cd".repeat(32))],
+            [format!("uploaded 1 {id} {}", "cd".repeat(32))],
         )
         .unwrap()
     });
@@ -138,7 +138,7 @@ async fn uploaded_locations_retain_the_key_identity_and_refuse_malformed_encodin
         sql.internal_execute(
             "UPDATE files SET location=?1",
             [format!(
-                "uploaded {} {}",
+                "uploaded 1 {} {}",
                 uuid::Uuid::from_u128(8),
                 "cd".repeat(32)
             )],
@@ -159,7 +159,7 @@ async fn uploaded_locations_retain_the_key_identity_and_refuse_malformed_encodin
             FileLocation::OnDevice(coven_foundation::id_source::DeviceId(device))
         );
     }
-    let valid = format!("uploaded {id} {}", "ab".repeat(32));
+    let valid = format!("uploaded 1 {id} {}", "ab".repeat(32));
     let mut malformed: Vec<_> = (0..valid.len())
         .map(|end| valid[..end].to_owned())
         .collect();
@@ -175,11 +175,11 @@ async fn uploaded_locations_retain_the_key_identity_and_refuse_malformed_encodin
         "device:7".into(),
         format!("{valid} "),
         format!("{valid}00"),
-        format!("uploaded {id} {}", "AB".repeat(32)),
-        format!("uploaded {id} {}", "zz".repeat(32)),
-        format!("uploaded {} {}", id.simple(), "ab".repeat(32)),
-        format!("uploaded  {id} {}", "ab".repeat(32)),
-        format!("uploaded {id} {}", "音".repeat(64)),
+        format!("uploaded 1 {id} {}", "AB".repeat(32)),
+        format!("uploaded 1 {id} {}", "zz".repeat(32)),
+        format!("uploaded 1 {} {}", id.simple(), "ab".repeat(32)),
+        format!("uploaded 1  {id} {}", "ab".repeat(32)),
+        format!("uploaded 1 {id} {}", "音".repeat(64)),
     ]);
     for malformed in malformed {
         db.commit_writer(|sql| {

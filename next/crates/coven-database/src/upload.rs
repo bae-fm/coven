@@ -213,6 +213,37 @@ pub(crate) fn read<R, E>(
     consume(upload).map(Some).map_err(UploadReadError::Consumer)
 }
 
+/// Read every waiting plaintext, including entries with fixed ciphertext.
+/// The caller holds a reader transaction for a consistent queue view.
+pub(crate) fn each_plaintext(
+    database: &DatabaseConnection,
+    mut consume: impl FnMut(WriteHeaderFrame, UploadParts<'_>) -> Result<(), DbError>,
+) -> Result<(), DbError> {
+    let entries = database.query(
+        "SELECT rowid,device,number FROM coven_uploads ORDER BY rowid",
+        [],
+        |row| {
+            Ok(Oldest {
+                rowid: row.get(0)?,
+                write: WriteId {
+                    device: DeviceId(counter(row.get(1)?)),
+                    number: counter(row.get(2)?),
+                },
+                sealed: None,
+            })
+        },
+    )?;
+    for entry in entries {
+        let (header, _, bytes) = plaintext(database, &entry)?;
+        let parts = UploadParts {
+            bytes,
+            headers: header.parts.clone().into_iter(),
+        };
+        consume(header, parts)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn prepare(
     database: &DatabaseConnection,
     seal: impl FnOnce(

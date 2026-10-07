@@ -90,6 +90,7 @@ async fn device(storage: Arc<MemoryStorage>, n: u64, member: MemberKeys, store: 
         Arc::new(InMemoryCustody::new(member.clone())),
         clock.clone(),
         Arc::new(coven_foundation::id_source::UuidIds),
+        directory.clone(),
     );
     Device {
         sync,
@@ -146,6 +147,7 @@ impl Device {
             Arc::new(InMemoryCustody::new(self.member.clone())),
             self.clock.clone(),
             self.sync.ids.clone(),
+            self.directory.clone(),
         );
     }
     async fn device(&self) -> DeviceId {
@@ -838,3 +840,6 @@ mod key_distribution;
 
 #[path = "operations_tests.rs"]
 mod operations;
+
+#[path = "snapshots_tests.rs"]
+mod snapshots;

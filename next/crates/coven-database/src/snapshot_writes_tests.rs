@@ -51,10 +51,10 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
     assert!(!query.is_marked_for_rerun());
     b.inspect_writer(|db| db.batch("CREATE TEMP TRIGGER refuse_waiting AFTER UPDATE ON notes WHEN new.title='waiting' BEGIN SELECT RAISE(ABORT,'replay failed'); END").unwrap());
     assert!(b
-        .load_snapshots(
+        .load_snapshots(crate::SnapshotReload::new(
             vec![(id(Audience::Store), Cursor::new(snapshot.clone()))],
             vec![stream(&missing)]
-        )
+        ))
         .await
         .is_err());
     assert_eq!(contents(&b), original);
@@ -66,10 +66,10 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
         if duplicate {
             supplied.push(stream(&waiting[0]));
         }
-        b.load_snapshots(
+        b.load_snapshots(crate::SnapshotReload::new(
             vec![(id(Audience::Store), Cursor::new(snapshot.clone()))],
             supplied,
-        )
+        ))
         .await
         .unwrap();
         assert_eq!(records(&b), waiting);
@@ -150,10 +150,10 @@ async fn waiting_files_survive_intermediate_snapshot_and_gap_write_states() {
     );
     assert_eq!(contents(&db), before);
     assert_eq!(owned_paths(&store), paths);
-    db.load_snapshots(
+    db.load_snapshots(crate::SnapshotReload::new(
         vec![(id(Audience::Store), Cursor::new(snapshot))],
         vec![stream(&writes[1])],
-    )
+    ))
     .await
     .unwrap();
     assert_eq!(frames(&db, Audience::Store).await, expected);
@@ -217,38 +217,38 @@ async fn supplied_write_streams_are_bounded_and_fail_atomically() {
             }
         }
         assert!(b
-            .load_snapshots(
+            .load_snapshots(crate::SnapshotReload::new(
                 vec![(id(Audience::Store), Cursor::new(snapshot.clone()))],
                 vec![DownloadedWriteStream {
                     header: input.header.clone(),
                     parts: vec![DownloadedPartStream::Opened(Cursor::new(bytes.clone()))],
                 }]
-            )
+            ))
             .await
             .is_err());
         assert_eq!(contents(&b), before);
     }
     assert!(b
-        .load_snapshots(
+        .load_snapshots(crate::SnapshotReload::new(
             vec![(id(Audience::Store), Cursor::new(snapshot.clone()))],
             vec![DownloadedWriteStream::<Cursor<Vec<u8>>> {
                 header: input.header.clone(),
                 parts: vec![DownloadedPartStream::Skipped],
             }]
-        )
+        ))
         .await
         .is_err());
     assert_eq!(contents(&b), before);
     let mut file = tempfile::tempfile().unwrap();
     file.write_all(&original).unwrap();
     file.rewind().unwrap();
-    b.load_snapshots(
+    b.load_snapshots(crate::SnapshotReload::new(
         vec![(id(Audience::Store), Cursor::new(snapshot))],
         vec![DownloadedWriteStream {
             header: input.header,
             parts: vec![DownloadedPartStream::Opened(BoundedFile(file))],
         }],
-    )
+    ))
     .await
     .unwrap();
     a.apply_downloaded(records(&b)[0].clone().into())
@@ -293,7 +293,7 @@ async fn snapshots_with_the_same_key_in_different_audiences_recompute_together()
     a.apply_downloaded(b_write.clone().into()).await.unwrap();
     let original = contents(&c);
     assert!(c
-        .load_snapshots(
+        .load_snapshots(crate::SnapshotReload::new(
             vec![
                 (id(Audience::Store), Cursor::new(store.clone())),
                 (
@@ -302,7 +302,7 @@ async fn snapshots_with_the_same_key_in_different_audiences_recompute_together()
                 )
             ],
             vec![stream(&a_write), stream(&b_write)]
-        )
+        ))
         .await
         .is_err());
     assert_eq!(contents(&c), original);
@@ -318,9 +318,12 @@ async fn snapshots_with_the_same_key_in_different_audiences_recompute_together()
                 snapshots.pop();
             }
         }
-        c.load_snapshots(snapshots, vec![stream(&b_write), stream(&a_write)])
-            .await
-            .unwrap();
+        c.load_snapshots(crate::SnapshotReload::new(
+            snapshots,
+            vec![stream(&b_write), stream(&a_write)],
+        ))
+        .await
+        .unwrap();
         for audience in [Audience::Store, circle.clone()] {
             assert_eq!(
                 frames(&c, audience.clone()).await,
@@ -383,18 +386,18 @@ async fn supplied_dismissals_apply_before_waiting_changes_and_validate_their_pas
     invalid.header.header.had_read.0.clear();
     invalid.header.header.position.number = 1;
     assert!(matches!(
-        b.load_snapshots(
+        b.load_snapshots(crate::SnapshotReload::new(
             vec![(id(Audience::Store), Cursor::new(snapshot.clone()))],
             vec![invalid],
-        )
+        ))
         .await,
         Err(crate::DbError::Snapshot(crate::SnapshotError::Format(_)))
     ));
     assert_eq!(contents(&b), before);
-    b.load_snapshots(
+    b.load_snapshots(crate::SnapshotReload::new(
         vec![(id(Audience::Store), Cursor::new(snapshot))],
         vec![stream(&dismissal)],
-    )
+    ))
     .await
     .unwrap();
     assert_eq!(records(&b), waiting);

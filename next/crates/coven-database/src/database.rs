@@ -16,6 +16,11 @@ use read_pool::ReadPool;
 #[path = "database_operations.rs"]
 mod operations;
 
+#[path = "database_file_retention.rs"]
+pub(crate) mod file_retention;
+#[path = "database_snapshots.rs"]
+mod snapshots;
+
 #[cfg(any(test, feature = "test-utils"))]
 #[path = "database_operations_tests.rs"]
 mod operation_tests;

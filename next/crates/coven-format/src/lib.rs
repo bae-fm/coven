@@ -11,6 +11,7 @@ pub mod codes;
 pub mod dismissal;
 pub mod error;
 pub mod file;
+pub mod file_reference;
 pub mod key;
 pub mod merge_fields;
 mod merge_wire;

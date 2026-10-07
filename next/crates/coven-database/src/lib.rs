@@ -55,6 +55,7 @@ mod snapshot_error;
 mod snapshot_load;
 mod snapshot_loss;
 mod snapshot_metadata;
+mod snapshot_reload;
 mod snapshot_state;
 mod snapshot_write;
 mod snapshot_writes;
@@ -83,6 +84,7 @@ mod write_schema;
 pub use coven_format::value::EntryId;
 pub use coven_merge::WriteId;
 pub use database::file_database::{CacheReservation, FileChanges, FileDatabase, FileReservation};
+pub use database::file_retention::FileRetention;
 pub use database::{Database, DatabaseBuilder, DatabaseReadHandle};
 pub use declaration::{CacheFill, FileDecl, Provenance, RowIdentity, SyncedTable, Uploads};
 pub use download::{ApplyOutcome, DownloadedPart, DownloadedWrite, SyncState, WriteWait};
@@ -105,6 +107,7 @@ pub use migration_change::{ChangeOp, ColumnChange, RowChange};
 pub use read::{Read, SqlReadContext};
 pub use row_key::RowKey;
 pub use snapshot_error::SnapshotError;
+pub use snapshot_reload::{SnapshotInspection, SnapshotReload, SnapshotSource};
 pub use snapshot_write::SnapshotWriteError;
 pub use store_log::{
     DropReason, EntryOutcome, StoreCircle, StoreDevice, StoreIdentity, StoreLog, StoreLogReplay,
@@ -116,6 +119,7 @@ pub use upload::{UploadBytes, UploadParts, UploadReadError, WaitingUpload};
 pub use user_file::{prepare_user_file, PreparedUserFile, UserFile};
 pub use write::SqlContext;
 pub use write_batch::{FileSource, WriteBatch};
+pub use write_boundary::WriteBoundary;
 pub use write_failure::WriteFailure;
 
 // SQL values and parameters are part of the API. Connections remain private.

@@ -89,6 +89,7 @@ pub(crate) enum InviteState {
 #[derive(Serialize, Deserialize)]
 pub(crate) enum Data {
     KeepFile(KeepFileWork),
+    Snapshots(crate::snapshot_data::SnapshotTask),
     Entry(EntryWork),
     Invite(InviteWork),
     Revoke {
@@ -118,6 +119,11 @@ impl Data {
         match self {
             Self::KeepFile(_) => OperationKind::ChangeFileLocation,
             Self::Entry(work) => work.intent.kind(),
+            Self::Snapshots(task) => match task.job {
+                crate::snapshot_data::SnapshotJob::Write { .. } => OperationKind::WriteSnapshot,
+                crate::snapshot_data::SnapshotJob::Reload { .. } => OperationKind::ReloadSnapshots,
+                crate::snapshot_data::SnapshotJob::Retain => OperationKind::Retention,
+            },
             Self::Invite(_) => OperationKind::Invite,
             Self::Revoke { .. } => OperationKind::RevokeAccess,
         }
@@ -197,6 +203,9 @@ impl OperationKind {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::ChangeFileLocation => "change-file-location",
+            Self::WriteSnapshot => "write-snapshot",
+            Self::ReloadSnapshots => "reload-snapshots",
+            Self::Retention => "retention",
             Self::RemoveMember => "remove-member",
             Self::CreateCircle => "create-circle",
             Self::AddCircleMember => "add-circle-member",

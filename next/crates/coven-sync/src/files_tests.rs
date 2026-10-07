@@ -12,6 +12,8 @@ use coven_storage::{test_utils::MemoryStorage, StorageConfig};
 use std::time::{Duration, SystemTime};
 
 const CHUNK: usize = 64 * 1024;
+#[path = "snapshot_file_retention_tests.rs"]
+mod retention;
 struct Fixture {
     root: tempfile::TempDir,
     directory: StoreDir,
@@ -224,7 +226,8 @@ async fn ranges_authenticate_cache_batch_and_fail_offline() {
     f.storage
         .set_faults(coven_storage::test_utils::Faults::none())
         .await;
-    let path = coven_storage::ObjectPath::file(file.uploaded().unwrap().unwrap().0);
+    let uploaded = file.uploaded().unwrap().unwrap();
+    let path = coven_storage::ObjectPath::file(uploaded.device, uploaded.id);
     f.storage
         .corrupt_byte(&path, 15 + CHUNK + 16 + 1)
         .await

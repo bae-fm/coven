@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
-/// Owns the capabilities used to move store-log entries and sealed keys (§21.2).
+/// Owns store-log, key and snapshot synchronization capabilities (§21.2).
 /// Calls require exclusive access so one install never authors or applies two
 /// entries concurrently through this owner. The database also checks stale replay.
 pub struct StoreLogSync {
@@ -34,6 +34,7 @@ pub struct StoreLogSync {
     member_keys: Arc<dyn MemberKeyCustody>,
     clock: ClockRef,
     ids: IdSourceRef,
+    directory: coven_foundation::files::StoreDir,
 }
 
 impl StoreLogSync {
@@ -45,6 +46,7 @@ impl StoreLogSync {
         member_keys: Arc<dyn MemberKeyCustody>,
         clock: ClockRef,
         ids: IdSourceRef,
+        directory: coven_foundation::files::StoreDir,
     ) -> Self {
         Self {
             storage: Some(storage),
@@ -53,6 +55,7 @@ impl StoreLogSync {
             member_keys,
             clock,
             ids,
+            directory,
         }
     }
 
@@ -63,6 +66,7 @@ impl StoreLogSync {
         member_keys: Arc<dyn MemberKeyCustody>,
         clock: ClockRef,
         ids: IdSourceRef,
+        directory: coven_foundation::files::StoreDir,
     ) -> Self {
         Self {
             storage: None,
@@ -71,13 +75,16 @@ impl StoreLogSync {
             member_keys,
             clock,
             ids,
+            directory,
         }
     }
 
-    /// Publish fixed entries, download ready entries, replay and acquire keys.
+    /// Publish entries, replay downloads, acquire keys and resume snapshot work.
     /// A missing dependency or sealed copy waits solely in storage for a later call.
     pub async fn sync_store_log(&mut self) -> Result<SyncReport, SyncFailure> {
         let mut report = self.step().await.map_err(SyncFailure::from)?;
+        let snapshots = self.resume_snapshots().await.map_err(SyncFailure::from)?;
+        report.damaged_objects.extend(snapshots.damaged_objects);
         let operations = self.operation_report().await.map_err(SyncFailure::from)?;
         report.blocked_operations = operations.blocked_operations;
         report.access_keys_to_delete = operations.access_keys_to_delete;
@@ -91,6 +98,9 @@ impl StoreLogSync {
         &mut self,
         change: StoreChange,
     ) -> Result<EntryId, SyncError> {
+        if let Some(id) = self.pending_reload().await? {
+            return Err(SyncError::ReloadPending(id));
+        }
         let mut local = self.database.local_store_log().await?;
         let member = self
             .member_keys
@@ -105,6 +115,9 @@ impl StoreLogSync {
             .await?;
         if let Some(damaged) = report.damaged_objects.into_iter().next() {
             return Err(damaged.into());
+        }
+        if let Some(id) = self.pending_reload().await? {
+            return Err(SyncError::ReloadPending(id));
         }
         if let StoreChange::CreateStore { store, .. } = &change {
             if *store != local.store {
@@ -356,6 +369,10 @@ impl StoreLogSync {
         report: &mut SyncReport,
     ) -> Result<(), SyncError> {
         if let Some(upload) = &local.upload {
+            if let Some(id) = self.pending_reload().await? {
+                tracing::debug!(?id, "store-log publication waits for snapshot reload");
+                return Ok(());
+            }
             for record in self.database.operations().await? {
                 if record.failure.is_some()
                     && crate::operation_data::Data::read(&record)?
@@ -404,9 +421,21 @@ impl StoreLogSync {
         report: &mut SyncReport,
     ) -> Result<(), SyncError> {
         let (entry, replay) = crate::replay_entry(&local.log, entry);
-        let operations = self
+        let mut operations = self
             .removal_work(&local.log, &entry, &replay, member)
             .await?;
+        if local.log.replay.state.schema != replay.state.schema
+            || local.log.replay.state.format != replay.state.format
+            || local.log.replay.state.resets != replay.state.resets
+        {
+            operations.push(
+                crate::operation_data::Data::Snapshots(crate::snapshot_data::SnapshotTask {
+                    job: crate::snapshot_data::SnapshotJob::Reload { files: None },
+                    temporary: Vec::new(),
+                })
+                .new_operation("coven")?,
+            );
+        }
         let mut updates = Vec::new();
         for record in self.database.operations().await? {
             let data = crate::operation_data::Data::read(&record)?;
@@ -628,3 +657,6 @@ mod operation_calls;
 mod operation_invites;
 #[path = "operation_steps.rs"]
 mod operation_steps;
+
+#[path = "snapshots.rs"]
+mod snapshots;

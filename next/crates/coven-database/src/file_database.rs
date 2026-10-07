@@ -504,13 +504,14 @@ impl FileDatabase {
     pub async fn missing_bytes(&self, file: &FileRef) -> Result<u64, DbError> {
         let file = file.clone();
         self.run(move |db, _, _, _| {
-            let Some((id, _)) = file.uploaded()? else {
+            if file.uploaded()?.is_none() {
                 return Ok(0);
-            };
+            }
+            let id = cache::id(&file)?;
             if db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM coven_cache
                  WHERE namespace=?1 AND file_id=?2 AND chunk=-2)",
-                (file.namespace(), id.to_string()),
+                (file.namespace(), &id),
                 |r| r.get::<_, bool>(0),
             )? {
                 return Ok(0);
@@ -518,7 +519,7 @@ impl FileDatabase {
             let cached = db.query_row(
                 "SELECT coalesce(sum(size-16),0) FROM coven_cache
                  WHERE namespace=?1 AND file_id=?2 AND chunk>=0",
-                (file.namespace(), id.to_string()),
+                (file.namespace(), &id),
                 |r| r.get::<_, i64>(0),
             )?;
             file.plaintext_size()

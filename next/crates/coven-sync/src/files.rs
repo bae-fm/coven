@@ -9,7 +9,7 @@ mod file_keep;
 #[path = "file_read.rs"]
 mod file_read;
 #[path = "file_upload.rs"]
-mod file_upload;
+pub(crate) mod file_upload;
 use crate::SyncError;
 use coven_database::{DbError, FileDatabase};
 use coven_foundation::{clock::ClockRef, files::StoreDir, id_source::IdSourceRef};

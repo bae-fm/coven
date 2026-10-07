@@ -42,6 +42,9 @@ impl StoreLogSync {
             }
             Command::Sync => {
                 let mut report = self.step().await?;
+                report
+                    .damaged_objects
+                    .extend(self.resume_snapshots().await?.damaged_objects);
                 let operations = self.operation_report().await?;
                 report.blocked_operations = operations.blocked_operations;
                 report.access_keys_to_delete = operations.access_keys_to_delete;
@@ -83,6 +86,9 @@ impl StoreLogSync {
             }
             Command::Discard(id) => {
                 let record = self.blocked(id).await?;
+                if let Data::Snapshots(task) = Data::read(&record)? {
+                    self.discard_snapshot(&record, task).await?;
+                }
                 // Publication numbers cannot be abandoned. Publishing fixed bytes
                 // does not perform any later access or invite step.
                 if Data::read(&record)?.entry()?.is_some()

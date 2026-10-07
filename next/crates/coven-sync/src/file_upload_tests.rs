@@ -153,7 +153,10 @@ async fn fixing_bytes_survives_reopen_and_original_changes() {
     f.reopen().await;
     f.drain().await;
     assert_eq!(
-        f.storage.read(&ObjectPath::file(id)).await.unwrap(),
+        f.storage
+            .read(&ObjectPath::file(upload_device(&item).unwrap(), id))
+            .await
+            .unwrap(),
         encrypted
     );
     let uploaded = f.database.file_ref("files", "recording").await.unwrap();
@@ -216,7 +219,10 @@ async fn recorded_sessions_continue_or_restart_with_the_same_encrypted_bytes() {
             encrypted.len() as u64 - if expire { 0 } else { CHUNK as u64 }
         );
         assert_eq!(
-            f.storage.read(&ObjectPath::file(id)).await.unwrap(),
+            f.storage
+                .read(&ObjectPath::file(upload_device(&item).unwrap(), id))
+                .await
+                .unwrap(),
             encrypted
         );
         f.close().await;

@@ -77,20 +77,22 @@ impl<I: Iterator<Item = Result<Vec<u8>, Error>>> Iterator for PlaintextChunks<I>
 
 /// Holds only one unfinished frame. A known remaining length lets the write
 /// decoder refuse a frame that crosses its part's end before reserving memory.
-pub(crate) struct FrameDecoder {
+pub struct FrameDecoder {
     bytes: Vec<u8>,
     remaining: Option<u64>,
 }
 
 impl FrameDecoder {
-    pub(crate) fn new(remaining: Option<u64>) -> Self {
+    /// Bound the complete stream when its length is known.
+    pub fn new(remaining: Option<u64>) -> Self {
         Self {
             bytes: Vec::new(),
             remaining,
         }
     }
 
-    pub(crate) fn next(&mut self, input: &mut &[u8]) -> Result<Option<Vec<u8>>, Error> {
+    /// Consume bytes through one bounded frame, retaining an unfinished frame.
+    pub fn next(&mut self, input: &mut &[u8]) -> Result<Option<Vec<u8>>, Error> {
         loop {
             let target = if self.bytes.len() < FRAME_PREFIX_LEN {
                 FRAME_PREFIX_LEN
@@ -127,7 +129,8 @@ impl FrameDecoder {
         }
     }
 
-    pub(crate) fn finish(&self) -> Result<(), Error> {
+    /// Reject an incomplete frame or a stream shorter than its declared length.
+    pub fn finish(&self) -> Result<(), Error> {
         if self.bytes.is_empty() && self.remaining.is_none_or(|n| n == 0) {
             Ok(())
         } else {

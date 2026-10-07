@@ -346,9 +346,10 @@ async fn lost_completion_requires_byte_verification() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::file(coven_foundation::id_source::FileId(uuid::Uuid::from_bytes(
-        [0xcc; 16],
-    )));
+    let path = ObjectPath::file(
+        coven_foundation::id_source::DeviceId(31),
+        coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xcc; 16])),
+    );
     let mut upload = storage.begin_upload(&path, 4).await.unwrap();
     storage.upload_part(&mut upload, b"data").await.unwrap();
     let recorded = upload.encode().unwrap();
@@ -388,9 +389,10 @@ async fn missing_session_and_destination_is_expired() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::file(coven_foundation::id_source::FileId(uuid::Uuid::from_bytes(
-        [0xff; 16],
-    )));
+    let path = ObjectPath::file(
+        coven_foundation::id_source::DeviceId(31),
+        coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xff; 16])),
+    );
     let mut upload = storage.begin_upload(&path, 4).await.unwrap();
     state.lock().unwrap().uploads.clear();
     assert!(matches!(
@@ -441,9 +443,10 @@ async fn resume_queries_the_stored_offset_after_lost_part_reply() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::file(coven_foundation::id_source::FileId(uuid::Uuid::from_bytes(
-        [0xbb; 16],
-    )));
+    let path = ObjectPath::file(
+        coven_foundation::id_source::DeviceId(31),
+        coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xbb; 16])),
+    );
     let mut upload = storage
         .begin_upload(&path, 8 * 1024 * 1024 + 1)
         .await
@@ -581,7 +584,7 @@ async fn setup_refuses_unrelated_empty_folders_and_accepts_its_own_parents() {
     for folder in [
         "/vacation",
         "/devices/031",
-        "/files/00000000-0000-0000-0000-000000000000",
+        "/files/31/00000000-0000-0000-0000-000000000000",
     ] {
         state.lock().unwrap().folders = [folder.into()].into();
         assert_eq!(

@@ -14,6 +14,12 @@ pub type OperationError = crate::SyncError;
 pub enum OperationKind {
     /// Download an uploaded file and conditionally keep it on this device.
     ChangeFileLocation,
+    /// Write, upload and retain one audience snapshot.
+    WriteSnapshot,
+    /// Replace readable audiences and replay waiting writes atomically.
+    ReloadSnapshots,
+    /// Delete objects released by snapshot coverage.
+    Retention,
     /// Remove a member and rotate every affected key.
     RemoveMember,
     /// Create a circle and its first key.

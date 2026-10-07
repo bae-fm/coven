@@ -106,6 +106,8 @@ async fn removal_checks_the_authors_past_not_the_receivers_present() {
     let report = devices[2].sync.download_writes().await.unwrap();
     assert!(report.damaged_objects.is_empty(), "{report:?}");
     assert_eq!(rows(&devices[2].db).await[0].1, "before");
+    devices[2].log.reload_from_snapshots().await.unwrap();
+    assert_eq!(rows(&devices[2].db).await[0].1, "before");
     let log = devices[2].db.local_store_log().await.unwrap();
     after.header.position.number = 2;
     after.header.store_log_read = EntryPositions(
@@ -123,6 +125,14 @@ async fn removal_checks_the_authors_past_not_the_receivers_present() {
     publish(&storage, &after).await;
     let report = devices[2].sync.download_writes().await.unwrap();
     assert_eq!(report.damaged_objects.len(), 1, "{report:?}");
+    assert_eq!(rows(&devices[2].db).await[0].1, "before");
+    assert!(matches!(
+        devices[2].log.reload_from_snapshots().await,
+        Err(SyncError::Damaged(crate::DamagedObject {
+            failure: crate::ObjectCheckFailure::Parse(_),
+            ..
+        }))
+    ));
     assert_eq!(rows(&devices[2].db).await[0].1, "before");
 }
 
@@ -188,7 +198,10 @@ async fn newer_store_stops_uploads_but_reports_newer_downloads_as_waiting() {
         })
         .await
         .unwrap();
-    devices[1].log.sync_store_log().await.unwrap();
+    assert!(matches!(
+        devices[1].log.sync_store_log().await,
+        Err(SyncFailure::UpdateRequired)
+    ));
     sql(
         &devices[1].db,
         "INSERT INTO notes VALUES('local','old','body')",
@@ -285,35 +298,62 @@ async fn a_cached_read_view_still_checks_each_writes_timestamp() {
         .to_string()
         .contains("timestamp"));
     assert_eq!(rows(&devices[1].db).await[0].1, "before");
+    let error = devices[1].log.reload_from_snapshots().await.unwrap_err();
+    let SyncError::Damaged(damaged) = error else {
+        panic!("unexpected reload failure: {error:?}");
+    };
+    assert_eq!(
+        damaged.path,
+        crate::write_seal::path(second.header.position).as_str()
+    );
+    assert!(damaged.failure.to_string().contains("timestamp"));
+    assert_eq!(rows(&devices[1].db).await[0].1, "before");
 }
 
 #[tokio::test]
 async fn missing_read_view_waits_then_replays_after_the_store_log_arrives() {
-    let storage = storage();
-    let mut devices = group(storage.clone(), 2).await;
-    devices[0]
-        .log
-        .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(3),
-            name: "third".into(),
-        })
-        .await
-        .unwrap();
-    sql(
-        &devices[0].db,
-        "INSERT INTO notes VALUES('one','before','body')",
-    )
-    .await;
-    devices[0].sync.upload_writes().await.unwrap();
-    sql(&devices[0].db, "UPDATE notes SET title='after'").await;
-    devices[0].sync.upload_writes().await.unwrap();
-    let report = devices[1].sync.download_writes().await.unwrap();
-    assert_eq!(report.waiting.len(), 2, "{report:?}");
-    assert!(report.damaged_objects.is_empty(), "{report:?}");
-    assert!(rows(&devices[1].db).await.is_empty());
-    devices[1].log.sync_store_log().await.unwrap();
-    let report = devices[1].sync.download_writes().await.unwrap();
-    assert!(report.waiting.is_empty(), "{report:?}");
-    assert!(report.damaged_objects.is_empty(), "{report:?}");
-    assert_eq!(rows(&devices[1].db).await[0].1, "after");
+    for reload in [false, true] {
+        let storage = storage();
+        let mut devices = group(storage.clone(), 2).await;
+        devices[0]
+            .log
+            .make_and_upload_entry(StoreChange::AddDevice {
+                device: DeviceId(3),
+                name: "third".into(),
+            })
+            .await
+            .unwrap();
+        sql(
+            &devices[0].db,
+            "INSERT INTO notes VALUES('one','before','body')",
+        )
+        .await;
+        devices[0].sync.upload_writes().await.unwrap();
+        sql(&devices[0].db, "UPDATE notes SET title='after'").await;
+        devices[0].sync.upload_writes().await.unwrap();
+        let report = devices[1].sync.download_writes().await.unwrap();
+        assert_eq!(report.waiting.len(), 2, "{report:?}");
+        assert!(report.damaged_objects.is_empty(), "{report:?}");
+        assert!(rows(&devices[1].db).await.is_empty());
+        if reload {
+            assert!(matches!(
+                devices[1].log.reload_from_snapshots().await,
+                Err(SyncError::Database(coven_database::DbError::Snapshot(
+                    coven_database::SnapshotError::WriteWaiting(
+                        coven_database::WriteWait::StoreLog(_)
+                    )
+                )))
+            ));
+            assert!(rows(&devices[1].db).await.is_empty());
+        }
+        devices[1].log.sync_store_log().await.unwrap();
+        if reload {
+            devices[1].log.reload_from_snapshots().await.unwrap();
+            assert_eq!(rows(&devices[1].db).await[0].1, "after");
+        }
+        let report = devices[1].sync.download_writes().await.unwrap();
+        assert!(report.waiting.is_empty(), "{report:?}");
+        assert!(report.damaged_objects.is_empty(), "{report:?}");
+        assert_eq!(rows(&devices[1].db).await[0].1, "after");
+    }
 }

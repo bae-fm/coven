@@ -36,7 +36,7 @@ async fn an_uploading_write_refuses_a_trigger_that_removes_its_file() {
         .unwrap();
     owner.record_stored(id).await.unwrap();
     let location = SecretText::new(format!(
-        "uploaded 00000000-0000-4000-8000-000000000123 {}",
+        "uploaded 1 00000000-0000-4000-8000-000000000123 {}",
         "11".repeat(32)
     ));
     assert!(matches!(

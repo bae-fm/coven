@@ -243,9 +243,10 @@ async fn multipart_recovers_lost_part_and_completion_replies() {
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     assert_eq!(storage.single_request_limit(), 5 * 1024 * 1024 * 1024);
-    let path = ObjectPath::file(coven_foundation::id_source::FileId(uuid::Uuid::from_bytes(
-        [0xaa; 16],
-    )));
+    let path = ObjectPath::file(
+        coven_foundation::id_source::DeviceId(31),
+        coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xaa; 16])),
+    );
     let mut session = storage
         .begin_upload(&path, 8 * 1024 * 1024 + 1)
         .await
@@ -319,9 +320,10 @@ async fn multipart_sizes_parts_for_the_promised_object() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::file(coven_foundation::id_source::FileId(uuid::Uuid::from_bytes(
-        [0xdd; 16],
-    )));
+    let path = ObjectPath::file(
+        coven_foundation::id_source::DeviceId(31),
+        coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xdd; 16])),
+    );
     let total = 1024u64.pow(4);
     let upload = storage.begin_upload(&path, total).await.unwrap();
     assert!(total.div_ceil(upload.part_size() as u64) <= 10_000);
@@ -359,9 +361,10 @@ async fn missing_session_and_destination_is_expired() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::file(coven_foundation::id_source::FileId(uuid::Uuid::from_bytes(
-        [0xff; 16],
-    )));
+    let path = ObjectPath::file(
+        coven_foundation::id_source::DeviceId(31),
+        coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xff; 16])),
+    );
     let mut upload = storage.begin_upload(&path, 4).await.unwrap();
     state.lock().unwrap().uploads.clear();
     assert!(matches!(

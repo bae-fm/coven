@@ -302,9 +302,10 @@ async fn lost_completion_requires_byte_verification() {
     let state = remote();
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::file(coven_foundation::id_source::FileId(uuid::Uuid::from_bytes(
-        [0xff; 16],
-    )));
+    let path = ObjectPath::file(
+        coven_foundation::id_source::DeviceId(31),
+        coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xff; 16])),
+    );
     let mut upload = storage.begin_upload(&path, 4).await.unwrap();
     let recorded = upload.encode().unwrap();
     state.lock().unwrap().fail_reply = true;
@@ -346,9 +347,10 @@ async fn missing_session_and_destination_is_expired() {
     let state = remote();
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::file(coven_foundation::id_source::FileId(uuid::Uuid::from_bytes(
-        [0xff; 16],
-    )));
+    let path = ObjectPath::file(
+        coven_foundation::id_source::DeviceId(31),
+        coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xff; 16])),
+    );
     let mut upload = storage.begin_upload(&path, 4).await.unwrap();
     state.lock().unwrap().uploads.clear();
     assert!(matches!(
@@ -390,9 +392,10 @@ async fn resume_uses_provider_progress_and_keeps_bearer_off_transfer_urls() {
     let state = remote();
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::file(coven_foundation::id_source::FileId(uuid::Uuid::from_bytes(
-        [0xee; 16],
-    )));
+    let path = ObjectPath::file(
+        coven_foundation::id_source::DeviceId(31),
+        coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xee; 16])),
+    );
     let part_size = 24 * 320 * 1024;
     let mut upload = storage.begin_upload(&path, part_size + 1).await.unwrap();
     let recorded = upload.encode().unwrap();

@@ -121,9 +121,10 @@ macro_rules! coven_tables {
         $visit!(coven_applied_boundaries, "
             CREATE TABLE coven_applied_boundaries (
                 id INTEGER PRIMARY KEY,
-                cause BLOB NOT NULL UNIQUE,
-                audience TEXT,
-                included BLOB NOT NULL
+                cause BLOB NOT NULL,
+                audience TEXT NOT NULL,
+                included BLOB NOT NULL,
+                UNIQUE(cause,audience)
             ) STRICT;
         ");
         $visit!(coven_snapshot_schema, "

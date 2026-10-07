@@ -17,6 +17,7 @@ use std::time::SystemTime;
 enum Source<R> {
     Download(DownloadedWriteStream<R>),
     Queue(i64),
+    Deleted(AppliedWrite),
 }
 
 pub(crate) fn apply<R: Read>(
@@ -24,6 +25,7 @@ pub(crate) fn apply<R: Read>(
     schema: &WriteSchema,
     now: SystemTime,
     downloads: Vec<DownloadedWriteStream<R>>,
+    absent: Vec<WriteId>,
     mut coverage: SnapshotCoverage,
     deleted: &BTreeSet<CircleId>,
 ) -> Result<BTreeSet<AppKey>, DbError> {
@@ -76,12 +78,51 @@ pub(crate) fn apply<R: Read>(
             Ok::<_, DbError>(())
         },
     )?;
+    for id in absent {
+        if supplied.contains(&id) || queued.contains(&id) {
+            return Err(invalid("absent write also has a supplied stream"));
+        }
+        if !coverage.covered_by_snapshot(id) {
+            return Err(invalid("absent write is not covered by a loaded snapshot"));
+        }
+        let write = database.query_row("SELECT timestamp,had_read FROM coven_writes WHERE substr(timestamp,9,8)=?1 AND number=?2",
+            (id.device.0.to_be_bytes().as_slice(), id.number.to_be_bytes().as_slice()), |r| Ok(AppliedWrite {
+                id, timestamp: decoded(merge_fields::decode_timestamp(&r.get::<_, Vec<u8>>(0)?))?,
+                had_read: decoded(merge_fields::decode_write_positions(&r.get::<_, Vec<u8>>(1)?))?,
+            }))?;
+        sources.insert((write.timestamp, id, false), Source::Deleted(write));
+    }
     coverage.start(database)?;
     let mut affected = BTreeSet::new();
     for source in sources.into_values() {
         let supplied = matches!(source, Source::Download(_));
         let write = match source {
             Source::Download(stream) => stream.read()?,
+            Source::Deleted(write) => {
+                let positions = crate::download::positions(database)?;
+                if !positions.covers(write.id) {
+                    let mut missing: Vec<_> = write
+                        .had_read
+                        .0
+                        .into_iter()
+                        .filter(|id| !positions.covers(*id))
+                        .collect();
+                    if write.id.number > 1 {
+                        let previous = WriteId {
+                            number: write.id.number - 1,
+                            ..write.id
+                        };
+                        if !positions.covers(previous) {
+                            missing.push(previous);
+                        }
+                    }
+                    if !missing.is_empty() {
+                        return Err(SnapshotError::MissingWrites { missing }.into());
+                    }
+                    database.internal_execute("INSERT INTO coven_positions(device,number) VALUES(?1,?2) ON CONFLICT(device) DO UPDATE SET number=excluded.number", (write.id.device.0.to_be_bytes().as_slice(), write.id.number.to_be_bytes().as_slice()))?;
+                }
+                continue;
+            }
             Source::Queue(rowid) => database
                 .query_row(
                     "SELECT record FROM coven_uploads WHERE rowid=?1",

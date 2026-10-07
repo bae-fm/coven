@@ -266,7 +266,11 @@ async fn a_downloaded_location_change_releases_this_devices_owned_copy() {
             .map(|(name, value)| (name.clone(), value.value.clone()))
             .collect();
         columns.get_mut("location").unwrap().value = Value::Text(if uploaded {
-            format!("uploaded {} {}", uuid::Uuid::from_u128(7), "ab".repeat(32))
+            format!(
+                "uploaded 1 {} {}",
+                uuid::Uuid::from_u128(7),
+                "ab".repeat(32)
+            )
         } else {
             other.0.to_string()
         });

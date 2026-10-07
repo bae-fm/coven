@@ -379,6 +379,7 @@ impl OperationRun {
     async fn drive(&mut self) -> Result<(), SyncError> {
         loop {
             let records = self.sync.operation_records().await?;
+            let reloading = self.sync.pending_reload().await?.is_some();
             let mut advanced = false;
             let mut writer = None;
             for record in &records {
@@ -393,7 +394,7 @@ impl OperationRun {
                 if record.failure.is_some() && !self.sync.invite_expired(&data) {
                     continue;
                 }
-                if data.writes_entry() && writer != Some(record.id) {
+                if data.writes_entry() && (reloading || writer != Some(record.id)) {
                     continue;
                 }
                 let step = if matches!(data, crate::operation_data::Data::KeepFile(_)) {
@@ -416,7 +417,11 @@ impl OperationRun {
                             let _ = reply.send(Ok(value));
                         }
                     }
-                    Err(SyncError::NoStorage | SyncError::KeyUnavailable(_)) => (),
+                    Err(
+                        SyncError::NoStorage
+                        | SyncError::KeyUnavailable(_)
+                        | SyncError::ReloadPending(_),
+                    ) => (),
                     Err(SyncError::Storage(error)) if error.retryable() => {
                         tracing::debug!(operation = record.id.0, error = %error, "operation waiting for storage");
                     }

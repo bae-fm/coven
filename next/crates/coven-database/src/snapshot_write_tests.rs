@@ -92,10 +92,10 @@ pub(crate) async fn load_one<R: std::io::Read + Send + 'static>(
     plaintext: R,
 ) -> Result<(), crate::DbError> {
     database
-        .load_snapshots(
+        .load_snapshots(crate::SnapshotReload::new(
             vec![(expected, plaintext)],
             Vec::<crate::DownloadedWriteStream<std::io::Cursor<Vec<u8>>>>::new(),
-        )
+        ))
         .await
 }
 

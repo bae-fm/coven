@@ -27,17 +27,9 @@ impl StoredLocation {
         let Value::Text(text) = value else {
             return Err(DbError::DamagedDatabase);
         };
-        if let Some(uploaded) = text.strip_prefix("uploaded ") {
-            let (id, key) = uploaded.split_once(' ').ok_or(DbError::DamagedDatabase)?;
-            let id_value = uuid::Uuid::parse_str(id).map_err(|_| DbError::DamagedDatabase)?;
-            if id_value.to_string() != id
-                || key.len() != 64
-                || !key
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            {
-                return Err(DbError::DamagedDatabase);
-            }
+        if text.starts_with("uploaded ") {
+            coven_format::file_reference::UploadedFileReference::decode(text)
+                .map_err(|_| DbError::DamagedDatabase)?;
             Ok(Self::Uploaded(SecretText::new(text.clone())))
         } else {
             let device: u64 = text.parse().map_err(|_| DbError::DamagedDatabase)?;

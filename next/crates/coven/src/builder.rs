@@ -219,7 +219,7 @@ impl OpeningStore {
         let database = self.database.open_locked(self.lock).await?;
         let files = coven_sync::Files::new(
             coven_database::FileDatabase::new(database.clone()),
-            self.directory,
+            self.directory.clone(),
             self.storage.clone(),
             self.clock.clone(),
             self.ids.clone(),
@@ -232,6 +232,7 @@ impl OpeningStore {
                 self.identity,
                 self.clock,
                 self.ids.clone(),
+                self.directory,
             ),
             None => coven_sync::StoreLogSync::disconnected(
                 database.clone(),
@@ -239,6 +240,7 @@ impl OpeningStore {
                 self.identity,
                 self.clock,
                 self.ids.clone(),
+                self.directory,
             ),
         };
         let operations = coven_sync::Operations::new(sync, files.clone());

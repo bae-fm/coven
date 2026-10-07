@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) struct SnapshotCoverage {
     audiences: BTreeMap<Audience, WritePositions>,
+    loaded: BTreeSet<Audience>,
     target: BTreeMap<DeviceId, u64>,
 }
 
@@ -29,6 +30,7 @@ impl SnapshotCoverage {
             .collect();
         let mut coverage = Self {
             audiences,
+            loaded: BTreeSet::new(),
             target: BTreeMap::new(),
         };
         // A device's next write implicitly reads every earlier own write, even
@@ -56,7 +58,14 @@ impl SnapshotCoverage {
     }
 
     pub(crate) fn loaded(&mut self, audience: Audience, positions: WritePositions) {
+        self.loaded.insert(audience.clone());
         self.audiences.insert(audience, positions);
+    }
+
+    pub(crate) fn covered_by_snapshot(&self, write: WriteId) -> bool {
+        self.loaded
+            .iter()
+            .any(|audience| self.audiences[audience].covers(write))
     }
 
     pub(crate) fn opened(&mut self, audience: &Audience) {
