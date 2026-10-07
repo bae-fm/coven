@@ -115,6 +115,7 @@ impl StoreLogSync {
                 .await
             {
                 Ok(saved) => saved,
+                Err(error) if waiting(&object.path, &error) => return Ok(()),
                 Err(error) => {
                     snapshot_damage(report, &object.path, error)?;
                     continue;
@@ -222,4 +223,23 @@ impl StoreLogSync {
         let positions = crate::posted_positions::open(&bytes, path, ring.as_ref(), log)?;
         Ok((positions.device, positions.writes))
     }
+}
+
+// Retention cannot prove coverage or absence until a write's inputs arrive.
+pub(super) fn waiting(path: &ObjectPath, error: &SyncError) -> bool {
+    let waiting = matches!(
+        error,
+        SyncError::KeyUnavailable(_)
+            | SyncError::Database(coven_database::DbError::Snapshot(
+                coven_database::SnapshotError::WriteWaiting(_)
+            ))
+    );
+    if waiting {
+        tracing::debug!(
+            path = path.as_str(),
+            ?error,
+            "waiting write holds back retention"
+        );
+    }
+    waiting
 }

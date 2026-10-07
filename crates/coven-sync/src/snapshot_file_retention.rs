@@ -102,6 +102,7 @@ impl StoreLogSync {
                 .await
             {
                 Ok(saved) => saved,
+                Err(error) if super::retention::waiting(&object.path, &error) => return Ok(()),
                 Err(error) => {
                     snapshot_damage(report, &object.path, error)?;
                     return Ok(());

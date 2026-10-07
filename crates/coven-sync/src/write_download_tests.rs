@@ -357,3 +357,56 @@ async fn missing_read_view_waits_then_replays_after_the_store_log_arrives() {
         assert_eq!(rows(&devices[1].db).await[0].1, "after");
     }
 }
+
+#[tokio::test]
+async fn retention_waits_for_store_log_entries_without_reporting_damage() {
+    let mut damaged = Vec::new();
+    for removed in [false, true] {
+        let storage = storage();
+        let mut devices = group(storage.clone(), 2).await;
+        if removed {
+            devices[1]
+                .log
+                .make_and_upload_entry(StoreChange::RemoveDevice {
+                    device: DeviceId(1),
+                })
+                .await
+                .unwrap();
+        }
+        devices[0]
+            .log
+            .make_and_upload_entry(StoreChange::AddDevice {
+                device: DeviceId(3),
+                name: "third".into(),
+            })
+            .await
+            .unwrap();
+        sql(
+            &devices[0].db,
+            "INSERT INTO notes VALUES('one','title','body')",
+        )
+        .await;
+        devices[0].sync.upload_writes().await.unwrap();
+        let unused = ObjectPath::file(
+            DeviceId(2),
+            coven_foundation::id_source::FileId(Uuid::from_u128(99)),
+        );
+        storage.create(&unused, b"unused").await.unwrap();
+        let report = devices[1].log.run_retention().await.unwrap();
+        if !report.damaged_objects.is_empty() {
+            damaged.push((removed, report));
+        }
+        assert_eq!(storage.read(&unused).await.unwrap(), b"unused");
+        devices[1].log.sync_store_log().await.unwrap();
+        let report = devices[1].log.run_retention().await.unwrap();
+        assert!(report.damaged_objects.is_empty(), "{report:?}");
+        assert!(matches!(
+            storage.read(&unused).await,
+            Err(coven_storage::StorageError::NotFound)
+        ));
+    }
+    assert!(
+        damaged.is_empty(),
+        "waiting writes were reported damaged: {damaged:?}"
+    );
+}

@@ -1997,6 +1997,9 @@ Carol's tablet:
   30 days.
   - Every device means every device the store log has and hasn't removed;
     one that has never posted counts as having read nothing.
+- A write waiting for store-log entries or a key copy holds retention back.
+  This is not damaged data and does not fail the sync pass. Deletion is
+  reconsidered after those inputs arrive, under the same coverage rules.
 - A device deletes a snapshot of its own once a newer one of the same
   audience covers everything it covers.
   - A snapshot named by a kept reset or version-raise entry that changes

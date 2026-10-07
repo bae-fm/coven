@@ -420,3 +420,43 @@ async fn dropped_removal_parts(
     assert_eq!(ben.fingerprints.len(), 2);
     assert_eq!(ben.fingerprints, carol.fingerprints);
 }
+
+#[tokio::test]
+async fn retention_waits_for_key_copies_without_failing() {
+    let mut failed = Vec::new();
+    for reader in [0, 1] {
+        let storage = storage();
+        let mut devices = household(storage.clone()).await;
+        sql(&devices[0].db, "INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','private')").await;
+        devices[0].sync.upload_writes().await.unwrap();
+        let keys = devices[reader].keys.unlock().unwrap().unwrap();
+        devices[reader]
+            .keys
+            .persist(&StoreKeyring::new(StoreKey::from_bytes(
+                KeyId(Uuid::from_u128(1)),
+                [7; 32],
+            )))
+            .unwrap();
+        let unused = ObjectPath::file(
+            DeviceId(reader as u64 + 1),
+            coven_foundation::id_source::FileId(Uuid::from_u128(99)),
+        );
+        storage.create(&unused, b"unused").await.unwrap();
+        match devices[reader].log.run_retention().await {
+            Ok(report) => assert!(report.damaged_objects.is_empty(), "{report:?}"),
+            Err(error) => failed.push((reader, error)),
+        }
+        assert_eq!(storage.read(&unused).await.unwrap(), b"unused");
+        devices[reader].keys.persist(&keys).unwrap();
+        let report = devices[reader].log.run_retention().await.unwrap();
+        assert!(report.damaged_objects.is_empty(), "{report:?}");
+        assert!(matches!(
+            storage.read(&unused).await,
+            Err(coven_storage::StorageError::NotFound)
+        ));
+    }
+    assert!(
+        failed.is_empty(),
+        "waiting keys failed retention: {failed:?}"
+    );
+}
