@@ -12,8 +12,8 @@ your queries through them, so it can capture each change with SQLite's session
 extension, encrypt and sign it, move it through the user's storage, and apply
 other devices' changes back.
 
-The implementation is the Cargo workspace in [`next/`](next). Its design is
-[`plans/coven-from-scratch.md`](plans/coven-from-scratch.md), and every byte it
-writes to storage is in [`plans/coven-format.md`](plans/coven-format.md).
+This Cargo workspace is the implementation. Its design is
+[`spec/coven.md`](spec/coven.md), and every byte it
+writes to storage is in [`spec/format.md`](spec/format.md).
 
 Docs: <https://coven.bae.fm>

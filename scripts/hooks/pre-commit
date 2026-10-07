@@ -44,15 +44,14 @@ restage_and_fail_if_changed() {
     fi
 }
 
-# next/ holds the implementation; formatting, clippy and the checker's rules
-# run before every commit (§21.4).
-run_check "cargo fmt" bash -c 'cd next && cargo fmt --all' || {
+# Formatting, clippy and the checker's rules run before every commit (§20.4).
+run_check "cargo fmt" cargo fmt --all || {
     echo "cargo fmt failed"
     exit 1
 }
 restage_and_fail_if_changed "cargo fmt"
 
-run_check "formatting, clippy and the checker" next/scripts/check-fast.sh || {
+run_check "formatting, clippy and the checker" scripts/check-fast.sh || {
     echo "Fix the findings above and try again"
     exit 1
 }
@@ -60,7 +59,7 @@ run_check "formatting, clippy and the checker" next/scripts/check-fast.sh || {
 # Full test runs are periodic, not per-commit: CI runs the complete suite on
 # three platforms at every push. Set COVEN_HOOK_TESTS=1 to run it locally too.
 if [ "${COVEN_HOOK_TESTS:-0}" = "1" ]; then
-    run_check "cargo test" bash -c 'cd next && cargo test --all-features' || {
+    run_check "cargo test" cargo test --all-features || {
         echo "Tests failed"
         exit 1
     }

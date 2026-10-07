@@ -1,0 +1,68 @@
+name: ci
+
+# One script runs every check of §20.4, and this runs that same script on
+# every platform.
+# Spec edits alone don't run it, so they never cancel a run checking code.
+on:
+  push:
+    branches: [main]
+    paths: &code_paths
+      - "crates/**"
+      - "tools/**"
+      - "scripts/**"
+      - ".cargo/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "clippy.toml"
+      - "rust-toolchain.toml"
+      - "spec/proofs/**"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths: *code_paths
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # A main run always finishes; GitHub still replaces a waiting run with the newest.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+      # The pinned toolchain and components come from rust-toolchain.toml on
+      # the first cargo invocation.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: coven-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'rust-toolchain.toml') }}
+      # elan reads the Lean toolchain from spec/proofs/merge/lean-toolchain the
+      # first time lake runs there; the cache keeps that toolchain. The proof
+      # itself is built from scratch every run (scripts/check.sh).
+      - name: Restore elan and the Lean toolchain
+        id: elan-cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.elan
+          key: elan-${{ runner.os }}-${{ hashFiles('spec/proofs/merge/lean-toolchain') }}
+      - name: Install elan
+        if: steps.elan-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o elan-init.sh
+          sh elan-init.sh -y --no-modify-path --default-toolchain none
+          rm elan-init.sh
+      - name: Put elan on the path
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            echo "$USERPROFILE\\.elan\\bin" >> "$GITHUB_PATH"
+          else
+            echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          fi
+      - name: scripts/check.sh
+        run: scripts/check.sh

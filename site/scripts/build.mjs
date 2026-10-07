@@ -5,7 +5,7 @@ import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 
 const siteDir = dirname(dirname(fileURLToPath(import.meta.url)))
-const workspace = resolve(siteDir, '../next')
+const workspace = resolve(siteDir, '..')
 const execFileAsync = promisify(execFile)
 const { stdout: cargoMetadata } = await execFileAsync(
     'cargo',
