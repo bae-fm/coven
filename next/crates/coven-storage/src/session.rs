@@ -130,6 +130,8 @@ impl UploadSession {
         crate::secret_json::encode(self)
     }
     /// Read a recording only if its provider, destination, state and progress agree.
+    /// Validation covers the location, state variant, nonempty identifiers, part
+    /// counts and sizes, and confirmed byte offset; positions paths are refused.
     /// The adapter also checks that it names the adapter's location before any request.
     pub fn decode(bytes: &[u8]) -> Result<Self, StorageError> {
         let value: RecordedUploadSession = serde_json::from_slice(bytes)

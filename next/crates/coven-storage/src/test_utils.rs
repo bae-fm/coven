@@ -99,6 +99,15 @@ struct State {
 }
 
 /// Clones share a provider's durable objects and sessions across simulated crashes.
+/// Publication is timestamped by the injected clock and retains the upload's
+/// identity after pending parts are discarded. [`Faults`] can lose part/completion
+/// replies or expire pending sessions without losing published objects.
+///
+/// [`Self::for_recipient`] shares the backend with a separate account and sign-in.
+/// Grants and acceptance govern that account's reads, writes and uploads; revoking
+/// it leaves the owner and other recipients untouched. Clones share their account's
+/// tokens, and replacement tokens govern subsequent calls on the same adapter.
+/// S3 console keys are outside this account-sharing model.
 #[derive(Clone)]
 pub struct MemoryStorage {
     config: StorageConfig,

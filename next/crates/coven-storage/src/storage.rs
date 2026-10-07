@@ -131,10 +131,12 @@ pub struct StoredObject {
     pub path: ObjectPath,
     /// Complete encrypted length in bytes.
     pub size: u64,
-    /// Provider timestamp, never the uploading device's clock. Drive and OneDrive
-    /// return creation time; Dropbox returns server modification time; CloudKit
-    /// returns publication time. S3 returns Last-Modified, which is initiation
-    /// time for multipart objects and cannot establish their age since completion.
+    /// Provider timestamp, never the uploading device's clock: Drive's createdTime,
+    /// OneDrive's createdDateTime, Dropbox's server_modified, CloudKit's server
+    /// publication time, or S3's Last-Modified. S3 uses initiation time for multipart
+    /// objects, but the 30-day deletion rule applies only to device-log objects
+    /// (§15). Those writes are at most 1 GB (§6), below S3's 5 GiB single-request
+    /// limit, so their retention age does not depend on multipart completion time.
     pub stored_at: std::time::SystemTime,
 }
 
@@ -150,6 +152,8 @@ pub trait Storage: Send + Sync {
     /// Largest complete encrypted body sent in one request, in bytes. Larger
     /// create-once objects use resumable or multipart uploads, for every path kind.
     /// Callers retaining sessions across crashes use `begin_upload` and record them.
+    /// S3 uses 5 GiB, Drive 5,000,000 bytes, Dropbox 150 MiB and OneDrive
+    /// 250,000,000 bytes. CloudKit uses the app bridge's nonzero native-call limit.
     fn single_request_limit(&self) -> u64;
     /// Install replacement OAuth tokens after the owner commits them to key custody.
     /// S3 and CloudKit refuse OAuth tokens; they use different account credentials.
@@ -159,8 +163,12 @@ pub trait Storage: Send + Sync {
         ))
     }
     /// Create a complete encrypted object, refusing an occupied path.
+    /// Bodies above [`Self::single_request_limit`] use a session for any immutable
+    /// path, including writes and snapshots. A failed transfer aborts the session;
+    /// if abort fails too, [`StorageError::Cleanup`] retains both causes.
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError>;
     /// Replace a device's posted positions; immutable paths are refused.
+    /// Always one request; an oversized body returns [`StorageError::SingleRequestTooLarge`].
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError>;
     /// Read the whole encrypted object.
     async fn read(&self, path: &ObjectPath) -> Result<Vec<u8>, StorageError>;
@@ -171,15 +179,32 @@ pub trait Storage: Send + Sync {
         range: ByteRange,
     ) -> Result<Vec<u8>, StorageError>;
     /// List every object under the prefix, across all pages.
+    /// Missing or malformed metadata fails the call. Drive returns the earliest
+    /// stored copy of each path, breaking creation-time ties by native id.
     async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError>;
     /// Delete an object; on Drive, remove it from the folder when this account is not its owner.
     /// An already absent object succeeds, making operation retries safe.
+    /// Sync chooses the deleting device under §15; storage exposes no deletion-rights
+    /// query. A provider refusal retains its cause, including a refused owned-object deletion.
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError>;
     /// Share the store using its owner's account, or tell an S3 admin to create a key.
     /// A signed-in sharing account that does not own the location gets `NotStoreOwner`.
+    /// Ownership comes from Drive's folder `ownedByMe`, Dropbox's folder `access_type`,
+    /// OneDrive's current-account drive id, or CloudKit's native `is_owner` call.
+    /// S3's console-key instructions need no sharing-account check.
+    ///
+    /// Dropbox upgrades viewers in place with `update_folder_member`; a pending
+    /// viewer without a native account id gets [`StorageError::AccountIdUnavailable`]
+    /// and keeps its invitation. Drive updates direct readers in place and adds a
+    /// direct writer grant when read access is inherited.
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError>;
     /// Finish provider onboarding under the invited account, then check that the
     /// location can be read. The facade verifies coven's store identity and keys.
+    /// Dropbox mounts the shared namespace. OneDrive checks the share's drive/folder
+    /// before redeeming it; CloudKit checks share metadata before native acceptance.
+    /// Native acceptance material comes from the encrypted [`crate::StorageInvitation`],
+    /// not a revocation grant id. Removal during joining returns the provider's
+    /// permission failure; an admin can invite again.
     async fn join(&self, invitation: &crate::StorageInvitation) -> Result<(), StorageError> {
         invitation.check(&self.config())?;
         if !matches!(
@@ -194,6 +219,15 @@ pub trait Storage: Send + Sync {
         Ok(())
     }
     /// Unshare through the owner's account, or tell an S3 admin which key to delete.
+    /// Ownership is checked as for [`Self::grant_access`]. Only grants exclusive to
+    /// this account are removed; owner, inherited, shared or unidentified grants
+    /// remain in [`MemberRemoval::AccessRemains`] for owner action.
+    ///
+    /// OneDrive resolves native identities across all permission pages and keeps
+    /// email-bearing grants until dependent ID-only removals succeed. Drive removes
+    /// direct access without changing parent permissions. Dropbox pages direct and
+    /// inherited memberships separately and waits for the native removal job,
+    /// preserving its failure cause; group and parent access remain reported.
     async fn revoke_access(&self, member: &MemberAccess) -> Result<MemberRemoval, StorageError>;
     /// Begin a create-once upload, returning the value to record before parts are sent.
     /// Posted positions are refused: replacement always sends complete bytes in one request.
@@ -226,6 +260,7 @@ pub trait Storage: Send + Sync {
     /// Publish all stored parts at the destination. A repeated completion is safe.
     async fn finish_upload(&self, session: &mut UploadSession) -> Result<(), StorageError>;
     /// Explicitly abandon an upload. Dropping a recorded value does not abort it.
+    /// Already closed or absent sessions succeed; published objects are preserved.
     async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError>;
 
     /// Provider-specific sign-out instructions; coven never makes or deletes S3 keys.
@@ -238,6 +273,8 @@ pub trait Storage: Send + Sync {
     }
 
     /// Retry an operation's create with the same encrypted bytes (§18).
+    /// Every path has one writer. On Drive a retry looks for this writer's earlier
+    /// copies, keeps the earliest createdTime (ties by id), and deletes later copies.
     async fn create_once(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         match self.create(path, bytes).await {
             Err(error) if error.failure() == crate::StorageFailure::AlreadyExists => {
@@ -254,6 +291,8 @@ pub trait Storage: Send + Sync {
     /// Check create, read, range, list and delete using a fresh encrypted probe
     /// supplied by the caller. The probe path must be unused; no connection or
     /// local settings are committed. A failed cleanup is returned too.
+    /// Cleanup runs even after a lost create reply; an already-occupied path is
+    /// left intact. [`StorageError::Cleanup`] retains both failures when necessary.
     async fn probe(&self, path: &ObjectPath, encrypted_bytes: &[u8]) -> Result<(), StorageError> {
         let range = ByteRange::new(0, encrypted_bytes.len() as u64)?;
         let created = self.create(path, encrypted_bytes).await;
@@ -304,6 +343,10 @@ pub trait Storage: Send + Sync {
     /// Reconnect when the location contains that same entry, including when later
     /// objects have been uploaded. The facade commits settings and credentials
     /// only after this call succeeds (§20.5).
+    /// Another store or unrelated content returns [`StorageSetupError::LocationOccupied`].
+    /// Provider folders must be ancestors in coven's layout; empty layout folders
+    /// left by interrupted uploads contain no stored objects. Two setups observing
+    /// an empty location may both succeed; sync detects their listed first entries.
     async fn setup(
         &self,
         first_entry: &ObjectPath,

@@ -24,21 +24,41 @@ measurements of server enforcement.
 [Drive uploads](https://developers.google.com/workspace/drive/api/guides/manage-uploads),
 [OneDrive content upload](https://learn.microsoft.com/en-us/graph/api/driveitem-put-content?view=graph-rest-1.0).
 Larger creates use
-resumable or multipart transfer for every object family. Positions remain one
-request. For crash continuation, callers begin a session, commit its secret
+resumable or multipart transfer for every object family, including writes and
+snapshots. Transfer failure aborts the unfinished session; `StorageError::Cleanup`
+retains both causes if abort fails too. Positions remain one request and an
+oversized replacement returns `SingleRequestTooLarge`.
+For crash continuation, callers begin a session, commit its secret
 recording, and retain the bytes. Resume asks the provider for confirmed progress;
-`restart_upload` begins a new session at the same destination after expiry.
-Decoding rejects inconsistent provider/location/state/part/progress recordings.
+`restart_upload` begins a new session at the same destination and total length
+after expiry, with zero confirmed bytes; a completed session cannot restart.
+Decoding validates the provider, location, state variant, nonempty identifiers,
+part counts/sizes and confirmed offset. A session for another location is
+refused before a request.
 Sessions cannot target positions. Lost completion replies are checked against
 the immutable destination or the provider's publication identity. Abort accepts
 already closed or absent sessions and preserves published objects.
 
 `list` follows every provider page and returns path, encrypted byte size and
-provider storage time. Setup reconnects using the known first-entry path and
+provider storage time, rejecting missing or malformed metadata. Drive uses
+`createdTime` (earliest copy, ties by id), Dropbox `server_modified`, OneDrive
+`createdDateTime`, CloudKit the publication record's server time, and S3
+`LastModified`. S3's multipart timestamp is upload initiation time, but the
+30-day deletion rule applies only to device-log objects (§15). Writes are at
+most 1 GB (§6), below S3's 5 GiB single-request limit, so their retention age
+does not depend on multipart completion time.
+[AWS metadata documentation](https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingMetadata.html).
+
+Setup reconnects using the known first-entry path and
 bytes even after other objects have arrived. A different store or unrelated
-content yields `LocationOccupied`. Two initially empty setups can both succeed;
+content yields `LocationOccupied`. Provider folders must be ancestors in
+coven's layout; empty layout folders left by interrupted uploads contain no
+stored objects. Two initially empty setups can both succeed;
 sync detects their first entries later. Probe attempts cleanup even after an
 unconfirmed create and retains both operation and cleanup failures.
+Storage exposes `delete`, not a deletion-rights query: sync chooses the deleting
+device under §15. Drive deletes objects owned by the account and otherwise
+removes them from the store's folder. A refusal retains its native cause.
 
 ## Provider operations and test evidence
 
@@ -70,24 +90,46 @@ removes the owner. Repeated revocation may remove a concurrent re-invitation, as
 the protocol permits. Unknown account identities are reported, not guessed. An ID-only OneDrive
 grant with no mapping to the requested email remains accessible and is returned
 as `UnidentifiedAccount`; automatic revocation of arbitrary aliases is not
-established by these tests. Business/SharePoint do not return `inheritedFrom`;
+established by these tests. OneDrive resolves identities across all permission
+pages and keeps email-bearing grants until dependent ID-only removals succeed,
+so retries can identify them. Business/SharePoint do not return `inheritedFrom`;
 the explicit-inheritance stub cases do not establish native inheritance handling
 there, and native mutation refusals are preserved.
 [Microsoft permission fields](https://learn.microsoft.com/en-us/graph/api/resources/permission?view=graph-rest-1.0).
 `StorageInvitation` records only native recipient-acceptance material, not a
 per-invite grant identity; ordinary formatting redacts its secrets.
 
-The memory provider uses an injected clock, separate recipient sign-ins,
-account grants and acceptance, durable backend sessions, immutable publication
-identity, and injected expiry/lost replies. It does not implement provider HTTP
-or substitute for the provider suites.
+Before changing sharing, adapters check Drive's folder `ownedByMe`, Dropbox's
+folder `access_type`, OneDrive's current-account drive id, or CloudKit's native
+`is_owner` call. A non-owner gets `NotStoreOwner` (`PermissionDenied`) before any
+mutation. S3's console-key instructions need no account-ownership check.
+Drive removes direct access without changing parent permissions and reports
+remaining inherited, group, domain or public access. It upgrades direct readers
+in place and adds a direct writer grant for inherited readers. Dropbox pages
+direct and inherited memberships separately, removes only direct account
+membership, waits for its native removal job and reports group/parent access.
+Viewer upgrades use `update_folder_member`; a pending viewer without an account
+id gets `AccountIdUnavailable` (`Refused`) and retains its invitation.
+
+Joining checks invitation location and provider before onboarding, then verifies
+readability. Dropbox mounts the shared namespace; OneDrive verifies the share's
+drive/folder before redemption; CloudKit validates metadata before native
+acceptance. Removal while joining returns the provider's permission failure;
+an admin can invite again. The facade verifies coven's identity and commits keys
+and credentials only after bootstrap succeeds.
+
+`MemoryStorage::new` takes an injected `ClockRef` for publication timestamps.
+Its `Faults` can lose part or completion replies and expire pending sessions.
+Completed uploads discard pending parts and retain their immutable publication
+identity. `MemoryStorage::for_recipient(owner, email)` shares the backend with a
+separate account and sign-in; grants and acceptance govern its reads, writes and
+uploads. Revocation leaves the owner and other recipients untouched. Clones
+share their account's sign-in, and replacement OAuth tokens govern subsequent
+calls on the same adapter. S3 keys are outside this account-sharing fake. It
+does not implement provider HTTP or substitute for the provider suites.
 
 ## Native limitations and unchecked boundaries
 
-- S3 documents multipart `LastModified` as initiation time, not completion.
-  The returned timestamp cannot establish how long the complete object has
-  existed for the 30-day deletion rule. No alternative retention protocol is
-  implemented. [AWS metadata documentation](https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingMetadata.html).
 - Dropbox's documented viewer-update selector needs a native account ID. A
   pending viewer without that ID receives typed `AccountIdUnavailable` and
   retains the invitation. An in-place upgrade for that case has not been

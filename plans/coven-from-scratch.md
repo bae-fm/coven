@@ -2754,6 +2754,16 @@ impl ByteRange {
     pub fn is_empty(self) -> bool;
 }
 
+/// A complete object returned by the app's CloudKit list call.
+pub struct StoredObject {
+    /// Validated path relative to the store's location.
+    pub path: ObjectPath,
+    /// Complete encrypted length in bytes.
+    pub size: u64,
+    /// Server publication time of the complete object, not the uploading device's clock.
+    pub stored_at: SystemTime,
+}
+
 /// A durable upload prepared by the app's CloudKit bridge (§16.5).
 pub struct CloudKitUpload {
     /// The bridge's recorded session capability, erased on drop.
@@ -2786,7 +2796,8 @@ pub trait CloudKitOps: Send + Sync {
     async fn replace(&self, location: &StorageConfig, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError>;
     /// Reads the whole object or only the asset parts covering the range (§16.3).
     async fn read(&self, location: &StorageConfig, path: &ObjectPath, range: Option<ByteRange>) -> Result<Vec<u8>, StorageError>;
-    /// Lists every object under the prefix, following every native query cursor.
+    /// Lists complete objects with encrypted size and server publication time,
+    /// following every native query cursor; pending assets are not listed.
     async fn list(&self, location: &StorageConfig, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError>;
     /// Deletes an object and its parts; an already absent object succeeds (§18).
     async fn delete(&self, location: &StorageConfig, path: &ObjectPath) -> Result<(), StorageError>;
@@ -3877,69 +3888,8 @@ while let Ok(values) = lost.next().await {
     `disconnect_storage`, setup reconnects to it; one that holds another
     store, or anything that isn't a coven store, fails with
     `LocationOccupied`.
-    Storage identifies a reconnect by the caller's known first-entry path and
-    encrypted bytes, even when later objects are present. Provider folders must
-    be ancestors in coven's layout; unrelated folders count as occupied. Empty
-    layout folders left by an interrupted upload contain no stored objects.
-    Concurrent empty-location setups both may succeed; storage lists their
-    first entries for sync to detect the collision (§4).
   - Creating uploads the store's first entry and its key sealed to this
     member; waiting writes then go up through sync like any others.
-- `Storage::single_request_limit() -> u64` exposes the maximum encrypted body
-  sent in one request: S3 5 GiB, Drive 5,000,000 bytes, Dropbox 150 MiB, OneDrive
-  250,000,000 bytes, and CloudKit's nonzero `CloudKitOps::single_request_limit()`.
-  `create` sends larger bodies through resumable or multipart uploads for any
-  object path, including writes and snapshots. On failure it aborts the
-  unfinished session and retains both operation and cleanup failures.
-  Callers needing crash continuation use the recorded-session calls directly.
-  Posted-positions replacement above the limit returns `SingleRequestTooLarge`.
-- Recorded `UploadSession`s only target create-once paths. Every provider's
-  `begin_upload` and recorded-session decoding refuse posted positions; their
-  replacement sends the complete bytes in one request. Completion recovery can
-  therefore compare immutable object ranges without mixing replacements.
-  - Decoding a recorded session validates its provider and location, state
-    variant, identifiers, part sizes and counts, and confirmed byte offset.
-    Adapters refuse a session naming another location before making a request.
-  - After `SessionExpired`, `Storage::restart_upload(&UploadSession)` returns
-    a new recorded session for the same path and total length, with zero
-    confirmed bytes. The caller records it and supplies the kept encrypted
-    bytes again. A completed session cannot be restarted.
-- Before sharing changes, storage checks that the signed-in account owns the
-  store: Drive's folder `ownedByMe`, Dropbox's folder `access_type`, OneDrive's
-  current-account drive id, or CloudKit's native `is_owner` call. Another account
-  fails with `StorageError::NotStoreOwner`, classified `PermissionDenied`,
-  before any grant or revocation. S3's console-key instructions need no sharing
-  account check.
-- Dropbox lists direct and inherited members separately, through every page.
-  Revocation removes only direct account membership, waits for the native removal
-  job, and reports group and parent-folder access as `MemberRemoval::AccessRemains`.
-  An existing viewer is upgraded with `update_folder_member`; a pending viewer
-  without a native account id returns `AccountIdUnavailable` (`Refused`) and
-  retains its invitation. The provider's schema does not establish an in-place
-  upgrade for that case.
-- `Storage::list` and `CloudKitOps::list` return `Vec<StoredObject>`, each with
-  `path: ObjectPath`, `size: u64` (complete encrypted bytes) and
-  `stored_at: SystemTime` from the provider. Drive uses `createdTime`, Dropbox
-  `server_modified`, OneDrive `createdDateTime`, CloudKit the publication
-  record's server time, and S3 `LastModified`. S3 documents multipart
-  `LastModified` as upload initiation, so it does not establish the completed
-  object's retention age; that provider requirement remains unresolved.
-  Listings follow every page and reject absent or malformed metadata. Drive
-  lists the earliest stored copy, with id breaking timestamp ties.
-  `MemoryStorage::new` takes an injected `ClockRef` and timestamps publication.
-  Its `Faults` can lose part or completion replies and expire pending sessions;
-  completed uploads discard pending parts and retain their session identity on
-  the published object. OAuth replacement tokens govern subsequent calls on the
-  same fake adapter.
-  `MemoryStorage::for_recipient(owner, email)` models a separate non-owner account at the
-  same location, with independent sign-in tokens. Grants and recipient acceptance
-  control its reads, writes and recorded uploads; revocation removes that account
-  without affecting the owner or other recipients. Clones retain their account's
-  sign-in and backend state. S3 keys remain outside this account-sharing fake.
-- Storage exposes `delete`, not a deletion-rights query. Sync chooses the
-  deleting device by §15; Drive deletes an object the account owns and
-  otherwise removes it from the store's folder. Provider refusals keep
-  their typed cause.
 - Setup commits the storage credentials and keys only once the connection
   is ready; a failed setup leaves the device as it was.
 - A device that isn't connected still reads and writes
@@ -4853,17 +4803,9 @@ match stream.read_at(resume_at, 256 * 1024).await {
 - Only admins add and remove members, and change roles; each member removes
   their own devices, and admins any device ([§9](#9-members-and-roles)).
 - Removing a member is an operation ([§18.1](#181-operations)).
-- Storage removes only permissions that reach the requested account alone.
-  OneDrive resolves native account ids from invitation and recipient identities
-  across all permission pages before deletion, keeping email-bearing permissions
-  until the account's other exclusive permissions are gone so retries can still
-  identify them. Permissions that also reach other accounts, come from a parent,
-  identify no recipient, or belong to the owner are retained and returned for
-  owner action; they are never reported as revoked.
-  Drive inspects `permissionDetails.inherited`: it removes a direct user grant
-  without changing parent permissions, then reports inherited access that remains.
-  Group, domain and public grants remain for owner action. Upgrading an inherited
-  reader adds a direct writer grant; upgrading a direct reader updates it in place.
+- Removing an account can leave access through a parent, a grant reaching other
+  accounts, an unidentified recipient, or the owner. `MemberRemoval::AccessRemains`
+  returns these grants and their reasons for the app to present to the owner.
 
 ```rust
 impl CovenHandle {
@@ -4901,14 +4843,6 @@ impl CovenHandle {
     /// result says how its member signs out of the provider and signs in
     /// again on the devices they keep (§13).
     pub async fn remove_device(&self, device: DeviceId) -> Result<ProviderSignOut, SyncError>;
-}
-
-/// The member's provider account or the public id of their S3 key (§4).
-pub enum MemberAccess {
-    /// The member's provider account email.
-    ProviderAccount(String),
-    /// An S3 key the admin made in the provider's console.
-    S3AccessKey { access_key_id: String },
 }
 
 /// Revoked sharing or remaining owner actions (§13).
@@ -5107,24 +5041,6 @@ impl CovenHandle {
     pub async fn cancel_invite(&self, invite: &InviteId) -> Result<(), SyncError>;
 }
 
-/// Provider acceptance material carried inside the encrypted invite code.
-/// It identifies the location and admission step, never a per-invite grant.
-/// Serialization erases its secret buffer on drop; Debug omits native share tokens.
-pub struct StorageInvitation { /* private */ }
-impl StorageInvitation {
-    /// Direct account access or a Dropbox namespace to mount; an S3 admin uses
-    /// this after creating the member's key. CloudKit needs grant_access's URL.
-    pub fn for_account(location: StorageConfig) -> Result<Self, StorageError>;
-    pub fn location(&self) -> &StorageConfig;
-    pub fn encode(&self) -> Result<SecretBytes, StorageError>;
-    pub fn decode(bytes: &[u8]) -> Result<Self, StorageError>;
-}
-
-pub enum AccessGrant {
-    Granted { invitation: StorageInvitation },
-    CreateAccessKey,
-}
-
 /// How the new person reaches storage (§12.2).
 pub enum InviteAccess {
     /// Google Drive, Dropbox, OneDrive or iCloud: the store is shared with
@@ -5187,15 +5103,11 @@ pub async fn restore_from_keychain(
     cancel: &watch::Receiver<bool>,
 ) -> Result<Option<StoreDir>, BootstrapError>;
 
-/// Before coven's join request, Storage::join(&StorageInvitation) completes the
-/// provider's recipient onboarding: Dropbox mounts the namespace; OneDrive
-/// inspects the share target, verifies drive/folder ids, then redeems it durably;
-/// CloudKit fetches and validates share metadata and accepts through the app's
-/// calls. Storage verifies readability afterward. Grant removal during joining
-/// returns the provider's permission failure; an admin can invite again.
-/// The facade verifies store identity and commits keys and credentials only
-/// after its own bootstrap succeeds. Native tokens are inside the encrypted
-/// invite code and are not used to identify access for revocation.
+/// Completes the provider's recipient acceptance using the encrypted invite
+/// code before sending the join request. CloudKit acceptance runs through the
+/// app's CloudKitOps calls. If access is removed while joining, the provider's
+/// permission failure reaches the app and an admin can invite again. Keys and
+/// credentials are committed only after bootstrap succeeds.
 ///
 /// On the new person's device: makes their member keys, writes a join
 /// request to storage, and waits for the admin to approve it, then loads
@@ -5250,10 +5162,7 @@ impl OAuthClients {
 ```
 
 - Refreshed tokens are committed to key custody before the provider session
-  uses them. The owner then awaits the storage capability's
-  `set_oauth_tokens(tokens: OAuthTokens) -> Result<(), StorageError>`;
-  the next request on that same adapter uses them. S3 and CloudKit refuse
-  this call with `StorageError::InvalidConfiguration`.
+  uses them.
 
 Example, when the app handles the sign-in redirect:
 
