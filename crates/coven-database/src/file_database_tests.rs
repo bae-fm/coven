@@ -5,6 +5,69 @@ use crate::{
     Provenance,
 };
 
+#[test]
+fn cancelled_cache_reservations_drop_outside_a_runtime_and_record_cleanup_failures() {
+    use crate::file_write::tests::{local_count, SCHEMA};
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut panicked = Vec::new();
+    for refuse_cleanup in [false, true] {
+        let store = TestStore::new();
+        let db = runtime
+            .block_on(store.schema(tables(Provenance::AppProvided), SCHEMA))
+            .unwrap();
+        let owner = FileDatabase::new(db.clone());
+        let name = FileName::new("reserved").unwrap();
+        let reservation = runtime
+            .block_on(owner.reserve_cache_file(name.clone()))
+            .unwrap();
+        let path = store
+            .database_path()
+            .parent()
+            .unwrap()
+            .join("cache")
+            .join(name.as_str());
+        if refuse_cleanup {
+            std::fs::create_dir(&path).unwrap();
+        } else {
+            std::fs::write(&path, b"unclaimed").unwrap();
+        }
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(reservation))).is_err() {
+            panicked.push(refuse_cleanup);
+        }
+        assert_eq!(local_count(&db, "_coven_file_removals"), 1);
+        runtime.block_on(db.close()).unwrap();
+        let opened = runtime.block_on(store.schema(tables(Provenance::AppProvided), SCHEMA));
+        let reopened = if refuse_cleanup {
+            assert!(matches!(
+                opened,
+                Err(crate::CovenError::Database(DbError::FileCleanup { .. }))
+            ));
+            store.assert_writer_unlocked();
+            let sql = rusqlite::Connection::open(store.database_path()).unwrap();
+            assert_eq!(
+                sql.query_row("SELECT count(*) FROM _coven_file_removals", [], |r| r
+                    .get::<_, u32>(0))
+                    .unwrap(),
+                1
+            );
+            drop(sql);
+            std::fs::remove_dir(&path).unwrap();
+            runtime
+                .block_on(store.schema(tables(Provenance::AppProvided), SCHEMA))
+                .unwrap()
+        } else {
+            opened.unwrap()
+        };
+        assert_eq!(local_count(&reopened, "_coven_file_removals"), 0);
+        assert!(!path.exists());
+        runtime.block_on(reopened.close()).unwrap();
+    }
+    assert!(
+        panicked.is_empty(),
+        "cancelling cache reservations needed a runtime: {panicked:?}"
+    );
+}
+
 #[tokio::test]
 async fn an_uploading_write_refuses_a_trigger_that_removes_its_file() {
     let store = TestStore::new();

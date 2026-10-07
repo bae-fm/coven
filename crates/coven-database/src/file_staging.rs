@@ -16,7 +16,7 @@ struct StagingSource {
 
 pub(super) struct FileStaging {
     database: Database,
-    // Moving this guard into cleanup makes close wait after cancellation too.
+    // Close waits until publication or cancellation releases the reservation.
     lease: Option<OwnedRwLockReadGuard<()>>,
     names: Vec<FileName>,
     sources: VecDeque<StagingSource>,
@@ -219,30 +219,10 @@ impl FileStaging {
 
 impl Drop for FileStaging {
     fn drop(&mut self) {
-        let Some(lease) = self.lease.take() else {
+        let Some(_lease) = self.lease.take() else {
             return;
         };
-        let database = self.database.clone();
-        let names = std::mem::take(&mut self.names);
-        tokio::task::spawn_blocking(move || {
-            let _lease = lease;
-            let slot = database.inner.read().expect("database lock poisoned");
-            let inner = slot.as_ref().expect("staging holds close guard");
-            let result = inner.with_writer(|writer| {
-                let mut active = inner.staging.lock().expect("file staging lock poisoned");
-                for name in names {
-                    assert!(active.remove(&name), "staging name is registered");
-                }
-                let result =
-                    crate::file_removals::FileRemovals::new(writer, &inner.directory, &active)
-                        .finish(Ok::<_, DbError>(()));
-                drop(active);
-                result
-            });
-            if let Err(error) = result {
-                panic!("file cleanup after cancelled staging failed: {error:?}");
-            }
-        });
+        self.database.release_file_reservations(&self.names);
     }
 }
 

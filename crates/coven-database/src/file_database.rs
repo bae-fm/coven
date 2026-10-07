@@ -553,28 +553,11 @@ impl CacheReservation {
 }
 impl Drop for CacheReservation {
     fn drop(&mut self) {
-        let Some(lease) = self.lease.take() else {
+        let Some(_lease) = self.lease.take() else {
             return;
         };
-        let database = self.database.clone();
-        let name = self.name.clone();
-        tokio::task::spawn_blocking(move || {
-            let _lease = lease;
-            let slot = database.inner.read().expect("database lock poisoned");
-            let inner = slot.as_ref().expect("reservation holds close guard");
-            let result = inner.with_writer(|writer| {
-                let mut active = inner.staging.lock().expect("staging lock poisoned");
-                active.remove(&name);
-                let result =
-                    crate::file_removals::FileRemovals::new(writer, &inner.directory, &active)
-                        .finish(Ok::<_, DbError>(()));
-                drop(active);
-                result
-            });
-            if let Err(error) = result {
-                panic!("reserved file cleanup failed: {error:?}")
-            }
-        });
+        self.database
+            .release_file_reservations(std::iter::once(&self.name));
     }
 }
 fn changed(count: usize) -> Result<(), DbError> {

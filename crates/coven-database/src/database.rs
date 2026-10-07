@@ -121,6 +121,20 @@ impl DatabaseInner {
 }
 
 impl Database {
+    // The caller retains its file-task lease until these names are released.
+    // Their durable removal records remain for the next write or open.
+    fn release_file_reservations<'a>(
+        &self,
+        names: impl IntoIterator<Item = &'a coven_foundation::files::FileName>,
+    ) {
+        let slot = self.inner.read().expect("database lock poisoned");
+        let inner = slot.as_ref().expect("reservation holds close guard");
+        let mut active = inner.staging.lock().expect("file staging lock poisoned");
+        for name in names {
+            assert!(active.remove(name), "reserved name is registered");
+        }
+    }
+
     async fn call<R, E>(
         &self,
         run: impl FnOnce(&DatabaseInner) -> Result<R, E> + Send + 'static,

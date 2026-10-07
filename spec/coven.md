@@ -2252,6 +2252,10 @@ Carol's tablet:
   - the write that lets bytes go records them there in its transaction;
   - after a write commits or fails, and when the database opens, coven
     deletes the unused bytes `_coven_file_removals` names, then their records.
+    Names still held by staging or cache reservations are retained. Cancelling
+    either releases its active names synchronously, without requiring an async
+    runtime. The durable removal records retain its abandoned bytes for the next
+    write or open, which reports any deletion failure.
   - A deletion that fails stays recorded and is tried again then; the
     write that let the bytes go stays committed, and reports the failure.
 

@@ -10,6 +10,39 @@ use std::{
 };
 use tokio::io::{AsyncRead, AsyncWriteExt, ReadBuf};
 
+#[test]
+fn cancelled_staging_drops_outside_a_runtime_and_the_next_write_removes_its_bytes() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let store = TestStore::new();
+    let db = runtime
+        .block_on(store.schema(tables(Provenance::AppProvided), SCHEMA))
+        .unwrap();
+    let staging = runtime.block_on(async {
+        let staging = super::FileStaging::new(
+            db.clone(),
+            db.file_tasks.clone().read_owned().await,
+            |batch| {
+                batch.put_file("files", "7", b"unclaimed".to_vec());
+                Ok::<_, DbError>(())
+            },
+        )
+        .unwrap();
+        let (staging, result) = staging.write().await;
+        result.unwrap();
+        staging
+    });
+    assert_eq!(owned_paths(&store).len(), 1);
+    let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(staging)));
+    runtime.block_on(db.write(|_| Ok(()))).unwrap();
+    let remaining = owned_paths(&store);
+    runtime.block_on(db.close()).unwrap();
+    assert!(
+        dropped.is_ok(),
+        "cancelling staging must not need a runtime"
+    );
+    assert!(remaining.is_empty());
+}
+
 struct Started<R> {
     reader: R,
     entered: Option<tokio::sync::oneshot::Sender<()>>,
@@ -84,7 +117,7 @@ async fn a_socket_stream_leaves_the_writer_available_and_keeps_its_pending_bytes
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn close_waits_for_staging_and_cancelled_staging_removes_its_bytes() {
+async fn close_waits_for_staging_and_reopen_removes_cancelled_bytes() {
     for cancel in [false, true] {
         let store = TestStore::new();
         let db = store
@@ -136,19 +169,27 @@ async fn close_waits_for_staging_and_cancelled_staging_removes_its_bytes() {
             .unwrap()
             .unwrap()
             .unwrap();
-        assert_eq!(owned_paths(&store).len(), usize::from(!cancel));
+        assert_eq!(owned_paths(&store).len(), 1);
         let sql = rusqlite::Connection::open(store.database_path()).unwrap();
         assert_eq!(
             sql.query_row("SELECT count(*) FROM _coven_file_removals", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
-            0
+            i64::from(cancel)
         );
         assert_eq!(
             sql.query_row("SELECT count(*) FROM files", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
             i64::from(!cancel)
         );
+        drop(sql);
+        let reopened = store
+            .schema(tables(Provenance::AppProvided), SCHEMA)
+            .await
+            .unwrap();
+        assert_eq!(owned_paths(&store).len(), usize::from(!cancel));
+        assert_eq!(local_count(&reopened, "_coven_file_removals"), 0);
+        reopened.close().await.unwrap();
     }
 }
 
