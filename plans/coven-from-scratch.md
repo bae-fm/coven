@@ -3886,8 +3886,8 @@ while let Ok(values) = lost.next().await {
   - Creating uploads the store's first entry and its key sealed to this
     member; waiting writes then go up through sync like any others.
 - `Storage::single_request_limit() -> u64` exposes the maximum encrypted body
-  sent in one request: S3 5 GiB, Drive 5 MiB, Dropbox 150 MiB, OneDrive
-  250 MiB, and CloudKit's nonzero `CloudKitOps::single_request_limit()`.
+  sent in one request: S3 5 GiB, Drive 5,000,000 bytes, Dropbox 150 MiB, OneDrive
+  250,000,000 bytes, and CloudKit's nonzero `CloudKitOps::single_request_limit()`.
   `create` sends larger bodies through resumable or multipart uploads for any
   object path, including writes and snapshots. On failure it aborts the
   unfinished session and retains both operation and cleanup failures.

@@ -621,7 +621,7 @@ async fn create_switches_to_a_session_above_the_multipart_request_limit() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    assert_eq!(storage.single_request_limit(), 5 * 1024 * 1024);
+    assert_eq!(storage.single_request_limit(), 5_000_000);
     let path = ObjectPath::device_log(
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,

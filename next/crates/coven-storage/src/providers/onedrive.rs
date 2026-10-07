@@ -291,7 +291,7 @@ impl Storage for OneDriveStorage {
         Ok(())
     }
     fn single_request_limit(&self) -> u64 {
-        250 * 1024 * 1024
+        250_000_000
     }
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         crate::transfer::upload_bytes(self, path, bytes, async {

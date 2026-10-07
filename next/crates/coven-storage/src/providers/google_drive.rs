@@ -400,7 +400,7 @@ impl Storage for GoogleDriveStorage {
         Ok(())
     }
     fn single_request_limit(&self) -> u64 {
-        5 * 1024 * 1024
+        5_000_000
     }
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         let _guard = self.create_lock.lock().await;
