@@ -113,7 +113,6 @@ fn tools_answer_to_the_conventions_but_not_to_the_capability_table() {
         )]),
         &POLICY,
     );
-    assert_eq!(report.0.len(), 1);
     assert_eq!(
         report.lines(),
         vec![
@@ -213,12 +212,9 @@ fn inferred_default_construction_is_prevented_at_its_implementation() {
         ]),
         &POLICY,
     );
-    assert!(!report.is_empty());
-    assert_eq!(report.0.len(), 1);
-    assert!(report
-        .lines()
-        .iter()
-        .any(|line| line.contains("implements Default for capability SuppliedClock")));
+    assert_eq!(report.0, [Finding::new("crates/coven-foundation/src/clock.rs", 4,
+        "implements Default for capability SuppliedClock, which permits implicit construction through Default::default()",
+        "construct owners and capabilities explicitly at the listed roots; inject them elsewhere; do not implement or derive Default")]);
 }
 
 #[test]
@@ -243,18 +239,25 @@ fn one_exact_list_entry_allows_construction_and_task_starts() {
     ] {
         let source = format!("struct Worker {{ clock: Clock }} impl {owner} {{ fn {method}(clock: Clock) {{ let _ = Worker {{ clock }}; tokio::spawn(async {{}}); }} }}");
         let report = check(&workspace(vec![RustFile::fixture(path, &source)]), &ROOTED);
-        assert_eq!(
-            report.0.len(),
-            if allowed { 0 } else { 2 },
-            "{:?}",
-            report.lines()
-        );
+        let expected = if allowed {
+            Vec::new()
+        } else {
+            unrooted_worker(path, &format!("{owner}::{method}"))
+        };
+        assert_eq!(report.0, expected);
     }
     let source = "struct Worker { clock: Clock } impl Worker { fn open() { fn hidden(clock: Clock) { Worker { clock }; tokio::spawn(async {}); } } }";
     assert_eq!(
-        check(&workspace(vec![RustFile::fixture(PATH, source)]), &ROOTED)
-            .0
-            .len(),
-        2
+        check(&workspace(vec![RustFile::fixture(PATH, source)]), &ROOTED).0,
+        unrooted_worker(PATH, "<free>::hidden")
     );
+}
+
+fn unrooted_worker(path: &str, caller: &str) -> Vec<Finding> {
+    vec![
+        Finding::new(path, 1, format!("{caller} constructs owner Worker outside a composition root"),
+            "construct owners and capabilities explicitly at the listed roots; inject them elsewhere; do not implement or derive Default"),
+        Finding::new(path, 1, "thread or task spawn outside a composition root",
+            "start long-lived work only at a listed root, which must retain and stop it"),
+    ]
 }

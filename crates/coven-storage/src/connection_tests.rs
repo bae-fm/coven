@@ -1,6 +1,6 @@
 use super::*;
 use crate::test_utils::MemoryStorage;
-use coven_foundation::{clock::FixedClock, id_source::DeviceId};
+use coven_foundation::id_source::DeviceId;
 
 #[tokio::test]
 async fn wrong_location_and_invalid_part_keep_the_provider_refusal_order() {
@@ -42,11 +42,7 @@ async fn wrong_location_and_invalid_part_keep_the_provider_refusal_order() {
             StorageFailure::SessionMismatch,
         ),
     ] {
-        let storage = MemoryStorage::new(
-            config,
-            Arc::new(FixedClock::new(std::time::SystemTime::UNIX_EPOCH)),
-        )
-        .unwrap();
+        let storage = MemoryStorage::builder().location(config).build().unwrap();
         let path = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
         let mut session = storage.begin_upload(&path, 4).await.unwrap();
         session.location = StorageConfig::Dropbox {
@@ -67,13 +63,10 @@ async fn wrong_location_and_invalid_part_keep_the_provider_refusal_order() {
 
 #[tokio::test]
 async fn guards_and_completed_sessions_do_not_issue_provider_calls() {
-    let storage = MemoryStorage::new(
-        StorageConfig::Dropbox {
-            namespace_id: "store".into(),
-        },
-        Arc::new(FixedClock::new(std::time::SystemTime::UNIX_EPOCH)),
-    )
-    .unwrap();
+    let storage = MemoryStorage::builder()
+        .provider(CloudProvider::Dropbox)
+        .build()
+        .unwrap();
     let path = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
     let positions = ObjectPath::positions(DeviceId(31));
     let mut session = storage.begin_upload(&path, 4).await.unwrap();

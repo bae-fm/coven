@@ -66,7 +66,13 @@ async fn deleting_a_pending_record_can_fail_without_losing_the_retry() {
         .await
         .unwrap();
     attach(&db, b"original".to_vec(), true).await.unwrap();
-    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER _coven_fail_cleanup BEFORE DELETE ON _coven_file_removals BEGIN SELECT RAISE(ABORT,'record stays'); END").unwrap());
+    db.inspect_writer(|sql| {
+        sql.fail_at(
+            "_coven_fail_cleanup",
+            "BEFORE DELETE ON _coven_file_removals",
+            "record stays",
+        )
+    });
     let error = db
         .write(|sql| {
             sql.execute("DELETE FROM files", [])?;
@@ -75,7 +81,7 @@ async fn deleting_a_pending_record_can_fail_without_losing_the_retry() {
         .await
         .unwrap_err();
     assert!(
-        matches!(error, DbError::FileCleanup { write: Ok(()), failures } if failures.len() == 1)
+        matches!(error, DbError::FileCleanup { write: Ok(()), failures } if matches!(failures.as_slice(), [DbError::Sqlite(_)]))
     );
     assert_eq!(local_count(&db, "_coven_file_removals"), 1);
     assert!(owned_paths(&store).is_empty());
@@ -327,7 +333,13 @@ async fn a_failed_write_keeps_its_error_when_pending_deletion_also_fails() {
         .await
         .unwrap();
     let directory = store.database_path().parent().unwrap().join("files");
-    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER _coven_fail_cleanup BEFORE DELETE ON _coven_file_removals BEGIN SELECT RAISE(ABORT,'record stays'); END").unwrap());
+    db.inspect_writer(|sql| {
+        sql.fail_at(
+            "_coven_fail_cleanup",
+            "BEFORE DELETE ON _coven_file_removals",
+            "record stays",
+        )
+    });
     let error = db
         .write_with_files::<_, _, _, crate::DbError>(
             |batch| {

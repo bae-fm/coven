@@ -564,8 +564,7 @@
   truncation and single-bit change of every fixture without panicking.
 
 - `v1.hex` pins the plaintext frames, then a write prefix/header/part chunks
-  and a snapshot prefix/plaintext chunks. `migration.hex` also pins the
-  migration header separately. Frame mutations exercise the payload decoder,
+  and a snapshot prefix/plaintext chunks. Frame mutations exercise the payload decoder,
   including dismissal and migration frames; a successful mutation must
   re-encode to exactly the mutated bytes.
 - The sealed fixtures are `sealed-write.hex`, `sealed-store-log.hex`,

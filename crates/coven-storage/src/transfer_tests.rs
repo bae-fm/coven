@@ -1,18 +1,13 @@
 use super::*;
 use crate::test_utils::MemoryStorage;
-use crate::{StorageConfig, StorageFailure};
+use crate::StorageFailure;
 use coven_foundation::id_source::DeviceId;
 
 fn storage() -> MemoryStorage {
-    MemoryStorage::new(
-        StorageConfig::Dropbox {
-            namespace_id: "namespace".into(),
-        },
-        std::sync::Arc::new(coven_foundation::clock::FixedClock::new(
-            std::time::SystemTime::UNIX_EPOCH,
-        )),
-    )
-    .unwrap()
+    MemoryStorage::builder()
+        .provider(crate::CloudProvider::Dropbox)
+        .build()
+        .unwrap()
 }
 
 #[tokio::test]

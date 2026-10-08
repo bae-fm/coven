@@ -33,17 +33,25 @@ async fn fixed_copy_survives_reopen_without_resealing() {
 async fn failed_sealing_or_insertion_publishes_no_fixed_copy() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    assert!(db
-        .prepare_key_upload("key path".into(), || Err::<Vec<u8>, _>(
+    assert!(matches!(
+        db.prepare_key_upload("key path".into(), || Err::<Vec<u8>, _>(
             DbError::StoreClosed
         ))
-        .await
-        .is_err());
-    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER reject_copy BEFORE INSERT ON _coven_key_uploads BEGIN SELECT RAISE(ABORT,'copy failed'); END;").unwrap());
-    assert!(db
-        .prepare_key_upload("key path".into(), || Ok::<_, DbError>(vec![1]))
-        .await
-        .is_err());
+        .await,
+        Err(DbError::StoreClosed)
+    ));
+    db.inspect_writer(|sql| {
+        sql.fail_at(
+            "reject_copy",
+            "BEFORE INSERT ON _coven_key_uploads",
+            "copy failed",
+        )
+    });
+    assert!(matches!(
+        db.prepare_key_upload("key path".into(), || Ok::<_, DbError>(vec![1]))
+            .await,
+        Err(DbError::Sqlite(_))
+    ));
     db.inspect_writer(|sql| {
         assert_eq!(
             sql.query_row("SELECT count(*) FROM _coven_key_uploads", [], |r| r
@@ -68,8 +76,17 @@ async fn failed_retirement_keeps_the_original_copy() {
     db.prepare_key_upload("key path".into(), || Ok::<_, DbError>(vec![1]))
         .await
         .unwrap();
-    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER reject_retirement BEFORE DELETE ON _coven_key_uploads BEGIN SELECT RAISE(ABORT,'retirement failed'); END;").unwrap());
-    assert!(db.complete_key_upload("key path".into()).await.is_err());
+    db.inspect_writer(|sql| {
+        sql.fail_at(
+            "reject_retirement",
+            "BEFORE DELETE ON _coven_key_uploads",
+            "retirement failed",
+        )
+    });
+    assert!(matches!(
+        db.complete_key_upload("key path".into()).await,
+        Err(DbError::Sqlite(_))
+    ));
     assert_eq!(
         db.prepare_key_upload("key path".into(), || -> Result<Vec<u8>, DbError> {
             panic!("failed retirement must retain fixed bytes")

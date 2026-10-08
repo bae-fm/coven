@@ -702,9 +702,18 @@ async fn downloaded_deletion_removes_records_and_bytes_after_commit() {
     .await
     .unwrap();
     let deletion = records(&b).remove(0);
-    a.inspect_writer(|sql| sql.batch("CREATE TRIGGER fail_delete AFTER DELETE ON _coven_device_files BEGIN SELECT RAISE(ABORT,'cannot forget file'); END").unwrap());
+    a.inspect_writer(|sql| {
+        sql.fail_at(
+            "fail_delete",
+            "AFTER DELETE ON _coven_device_files",
+            "cannot forget file",
+        )
+    });
     let paths = owned_paths(&a_store);
-    assert!(a.apply_downloaded(deletion.clone().into()).await.is_err());
+    assert!(matches!(
+        a.apply_downloaded(deletion.clone().into()).await,
+        Err(DbError::Sqlite(_))
+    ));
     assert_eq!(local_count(&a, "files"), 1);
     assert_eq!(local_count(&a, "_coven_device_files"), 1);
     assert_eq!(owned_paths(&a_store), paths);

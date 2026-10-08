@@ -1,4 +1,5 @@
 use super::*;
+use crate::tests::Generator;
 use crate::{
     test_utils,
     write_stream::{PartDecoder, WriteEncoder, WriteHeaderFrame},
@@ -232,16 +233,9 @@ fn layout_refuses_wrong_counts_lengths_signature_positions_and_trailing_bytes() 
 
 #[test]
 fn generated_prefixes_are_bounded_and_canonical() {
-    let mut state = 0xd357_a213_u64;
+    let mut source = Generator(0xd357_a213_u64);
     for n in 0..25_000 {
-        let mut bytes: Vec<_> = (0..n % 128)
-            .map(|_| {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
-                state as u8
-            })
-            .collect();
+        let mut bytes: Vec<_> = (0..n % 128).map(|_| source.next() as u8).collect();
         if n % 2 == 0 && bytes.len() >= 3 {
             bytes[..3].copy_from_slice(&[32, 0, 1]);
         }

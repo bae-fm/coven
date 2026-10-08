@@ -18,6 +18,7 @@ pub(crate) struct OneDriveStorage {
     folder: String,
     session: OAuthSession,
     api: String,
+    single_request_limit: u64,
 }
 impl OneDriveStorage {
     /// Construct at a composition root with the device's own provider sign-in.
@@ -40,6 +41,7 @@ impl OneDriveStorage {
             config,
             session,
             api: "https://graph.microsoft.com/v1.0".into(),
+            single_request_limit: 250_000_000,
         })
     }
     fn item(&self, id: &str, suffix: &[&str]) -> Result<String, StorageError> {
@@ -297,7 +299,7 @@ impl ProviderOps for OneDriveStorage {
         self.config.clone()
     }
     fn single_request_limit(&self) -> u64 {
-        250_000_000
+        self.single_request_limit
     }
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         self.parents(path).await?;

@@ -159,37 +159,10 @@ impl Clone for MemoryStorage {
 }
 
 impl MemoryStorage {
-    /// A store at the supplied location, with a sixteen-byte single-request limit
-    /// and four-byte parts for transfer and crash tests.
-    pub fn new(config: StorageConfig, clock: ClockRef) -> Result<Self, StorageError> {
-        config.validate()?;
-        Ok(Self::from_provider(Arc::new(MemoryProvider {
-            config,
-            online: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            single_limit: 16,
-            part_size: 4,
-            requests: Arc::new(tokio::sync::watch::channel(0).0),
-            active_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            peak_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            clock,
-            tokens: Arc::new(Mutex::new(None)),
-            s3_key: Arc::new(Mutex::new(None)),
-            account: Account::Owner,
-            state: Arc::new(Mutex::new(State {
-                objects: BTreeMap::new(),
-                uploads: BTreeMap::new(),
-                next: 1,
-                accounts: BTreeMap::new(),
-                retained_access: BTreeMap::new(),
-                faults: Faults::none(),
-                ranges: Vec::new(),
-                reads: Vec::new(),
-                sent_bytes: 0,
-                largest_part: 0,
-                held_listing: None,
-                held_creation: None,
-            })),
-        })))
+    /// An S3 test location at the Unix epoch, with sixteen-byte single requests
+    /// and four-byte parts. Override only the choices relevant to the scenario.
+    pub fn builder() -> MemoryStorageBuilder {
+        MemoryStorageBuilder::new()
     }
     /// A separate non-owner account using the same provider location. Its sign-in
     /// is independent; access requires a grant and, where needed, recipient joining.
@@ -231,20 +204,6 @@ impl MemoryStorage {
         self.provider
             .online
             .store(online, std::sync::atomic::Ordering::SeqCst);
-    }
-    /// Choose transfer limits before sharing this adapter with a test's owners.
-    pub fn with_transfer_limits(
-        self,
-        single_limit: u64,
-        part_size: usize,
-    ) -> Result<Self, StorageError> {
-        if single_limit == 0 || part_size == 0 {
-            return Err(StorageFailure::InvalidPart.into());
-        }
-        let mut provider = (*self.provider).clone();
-        provider.single_limit = single_limit;
-        provider.part_size = part_size;
-        Ok(Self::from_provider(Arc::new(provider)))
     }
     /// Request notifications include failed attempts, so tests can wait without polling.
     pub fn subscribe_requests(&self) -> tokio::sync::watch::Receiver<u64> {
@@ -805,149 +764,9 @@ impl ProviderOps for MemoryProvider {
     }
 }
 
-/// Run identical object, range, prefix and immutable-create checks on any provider.
-/// The caller supplies the capability at construction, like production composition.
-pub struct Conformance {
-    storage: Arc<dyn Storage>,
-}
-impl Conformance {
-    /// The provider under test, at an otherwise empty location.
-    pub fn new(storage: Arc<dyn Storage>) -> Self {
-        Self { storage }
-    }
-    /// Exercise the real provider operations, returning the first violated contract.
-    pub async fn run(&self) -> Result<(), StorageError> {
-        use coven_foundation::id_source::DeviceId;
-        let path = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
-        let other = ObjectPath::device_log(DeviceId(32), std::num::NonZeroU64::MIN);
-        let data = b"encrypted bytes";
-        self.storage.create(&path, data).await?;
-        self.storage.create(&other, b"other").await?;
-        if self.storage.read(&path).await? != data {
-            return Err(StorageFailure::Protocol.with_source("whole read"));
-        }
-        for (start, end) in [(0, 3), (4, 8), (12, 15)] {
-            let range = ByteRange::new(start, end)?;
-            if self.storage.read_range(&path, range).await? != range.select(data)? {
-                return Err(StorageFailure::Protocol.with_source("range read"));
-            }
-        }
-        if self
-            .storage
-            .read_range(&path, ByteRange::new(15, 16)?)
-            .await
-            .is_ok()
-        {
-            return Err(StorageFailure::Protocol.with_source("past-end range accepted"));
-        }
-        if self
-            .storage
-            .create(&path, b"replacement")
-            .await
-            .err()
-            .map(|e| e.failure())
-            != Some(StorageFailure::AlreadyExists)
-        {
-            return Err(StorageFailure::Protocol.with_source("create-once refusal"));
-        }
-        self.storage.create_once(&path, data).await?;
-        if self
-            .storage
-            .list(&ObjectPrefix::device_log(DeviceId(31)))
-            .await?
-            .into_iter()
-            .map(|object| (object.path, object.size))
-            .collect::<Vec<_>>()
-            != [(path.clone(), data.len() as u64)]
-        {
-            return Err(StorageFailure::Protocol.with_source("prefix listing"));
-        }
-        self.storage.delete(&path).await?;
-        self.storage.delete(&path).await?;
-        self.storage.delete(&other).await?;
-        if self.storage.read(&path).await.err().map(|e| e.failure())
-            != Some(StorageFailure::NotFound)
-        {
-            return Err(StorageFailure::Protocol.with_source("deleted object read"));
-        }
-        let positions = ObjectPath::positions(DeviceId(31));
-        if !matches!(
-            self.storage.begin_upload(&positions, 1).await,
-            Err(error) if error.failure() == StorageFailure::InvalidPath
-        ) {
-            return Err(
-                StorageFailure::Protocol.with_source("positions accepted a recorded upload")
-            );
-        }
-        if !matches!(
-            self.storage.replace(&path, data).await,
-            Err(error) if error.failure() == StorageFailure::InvalidPath
-        ) {
-            return Err(
-                StorageFailure::Protocol.with_source("immutable object accepted replacement")
-            );
-        }
-        self.storage.replace(&positions, b"first positions").await?;
-        self.storage.replace(&positions, b"next positions").await?;
-        if self.storage.read(&positions).await? != b"next positions" {
-            return Err(StorageFailure::Protocol.with_source("posted positions replacement"));
-        }
-        self.storage.delete(&positions).await?;
-        self.storage.create(&path, &[]).await?;
-        self.storage.create_once(&path, &[]).await?;
-        if !self.storage.read(&path).await?.is_empty() {
-            return Err(StorageFailure::Protocol.with_source("empty object changed"));
-        }
-        self.storage.create_once(&path, b"different").await?;
-        if !self.storage.read(&path).await?.is_empty() {
-            return Err(StorageFailure::Protocol.with_source("empty immutable object replaced"));
-        }
-        self.storage.delete(&path).await?;
-        let bytes: Vec<_> = (0..1024 * 1024 + 10)
-            .map(|index| (index % 251) as u8)
-            .collect();
-        self.storage.create(&path, &bytes).await?;
-        if self
-            .storage
-            .read_range(&path, ByteRange::new(5, 1024 * 1024 + 5)?)
-            .await?
-            != bytes[5..1024 * 1024 + 5]
-        {
-            return Err(StorageFailure::Protocol.with_source("one MiB range changed"));
-        }
-        if self
-            .storage
-            .read_range(
-                &path,
-                ByteRange::new(bytes.len() as u64 - 1, bytes.len() as u64 + 1)?,
-            )
-            .await
-            .err()
-            .map(|error| error.failure())
-            != Some(StorageFailure::InvalidRange)
-        {
-            return Err(
-                StorageFailure::Protocol.with_source("clipped past-end range misclassified")
-            );
-        }
-        self.storage.delete(&path).await?;
-        let first = ObjectPath::store_log(DeviceId(31), std::num::NonZeroU64::MIN);
-        self.storage
-            .setup(&first, data)
-            .await
-            .map_err(|error| match error {
-                StorageSetupError::Storage(error) => error,
-                error => StorageFailure::Protocol.with_source(error),
-            })?;
-        if self.storage.read(&first).await? != data {
-            return Err(
-                StorageFailure::Protocol.with_source("setup did not create the first entry")
-            );
-        }
-        self.storage.delete(&first).await?;
-        Ok(())
-    }
-}
+#[path = "conformance.rs"]
+mod conformance;
+pub use conformance::Conformance;
 
 #[cfg(test)]
 #[path = "test_utils_tests.rs"]
@@ -985,3 +804,7 @@ impl crate::providers::StorageConnector for MemoryStorage {
         )))
     }
 }
+
+#[path = "memory_storage_builder.rs"]
+mod builder;
+pub use builder::MemoryStorageBuilder;

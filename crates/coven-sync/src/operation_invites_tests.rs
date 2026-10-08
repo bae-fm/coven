@@ -134,7 +134,9 @@ async fn decline_cancel_and_expiry_take_access_back() {
             _ => unreachable!(),
         }
         finish(&mut a, operation).await;
-        assert!(joining.list(&ObjectPrefix::store_logs()).await.is_err());
+        assert!(
+            matches!(joining.list(&ObjectPrefix::store_logs()).await, Err(error) if error.failure() == StorageFailure::PermissionDenied)
+        );
         assert!(matches!(
             storage.read(&ObjectPath::join_request(invite.id)).await,
             Err(error) if error.failure() == StorageFailure::NotFound
@@ -161,7 +163,9 @@ async fn another_open_invite_or_member_preserves_shared_account_access() {
     assert!(joining.list(&ObjectPrefix::store_logs()).await.is_ok());
     begin(&mut a, Command::Cancel(invite2.id)).await;
     finish(&mut a, second).await;
-    assert!(joining.list(&ObjectPrefix::store_logs()).await.is_err());
+    assert!(
+        matches!(joining.list(&ObjectPrefix::store_logs()).await, Err(error) if error.failure() == StorageFailure::PermissionDenied)
+    );
     let (operation, invite) = invite(&mut a, "ben@example.com").await;
     begin(&mut a, Command::Cancel(invite.id)).await;
     finish(&mut a, operation).await;
@@ -235,9 +239,9 @@ async fn replacement_request_cannot_be_approved_from_a_stale_prompt() {
     finish(&mut a, operation).await;
 }
 
-struct RetryClock {
-    time: Arc<FixedClock>,
-    sleeps: tokio::sync::watch::Sender<usize>,
+pub(super) struct RetryClock {
+    pub(super) time: Arc<FixedClock>,
+    pub(super) sleeps: tokio::sync::watch::Sender<usize>,
 }
 
 impl Clock for RetryClock {
@@ -265,10 +269,7 @@ async fn failed_join_request_still_expires_and_live_requests_are_delivered() {
     });
     a.sync.clock = clock.clone();
     let files = file_owner(&a);
-    let operations = {
-        let writes = a.writes();
-        crate::Operations::new(a.sync, files, writes, clock.clone())
-    };
+    let operations = { operation_owner(a.sync, files) };
     let mut joins = operations.subscribe_join_requests();
     tokio::time::timeout(
         Duration::from_secs(5),
@@ -312,7 +313,9 @@ async fn failed_join_request_still_expires_and_live_requests_are_delivered() {
     assert_eq!(operations.blocked_operations().await.unwrap().len(), 1);
     a.clock.set(invite.expires_at);
     assert!(operations.blocked_operations().await.unwrap().is_empty());
-    assert!(joining.list(&ObjectPrefix::store_logs()).await.is_err());
+    assert!(
+        matches!(joining.list(&ObjectPrefix::store_logs()).await, Err(error) if error.failure() == StorageFailure::PermissionDenied)
+    );
     assert!(matches!(
         storage.read(&ObjectPath::join_request(invite.id)).await,
         Err(error) if error.failure() == StorageFailure::NotFound
@@ -325,10 +328,7 @@ async fn cancelling_keeps_retained_provider_grants_visible_until_acknowledged() 
     let storage = google();
     let [a, _b, _c] = accounts(storage.clone()).await;
     let files = file_owner(&a);
-    let operations = {
-        let writes = a.writes();
-        crate::Operations::new(a.sync, files, writes, a.clock.clone())
-    };
+    let operations = { operation_owner(a.sync, files) };
     let invite = operations
         .create_invite(
             MemberRole::Member,
@@ -370,10 +370,7 @@ async fn invitation_expiring_while_its_create_call_waits_returns_a_failure() {
     let [mut a, _b, _c] = accounts(storage.clone()).await;
     a.sync.storage = None;
     let files = file_owner(&a);
-    let operations = {
-        let writes = a.writes();
-        crate::Operations::new(a.sync, files, writes, a.clock.clone())
-    };
+    let operations = { operation_owner(a.sync, files) };
     let mut pending = Box::pin(operations.create_invite(
         MemberRole::Member,
         InviteAccess::ProviderAccount {

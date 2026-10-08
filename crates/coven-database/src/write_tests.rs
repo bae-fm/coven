@@ -607,43 +607,22 @@ async fn writes_visit_only_indexed_rows_in_a_ten_thousand_row_store() {
     .await
     .unwrap();
     assert_indexed(&db);
-    for c in 0..2 {
-        let child = format!("00000000-0000-4000-8001-{:012x}", 6 + c);
-        crate::removal::tests::remove(
-            &db,
-            "items",
-            &child,
-            &[],
-            [coven_merge::Rule::ForeignKey(coven_merge::ForeignKey::new(
-                ["task"],
-                "tasks",
-                ["id"],
-            ))]
-            .into(),
-        );
-        crate::removal::tests::remove(
-            &db,
-            "tasks",
-            &child,
-            &[],
-            [coven_merge::Rule::ForeignKey(coven_merge::ForeignKey::new(
-                ["note"],
-                "notes",
-                ["id"],
-            ))]
-            .into(),
-        );
-    }
-    crate::removal::tests::remove(
+    crate::tests::remote_update(
         &db,
         "notes",
-        "00000000-0000-4000-8000-000000000003",
-        &[],
-        [coven_merge::Rule::Unique(["audience", "body"].into())].into(),
-    );
-    sql(&db, "UPDATE notes SET body='00000000-0000-4000-8000-000000000003' WHERE id='00000000-0000-4000-8000-000000000002'")
-        .await
-        .unwrap();
+        "00000000-0000-4000-8000-000000000002",
+        &[(
+            "body",
+            Value::Text("00000000-0000-4000-8000-000000000003".into()),
+        )],
+    )
+    .await;
+    sql(
+        &db,
+        "UPDATE notes SET body='released' WHERE id='00000000-0000-4000-8000-000000000003'",
+    )
+    .await
+    .unwrap();
     assert_indexed(&db);
     assert_eq!(
         db.inspect_writer(|db| db
@@ -653,7 +632,7 @@ async fn writes_visit_only_indexed_rows_in_a_ten_thousand_row_store() {
                 |r| r.get::<_, i64>(0)
             )
             .unwrap()),
-        0
+        1
     );
     assert_eq!(
         db.inspect_writer(|db| db

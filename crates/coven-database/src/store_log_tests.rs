@@ -236,11 +236,12 @@ async fn deletion_and_reversal_commit_marks_and_visible_rows_together() {
     assert!(next(&mut losses).await.is_empty());
     let (delete, deleted) = history[4].clone();
     let before = db.store_log().await.unwrap();
-    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER refuse BEFORE DELETE ON notes BEGIN SELECT RAISE(ABORT,'keep circle'); END").unwrap());
-    assert!(db
-        .apply_store_log(checked(delete.clone()), deleted.clone())
-        .await
-        .is_err());
+    db.inspect_writer(|sql| sql.fail_at("refuse", "BEFORE DELETE ON notes", "keep circle"));
+    assert!(matches!(
+        db.apply_store_log(checked(delete.clone()), deleted.clone())
+            .await,
+        Err(DbError::Sqlite(_))
+    ));
     assert_eq!(db.store_log().await.unwrap(), before);
     assert_eq!(count(&db, "notes"), 1);
     assert_eq!(count(&db, "children"), 1);
@@ -275,11 +276,12 @@ async fn deletion_and_reversal_commit_marks_and_visible_rows_together() {
         EntryOutcome::Dropped(DropReason::BeatenBy(remove.position)),
     );
     let before = db.store_log().await.unwrap();
-    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER refuse BEFORE INSERT ON notes BEGIN SELECT RAISE(ABORT,'refuse restoration'); END").unwrap());
-    assert!(db
-        .apply_store_log(checked(remove.clone()), restored.clone())
-        .await
-        .is_err());
+    db.inspect_writer(|sql| sql.fail_at("refuse", "BEFORE INSERT ON notes", "refuse restoration"));
+    assert!(matches!(
+        db.apply_store_log(checked(remove.clone()), restored.clone())
+            .await,
+        Err(DbError::Sqlite(_))
+    ));
     assert_eq!(db.store_log().await.unwrap(), before);
     assert!(db.store_log().await.unwrap().replay.state.circles[&circle].deleted);
     assert_eq!(count(&db, "notes"), 0);
@@ -350,11 +352,18 @@ async fn circle_deletion_commits_file_removal_with_the_entry_and_rolls_both_back
     assert_eq!(paths.len(), 1);
     let before = db.store_log().await.unwrap();
     let (entry, replay) = history[4].clone();
-    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER refuse_file AFTER DELETE ON _coven_device_files BEGIN SELECT RAISE(ABORT,'keep file'); END").unwrap());
-    assert!(db
-        .apply_store_log(checked(entry.clone()), replay.clone())
-        .await
-        .is_err());
+    db.inspect_writer(|sql| {
+        sql.fail_at(
+            "refuse_file",
+            "AFTER DELETE ON _coven_device_files",
+            "keep file",
+        )
+    });
+    assert!(matches!(
+        db.apply_store_log(checked(entry.clone()), replay.clone())
+            .await,
+        Err(DbError::Sqlite(_))
+    ));
     assert_eq!(db.store_log().await.unwrap(), before);
     assert_eq!(count(&db, "files"), 1);
     assert_eq!(count(&db, "_coven_device_files"), 1);
@@ -384,12 +393,19 @@ async fn a_failure_halfway_through_replacing_state_rolls_back_the_entry_too() {
             .unwrap();
     }
     let before = db.store_log().await.unwrap();
-    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER _coven_refuse BEFORE INSERT ON _coven_circles BEGIN SELECT RAISE(ABORT,'state failed'); END").unwrap());
+    db.inspect_writer(|sql| {
+        sql.fail_at(
+            "_coven_refuse",
+            "BEFORE INSERT ON _coven_circles",
+            "state failed",
+        )
+    });
     let (entry, replay) = history[2].clone();
-    assert!(db
-        .apply_store_log(checked(entry.clone()), replay.clone())
-        .await
-        .is_err());
+    assert!(matches!(
+        db.apply_store_log(checked(entry.clone()), replay.clone())
+            .await,
+        Err(DbError::Sqlite(_))
+    ));
     assert_eq!(db.store_log().await.unwrap(), before);
     db.inspect_writer(|sql| sql.batch("DROP TRIGGER _coven_refuse").unwrap());
     db.apply_store_log(checked(entry.clone()), replay.clone())
@@ -663,11 +679,18 @@ async fn audience_versions_round_trip_and_a_failed_raise_keeps_every_audience() 
         },
     );
     replay.entries.insert(raised.position, EntryOutcome::Kept);
-    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER _coven_refuse BEFORE INSERT ON _coven_versions WHEN NEW.version=13 BEGIN SELECT RAISE(ABORT,'refuse circle raise'); END").unwrap());
-    assert!(db
-        .apply_store_log(checked(raised.clone()), replay.clone())
-        .await
-        .is_err());
+    db.inspect_writer(|sql| {
+        sql.fail_at(
+            "_coven_refuse",
+            "BEFORE INSERT ON _coven_versions WHEN NEW.version=13",
+            "refuse circle raise",
+        )
+    });
+    assert!(matches!(
+        db.apply_store_log(checked(raised.clone()), replay.clone())
+            .await,
+        Err(DbError::Sqlite(_))
+    ));
     assert_eq!(db.store_log().await.unwrap(), before);
     db.inspect_writer(|sql| sql.batch("DROP TRIGGER _coven_refuse").unwrap());
     db.apply_store_log(checked(raised), replay.clone())

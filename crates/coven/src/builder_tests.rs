@@ -37,18 +37,11 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         .unwrap();
     let clock = Arc::new(FixedClock::new(UNIX_EPOCH));
     let storage = Arc::new(
-        MemoryStorage::new(
-            StorageConfig::S3 {
-                bucket: "test".into(),
-                region: "us-east-1".into(),
-                endpoint: None,
-                prefix: "household".into(),
-            },
-            clock.clone(),
-        )
-        .unwrap()
-        .with_transfer_limits(65536, 65536)
-        .unwrap(),
+        MemoryStorage::builder()
+            .clock(clock.clone())
+            .transfer_limits(65536, 65536)
+            .build()
+            .unwrap(),
     );
     let member = MemberKeys::generate().unwrap();
     let identity = Arc::new(InMemoryCustody::new(member.clone()));
@@ -281,9 +274,11 @@ mod recovery {
             let clock = Arc::new(FixedClock::new(UNIX_EPOCH));
             let sign_in = crate::authentication::SignIn::new(clock.clone()).await;
             let storage = Arc::new(
-                MemoryStorage::new(config.clone(), clock.clone())
-                    .unwrap()
-                    .with_transfer_limits(65536, 65536)
+                MemoryStorage::builder()
+                    .location(config.clone())
+                    .clock(clock.clone())
+                    .transfer_limits(65536, 65536)
+                    .build()
                     .unwrap(),
             );
             let builder = || {
@@ -435,16 +430,10 @@ mod recovery {
                 .unwrap();
             let clock = Arc::new(FixedClock::new(UNIX_EPOCH));
             let storage = Arc::new(
-                MemoryStorage::new(
-                    StorageConfig::S3 {
-                        bucket: "test".into(),
-                        region: "us-east-1".into(),
-                        endpoint: None,
-                        prefix: "recovery".into(),
-                    },
-                    clock.clone(),
-                )
-                .unwrap(),
+                MemoryStorage::builder()
+                    .clock(clock.clone())
+                    .build()
+                    .unwrap(),
             );
             let identity = Arc::new(InMemoryCustody::new(MemberKeys::generate().unwrap()));
             let keys = Arc::new(InMemoryCustody::<StoreKeyring>::empty());

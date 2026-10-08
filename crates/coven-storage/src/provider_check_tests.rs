@@ -1,28 +1,13 @@
 use super::*;
-use crate::{
-    test_utils::{Faults, MemoryStorage},
-    StorageConfig,
-};
-use coven_foundation::{
-    clock::FixedClock,
-    id_source::{DeviceId, FileId},
-};
-use std::sync::Arc;
+use crate::test_utils::{Faults, MemoryStorage};
+use coven_foundation::id_source::{DeviceId, FileId};
 
 #[tokio::test]
 async fn duplicate_upload_cleanup_failure_is_not_an_expected_refusal() {
-    let storage = MemoryStorage::new(
-        StorageConfig::S3 {
-            bucket: "test".into(),
-            region: "test".into(),
-            prefix: "store".into(),
-            endpoint: None,
-        },
-        Arc::new(FixedClock::new(std::time::SystemTime::UNIX_EPOCH)),
-    )
-    .unwrap()
-    .with_transfer_limits(1024, 16)
-    .unwrap();
+    let storage = MemoryStorage::builder()
+        .transfer_limits(1024, 16)
+        .build()
+        .unwrap();
     storage
         .set_faults(Faults {
             fail_duplicate_cleanup: true,

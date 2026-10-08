@@ -1,8 +1,11 @@
-fn tables() -> Vec<SyncedTable> {
+use super::*;
+pub(super) use crate::tests::{join_and_approve, join_with_response, next_join_request};
+
+pub(super) fn tables() -> Vec<SyncedTable> {
     vec![SyncedTable::new("notes", RowIdentity::SharedKey)]
 }
 
-fn migrations() -> Vec<Migration> {
+pub(super) fn migrations() -> Vec<Migration> {
     vec![Migration::sql(
         1,
         "notes",
@@ -10,117 +13,39 @@ fn migrations() -> Vec<Migration> {
     )]
 }
 
-// These integration fixtures control timestamps while approval polling uses runtime time.
-fn clock_with_runtime_waits(time: &Arc<FixedClock>) -> ClockRef {
-    let time = time.clone();
-    Arc::new(coven_foundation::clock::ClosureClock(move || time.now()))
-}
-
-struct Owner {
-    _root: tempfile::TempDir,
-    directory: StoreDir,
-    db: Database,
-    member: MemberKeys,
-    keys: Arc<dyn StoreKeyCustody>,
-    operations: Operations,
-    files: Files,
-    storage: Arc<MemoryStorage>,
-    clock: Arc<FixedClock>,
-    code: RestoreCode,
+#[cfg(test)]
+pub(super) struct Owner {
+    network: crate::tests::Network,
+    pub(super) directory: StoreDir,
+    pub(super) handle: CovenHandle,
+    pub(super) member: MemberKeys,
+    pub(super) storage: Arc<MemoryStorage>,
+    pub(super) clock: Arc<FixedClock>,
+    pub(super) code: RestoreCode,
 }
 
 impl Owner {
-    async fn new(provider: CloudProvider, snapshot: bool) -> Self {
-        let root = tempfile::tempdir().unwrap();
-        let layout = StoreLayout::new(root.path().into());
-        let ids = Arc::new(UuidIds);
-        let clock = Arc::new(FixedClock::new(UNIX_EPOCH));
-        let app = TestCoven::new();
-        let directory = app
-            .create_store(&layout, "Household", ids.clone())
+    pub(super) async fn new(provider: CloudProvider, snapshot: bool) -> Self {
+        let network = crate::tests::Network::with_schema(provider, tables(), migrations()).await;
+        let device = &network.devices[0];
+        let handle = device.handle.clone();
+        let directory = device.layout.store_dir(&device.store);
+        let storage = device.storage.clone();
+        let clock = network.clock.clone();
+        let code = coven_sync::read_restore_code(&handle.restore_code().await.unwrap()).unwrap();
+        let member = code.member_keys.clone();
+        handle
+            .write(move |sql| {
+                sql.execute(
+                    "INSERT INTO notes VALUES('before',?1)",
+                    coven_database::params![vec![42_u8; if snapshot { 1_100_000 } else { 37 }]],
+                )?;
+                Ok(())
+            })
             .await
             .unwrap();
-        let config = match provider {
-            CloudProvider::S3 => StorageConfig::S3 {
-                bucket: "test".into(),
-                region: "us-east-1".into(),
-                endpoint: None,
-                prefix: "household".into(),
-            },
-            CloudProvider::GoogleDrive => StorageConfig::GoogleDrive {
-                folder_id: "folder".into(),
-            },
-            CloudProvider::Dropbox => StorageConfig::Dropbox {
-                namespace_id: "folder".into(),
-            },
-            CloudProvider::OneDrive => StorageConfig::OneDrive {
-                drive_id: "drive".into(),
-                folder_id: "folder".into(),
-            },
-            CloudProvider::CloudKit => StorageConfig::CloudKit {
-                container: "container".into(),
-                owner: "owner".into(),
-                zone: "zone".into(),
-            },
-        };
-        let storage = Arc::new(
-            MemoryStorage::new(config.clone(), clock.clone())
-                .unwrap()
-                .with_transfer_limits(65536, 65536)
-                .unwrap(),
-        );
-        let member = MemberKeys::generate().unwrap();
-        let identity = Arc::new(InMemoryCustody::new(member.clone()));
-        let keys: Arc<dyn StoreKeyCustody> = Arc::new(InMemoryCustody::<StoreKeyring>::empty());
-        let db = DatabaseBuilder::new(directory.clone())
-            .synced_tables(tables())
-            .migrations(migrations())
-            .clock(clock.clone())
-            .open()
-            .await
-            .unwrap();
-        let mut sync = StoreLogSync::new(
-            storage.clone(),
-            db.clone(),
-            keys.clone(),
-            identity.clone(),
-            clock.clone(),
-            ids.clone(),
-            directory.clone(),
-        );
-        let access = if provider == CloudProvider::S3 {
-            MemberAccess::S3AccessKey {
-                access_key_id: "owner-key".into(),
-            }
-        } else {
-            MemberAccess::ProviderAccount("owner@example.com".into())
-        };
-        sync.make_and_upload_entry(StoreChange::CreateStore {
-            store: directory.id(),
-            name: "Household".into(),
-            admin: MemberPublicKeys {
-                signing: member.member_id(),
-                sealing: member.sealing_public_key(),
-            },
-            access,
-            device_name: "Owner".into(),
-            key: KeyId(ids.new_id()),
-        })
-        .await
-        .unwrap();
-        db.write(move |sql| {
-            sql.execute(
-                "INSERT INTO notes VALUES('before',?1)",
-                coven_database::params![vec![42_u8; if snapshot { 1_100_000 } else { 37 }]],
-            )?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-        let mut writes = DeviceLogSync::new(storage.clone(), db.clone(), keys.clone(), identity);
-        writes.upload_writes().await.unwrap();
+        network.sync(0).await;
         if snapshot {
-            sync.write_snapshots().await.unwrap();
             assert_eq!(
                 storage
                     .list(&ObjectPrefix::snapshots())
@@ -130,57 +55,58 @@ impl Owner {
                 1
             );
         }
-        db.write(|sql| {
-            sql.execute(
-                "INSERT INTO notes VALUES('after',?1)",
-                coven_database::params![vec![17_u8; 91]],
-            )?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-        writes.upload_writes().await.unwrap();
-        let restore = if provider == CloudProvider::S3 {
-            RestoreStorage::S3 {
-                location: config,
-                credentials: S3Credentials {
-                    access_key_id: "owner-key".into(),
-                    secret_access_key: SecretText::new("owner-secret".into()),
-                },
-            }
-        } else {
-            RestoreStorage::Account(config)
-        };
-        let code = RestoreCode {
-            store: directory.id(),
-            name: "Household".into(),
-            member_keys: member.clone(),
-            storage: restore.encode().unwrap(),
-        };
-        let files = Files::new(
-            FileDatabase::new(db.clone()),
-            directory.clone(),
-            Some(storage.clone()),
-            clock.clone(),
-            ids,
-            TransferLimits::default(),
-        );
-        let operations = Operations::new(sync, files.clone(), writes, clock_with_runtime_waits(&clock));
+        handle
+            .write(|sql| {
+                sql.execute(
+                    "INSERT INTO notes VALUES('after',?1)",
+                    coven_database::params![vec![17_u8; 91]],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        network.sync(0).await;
+        // Keep operation calls connected without a background sync pass racing
+        // the joining device for held requests and injected failures.
+        handle.unlock_store_key().await.unwrap();
         Self {
-            _root: root,
+            network,
             directory,
-            db,
+            handle,
             member,
-            keys,
-            operations,
-            files,
             storage,
             clock,
             code,
         }
     }
 
-    async fn invite(&self) -> Invite {
+    pub(super) async fn sync(&self) {
+        self.handle.start_sync().await.unwrap();
+        self.network.sync(0).await;
+        self.handle.unlock_store_key().await.unwrap();
+    }
+
+    pub(super) async fn rows(&self) -> Vec<(String, Vec<u8>)> {
+        self.handle
+            .read(|sql| {
+                Ok(sql.query("SELECT id,body FROM notes ORDER BY id", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?)
+            })
+            .await
+            .unwrap()
+    }
+
+    pub(super) async fn fingerprints(&self) -> Vec<(Audience, coven_crypto::Fingerprint)> {
+        crate::tests::posted(&self.network.devices[0])
+            .await
+            .fingerprints
+            .into_iter()
+            .map(|f| (f.audience, f.bytes))
+            .collect()
+    }
+
+    pub(super) async fn invite(&self) -> Invite {
         let access = if self.storage.config().provider() == CloudProvider::S3 {
             InviteAccess::S3AccessKey {
                 access_key_id: "invited-key".into(),
@@ -191,13 +117,13 @@ impl Owner {
                 email: "join@example.com".into(),
             }
         };
-        self.operations
+        self.handle
             .create_invite(MemberRole::Member, access)
             .await
             .unwrap()
     }
 
-    fn recipient(&self) -> Arc<MemoryStorage> {
+    pub(super) fn recipient(&self) -> Arc<MemoryStorage> {
         if self.storage.config().provider() == CloudProvider::S3 {
             self.storage.clone()
         } else {
@@ -205,21 +131,20 @@ impl Owner {
         }
     }
 
-    async fn close(self) {
-        self.operations.close().await.unwrap();
-        self.files.close().await;
-        self.db.close().await.unwrap();
+    pub(super) async fn close(self) {
+        self.network.close().await;
     }
 }
 
-struct Installation {
-    root: tempfile::TempDir,
-    layout: StoreLayout,
-    keychain: Arc<Keychain>,
+#[cfg(test)]
+pub(super) struct Installation {
+    pub(super) root: tempfile::TempDir,
+    pub(super) layout: StoreLayout,
+    pub(super) keychain: Arc<Keychain>,
 }
 
 impl Installation {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
         let layout = StoreLayout::new(root.path().into());
         Self {
@@ -229,16 +154,16 @@ impl Installation {
         }
     }
 
-    fn builder(&self, owner: &Owner, storage: Arc<MemoryStorage>) -> CovenBuilder {
+    pub(super) fn builder(&self, owner: &Owner, storage: Arc<MemoryStorage>) -> CovenBuilder {
         Coven::builder(self.layout.clone())
             .with_keychain(self.keychain.clone())
             .synced_tables(tables())
             .migrations(migrations())
-            .clock(clock_with_runtime_waits(&owner.clock))
+            .clock(Arc::new(crate::tests::PollingClock(owner.clock.clone())))
             .storage_connector(storage)
     }
 
-    async fn authenticated_builder(
+    pub(super) async fn authenticated_builder(
         &self,
         owner: &Owner,
         storage: Arc<MemoryStorage>,
@@ -256,7 +181,7 @@ impl Installation {
         builder
     }
 
-    async fn run(
+    pub(super) async fn run(
         &self,
         owner: &Owner,
         request: BootstrapRequest,
@@ -273,10 +198,11 @@ impl Installation {
         .await
     }
 
-    async fn restore(&self, owner: &Owner) -> CovenHandle {
+    pub(super) async fn restore(&self, owner: &Owner) -> CovenHandle {
         let (_, cancel) = watch::channel(false);
         restore_from_code(
-            self.authenticated_builder(owner, owner.storage.clone()).await,
+            self.authenticated_builder(owner, owner.storage.clone())
+                .await,
             &owner.code.to_text().unwrap(),
             "Ana’s laptop",
             |_| {},
@@ -286,21 +212,21 @@ impl Installation {
         .unwrap()
     }
 
-    fn restore_request(owner: &Owner) -> BootstrapRequest {
+    pub(super) fn restore_request(owner: &Owner) -> BootstrapRequest {
         BootstrapRequest::Restore {
             code: coven_sync::read_restore_code(&owner.code.to_text().unwrap()).unwrap(),
             name: "Ana’s laptop".into(),
         }
     }
 
-    fn join_request(invite: &Invite) -> BootstrapRequest {
+    pub(super) fn join_request(invite: &Invite) -> BootstrapRequest {
         BootstrapRequest::Join {
             code: coven_sync::read_invite_code(&invite.code).unwrap(),
             name: "New phone".into(),
         }
     }
 
-    async fn absent(&self, id: StoreId) {
+    pub(super) async fn absent(&self, id: StoreId) {
         assert!(self.layout.stores().await.unwrap().is_empty());
         let scoped = Arc::new(StoreKeychain::new(self.keychain.clone(), id));
         assert!(
@@ -318,7 +244,7 @@ impl Installation {
         assert!(scoped.synced_restore_code().unwrap().is_none());
     }
 
-    async fn handle(&self, directory: StoreDir, owner: &Owner) -> CovenHandle {
+    pub(super) async fn handle(&self, directory: StoreDir, owner: &Owner) -> CovenHandle {
         let handle = self
             .builder(owner, owner.storage.clone())
             .open(directory.id())
@@ -329,16 +255,7 @@ impl Installation {
     }
 }
 
-async fn next_request(requests: &mut watch::Receiver<Vec<JoinRequest>>) -> JoinRequest {
-    loop {
-        if let Some(request) = requests.borrow_and_update().first() {
-            return request.clone();
-        }
-        requests.changed().await.unwrap();
-    }
-}
-
-async fn rows(db: &Database) -> Vec<(String, Vec<u8>)> {
+pub(super) async fn rows(db: &Database) -> Vec<(String, Vec<u8>)> {
     db.read(|sql| {
         Ok(sql.query("SELECT id,body FROM notes ORDER BY id", [], |r| {
             Ok((r.get(0)?, r.get(1)?))
@@ -348,7 +265,7 @@ async fn rows(db: &Database) -> Vec<(String, Vec<u8>)> {
     .unwrap()
 }
 
-async fn fingerprint(
+pub(super) async fn fingerprint(
     db: &Database,
     keys: &dyn StoreKeyCustody,
 ) -> Vec<(Audience, coven_crypto::Fingerprint)> {

@@ -658,7 +658,7 @@ impl StoreLogSync {
 
 #[cfg(test)]
 #[path = "store_log_sync_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 #[path = "operation_calls.rs"]
 mod operation_calls;

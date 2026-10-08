@@ -43,11 +43,14 @@ fn the_prescribed_layout_passes() {
 fn a_singular_test_file_is_rejected_with_its_rename() {
     let files = [RustFile::fixture("crates/coven-sync/src/pull_test.rs", "")];
     let violations = find_test_layout_violations(&files);
-    assert_eq!(violations.len(), 1);
-    assert_eq!(violations[0].remedy, Convention::SingularTestFile.remedy());
     assert_eq!(
-        violations[0].message,
-        "test files are named <name>_tests.rs; rename pull_test.rs to pull_tests.rs"
+        violations,
+        [Finding::new(
+            "crates/coven-sync/src/pull_test.rs",
+            1,
+            "test files are named <name>_tests.rs; rename pull_test.rs to pull_tests.rs",
+            Convention::SingularTestFile.remedy(),
+        )]
     );
 }
 

@@ -1,4 +1,5 @@
 use super::*;
+use crate::error::Rule as FormatRule;
 use crate::snapshot::{SnapshotEncoder, SnapshotRecord};
 use crate::test_utils as fixture;
 use crate::value::EntryId;
@@ -15,9 +16,10 @@ fn take_field<T: std::fmt::Debug + PartialEq>(
     assert_eq!(input.take(bytes.len()).unwrap(), bytes);
     assert_eq!(decode(&bytes).unwrap(), *value);
     for end in 0..bytes.len() {
-        assert!(
-            decode(&bytes[..end]).is_err(),
-            "accepted truncated field at {end}"
+        assert_eq!(
+            decode(&bytes[..end]),
+            Err(Error::Truncated),
+            "truncated field at {end}"
         );
     }
     let mut trailing = bytes;
@@ -183,38 +185,87 @@ fn field_codecs_refuse_invalid_values_and_noncanonical_bytes() {
         device: DeviceId(1),
         number: 0,
     };
-    assert!(encode_write_id(&invalid).is_err());
-    assert!(decode_write_id(&[0; 16]).is_err());
-    assert!(encode_write_positions(&WritePositions(vec![fixture::position(); 2])).is_err());
-    assert!(encode_setters(&BTreeMap::from([("x".into(), invalid)])).is_err());
-    assert!(encode_parents(&BTreeMap::from([(
-        coven_merge::ForeignKey::new(["fk"], "t", ["id"]),
-        Parent {
-            row: RowId {
-                key: vec![255],
-                ..fixture::row()
-            },
-            generation: 1
-        }
-    )]))
-    .is_err());
-    assert!(encode_columns(&BTreeMap::from([("".into(), fixture::column(Value::Null))])).is_err());
-    for real in [f64::NAN.to_bits(), (-0.0_f64).to_bits()] {
-        assert!(encode_column_value(&fixture::column(Value::Real(real))).is_err());
+    for error in [
+        encode_write_id(&invalid).unwrap_err(),
+        decode_write_id(&[0; 16]).unwrap_err(),
+        encode_setters(&BTreeMap::from([("x".into(), invalid)])).unwrap_err(),
+        encode_lost_write_cause(&LostWriteCause::Reset(EntryId {
+            device: DeviceId(1),
+            number: 0,
+        }))
+        .unwrap_err(),
+    ] {
+        assert_eq!(
+            error,
+            Error::Invalid {
+                field: "log number",
+                rule: FormatRule::Required
+            }
+        );
     }
-    assert!(encode_rules(&BTreeSet::from([Rule::Check(
-        "x".repeat(crate::wire::MAX_BYTES + 1)
-    )]))
-    .is_err());
-    assert!(decode_rules(&[0, 0, 0, 2, 3, 2]).is_err());
-    assert!(decode_rules(&[0, 0, 0, 2, 2, 2]).is_err());
-    assert!(decode_rules(&[0, 1, 0, 1]).is_err());
-    assert!(decode_lost_write_cause(&[255]).is_err());
-    assert!(encode_lost_write_cause(&LostWriteCause::Reset(EntryId {
-        device: DeviceId(1),
-        number: 0
-    }))
-    .is_err());
+    assert_eq!(
+        encode_write_positions(&WritePositions(vec![fixture::position(); 2])),
+        Err(Error::Invalid {
+            field: "positions",
+            rule: FormatRule::Order
+        })
+    );
+    assert_eq!(
+        encode_parents(&BTreeMap::from([(
+            coven_merge::ForeignKey::new(["fk"], "t", ["id"]),
+            Parent {
+                row: RowId {
+                    key: vec![255],
+                    ..fixture::row()
+                },
+                generation: 1
+            }
+        )])),
+        Err(Error::Invalid {
+            field: "key",
+            rule: FormatRule::KeyEncoding
+        })
+    );
+    assert_eq!(
+        encode_columns(&BTreeMap::from([("".into(), fixture::column(Value::Null))])),
+        Err(Error::Invalid {
+            field: "name",
+            rule: FormatRule::Required
+        })
+    );
+    for real in [f64::NAN.to_bits(), (-0.0_f64).to_bits()] {
+        assert_eq!(
+            encode_column_value(&fixture::column(Value::Real(real))),
+            Err(Error::Invalid {
+                field: "real",
+                rule: FormatRule::Real
+            })
+        );
+    }
+    for bytes in [[0, 0, 0, 2, 3, 2], [0, 0, 0, 2, 2, 2]] {
+        assert_eq!(
+            decode_rules(&bytes),
+            Err(Error::Invalid {
+                field: "set",
+                rule: FormatRule::Order
+            })
+        );
+    }
+    assert_eq!(
+        decode_rules(&[0, 1, 0, 1]),
+        Err(Error::Limit {
+            field: "collection",
+            actual: 65_537,
+            maximum: crate::wire::MAX_ITEMS,
+        })
+    );
+    assert_eq!(
+        decode_lost_write_cause(&[255]),
+        Err(Error::UnknownTag {
+            field: "lost write cause",
+            tag: 255
+        })
+    );
 }
 
 #[test]
@@ -248,16 +299,36 @@ fn foreign_key_identity_keeps_both_sides_and_column_order() {
     assert_eq!(parents.len(), keys.len());
     let rules = keys.into_iter().map(Rule::ForeignKey).collect();
     assert_eq!(decode_rules(&encode_rules(&rules).unwrap()).unwrap(), rules);
-    for key in [
-        ForeignKey::new([], "parents", []),
-        ForeignKey::new(["parent"], "", ["id"]),
-        ForeignKey::new(["parent"], "parents", [""]),
-        ForeignKey::new(["parent"], "parents", ["id", "extra"]),
+    for (key, field, rule) in [
+        (
+            ForeignKey::new([], "parents", []),
+            "constraint columns",
+            FormatRule::Required,
+        ),
+        (
+            ForeignKey::new(["parent"], "", ["id"]),
+            "name",
+            FormatRule::Required,
+        ),
+        (
+            ForeignKey::new(["parent"], "parents", [""]),
+            "name",
+            FormatRule::Required,
+        ),
+        (
+            ForeignKey::new(["parent"], "parents", ["id", "extra"]),
+            "foreign key columns",
+            FormatRule::ForeignKeyColumns,
+        ),
     ] {
         let rules = [Rule::ForeignKey(key)].into();
-        assert!(encode_rules(&rules).is_err());
         // Bypass validation to exercise rejection by the field decoder too.
-        assert!(decode_rules(&encode(&rules).unwrap()).is_err());
+        for error in [
+            encode_rules(&rules).unwrap_err(),
+            decode_rules(&encode(&rules).unwrap()).unwrap_err(),
+        ] {
+            assert_eq!(error, Error::Invalid { field, rule });
+        }
     }
 }
 
@@ -290,8 +361,18 @@ fn unique_identity_retains_terms_order_and_partial_predicate() {
     let rules = identities.into_iter().map(Rule::Unique).collect();
     assert_eq!(decode_rules(&encode_rules(&rules).unwrap()).unwrap(), rules);
     let empty = UniqueConstraint::from([]);
-    assert!(encode_unique_constraint(&empty).is_err());
-    assert!(decode_unique_constraint(&encode(&empty).unwrap()).is_err());
+    for error in [
+        encode_unique_constraint(&empty).unwrap_err(),
+        decode_unique_constraint(&encode(&empty).unwrap()).unwrap_err(),
+    ] {
+        assert_eq!(
+            error,
+            Error::Invalid {
+                field: "unique terms",
+                rule: FormatRule::Required
+            }
+        );
+    }
 }
 #[test]
 fn schema_loss_uses_a_positive_u32_while_reset_retains_its_entry() {
@@ -302,23 +383,54 @@ fn schema_loss_uses_a_positive_u32_while_reset_retains_its_entry() {
         assert_eq!(bytes, [vec![0], version.to_be_bytes().to_vec()].concat());
         assert_eq!(decode_lost_write_cause(&bytes).unwrap(), cause);
     }
-    assert!(encode_lost_write_cause(&LostWriteCause::SchemaChange(0)).is_err());
-    assert!(decode_lost_write_cause(&[0, 0, 0, 0, 0]).is_err());
+    for error in [
+        encode_lost_write_cause(&LostWriteCause::SchemaChange(0)).unwrap_err(),
+        decode_lost_write_cause(&[0, 0, 0, 0, 0]).unwrap_err(),
+    ] {
+        assert_eq!(
+            error,
+            Error::Invalid {
+                field: "breaking schema version",
+                rule: FormatRule::Required
+            }
+        );
+    }
 }
 
 #[test]
 fn check_and_unique_expressions_have_text_bounds() {
-    use coven_merge::{Rule, UniqueConstraint};
-    for text in [String::new(), "a\0b".into(), "x".repeat(1025)] {
-        let rules = [
+    use coven_merge::UniqueConstraint;
+    for text in [
+        String::new(),
+        "a\0b".into(),
+        "x".repeat(crate::wire::MAX_BYTES),
+        "x".repeat(crate::wire::MAX_BYTES + 1),
+    ] {
+        for rule in [
             Rule::Check(text.clone()),
             Rule::Unique(UniqueConstraint {
                 terms: vec![text.clone()],
-                partial: Some(text),
+                partial: None,
             }),
-        ]
-        .into();
-        let bytes = crate::merge_fields::encode_rules(&rules).unwrap();
-        assert_eq!(crate::merge_fields::decode_rules(&bytes).unwrap(), rules);
+            Rule::Unique(UniqueConstraint {
+                terms: vec!["id".into()],
+                partial: Some(text.clone()),
+            }),
+        ] {
+            let rules = BTreeSet::from([rule]);
+            let encoded = encode_rules(&rules);
+            if text.len() <= crate::wire::MAX_BYTES {
+                assert_eq!(decode_rules(&encoded.unwrap()).unwrap(), rules);
+            } else {
+                assert_eq!(
+                    encoded,
+                    Err(Error::Limit {
+                        field: "text",
+                        actual: text.len(),
+                        maximum: crate::wire::MAX_BYTES
+                    })
+                );
+            }
+        }
     }
 }

@@ -57,23 +57,4 @@ impl Database {
         })
         .await
     }
-
-    /// Test transport: acknowledge a write after transferring it to the peer.
-    pub async fn test_acknowledge_write(&self, write: coven_merge::WriteId) -> Result<(), DbError> {
-        self.call(move |inner| {
-            inner.with_writer(|writer| {
-                writer.transaction(|db| {
-                    db.internal_execute(
-                        "DELETE FROM _coven_uploads WHERE device=?1 AND number=?2",
-                        (
-                            write.device.0.to_be_bytes().as_slice(),
-                            write.number.to_be_bytes().as_slice(),
-                        ),
-                    )?;
-                    Ok(())
-                })
-            })
-        })
-        .await
-    }
 }

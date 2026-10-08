@@ -1,5 +1,6 @@
 use super::*;
 use crate::test_utils;
+use crate::tests::Generator;
 
 #[test]
 fn codes_use_their_assigned_frame_kinds() {
@@ -199,15 +200,12 @@ fn maximum_storage_and_names_use_zeroizing_frame_and_text_types() {
 }
 #[test]
 fn arbitrary_code_text_never_panics() {
-    let mut state = 0x89ab_cdef_0123_4567u64;
+    let mut source = Generator(0x89ab_cdef_0123_4567u64);
     for n in 0..5000 {
         let mut text = Zeroizing::new(String::with_capacity(5 + 2 * (n % 256)));
         text.push_str(if n % 2 == 0 { "CVR1-" } else { "CVI1-" });
         for _ in 0..n % 256 {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            text.push(char::from((state & 255) as u8));
+            text.push(char::from(source.next() as u8));
         }
         if let Ok(code) = RestoreCode::from_text(&text) {
             assert_eq!(code.to_text().unwrap(), text);

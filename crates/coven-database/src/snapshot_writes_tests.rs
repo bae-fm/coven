@@ -1,5 +1,5 @@
-use crate::snapshot_load::tests::contents;
 use crate::snapshot_write::tests::{frames, id, load_one, stream};
+use crate::tests::contents;
 use crate::tests::TestStore;
 use crate::write::tests::{notes, records, sql, NOTES};
 use coven_foundation::id_source::SequentialIds;

@@ -164,7 +164,6 @@ async fn foreign_keys_on_one_column_keep_both_target_column_lists() {
 
 #[tokio::test]
 async fn removing_and_restoring_two_parents_keeps_each_foreign_key_reason() {
-    use crate::removal::tests::remove;
     use crate::write::tests::{count, sql};
     use coven_format::value::Value;
     use coven_merge::{ForeignKey, Rule};
@@ -174,17 +173,9 @@ async fn removing_and_restoring_two_parents_keeps_each_foreign_key_reason() {
         "CREATE TABLE lefts(id TEXT NOT NULL PRIMARY KEY,enabled INT CONSTRAINT enabled CHECK(enabled=1)); CREATE TABLE rights(id TEXT NOT NULL PRIMARY KEY,enabled INT CONSTRAINT enabled CHECK(enabled=1)); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT,FOREIGN KEY(parent) REFERENCES lefts(id),FOREIGN KEY(parent) REFERENCES rights(id))",
     ).await.unwrap();
     sql(&db, "INSERT INTO lefts VALUES('1',1); INSERT INTO rights VALUES('1',1); INSERT INTO children VALUES('c','1')").await.unwrap();
-    let left = Rule::ForeignKey(ForeignKey::new(["parent"], "lefts", ["id"]));
     let right = Rule::ForeignKey(ForeignKey::new(["parent"], "rights", ["id"]));
-    remove(&db, "children", "c", &[], [left, right.clone()].into());
     for parent in ["lefts", "rights"] {
-        remove(
-            &db,
-            parent,
-            "1",
-            &[("enabled", Value::Integer(0))],
-            [Rule::Check("enabled".into())].into(),
-        );
+        crate::tests::remote_update(&db, parent, "1", &[("enabled", Value::Integer(0))]).await;
     }
     sql(&db, "INSERT INTO lefts VALUES('1',1)").await.unwrap();
     assert_eq!(count(&db, "children"), 0);
@@ -228,7 +219,6 @@ async fn ordinary_sqlite_can_maintain_a_store_without_coven_functions() {
 
 #[tokio::test]
 async fn column_expression_and_partial_unique_identities_keep_each_reason() {
-    use crate::removal::tests::remove;
     use crate::write::tests::sql;
     use coven_format::value::Value;
     use coven_merge::{Rule, UniqueConstraint};
@@ -257,13 +247,13 @@ async fn column_expression_and_partial_unique_identities_keep_each_reason() {
         };
         let expected: BTreeSet<_> =
             [Rule::Unique(column.clone()), Rule::Unique(other.clone())].into();
-        remove(
+        crate::tests::remote_update(
             &db,
             "notes",
             "46",
             &[("title", Value::Text("Groceries".into()))],
-            expected.clone(),
-        );
+        )
+        .await;
         sql(&db, "UPDATE notes SET active=2 WHERE id='45'")
             .await
             .unwrap();
@@ -298,7 +288,7 @@ async fn explicit_collation_terms_do_not_merge_with_bare_column_constraints() {
         let db = store.schema(vec![SyncedTable::new("notes", RowIdentity::SharedKey)], schema).await.unwrap();
         sql(&db,"INSERT INTO notes VALUES('45','Groceries',0),('46','Shopping',0)").await.unwrap();
         let expected = Rule::Unique(["title COLLATE NOCASE"].into());
-        crate::removal::tests::remove(&db,"notes","46",&[("title",Value::Text("GROCERIES".into()))],[expected.clone()].into());
+        crate::tests::remote_update(&db, "notes", "46", &[("title",Value::Text("GROCERIES".into()))]).await;
         sql(&db,"UPDATE notes SET edited=1 WHERE id='45'").await.unwrap();
         db.inspect_writer(|db| {
             let rules = db.query_row("SELECT replaced_by FROM _coven_lost WHERE column_id IS NULL",[],|r| Ok(coven_format::merge_fields::decode_rules(&r.get::<_,Vec<u8>>(0)?).unwrap())).unwrap();

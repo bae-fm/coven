@@ -424,14 +424,6 @@ impl CovenHandle {
     ) -> Result<Vec<coven_format::write::WriteRecord>, DbError> {
         self.database.test_queued_writes().await
     }
-
-    /// Inspect the actual synchronization state in application integration tests.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn test_sync_state(
-        &self,
-    ) -> Result<Option<coven_format::objects::PostedPositions>, SyncError> {
-        self.operations.test_positions().await
-    }
 }
 
 #[cfg(test)]

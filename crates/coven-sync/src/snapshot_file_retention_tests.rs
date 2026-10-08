@@ -6,16 +6,24 @@ use coven_foundation::id_source::KeyId;
 use coven_merge::Audience;
 use coven_storage::{ObjectPath, ObjectPrefix, Storage};
 
-async fn sync(f: &Fixture) -> (StoreLogSync, MemberKeys) {
+async fn sync(f: &Fixture) -> (StoreLogSync, MemberKeys, crate::DeviceLogSync) {
     let member = MemberKeys::generate().unwrap();
     let key = KeyId(uuid::Uuid::from_u128(500));
+    let store_keys = Arc::new(InMemoryCustody::new(StoreKeyring::new(
+        StoreKey::generate(key).unwrap(),
+    )));
+    let member_keys = Arc::new(InMemoryCustody::new(member.clone()));
+    let writes = crate::DeviceLogSync::new(
+        f.storage.clone(),
+        f.database.clone(),
+        store_keys.clone(),
+        member_keys.clone(),
+    );
     let mut sync = StoreLogSync::new(
         f.storage.clone(),
         f.database.clone(),
-        Arc::new(InMemoryCustody::new(StoreKeyring::new(
-            StoreKey::generate(key).unwrap(),
-        ))),
-        Arc::new(InMemoryCustody::new(member.clone())),
+        store_keys,
+        member_keys,
         f.clock.clone(),
         f.ids.clone(),
         f.directory.clone(),
@@ -33,7 +41,7 @@ async fn sync(f: &Fixture) -> (StoreLogSync, MemberKeys) {
     })
     .await
     .unwrap();
-    (sync, member)
+    (sync, member, writes)
 }
 
 fn path(file: &FileRef) -> ObjectPath {
@@ -44,7 +52,7 @@ fn path(file: &FileRef) -> ObjectPath {
 #[tokio::test]
 async fn an_excluded_snapshot_prevents_proving_file_absence() {
     let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-    let (mut sync, author) = sync(&f).await;
+    let (mut sync, author, mut writes) = sync(&f).await;
     let file = f.uploaded("old", vec![31; CHUNK]).await;
     sync.write_snapshot(Audience::Store).await.unwrap();
     f.database
@@ -54,12 +62,7 @@ async fn an_excluded_snapshot_prevents_proving_file_absence() {
         })
         .await
         .unwrap();
-    for write in f.database.test_queued_writes().await.unwrap() {
-        f.database
-            .test_acknowledge_write(write.header.position)
-            .await
-            .unwrap();
-    }
+    writes.upload_writes().await.unwrap();
     let object = f
         .storage
         .list(&ObjectPrefix::snapshots())
@@ -85,7 +88,7 @@ async fn an_excluded_snapshot_prevents_proving_file_absence() {
 #[tokio::test]
 async fn file_references_survive_in_waiting_writes_and_kept_snapshots() {
     let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-    let (mut sync, _) = sync(&f).await;
+    let (mut sync, _, mut writes) = sync(&f).await;
     let old = f.uploaded("old", vec![31; CHUNK]).await;
     let kept = f.uploaded("kept", vec![32; CHUNK]).await;
     sync.write_snapshot(Audience::Store).await.unwrap();
@@ -99,14 +102,8 @@ async fn file_references_survive_in_waiting_writes_and_kept_snapshots() {
     sync.run_retention().await.unwrap();
     assert!(f.storage.read(&path(&old)).await.is_ok());
     assert!(f.storage.read(&path(&kept)).await.is_ok());
-    // Simulate successful device-log publication, whose storage copy is tested
-    // separately: the queue no longer protects the old row's upload reference.
-    for write in f.database.test_queued_writes().await.unwrap() {
-        f.database
-            .test_acknowledge_write(write.header.position)
-            .await
-            .unwrap();
-    }
+    writes.upload_writes().await.unwrap();
+    assert!(writes.post_positions().await.unwrap());
     sync.run_retention().await.unwrap();
     assert!(f.storage.read(&path(&old)).await.is_ok());
     sync.write_snapshot(Audience::Store).await.unwrap();
@@ -120,7 +117,7 @@ async fn file_references_survive_in_waiting_writes_and_kept_snapshots() {
 #[tokio::test]
 async fn deleting_an_unused_publication_retires_its_queue() {
     let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-    let (mut sync, _) = sync(&f).await;
+    let (mut sync, _, _) = sync(&f).await;
     super::uploads::unused_upload(&f).await;
     sync.run_retention().await.unwrap();
     assert!(f
@@ -142,7 +139,7 @@ async fn deleting_an_unused_publication_retires_its_queue() {
 #[tokio::test]
 async fn locally_protected_files_need_only_snapshot_prefixes() {
     let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-    let (mut sync, _) = sync(&f).await;
+    let (mut sync, _, _) = sync(&f).await;
     f.uploaded("kept", vec![32; CHUNK]).await;
     sync.write_snapshot(Audience::Store).await.unwrap();
     let object = f
@@ -170,7 +167,7 @@ async fn locally_protected_files_need_only_snapshot_prefixes() {
 #[tokio::test]
 async fn a_damaged_snapshot_cannot_prove_file_absence() {
     let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-    let (mut sync, _) = sync(&f).await;
+    let (mut sync, _, _) = sync(&f).await;
     let kept = f.uploaded("kept", vec![32; CHUNK]).await;
     sync.write_snapshot(Audience::Store).await.unwrap();
     let orphan = ObjectPath::file(

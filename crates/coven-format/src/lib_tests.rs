@@ -98,13 +98,13 @@ fn pinned_chunks_decode_with_their_declared_boundaries() {
 // A reproducible generator exercises arbitrary bytes without a randomness
 // capability or an external dependency. Canonical fixtures supply deep valid
 // structures, then every bit and every truncation boundary is exercised.
-struct Bytes(u64);
-impl Bytes {
-    fn next(&mut self) -> u8 {
+pub(crate) struct Generator(pub(crate) u64);
+impl Generator {
+    pub(crate) fn next(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
-        self.0 as u8
+        self.0
     }
 }
 
@@ -154,13 +154,13 @@ fn decode_or_typed_error(bytes: &[u8]) {
 
 #[test]
 fn arbitrary_truncated_and_bit_flipped_inputs_never_panic() {
-    let mut source = Bytes(0xb5f2_106d_7538_901b);
+    let mut source = Generator(0xb5f2_106d_7538_901b);
     for n in 0..25_000 {
-        let mut bytes: Vec<_> = (0..n % 1024).map(|_| source.next()).collect();
+        let mut bytes: Vec<_> = (0..n % 1024).map(|_| source.next() as u8).collect();
         decode_or_typed_error(&bytes);
         if bytes.len() >= 7 {
             // Reach the payload decoder as well as the prefix checks.
-            bytes[0] = 1 + source.next() % 11;
+            bytes[0] = 1 + source.next() as u8 % 11;
             bytes[1..3].copy_from_slice(&1u16.to_be_bytes());
             let len = (bytes.len() - 7) as u32;
             bytes[3..7].copy_from_slice(&len.to_be_bytes());

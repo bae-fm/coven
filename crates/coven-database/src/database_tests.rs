@@ -4,6 +4,11 @@ use crate::tests::TestStore;
 use coven_foundation::files::{SettingsError, StoreLockError};
 
 impl Database {
+    pub(crate) fn observe_next_reader_wait(&self) -> tokio::sync::oneshot::Receiver<()> {
+        let inner = self.inner.read().unwrap();
+        inner.as_ref().unwrap().access.readers.observe_next_wait()
+    }
+
     pub(crate) fn commit_writer<T>(&self, run: impl FnOnce(&DatabaseConnection) -> T) -> T {
         self.inspect_writer(|writer| writer.transaction(|writer| Ok(run(writer))).unwrap())
     }
@@ -215,8 +220,9 @@ fn another_process_can_read_while_the_writer_is_open() {
         .env("COVEN_DATABASE_TEST_STORE", store.id().to_string())
         .output()
         .unwrap();
-    assert!(
-        output.status.success(),
+    assert_eq!(
+        output.status.code(),
+        Some(86),
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
@@ -254,6 +260,7 @@ fn read_only_process() {
         .unwrap();
     assert_eq!(runtime.block_on(db.schema_version()).unwrap(), 1);
     runtime.block_on(db.close()).unwrap();
+    std::process::exit(86);
 }
 
 #[tokio::test]

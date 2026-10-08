@@ -1,7 +1,6 @@
 use super::*;
-use crate::{CircleId, CircleKey, InviteSecret, StoreKey};
-use coven_foundation::id_source::{IdSource, KeyId};
-use uuid::Uuid;
+use crate::{InviteSecret, StoreKey};
+use coven_foundation::id_source::KeyId;
 
 #[test]
 fn purpose_labels_and_hkdf_answers_are_pinned() {
@@ -49,56 +48,6 @@ fn fingerprint_key_answer_is_pinned() {
 }
 
 #[test]
-fn store_and_circle_objects_bind_path_and_use_random_nonces() {
-    let key_ids = coven_foundation::id_source::SequentialIds::new();
-    let keys = [
-        StoreKey::generate(KeyId(key_ids.new_id()))
-            .unwrap()
-            .derive(),
-        CircleKey::generate(CircleId(Uuid::from_u128(5)), KeyId(key_ids.new_id()))
-            .unwrap()
-            .derive(),
-    ];
-    for key in keys {
-        for plaintext in [b"".as_slice(), b"object payload"] {
-            let sealed = key
-                .seal_object_chunk("devices/phone/3", b"cleartext prefix", 0, 0, plaintext)
-                .unwrap();
-            assert_eq!(
-                key.open_object_chunk("devices/phone/3", b"cleartext prefix", 0, 0, &sealed)
-                    .unwrap(),
-                plaintext
-            );
-            assert_ne!(
-                sealed,
-                key.seal_object_chunk("devices/phone/3", b"cleartext prefix", 0, 0, plaintext)
-                    .unwrap()
-            );
-            assert!(matches!(
-                key.open_object_chunk("devices/phone/4", b"cleartext prefix", 0, 0, &sealed),
-                Err(CryptoError::Authentication)
-            ));
-            for i in 0..sealed.len() {
-                let mut altered = sealed.clone();
-                altered[i] ^= 1;
-                assert!(matches!(
-                    key.open_object_chunk("devices/phone/3", b"cleartext prefix", 0, 0, &altered),
-                    Err(CryptoError::Authentication)
-                ));
-                assert!(key
-                    .open_object_chunk("devices/phone/3", b"cleartext prefix", 0, 0, &sealed[..i])
-                    .is_err());
-            }
-            let mut trailing = sealed;
-            trailing.push(0);
-            assert!(key
-                .open_object_chunk("devices/phone/3", b"cleartext prefix", 0, 0, &trailing)
-                .is_err());
-        }
-    }
-}
-
-#[test]
 fn a_join_request_is_bound_to_its_invite_and_path() {
     let invite = InviteSecret::generate().unwrap();
     let key = invite.join_request_key();
@@ -110,14 +59,17 @@ fn a_join_request_is_bound_to_its_invite_and_path() {
             .unwrap(),
         b"Carol"
     );
-    assert!(key
-        .open_object_chunk("join-requests/43", b"cleartext prefix", 0, 0, &sealed)
-        .is_err());
-    assert!(InviteSecret::generate()
-        .unwrap()
-        .join_request_key()
-        .open_object_chunk("join-requests/42", b"cleartext prefix", 0, 0, &sealed)
-        .is_err());
+    assert!(matches!(
+        key.open_object_chunk("join-requests/43", b"cleartext prefix", 0, 0, &sealed),
+        Err(CryptoError::Authentication)
+    ));
+    assert!(matches!(
+        InviteSecret::generate()
+            .unwrap()
+            .join_request_key()
+            .open_object_chunk("join-requests/42", b"cleartext prefix", 0, 0, &sealed),
+        Err(CryptoError::Authentication)
+    ));
     let same = InviteSecret::from_bytes(invite.to_secret_bytes().as_bytes().try_into().unwrap());
     assert_eq!(
         same.join_request_key()
@@ -125,29 +77,6 @@ fn a_join_request_is_bound_to_its_invite_and_path() {
             .unwrap(),
         b"Carol"
     );
-}
-
-#[test]
-#[should_panic(expected = "storage paths must be nonempty")]
-fn objects_cannot_be_sealed_without_a_storage_path() {
-    let key_ids = coven_foundation::id_source::SequentialIds::new();
-    let key = StoreKey::generate(KeyId(key_ids.new_id()))
-        .unwrap()
-        .derive();
-    let _sealed = key.seal_object_chunk("", b"cleartext prefix", 0, 0, b"payload");
-}
-
-#[test]
-#[should_panic(expected = "storage paths must be nonempty")]
-fn objects_cannot_be_opened_without_a_storage_path() {
-    let key_ids = coven_foundation::id_source::SequentialIds::new();
-    let key = StoreKey::generate(KeyId(key_ids.new_id()))
-        .unwrap()
-        .derive();
-    let sealed = key
-        .seal_object_chunk("objects/1", b"cleartext prefix", 0, 0, b"payload")
-        .unwrap();
-    let _opened = key.open_object_chunk("", b"cleartext prefix", 0, 0, &sealed);
 }
 
 #[test]
@@ -178,7 +107,8 @@ fn retry_nonces_are_pinned_and_separate_keys_paths_sections_and_chunks() {
     ] {
         assert_ne!(sealed[..24], other[..24]);
     }
-    assert!(key
-        .open_object_chunk(path, b"changed prefix", 1, 2, &sealed)
-        .is_err());
+    assert!(matches!(
+        key.open_object_chunk(path, b"changed prefix", 1, 2, &sealed),
+        Err(CryptoError::Authentication)
+    ));
 }

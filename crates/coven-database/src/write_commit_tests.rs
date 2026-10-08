@@ -1,30 +1,11 @@
-use coven_format::{merge_fields, value::Value};
+use coven_format::value::Value;
 use coven_foundation::id_source::{DeviceId, StoreId};
-use coven_merge::{ColumnValue, Rule, Timestamp, WriteId};
-use std::collections::BTreeSet;
+use coven_merge::{Timestamp, WriteId};
 
-use crate::tests::TestStore;
+use crate::tests::{contents, TestStore};
 use crate::write::tests::{count, notes, records, sql, NOTES};
 use crate::{Database, Migration, SyncedTable};
 
-const TABLES: &[&str] = &[
-    "notes",
-    "tags",
-    "local_rows",
-    "_coven_writes",
-    "_coven_uploads",
-    "_coven_positions",
-    "_coven_rows",
-    "_coven_columns",
-    "_coven_cells",
-    "_coven_lost",
-    "_coven_foreign_keys",
-    "_coven_references",
-    "_coven_constraints",
-    "_coven_claims",
-    "_coven_fingerprint_leaves",
-    "_coven_fingerprint_sums",
-];
 const STEPS: &[(&str, &str)] = &[
     ("notes", "UPDATE"),
     ("_coven_writes", "INSERT"),
@@ -55,47 +36,33 @@ fn migrations() -> Vec<Migration> {
     })]
 }
 
-fn state(database: &Database) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
-    database.inspect_writer(|db| {
-        TABLES
-            .iter()
-            .map(|table| {
-                db.query(&format!("SELECT * FROM {table} ORDER BY 1"), [], |row| {
-                    (0..row.as_ref().column_count())
-                        .map(|column| row.get(column))
-                        .collect()
-                })
-                .unwrap()
-            })
-            .collect()
-    })
-}
-
 async fn seed(database: &Database) {
     sql(
         database,
-        "INSERT INTO notes VALUES('42','Groceries','milk, eggs')",
+        "INSERT INTO notes VALUES('42','Original','milk, eggs')",
     )
     .await
     .unwrap();
-    let original = records(database)[0].header.clone();
-    let loser = WriteId {
-        device: DeviceId(original.position.device.0.wrapping_add(1)),
-        number: 1,
+    sql(database, "UPDATE notes SET title='Groceries'")
+        .await
+        .unwrap();
+    let writes = records(database);
+    let mut concurrent = writes[1].clone();
+    concurrent.header.had_read.0.push(writes[0].header.position);
+    let device = DeviceId(concurrent.header.position.device.0.checked_add(1).unwrap());
+    concurrent.header.position = WriteId { device, number: 1 };
+    concurrent.header.timestamp =
+        Timestamp::new(concurrent.header.timestamp.milliseconds() + 1, 0, device).unwrap();
+    let coven_merge::Operation::Update(columns) = &mut concurrent.parts[0].rows[0].change.operation
+    else {
+        panic!("seed update")
     };
-    database.inspect_writer(|db| {
-        db.internal_execute("INSERT INTO _coven_writes(timestamp,number,had_read) VALUES(?1,?2,?3)", crate::params![
-            merge_fields::encode_timestamp(&Timestamp::new(original.timestamp.milliseconds() - 1, 0, loser.device).unwrap()).unwrap(),
-            loser.number.to_be_bytes().as_slice(), merge_fields::encode_write_positions(&coven_format::value::WritePositions(vec![])).unwrap(),
-        ]).unwrap();
-        db.internal_execute("UPDATE _coven_rows SET write_id=last_insert_rowid() WHERE table_name='notes'",[]).unwrap();
-        db.internal_execute("INSERT INTO _coven_positions(device,number) VALUES(?1,?2)",crate::params![loser.device.0.to_be_bytes().as_slice(),loser.number.to_be_bytes().as_slice()]).unwrap();
-        db.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES('notes',?1,'store',?2,(SELECT id FROM _coven_columns WHERE table_name='notes' AND column_name='title'),?3,?4,'write',?5)", crate::params![
-            coven_format::key::encode_key(&[Value::Text("42".into())]).unwrap(), 1u64.to_be_bytes().as_slice(),
-            merge_fields::encode_column_value(&ColumnValue { value: Value::Text("Shopping".into()), parents: Default::default() }).unwrap(),
-            merge_fields::encode_write_id(&loser).unwrap(), merge_fields::encode_write_id(&original.position).unwrap(),
-        ]).unwrap();
-    });
+    columns.get_mut("title").unwrap().value = Value::Text("Shopping".into());
+    assert_eq!(
+        database.apply_downloaded(concurrent.into()).await.unwrap(),
+        crate::ApplyOutcome::Applied
+    );
+    assert_eq!(count(database, "_coven_lost"), 1);
 }
 
 #[tokio::test]
@@ -103,19 +70,25 @@ async fn failure_after_every_step_restores_app_rows_records_and_metadata() {
     let store = TestStore::new();
     let database = store.builder(tables(), migrations()).open().await.unwrap();
     seed(&database).await;
-    let before = state(&database);
+    let before = contents(&database);
     for (table, action) in STEPS {
-        database.inspect_writer(|db| db.batch(&format!("CREATE TRIGGER _coven_fail AFTER {action} ON {table} BEGIN SELECT RAISE(ABORT,'injected failure'); END")).unwrap());
+        database.inspect_writer(|db| {
+            db.fail_at(
+                "_coven_fail",
+                &format!("AFTER {action} ON {table}"),
+                "injected failure",
+            )
+        });
         let error = sql(&database, WRITE).await.unwrap_err();
         assert!(
             matches!(error, crate::DbError::Sqlite(_)),
             "{table}: {error:?}"
         );
-        assert_eq!(state(&database), before, "failure after {table}");
+        assert_eq!(contents(&database), before, "failure after {table}");
         database.inspect_writer(|db| db.batch("DROP TRIGGER _coven_fail").unwrap());
     }
     sql(&database, WRITE).await.unwrap();
-    assert_eq!(records(&database)[1].header.position.number, 2);
+    assert_eq!(records(&database)[2].header.position.number, 3);
     assert_eq!(count(&database, "_coven_lost"), 0);
     assert_eq!(count(&database, "local_rows"), 1);
     database.close().await.unwrap();
@@ -126,21 +99,21 @@ async fn sqlite_value_limit_refuses_the_whole_write_and_rolls_back() {
     let store = TestStore::new();
     let database = store.builder(tables(), migrations()).open().await.unwrap();
     seed(&database).await;
-    let before = state(&database);
+    let before = contents(&database);
     let old_limit = database.inspect_writer(|db| db.set_value_limit(4096));
     const INSERT: &str = "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<100) INSERT INTO notes SELECT 'import-'||i,'Imported note','' FROM n; INSERT INTO local_rows VALUES('import')";
     let error = sql(&database, INSERT).await.unwrap_err();
     database.inspect_writer(|db| db.set_value_limit(old_limit));
-    assert_eq!(state(&database), before);
+    assert_eq!(contents(&database), before);
     assert!(
         matches!(error, crate::DbError::TooLarge { field: "write plaintext", actual, maximum: 4096 } if actual > 4096),
         "{error:?}"
     );
     sql(&database, INSERT).await.unwrap();
     let queued = records(&database);
-    assert_eq!(queued.len(), 2);
-    assert_eq!(queued[1].header.position.number, 2);
-    assert_eq!(queued[1].parts[0].rows.len(), 100);
+    assert_eq!(queued.len(), 3);
+    assert_eq!(queued[2].header.position.number, 3);
+    assert_eq!(queued[2].parts[0].rows.len(), 100);
     assert_eq!(count(&database, "local_rows"), 1);
     database.close().await.unwrap();
 }
@@ -295,7 +268,7 @@ fn a_process_crash_after_every_step_leaves_no_partial_write() {
         .block_on(store.builder(tables(), migrations()).open())
         .unwrap();
     runtime.block_on(seed(&database));
-    let before = state(&database);
+    let before = contents(&database);
     runtime.block_on(database.close()).unwrap();
     for (table, action) in STEPS {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -320,7 +293,7 @@ fn a_process_crash_after_every_step_leaves_no_partial_write() {
         let database = runtime
             .block_on(store.builder(tables(), migrations()).open())
             .unwrap();
-        assert_eq!(state(&database), before, "crash after {table}");
+        assert_eq!(contents(&database), before, "crash after {table}");
         database.inspect_writer(|db| db.batch("DROP TRIGGER _coven_crash").unwrap());
         runtime.block_on(database.close()).unwrap();
     }
@@ -328,7 +301,7 @@ fn a_process_crash_after_every_step_leaves_no_partial_write() {
         .block_on(store.builder(tables(), migrations()).open())
         .unwrap();
     runtime.block_on(sql(&database, WRITE)).unwrap();
-    assert_eq!(records(&database)[1].header.position.number, 2);
+    assert_eq!(records(&database)[2].header.position.number, 3);
     runtime.block_on(database.close()).unwrap();
 }
 
@@ -368,44 +341,14 @@ fn crashing_writer() {
     panic!("write did not reach its crash point");
 }
 
-use crate::removal::tests::remove;
-
 const CRASH_SCHEMA: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT UNIQUE,parent TEXT REFERENCES notes(id) ON DELETE CASCADE); CREATE UNIQUE INDEX notes_root_title ON notes(title) WHERE parent IS NULL";
 
 fn crash_statement(restoring: bool) -> &'static str {
     if restoring {
         "DELETE FROM notes WHERE id='45'"
     } else {
-        "UPDATE notes SET title='Plan' WHERE id='1'"
+        "DELETE FROM notes WHERE id='3'; UPDATE notes SET title='Plan' WHERE id='1'"
     }
-}
-
-fn removal_state(db: &Database) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
-    db.inspect_writer(|db| {
-        [
-            "notes",
-            "_coven_writes",
-            "_coven_uploads",
-            "_coven_rows",
-            "_coven_cells",
-            "_coven_lost",
-            "_coven_positions",
-            "_coven_foreign_keys",
-            "_coven_references",
-            "_coven_constraints",
-            "_coven_claims",
-        ]
-        .iter()
-        .map(|table| {
-            db.query(&format!("SELECT * FROM {table} ORDER BY 1"), [], |r| {
-                (0..r.as_ref().column_count())
-                    .map(|i| r.get::<_, rusqlite::types::Value>(i))
-                    .collect::<rusqlite::Result<Vec<_>>>()
-            })
-            .unwrap()
-        })
-        .collect()
-    })
 }
 
 #[test]
@@ -445,24 +388,16 @@ fn a_process_crash_during_removal_or_restoration_keeps_the_previous_database() {
             runtime
                 .block_on(sql(&db, "INSERT INTO notes VALUES('46','Shopping',NULL)"))
                 .unwrap();
-            remove(
+            runtime.block_on(crate::tests::remote_update(
                 &db,
                 "notes",
                 "46",
                 &[("title", Value::Text("Groceries".into()))],
-                BTreeSet::from([Rule::Unique(["title"].into())]),
-            );
+            ));
         } else {
-            runtime.block_on(sql(&db, "INSERT INTO notes VALUES('1','Ideas',NULL); INSERT INTO notes VALUES('2','Plan','1')")).unwrap();
-            remove(
-                &db,
-                "notes",
-                "2",
-                &[],
-                BTreeSet::from([Rule::Unique(["title"].into())]),
-            );
+            runtime.block_on(crate::removal::tests::hidden_plan_note(&db));
         }
-        let before = removal_state(&db);
+        let before = contents(&db);
         runtime.block_on(db.close()).unwrap();
         for (target, action) in points {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -491,7 +426,7 @@ fn a_process_crash_during_removal_or_restoration_keeps_the_previous_database() {
                     CRASH_SCHEMA,
                 ))
                 .unwrap();
-            assert_eq!(removal_state(&db), before, "{target} {action}");
+            assert_eq!(contents(&db), before, "{target} {action}");
             db.inspect_writer(|db| db.batch("DROP TRIGGER _coven_crash").unwrap());
             runtime.block_on(db.close()).unwrap();
         }

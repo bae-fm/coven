@@ -2884,9 +2884,9 @@ Carol's tablet:
   Waiting writes and skipped damaged remote objects remain internal (§19.1).
 - A source file holds at most 1,000 lines, and its tests live beside it
   in `<name>_tests.rs`.
-- Each crate offers a `test-utils` feature with its fakes, such as an
-  in-memory provider and a fixed clock; tests build the same object graph
-  production does.
+- Crates offer shared fakes through `test-utils` where needed, such as an
+  in-memory provider and a fixed clock. Test-only implementations stay behind
+  injected dependencies; tests build the same object graph production does.
 
 ### 20.4 Checks
 
@@ -2920,6 +2920,9 @@ Carol's tablet:
     beyond Lean's own, and their differential tests against Rust.
 - The checker is the first thing built, before any crate, so every rule
   holds from the first line of code.
+- Tests control clocks, transfer limits and request completion. Upload boundary
+  tests use byte-sized payloads; races wait for observed events, and interrupted
+  operations are reopened until they report completion.
 - The pre-commit hook runs the fast ones: formatting, clippy, and the
   rules of [§20.1](#201-crates) to [§20.3](#203-code-conventions).
 

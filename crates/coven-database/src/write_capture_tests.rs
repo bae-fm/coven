@@ -191,13 +191,13 @@ async fn readding_a_rule_removed_row_keeps_its_generation() {
     })
     .await
     .unwrap();
-    crate::removal::tests::remove(
+    crate::tests::remote_update(
         &db,
         "notes",
         V4,
         &[("title", coven_format::value::Value::Text(String::new()))],
-        [coven_merge::Rule::Check("title_present".into())].into(),
-    );
+    )
+    .await;
     assert_eq!(db.lost_values().await.unwrap().len(), 1);
     db.write(|context| {
         context.execute("INSERT INTO notes VALUES(?1,'restored','')", [V4])?;

@@ -117,7 +117,11 @@ fn read_view_replay_cost() {
     }
     let after = started.elapsed();
     assert_eq!(cache.views.len(), views.len());
-    for view in &writes {
+    assert!(
+        after < before,
+        "cached replay {after:?} exceeded uncached replay {before:?}"
+    );
+    for view in &views {
         assert_eq!(cache.at(view), &at(&log, view));
     }
     println!(

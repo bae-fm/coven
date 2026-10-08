@@ -1,4 +1,5 @@
 use super::*;
+use crate::tests::Generator;
 
 fn real(n: f64) -> Value {
     Value::Real(n.to_bits())
@@ -148,13 +149,10 @@ fn null_nan_negative_zero_and_noncanonical_keys_are_refused() {
 }
 #[test]
 fn generated_real_values_round_trip_and_compare_numerically() {
-    let mut state = 0x1234_5678_9abc_def0u64;
+    let mut source = Generator(0x1234_5678_9abc_def0u64);
     let mut values = Vec::new();
     for _ in 0..10000 {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        let value = f64::from_bits(state);
+        let value = f64::from_bits(source.next());
         if !value.is_nan() && value != 0.0 {
             values.push(value);
         }
@@ -166,14 +164,11 @@ fn generated_real_values_round_trip_and_compare_numerically() {
 
 #[test]
 fn arbitrary_key_bytes_are_rejected_or_reencode_identically() {
-    let mut state = 0x89ab_cdef_0123_4567u64;
+    let mut source = Generator(0x89ab_cdef_0123_4567u64);
     for n in 0..25_000 {
         let mut bytes = Vec::new();
         for _ in 0..n % 64 {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            bytes.push(state as u8);
+            bytes.push(source.next() as u8);
         }
         if let Ok(values) = decode_key(&bytes) {
             assert_eq!(encode_key(&values).unwrap(), bytes);

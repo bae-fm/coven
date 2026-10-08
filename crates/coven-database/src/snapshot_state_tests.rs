@@ -1,5 +1,5 @@
-use crate::snapshot_load::tests::contents;
 use crate::snapshot_write::tests::{decode, frames, id, load_one};
+use crate::tests::contents;
 use crate::tests::TestStore;
 use crate::write::tests::{count, notes, records, sql};
 use coven_format::loss::{LossCause, LossValues};

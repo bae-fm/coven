@@ -20,9 +20,7 @@ fn registration_propagates_a_poisoned_service_lock() {
 #[should_panic(expected = "in-memory keychain entries lock is poisoned")]
 fn discovery_propagates_a_poisoned_entries_lock() {
     let fake = Keychain::in_memory("poisoned").unwrap();
-    let Backend::Memory(memory) = &fake.backend else {
-        panic!("expected in-memory keychain");
-    };
+    let memory = fake.memory_backend();
     let poisoned = std::panic::catch_unwind(|| {
         let _guard = memory.lock().unwrap();
         panic!("poison keychain entries");
@@ -371,9 +369,7 @@ fn each_host_value_keeps_the_native_entry_size_limit() {
         store.set_host_secret(name, value).unwrap();
         assert_eq!(store.host_secret(name).unwrap().as_ref(), Some(value));
     }
-    let Backend::Memory(memory) = &fake.backend else {
-        panic!("memory keychain")
-    };
+    let memory = fake.memory_backend();
     let memory = memory.lock().unwrap();
     for bytes in memory.entries.values() {
         assert!(
@@ -471,14 +467,10 @@ fn crash_between_host_updates_leaves_only_a_harmless_extra_name() {
         };
         assert!(matches!(result, Err(KeyError::Keychain(_))));
         drop(store);
-        let Backend::Memory(memory) = Arc::try_unwrap(fake).unwrap().backend else {
-            panic!("memory keychain")
-        };
-        let entries = memory.into_inner().unwrap().entries;
+        let entries = std::mem::take(&mut fake.memory_backend().lock().unwrap().entries);
+        drop(fake);
         let reopened = Keychain::in_memory("interrupted-host-update").unwrap();
-        let Backend::Memory(memory) = &reopened.backend else {
-            panic!("memory keychain")
-        };
+        let memory = reopened.memory_backend();
         memory.lock().unwrap().entries = entries;
         let store = StoreKeychain::new(reopened.clone(), id);
         assert_eq!(
@@ -496,9 +488,7 @@ fn crash_between_host_updates_leaves_only_a_harmless_extra_name() {
 }
 
 fn fail_operation(fake: &Keychain, after: usize) {
-    let Backend::Memory(memory) = &fake.backend else {
-        panic!("memory keychain")
-    };
+    let memory = fake.memory_backend();
     memory.lock().unwrap().fail_after = Some(after);
 }
 
@@ -587,9 +577,7 @@ fn malformed_host_values_do_not_prevent_deletion() {
         Some("preserved")
     );
     store.delete_store_entries().unwrap();
-    let Backend::Memory(memory) = &fake.backend else {
-        panic!("memory keychain")
-    };
+    let memory = fake.memory_backend();
     assert!(memory.lock().unwrap().entries.is_empty());
 }
 
@@ -620,9 +608,7 @@ fn concurrent_host_secret_updates_keep_every_name() {
         );
     }
     store.delete_store_entries().unwrap();
-    let Backend::Memory(memory) = &fake.backend else {
-        panic!("memory keychain")
-    };
+    let memory = fake.memory_backend();
     assert!(memory.lock().unwrap().entries.is_empty());
 }
 
@@ -659,9 +645,7 @@ fn deletion_can_retry_after_each_keychain_failure() {
             assert!(store.read(STORE_KEYS_ENTRY).unwrap().is_some());
         }
         store.delete_store_entries().unwrap();
-        let Backend::Memory(memory) = &fake.backend else {
-            panic!("memory keychain")
-        };
+        let memory = fake.memory_backend();
         assert!(memory.lock().unwrap().entries.is_empty());
     }
 }

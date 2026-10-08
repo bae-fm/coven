@@ -1,6 +1,6 @@
 use super::*;
 use coven_crypto::{custody::InMemoryCustody, MemberKeys, StoreKey};
-use coven_database::{DatabaseBuilder, EntryOutcome};
+use coven_database::{DatabaseBuilder, EntryOutcome, Migration, SyncedTable};
 use coven_format::store_log::{CircleKeyId, MemberPublicKeys, MemberRole};
 use coven_foundation::{
     clock::FixedClock,
@@ -14,14 +14,18 @@ use coven_storage::{
 use std::time::Duration;
 use uuid::Uuid;
 
-struct Device {
-    storage: Arc<MemoryStorage>,
-    sync: StoreLogSync,
-    db: Database,
-    directory: StoreDir,
-    custody: Arc<InMemoryCustody<StoreKeyring>>,
-    member: MemberKeys,
-    clock: Arc<FixedClock>,
+#[cfg(test)]
+pub(crate) struct Device {
+    pub(crate) storage: Arc<MemoryStorage>,
+    pub(crate) sync: StoreLogSync,
+    pub(crate) writes: crate::DeviceLogSync,
+    pub(crate) db: Database,
+    pub(crate) directory: StoreDir,
+    pub(crate) custody: Arc<InMemoryCustody<StoreKeyring>>,
+    pub(crate) identity: Arc<InMemoryCustody<MemberKeys>>,
+    pub(crate) member: MemberKeys,
+    pub(crate) clock: Arc<FixedClock>,
+    pub(crate) ids: coven_foundation::id_source::IdSourceRef,
     _temporary: tempfile::TempDir,
 }
 
@@ -46,65 +50,128 @@ fn public(member: &MemberKeys) -> MemberPublicKeys {
     }
 }
 fn storage() -> Arc<MemoryStorage> {
-    Arc::new(
-        MemoryStorage::new(
-            StorageConfig::S3 {
-                bucket: "test".into(),
-                region: "us-east-1".into(),
-                endpoint: None,
-                prefix: "store".into(),
-            },
-            Arc::new(FixedClock::new(UNIX_EPOCH)),
-        )
-        .unwrap(),
-    )
-}
-async fn open(directory: StoreDir, clock: Arc<FixedClock>) -> Database {
-    DatabaseBuilder::new(directory)
-        .synced_tables(vec![])
-        .migrations(vec![])
-        .clock(clock)
-        .open()
-        .await
-        .unwrap()
+    Arc::new(MemoryStorage::builder().build().unwrap())
 }
 async fn device(storage: Arc<MemoryStorage>, n: u64, member: MemberKeys, store: StoreId) -> Device {
-    let temporary = tempfile::tempdir().unwrap();
-    let ids = SequentialIds::new();
-    for _ in 1..n {
-        ids.new_device_id();
-    }
-    let directory = StoreLayout::new(temporary.path().into())
-        .create_store_dir(store, "Store", &ids)
-        .unwrap();
-    let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1)));
-    let db = open(directory.clone(), clock.clone()).await;
-    let custody = Arc::new(InMemoryCustody::new(StoreKeyring::new(
-        StoreKey::generate(key(999)).unwrap(),
-    )));
-    custody.forget().unwrap();
-    let sync = StoreLogSync::new(
-        storage.clone(),
-        db.clone(),
-        custody.clone(),
-        Arc::new(InMemoryCustody::new(member.clone())),
-        clock.clone(),
-        Arc::new(coven_foundation::id_source::UuidIds),
-        directory.clone(),
-    );
-    Device {
+    Device::new(
         storage,
-        sync,
-        db,
-        directory,
-        custody,
+        n,
         member,
-        clock,
-        _temporary: temporary,
-    }
+        store,
+        vec![],
+        vec![],
+        Arc::new(coven_foundation::id_source::UuidIds),
+    )
+    .await
 }
 
 impl Device {
+    pub(crate) async fn new(
+        storage: Arc<MemoryStorage>,
+        n: u64,
+        member: MemberKeys,
+        store: StoreId,
+        tables: Vec<SyncedTable>,
+        migrations: Vec<Migration>,
+        ids: coven_foundation::id_source::IdSourceRef,
+    ) -> Self {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory_ids = SequentialIds::new();
+        for _ in 1..n {
+            directory_ids.new_device_id();
+        }
+        let directory = StoreLayout::new(temporary.path().into())
+            .create_store_dir(store, "Store", &directory_ids)
+            .unwrap();
+        let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1)));
+        let db = DatabaseBuilder::new(directory.clone())
+            .synced_tables(tables)
+            .migrations(migrations)
+            .clock(clock.clone())
+            .open()
+            .await
+            .unwrap();
+        let custody = Arc::new(InMemoryCustody::empty());
+        let identity = Arc::new(InMemoryCustody::new(member.clone()));
+        let writes = crate::DeviceLogSync::new(
+            storage.clone(),
+            db.clone(),
+            custody.clone(),
+            identity.clone(),
+        );
+        let sync = StoreLogSync::new(
+            storage.clone(),
+            db.clone(),
+            custody.clone(),
+            identity.clone(),
+            clock.clone(),
+            ids.clone(),
+            directory.clone(),
+        );
+        Self {
+            storage,
+            sync,
+            writes,
+            db,
+            directory,
+            custody,
+            identity,
+            member,
+            clock,
+            ids,
+            _temporary: temporary,
+        }
+    }
+
+    pub(crate) async fn reopen(
+        &mut self,
+        storage: Arc<MemoryStorage>,
+        tables: Vec<SyncedTable>,
+        migrations: Vec<Migration>,
+    ) {
+        self.db.close().await.unwrap();
+        self.db = DatabaseBuilder::new(self.directory.clone())
+            .synced_tables(tables)
+            .migrations(migrations)
+            .clock(self.clock.clone())
+            .open()
+            .await
+            .unwrap();
+        self.storage = storage;
+        self.writes = self.writes();
+        self.sync = StoreLogSync::new(
+            self.storage.clone(),
+            self.db.clone(),
+            self.custody.clone(),
+            self.identity.clone(),
+            self.clock.clone(),
+            self.ids.clone(),
+            self.directory.clone(),
+        );
+    }
+
+    pub(crate) async fn operation(
+        &self,
+        id: coven_database::OperationId,
+    ) -> coven_database::OperationRecord {
+        self.db
+            .operations()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == id)
+            .expect("pending operation")
+    }
+
+    pub(crate) async fn step(
+        &mut self,
+        id: coven_database::OperationId,
+    ) -> Result<crate::operations::Progress, SyncError> {
+        let row = self.operation(id).await;
+        let data = crate::operation_data::Data::read(&row)?;
+        self.sync.operation_step(&row, data).await
+    }
+
     fn reseal(&self, upload: &coven_database::StoreLogUpload) -> Vec<u8> {
         object::seal_upload(
             upload,
@@ -119,7 +186,7 @@ impl Device {
             self.storage.clone(),
             self.db.clone(),
             self.custody.clone(),
-            Arc::new(InMemoryCustody::new(self.member.clone())),
+            self.identity.clone(),
         )
     }
 
@@ -157,17 +224,7 @@ impl Device {
         self.db.local_store_log().await.unwrap().log
     }
     async fn restart(&mut self, storage: Arc<MemoryStorage>) {
-        self.db.close().await.unwrap();
-        self.db = open(self.directory.clone(), self.clock.clone()).await;
-        self.sync = StoreLogSync::new(
-            storage,
-            self.db.clone(),
-            self.custody.clone(),
-            Arc::new(InMemoryCustody::new(self.member.clone())),
-            self.clock.clone(),
-            self.sync.ids.clone(),
-            self.directory.clone(),
-        );
+        self.reopen(storage, vec![], vec![]).await;
     }
     async fn device(&self) -> DeviceId {
         self.db.local_store_log().await.unwrap().device
@@ -619,139 +676,6 @@ async fn outside_admin_does_not_keep_circle_key_and_noop_keeps_named_store_key()
     }
 }
 
-use crate::replay::tests as history;
-use coven_format::store_log::MemberRole::{Admin, Member};
-
-fn examples() -> Vec<(history::History, usize)> {
-    let mut cases = Vec::new();
-    let mut h = history::household(Member, Member).prefix(2);
-    h.push(1, 1, &[0, 1], history::device(2));
-    h.push(0, 3, &[0, 1], history::role(1, Admin));
-    cases.push((h, 2));
-    let mut h = history::household(Admin, Member).prefix(4);
-    h.push(0, 0, &[0, 1, 2, 3], history::add(3, Member));
-    h.push(1, 1, &[0, 1, 2, 3], history::role(2, Admin));
-    cases.push((h, 4));
-    let mut h = history::household(Admin, Member).prefix(3);
-    h.push(1, 4, &[0, 1, 2], history::device(4));
-    h.push(0, 0, &[0, 1, 2], history::remove(1, &[]));
-    cases.push((h, 3));
-    let mut h = history::household(Member, Admin);
-    h.push(0, 0, &[0, 1, 2, 3, 4], history::role(1, Admin));
-    h.push(2, 2, &[0, 1, 2, 3, 4], history::role(1, Member));
-    cases.push((h, 5));
-    let mut h = history::household(Admin, Member).prefix(3);
-    h.push(0, 0, &[0, 1, 2], history::remove(1, &[]));
-    h.push(1, 1, &[0, 1, 2], history::remove(0, &[]));
-    cases.push((h, 3));
-    let mut h = history::household(Admin, Member).prefix(3);
-    h.all(0, 0, history::add(3, Member));
-    h.push(0, 0, &[0, 1, 2, 3], history::add(2, Member));
-    h.push(1, 1, &[0, 1, 2, 3], history::remove(3, &[]));
-    cases.push((h, 4));
-    let mut h = history::household(Admin, Member).prefix(3);
-    h.push(0, 0, &[0, 1, 2], history::add(3, Member));
-    h.push(1, 1, &[0, 1, 2], history::add(3, Member));
-    cases.push((h, 3));
-    let mut h = history::household(Admin, Admin);
-    h.push(0, 0, &[0, 1, 2, 3, 4], history::remove(1, &[]));
-    h.push(1, 1, &[0, 1, 2, 3, 4], history::remove(2, &[]));
-    h.push(2, 2, &[0, 1, 2, 3, 4], history::remove(0, &[]));
-    cases.push((h, 5));
-    let mut h = history::losing_removal();
-    h.push(1, 1, &[0, 1, 2, 3], history::remove(0, &[]));
-    h.push(0, 0, &[0, 1, 2, 3], history::remove(1, &[]));
-    h.push(1, 4, &[0, 1, 2, 3], history::device(5));
-    cases.push((h, 4));
-    let mut h = history::losing_removal();
-    h.push(0, 0, &[0, 1, 2, 3], history::add(2, Admin));
-    h.push(1, 1, &[0, 1, 2, 3], history::role(1, Member));
-    h.push(1, 4, &[0, 1, 2, 3], history::remove(0, &[]));
-    cases.push((h, 4));
-    let mut h = history::gifts();
-    let past: Vec<_> = (0..h.entries.len()).collect();
-    let prefix = past.len();
-    h.push(0, 0, &past, history::leave(0, 1));
-    h.push(0, 3, &past, history::remove(0, &[0]));
-    cases.push((h, prefix));
-    let mut h = history::gifts();
-    let past: Vec<_> = (0..h.entries.len()).collect();
-    h.push(0, 0, &past, history::leave(0, 1));
-    h.push(1, 1, &past, history::delete(0));
-    cases.push((h, past.len()));
-    cases
-}
-
-fn permutations(values: &mut [usize], start: usize, out: &mut Vec<Vec<usize>>) {
-    if start == values.len() {
-        out.push(values.to_vec());
-        return;
-    }
-    for index in start..values.len() {
-        values.swap(start, index);
-        permutations(values, start + 1, out);
-        values.swap(start, index);
-    }
-}
-
-#[tokio::test]
-async fn section_nine_examples_converge_for_every_concurrent_upload_order() {
-    for (case, (history, prefix)) in examples().into_iter().enumerate() {
-        let expected = crate::replay(&history.entries);
-        let mut orders = Vec::new();
-        permutations(
-            &mut (prefix..history.entries.len()).collect::<Vec<_>>(),
-            0,
-            &mut orders,
-        );
-        for order in orders {
-            let storage = storage();
-            // These observers hold a fixture's shared key and are not members
-            // targeted by the history, so §10's stopping rule cannot end replay.
-            let mut left = device(storage.clone(), 98, member(20), store(1)).await;
-            let mut right = device(storage.clone(), 99, member(21), store(1)).await;
-            let key = StoreKey::generate(key(1)).unwrap();
-            for observer in [&left, &right] {
-                observer
-                    .custody
-                    .persist(&StoreKeyring::new(key.clone()))
-                    .unwrap();
-            }
-            // Older store keys remain valid decryption keys. These transport
-            // fixtures use one held key; authoring/key-rotation tests use the owner.
-            let objects: Vec<_> = history
-                .entries
-                .iter()
-                .map(|entry| {
-                    let author = (1..=4)
-                        .map(member)
-                        .find(|m| m.member_id() == entry.author)
-                        .unwrap();
-                    (
-                        object::path(entry.position),
-                        object::seal(entry, &key, &author).unwrap(),
-                    )
-                })
-                .collect();
-            for (path, bytes) in &objects[..prefix] {
-                storage.create(path, bytes).await.unwrap();
-            }
-            left.sync().await;
-            right.sync().await;
-            for index in &order {
-                let (path, bytes) = &objects[*index];
-                storage.create(path, bytes).await.unwrap();
-                left.sync().await;
-            }
-            right.sync().await;
-            let left = left.log().await;
-            let right = right.log().await;
-            assert_eq!(left.replay, expected, "case {case}, {order:?}");
-            assert_eq!(left, right, "case {case}, {order:?}");
-        }
-    }
-}
-
 #[tokio::test]
 async fn only_newer_envelopes_require_an_update() {
     for sealed_key in [false, true] {
@@ -829,7 +753,7 @@ mod objects;
 mod key_distribution;
 
 #[path = "operations_tests.rs"]
-mod operations;
+pub(crate) mod operations;
 
 #[path = "snapshots_tests.rs"]
 mod snapshots;

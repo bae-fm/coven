@@ -15,9 +15,7 @@ async fn transfer_limits_bound_requests_and_an_active_batch_keeps_its_limit() {
         let root = tempfile::tempdir().unwrap();
         let app = TestCoven::new();
         let clock = Arc::new(coven_foundation::clock::ClosureClock(|| UNIX_EPOCH + Duration::from_secs(1000)));
-        let memory = Arc::new(MemoryStorage::new(StorageConfig::S3 {
-            bucket: "files".into(), region: "test".into(), endpoint: None, prefix: "store".into(),
-        }, clock.clone()).unwrap().with_transfer_limits(1024 * 1024, 65536).unwrap());
+        let memory = Arc::new(MemoryStorage::builder().clock(clock.clone()).transfer_limits(1024 * 1024,65536).build().unwrap());
         let layout = StoreLayout::new(root.path().into());
         let directory = app.create_store(&layout, "Files", Arc::new(UuidIds)).await.unwrap();
         let handle = app.builder(layout).clock(clock).storage_connector(memory.clone())
@@ -384,18 +382,11 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         .await
         .unwrap();
     let storage = Arc::new(
-        coven_storage::test_utils::MemoryStorage::new(
-            StorageConfig::S3 {
-                bucket: "files".into(),
-                region: "test".into(),
-                endpoint: None,
-                prefix: "uploaded".into(),
-            },
-            Arc::new(SystemClock),
-        )
-        .unwrap()
-        .with_transfer_limits(65536, 65536)
-        .unwrap(),
+        coven_storage::test_utils::MemoryStorage::builder()
+            .clock(Arc::new(SystemClock))
+            .transfer_limits(65536, 65536)
+            .build()
+            .unwrap(),
     );
     let handle = builder(&app, layout.clone(), ids.clone())
         .storage_connector(storage.clone())
@@ -507,16 +498,16 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         file
     );
     let wrong_location = Arc::new(
-        coven_storage::test_utils::MemoryStorage::new(
-            StorageConfig::S3 {
+        coven_storage::test_utils::MemoryStorage::builder()
+            .location(StorageConfig::S3 {
                 bucket: "other".into(),
                 region: "test".into(),
                 endpoint: None,
                 prefix: "uploaded".into(),
-            },
-            Arc::new(SystemClock),
-        )
-        .unwrap(),
+            })
+            .clock(Arc::new(SystemClock))
+            .build()
+            .unwrap(),
     );
     assert!(matches!(
         builder(&app, layout.clone(), ids.clone())

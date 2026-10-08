@@ -117,8 +117,17 @@ async fn only_success_removes_a_write_and_its_session_and_advances_the_queue() {
         db.upload_succeeded(ids[1]).await,
         Err(DbError::UploadNotOldest { .. })
     ));
-    db.inspect_writer(|db| db.batch("CREATE TRIGGER _coven_fail AFTER DELETE ON _coven_uploads BEGIN SELECT RAISE(ABORT,'failed removal'); END").unwrap());
-    assert!(db.upload_succeeded(first).await.is_err());
+    db.inspect_writer(|db| {
+        db.fail_at(
+            "_coven_fail",
+            "AFTER DELETE ON _coven_uploads",
+            "failed removal",
+        )
+    });
+    assert!(matches!(
+        db.upload_succeeded(first).await,
+        Err(DbError::Sqlite(_))
+    ));
     assert_eq!(selected(&db).await, fixed);
     assert_eq!(
         db.write_upload_session(first).await.unwrap(),
@@ -143,15 +152,22 @@ async fn key_selection_rolls_back_and_competing_attempts_keep_one_choice() {
         .unwrap();
     let original = records(&db);
     let id = original[0].header.position;
-    db.inspect_writer(|db| db.batch("CREATE TRIGGER _coven_fail AFTER UPDATE OF sealing_keys ON _coven_uploads BEGIN SELECT RAISE(ABORT,'failed keys'); END").unwrap());
-    assert!(attempt(&db, 19).await.is_err());
+    db.inspect_writer(|db| {
+        db.fail_at(
+            "_coven_fail",
+            "AFTER UPDATE OF sealing_keys ON _coven_uploads",
+            "failed keys",
+        )
+    });
+    assert!(matches!(attempt(&db, 19).await, Err(DbError::Sqlite(_))));
     assert_eq!(selected(&db).await, (id, None));
     assert_eq!(records(&db), original);
     db.inspect_writer(|db| db.batch("DROP TRIGGER _coven_fail").unwrap());
-    assert!(db
-        .prepare_write_upload(|_, _, _| Err(DbError::StoreClosed))
-        .await
-        .is_err());
+    assert!(matches!(
+        db.prepare_write_upload(|_, _, _| Err(DbError::StoreClosed))
+            .await,
+        Err(DbError::StoreClosed)
+    ));
     assert_eq!(selected(&db).await, (id, None));
     assert!(db
         .prepare_write_upload(|_, _, _| Ok(WriteObjectPrefix {
@@ -309,8 +325,9 @@ fn upload_completion_does_not_retain_the_object_in_sqlite_observation() {
             .env(CHILD, "1")
             .output()
             .unwrap();
-        assert!(
-            output.status.success(),
+        assert_eq!(
+            output.status.code(),
+            Some(86),
             "{}{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
@@ -356,4 +373,5 @@ fn upload_completion_does_not_retain_the_object_in_sqlite_observation() {
         );
         db.close().await.unwrap();
     });
+    std::process::exit(86);
 }

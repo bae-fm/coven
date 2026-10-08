@@ -1,4 +1,5 @@
 use super::*;
+use crate::tests::Generator;
 use crate::{chunks::PlaintextChunks, snapshot::SnapshotEncoder, test_utils, value::Value};
 
 #[test]
@@ -81,16 +82,9 @@ fn missing_end_markers_partial_frames_and_wrong_prefix_audiences_are_refused() {
 
 #[test]
 fn generated_snapshot_chunks_never_panic() {
-    let mut state = 0x29fa_143du64;
+    let mut source = Generator(0x29fa_143du64);
     for n in 0..25_000 {
-        let mut bytes: Vec<_> = (0..n % 512)
-            .map(|_| {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
-                state as u8
-            })
-            .collect();
+        let mut bytes: Vec<_> = (0..n % 512).map(|_| source.next() as u8).collect();
         if n % 2 == 0 && bytes.len() >= 7 {
             bytes[..3].copy_from_slice(&[5, 0, 1]);
             let length = (bytes.len() - 7) as u32;

@@ -382,6 +382,7 @@ fn provider(url: &str) -> StorageConnection<DropboxStorage> {
     .unwrap();
     storage.api = format!("{url}/2");
     storage.content = storage.api.clone();
+    storage.removal_poll_interval = std::time::Duration::from_millis(1);
     StorageConnection::from_provider(Arc::new(storage))
 }
 #[tokio::test]
@@ -389,28 +390,12 @@ async fn missing_session_and_destination_is_expired() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::file(
-        coven_foundation::id_source::DeviceId(31),
-        coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xff; 16])),
-    );
-    let mut upload = storage.begin_upload(&path, 4).await.unwrap();
-    state.lock().unwrap().uploads.clear();
-    let error = storage.resume_upload(&mut upload).await.unwrap_err();
-    assert_eq!(error.failure(), StorageFailure::SessionExpired);
+    let error = crate::test_utils::Conformance::new(Arc::new(storage))
+        .expired_session(async {
+            state.lock().unwrap().uploads.clear();
+        })
+        .await;
     assert!(std::error::Error::source(&error).is_some());
-    let replacement = storage.restart_upload(&upload).await.unwrap();
-    assert_eq!(replacement.path(), &path);
-    assert_eq!(replacement.total_bytes(), b"data".len() as u64);
-    assert_eq!(replacement.confirmed_bytes(), 0);
-    let recorded = replacement.encode().unwrap();
-    let mut replacement = UploadSession::decode(recorded.as_bytes()).unwrap();
-    storage.resume_upload(&mut replacement).await.unwrap();
-    storage
-        .upload_part(&mut replacement, b"data")
-        .await
-        .unwrap();
-    storage.finish_upload(&mut replacement).await.unwrap();
-    assert_eq!(storage.read(&path).await.unwrap(), b"data");
 }
 #[tokio::test]
 async fn conformance_ranges_pagination_and_account_sharing() {
@@ -442,38 +427,11 @@ async fn resume_queries_the_stored_offset_after_lost_part_reply() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::file(
-        coven_foundation::id_source::DeviceId(31),
-        coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xbb; 16])),
-    );
-    let mut upload = storage
-        .begin_upload(&path, 8 * 1024 * 1024 + 1)
-        .await
-        .unwrap();
-    let recorded = upload.encode().unwrap();
-    state.lock().unwrap().fail_reply = true;
-    assert!(storage
-        .upload_part(&mut upload, &vec![42; 8 * 1024 * 1024])
-        .await
-        .is_err());
-    drop(upload);
-    let storage = provider(&server.url);
-    let mut upload = UploadSession::decode(recorded.as_bytes()).unwrap();
-    storage.resume_upload(&mut upload).await.unwrap();
-    assert_eq!(upload.confirmed, 8 * 1024 * 1024);
-    storage.upload_part(&mut upload, b"z").await.unwrap();
-    storage.finish_upload(&mut upload).await.unwrap();
-    storage.finish_upload(&mut upload).await.unwrap();
-    assert_eq!(
-        storage
-            .read_range(
-                &path,
-                ByteRange::new(8 * 1024 * 1024, 8 * 1024 * 1024 + 1).unwrap()
-            )
-            .await
-            .unwrap(),
-        b"z"
-    );
+    crate::test_utils::Conformance::new(Arc::new(storage))
+        .lost_part_reply(8 * 1024 * 1024, async {
+            state.lock().unwrap().fail_reply = true;
+        })
+        .await;
 }
 
 #[tokio::test]
@@ -555,20 +513,25 @@ async fn abort_does_not_remove_an_upload_published_before_a_lost_reply() {
 async fn create_uploads_an_oversized_write_in_parts() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-    let storage = provider(&server.url);
+    let mut storage = provider(&server.url);
     let path = ObjectPath::device_log(
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
     );
     assert_eq!(storage.single_request_limit(), 150 * 1024 * 1024);
+    Arc::get_mut(&mut storage.provider)
+        .unwrap()
+        .single_request_limit = 4;
     let mut bytes = vec![0x7b; storage.single_request_limit() as usize];
     storage.create(&path, &bytes).await.unwrap();
     assert!(state.lock().unwrap().uploads.is_empty());
+    assert_eq!(state.lock().unwrap().next_upload, 0);
     storage.delete(&path).await.unwrap();
     bytes.push(8);
     storage.create(&path, &bytes).await.unwrap();
     assert_eq!(state.lock().unwrap().objects[&path.absolute()], bytes);
     assert!(state.lock().unwrap().uploads.is_empty());
+    assert_eq!(state.lock().unwrap().next_upload, 1);
 }
 
 #[tokio::test]
@@ -602,39 +565,14 @@ async fn listing_retains_server_time_and_size_across_pages_and_retries() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
     let storage = provider(&server.url);
-    let first = ObjectPath::device_log(
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
-    let second = ObjectPath::device_log(
-        coven_foundation::id_source::DeviceId(32),
-        std::num::NonZeroU64::MIN,
-    );
-    storage.create_once(&first, b"first").await.unwrap();
-    storage.create_once(&second, b"second").await.unwrap();
     let time = crate::providers::http::timestamp(
         &serde_json::json!({"time":"2026-10-06T00:00:00Z"}),
         "time",
     )
     .unwrap();
-    let expected = vec![
-        StoredObject {
-            path: first.clone(),
-            size: 5,
-            stored_at: time,
-        },
-        StoredObject {
-            path: second,
-            size: 6,
-            stored_at: time,
-        },
-    ];
-    assert_eq!(
-        storage.list(&ObjectPrefix::device_logs()).await.unwrap(),
-        expected
-    );
-    storage.create_once(&first, b"first").await.unwrap();
-    assert_eq!(storage.list(&ObjectPrefix::all()).await.unwrap(), expected);
+    crate::test_utils::Conformance::new(Arc::new(storage))
+        .listing_times(time, async {})
+        .await;
 }
 
 #[tokio::test]
@@ -723,7 +661,7 @@ async fn asynchronous_removal_waits_for_publication_and_retries_after_completion
     assert_eq!(state.lock().unwrap().sharing_mutations, ["add", "remove"]);
     assert_eq!(
         *clock.0.lock().unwrap(),
-        [std::time::Duration::from_secs(1)]
+        [std::time::Duration::from_millis(1)]
     );
 }
 
@@ -756,7 +694,7 @@ async fn asynchronous_removal_times_out_without_hiding_remaining_access() {
     assert!(state.lock().unwrap().members.contains_key("member"));
     assert_eq!(
         *clock.0.lock().unwrap(),
-        [std::time::Duration::from_secs(1); 60]
+        [std::time::Duration::from_millis(1); 60]
     );
     state.lock().unwrap().removal_job.as_mut().unwrap().statuses =
         [json!({".tag":"complete", "complete":{}})].into();
@@ -850,10 +788,14 @@ async fn permission_failures_reach_every_object_and_upload_caller() {
         },
     ))
     .await;
-    crate::providers::tests::assert_permission_failures(Arc::new(provider(&server.url)), || {
-        denied.store(true, Ordering::SeqCst)
-    })
-    .await;
+    let errors = crate::test_utils::Conformance::new(Arc::new(provider(&server.url)))
+        .permission_failures(async {
+            denied.store(true, Ordering::SeqCst);
+        })
+        .await;
+    assert!(errors
+        .iter()
+        .all(|error| matches!(error, StorageError::Provider { .. })));
 }
 
 #[tokio::test]

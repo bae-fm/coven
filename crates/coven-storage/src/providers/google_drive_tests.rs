@@ -337,28 +337,12 @@ async fn missing_session_and_destination_is_expired() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::file(
-        coven_foundation::id_source::DeviceId(31),
-        coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xff; 16])),
-    );
-    let mut upload = storage.begin_upload(&path, 4).await.unwrap();
-    state.lock().unwrap().uploads.clear();
-    let error = storage.resume_upload(&mut upload).await.unwrap_err();
-    assert_eq!(error.failure(), StorageFailure::SessionExpired);
+    let error = crate::test_utils::Conformance::new(Arc::new(storage))
+        .expired_session(async {
+            state.lock().unwrap().uploads.clear();
+        })
+        .await;
     assert!(std::error::Error::source(&error).is_some());
-    let replacement = storage.restart_upload(&upload).await.unwrap();
-    assert_eq!(replacement.path(), &path);
-    assert_eq!(replacement.total_bytes(), b"data".len() as u64);
-    assert_eq!(replacement.confirmed_bytes(), 0);
-    let recorded = replacement.encode().unwrap();
-    let mut replacement = UploadSession::decode(recorded.as_bytes()).unwrap();
-    storage.resume_upload(&mut replacement).await.unwrap();
-    storage
-        .upload_part(&mut replacement, b"data")
-        .await
-        .unwrap();
-    storage.finish_upload(&mut replacement).await.unwrap();
-    assert_eq!(storage.read(&path).await.unwrap(), b"data");
 }
 fn provider(url: &str) -> StorageConnection<GoogleDriveStorage> {
     let mut storage = GoogleDriveStorage::new(
@@ -379,25 +363,14 @@ async fn session_reopens_and_only_uploader_deletes() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::file(
-        coven_foundation::id_source::DeviceId(31),
-        coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xcc; 16])),
-    );
-    let mut upload = storage
-        .begin_upload(&path, 8 * 1024 * 1024 + 1)
-        .await
-        .unwrap();
-    let recorded = upload.encode().unwrap();
-    state.lock().unwrap().fail_reply = true;
-    assert!(storage
-        .upload_part(&mut upload, &vec![1; 8 * 1024 * 1024])
-        .await
-        .is_err());
-    drop(upload);
-    let storage = provider(&server.url);
-    let mut upload = UploadSession::decode(recorded.as_bytes()).unwrap();
-    storage.resume_upload(&mut upload).await.unwrap();
-    assert_eq!(upload.confirmed, 8 * 1024 * 1024);
+    let storage = Arc::new(storage);
+    crate::test_utils::Conformance::new(storage.clone())
+        .lost_part_reply(8 * 1024 * 1024, async {
+            state.lock().unwrap().fail_reply = true;
+        })
+        .await;
+    let path = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
+    let mut upload = storage.begin_upload(&path, 1).await.unwrap();
     let before_final = upload.encode().unwrap();
     storage.upload_part(&mut upload, b"z").await.unwrap();
     let mut lost_reply = UploadSession::decode(before_final.as_bytes()).unwrap();
@@ -407,10 +380,7 @@ async fn session_reopens_and_only_uploader_deletes() {
     state.lock().unwrap().files.get_mut(&id).unwrap().0["ownedByMe"] = json!(false);
     storage.delete(&path).await.unwrap();
     assert!(storage.list(&ObjectPrefix::all()).await.unwrap().is_empty());
-    assert_eq!(
-        state.lock().unwrap().files[&id].1.len(),
-        8 * 1024 * 1024 + 1
-    );
+    assert_eq!(state.lock().unwrap().files[&id].1.len(), 1);
 }
 #[tokio::test]
 async fn two_uploads_cannot_publish_different_bytes_at_one_path() {
@@ -665,39 +635,14 @@ async fn listing_retains_server_time_and_size_across_pages_and_retries() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
     let storage = provider(&server.url);
-    let first = ObjectPath::device_log(
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
-    let second = ObjectPath::device_log(
-        coven_foundation::id_source::DeviceId(32),
-        std::num::NonZeroU64::MIN,
-    );
-    storage.create_once(&first, b"first").await.unwrap();
-    storage.create_once(&second, b"second").await.unwrap();
     let time = crate::providers::http::timestamp(
         &serde_json::json!({"time":"2026-10-06T00:00:00Z"}),
         "time",
     )
     .unwrap();
-    let expected = vec![
-        StoredObject {
-            path: first.clone(),
-            size: 5,
-            stored_at: time,
-        },
-        StoredObject {
-            path: second,
-            size: 6,
-            stored_at: time,
-        },
-    ];
-    assert_eq!(
-        storage.list(&ObjectPrefix::device_logs()).await.unwrap(),
-        expected
-    );
-    storage.create_once(&first, b"first").await.unwrap();
-    assert_eq!(storage.list(&ObjectPrefix::all()).await.unwrap(), expected);
+    crate::test_utils::Conformance::new(Arc::new(storage))
+        .listing_times(time, async {})
+        .await;
 }
 
 #[tokio::test]
@@ -814,10 +759,14 @@ async fn permission_failures_reach_every_object_and_upload_caller() {
         },
     ))
     .await;
-    crate::providers::tests::assert_permission_failures(Arc::new(provider(&server.url)), || {
-        denied.store(true, Ordering::SeqCst)
-    })
-    .await;
+    let errors = crate::test_utils::Conformance::new(Arc::new(provider(&server.url)))
+        .permission_failures(async {
+            denied.store(true, Ordering::SeqCst);
+        })
+        .await;
+    assert!(errors
+        .iter()
+        .all(|error| matches!(error, StorageError::Provider { .. })));
 }
 
 #[tokio::test]

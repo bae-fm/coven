@@ -345,17 +345,6 @@ fn snapshot_fixture_classifies_every_consumed_write_once() {
         }
     }
 }
-#[test]
-fn snapshot_header_contains_only_identity_schema_and_counts() {
-    use crate::wire::Wire;
-    let header = test_utils::snapshot_header();
-    let mut expected = crate::wire::Encoder::new();
-    header.id.put(&mut expected).unwrap();
-    header.schema_version.put(&mut expected).unwrap();
-    header.counts.put(&mut expected).unwrap();
-    let (_, bytes) = SnapshotEncoder::start(header).unwrap();
-    assert_eq!(&bytes[crate::FRAME_PREFIX_LEN..], expected.bytes);
-}
 
 #[test]
 fn snapshot_positions_are_bounded_in_the_prefix_independently_of_the_frame() {

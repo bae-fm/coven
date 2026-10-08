@@ -1,31 +1,13 @@
 use super::*;
-use crate::StoreLogSync;
-use coven_crypto::{custody::InMemoryCustody, MemberKeys, StoreKey, StoreKeyring};
-use coven_database::{DatabaseBuilder, Migration, RowIdentity, SyncedTable};
+use coven_crypto::{MemberKeys, StoreKey, StoreKeyring};
+use coven_database::{Migration, RowIdentity, SyncedTable};
 use coven_format::store_log::{MemberPublicKeys, StoreChange};
-use coven_foundation::{
-    clock::FixedClock,
-    files::{StoreDir, StoreLayout},
-    id_source::{DeviceId, IdSource, KeyId, SequentialIds, StoreId},
-};
-use coven_storage::{
-    test_utils::{Faults, MemoryStorage},
-    StorageConfig,
-};
+use coven_foundation::id_source::{DeviceId, IdSource, KeyId, SequentialIds, StoreId};
+use coven_storage::test_utils::{Faults, MemoryStorage};
 use std::time::{Duration, UNIX_EPOCH};
 use uuid::Uuid;
 
-struct Device {
-    sync: DeviceLogSync,
-    log: StoreLogSync,
-    db: Database,
-    directory: StoreDir,
-    keys: Arc<InMemoryCustody<StoreKeyring>>,
-    identity: Arc<InMemoryCustody<MemberKeys>>,
-    clock: Arc<FixedClock>,
-    ids: Arc<SequentialIds>,
-    _temporary: tempfile::TempDir,
-}
+use crate::store_log_sync::tests::Device;
 
 fn member() -> MemberKeys {
     let mut bytes = b"CVMK\x01".to_vec();
@@ -34,62 +16,35 @@ fn member() -> MemberKeys {
 }
 fn storage() -> Arc<MemoryStorage> {
     Arc::new(
-        MemoryStorage::new(
-            StorageConfig::S3 {
-                bucket: "test".into(),
-                region: "test".into(),
-                endpoint: None,
-                prefix: "store".into(),
-            },
-            Arc::new(FixedClock::new(UNIX_EPOCH)),
-        )
-        .unwrap()
-        .with_transfer_limits(1024 * 1024, 64 * 1024)
-        .unwrap(),
+        MemoryStorage::builder()
+            .transfer_limits(1024 * 1024, 64 * 1024)
+            .build()
+            .unwrap(),
     )
 }
-async fn open(directory: StoreDir, clock: Arc<FixedClock>) -> Database {
-    DatabaseBuilder::new(directory)
-        .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
-        .migrations(vec![Migration::sql(1, "notes", "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL);")])
-        .clock(clock).open().await.unwrap()
-}
 async fn device(storage: Arc<MemoryStorage>, number: u64) -> Device {
-    let temporary = tempfile::tempdir().unwrap();
     let ids = Arc::new(SequentialIds::new());
-    for _ in 1..number {
+    for _ in 0..number {
         ids.new_device_id();
     }
-    let directory = StoreLayout::new(temporary.path().into())
-        .create_store_dir(StoreId(Uuid::from_u128(1)), "Store", ids.as_ref())
-        .unwrap();
-    let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1)));
-    let db = open(directory.clone(), clock.clone()).await;
-    let keys = Arc::new(InMemoryCustody::new(StoreKeyring::new(
-        StoreKey::from_bytes(KeyId(Uuid::from_u128(1)), [7; 32]),
-    )));
-    let identity = Arc::new(InMemoryCustody::new(member()));
-    let sync = DeviceLogSync::new(storage.clone(), db.clone(), keys.clone(), identity.clone());
-    let log = StoreLogSync::new(
+    let device = Device::new(
         storage,
-        db.clone(),
-        keys.clone(),
-        identity.clone(),
-        clock.clone(),
-        ids.clone(),
-        directory.clone(),
-    );
-    Device {
-        sync,
-        log,
-        db,
-        directory,
-        keys,
-        identity,
-        clock,
+        number,
+        member(),
+        StoreId(Uuid::from_u128(1)),
+        vec![SyncedTable::new("notes", RowIdentity::SharedKey)],
+        vec![schema::initial()],
         ids,
-        _temporary: temporary,
-    }
+    )
+    .await;
+    device
+        .custody
+        .persist(&StoreKeyring::new(StoreKey::from_bytes(
+            KeyId(Uuid::from_u128(1)),
+            [7; 32],
+        )))
+        .unwrap();
+    device
 }
 async fn group(storage: Arc<MemoryStorage>, count: u64) -> Vec<Device> {
     let mut devices = Vec::new();
@@ -97,7 +52,7 @@ async fn group(storage: Arc<MemoryStorage>, count: u64) -> Vec<Device> {
         devices.push(device(storage.clone(), number).await);
     }
     devices[0]
-        .log
+        .sync
         .make_and_upload_entry(StoreChange::CreateStore {
             store: StoreId(Uuid::from_u128(1)),
             name: "Store".into(),
@@ -115,7 +70,7 @@ async fn group(storage: Arc<MemoryStorage>, count: u64) -> Vec<Device> {
         .unwrap();
     for number in 2..=count {
         devices[0]
-            .log
+            .sync
             .make_and_upload_entry(StoreChange::AddDevice {
                 device: DeviceId(number),
                 name: number.to_string(),
@@ -124,7 +79,7 @@ async fn group(storage: Arc<MemoryStorage>, count: u64) -> Vec<Device> {
             .unwrap();
     }
     for device in &mut devices {
-        device.log.sync_store_log().await.unwrap();
+        device.sync.sync_store_log().await.unwrap();
     }
     devices
 }
@@ -165,10 +120,10 @@ async fn offline_writes_converge_on_two_and_three_devices() {
                 })
                 .await
                 .unwrap();
-            assert_eq!(device.sync.upload_writes().await.unwrap().len(), 1);
+            assert_eq!(device.writes.upload_writes().await.unwrap().len(), 1);
         }
         for device in &mut devices {
-            device.sync.download_writes().await.unwrap();
+            device.writes.download_writes().await.unwrap();
         }
         let expected = rows(&devices[0].db).await;
         for device in &devices {
@@ -186,21 +141,21 @@ async fn causal_wait_applies_when_the_missing_write_arrives() {
         "INSERT INTO notes VALUES('one','first','body')",
     )
     .await;
-    devices[0].sync.upload_writes().await.unwrap();
-    devices[1].sync.download_writes().await.unwrap();
+    devices[0].writes.upload_writes().await.unwrap();
+    devices[1].writes.download_writes().await.unwrap();
     sql(&devices[1].db, "UPDATE notes SET title='second'").await;
-    devices[1].sync.upload_writes().await.unwrap();
+    devices[1].writes.upload_writes().await.unwrap();
     let path = ObjectPath::device_log(DeviceId(1), 1.try_into().unwrap());
     let bytes = storage.read(&path).await.unwrap();
     storage.delete(&path).await.unwrap();
-    devices[2].sync.download_writes().await.unwrap();
+    devices[2].writes.download_writes().await.unwrap();
     assert!(rows(&devices[2].db).await.is_empty());
 
     devices[2].clock.set(UNIX_EPOCH + Duration::from_secs(6));
-    devices[2].sync.download_writes().await.unwrap();
+    devices[2].writes.download_writes().await.unwrap();
     assert!(rows(&devices[2].db).await.is_empty());
     storage.create(&path, &bytes).await.unwrap();
-    devices[2].sync.download_writes().await.unwrap();
+    devices[2].writes.download_writes().await.unwrap();
     assert_eq!(rows(&devices[2].db).await, rows(&devices[1].db).await);
 }
 
@@ -212,7 +167,7 @@ async fn posted(storage: &MemoryStorage, device: &Device, number: u64) -> Posted
         panic!("positions prefix");
     };
     let prefix = sealed.prefix().encode().unwrap();
-    let key = device.keys.unlock().unwrap().unwrap();
+    let key = device.custody.unlock().unwrap().unwrap();
     let plain = key
         .store_key(key_id)
         .unwrap()
@@ -229,7 +184,7 @@ async fn posted(storage: &MemoryStorage, device: &Device, number: u64) -> Posted
 async fn positions_never_include_an_unpublished_local_write() {
     let storage = storage();
     let mut devices = group(storage.clone(), 2).await;
-    assert!(devices[0].sync.post_positions().await.unwrap());
+    assert!(devices[0].writes.post_positions().await.unwrap());
     let path = ObjectPath::positions(DeviceId(1));
     let before = storage.read(&path).await.unwrap();
     sql(
@@ -237,10 +192,10 @@ async fn positions_never_include_an_unpublished_local_write() {
         "INSERT INTO notes VALUES('one','first','body')",
     )
     .await;
-    assert!(!devices[0].sync.post_positions().await.unwrap());
+    assert!(!devices[0].writes.post_positions().await.unwrap());
     assert_eq!(storage.read(&path).await.unwrap(), before);
-    devices[0].sync.upload_writes().await.unwrap();
-    assert!(devices[0].sync.post_positions().await.unwrap());
+    devices[0].writes.upload_writes().await.unwrap();
+    assert!(devices[0].writes.post_positions().await.unwrap());
     let posted = posted(&storage, &devices[0], 1).await;
     assert_eq!(posted.schema_version, 1);
     assert_eq!(
@@ -271,25 +226,24 @@ async fn fixed_bytes_survive_restart_and_a_lost_completion_reply() {
     let mut faults = Faults::none();
     faults.fail_next = 1;
     storage.set_faults(faults).await;
-    assert!(device.sync.upload_writes().await.is_err());
+    assert!(device.writes.upload_writes().await.is_err());
     let expected = writes::resealed(device).await.1;
-    device.db.close().await.unwrap();
-    device.db = open(device.directory.clone(), device.clock.clone()).await;
-    device.sync = DeviceLogSync::new(
-        storage.clone(),
-        device.db.clone(),
-        device.keys.clone(),
-        device.identity.clone(),
-    );
+    device
+        .reopen(
+            storage.clone(),
+            vec![SyncedTable::new("notes", RowIdentity::SharedKey)],
+            vec![schema::initial()],
+        )
+        .await;
     let mut faults = Faults::none();
     faults.lose_completion_reply = true;
     storage.set_faults(faults).await;
-    assert!(device.sync.upload_writes().await.is_err());
+    assert!(device.writes.upload_writes().await.is_err());
     let path = ObjectPath::device_log(DeviceId(1), 1.try_into().unwrap());
     assert_eq!(storage.read(&path).await.unwrap(), expected);
-    assert_eq!(device.sync.upload_writes().await.unwrap().len(), 1);
+    assert_eq!(device.writes.upload_writes().await.unwrap().len(), 1);
     assert_eq!(storage.read(&path).await.unwrap(), expected);
-    assert!(device.sync.upload_writes().await.unwrap().is_empty());
+    assert!(device.writes.upload_writes().await.unwrap().is_empty());
 }
 
 #[path = "write_seal_tests.rs"]
@@ -329,7 +283,7 @@ mod writes {
     }
 
     pub(super) async fn resealed(device: &Device) -> (WriteId, Vec<u8>) {
-        let ring = device.keys.unlock().unwrap().unwrap();
+        let ring = device.custody.unlock().unwrap().unwrap();
         let member = device.identity.unlock().unwrap().unwrap();
         device
             .db
@@ -422,18 +376,18 @@ async fn fingerprint_comparison_leaves_recovery_to_an_explicit_reload() {
             "INSERT INTO notes VALUES('one','shared','body')",
         )
         .await;
-        devices[0].sync.upload_writes().await.unwrap();
+        devices[0].writes.upload_writes().await.unwrap();
         for device in &mut devices {
-            device.sync.download_writes().await.unwrap();
-            assert!(device.sync.post_positions().await.unwrap());
+            device.writes.download_writes().await.unwrap();
+            assert!(device.writes.post_positions().await.unwrap());
         }
         devices[0]
-            .log
+            .sync
             .write_snapshot(Audience::Store)
             .await
             .unwrap();
         let expected = devices[0]
-            .sync
+            .writes
             .current_positions()
             .await
             .unwrap()
@@ -444,9 +398,9 @@ async fn fingerprint_comparison_leaves_recovery_to_an_explicit_reload() {
             .test_damage_fingerprint(Audience::Store)
             .await
             .unwrap();
-        devices[1].sync.post_positions().await.unwrap();
+        devices[1].writes.post_positions().await.unwrap();
         let damaged = devices[1]
-            .sync
+            .writes
             .current_positions()
             .await
             .unwrap()
@@ -455,12 +409,12 @@ async fn fingerprint_comparison_leaves_recovery_to_an_explicit_reload() {
         assert_ne!(damaged, expected);
         for _ in 0..2 {
             for device in &mut devices {
-                device.sync.compare_fingerprints().await.unwrap();
+                device.writes.compare_fingerprints().await.unwrap();
                 assert!(device.db.operations().await.unwrap().is_empty());
             }
             assert_eq!(
                 devices[1]
-                    .sync
+                    .writes
                     .current_positions()
                     .await
                     .unwrap()
@@ -469,12 +423,12 @@ async fn fingerprint_comparison_leaves_recovery_to_an_explicit_reload() {
                 damaged
             );
         }
-        devices[1].log.reload_from_snapshots().await.unwrap();
-        devices[1].sync.post_positions().await.unwrap();
+        devices[1].sync.reload_from_snapshots().await.unwrap();
+        devices[1].writes.post_positions().await.unwrap();
         for device in &mut devices {
             assert_eq!(
                 device
-                    .sync
+                    .writes
                     .current_positions()
                     .await
                     .unwrap()
@@ -503,19 +457,19 @@ async fn groceries_example_converges_in_every_arrival_order() {
             "INSERT INTO notes VALUES('42','Grocery list','body')",
         )
         .await;
-        devices[0].sync.upload_writes().await.unwrap();
+        devices[0].writes.upload_writes().await.unwrap();
         for device in devices.iter_mut().skip(1) {
-            device.sync.download_writes().await.unwrap();
+            device.writes.download_writes().await.unwrap();
         }
         devices[0].clock.set(UNIX_EPOCH + Duration::from_secs(2));
         sql(&devices[0].db, "UPDATE notes SET title='Groceries'").await;
-        devices[0].sync.upload_writes().await.unwrap();
-        devices[1].sync.download_writes().await.unwrap();
+        devices[0].writes.upload_writes().await.unwrap();
+        devices[1].writes.download_writes().await.unwrap();
         sql(&devices[1].db, "UPDATE notes SET title='Weekly groceries'").await;
-        devices[1].sync.upload_writes().await.unwrap();
+        devices[1].writes.upload_writes().await.unwrap();
         devices[2].clock.set(UNIX_EPOCH + Duration::from_secs(3));
         sql(&devices[2].db, "UPDATE notes SET title='Shopping'").await;
-        devices[2].sync.upload_writes().await.unwrap();
+        devices[2].writes.upload_writes().await.unwrap();
         let mut objects = Vec::new();
         for (device, number) in [(1, 2), (2, 1), (3, 1)] {
             let path = ObjectPath::device_log(DeviceId(device), number.try_into().unwrap());
@@ -525,12 +479,12 @@ async fn groceries_example_converges_in_every_arrival_order() {
         for index in order {
             let (path, bytes) = &objects[index];
             storage.create(path, bytes).await.unwrap();
-            devices[3].sync.download_writes().await.unwrap();
+            devices[3].writes.download_writes().await.unwrap();
         }
         assert_eq!(rows(&devices[3].db).await[0].1, "Shopping", "{order:?}");
-        devices[3].sync.download_writes().await.unwrap();
+        devices[3].writes.download_writes().await.unwrap();
         for device in devices.iter_mut().take(3) {
-            device.sync.download_writes().await.unwrap();
+            device.writes.download_writes().await.unwrap();
         }
         let expected = devices[3]
             .db

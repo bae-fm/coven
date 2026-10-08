@@ -2,7 +2,7 @@
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 use super::keychain::restore_code_store;
-use super::keychain::EntryScope;
+use super::keychain::{EntryScope, KeychainBackend};
 use super::{KeyError, KeychainError};
 use crate::SecretBytes;
 use coven_foundation::id_source::StoreId;
@@ -55,8 +55,14 @@ impl NativeKeychain {
             EntryScope::Synced => Err(KeyError::Unsupported),
         }
     }
+}
 
-    pub(crate) fn read(
+impl KeychainBackend for NativeKeychain {
+    fn supports_synced_restore_codes(&self) -> bool {
+        cfg!(any(target_os = "macos", target_os = "ios"))
+    }
+
+    fn read(
         &self,
         scope: EntryScope,
         service: &str,
@@ -72,7 +78,7 @@ impl NativeKeychain {
         }
     }
 
-    pub(crate) fn write(
+    fn write(
         &self,
         scope: EntryScope,
         service: &str,
@@ -84,12 +90,7 @@ impl NativeKeychain {
             .map_err(|error| KeychainError::from(error).into())
     }
 
-    pub(crate) fn delete(
-        &self,
-        scope: EntryScope,
-        service: &str,
-        account: &str,
-    ) -> Result<(), KeyError> {
+    fn delete(&self, scope: EntryScope, service: &str, account: &str) -> Result<(), KeyError> {
         match self.entry(scope, service, account)?.delete_credential() {
             Ok(()) => Ok(()),
             Err(keyring_core::Error::NoEntry) => {
@@ -101,10 +102,7 @@ impl NativeKeychain {
     }
 
     #[cfg(any(target_os = "macos", target_os = "ios"))]
-    pub(crate) fn synced_restore_codes(
-        &self,
-        service: &str,
-    ) -> Result<Vec<(StoreId, SecretBytes)>, KeyError> {
+    fn synced_restore_codes(&self, service: &str) -> Result<Vec<(StoreId, SecretBytes)>, KeyError> {
         let query = std::collections::HashMap::from([("service", service)]);
         let entries = self.synced.search(&query).map_err(KeychainError::from)?;
         let mut codes = Vec::new();
@@ -131,7 +129,7 @@ impl NativeKeychain {
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-    pub(crate) fn synced_restore_codes(
+    fn synced_restore_codes(
         &self,
         _service: &str,
     ) -> Result<Vec<(StoreId, SecretBytes)>, KeyError> {

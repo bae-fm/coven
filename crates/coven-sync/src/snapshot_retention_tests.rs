@@ -132,13 +132,10 @@ async fn removed_member_logs_belong_to_the_store_owner_and_stay_on_google_drive(
     for google in [false, true] {
         let storage = if google {
             Arc::new(
-                MemoryStorage::new(
-                    StorageConfig::GoogleDrive {
-                        folder_id: "store".into(),
-                    },
-                    Arc::new(FixedClock::new(UNIX_EPOCH)),
-                )
-                .unwrap(),
+                MemoryStorage::builder()
+                    .provider(coven_storage::CloudProvider::GoogleDrive)
+                    .build()
+                    .unwrap(),
             )
         } else {
             snapshot_storage()
@@ -146,13 +143,11 @@ async fn removed_member_logs_belong_to_the_store_owner_and_stay_on_google_drive(
         let mut a = notes_device(storage.clone(), 1).await;
         a.create(key(1)).await;
         let mut b = device(storage.clone(), 2, member(2), store(1)).await;
-        b.db.close().await.unwrap();
-        b.db = open_notes(b.directory.clone(), b.clock.clone()).await;
-        b.sync.database = b.db.clone();
+        b.reopen(storage.clone(), notes_tables(), notes_migrations())
+            .await;
         let mut c = device(storage.clone(), 3, member(3), store(1)).await;
-        c.db.close().await.unwrap();
-        c.db = open_notes(c.directory.clone(), c.clock.clone()).await;
-        c.sync.database = c.db.clone();
+        c.reopen(storage.clone(), notes_tables(), notes_migrations())
+            .await;
         a.add(&b.member, MemberRole::Member).await;
         a.add(&c.member, MemberRole::Admin).await;
         add_device(&mut b).await;

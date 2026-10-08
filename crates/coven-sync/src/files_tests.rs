@@ -8,7 +8,7 @@ use coven_foundation::{
     files::StoreLayout,
     id_source::{StoreId, UuidIds},
 };
-use coven_storage::{test_utils::MemoryStorage, StorageConfig};
+use coven_storage::test_utils::MemoryStorage;
 use std::time::{Duration, SystemTime};
 
 const CHUNK: usize = 64 * 1024;
@@ -49,15 +49,12 @@ impl Fixture {
             .await
             .unwrap();
         let storage = Arc::new(
-            MemoryStorage::new(
-                StorageConfig::Dropbox {
-                    namespace_id: "files".into(),
-                },
-                clock.clone(),
-            )
-            .unwrap()
-            .with_transfer_limits(CHUNK as u64, CHUNK)
-            .unwrap(),
+            MemoryStorage::builder()
+                .provider(coven_storage::CloudProvider::Dropbox)
+                .clock(clock.clone())
+                .transfer_limits(CHUNK as u64, CHUNK)
+                .build()
+                .unwrap(),
         );
         let files = Files::new(
             FileDatabase::new(database.clone()),

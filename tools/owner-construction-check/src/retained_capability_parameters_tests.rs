@@ -66,10 +66,15 @@ fn retained_owner_runtime_method_cannot_accept_the_store_directory() {
     let graph = OwnerGraph::collect(&files, &POLICY);
     let violations = find_retained_capability_parameter_violations(&files, &graph.owners, &POLICY);
 
-    assert_eq!(violations.len(), 1);
-    assert!(violations[0].message.contains("Rows"));
-    assert!(violations[0].message.contains("execute"));
-    assert!(violations[0].message.contains("StoreDir"));
+    assert_eq!(
+        violations,
+        [Finding::new(
+            "crates/coven/src/rows.rs",
+            11,
+            "Rows::execute accepts construction-only capability StoreDir at runtime",
+            "a method never takes a raw capability; it uses the one its owner was built with"
+        )]
+    );
 }
 
 #[test]
@@ -103,7 +108,13 @@ fn trait_implementations_have_the_same_parameter_boundary_as_explicit_capabiliti
     ];
     let graph = OwnerGraph::collect(&files, &POLICY);
     let violations = find_retained_capability_parameter_violations(&files, &graph.owners, &POLICY);
-    assert_eq!(violations.len(), 1, "{violations:?}");
-    assert!(violations[0].message.contains("SuppliedClock"));
-    assert!(violations[0].message.contains("run"));
+    assert_eq!(
+        violations,
+        [Finding::new(
+            "crates/coven/src/runtime.rs",
+            6,
+            "Runtime::run accepts construction-only capability SuppliedClock at runtime",
+            "a method never takes a raw capability; it uses the one its owner was built with"
+        )]
+    );
 }

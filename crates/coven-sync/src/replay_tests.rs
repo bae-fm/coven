@@ -902,7 +902,10 @@ async fn replay_cost() {
     let start = Instant::now();
     let result = replay(&h.entries);
     let elapsed = start.elapsed();
-    println!("2,000 entries: one full replay {elapsed:?}");
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "2,000-entry replay took {elapsed:?}"
+    );
     let temporary = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(temporary.path().to_owned());
     let directory = layout
@@ -934,7 +937,19 @@ async fn replay_cost() {
         applied.replay = replay;
         last_apply = start.elapsed();
     }
-    println!("2,000 entries: sequential application including SQLite {:?}; last replay {last_replay:?}; last application {last_apply:?}", started.elapsed());
+    let application = started.elapsed();
+    assert!(
+        application < std::time::Duration::from_secs(60),
+        "sequential application took {application:?}"
+    );
+    assert!(
+        last_replay < std::time::Duration::from_secs(1),
+        "last replay took {last_replay:?}"
+    );
+    assert!(
+        last_apply < std::time::Duration::from_secs(1),
+        "last application took {last_apply:?}"
+    );
     assert_eq!(applied.replay, result);
     let mut expected = applied;
     expected.entries.sort_by_key(|entry| entry.entry.timestamp);

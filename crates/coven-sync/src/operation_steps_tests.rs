@@ -2,11 +2,8 @@ use super::*;
 use coven_database::{Migration, RowIdentity, SyncedTable};
 
 async fn rows(d: &mut Device) {
-    d.db.close().await.unwrap();
-    d.db = DatabaseBuilder::new(d.directory.clone()).synced_tables(vec![SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience")])
-        .migrations(vec![Migration::sql(1, "notes", "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL, audience TEXT NOT NULL)")])
-        .clock(d.clock.clone()).open().await.unwrap();
-    d.sync.database = d.db.clone();
+    d.reopen(d.storage.clone(), vec![SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience")],
+        vec![Migration::sql(1, "notes", "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL, audience TEXT NOT NULL)")]).await;
 }
 async fn write(d: &Device, circle: CircleId, n: u128) {
     d.db.write(move |sql| {
@@ -29,13 +26,13 @@ async fn count(d: &Device) -> i64 {
         .unwrap()
 }
 async fn transfer(a: &Device, b: &Device) {
-    for record in a.db.test_queued_writes().await.unwrap() {
-        let position = record.header.position;
+    let records = a.db.test_queued_writes().await.unwrap();
+    a.writes().upload_writes().await.unwrap();
+    for record in records {
         assert!(!matches!(
             b.db.apply_downloaded(record.into()).await.unwrap(),
             coven_database::ApplyOutcome::Waiting(_)
         ));
-        a.db.test_acknowledge_write(position).await.unwrap();
     }
 }
 
@@ -156,7 +153,7 @@ async fn restarted_circle_deletion_deletes_rows_that_arrived_during_its_first_at
     finish(&mut b, removal).await;
     transfer(&b, &a).await;
     assert_eq!(count(&a).await, 1);
-    for _ in 0..12 {
+    loop {
         match step(&mut a, deletion).await.unwrap() {
             Progress::Waiting => break,
             Progress::Advanced => (),
@@ -377,8 +374,7 @@ async fn a_retained_grant_on_old_access_blocks_removal_until_explicit_retry() {
         .set_retained_access("ben@example.com", shares.clone())
         .await;
     let files = file_owner(&a);
-    let writes = a.writes();
-    let operations = Operations::new(a.sync, files, writes, a.clock.clone());
+    let operations = operation_owner(a.sync, files);
     assert_eq!(
         operations
             .remove_member(&b.member.member_id())
@@ -387,11 +383,10 @@ async fn a_retained_grant_on_old_access_blocks_removal_until_explicit_retry() {
         MemberRemoval::AccessRemains { shares }
     );
     assert!(
-        MemoryStorage::for_recipient(&storage, "replacement@example.com")
+        matches!(MemoryStorage::for_recipient(&storage, "replacement@example.com")
             .unwrap()
             .list(&ObjectPrefix::all())
-            .await
-            .is_err()
+            .await, Err(error) if error.failure() == StorageFailure::PermissionDenied)
     );
     let blocked = operations.blocked_operations().await.unwrap();
     assert_eq!(blocked.len(), 1);
@@ -402,11 +397,12 @@ async fn a_retained_grant_on_old_access_blocks_removal_until_explicit_retry() {
         .retry_blocked_operation(blocked[0].id)
         .await
         .unwrap();
-    assert!(MemoryStorage::for_recipient(&storage, "ben@example.com")
+    assert!(
+        matches!(MemoryStorage::for_recipient(&storage, "ben@example.com")
         .unwrap()
         .list(&ObjectPrefix::all())
-        .await
-        .is_err());
+        .await, Err(error) if error.failure() == StorageFailure::PermissionDenied)
+    );
     operations.close().await.unwrap();
 }
 

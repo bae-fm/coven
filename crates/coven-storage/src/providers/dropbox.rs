@@ -16,6 +16,8 @@ pub(crate) struct DropboxStorage {
     session: OAuthSession,
     api: String,
     content: String,
+    single_request_limit: u64,
+    removal_poll_interval: std::time::Duration,
 }
 impl DropboxStorage {
     /// Construct with this device's own Dropbox sign-in.
@@ -34,6 +36,8 @@ impl DropboxStorage {
             session,
             api: "https://api.dropboxapi.com/2".into(),
             content: "https://content.dropboxapi.com/2".into(),
+            single_request_limit: 150 * 1024 * 1024,
+            removal_poll_interval: std::time::Duration::from_secs(1),
         })
     }
     fn root(&self) -> String {
@@ -139,7 +143,7 @@ impl DropboxStorage {
             .await?;
             match http::string(&value, ".tag")? {
                 "complete" => return remaining_parent_access(&value["complete"], member),
-                "in_progress" => self.session.sleep(std::time::Duration::from_secs(1)).await,
+                "in_progress" => self.session.sleep(self.removal_poll_interval).await,
                 "failed" => return Err(original.into_error(PROVIDER)),
                 _ => {
                     return Err(
@@ -233,7 +237,7 @@ impl ProviderOps for DropboxStorage {
         self.config.clone()
     }
     fn single_request_limit(&self) -> u64 {
-        150 * 1024 * 1024
+        self.single_request_limit
     }
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         self.write(path, bytes, "add").await

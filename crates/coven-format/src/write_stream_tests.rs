@@ -1,5 +1,6 @@
 use super::*;
 use crate::test_utils;
+use crate::tests::Generator;
 use crate::value::Value;
 use coven_merge::Operation;
 use std::collections::BTreeMap;
@@ -182,16 +183,9 @@ fn counts_lengths_order_and_audience_are_checked_at_stream_boundaries() {
 
 #[test]
 fn generated_plaintext_streams_are_rejected_or_reencode_identically() {
-    let mut state = 0xb5f2_106d_7538_901bu64;
+    let mut source = Generator(0xb5f2_106d_7538_901bu64);
     for n in 0..25_000 {
-        let bytes: Vec<_> = (0..n % 512)
-            .map(|_| {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
-                state as u8
-            })
-            .collect();
+        let bytes: Vec<_> = (0..n % 512).map(|_| source.next() as u8).collect();
         if let Ok(record) = decode_plaintext(&bytes) {
             assert_eq!(test_utils::write_plaintext(&record).unwrap(), bytes);
         }

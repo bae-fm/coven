@@ -49,15 +49,16 @@ async fn failed_sealing_reserves_nothing_and_pending_entry_blocks_another() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let entry = coven_format::test_utils::store_log();
-    assert!(db
-        .prepare_store_log(entry.author.clone(), entry.change.clone(), |_, _| Err::<
+    assert!(matches!(
+        db.prepare_store_log(entry.author.clone(), entry.change.clone(), |_, _| Err::<
             StoreLogSealing,
             _,
         >(
             DbError::StoreClosed
         ))
-        .await
-        .is_err());
+        .await,
+        Err(DbError::StoreClosed)
+    ));
     assert!(db.local_store_log().await.unwrap().upload.is_none());
     let id = db
         .prepare_store_log(entry.author.clone(), entry.change.clone(), |_, _| {
@@ -112,11 +113,17 @@ async fn applying_entry_and_retiring_the_queue_roll_back_together() {
         entries: [(id, crate::EntryOutcome::Kept)].into(),
         ..Default::default()
     };
-    db.inspect_writer(|sql| sql.batch("CREATE TRIGGER reject_retirement BEFORE DELETE ON _coven_store_log_uploads BEGIN SELECT RAISE(ABORT,'retirement failed'); END;").unwrap());
-    assert!(db
-        .apply_store_log(checked.clone(), result.clone())
-        .await
-        .is_err());
+    db.inspect_writer(|sql| {
+        sql.fail_at(
+            "reject_retirement",
+            "BEFORE DELETE ON _coven_store_log_uploads",
+            "retirement failed",
+        )
+    });
+    assert!(matches!(
+        db.apply_store_log(checked.clone(), result.clone()).await,
+        Err(DbError::Sqlite(_))
+    ));
     let state = db.local_store_log().await.unwrap();
     assert!(state.log.entries.is_empty());
     assert_eq!(state.upload, Some(pending));

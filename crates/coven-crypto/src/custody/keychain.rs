@@ -1,8 +1,6 @@
 //! One registered service, with independent entries for each store (E1).
 
 use super::platform::NativeKeychain;
-#[cfg(any(test, feature = "test-utils"))]
-use super::KeychainError;
 use super::{KeyError, MEMBER_KEYS_ENTRY, STORE_KEYS_ENTRY};
 use crate::{wire, MaterialError, SecretBytes};
 use coven_foundation::id_source::{DeviceId, StoreId};
@@ -58,45 +56,30 @@ pub(crate) enum EntryScope {
     Synced,
 }
 
-enum Backend {
-    Native(NativeKeychain),
-    #[cfg(any(test, feature = "test-utils"))]
-    Memory(Mutex<MemoryEntries>),
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-struct MemoryEntries {
-    entries: std::collections::BTreeMap<(EntryScope, String), SecretBytes>,
-    fail_after: Option<usize>,
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-impl MemoryEntries {
-    fn check(&mut self) -> Result<(), KeyError> {
-        if self.fail_after == Some(0) {
-            self.fail_after = None;
-            return Err(
-                KeychainError::from(keyring_core::Error::NoStorageAccess(Box::new(
-                    std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        "in-memory keychain refused the operation",
-                    ),
-                )))
-                .into(),
-            );
-        }
-        if let Some(remaining) = &mut self.fail_after {
-            *remaining -= 1;
-        }
-        Ok(())
-    }
+pub(crate) trait KeychainBackend: std::any::Any + Send + Sync {
+    fn read(
+        &self,
+        scope: EntryScope,
+        service: &str,
+        account: &str,
+    ) -> Result<Option<SecretBytes>, KeyError>;
+    fn write(
+        &self,
+        scope: EntryScope,
+        service: &str,
+        account: &str,
+        bytes: &[u8],
+    ) -> Result<(), KeyError>;
+    fn delete(&self, scope: EntryScope, service: &str, account: &str) -> Result<(), KeyError>;
+    fn synced_restore_codes(&self, service: &str) -> Result<Vec<(StoreId, SecretBytes)>, KeyError>;
+    fn supports_synced_restore_codes(&self) -> bool;
 }
 
 /// The OS keychain capability, constructed only at a composition root.
 /// It never exposes native entries or its underlying credential store.
 pub struct Keychain {
     name: String,
-    backend: Backend,
+    backend: Box<dyn KeychainBackend>,
     host_secrets: Mutex<()>,
 }
 
@@ -112,7 +95,7 @@ impl Keychain {
             .ok_or(KeyError::ServiceNotRegistered)?;
         Ok(Arc::new(Self {
             name,
-            backend: Backend::Native(NativeKeychain::new()?),
+            backend: Box::new(NativeKeychain::new()?),
             host_secrets: Mutex::new(()),
         }))
     }
@@ -124,25 +107,7 @@ impl Keychain {
     /// the entire call; a missing or unreadable code is never silently omitted.
     /// Native non-Apple keychains return `KeyError::Unsupported`.
     pub fn synced_restore_codes(&self) -> Result<Vec<(StoreId, SecretBytes)>, KeyError> {
-        let codes = match &self.backend {
-            Backend::Native(native) => native.synced_restore_codes(&self.name)?,
-            #[cfg(any(test, feature = "test-utils"))]
-            Backend::Memory(memory) => {
-                let mut memory = memory
-                    .lock()
-                    .expect("in-memory keychain entries lock is poisoned");
-                memory.check()?;
-                let mut codes = Vec::new();
-                for ((scope, account), bytes) in &memory.entries {
-                    if *scope == EntryScope::Synced {
-                        if let Some(store) = restore_code_store(account)? {
-                            codes.push((store, SecretBytes::new(bytes.as_bytes().to_vec())));
-                        }
-                    }
-                }
-                codes
-            }
-        };
+        let codes = self.backend.synced_restore_codes(&self.name)?;
         let mut stores = std::collections::BTreeMap::new();
         for (store, code) in codes {
             if stores.insert(store, code).is_some() {
@@ -153,84 +118,15 @@ impl Keychain {
     }
 
     fn read(&self, scope: EntryScope, account: &str) -> Result<Option<SecretBytes>, KeyError> {
-        match &self.backend {
-            Backend::Native(native) => native.read(scope, &self.name, account),
-            #[cfg(any(test, feature = "test-utils"))]
-            Backend::Memory(memory) => {
-                let mut memory = memory
-                    .lock()
-                    .expect("in-memory keychain entries lock is poisoned");
-                memory.check()?;
-                Ok(memory
-                    .entries
-                    .get(&(scope, account.to_owned()))
-                    .map(|bytes| SecretBytes::new(bytes.as_bytes().to_vec())))
-            }
-        }
+        self.backend.read(scope, &self.name, account)
     }
 
     fn write(&self, scope: EntryScope, account: &str, bytes: &[u8]) -> Result<(), KeyError> {
-        match &self.backend {
-            Backend::Native(native) => native.write(scope, &self.name, account, bytes),
-            #[cfg(any(test, feature = "test-utils"))]
-            Backend::Memory(memory) => {
-                let mut memory = memory
-                    .lock()
-                    .expect("in-memory keychain entries lock is poisoned");
-                memory.check()?;
-                memory.entries.insert(
-                    (scope, account.to_owned()),
-                    SecretBytes::new(bytes.to_vec()),
-                );
-                Ok(())
-            }
-        }
+        self.backend.write(scope, &self.name, account, bytes)
     }
 
     fn delete(&self, scope: EntryScope, account: &str) -> Result<(), KeyError> {
-        match &self.backend {
-            Backend::Native(native) => native.delete(scope, &self.name, account),
-            #[cfg(any(test, feature = "test-utils"))]
-            Backend::Memory(memory) => {
-                let mut memory = memory
-                    .lock()
-                    .expect("in-memory keychain entries lock is poisoned");
-                memory.check()?;
-                memory.entries.remove(&(scope, account.to_owned()));
-                Ok(())
-            }
-        }
-    }
-
-    /// An isolated in-memory keychain with separate device-only and synced entries.
-    /// It models Apple sync on every test platform without touching the OS.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn in_memory(name: impl Into<String>) -> Result<Arc<Self>, KeyError> {
-        let name = name.into();
-        validate_service(&name)?;
-        Ok(Arc::new(Self {
-            name,
-            backend: Backend::Memory(Mutex::new(MemoryEntries {
-                entries: std::collections::BTreeMap::new(),
-                fail_after: None,
-            })),
-            host_secrets: Mutex::new(()),
-        }))
-    }
-
-    /// Make the fake refuse the next read, write, delete or list before changing state.
-    /// Panics if this is a native keychain.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn fail_next_operation(&self) {
-        match &self.backend {
-            Backend::Memory(memory) => {
-                memory
-                    .lock()
-                    .expect("in-memory keychain entries lock is poisoned")
-                    .fail_after = Some(0);
-            }
-            Backend::Native(_) => panic!("failure injection requires an in-memory keychain"),
-        }
+        self.backend.delete(scope, &self.name, account)
     }
 }
 
@@ -310,11 +206,7 @@ impl StoreKeychain {
     /// Whether this backend supports iCloud restore-code publication. The memory
     /// backend models Apple keychains on every test platform.
     pub fn supports_synced_restore_codes(&self) -> bool {
-        match &self.keychain.backend {
-            Backend::Native(_) => cfg!(any(target_os = "macos", target_os = "ios")),
-            #[cfg(any(test, feature = "test-utils"))]
-            Backend::Memory(_) => true,
-        }
+        self.keychain.backend.supports_synced_restore_codes()
     }
 
     /// Remove every coven entry, including all recorded host secrets, without
@@ -341,14 +233,10 @@ impl StoreKeychain {
         ] {
             self.remove(name)?;
         }
-        match &self.keychain.backend {
-            #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-            Backend::Native(_) => Ok(()),
-            #[cfg(any(target_os = "macos", target_os = "ios"))]
-            Backend::Native(_) => self.delete_synced_restore_code(),
-            #[cfg(any(test, feature = "test-utils"))]
-            Backend::Memory(_) => self.delete_synced_restore_code(),
+        if self.supports_synced_restore_codes() {
+            self.delete_synced_restore_code()?;
         }
+        Ok(())
     }
 
     /// Keep exactly the restore-code bytes in iCloud Keychain (§12.1).
@@ -537,3 +425,7 @@ impl<T> std::fmt::Debug for KeyringCustody<T> {
 #[cfg(test)]
 #[path = "keychain_tests.rs"]
 mod tests;
+
+#[cfg(any(test, feature = "test-utils"))]
+#[path = "keychain_test_utils.rs"]
+mod test_utils;

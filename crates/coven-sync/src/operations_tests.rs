@@ -18,15 +18,30 @@ fn file_owner(d: &Device) -> Files {
     )
 }
 
+pub(crate) fn operation_owner(sync: StoreLogSync, files: Files) -> Operations {
+    let writes = match sync.storage.clone() {
+        Some(storage) => crate::DeviceLogSync::new(
+            storage,
+            sync.database.clone(),
+            sync.store_keys.clone(),
+            sync.member_keys.clone(),
+        ),
+        None => crate::DeviceLogSync::disconnected(
+            sync.database.clone(),
+            sync.store_keys.clone(),
+            sync.member_keys.clone(),
+        ),
+    };
+    let clock = sync.clock.clone();
+    Operations::new(sync, files, writes, clock)
+}
+
 fn google() -> Arc<MemoryStorage> {
     Arc::new(
-        MemoryStorage::new(
-            StorageConfig::GoogleDrive {
-                folder_id: "store-folder".into(),
-            },
-            Arc::new(FixedClock::new(UNIX_EPOCH)),
-        )
-        .unwrap(),
+        MemoryStorage::builder()
+            .provider(coven_storage::CloudProvider::GoogleDrive)
+            .build()
+            .unwrap(),
     )
 }
 async fn accounts(storage: Arc<MemoryStorage>) -> [Device; 3] {
@@ -82,18 +97,10 @@ async fn begin(d: &mut Device, command: Command) -> OperationId {
     }
 }
 async fn step(d: &mut Device, id: OperationId) -> Result<Progress, SyncError> {
-    let row =
-        d.db.operations()
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|r| r.id == id)
-            .unwrap();
-    let data = Data::read(&row)?;
-    d.sync.operation_step(&row, data).await
+    d.step(id).await
 }
 async fn finish(d: &mut Device, id: OperationId) -> Output {
-    for _ in 0..30 {
+    loop {
         match step(d, id).await.unwrap() {
             Progress::Finished(value) | Progress::Reply(Ok(value)) => return value,
             Progress::Reply(Err(error)) => panic!("operation call failed: {error}"),
@@ -101,7 +108,6 @@ async fn finish(d: &mut Device, id: OperationId) -> Output {
             Progress::Waiting => panic!("unexpected wait"),
         }
     }
-    panic!("operation did not finish")
 }
 
 #[tokio::test]
@@ -170,13 +176,10 @@ async fn outside_admin_rotates_gifts_without_learning_its_key() {
     finish(&mut a, id).await;
     c.sync().await;
     let key = a.log().await.replay.state.circles[&gifts].key;
-    assert!(a
-        .custody
-        .unlock()
-        .unwrap()
-        .unwrap()
-        .circle_key(gifts, key)
-        .is_err());
+    assert!(matches!(
+        a.custody.unlock().unwrap().unwrap().circle_key(gifts, key),
+        Err(coven_crypto::MaterialError::UnknownCircleKey { .. })
+    ));
     assert!(c
         .custody
         .unlock()
@@ -216,22 +219,27 @@ async fn another_admin_cannot_share_and_owner_applies_their_revocation() {
         finish(&mut a, pending[0].id).await,
         Output::Removal(MemberRemoval::Revoked)
     ));
-    assert!(recipient.list(&ObjectPrefix::store_logs()).await.is_err());
+    assert!(
+        matches!(recipient.list(&ObjectPrefix::store_logs()).await, Err(error) if error.failure() == StorageFailure::PermissionDenied)
+    );
 }
 
 #[tokio::test]
 async fn restart_after_each_step_uses_the_committed_entry_and_keys() {
-    for crash_step in 0..=5 {
+    'crashes: for crash_step in 0.. {
         let storage = storage();
         let mut a = device(storage.clone(), 1, member(1), store(1)).await;
         a.create(key(1)).await;
         a.add(&member(2), MemberRole::Member).await;
         let id = begin(&mut a, Command::RemoveMember(member(2).member_id())).await;
         for _ in 0..crash_step {
-            assert!(matches!(
-                step(&mut a, id).await.unwrap(),
-                Progress::Advanced
-            ));
+            match step(&mut a, id).await.unwrap() {
+                Progress::Finished(Output::Removal(MemberRemoval::DeleteAccessKey { .. })) => {
+                    break 'crashes
+                }
+                Progress::Advanced => (),
+                _ => panic!("unexpected removal progress"),
+            }
         }
         let before = a.db.local_store_log().await.unwrap().upload;
         let expected = before.as_ref().map(|upload| a.reseal(upload));
@@ -305,10 +313,7 @@ async fn cancelled_app_future_keeps_running_and_permanent_failure_retries_or_dis
     d.add(&member(2), MemberRole::Member).await;
     d.sync.storage = None;
     let files = file_owner(&d);
-    let operations = {
-        let writes = d.writes();
-        crate::Operations::new(d.sync, files, writes, d.clock.clone())
-    };
+    let operations = { operation_owner(d.sync, files) };
     let mut waiting = Box::pin(operations.create_circle("offline"));
     std::future::poll_fn(|cx| {
         use std::future::Future;
@@ -329,7 +334,10 @@ async fn cancelled_app_future_keeps_running_and_permanent_failure_retries_or_dis
     let blocked = operations.blocked_operations().await.unwrap();
     assert_eq!(blocked.len(), 1);
     let blocked = blocked[0].id;
-    assert!(operations.retry_blocked_operation(blocked).await.is_err());
+    assert!(matches!(
+        operations.retry_blocked_operation(blocked).await,
+        Err(SyncError::Database(_))
+    ));
     operations.discard_blocked_operation(blocked).await.unwrap();
     assert!(operations.blocked_operations().await.unwrap().is_empty());
     operations.close().await.unwrap();
@@ -401,13 +409,14 @@ async fn circle_membership_rotates_and_shares_history() {
     b.sync().await;
     let new_key = a.log().await.replay.state.circles[&circle].key;
     assert_ne!(old_key, new_key);
-    assert!(b
-        .custody
-        .unlock()
-        .unwrap()
-        .unwrap()
-        .circle_key(circle, new_key)
-        .is_err());
+    assert!(matches!(
+        b.custody
+            .unlock()
+            .unwrap()
+            .unwrap()
+            .circle_key(circle, new_key),
+        Err(coven_crypto::MaterialError::UnknownCircleKey { .. })
+    ));
     let add = begin(
         &mut a,
         Command::AddCircleMember(circle, c.member.member_id()),
@@ -442,10 +451,7 @@ async fn permanent_storage_failure_preserves_fixed_bytes_for_retry_and_discard()
             MemoryStorage::for_recipient(&storage, "uninvited@example.com").unwrap(),
         ));
         let files = file_owner(&a);
-        let operations = {
-            let writes = a.writes();
-            crate::Operations::new(a.sync, files, writes, a.clock.clone())
-        };
+        let operations = { operation_owner(a.sync, files) };
         let blocked = operations.blocked_operations().await.unwrap();
         assert_eq!(blocked.len(), 1);
         assert_eq!(blocked[0].id, id);
@@ -495,10 +501,7 @@ async fn retained_provider_grants_block_both_requested_and_remote_revocations() 
             a.sync().await;
         }
         let files = file_owner(&a);
-        let operations = {
-            let writes = a.writes();
-            crate::Operations::new(a.sync, files, writes, a.clock.clone())
-        };
+        let operations = { operation_owner(a.sync, files) };
         if !remote {
             assert_eq!(
                 operations
@@ -534,11 +537,12 @@ async fn retained_provider_grants_block_both_requested_and_remote_revocations() 
             .await;
         operations.retry_blocked_operation(id).await.unwrap();
         assert!(operations.blocked_operations().await.unwrap().is_empty());
-        assert!(MemoryStorage::for_recipient(&storage, "cat@example.com")
+        assert!(
+            matches!(MemoryStorage::for_recipient(&storage, "cat@example.com")
             .unwrap()
             .list(&ObjectPrefix::all())
-            .await
-            .is_err());
+            .await, Err(error) if error.failure() == StorageFailure::PermissionDenied)
+        );
         operations.close().await.unwrap();
     }
 }
@@ -570,13 +574,15 @@ async fn removing_a_member_cuts_off_every_device_of_their_account() {
     assert!(
         matches!(phone.sync.sync_store_log().await, Err(SyncFailure::Storage(error)) if error.failure() == StorageFailure::PermissionDenied)
     );
-    assert!(phone
-        .custody
-        .unlock()
-        .unwrap()
-        .unwrap()
-        .store_key(state.store.unwrap().key)
-        .is_err());
+    assert!(matches!(
+        phone
+            .custody
+            .unlock()
+            .unwrap()
+            .unwrap()
+            .store_key(state.store.unwrap().key),
+        Err(coven_crypto::MaterialError::UnknownStoreKey(_))
+    ));
 }
 
 #[tokio::test]
@@ -632,20 +638,11 @@ async fn role_changes_preserve_an_admin_and_owner_accounts_cannot_be_removed() {
     let owner = a.member.member_id();
     let admin = b.member.member_id();
     let files = file_owner(&a);
-    let a = {
-        let writes = a.writes();
-        crate::Operations::new(a.sync, files, writes, a.clock.clone())
-    };
+    let a = { operation_owner(a.sync, files) };
     let files = file_owner(&b);
-    let b = {
-        let writes = b.writes();
-        crate::Operations::new(b.sync, files, writes, b.clock.clone())
-    };
+    let b = { operation_owner(b.sync, files) };
     let files = file_owner(&c);
-    let c = {
-        let writes = c.writes();
-        crate::Operations::new(c.sync, files, writes, c.clock.clone())
-    };
+    let c = { operation_owner(c.sync, files) };
     assert!(matches!(
         b.remove_member(&owner).await,
         Err(SyncError::StoreOwner)
@@ -715,11 +712,10 @@ async fn resumed_removal_uses_the_targets_current_storage_account() {
         .unwrap();
     finish(&mut a, waiting).await;
     assert!(
-        MemoryStorage::for_recipient(&storage, "ben-new@example.com")
+        matches!(MemoryStorage::for_recipient(&storage, "ben-new@example.com")
             .unwrap()
             .list(&ObjectPrefix::all())
-            .await
-            .is_err()
+            .await, Err(error) if error.failure() == StorageFailure::PermissionDenied)
     );
 }
 
@@ -727,20 +723,11 @@ async fn resumed_removal_uses_the_targets_current_storage_account() {
 async fn store_reset_requires_admin_and_circle_reset_requires_membership() {
     let [a, b, c] = accounts(google()).await;
     let files = file_owner(&a);
-    let a = {
-        let writes = a.writes();
-        crate::Operations::new(a.sync, files, writes, a.clock.clone())
-    };
+    let a = { operation_owner(a.sync, files) };
     let files = file_owner(&b);
-    let b = {
-        let writes = b.writes();
-        crate::Operations::new(b.sync, files, writes, b.clock.clone())
-    };
+    let b = { operation_owner(b.sync, files) };
     let files = file_owner(&c);
-    let c = {
-        let writes = c.writes();
-        crate::Operations::new(c.sync, files, writes, c.clock.clone())
-    };
+    let c = { operation_owner(c.sync, files) };
     assert!(matches!(
         c.reset_store().await,
         Err(SyncError::PermissionDenied)
@@ -777,10 +764,10 @@ async fn maintenance_failures_are_hidden_and_retry_on_the_next_pass() {
         SnapshotJob::Retain,
     ] {
         let storage = Arc::new(
-            google()
-                .as_ref()
-                .clone()
-                .with_transfer_limits(65536, 65536)
+            MemoryStorage::builder()
+                .provider(coven_storage::CloudProvider::GoogleDrive)
+                .transfer_limits(65536, 65536)
+                .build()
                 .unwrap(),
         );
         let [mut a, _b, _c] = accounts(storage.clone()).await;
@@ -799,8 +786,7 @@ async fn maintenance_failures_are_hidden_and_retry_on_the_next_pass() {
             MemoryStorage::for_recipient(&storage, "uninvited@example.com").unwrap(),
         ));
         let files = file_owner(&a);
-        let writes = a.writes();
-        let operations = Operations::new(a.sync, files, writes, a.clock.clone());
+        let operations = operation_owner(a.sync, files);
         assert!(operations.blocked_operations().await.unwrap().is_empty());
         let failed = a.db.operations().await.unwrap().remove(0);
         assert_eq!(failed.id, id);
@@ -811,7 +797,11 @@ async fn maintenance_failures_are_hidden_and_retry_on_the_next_pass() {
         assert!(
             matches!(operations.discard_blocked_operation(id).await, Err(SyncError::NotBlocked(found)) if found == id)
         );
-        assert!(operations.sync().await.is_err());
+        let error = operations.sync().await.unwrap_err();
+        assert!(
+            matches!(&error, SyncError::Stopped(SyncFailure::Storage(error)) if error.failure() == StorageFailure::PermissionDenied),
+            "{error:?}"
+        );
         operations.set_storage(Some(storage)).await.unwrap();
         assert!(a.db.operations().await.unwrap()[0].failure.is_some());
         operations.sync().await.unwrap();
@@ -827,10 +817,10 @@ async fn app_reload_and_reset_stay_blocked_until_explicit_retry() {
         (Command::Reset(Audience::Store), OperationKind::Reset),
     ] {
         let storage = Arc::new(
-            google()
-                .as_ref()
-                .clone()
-                .with_transfer_limits(65536, 65536)
+            MemoryStorage::builder()
+                .provider(coven_storage::CloudProvider::GoogleDrive)
+                .transfer_limits(65536, 65536)
+                .build()
                 .unwrap(),
         );
         let [mut a, _b, _c] = accounts(storage.clone()).await;
@@ -839,8 +829,7 @@ async fn app_reload_and_reset_stay_blocked_until_explicit_retry() {
             MemoryStorage::for_recipient(&storage, "uninvited@example.com").unwrap(),
         ));
         let files = file_owner(&a);
-        let writes = a.writes();
-        let operations = Operations::new(a.sync, files, writes, a.clock.clone());
+        let operations = operation_owner(a.sync, files);
         let blocked = operations.blocked_operations().await.unwrap();
         assert_eq!(blocked.len(), 1);
         assert_eq!(blocked[0].id, id);
@@ -868,8 +857,7 @@ async fn app_reload_and_reset_stay_blocked_until_explicit_retry() {
             a.directory.clone(),
         );
         let files = file_owner(&a);
-        let writes = a.writes();
-        let operations = Operations::new(a.sync, files, writes, a.clock.clone());
+        let operations = operation_owner(a.sync, files);
         assert_eq!(operations.blocked_operations().await.unwrap(), blocked);
         operations.retry_blocked_operation(id).await.unwrap();
         assert!(operations.blocked_operations().await.unwrap().is_empty());
@@ -923,9 +911,22 @@ async fn a_reload_failure_during_sync_reaches_its_waiting_app_call() {
     let storage = storage();
     let mut a = device(storage.clone(), 1, member(1), store(1)).await;
     a.create(key(1)).await;
+    let (sleeps, mut sleeping) = tokio::sync::watch::channel(0);
+    a.sync.clock = Arc::new(invites::RetryClock {
+        time: a.clock.clone(),
+        sleeps,
+    });
     let files = file_owner(&a);
-    let writes = a.writes();
-    let operations = Operations::new(a.sync, files, writes, a.clock.clone());
+    let operations = operation_owner(a.sync, files);
+    // Consume the initial retry before reconnecting storage; only the sync call
+    // below may encounter the missing snapshot.
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        sleeping.wait_for(|count| *count == 2),
+    )
+    .await
+    .expect("operation worker did not schedule its injected retry")
+    .unwrap();
     operations.reset_store().await.unwrap();
     let snapshot = storage
         .list(&ObjectPrefix::snapshots())
@@ -947,7 +948,11 @@ async fn a_reload_failure_during_sync_reaches_its_waiting_app_call() {
     assert!(retained[0].failure.is_none());
     storage.set_online(true);
     storage.delete(&snapshot).await.unwrap();
-    assert!(operations.sync().await.is_err());
+    let error = operations.sync().await.unwrap_err();
+    assert!(
+        matches!(&error, SyncError::Stopped(SyncFailure::Storage(error)) if error.failure() == StorageFailure::NotFound),
+        "{error:?}"
+    );
     std::future::poll_fn(|cx| {
         use std::future::Future;
         assert!(

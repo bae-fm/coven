@@ -89,13 +89,7 @@ async fn a_removed_device_cannot_start_or_resume_snapshot_publication() {
                     .await
                     .unwrap();
             for _ in 0..step {
-                let record =
-                    a.db.operations()
-                        .await
-                        .unwrap()
-                        .into_iter()
-                        .find(|r| r.id == id)
-                        .unwrap();
+                let record = a.operation(id).await;
                 a.sync
                     .operation_step(&record, Data::read(&record).unwrap())
                     .await
@@ -151,22 +145,10 @@ async fn reload_retries_with_the_stored_copy_when_a_waiting_write_finishes_uploa
         a.db.start_operation(data.new_operation("coven").unwrap())
             .await
             .unwrap();
-    let record =
-        a.db.operations()
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|r| r.id == id)
-            .unwrap();
+    let record = a.operation(id).await;
     a.sync.operation_step(&record, data).await.unwrap();
     upload(&a, &storage).await;
-    let record =
-        a.db.operations()
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|r| r.id == id)
-            .unwrap();
+    let record = a.operation(id).await;
     assert!(matches!(
         a.sync
             .operation_step(&record, Data::read(&record).unwrap())
@@ -176,13 +158,7 @@ async fn reload_retries_with_the_stored_copy_when_a_waiting_write_finishes_uploa
         )))
     ));
     assert_eq!(tables(&a).await, expected);
-    let record =
-        a.db.operations()
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|r| r.id == id)
-            .unwrap();
+    let record = a.operation(id).await;
     assert_eq!(record.last_step, 0);
     a.sync.reload_from_snapshots().await.unwrap();
     assert_eq!(tables(&a).await, expected);
@@ -361,13 +337,7 @@ mod reset {
     }
 
     async fn reset_step(d: &mut Device, id: OperationId) -> Progress {
-        let record =
-            d.db.operations()
-                .await
-                .unwrap()
-                .into_iter()
-                .find(|r| r.id == id)
-                .unwrap();
+        let record = d.operation(id).await;
         d.sync
             .operation_step(&record, Data::read(&record).unwrap())
             .await
@@ -375,7 +345,7 @@ mod reset {
     }
 
     async fn finish_reset(d: &mut Device, id: OperationId) {
-        for _ in 0..20 {
+        loop {
             match reset_step(d, id).await {
                 Progress::Finished(Output::Unit) => return,
                 Progress::Advanced => (),
@@ -385,7 +355,6 @@ mod reset {
                 _ => panic!("unexpected reset result"),
             }
         }
-        panic!("reset did not settle")
     }
 
     #[tokio::test]
@@ -448,7 +417,7 @@ mod reset {
         let second = begin_reset(&mut b, Audience::Store).await;
         // Snapshot publication and entry preparation happen before either entry uploads.
         for (d, id) in [(&mut a, first), (&mut b, second)] {
-            for _ in 0..4 {
+            while d.db.local_store_log().await.unwrap().upload.is_none() {
                 assert!(matches!(reset_step(d, id).await, Progress::Advanced));
             }
         }
@@ -484,7 +453,7 @@ mod reset {
 
     #[tokio::test]
     async fn reset_resumes_every_durable_step_without_replacing_its_snapshot_or_entry() {
-        for steps in 0..=7 {
+        'crashes: for steps in 0.. {
             let storage = snapshot_storage();
             let mut a = notes_device(storage.clone(), 1).await;
             a.create(key(1)).await;
@@ -492,7 +461,14 @@ mod reset {
             upload(&a, &storage).await;
             let id = begin_reset(&mut a, Audience::Store).await;
             for _ in 0..steps {
-                assert!(matches!(reset_step(&mut a, id).await, Progress::Advanced));
+                match reset_step(&mut a, id).await {
+                    Progress::Finished(crate::operations::Output::Unit) => break 'crashes,
+                    Progress::Advanced => (),
+                    Progress::Waiting => {
+                        a.sync.sync_store_log().await.unwrap();
+                    }
+                    _ => panic!("unexpected reset progress"),
+                }
             }
             let mut published = Vec::new();
             for object in storage.list(&ObjectPrefix::all()).await.unwrap() {
@@ -504,9 +480,8 @@ mod reset {
                     ));
                 }
             }
-            a.db.close().await.unwrap();
-            a.db = open_notes(a.directory.clone(), a.clock.clone()).await;
-            a.sync.database = a.db.clone();
+            a.reopen(storage.clone(), notes_tables(), notes_migrations())
+                .await;
             finish_reset(&mut a, id).await;
             for (path, bytes) in published {
                 assert_eq!(storage.read(&path).await.unwrap(), bytes);

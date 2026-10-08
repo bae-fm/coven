@@ -24,18 +24,11 @@ impl Fixture {
         let app = TestCoven::new();
         let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1000)));
         let storage = Arc::new(
-            MemoryStorage::new(
-                StorageConfig::S3 {
-                    bucket: "sync".into(),
-                    region: "test".into(),
-                    prefix: "store".into(),
-                    endpoint: None,
-                },
-                clock.clone(),
-            )
-            .unwrap()
-            .with_transfer_limits(1024 * 1024, 64 * 1024)
-            .unwrap(),
+            MemoryStorage::builder()
+                .clock(clock.clone())
+                .transfer_limits(1024 * 1024, 64 * 1024)
+                .build()
+                .unwrap(),
         );
         let directory = app
             .create_store(
@@ -589,9 +582,11 @@ async fn moving_storage_retries_a_partial_copy_before_committing_the_new_locatio
     };
     *prefix = "destination".into();
     let destination = Arc::new(
-        MemoryStorage::new(config.clone(), f.clock.clone())
-            .unwrap()
-            .with_transfer_limits(16, 65536)
+        MemoryStorage::builder()
+            .location(config.clone())
+            .clock(f.clock.clone())
+            .transfer_limits(16, 65536)
+            .build()
             .unwrap(),
     );
     let locations = Arc::new(Locations(vec![f.storage.clone(), destination.clone()]));
@@ -758,8 +753,7 @@ async fn moving_storage_waits_for_file_publication_before_copying_history() {
         let mut config = f.storage.config();
         let StorageConfig::S3 { prefix, .. } = &mut config else { unreachable!() };
         *prefix = "destination".into();
-        let destination = Arc::new(MemoryStorage::new(config.clone(), f.clock.clone()).unwrap()
-            .with_transfer_limits(1024 * 1024, 65536).unwrap());
+        let destination = Arc::new(MemoryStorage::builder().location(config.clone()).clock(f.clock.clone()).transfer_limits(1024 * 1024,65536).build().unwrap());
         let handle = builder(&f.app, StoreLayout::new(f._root.path().into()), f.clock.clone(), Arc::new(Locations(vec![f.storage.clone(), destination.clone()])))
             .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey),
                 SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new("files", Provenance::AppProvided, CacheFill::CacheLazy))])

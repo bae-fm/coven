@@ -312,10 +312,11 @@ fn native_keychain_acquisition_is_checked_at_its_real_factory_use_site() {
         &rooted,
         &crate::owner_graph::OwnerGraph::collect(&files, &rooted),
     );
-    assert_eq!(violations.len(), 1, "{violations:?}");
-    assert_eq!(violations[0].path, "crates/coven/src/builder.rs");
-    assert_eq!(violations[0].line, 3);
-    assert!(violations[0].message.contains("capability Keychain"));
+    assert_eq!(violations, [crate::finding::Finding::new(
+        "crates/coven/src/builder.rs", 3,
+        "Builder::run constructs capability Keychain outside a composition root",
+        "construct owners and capabilities explicitly at the listed roots; inject them elsewhere; do not implement or derive Default",
+    )]);
 }
 
 #[test]

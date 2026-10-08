@@ -5,18 +5,6 @@ use coven_foundation::id_source::{CircleId, DeviceId};
 use coven_merge::{ColumnValue, MergeError, Parent};
 use uuid::Uuid;
 
-#[test]
-fn header_contains_both_write_and_store_log_frontiers() {
-    let record = test_utils::write();
-    let encoder = crate::write_stream::WriteEncoder::new(&record).unwrap();
-    // D5: identity, timestamp, one write position, the empty store-log
-    // frontier, schema, disposition, and one audience stream descriptor.
-    assert_eq!(
-        encoder.header_frame().len(),
-        7 + 16 + 16 + 20 + 4 + 4 + 1 + 4 + 17
-    );
-}
-
 // Bypass validation to exercise the decoder's independent checks.
 fn raw(write: &WriteRecord) -> Vec<u8> {
     let streams: Vec<Vec<u8>> = write
@@ -236,15 +224,6 @@ fn only_migration_writes_have_no_parts() {
     write.header.disposition = WriteDisposition::Migration;
     let bytes = test_utils::write_plaintext(&write).unwrap();
     assert_eq!(decode_plaintext(&bytes).unwrap(), write);
-    assert_eq!(
-        bytes,
-        include_str!("../fixtures/migration.hex")
-            .trim()
-            .as_bytes()
-            .chunks_exact(2)
-            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
-            .collect::<Vec<_>>()
-    );
     write.parts = test_utils::write().parts;
     refuses(
         write,

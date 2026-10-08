@@ -1,7 +1,8 @@
 use super::*;
 use async_trait::async_trait;
 use coven_storage::{
-    AccessGrant, ByteRange, MemberAccess, MemberRemoval, StorageError, StoredObject, UploadSession,
+    AccessGrant, ByteRange, MemberAccess, MemberRemoval, StorageConfig, StorageError, StoredObject,
+    UploadSession,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -96,10 +97,10 @@ async fn a_write_exceeds_the_transfer_budget_on_upload_and_download() {
         largest: AtomicUsize::new(0),
     });
     for device in &mut devices {
-        device.sync = DeviceLogSync::new(
+        device.writes = DeviceLogSync::new(
             bounded.clone(),
             device.db.clone(),
-            device.keys.clone(),
+            device.custody.clone(),
             device.identity.clone(),
         );
     }
@@ -117,10 +118,10 @@ async fn a_write_exceeds_the_transfer_budget_on_upload_and_download() {
         })
         .await
         .unwrap();
-    assert_eq!(devices[0].sync.upload_writes().await.unwrap().len(), 1);
+    assert_eq!(devices[0].writes.upload_writes().await.unwrap().len(), 1);
     let objects = storage.list(&ObjectPrefix::device_logs()).await.unwrap();
     assert!(objects[0].size > 100 * BUDGET as u64);
-    devices[1].sync.download_writes().await.unwrap();
+    devices[1].writes.download_writes().await.unwrap();
     assert!(bounded.largest.load(Ordering::SeqCst) >= 64 * 1024);
     assert_eq!(
         devices[1]
@@ -160,7 +161,9 @@ async fn lost_part_replies_and_expired_sessions_preserve_order_and_bytes() {
         let mut faults = Faults::none();
         faults.lose_part_reply = true;
         storage.set_faults(faults).await;
-        assert!(devices[0].sync.upload_writes().await.is_err());
+        assert!(
+            matches!(devices[0].writes.upload_writes().await, Err(SyncError::Storage(error)) if error.failure() == coven_storage::StorageFailure::Network)
+        );
         assert!(storage
             .list(&ObjectPrefix::device_logs())
             .await
@@ -171,7 +174,7 @@ async fn lost_part_replies_and_expired_sessions_preserve_order_and_bytes() {
         faults.expire_uploads = expire;
         storage.set_faults(faults).await;
         assert_eq!(
-            devices[0].sync.upload_writes().await.unwrap(),
+            devices[0].writes.upload_writes().await.unwrap(),
             [
                 WriteId {
                     device: DeviceId(1),
@@ -190,7 +193,7 @@ async fn lost_part_replies_and_expired_sessions_preserve_order_and_bytes() {
                 .unwrap(),
             fixed
         );
-        devices[1].sync.download_writes().await.unwrap();
+        devices[1].writes.download_writes().await.unwrap();
         assert_eq!(rows(&devices[1].db).await, rows(&devices[0].db).await);
     }
 }
@@ -218,7 +221,9 @@ async fn classified_occupied_paths_count_as_stored_with_and_without_a_session() 
             fault.fail_next = 1;
         }
         storage.set_faults(fault).await;
-        assert!(devices[0].sync.upload_writes().await.is_err());
+        assert!(
+            matches!(devices[0].writes.upload_writes().await, Err(SyncError::Storage(error)) if error.failure() == coven_storage::StorageFailure::Network)
+        );
         let fixed = writes::resealed(&devices[0]).await;
         storage
             .create(&crate::write_seal::path(fixed.0), &fixed.1)
@@ -228,6 +233,6 @@ async fn classified_occupied_paths_count_as_stored_with_and_without_a_session() 
         fault.fail_next = 1;
         fault.failure = coven_storage::StorageFailure::AlreadyExists;
         storage.set_faults(fault).await;
-        assert_eq!(devices[0].sync.upload_writes().await.unwrap(), [fixed.0]);
+        assert_eq!(devices[0].writes.upload_writes().await.unwrap(), [fixed.0]);
     }
 }

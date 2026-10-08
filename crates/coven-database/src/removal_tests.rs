@@ -11,35 +11,6 @@ fn table(name: &str) -> SyncedTable {
     SyncedTable::new(name, RowIdentity::SharedKey)
 }
 
-// Fixture an already-merged hidden row. Downloaded-write application is a
-// different database capability; these tests start at its persistent boundary.
-pub(crate) fn remove(
-    database: &Database,
-    table: &str,
-    id: &str,
-    changes: &[(&str, Value)],
-    rules: BTreeSet<Rule>,
-) {
-    database.inspect_writer_schema(|db,schema| {
-        let (row, generation, audience): (i64, Vec<u8>, String) = db.query_row("SELECT id,generation,audience FROM _coven_rows WHERE table_name=?1 AND key=?2 ORDER BY generation DESC LIMIT 1", crate::params![table, coven_format::key::encode_key(&[Value::Text(id.into())]).unwrap()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
-        let identity = coven_merge::RowId { table: table.into(), key:coven_format::key::encode_key(&[Value::Text(id.into())]).unwrap(), audience:crate::write_encoding::audience(&audience).unwrap() };
-        let app = crate::write_rows::AppView::after(db,schema);
-        let store = crate::merge_store::MergeStore::new(db,&app);
-        let state = store.row(&identity).unwrap().state;
-        let mut columns: BTreeMap<_,_> = state.cells().iter().map(|(name,cell)| (name.clone(),cell.value.clone())).collect();
-        for (name, value) in changes { columns.get_mut(*name).unwrap().value = value.clone(); }
-        let setters = state.cells().iter().map(|(name,cell)| (name.clone(),cell.write)).collect();
-        db.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,NULL,?5,?6,'rules',?7)", crate::params![table, identity.key, audience, generation, merge_fields::encode_columns(&columns).unwrap(), merge_fields::encode_setters(&setters).unwrap(), merge_fields::encode_rules(&rules).unwrap()]).unwrap();
-        let values = columns.into_iter().map(|(n,c)| (n,c.value)).collect();
-        let claims = crate::removal_sql::constraints(db,schema.table(table),&schema.rules[table],&state,&values,|id| store.stamp(id)).unwrap().unique;
-        for (constraint,claim) in claims {
-            let constraint = crate::row_queries::constraint(db,table,&constraint).unwrap();
-            db.internal_execute("INSERT INTO _coven_claims(row_id,constraint_id,audience,value) VALUES(?1,?2,?3,?4)",crate::params![row,constraint,audience,claim.value]).unwrap();
-        }
-        db.materialize(|db| { db.internal_execute(&format!("DELETE FROM {} WHERE id=?1", crate::sql::identifier(table)), [id])?; Ok(()) }).unwrap();
-    });
-}
-
 type RemovedRow = (String, BTreeMap<String, ColumnValue<Value>>, BTreeSet<Rule>);
 
 fn losses(database: &Database) -> Vec<RemovedRow> {
@@ -53,13 +24,13 @@ async fn readding_a_removed_shared_key_updates_every_column_and_clears_its_check
     sql(&db, "INSERT INTO ranges VALUES('urgent',5,12)")
         .await
         .unwrap();
-    remove(
+    crate::tests::remote_update(
         &db,
         "ranges",
         "urgent",
         &[("start", Value::Integer(10)), ("end", Value::Integer(8))],
-        BTreeSet::from([Rule::Check("ordered".into())]),
-    );
+    )
+    .await;
     sql(&db, "INSERT INTO ranges VALUES('urgent',10,20)")
         .await
         .unwrap();
@@ -87,24 +58,14 @@ async fn deleting_groceries_winner_returns_note_46_and_its_link() {
     )
     .await
     .unwrap();
-    remove(
-        &db,
-        "links",
-        "7",
-        &[],
-        BTreeSet::from([Rule::ForeignKey(ForeignKey::new(
-            ["note_id"],
-            "notes",
-            ["id"],
-        ))]),
-    );
-    remove(
+
+    crate::tests::remote_update(
         &db,
         "notes",
         "46",
         &[("title", Value::Text("Groceries".into()))],
-        BTreeSet::from([Rule::Unique(["title"].into())]),
-    );
+    )
+    .await;
     sql(&db, "SELECT 1").await.unwrap();
     assert_eq!(losses(&db).len(), 2);
     assert_eq!(records(&db).len(), 2);
@@ -155,17 +116,15 @@ async fn deleted_note_43_nulls_link_6_but_takes_out_stale_children() {
         )
         .await
         .unwrap();
-        remove(
-            &db,
-            "links",
-            "6",
-            &[],
-            BTreeSet::from([Rule::ForeignKey(ForeignKey::new(
-                ["note_id"],
-                "notes",
-                ["id"],
-            ))]),
-        );
+        let mut deletion = records(&db)[0].parts[0]
+            .rows
+            .iter()
+            .find(|r| r.row.table == "notes")
+            .unwrap()
+            .clone();
+        deletion.change.generation = 1;
+        deletion.change.operation = Operation::Delete;
+        crate::tests::remote_write(&db, deletion).await;
         sql(&db, "DELETE FROM notes").await.unwrap();
         assert_eq!(count(&db, "links"), i64::from(restored), "{action}");
         if restored {
@@ -211,13 +170,13 @@ async fn every_final_check_and_foreign_key_reason_is_retained() {
     )
     .await
     .unwrap();
-    remove(
+    crate::tests::remote_update(
         &db,
         "todos",
         "7",
         &[("start", Value::Integer(-1)), ("end", Value::Integer(-2))],
-        BTreeSet::from([Rule::Check("ordered".into())]),
-    );
+    )
+    .await;
     sql(&db, "DELETE FROM lists").await.unwrap();
     assert_eq!(
         losses(&db)[0].2,
@@ -237,13 +196,7 @@ async fn checks_keep_sqlite_affinity_and_quoted_expressions() {
     sql(&db, "INSERT INTO ranges VALUES('7','10','12')")
         .await
         .unwrap();
-    remove(
-        &db,
-        "ranges",
-        "7",
-        &[("end", Value::Text("8".into()))],
-        BTreeSet::from([Rule::Check("numeric test".into())]),
-    );
+    crate::tests::remote_update(&db, "ranges", "7", &[("end", Value::Text("8".into()))]).await;
     sql(&db, "SELECT 1").await.unwrap();
     assert_eq!(
         losses(&db)[0].2,
@@ -260,16 +213,13 @@ async fn expression_partial_and_collated_unique_claims_use_sqlite_equality() {
         .await
         .unwrap();
     sql(&db, "INSERT INTO notes VALUES('46','Shopping','Work ',1,0); INSERT INTO notes VALUES('47',NULL,'Work',1,0)").await.unwrap();
-    remove(
+    crate::tests::remote_update(
         &db,
         "notes",
         "46",
         &[("title", Value::Text("GROCERIES".into()))],
-        BTreeSet::from([Rule::Unique(coven_merge::UniqueConstraint {
-            terms: vec!["lower(title)".into(), "folder COLLATE RTRIM".into()],
-            partial: Some("active=1".into()),
-        })]),
-    );
+    )
+    .await;
     sql(&db, "UPDATE notes SET ignored=1 WHERE id='45'")
         .await
         .unwrap();
@@ -299,13 +249,13 @@ async fn restoration_skips_shared_triggers_and_runs_local_triggers() {
     sql(&db, "INSERT INTO notes VALUES('46','Shopping',0)")
         .await
         .unwrap();
-    remove(
+    crate::tests::remote_update(
         &db,
         "notes",
         "46",
         &[("title", Value::Text("Groceries".into()))],
-        BTreeSet::from([Rule::Unique(["title"].into())]),
-    );
+    )
+    .await;
     sql(&db, "DELETE FROM notes WHERE id='45'").await.unwrap();
     assert_eq!(
         db.inspect_writer(|db| db
@@ -336,60 +286,44 @@ async fn materialization_and_loss_failures_roll_back_the_entire_write() {
         ),
         (
             "AFTER UPDATE ON _coven_lost",
-            "UPDATE notes SET title='Changed' WHERE id='45'",
+            "DELETE FROM notes WHERE id='45'",
         ),
     ] {
         let store = TestStore::new();
         let db = store
             .schema(
                 vec![table("notes")],
-                if point=="AFTER UPDATE ON _coven_lost" {
-                    "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT UNIQUE,CHECK(id<>'46' OR title<>'Groceries'))"
-                } else {
-                    "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT UNIQUE)"
-                },
+                "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT UNIQUE,parent TEXT REFERENCES notes(id))",
             )
             .await
             .unwrap();
-        sql(&db, "INSERT INTO notes VALUES('45','Groceries')")
+        sql(&db, "INSERT INTO notes VALUES('45','Groceries',NULL)")
             .await
             .unwrap();
-        sql(&db, "INSERT INTO notes VALUES('46','Shopping')")
-            .await
-            .unwrap();
-        remove(
+        sql(
+            &db,
+            if point == "AFTER UPDATE ON _coven_lost" {
+                "INSERT INTO notes VALUES('46','Shopping','45')"
+            } else {
+                "INSERT INTO notes VALUES('46','Shopping',NULL)"
+            },
+        )
+        .await
+        .unwrap();
+        crate::tests::remote_update(
             &db,
             "notes",
             "46",
             &[("title", Value::Text("Groceries".into()))],
-            BTreeSet::from([Rule::Unique(["title"].into())]),
+        )
+        .await;
+        let before = crate::tests::contents(&db);
+        db.inspect_writer(|db| db.fail_at("_coven_fail", point, "materialization failed"));
+        assert!(
+            matches!(sql(&db, statement).await, Err(crate::DbError::Sqlite(_))),
+            "{point}"
         );
-        let snapshot = || {
-            db.inspect_writer(|db| {
-                [
-                    "notes",
-                    "_coven_writes",
-                    "_coven_uploads",
-                    "_coven_rows",
-                    "_coven_cells",
-                    "_coven_lost",
-                ]
-                .iter()
-                .map(|table| {
-                    db.query(&format!("SELECT * FROM {table} ORDER BY rowid"), [], |r| {
-                        (0..r.as_ref().column_count())
-                            .map(|i| r.get::<_, rusqlite::types::Value>(i))
-                            .collect::<rusqlite::Result<Vec<_>>>()
-                    })
-                    .unwrap()
-                })
-                .collect::<Vec<_>>()
-            })
-        };
-        let before = snapshot();
-        db.inspect_writer(|db| db.batch(&format!("CREATE TRIGGER _coven_fail {point} BEGIN SELECT RAISE(ABORT,'materialization failed'); END")).unwrap());
-        assert!(sql(&db, statement).await.is_err(), "{point}");
-        assert_eq!(snapshot(), before, "{point}");
+        assert_eq!(crate::tests::contents(&db), before, "{point}");
         db.inspect_writer(|db| db.batch("DROP TRIGGER _coven_fail").unwrap());
         db.close().await.unwrap();
     }
@@ -399,21 +333,20 @@ async fn materialization_and_loss_failures_roll_back_the_entire_write() {
 async fn taking_a_row_out_runs_foreign_key_actions_on_local_tables() {
     let store = TestStore::new();
     let db = store.schema(vec![table("notes")], "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT UNIQUE,parent TEXT REFERENCES notes(id)); CREATE TABLE search_index(note_id TEXT REFERENCES notes(id) ON DELETE CASCADE); CREATE TABLE selection(note_id TEXT REFERENCES notes(id) ON DELETE SET NULL);").await.unwrap();
-    sql(&db, "INSERT INTO notes VALUES('1','Ideas',NULL); INSERT INTO notes VALUES('2','Plan','1'); INSERT INTO search_index VALUES('1'); INSERT INTO selection VALUES('1')").await.unwrap();
-    remove(
+    hidden_plan_note(&db).await;
+    sql(
         &db,
-        "notes",
-        "2",
-        &[],
-        BTreeSet::from([Rule::ForeignKey(ForeignKey::new(
-            ["parent"],
-            "notes",
-            ["id"],
-        ))]),
-    );
-    sql(&db, "UPDATE notes SET title='Plan' WHERE id='1'")
-        .await
-        .unwrap();
+        "INSERT INTO search_index VALUES('1'); INSERT INTO selection VALUES('1')",
+    )
+    .await
+    .unwrap();
+
+    sql(
+        &db,
+        "DELETE FROM notes WHERE id='3'; UPDATE notes SET title='Plan' WHERE id='1'",
+    )
+    .await
+    .unwrap();
     assert_eq!(count(&db, "notes"), 0);
     assert_eq!(count(&db, "search_index"), 0);
     assert_eq!(
@@ -436,13 +369,13 @@ async fn a_trigger_cannot_silently_ignore_a_required_restoration() {
     sql(&db, "INSERT INTO notes VALUES('46','Shopping')")
         .await
         .unwrap();
-    remove(
+    crate::tests::remote_update(
         &db,
         "notes",
         "46",
         &[("title", Value::Text("Groceries".into()))],
-        BTreeSet::from([Rule::Unique(["title"].into())]),
-    );
+    )
+    .await;
     assert!(matches!(
         sql(&db, "DELETE FROM notes WHERE id='45'").await,
         Err(crate::DbError::Sqlite(
@@ -465,13 +398,13 @@ async fn moving_note_42_also_moves_its_removed_attachments() {
     )
     .await
     .unwrap();
-    remove(
+    crate::tests::remote_update(
         &db,
         "attachments",
         "00000000-0000-4000-8000-000000000008",
         &[("start", Value::Integer(10)), ("end", Value::Integer(8))],
-        BTreeSet::from([Rule::Check("ordered".into())]),
-    );
+    )
+    .await;
     sql(
         &db,
         "UPDATE notes SET audience='00000000-0000-4000-8000-00000000000a'",
@@ -518,22 +451,20 @@ async fn store_wins_one_key_and_circles_use_their_generation_start() {
         })
         .await
         .unwrap();
-        remove(
-            &db,
-            "notes",
-            "00000000-0000-4000-8000-000000000001",
-            &[],
-            BTreeSet::from([Rule::OtherAudience]),
-        );
-        db.write(move |context| {
-            context.execute(
-                "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001',?1,'Other')",
-                [other],
-            )?;
-            Ok(())
-        })
-        .await
-        .unwrap();
+        let mut other_row = records(&db)[0].parts[0].rows[0].clone();
+        other_row.row.audience = if other == "store" {
+            coven_merge::Audience::Store
+        } else {
+            coven_merge::Audience::Circle(coven_foundation::id_source::CircleId(
+                uuid::Uuid::parse_str(other).unwrap(),
+            ))
+        };
+        let Operation::Insert(columns) = &mut other_row.change.operation else {
+            panic!("insert")
+        };
+        columns.get_mut("audience").unwrap().value = Value::Text(other.into());
+        columns.get_mut("title").unwrap().value = Value::Text("Other".into());
+        crate::tests::remote_write(&db, other_row).await;
         let winner: String = db.inspect_writer(|db| {
             db.query_row("SELECT audience FROM notes", [], |r| r.get(0))
                 .unwrap()
@@ -560,7 +491,7 @@ async fn store_wins_one_key_and_circles_use_their_generation_start() {
                 deleted,
             )
             .unwrap();
-            assert_eq!(records(&db).len(), 2);
+            assert_eq!(records(&db).len(), 1);
             assert_eq!(losses(&db)[0].2, BTreeSet::from([Rule::DeletedCircle]));
             let audience: String = db.inspect_writer(|db| {
                 db.query_row("SELECT audience FROM notes", [], |r| r.get(0))
@@ -576,30 +507,14 @@ async fn store_wins_one_key_and_circles_use_their_generation_start() {
 async fn unique_then_parent_removal_keeps_both_plan_notes_out() {
     let store = TestStore::new();
     let db = store.schema(vec![table("notes")], "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT UNIQUE,parent TEXT REFERENCES notes(id) ON DELETE CASCADE)").await.unwrap();
+    hidden_plan_note(&db).await;
+
     sql(
         &db,
-        "INSERT INTO notes VALUES('1','Ideas',NULL); INSERT INTO notes VALUES('2','Plan','1')",
+        "DELETE FROM notes WHERE id='3'; UPDATE notes SET title='Plan' WHERE id='1'",
     )
     .await
     .unwrap();
-    // Make note 1's claim later than note 2's, then retain both merged values.
-    sql(&db, "UPDATE notes SET title='Later' WHERE id='1'")
-        .await
-        .unwrap();
-    remove(
-        &db,
-        "notes",
-        "2",
-        &[],
-        BTreeSet::from([Rule::ForeignKey(ForeignKey::new(
-            ["parent"],
-            "notes",
-            ["id"],
-        ))]),
-    );
-    sql(&db, "UPDATE notes SET title='Plan' WHERE id='1'")
-        .await
-        .unwrap();
     assert_eq!(count(&db, "notes"), 0);
     let removed = losses(&db);
     assert_eq!(removed.len(), 2);
@@ -612,14 +527,16 @@ async fn unique_then_parent_removal_keeps_both_plan_notes_out() {
             ["id"]
         ))])
     );
-    assert_eq!(records(&db)[2].parts[0].rows.len(), 1);
+    assert_eq!(records(&db).last().unwrap().parts[0].rows.len(), 2);
     sql(&db, "INSERT INTO notes VALUES('1','Plan',NULL)")
         .await
         .unwrap();
     assert_eq!(count(&db, "notes"), 0);
     assert_eq!(losses(&db).len(), 2);
     assert!(matches!(
-        records(&db)[3].parts[0].rows[0].change.operation,
+        records(&db).last().unwrap().parts[0].rows[0]
+            .change
+            .operation,
         Operation::Update(_)
     ));
     db.close().await.unwrap();
@@ -635,13 +552,13 @@ async fn unique_constraint_identity_preserves_repeated_columns() {
     sql(&db, "INSERT INTO notes VALUES('46','Shopping',0)")
         .await
         .unwrap();
-    remove(
+    crate::tests::remote_update(
         &db,
         "notes",
         "46",
         &[("title", Value::Text("Groceries".into()))],
-        [Rule::Unique(["title", "title"].into())].into(),
-    );
+    )
+    .await;
     sql(&db, "UPDATE notes SET edited=1 WHERE id='45'")
         .await
         .unwrap();
@@ -662,13 +579,13 @@ async fn unique_indexes_with_the_same_columns_keep_each_claim() {
     sql(&db, "INSERT INTO notes VALUES('46','beta','45',0)")
         .await
         .unwrap();
-    remove(
+    crate::tests::remote_update(
         &db,
         "notes",
         "46",
         &[("title", Value::Text("APPLE".into()))],
-        [Rule::Unique(["lower(substr(title,1,1))"].into())].into(),
-    );
+    )
+    .await;
     sql(&db, "UPDATE notes SET edited=1 WHERE id='45'")
         .await
         .unwrap();
@@ -685,14 +602,14 @@ async fn a_constant_unique_index_keeps_its_expression_term() {
     let store = TestStore::new();
     let db=store.schema(vec![table("notes")],"CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); CREATE UNIQUE INDEX one_note ON notes((1))").await.unwrap();
     sql(&db, "INSERT INTO notes VALUES('45')").await.unwrap();
-    remove(
-        &db,
-        "notes",
-        "45",
-        &[],
-        [Rule::Unique(["(1)"].into())].into(),
-    );
-    sql(&db, "INSERT INTO notes VALUES('46')").await.unwrap();
+    let mut second = records(&db)[0].parts[0].rows[0].clone();
+    second.row.key = coven_format::key::encode_key(&[Value::Text("46".into())]).unwrap();
+    let Operation::Insert(columns) = &mut second.change.operation else {
+        panic!("insert")
+    };
+    columns.get_mut("id").unwrap().value = Value::Text("46".into());
+    crate::tests::remote_write(&db, second).await;
+
     assert_eq!(count(&db, "notes"), 1);
     assert_eq!(
         db.inspect_writer(|db| db
@@ -738,4 +655,20 @@ pub(crate) fn materialize_deleted(
             crate::removal::materialize(db, schema, &app, &view, &result)
         })
     })
+}
+
+/// A competing title hides the child while its parent remains writable.
+pub(crate) async fn hidden_plan_note(db: &Database) {
+    sql(
+        db,
+        "INSERT INTO notes VALUES('1','Ideas',NULL); INSERT INTO notes VALUES('3','Plan',NULL)",
+    )
+    .await
+    .unwrap();
+    sql(db, "INSERT INTO notes VALUES('2','Draft','1')")
+        .await
+        .unwrap();
+    crate::tests::remote_update(db, "notes", "2", &[("title", Value::Text("Plan".into()))]).await;
+    assert_eq!(count(db, "notes"), 2);
+    assert_eq!(losses(db)[0].2, [Rule::Unique(["title"].into())].into());
 }

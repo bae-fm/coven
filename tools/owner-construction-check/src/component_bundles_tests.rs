@@ -22,8 +22,15 @@ fn component_bundle_constructed_only_to_be_destructured_is_rejected() {
     )];
 
     let violations = find_component_bundle_violations(&files);
-    assert_eq!(violations.len(), 1);
-    assert!(violations[0].message.starts_with("ComponentBundle "));
+    assert_eq!(
+        violations,
+        [Finding::new(
+            "crates/coven/src/handle.rs",
+            12,
+            "ComponentBundle only bundles components to be destructured",
+            "pass collaborators by name; a bundle type needs behavior or an invariant of its own",
+        )]
+    );
 }
 
 #[test]
@@ -69,5 +76,13 @@ fn a_bundle_destructured_inside_a_macro_call_is_rejected() {
         "#,
     )];
 
-    assert_eq!(find_component_bundle_violations(&files).len(), 1);
+    assert_eq!(
+        find_component_bundle_violations(&files),
+        [Finding::new(
+            "crates/coven/src/handle.rs",
+            13,
+            "ComponentBundle only bundles components to be destructured",
+            "pass collaborators by name; a bundle type needs behavior or an invariant of its own",
+        )]
+    );
 }

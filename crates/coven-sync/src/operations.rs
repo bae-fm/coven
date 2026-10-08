@@ -56,8 +56,6 @@ pub(crate) enum Command {
         require_connected: bool,
         commit: crate::StorageCommit,
     },
-    #[cfg(any(test, feature = "test-utils"))]
-    InspectPositions,
     CheckKeys,
     ForgetKeys,
     #[cfg(any(test, feature = "test-utils"))]
@@ -77,8 +75,6 @@ pub(crate) enum Command {
 }
 
 pub(crate) enum Output {
-    #[cfg(any(test, feature = "test-utils"))]
-    Positions(Option<coven_format::objects::PostedPositions>),
     Unit,
     Removal(MemberRemoval),
     SignOut(ProviderSignOut),
@@ -392,16 +388,6 @@ impl Operations {
             _ => unreachable!("unit result"),
         }
     }
-    /// Inspect the same committed positions and fingerprints used for publication.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn test_positions(
-        &self,
-    ) -> Result<Option<coven_format::objects::PostedPositions>, SyncError> {
-        match self.call(Command::InspectPositions).await? {
-            Output::Positions(state) => Ok(state),
-            _ => unreachable!("position result"),
-        }
-    }
 }
 
 impl Drop for RunningOperations {
@@ -428,11 +414,6 @@ impl OperationRun {
                 command = self.commands.recv() => {
                     let Some(Request { command, reply }) = command else { break; };
                     if matches!(command, Command::Close) { let _ = reply.send(Ok(Output::Unit)); break; }
-                    #[cfg(any(test, feature = "test-utils"))]
-                    if matches!(command, Command::InspectPositions) {
-                        let _ = reply.send(self.writes.current_positions().await.map(Output::Positions));
-                        continue;
-                    }
                     if let Command::Storage(storage) = &command {
                         if let Err(error) = self.files.set_storage(storage.clone(), std::future::ready(Ok(()))).await {
                             let _ = reply.send(Err(error));

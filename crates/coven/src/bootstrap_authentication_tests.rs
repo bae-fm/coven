@@ -1,6 +1,34 @@
 use super::*;
 use crate::authentication::SignIn;
 
+#[cfg(test)]
+struct JoinClock {
+    clock: crate::tests::PollingClock,
+    sleeping: watch::Sender<bool>,
+    resume: watch::Receiver<bool>,
+}
+
+impl Clock for JoinClock {
+    fn now(&self) -> std::time::SystemTime {
+        self.clock.now()
+    }
+
+    fn sleep(
+        &self,
+        duration: Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        if duration == Duration::from_secs(1) && !*self.resume.borrow() {
+            self.sleeping.send(true).unwrap();
+            let mut resume = self.resume.clone();
+            Box::pin(async move {
+                resume.wait_for(|resumed| *resumed).await.unwrap();
+            })
+        } else {
+            self.clock.sleep(duration)
+        }
+    }
+}
+
 #[tokio::test]
 async fn restore_and_keychain_restore_use_builder_sign_in_without_returning_tokens() {
     for from_keychain in [false, true] {
@@ -79,26 +107,27 @@ async fn join_refreshes_while_waiting_and_publishes_the_refreshed_credentials() 
     let invite = owner.invite().await;
     let install = Installation::new();
     let sign_in = SignIn::new(owner.clock.clone()).await;
-    let mut builder = sign_in.configure(install.builder(&owner, owner.recipient()));
+    let (sleeping, mut asleep) = watch::channel(false);
+    let (resume, resumed) = watch::channel(false);
+    let clock = Arc::new(JoinClock {
+        clock: crate::tests::PollingClock(owner.clock.clone()),
+        sleeping,
+        resume: resumed,
+    });
+    let mut builder = sign_in.configure(install.builder(&owner, owner.recipient()).clock(clock));
     builder.authenticate(CloudProvider::Dropbox).await.unwrap();
     let (_, cancel) = watch::channel(false);
-    let mut requests = owner.operations.subscribe_join_requests();
     let join = join_with_invite(builder, &invite.code, "New phone", |_| {}, &cancel);
-    let approve = async {
-        let request = next_request(&mut requests).await;
+    let (joined, _) = join_and_approve(&owner.handle, join, |_| async {
         install.absent(owner.directory.id()).await;
-        owner.clock.set(UNIX_EPOCH + Duration::from_secs(3600));
+        asleep.wait_for(|sleeping| *sleeping).await.unwrap();
         owner
-            .operations
-            .approve_join_request(&request)
-            .await
-            .unwrap();
-    };
-    let (joined, ()) = tokio::time::timeout(Duration::from_secs(20), async {
-        tokio::join!(join, approve)
+            .clock
+            .set(owner.clock.now() + Duration::from_secs(3600));
+        owner.handle.unlock_store_key().await.unwrap();
+        resume.send(true).unwrap();
     })
-    .await
-    .unwrap();
+    .await;
     let handle = joined.unwrap().unwrap();
     let scoped = StoreKeychain::new(install.keychain.clone(), owner.directory.id());
     let StorageCredentials::OAuth(tokens) =

@@ -196,7 +196,11 @@ async fn attachment_and_upload_queue_commit_or_roll_back_together() {
         std::fs::write(original.path(), b"source").unwrap();
         let owner = FileDatabase::new(database.clone());
         database.inspect_writer(|sql| {
-            sql.batch("CREATE TRIGGER _coven_refuse_upload BEFORE INSERT ON _coven_file_uploads BEGIN SELECT RAISE(ABORT,'queue unavailable'); END").unwrap();
+            sql.fail_at(
+                "_coven_refuse_upload",
+                "BEFORE INSERT ON _coven_file_uploads",
+                "queue unavailable",
+            );
         });
         for rejected in [true, false] {
             let result = match provenance {

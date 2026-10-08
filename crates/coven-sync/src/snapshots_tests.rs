@@ -1,3 +1,4 @@
+use super::operations::operation_owner;
 use super::*;
 use crate::{
     operation_data::Data,
@@ -16,36 +17,33 @@ mod signatures;
 
 fn snapshot_storage() -> Arc<MemoryStorage> {
     Arc::new(
-        MemoryStorage::new(
-            StorageConfig::S3 {
-                bucket: "snapshots".into(),
-                region: "us-east-1".into(),
-                endpoint: None,
-                prefix: "store".into(),
-            },
-            Arc::new(FixedClock::new(UNIX_EPOCH)),
-        )
-        .unwrap()
-        .with_transfer_limits(65536, 65536)
-        .unwrap(),
+        MemoryStorage::builder()
+            .transfer_limits(65536, 65536)
+            .build()
+            .unwrap(),
     )
 }
 
-async fn open_notes(directory: StoreDir, clock: Arc<FixedClock>) -> Database {
-    DatabaseBuilder::new(directory)
-        .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey).key_columns(["audience", "id"]).audience_column("audience")])
-        .migrations(vec![Migration::sql(1, "notes", "CREATE TABLE notes(id TEXT NOT NULL,audience TEXT NOT NULL,title TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(audience,id))")])
-        .clock(clock).open().await.unwrap()
+fn notes_tables() -> Vec<SyncedTable> {
+    vec![SyncedTable::new("notes", RowIdentity::SharedKey)
+        .key_columns(["audience", "id"])
+        .audience_column("audience")]
 }
-
+fn notes_migrations() -> Vec<Migration> {
+    vec![Migration::sql(1, "notes", "CREATE TABLE notes(id TEXT NOT NULL,audience TEXT NOT NULL,title TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(audience,id))")]
+}
 async fn notes_device(storage: Arc<MemoryStorage>, n: u64) -> Device {
-    let mut device = device(storage, n, member(1), store(1)).await;
-    device.db.close().await.unwrap();
-    device.db = open_notes(device.directory.clone(), device.clock.clone()).await;
-    device.sync.database = device.db.clone();
-    device
+    Device::new(
+        storage,
+        n,
+        member(1),
+        store(1),
+        notes_tables(),
+        notes_migrations(),
+        Arc::new(coven_foundation::id_source::UuidIds),
+    )
+    .await
 }
-
 async fn add_device(device: &mut Device) {
     device.sync().await;
     let id = device.device().await;
@@ -169,7 +167,7 @@ async fn threshold_snapshot_and_later_writes_reload_on_a_new_device() {
 
 #[tokio::test]
 async fn writing_resumes_after_each_recorded_step_with_identical_ciphertext() {
-    for crash_step in 0..=2 {
+    'crashes: for crash_step in 0.. {
         let storage = snapshot_storage();
         let mut a = notes_device(storage.clone(), 1).await;
         a.create(key(1)).await;
@@ -189,20 +187,17 @@ async fn writing_resumes_after_each_recorded_step_with_identical_ciphertext() {
                 .await
                 .unwrap();
         for _ in 0..crash_step {
-            let record =
-                a.db.operations()
-                    .await
-                    .unwrap()
-                    .into_iter()
-                    .find(|r| r.id == id)
-                    .unwrap();
-            assert!(matches!(
-                a.sync
-                    .operation_step(&record, Data::read(&record).unwrap())
-                    .await
-                    .unwrap(),
-                Progress::Advanced
-            ));
+            let record = a.operation(id).await;
+            match a
+                .sync
+                .operation_step(&record, Data::read(&record).unwrap())
+                .await
+                .unwrap()
+            {
+                Progress::Advanced => (),
+                Progress::Finished(crate::operations::Output::Unit) => break 'crashes,
+                _ => panic!("unexpected snapshot progress"),
+            }
         }
         let before = a.db.operations().await.unwrap().remove(0);
         let Data::Snapshots(task) = Data::read(&before).unwrap() else {
@@ -222,9 +217,8 @@ async fn writing_resumes_after_each_recorded_step_with_identical_ciphertext() {
         } else {
             None
         };
-        a.db.close().await.unwrap();
-        a.db = open_notes(a.directory.clone(), a.clock.clone()).await;
-        a.sync.database = a.db.clone();
+        a.reopen(storage.clone(), notes_tables(), notes_migrations())
+            .await;
         a.sync.write_snapshots().await.unwrap();
         let objects = storage.list(&ObjectPrefix::snapshots()).await.unwrap();
         assert_eq!(objects.len(), 1);
@@ -448,23 +442,9 @@ async fn selected_snapshot(device: &mut Device) -> ObjectPath {
         .start_operation(data.new_operation("coven").unwrap())
         .await
         .unwrap();
-    let record = device
-        .db
-        .operations()
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|r| r.id == id)
-        .unwrap();
+    let record = device.operation(id).await;
     device.sync.operation_step(&record, data).await.unwrap();
-    let record = device
-        .db
-        .operations()
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|r| r.id == id)
-        .unwrap();
+    let record = device.operation(id).await;
     let Data::Snapshots(SnapshotTask {
         job: SnapshotJob::Reload {
             files: Some(files), ..
@@ -555,12 +535,13 @@ async fn newer_schema_snapshot_is_passed_over_for_an_older_supported_one() {
     let supported = b.sync.write_snapshot(Audience::Store).await.unwrap();
     write_rows(&a, 1, 1, 17, Audience::Store).await;
     upload(&a, &storage).await;
-    a.db.close().await.unwrap();
-    a.db = DatabaseBuilder::new(a.directory.clone())
-        .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey).key_columns(["audience", "id"]).audience_column("audience")])
-        .migrations(vec![Migration::sql(1, "notes", "CREATE TABLE notes(id TEXT NOT NULL,audience TEXT NOT NULL,title TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(audience,id))"), Migration::sql(2,"addition","ALTER TABLE notes ADD COLUMN added TEXT")])
-        .clock(a.clock.clone()).open().await.unwrap();
-    a.sync.database = a.db.clone();
+    let mut migrations = notes_migrations();
+    migrations.push(Migration::sql(
+        2,
+        "addition",
+        "ALTER TABLE notes ADD COLUMN added TEXT",
+    ));
+    a.reopen(storage.clone(), notes_tables(), migrations).await;
     a.sync.write_snapshot(Audience::Store).await.unwrap();
     let mut c = notes_device(storage.clone(), 3).await;
     add_device(&mut c).await;
@@ -577,9 +558,8 @@ async fn a_snapshot_sealed_by_a_dropped_key_introduction_is_not_a_candidate() {
     let mut a = notes_device(storage.clone(), 1).await;
     a.create(key(1)).await;
     let mut b = device(storage.clone(), 2, member(2), store(1)).await;
-    b.db.close().await.unwrap();
-    b.db = open_notes(b.directory.clone(), b.clock.clone()).await;
-    b.sync.database = b.db.clone();
+    b.reopen(storage.clone(), notes_tables(), notes_migrations())
+        .await;
     a.add(&b.member, MemberRole::Admin).await;
     add_device(&mut b).await;
     a.sync().await;
@@ -712,13 +692,7 @@ async fn reload_reselects_after_store_log_changes_and_preserves_interleaved_app_
         a.db.start_operation(data.new_operation("coven").unwrap())
             .await
             .unwrap();
-    let record =
-        a.db.operations()
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|r| r.id == id)
-            .unwrap();
+    let record = a.operation(id).await;
     a.sync.operation_step(&record, data).await.unwrap();
     assert!(matches!(
         a.sync
@@ -740,24 +714,12 @@ async fn reload_reselects_after_store_log_changes_and_preserves_interleaved_app_
     a.sync.step().await.unwrap();
     write_rows(&a, 1, 1, 17, Audience::Circle(circle(1))).await;
     let waiting = a.db.test_queued_writes().await.unwrap();
-    let record =
-        a.db.operations()
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|r| r.id == id)
-            .unwrap();
+    let record = a.operation(id).await;
     a.sync
         .operation_step(&record, Data::read(&record).unwrap())
         .await
         .unwrap();
-    let record =
-        a.db.operations()
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|r| r.id == id)
-            .unwrap();
+    let record = a.operation(id).await;
     assert_eq!(record.last_step, 0, "stale selection must not commit");
     a.sync.sync_store_log().await.unwrap();
     assert_eq!(a.db.test_queued_writes().await.unwrap(), waiting);
@@ -812,8 +774,7 @@ async fn idle_pass_reads_only_snapshot_prefixes_and_log_headers() {
         a.sync.ids.clone(),
         crate::TransferLimits::default(),
     );
-    let writes = a.writes();
-    let operations = crate::Operations::new(a.sync, files.clone(), writes, a.clock.clone());
+    let operations = operation_owner(a.sync, files.clone());
     let mut excess_reads = 0;
     for pass in 0..2 {
         let start = storage.reads().await.len();
@@ -890,9 +851,8 @@ async fn a_pass_reuses_loaded_snapshot_and_write_references() {
             a.sync.ids.clone(),
             crate::TransferLimits::default(),
         );
-        let writes = a.writes();
         let database = a.db.clone();
-        let operations = crate::Operations::new(a.sync, files.clone(), writes, a.clock.clone());
+        let operations = operation_owner(a.sync, files.clone());
         let start = storage.reads().await.len();
         operations.sync().await.unwrap();
         assert!(operations.blocked_operations().await.unwrap().is_empty());

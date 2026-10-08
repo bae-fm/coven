@@ -7,6 +7,8 @@ pub(super) struct ReadPool {
     readers: Vec<Mutex<DatabaseConnection>>,
     idle_readers: Mutex<Vec<usize>>,
     reader_ready: Condvar,
+    #[cfg(test)]
+    waiting: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
 impl ReadPool {
@@ -15,6 +17,8 @@ impl ReadPool {
             idle_readers: Mutex::new((0..readers.len()).collect()),
             readers,
             reader_ready: Condvar::new(),
+            #[cfg(test)]
+            waiting: Mutex::new(None),
         }
     }
 
@@ -40,6 +44,10 @@ impl ReadPool {
                     database: self,
                     index,
                 };
+            }
+            #[cfg(test)]
+            if let Some(waiting) = self.waiting.lock().unwrap().take() {
+                waiting.send(()).unwrap();
             }
             idle = self.reader_ready.wait(idle).expect("reader pool poisoned");
         }

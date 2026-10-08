@@ -170,22 +170,21 @@ async fn a_single_request_reports_uploading_while_storage_is_pending() {
     let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     f.attach("files", "single", vec![44; 19]).await;
 
+    let (started, receiving) = tokio::sync::oneshot::channel();
+    let (release, resume) = tokio::sync::oneshot::channel();
     f.storage
-        .set_faults(Faults {
-            delay: Duration::from_millis(200),
-            ..Faults::none()
-        })
+        .hold_next_creation(coven_storage::ObjectPrefix::files(), started, resume)
         .await;
-    let mut requests = f.storage.subscribe_requests();
     f.files.inner.state.lock().unwrap().paused = false;
     let files = f.files.clone();
     let task = tokio::spawn(async move { files.retry_uploads_now().await });
-    tokio::time::timeout(Duration::from_secs(20), requests.changed())
+    tokio::time::timeout(Duration::from_secs(20), receiving)
         .await
         .unwrap()
         .unwrap();
     let mut uploads = f.files.subscribe_uploads();
     let phase = uploads.next().await.unwrap().files.remove(0).phase;
+    release.send(()).unwrap();
     task.await.unwrap().unwrap();
     f.close().await;
     assert!(

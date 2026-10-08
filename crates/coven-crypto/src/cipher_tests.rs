@@ -45,3 +45,9 @@ fn encryption_rejection_is_an_invariant_violation() {
     // Exercise rejection without allocating a message exceeding the cipher's limit.
     encrypt(&RefusingCipher, &[0; 24], b"context", b"payload");
 }
+
+#[test]
+#[should_panic(expected = "storage paths must be nonempty")]
+fn storage_paths_require_a_nonempty_value() {
+    storage_path("");
+}

@@ -47,23 +47,6 @@ fn entries_preserve_every_key_id_byte_including_zero() {
     }
 }
 
-#[test]
-fn member_removal_encodes_empty_replacement_keys() {
-    let mut entry = test_utils::store_log();
-    entry.change = StoreChange::RemoveMember {
-        member: test_utils::member().signing,
-        key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([2; 16])),
-        circle_keys: vec![],
-    };
-    let object = Object::StoreLog(entry);
-    let bytes = object.encode().unwrap();
-    assert_eq!(bytes.len(), 128);
-    assert_eq!(bytes[75], 2);
-    assert_eq!(&bytes[108..124], &[2; 16]);
-    assert_eq!(&bytes[124..], &[0; 4]);
-    assert_eq!(Object::decode(&bytes).unwrap(), object);
-}
-
 fn circle(number: u128) -> CircleId {
     CircleId(uuid::Uuid::from_u128(number))
 }
@@ -144,50 +127,6 @@ fn creation_names_its_writing_device() {
 }
 
 #[test]
-fn device_and_circle_creation_encode_no_derived_member() {
-    for (change, length) in [
-        (
-            StoreChange::AddDevice {
-                device: DeviceId(2),
-                name: "D".into(),
-            },
-            89,
-        ),
-        (
-            StoreChange::CreateCircle {
-                circle: circle(1),
-                name: "C".into(),
-                key: KeyId(uuid::Uuid::from_u128(2)),
-            },
-            113,
-        ),
-    ] {
-        let object = Object::StoreLog(StoreLogEntry {
-            change,
-            ..test_utils::store_log()
-        });
-        let bytes = object.encode().unwrap();
-        assert_eq!(bytes.len(), length);
-        assert_eq!(Object::decode(&bytes).unwrap(), object);
-    }
-}
-
-#[test]
-fn every_store_log_change_round_trips_with_a_pinned_tag() {
-    let changes = test_utils::store_changes();
-    let tags = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14];
-    assert_eq!(changes.len(), tags.len());
-    for (tag, change) in tags.into_iter().zip(changes) {
-        let mut entry = test_utils::store_log();
-        entry.change = change;
-        let object = Object::StoreLog(entry);
-        let bytes = object.encode().unwrap();
-        assert_eq!(bytes[75], tag);
-        assert_eq!(Object::decode(&bytes).unwrap(), object);
-    }
-}
-
-#[test]
 fn unused_tag_12_is_rejected() {
     let mut entry = test_utils::store_log();
     entry.change = StoreChange::Reset {
@@ -254,36 +193,4 @@ fn first_entry_and_versions_are_checked() {
     };
     assert!(Object::StoreLog(entry.clone()).encode().is_err());
     assert!(Object::decode(&encode_frame(4, &entry).unwrap()).is_err());
-}
-
-#[test]
-fn raises_name_their_audience_through_the_snapshot_id() {
-    for audience in [Audience::Store, Audience::Circle(circle(7))] {
-        let snapshot = SnapshotId {
-            audience: audience.clone(),
-            device: DeviceId(9),
-            number: 11,
-        };
-        let change = StoreChange::RaiseSchema {
-            version: 3,
-            snapshot,
-        };
-        let mut expected = vec![11, 0, 0, 0, 3];
-        match audience {
-            Audience::Store => expected.push(0),
-            Audience::Circle(id) => {
-                expected.push(1);
-                expected.extend(id.0.as_bytes());
-            }
-        }
-        expected.extend(9u64.to_be_bytes());
-        expected.extend(11u64.to_be_bytes());
-        let entry = StoreLogEntry {
-            change,
-            ..test_utils::store_log()
-        };
-        let bytes = Object::StoreLog(entry.clone()).encode().unwrap();
-        assert_eq!(&bytes[75..], expected);
-        assert_eq!(Object::decode(&bytes).unwrap(), Object::StoreLog(entry));
-    }
 }

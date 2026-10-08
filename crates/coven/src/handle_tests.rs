@@ -310,7 +310,7 @@ async fn closing_waits_for_setup_after_its_caller_is_cancelled() {
         let config = StorageConfig::S3 {
             bucket: "bucket".into(), region: "region".into(), prefix: "store".into(), endpoint: None,
         };
-        let storage = Arc::new(MemoryStorage::new(config.clone(), Arc::new(SystemClock)).unwrap());
+        let storage = Arc::new(MemoryStorage::builder().location(config.clone()).clock(Arc::new(SystemClock)).build().unwrap());
         let handle = builder(&app, layout).storage_connector(storage.clone()).open(directory.id()).await.unwrap();
         handle.initialize_identity().unwrap();
         let (entered, entering) = tokio::sync::oneshot::channel();

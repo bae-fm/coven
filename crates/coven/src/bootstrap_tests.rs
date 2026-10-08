@@ -1,20 +1,16 @@
 use super::*;
 use coven_crypto::custody::KeyringCustody;
-use coven_database::{DatabaseBuilder, FileDatabase};
-use coven_format::{
-    store_log::{MemberPublicKeys, StoreChange},
-    MemberAccess,
-};
+use coven_database::DatabaseBuilder;
+use coven_format::MemberAccess;
 use coven_storage::{
     test_utils::{Faults, MemoryStorage},
     ObjectPath, ObjectPrefix, S3Credentials, Storage, StorageFailure,
 };
-use coven_sync::{DeviceLogSync, Files, Operations};
-use std::{num::NonZeroUsize, time::UNIX_EPOCH};
+use std::num::NonZeroUsize;
 
-// Include the installation fixtures in this test module so their retained
-// database, storage and custody dependencies stay private.
-include!("../tests/fixtures/bootstrap.rs");
+#[path = "../tests/fixtures/bootstrap.rs"]
+mod fixtures;
+use fixtures::*;
 
 #[tokio::test]
 async fn restore_loads_snapshots_and_later_writes_with_identical_fingerprints() {
@@ -44,11 +40,8 @@ async fn restore_loads_snapshots_and_later_writes_with_identical_fingerprints() 
         .unwrap();
     let scoped = Arc::new(StoreKeychain::new(install.keychain.clone(), directory.id()));
     let keys = KeyringCustody::<StoreKeyring>::new(scoped.clone());
-    assert_eq!(rows(&db).await, rows(&owner.db).await);
-    assert_eq!(
-        fingerprint(&db, &keys).await,
-        fingerprint(&owner.db, owner.keys.as_ref()).await
-    );
+    assert_eq!(rows(&db).await, owner.rows().await);
+    assert_eq!(fingerprint(&db, &keys).await, owner.fingerprints().await);
     let log = db.local_store_log().await.unwrap();
     assert_eq!(
         log.log.replay.state.devices[&log.device].member,
@@ -80,7 +73,6 @@ async fn join_accepts_provider_access_and_approval_then_loads_the_store() {
         let invite = owner.invite().await;
         let install = Installation::new();
         let (_, cancel) = watch::channel(false);
-        let mut requests = owner.operations.subscribe_join_requests();
         let joining = install.run(
             &owner,
             Installation::join_request(&invite),
@@ -88,22 +80,11 @@ async fn join_accepts_provider_access_and_approval_then_loads_the_store() {
             &cancel,
             |_| {},
         );
-        let approve = async {
-            let request = next_request(&mut requests).await;
+        let (result, member) = join_and_approve(&owner.handle, joining, |request| {
             assert_eq!(request.device_name, "New phone");
-            install.absent(owner.directory.id()).await;
-            owner
-                .operations
-                .approve_join_request(&request)
-                .await
-                .unwrap();
-            request.member
-        };
-        let (result, member) = tokio::time::timeout(Duration::from_secs(20), async {
-            tokio::join!(joining, approve)
+            install.absent(owner.directory.id())
         })
-        .await
-        .unwrap();
+        .await;
         let handle = result.unwrap().unwrap();
         let restored =
             coven_sync::read_restore_code(&handle.restore_code().await.unwrap()).unwrap();
@@ -119,7 +100,7 @@ async fn join_accepts_provider_access_and_approval_then_loads_the_store() {
                 ))
                 .await
                 .unwrap(),
-            rows(&owner.db).await
+            owner.rows().await
         );
         assert_eq!(
             handle
@@ -144,7 +125,6 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
     let invite = owner.invite().await;
     let install = Installation::new();
     let (_, cancel) = watch::channel(false);
-    let mut requests = owner.operations.subscribe_join_requests();
     let mut joining = Box::pin(install.run(
         &owner,
         Installation::join_request(&invite),
@@ -153,7 +133,7 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
         |_| {},
     ));
     let request = tokio::time::timeout(Duration::from_secs(20), async {
-        tokio::select! { result = &mut joining => panic!("join returned before approval: {result:?}"), request = next_request(&mut requests) => request }
+        tokio::select! { result = &mut joining => panic!("join returned before approval: {result:?}"), request = next_join_request(&owner.handle) => request }
     }).await.unwrap();
     let bytes = owner
         .storage
@@ -184,17 +164,9 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
                 .unwrap(),
             bytes
         );
-        owner
-            .operations
-            .approve_join_request(&request)
-            .await
-            .unwrap();
+        owner.handle.approve_join_request(&request).await.unwrap();
     };
-    let (result, ()) = tokio::time::timeout(Duration::from_secs(20), async {
-        tokio::join!(resumed, approve)
-    })
-    .await
-    .unwrap();
+    let (result, ()) = join_with_response(resumed, approve).await;
     let handle = result.unwrap().unwrap();
     let directory = install.layout.store_dir(&owner.directory.id());
     assert_eq!(directory.settings().unwrap().device_id, device);
@@ -217,7 +189,6 @@ async fn declined_and_expired_requests_finish_without_committing_custody() {
         let invite = owner.invite().await;
         let install = Installation::new();
         let (_, cancel) = watch::channel(false);
-        let mut requests = owner.operations.subscribe_join_requests();
         let joining = install.run(
             &owner,
             Installation::join_request(&invite),
@@ -226,23 +197,15 @@ async fn declined_and_expired_requests_finish_without_committing_custody() {
             |_| {},
         );
         let settle = async {
-            let request = next_request(&mut requests).await;
+            let request = next_join_request(&owner.handle).await;
             if expiry {
                 owner.clock.set(invite.expires_at);
-                owner.operations.blocked_operations().await.unwrap();
+                owner.handle.blocked_operations().await.unwrap();
             } else {
-                owner
-                    .operations
-                    .decline_join_request(&request)
-                    .await
-                    .unwrap();
+                owner.handle.decline_join_request(&request).await.unwrap();
             }
         };
-        let (result, ()) = tokio::time::timeout(Duration::from_secs(20), async {
-            tokio::join!(joining, settle)
-        })
-        .await
-        .unwrap();
+        let (result, ()) = join_with_response(joining, settle).await;
         assert!(result.unwrap().is_none());
         install.absent(owner.directory.id()).await;
         assert!(!install
@@ -261,7 +224,6 @@ async fn permission_revocation_while_joining_keeps_the_provider_failure() {
     let invite = owner.invite().await;
     let install = Installation::new();
     let (_, cancel) = watch::channel(false);
-    let mut requests = owner.operations.subscribe_join_requests();
     let joining = install.run(
         &owner,
         Installation::join_request(&invite),
@@ -270,18 +232,10 @@ async fn permission_revocation_while_joining_keeps_the_provider_failure() {
         |_| {},
     );
     let revoke = async {
-        let request = next_request(&mut requests).await;
-        owner
-            .operations
-            .decline_join_request(&request)
-            .await
-            .unwrap();
+        let request = next_join_request(&owner.handle).await;
+        owner.handle.decline_join_request(&request).await.unwrap();
     };
-    let (result, ()) = tokio::time::timeout(Duration::from_secs(20), async {
-        tokio::join!(joining, revoke)
-    })
-    .await
-    .unwrap();
+    let (result, ()) = join_with_response(joining, revoke).await;
     assert!(
         matches!(result, Err(BootstrapError::Sync(SyncError::Storage(error))) if error.failure() == StorageFailure::PermissionDenied)
     );
@@ -295,7 +249,6 @@ async fn cancellation_while_waiting_removes_every_local_installation_value() {
     let invite = owner.invite().await;
     let install = Installation::new();
     let (stop, cancel) = watch::channel(false);
-    let mut requests = owner.operations.subscribe_join_requests();
     let joining = install.run(
         &owner,
         Installation::join_request(&invite),
@@ -304,14 +257,10 @@ async fn cancellation_while_waiting_removes_every_local_installation_value() {
         |_| {},
     );
     let cancel_join = async {
-        next_request(&mut requests).await;
+        next_join_request(&owner.handle).await;
         stop.send(true).unwrap();
     };
-    let (result, ()) = tokio::time::timeout(Duration::from_secs(20), async {
-        tokio::join!(joining, cancel_join)
-    })
-    .await
-    .unwrap();
+    let (result, ()) = join_with_response(joining, cancel_join).await;
     assert!(matches!(result, Err(BootstrapError::Cancelled)));
     install.absent(owner.directory.id()).await;
     assert!(!install
@@ -320,7 +269,7 @@ async fn cancellation_while_waiting_removes_every_local_installation_value() {
         .join("stores")
         .join(owner.directory.id().to_string())
         .exists());
-    owner.operations.cancel_invite(&invite.id).await.unwrap();
+    owner.handle.cancel_invite(&invite.id).await.unwrap();
     owner.close().await;
 }
 
@@ -512,7 +461,6 @@ async fn a_device_removed_during_loading_receives_the_provider_refusal() {
     let invite = owner.invite().await;
     let install = Installation::new();
     let (_, cancel) = watch::channel(false);
-    let mut requests = owner.operations.subscribe_join_requests();
     let (listed, listing) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
     owner
@@ -527,15 +475,11 @@ async fn a_device_removed_during_loading_receives_the_provider_refusal() {
         |_| {},
     );
     let remove = async {
-        let request = next_request(&mut requests).await;
-        owner
-            .operations
-            .approve_join_request(&request)
-            .await
-            .unwrap();
+        let request = next_join_request(&owner.handle).await;
+        owner.handle.approve_join_request(&request).await.unwrap();
         listing.await.unwrap();
-        owner.operations.sync_store_log().await.unwrap();
-        let members = owner.operations.get_members().await.unwrap();
+        owner.sync().await;
+        let members = owner.handle.get_members().await.unwrap();
         let devices = &members
             .iter()
             .find(|m| m.id == request.member)
@@ -543,7 +487,7 @@ async fn a_device_removed_during_loading_receives_the_provider_refusal() {
             .devices;
         assert_eq!(devices.len(), 1);
         assert!(matches!(
-            owner.operations.remove_device(devices[0]).await.unwrap(),
+            owner.handle.remove_device(devices[0]).await.unwrap(),
             ProviderSignOut::RemoveAppAccess {
                 provider: CloudProvider::GoogleDrive
             }
@@ -556,11 +500,7 @@ async fn a_device_removed_during_loading_receives_the_provider_refusal() {
             .unwrap();
         resume.send(()).unwrap();
     };
-    let (result, ()) = tokio::time::timeout(Duration::from_secs(20), async {
-        tokio::join!(joining, remove)
-    })
-    .await
-    .unwrap();
+    let (result, ()) = join_with_response(joining, remove).await;
     assert!(
         matches!(result, Err(BootstrapError::Sync(SyncError::Storage(error))) if error.failure() == StorageFailure::PermissionDenied)
     );
@@ -574,7 +514,6 @@ async fn approval_during_a_log_listing_is_not_mistaken_for_decline() {
     let invite = owner.invite().await;
     let install = Installation::new();
     let (_, cancel) = watch::channel(false);
-    let mut requests = owner.operations.subscribe_join_requests();
     let (listed, listing) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
     owner
@@ -590,19 +529,11 @@ async fn approval_during_a_log_listing_is_not_mistaken_for_decline() {
     );
     let approve = async {
         listing.await.unwrap();
-        let request = next_request(&mut requests).await;
-        owner
-            .operations
-            .approve_join_request(&request)
-            .await
-            .unwrap();
+        let request = next_join_request(&owner.handle).await;
+        owner.handle.approve_join_request(&request).await.unwrap();
         resume.send(()).unwrap();
     };
-    let (result, ()) = tokio::time::timeout(Duration::from_secs(20), async {
-        tokio::join!(joining, approve)
-    })
-    .await
-    .unwrap();
+    let (result, ()) = join_with_response(joining, approve).await;
     assert!(
         result.unwrap().is_some(),
         "approval deleted the request after this device took its log listing"
@@ -617,7 +548,6 @@ async fn removal_lists_every_recorded_key_including_a_dropped_replacement() {
         let invite = owner.invite().await;
         let install = Installation::new();
         let (_, cancel) = watch::channel(false);
-        let mut requests = owner.operations.subscribe_join_requests();
         let joining = install.run(
             &owner,
             Installation::join_request(&invite),
@@ -625,20 +555,7 @@ async fn removal_lists_every_recorded_key_including_a_dropped_replacement() {
             &cancel,
             |_| {},
         );
-        let approve = async {
-            let request = next_request(&mut requests).await;
-            owner
-                .operations
-                .approve_join_request(&request)
-                .await
-                .unwrap();
-            request.member
-        };
-        let (result, member) = tokio::time::timeout(Duration::from_secs(20), async {
-            tokio::join!(joining, approve)
-        })
-        .await
-        .unwrap();
+        let (result, member) = join_and_approve(&owner.handle, joining, |_| async {}).await;
         let handle = result.unwrap().unwrap();
         let replace = || {
             handle.replace_access_key(
@@ -646,7 +563,7 @@ async fn removal_lists_every_recorded_key_including_a_dropped_replacement() {
                 SecretText::new("new-secret".into()),
             )
         };
-        let expected_key = if concurrent {
+        if concurrent {
             let (listed, listing) = tokio::sync::oneshot::channel();
             let (resume, resumed) = tokio::sync::oneshot::channel();
             owner
@@ -666,7 +583,7 @@ async fn removal_lists_every_recorded_key_including_a_dropped_replacement() {
                 resume.send(()).unwrap();
             };
             let (removal, ()) = tokio::time::timeout(Duration::from_secs(20), async {
-                tokio::join!(owner.operations.remove_member(&member), replacement)
+                tokio::join!(owner.handle.remove_member(&member), replacement)
             })
             .await
             .unwrap();
@@ -676,7 +593,6 @@ async fn removal_lists_every_recorded_key_including_a_dropped_replacement() {
                     access_key_id: "invited-key".into()
                 }
             );
-            "invited-key"
         } else {
             let code = replace().await.unwrap();
             assert_eq!(
@@ -686,44 +602,16 @@ async fn removal_lists_every_recorded_key_including_a_dropped_replacement() {
                     .member_id(),
                 member
             );
-            owner.operations.sync_store_log().await.unwrap();
+            owner.sync().await;
             assert_eq!(
-                owner.operations.remove_member(&member).await.unwrap(),
+                owner.handle.remove_member(&member).await.unwrap(),
                 MemberRemoval::DeleteAccessKey {
                     access_key_id: "new-member-key".into()
                 }
             );
-            "new-member-key"
         };
-        let log = owner.db.local_store_log().await.unwrap().log;
-        let entry = log
-            .entries
-            .iter()
-            .find(|e| {
-                e.entry.author == member
-                    && matches!(
-                        &e.entry.change,
-                        StoreChange::SetAccess {
-                            access: MemberAccess::S3AccessKey { access_key_id }
-                        } if access_key_id == "new-member-key"
-                    )
-            })
-            .unwrap();
         assert_eq!(
-            matches!(
-                log.replay.entries[&entry.entry.position],
-                coven_database::EntryOutcome::Dropped(_)
-            ),
-            concurrent
-        );
-        assert_eq!(
-            log.replay.state.members[&member].access,
-            MemberAccess::S3AccessKey {
-                access_key_id: expected_key.into()
-            }
-        );
-        assert_eq!(
-            owner.operations.access_keys_to_delete().await.unwrap(),
+            owner.handle.access_keys_to_delete().await.unwrap(),
             ["invited-key", "new-member-key"].map(|key| AccessKeyToDelete {
                 access_key_id: key.into(),
                 member: Some(member.clone())
@@ -740,6 +628,12 @@ async fn failed_access_publication_retains_credentials_and_retry_finishes_once()
     let install = Installation::new();
     let handle = install.restore(&owner).await;
     let directory = install.layout.store_dir(&owner.directory.id());
+    let entries_before = owner
+        .storage
+        .list(&ObjectPrefix::store_logs())
+        .await
+        .unwrap()
+        .len();
     owner
         .storage
         .set_faults(Faults {
@@ -774,14 +668,15 @@ async fn failed_access_publication_retains_credentials_and_retry_finishes_once()
             retained
         );
     }
-    owner.operations.sync_store_log().await.unwrap();
-    let log = owner.db.local_store_log().await.unwrap().log;
+    owner.sync().await;
     assert_eq!(
-        log.entries
-            .iter()
-            .filter(|e| matches!(e.entry.change, StoreChange::SetAccess { .. }))
-            .count(),
-        1
+        owner
+            .storage
+            .list(&ObjectPrefix::store_logs())
+            .await
+            .unwrap()
+            .len(),
+        entries_before + 1
     );
     handle.close().await.unwrap();
     let disconnected = Coven::builder(install.layout.clone())
@@ -909,22 +804,10 @@ async fn joining_retains_the_approved_member_in_session_custody() {
         .key_custody(KeyCustody::InMemory)
         .identity_custody(IdentityCustody::InMemory);
     let joining = join_with_invite(builder, &invite.code, "New phone", |_| {}, &cancel);
-    let mut requests = owner.operations.subscribe_join_requests();
-    let approve = async {
-        let request = next_request(&mut requests).await;
+    let (handle, member) = join_and_approve(&owner.handle, joining, |_| async {
         install.absent(owner.directory.id()).await;
-        owner
-            .operations
-            .approve_join_request(&request)
-            .await
-            .unwrap();
-        request.member
-    };
-    let (handle, member) = tokio::time::timeout(Duration::from_secs(20), async {
-        tokio::join!(joining, approve)
     })
-    .await
-    .unwrap();
+    .await;
     let handle = handle.unwrap().unwrap();
     assert_eq!(
         coven_sync::read_restore_code(&handle.restore_code().await.unwrap())

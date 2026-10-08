@@ -1,6 +1,6 @@
 use crate::file_write::tests::{attach, local_count, owned_paths, tables, SCHEMA};
 use crate::snapshot_write::tests::{frames, id, load_one, stream, SnapshotFrames};
-use crate::tests::TestStore;
+use crate::tests::{contents, TestStore};
 use crate::write::tests::{count, notes, records, sql, NOTES};
 use crate::{Database, DbError, Provenance, RowIdentity, SyncedTable};
 use coven_foundation::id_source::{CircleId, SequentialIds};
@@ -16,33 +16,6 @@ async fn load(db: &Database, audience: Audience, frames: SnapshotFrames) {
     )
     .await
     .unwrap();
-}
-
-pub(crate) fn contents(
-    db: &Database,
-) -> std::collections::BTreeMap<String, Vec<Vec<crate::types::Value>>> {
-    db.inspect_writer(|db| {
-        let tables = db
-            .query(
-                "SELECT name FROM main.sqlite_schema WHERE type='table' ORDER BY name",
-                [],
-                |r| r.get::<_, String>(0),
-            )
-            .unwrap();
-        tables
-            .into_iter()
-            .map(|table| {
-                let values = db
-                    .query(
-                        &format!("SELECT * FROM {}", crate::sql::identifier(&table)),
-                        [],
-                        |r| (0..r.as_ref().column_count()).map(|i| r.get(i)).collect(),
-                    )
-                    .unwrap();
-                (table, values)
-            })
-            .collect()
-    })
 }
 
 #[tokio::test]
@@ -724,6 +697,7 @@ async fn waiting_for_a_snapshot_reader_keeps_the_writer_available() {
         }));
         ready.await.unwrap();
     }
+    let waiting = db.observe_next_reader_wait();
     let target = db.clone();
     let loading = tokio::spawn(async move {
         load_one(
@@ -734,8 +708,10 @@ async fn waiting_for_a_snapshot_reader_keeps_the_writer_available() {
         )
         .await
     });
-    // Every reader is reserved; allow the blocking loader to reach that wait.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::timeout(Duration::from_secs(10), waiting)
+        .await
+        .unwrap()
+        .unwrap();
     let committed = tokio::time::timeout(
         Duration::from_secs(1),
         sql(&db, "UPDATE notes SET title='while readers are occupied'"),

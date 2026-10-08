@@ -147,15 +147,12 @@ async fn close_waits_for_staging_and_reopen_removes_cancelled_bytes() {
             }
         });
         reading.await.unwrap();
-        let mut closing = tokio::spawn({
-            let db = db.clone();
-            async move { db.close().await }
-        });
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut closing)
-                .await
-                .is_err()
-        );
+        let mut closing = std::pin::pin!(db.close());
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(closing.as_mut(), cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
         if cancel {
             writing.abort();
             assert!(writing.await.unwrap_err().is_cancelled());
@@ -166,7 +163,6 @@ async fn close_waits_for_staging_and_reopen_removes_cancelled_bytes() {
         }
         tokio::time::timeout(Duration::from_secs(5), closing)
             .await
-            .unwrap()
             .unwrap()
             .unwrap();
         assert_eq!(owned_paths(&store).len(), 1);

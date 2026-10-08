@@ -43,14 +43,6 @@ fn wrong_key_lengths_are_refused_before_opening_the_box() {
 }
 
 #[test]
-#[should_panic(expected = "storage paths must be nonempty")]
-fn sealed_keys_require_a_storage_path() {
-    let member = MemberKeys::generate().unwrap();
-    let store = StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [17; 32]);
-    let _sealed = seal_store_key(&store, &member.sealing_public_key(), "");
-}
-
-#[test]
 fn member_public_bytes_round_trip_through_each_constructor() {
     let text = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
     let bytes: [u8; 32] = hex::decode(text).unwrap().try_into().unwrap();

@@ -148,6 +148,21 @@ pub(crate) const POLICY: Policy = Policy {
             "check",
         ),
         (
+            "crates/coven-storage/src/conformance.rs",
+            "Conformance",
+            "new",
+        ),
+        (
+            "crates/coven-storage/src/memory_storage_builder.rs",
+            "MemoryStorageBuilder",
+            "new",
+        ),
+        (
+            "crates/coven-storage/src/memory_storage_builder.rs",
+            "MemoryStorageBuilder",
+            "build",
+        ),
+        (
             "crates/coven-storage/src/providers/cloudkit.rs",
             "CloudKitStorage",
             "new",
@@ -194,8 +209,8 @@ pub(crate) const POLICY: Policy = Policy {
         ),
         (
             "crates/coven-storage/src/test_utils.rs",
-            "Conformance",
-            "new",
+            "MemoryStorage",
+            "builder",
         ),
         (
             "crates/coven-storage/src/test_utils.rs",
@@ -216,16 +231,6 @@ pub(crate) const POLICY: Policy = Policy {
             "crates/coven-storage/src/test_utils.rs",
             "MemoryStorage",
             "for_recipient",
-        ),
-        (
-            "crates/coven-storage/src/test_utils.rs",
-            "MemoryStorage",
-            "new",
-        ),
-        (
-            "crates/coven-storage/src/test_utils.rs",
-            "MemoryStorage",
-            "with_transfer_limits",
         ),
         (
             "crates/coven-sync/src/device_log_sync.rs",

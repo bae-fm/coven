@@ -1,4 +1,6 @@
 use super::*;
+use crate::StoreLogSync;
+use coven_database::DatabaseBuilder;
 use coven_format::write::WriteDisposition;
 
 async fn update(device: &mut Device, storage: Arc<MemoryStorage>, rename: bool, convert: bool) {
@@ -23,7 +25,7 @@ async fn update(device: &mut Device, storage: Arc<MemoryStorage>, rename: bool, 
     .await;
 }
 
-fn initial() -> Migration {
+pub(super) fn initial() -> Migration {
     Migration::sql(
         1,
         "notes",
@@ -44,43 +46,21 @@ async fn reopen(
     tables: Vec<SyncedTable>,
     migrations: Vec<Migration>,
 ) {
-    device.db.close().await.unwrap();
-    device.db = DatabaseBuilder::new(device.directory.clone())
-        .synced_tables(tables)
-        .migrations(migrations)
-        .clock(device.clock.clone())
-        .open()
-        .await
-        .unwrap();
-    device.sync = DeviceLogSync::new(
-        storage.clone(),
-        device.db.clone(),
-        device.keys.clone(),
-        device.identity.clone(),
-    );
-    device.log = StoreLogSync::new(
-        storage,
-        device.db.clone(),
-        device.keys.clone(),
-        device.identity.clone(),
-        device.clock.clone(),
-        device.ids.clone(),
-        device.directory.clone(),
-    );
+    device.reopen(storage, tables, migrations).await;
 }
 
 async fn sync_all(devices: &mut [Device]) {
     for device in &mut *devices {
-        device.sync.upload_writes().await.unwrap();
+        device.writes.upload_writes().await.unwrap();
     }
     for device in &mut *devices {
-        device.log.sync_store_log().await.unwrap();
+        device.sync.sync_store_log().await.unwrap();
     }
     for device in &mut *devices {
-        device.sync.upload_writes().await.unwrap();
+        device.writes.upload_writes().await.unwrap();
     }
     for device in &mut *devices {
-        device.sync.download_writes().await.unwrap();
+        device.writes.download_writes().await.unwrap();
     }
 }
 
@@ -96,9 +76,9 @@ async fn seed(devices: &mut [Device]) {
         "INSERT INTO notes VALUES('42','Groceries','body')",
     )
     .await;
-    devices[0].sync.upload_writes().await.unwrap();
+    devices[0].writes.upload_writes().await.unwrap();
     for device in devices.iter_mut().skip(1) {
-        device.sync.download_writes().await.unwrap();
+        device.writes.download_writes().await.unwrap();
     }
 }
 
@@ -108,13 +88,13 @@ async fn adding_color_accepts_older_edits_without_raising_the_store() {
     let mut devices = group(storage.clone(), 2).await;
     seed(&mut devices).await;
     update(&mut devices[0], storage, false, false).await;
-    devices[0].log.sync_store_log().await.unwrap();
+    devices[0].sync.sync_store_log().await.unwrap();
     sql(&devices[0].db, "UPDATE notes SET color='blue'").await;
-    devices[0].sync.upload_writes().await.unwrap();
-    devices[1].sync.download_writes().await.unwrap();
+    devices[0].writes.upload_writes().await.unwrap();
+    devices[1].writes.download_writes().await.unwrap();
     sql(&devices[1].db, "UPDATE notes SET title='Shopping'").await;
-    devices[1].sync.upload_writes().await.unwrap();
-    devices[0].sync.download_writes().await.unwrap();
+    devices[1].writes.upload_writes().await.unwrap();
+    devices[0].writes.download_writes().await.unwrap();
     assert_eq!(rows(&devices[0].db).await[0].1, "Shopping");
     assert!(devices[0]
         .db
@@ -138,21 +118,21 @@ async fn rename_holds_uploads_then_converts_or_loses_offline_edits_everywhere() 
             sql(&devices[1].db, "UPDATE notes SET title='Shopping'").await;
             let original = devices[1].db.test_queued_writes().await.unwrap().remove(0);
             update(&mut devices[0], storage.clone(), true, convert).await;
-            assert!(devices[0].sync.upload_writes().await.unwrap().is_empty());
-            devices[0].log.sync_store_log().await.unwrap();
+            assert!(devices[0].writes.upload_writes().await.unwrap().is_empty());
+            devices[0].sync.sync_store_log().await.unwrap();
             let log = devices[0].db.store_log().await.unwrap();
             assert_eq!(log.replay.state.schema[&Audience::Store].number, 2);
             assert!(matches!(
-                devices[1].log.sync_store_log().await,
+                devices[1].sync.sync_store_log().await,
                 Err(SyncFailure::UpdateRequired)
             ));
             assert!(matches!(
-                devices[1].sync.upload_writes().await,
+                devices[1].writes.upload_writes().await,
                 Err(SyncError::Stopped(SyncFailure::UpdateRequired))
             ));
             for device in devices.iter_mut().skip(1) {
                 update(device, storage.clone(), true, convert).await;
-                device.log.sync_store_log().await.unwrap();
+                device.sync.sync_store_log().await.unwrap();
             }
             let converted = devices[1].db.test_queued_writes().await.unwrap().remove(0);
             assert_eq!(converted.header.position, original.header.position);
@@ -167,10 +147,10 @@ async fn rename_holds_uploads_then_converts_or_loses_offline_edits_everywhere() 
                 }
             );
             for device in &mut devices {
-                device.sync.upload_writes().await.unwrap();
+                device.writes.upload_writes().await.unwrap();
             }
             for device in &mut devices {
-                device.sync.download_writes().await.unwrap();
+                device.writes.download_writes().await.unwrap();
                 assert_eq!(
                     name(&device.db).await,
                     if convert { "Shopping" } else { "Groceries" }
@@ -199,17 +179,17 @@ async fn an_old_write_uploaded_without_being_read_by_the_change_is_lost_everywhe
                     ..Faults::none()
                 })
                 .await;
-            assert!(devices[1].sync.upload_writes().await.is_err());
+            assert!(devices[1].writes.upload_writes().await.is_err());
         } else {
-            devices[1].sync.upload_writes().await.unwrap();
-            devices[2].sync.download_writes().await.unwrap();
+            devices[1].writes.upload_writes().await.unwrap();
+            devices[2].writes.download_writes().await.unwrap();
             assert_eq!(rows(&devices[2].db).await[0].1, "Unseen");
         }
         update(&mut devices[0], storage.clone(), true, true).await;
-        devices[0].log.sync_store_log().await.unwrap();
+        devices[0].sync.sync_store_log().await.unwrap();
         for device in devices.iter_mut().skip(1) {
             assert!(matches!(
-                device.log.sync_store_log().await,
+                device.sync.sync_store_log().await,
                 Err(SyncFailure::UpdateRequired)
             ));
             update(device, storage.clone(), true, true).await;
@@ -234,7 +214,7 @@ async fn concurrent_raises_choose_the_earlier_timestamp_even_when_it_arrives_las
     for device in devices.iter_mut().take(2) {
         update(device, storage.clone(), true, true).await;
     }
-    devices[0].log.sync_store_log().await.unwrap();
+    devices[0].sync.sync_store_log().await.unwrap();
     let first =
         devices[0].db.store_log().await.unwrap().replay.state.schema[&Audience::Store].clone();
     let path = crate::store_log_object::path(first.entry);
@@ -247,16 +227,16 @@ async fn concurrent_raises_choose_the_earlier_timestamp_even_when_it_arrives_las
     );
     let snapshot = storage.read(&snapshot_path).await.unwrap();
     storage.delete(&snapshot_path).await.unwrap();
-    devices[1].log.sync_store_log().await.unwrap();
+    devices[1].sync.sync_store_log().await.unwrap();
     let winner =
         devices[1].db.store_log().await.unwrap().replay.state.schema[&Audience::Store].clone();
     assert_ne!(first.snapshot, winner.snapshot);
     storage.create(&snapshot_path, &snapshot).await.unwrap();
     storage.create(&path, &bytes).await.unwrap();
-    devices[0].sync.upload_writes().await.unwrap();
-    devices[1].sync.upload_writes().await.unwrap();
+    devices[0].writes.upload_writes().await.unwrap();
+    devices[1].writes.upload_writes().await.unwrap();
     assert!(matches!(
-        devices[2].log.sync_store_log().await,
+        devices[2].sync.sync_store_log().await,
         Err(SyncFailure::UpdateRequired)
     ));
     update(&mut devices[2], storage.clone(), true, true).await;
@@ -274,40 +254,38 @@ async fn concurrent_raises_choose_the_earlier_timestamp_even_when_it_arrives_las
 
 #[tokio::test]
 async fn a_raise_resumes_after_reopening_at_every_publication_step() {
-    for crash in 0..=7 {
+    'crashes: for crash in 0.. {
         let storage = storage();
         let mut devices = group(storage.clone(), 2).await;
         seed(&mut devices).await;
         let device = &mut devices[0];
         update(device, storage.clone(), true, true).await;
-        device.log.schedule_version_changes().await.unwrap();
+        device.sync.schedule_version_changes().await.unwrap();
         let id = device.db.operations().await.unwrap()[0].id;
         for _ in 0..crash {
-            let record = device
-                .db
-                .operations()
-                .await
-                .unwrap()
-                .into_iter()
-                .find(|r| r.id == id)
-                .unwrap();
-            device
-                .log
+            let record = device.operation(id).await;
+            match device
+                .sync
                 .operation_step(&record, crate::operation_data::Data::read(&record).unwrap())
                 .await
-                .unwrap();
+                .unwrap()
+            {
+                crate::operations::Progress::Finished(_) => break 'crashes,
+                crate::operations::Progress::Advanced => (),
+                _ => panic!("unexpected schema publication progress"),
+            }
         }
         let fixed = device.db.local_store_log().await.unwrap().upload;
         let expected = fixed.as_ref().map(|upload| {
             crate::store_log_object::seal_upload(
                 upload,
-                device.keys.unlock().unwrap().as_ref(),
+                device.custody.unlock().unwrap().as_ref(),
                 &device.identity.unlock().unwrap().unwrap(),
             )
             .unwrap()
         });
         update(device, storage.clone(), true, true).await;
-        device.log.sync_store_log().await.unwrap();
+        device.sync.sync_store_log().await.unwrap();
         let raised =
             device.db.store_log().await.unwrap().replay.state.schema[&Audience::Store].clone();
         assert_eq!(raised.number, 2);
@@ -322,7 +300,7 @@ async fn a_raise_resumes_after_reopening_at_every_publication_step() {
         }
         assert!(device.db.operations().await.unwrap().is_empty());
         assert!(matches!(
-            devices[1].log.sync_store_log().await,
+            devices[1].sync.sync_store_log().await,
             Err(SyncFailure::UpdateRequired)
         ));
         update(&mut devices[1], storage.clone(), true, true).await;
@@ -346,7 +324,7 @@ async fn a_circle_is_raised_by_its_first_updating_member_after_the_store() {
             .unwrap()
             .member_id();
         devices[0]
-            .log
+            .sync
             .make_and_upload_entry(StoreChange::ChangeRole {
                 member,
                 role: coven_format::store_log::MemberRole::Member,
@@ -355,20 +333,20 @@ async fn a_circle_is_raised_by_its_first_updating_member_after_the_store() {
             .unwrap();
     }
     for device in &mut devices {
-        device.log.sync_store_log().await.unwrap();
+        device.sync.sync_store_log().await.unwrap();
     }
     let circle = Audience::Circle(CircleId(Uuid::from_u128(10)));
     sql(&devices[0].db,"INSERT INTO notes VALUES('42','Groceries','body'); INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','private')").await;
-    devices[0].sync.upload_writes().await.unwrap();
+    devices[0].writes.upload_writes().await.unwrap();
     for device in devices.iter_mut().skip(1) {
-        device.sync.download_writes().await.unwrap();
+        device.writes.download_writes().await.unwrap();
     }
     devices[1].clock.set(UNIX_EPOCH + Duration::from_secs(2));
     sql(&devices[1].db, "UPDATE pins SET title='edited offline'").await;
     for index in [2, 0, 1] {
         if index != 2 {
             assert!(matches!(
-                devices[index].log.sync_store_log().await,
+                devices[index].sync.sync_store_log().await,
                 Err(SyncFailure::UpdateRequired)
             ));
         }
@@ -376,8 +354,8 @@ async fn a_circle_is_raised_by_its_first_updating_member_after_the_store() {
             vec![SyncedTable::new("notes", RowIdentity::SharedKey), SyncedTable::new("pins", RowIdentity::IndependentUuid).audience_column("audience")],
             vec![initial(), Migration::sql(2,"circles","CREATE TABLE pins(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,title TEXT NOT NULL);"),
                 Migration::sql(3,"names","ALTER TABLE notes RENAME COLUMN title TO name; ALTER TABLE pins RENAME COLUMN title TO name").writes(|row| {row.rename_column("title", "name"); Ok(())})]).await;
-        devices[index].log.sync_store_log().await.unwrap();
-        devices[index].sync.upload_writes().await.unwrap();
+        devices[index].sync.sync_store_log().await.unwrap();
+        devices[index].writes.upload_writes().await.unwrap();
         let log = devices[index].db.store_log().await.unwrap();
         assert_eq!(log.replay.state.schema[&Audience::Store].number, 3);
         assert_eq!(log.replay.state.schema.contains_key(&circle), index != 2);
@@ -434,7 +412,7 @@ async fn a_batch_raises_its_final_version_and_accepts_an_already_converted_waiti
             ],
         )
         .await;
-        devices[index].log.sync_store_log().await.unwrap();
+        devices[index].sync.sync_store_log().await.unwrap();
         assert_eq!(
             devices[index]
                 .db
@@ -447,7 +425,7 @@ async fn a_batch_raises_its_final_version_and_accepts_an_already_converted_waiti
                 .number,
             3
         );
-        devices[index].sync.upload_writes().await.unwrap();
+        devices[index].writes.upload_writes().await.unwrap();
     }
     sync_all(&mut devices).await;
     for device in &devices {
@@ -474,8 +452,8 @@ async fn concurrent_raises_to_different_versions_are_both_kept() {
     let mut devices = group(storage.clone(), 3).await;
     seed(&mut devices).await;
     update(&mut devices[0], storage.clone(), true, true).await;
-    devices[0].log.sync_store_log().await.unwrap();
-    devices[0].sync.upload_writes().await.unwrap();
+    devices[0].sync.sync_store_log().await.unwrap();
+    devices[0].writes.upload_writes().await.unwrap();
     let first =
         devices[0].db.store_log().await.unwrap().replay.state.schema[&Audience::Store].clone();
     // Ben's migration and snapshot have not read Ana's raise.
@@ -490,7 +468,7 @@ async fn concurrent_raises_to_different_versions_are_both_kept() {
         ],
     )
     .await;
-    devices[1].log.schedule_version_changes().await.unwrap();
+    devices[1].sync.schedule_version_changes().await.unwrap();
     let id = devices[1].db.operations().await.unwrap()[0].id;
     for _ in 0..3 {
         let record = devices[1]
@@ -502,13 +480,13 @@ async fn concurrent_raises_to_different_versions_are_both_kept() {
             .find(|r| r.id == id)
             .unwrap();
         devices[1]
-            .log
+            .sync
             .operation_step(&record, crate::operation_data::Data::read(&record).unwrap())
             .await
             .unwrap();
     }
-    devices[1].log.sync_store_log().await.unwrap();
-    devices[1].sync.upload_writes().await.unwrap();
+    devices[1].sync.sync_store_log().await.unwrap();
+    devices[1].writes.upload_writes().await.unwrap();
     for index in [0, 2] {
         reopen(
             &mut devices[index],
@@ -546,7 +524,7 @@ async fn reference_checks_do_not_reject_writes_from_before_a_table_rename() {
     let mut devices = group(storage.clone(), 2).await;
     seed(&mut devices).await;
     sql(&devices[1].db, "UPDATE notes SET title='Unseen'").await;
-    devices[1].sync.upload_writes().await.unwrap();
+    devices[1].writes.upload_writes().await.unwrap();
     reopen(
         &mut devices[0],
         storage,
@@ -557,10 +535,10 @@ async fn reference_checks_do_not_reject_writes_from_before_a_table_rename() {
         ],
     )
     .await;
-    devices[0].sync.download_writes().await.unwrap();
+    devices[0].writes.download_writes().await.unwrap();
     assert!(devices[0].db.lost_values().await.unwrap().is_empty());
-    devices[0].log.sync_store_log().await.unwrap();
-    devices[0].sync.download_writes().await.unwrap();
+    devices[0].sync.sync_store_log().await.unwrap();
+    devices[0].writes.download_writes().await.unwrap();
     assert_eq!(devices[0].db.lost_values().await.unwrap().len(), 1);
     let title: String = devices[0]
         .db
@@ -578,7 +556,7 @@ async fn a_newer_snapshot_format_requires_an_update_and_can_resume_after_replace
     let mut devices = group(storage.clone(), 2).await;
     seed(&mut devices).await;
     let id = devices[0]
-        .log
+        .sync
         .write_snapshot(Audience::Store)
         .await
         .unwrap();
@@ -589,12 +567,12 @@ async fn a_newer_snapshot_format_requires_an_update_and_can_resume_after_replace
     storage.delete(&path).await.unwrap();
     storage.create(&path, &future).await.unwrap();
     assert!(matches!(
-        devices[1].log.reload_from_snapshots().await,
+        devices[1].sync.reload_from_snapshots().await,
         Err(SyncError::Stopped(SyncFailure::UpdateRequired))
     ));
     storage.delete(&path).await.unwrap();
     storage.create(&path, &original).await.unwrap();
-    devices[1].log.sync_store_log().await.unwrap();
+    devices[1].sync.sync_store_log().await.unwrap();
     assert_eq!(rows(&devices[0].db).await, rows(&devices[1].db).await);
     assert!(devices[1].db.operations().await.unwrap().is_empty());
 }
@@ -605,10 +583,10 @@ async fn publication_intent_can_be_scheduled_while_member_keys_are_unavailable()
     let mut devices = group(storage.clone(), 1).await;
     update(&mut devices[0], storage, true, true).await;
     devices[0].identity.forget().unwrap();
-    devices[0].log.schedule_version_changes().await.unwrap();
+    devices[0].sync.schedule_version_changes().await.unwrap();
     assert_eq!(devices[0].db.operations().await.unwrap().len(), 1);
     devices[0].identity.persist(&member()).unwrap();
-    devices[0].log.sync_store_log().await.unwrap();
+    devices[0].sync.sync_store_log().await.unwrap();
     assert_eq!(
         devices[0].db.store_log().await.unwrap().replay.state.schema[&Audience::Store].number,
         2
@@ -622,23 +600,16 @@ async fn a_migration_waits_for_an_operation_that_already_reserved_the_entry_numb
         let mut device = group(storage.clone(), 1).await.pop().unwrap();
         if journaled {
             let crate::operations::Begun::Operation(id) = device
-                .log
+                .sync
                 .begin_operation_call(crate::operations::Command::CreateCircle("waiting".into()))
                 .await
                 .unwrap()
             else {
                 panic!("operation")
             };
-            let record = device
-                .db
-                .operations()
-                .await
-                .unwrap()
-                .into_iter()
-                .find(|r| r.id == id)
-                .unwrap();
+            let record = device.operation(id).await;
             device
-                .log
+                .sync
                 .operation_step(&record, Data::read(&record).unwrap())
                 .await
                 .unwrap();
@@ -650,7 +621,7 @@ async fn a_migration_waits_for_an_operation_that_already_reserved_the_entry_numb
                 })
                 .await;
             assert!(device
-                .log
+                .sync
                 .make_and_upload_entry(StoreChange::CreateCircle {
                     circle: coven_foundation::id_source::CircleId(Uuid::from_u128(77)),
                     name: "waiting".into(),
@@ -669,8 +640,12 @@ async fn a_migration_waits_for_an_operation_that_already_reserved_the_entry_numb
             device.ids.clone(),
             crate::TransferLimits::default(),
         );
-        let operations =
-            crate::Operations::new(device.log, files.clone(), device.sync, device.clock.clone());
+        let operations = crate::Operations::new(
+            device.sync,
+            files.clone(),
+            device.writes,
+            device.clock.clone(),
+        );
         operations.get_members().await.unwrap();
         assert!(operations.blocked_operations().await.unwrap().is_empty());
         assert_eq!(operations.circles().await.unwrap()[0].name, "waiting");
@@ -719,18 +694,18 @@ mod recovery {
                         .await
                         .unwrap();
                     for device in &mut devices {
-                        device.sync.post_positions().await.unwrap();
+                        device.writes.post_positions().await.unwrap();
                     }
                     assert_ne!(
                         devices[1]
-                            .sync
+                            .writes
                             .current_positions()
                             .await
                             .unwrap()
                             .unwrap()
                             .fingerprints,
                         devices[0]
-                            .sync
+                            .writes
                             .current_positions()
                             .await
                             .unwrap()
@@ -747,7 +722,7 @@ mod recovery {
                                 ..Faults::none()
                             })
                             .await;
-                        assert!(devices[1].sync.upload_writes().await.is_err());
+                        assert!(devices[1].writes.upload_writes().await.is_err());
                     }
                     let sealed = if attempted {
                         Some(writes::resealed(&devices[1]).await.1)
@@ -761,8 +736,8 @@ mod recovery {
                         recovery_migrations(convert),
                     )
                     .await;
-                    devices[0].log.sync_store_log().await.unwrap();
-                    devices[0].sync.upload_writes().await.unwrap();
+                    devices[0].sync.sync_store_log().await.unwrap();
+                    devices[0].writes.upload_writes().await.unwrap();
                     let device = &mut devices[1];
                     if rebuild {
                         let page: i64 = device
@@ -801,16 +776,16 @@ mod recovery {
                             .open_reloading_locked(lock, FileName::new("test").unwrap())
                             .await
                             .unwrap();
-                        device.sync = DeviceLogSync::new(
+                        device.writes = DeviceLogSync::new(
                             storage.clone(),
                             device.db.clone(),
-                            device.keys.clone(),
+                            device.custody.clone(),
                             device.identity.clone(),
                         );
-                        device.log = StoreLogSync::new(
+                        device.sync = StoreLogSync::new(
                             storage.clone(),
                             device.db.clone(),
-                            device.keys.clone(),
+                            device.custody.clone(),
                             device.identity.clone(),
                             device.clock.clone(),
                             device.ids.clone(),
@@ -846,11 +821,11 @@ mod recovery {
                         );
                         assert_eq!(waiting.header.schema_version, if convert { 3 } else { 1 });
                     }
-                    device.log.sync_store_log().await.unwrap();
-                    device.log.reload_from_snapshots().await.unwrap();
+                    device.sync.sync_store_log().await.unwrap();
+                    device.sync.reload_from_snapshots().await.unwrap();
                     if rebuild {
                         device
-                            .log
+                            .sync
                             .make_and_upload_entry(StoreChange::AddDevice {
                                 device: DeviceId(999),
                                 name: "Recovered".into(),
@@ -879,10 +854,10 @@ mod recovery {
                             }
                         );
                         assert_eq!(device.db.lost_values().await.unwrap(), losses);
-                        device.sync.post_positions().await.unwrap();
+                        device.writes.post_positions().await.unwrap();
                     }
                     let expected = devices[0]
-                        .sync
+                        .writes
                         .current_positions()
                         .await
                         .unwrap()
@@ -891,7 +866,7 @@ mod recovery {
                     for device in &mut devices {
                         assert_eq!(
                             device
-                                .sync
+                                .writes
                                 .current_positions()
                                 .await
                                 .unwrap()

@@ -94,10 +94,19 @@ fn the_database_and_storage_never_depend_on_each_other() {
             "[target.'cfg(unix)'.dependencies]\ncoven-storage.workspace = true\n",
         ),
     ]);
-    assert_eq!(violations.len(), 2);
-    assert!(violations.iter().all(|violation| violation
-        .message
-        .contains("the two never depend on each other")));
+    assert_eq!(
+        violations,
+        [
+            ("coven-database", "coven-storage"),
+            ("coven-storage", "coven-database"),
+        ]
+        .map(|(from, to)| Finding::new(
+            &format!("crates/{from}/Cargo.toml"),
+            1,
+            format!("{from} depends on {to}; the two never depend on each other"),
+            REMEDY
+        ))
+    );
 }
 
 #[test]
@@ -115,9 +124,13 @@ fn a_renamed_workspace_dependency_resolves_to_its_package() {
             "crates/coven-foundation",
             "coven-foundation",
             "[dependencies]\nfoundation.workspace = true\n",
-        )])
-        .len(),
-        1,
+        )]),
+        [Finding::new(
+            "crates/coven-foundation/Cargo.toml",
+            1,
+            "coven-foundation depends on coven-foundation, which is not above it in crate_order",
+            REMEDY
+        )],
     );
 }
 

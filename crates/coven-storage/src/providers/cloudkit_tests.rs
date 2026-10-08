@@ -15,6 +15,7 @@ struct Shares {
 }
 struct Bridge {
     recipient: Option<String>,
+    denied: Arc<std::sync::atomic::AtomicBool>,
     shares: Arc<tokio::sync::Mutex<Shares>>,
     memory: MemoryStorage,
     abort_failure: Option<StorageFailure>,
@@ -43,6 +44,7 @@ impl Bridge {
         Self {
             memory,
             recipient: None,
+            denied: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             shares: Arc::new(tokio::sync::Mutex::new(Shares::default())),
             abort_failure: None,
             non_owner: false,
@@ -54,6 +56,7 @@ impl Bridge {
     fn recipient(&self, email: &str) -> Self {
         Self {
             recipient: Some(email.into()),
+            denied: self.denied.clone(),
             shares: self.shares.clone(),
             memory: self.memory.clone(),
             abort_failure: None,
@@ -64,6 +67,9 @@ impl Bridge {
         }
     }
     async fn authorize(&self) -> Result<(), StorageError> {
+        if self.denied.load(Ordering::SeqCst) {
+            return Err(permission_error());
+        }
         if let Some(email) = &self.recipient {
             let shares = self.shares.lock().await;
             if !shares.granted.contains(email) || !shares.accepted.contains(email) {
@@ -84,6 +90,9 @@ impl CloudKitOps for Bridge {
     }
     async fn is_owner(&self, location: &StorageConfig) -> Result<bool, StorageError> {
         assert_eq!(location, &config());
+        if self.denied.load(Ordering::SeqCst) {
+            return Err(permission_error());
+        }
         Ok(!self.non_owner)
     }
     fn single_request_limit(&self) -> u64 {
@@ -291,99 +300,58 @@ impl CloudKitOps for Bridge {
 #[tokio::test]
 async fn bridge_conforms_and_retains_parts_across_adapter_restart() {
     let bridge = Arc::new(Bridge::new(
-        MemoryStorage::new(
-            config(),
-            Arc::new(coven_foundation::clock::FixedClock::new(
-                std::time::SystemTime::UNIX_EPOCH,
-            )),
-        )
-        .unwrap(),
+        MemoryStorage::builder().location(config()).build().unwrap(),
     ));
     let storage = Arc::new(provider(config(), bridge.clone()).unwrap());
     Conformance::new(storage.clone()).run().await.unwrap();
-    let path = ObjectPath::file(
-        coven_foundation::id_source::DeviceId(31),
-        coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xff; 16])),
-    );
-    let mut session = storage.begin_upload(&path, 5).await.unwrap();
-    let recorded = session.encode().unwrap();
-    bridge
-        .memory
-        .set_faults(Faults {
-            lose_part_reply: true,
-            ..Faults::none()
-        })
-        .await;
-    assert!(storage.upload_part(&mut session, b"abcd").await.is_err());
-    drop(storage);
-    drop(session);
-    let storage = provider(config(), bridge.clone()).unwrap();
-    let mut session = UploadSession::decode(recorded.as_bytes()).unwrap();
-    storage.resume_upload(&mut session).await.unwrap();
-    assert_eq!(session.confirmed, 4);
-    storage.upload_part(&mut session, b"e").await.unwrap();
-    storage.finish_upload(&mut session).await.unwrap();
-    assert_eq!(storage.read(&path).await.unwrap(), b"abcde");
-    bridge
-        .memory
-        .set_faults(Faults {
-            fail_next: 1,
-            failure: StorageFailure::PermissionDenied,
-            ..Faults::none()
+    Conformance::new(storage.clone())
+        .lost_part_reply(4, async {
+            bridge
+                .memory
+                .set_faults(Faults {
+                    lose_part_reply: true,
+                    ..Faults::none()
+                })
+                .await;
         })
         .await;
     assert_eq!(
-        storage.read(&path).await.unwrap_err().failure(),
-        StorageFailure::PermissionDenied
+        storage.config().provider().sign_out(),
+        ProviderSignOut::RemoveFromAppleAccount
     );
+    let errors = Conformance::new(storage)
+        .permission_failures(async {
+            bridge.denied.store(true, Ordering::SeqCst);
+        })
+        .await;
+    assert!(errors
+        .iter()
+        .all(|error| matches!(error, StorageError::Provider { .. })));
 }
 
 #[tokio::test]
 async fn expired_bridge_session_restarts_from_retained_bytes() {
     let bridge = Arc::new(Bridge::new(
-        MemoryStorage::new(
-            config(),
-            Arc::new(coven_foundation::clock::FixedClock::new(
-                std::time::SystemTime::UNIX_EPOCH,
-            )),
-        )
-        .unwrap(),
+        MemoryStorage::builder().location(config()).build().unwrap(),
     ));
-    let storage = provider(config(), bridge).unwrap();
-    let path = ObjectPath::device_log(
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
-    let mut expired = storage.begin_upload(&path, 5).await.unwrap();
-    storage.upload_part(&mut expired, b"abcd").await.unwrap();
-    storage.abort_upload(&expired).await.unwrap();
-    assert!(matches!(
-        storage.resume_upload(&mut expired).await,
-        Err(error) if error.failure() == StorageFailure::SessionExpired
-    ));
-    let replacement = storage.restart_upload(&expired).await.unwrap();
-    assert_eq!(replacement.path(), &path);
-    assert_eq!(replacement.confirmed_bytes(), 0);
-    let mut replacement = UploadSession::decode(replacement.encode().unwrap().as_bytes()).unwrap();
-    storage
-        .upload_part(&mut replacement, b"abcd")
-        .await
-        .unwrap();
-    storage.upload_part(&mut replacement, b"e").await.unwrap();
-    storage.finish_upload(&mut replacement).await.unwrap();
-    assert_eq!(storage.read(&path).await.unwrap(), b"abcde");
+    let storage = Arc::new(provider(config(), bridge.clone()).unwrap());
+    Conformance::new(storage)
+        .expired_session(async {
+            bridge
+                .memory
+                .set_faults(Faults {
+                    expire_uploads: true,
+                    ..Faults::none()
+                })
+                .await;
+        })
+        .await;
 }
 
 #[tokio::test]
 async fn abort_accepts_a_forgotten_session_and_keeps_published_objects() {
     let bridge = Arc::new(Bridge::new(
-        MemoryStorage::new(
-            config(),
-            Arc::new(coven_foundation::clock::FixedClock::new(
-                std::time::SystemTime::UNIX_EPOCH,
-            )),
-        )
-        .unwrap(),
+        MemoryStorage::builder().location(config()).build().unwrap(),
     ));
     let storage = provider(config(), bridge.clone()).unwrap();
     let path = ObjectPath::device_log(
@@ -407,13 +375,7 @@ async fn abort_accepts_a_forgotten_session_and_keeps_published_objects() {
 #[tokio::test]
 async fn create_respects_the_bridges_single_request_limit() {
     let bridge = Arc::new(Bridge::new(
-        MemoryStorage::new(
-            config(),
-            Arc::new(coven_foundation::clock::FixedClock::new(
-                std::time::SystemTime::UNIX_EPOCH,
-            )),
-        )
-        .unwrap(),
+        MemoryStorage::builder().location(config()).build().unwrap(),
     ));
     let storage = provider(config(), bridge.clone()).unwrap();
     assert_eq!(storage.single_request_limit(), 16);
@@ -431,15 +393,7 @@ async fn create_respects_the_bridges_single_request_limit() {
 
 #[tokio::test]
 async fn automatic_upload_keeps_both_transfer_and_abort_failures() {
-    let mut bridge = Bridge::new(
-        MemoryStorage::new(
-            config(),
-            Arc::new(coven_foundation::clock::FixedClock::new(
-                std::time::SystemTime::UNIX_EPOCH,
-            )),
-        )
-        .unwrap(),
-    );
+    let mut bridge = Bridge::new(MemoryStorage::builder().location(config()).build().unwrap());
     bridge.abort_failure = Some(StorageFailure::PermissionDenied);
     bridge
         .memory
@@ -465,55 +419,23 @@ async fn automatic_upload_keeps_both_transfer_and_abort_failures() {
 
 #[tokio::test]
 async fn sharing_requires_the_store_owners_account() {
-    let mut bridge = Bridge::new(
-        MemoryStorage::new(
-            config(),
-            Arc::new(coven_foundation::clock::FixedClock::new(
-                std::time::SystemTime::UNIX_EPOCH,
-            )),
-        )
-        .unwrap(),
-    );
+    let mut bridge = Bridge::new(MemoryStorage::builder().location(config()).build().unwrap());
     bridge.non_owner = true;
     let storage = provider(config(), Arc::new(bridge)).unwrap();
-    assert!(matches!(
-        storage.grant_access("new@example.test").await,
-        Err(error) if error.failure() == StorageFailure::NotStoreOwner
-    ));
-    assert!(matches!(
-        storage
-            .revoke_access(&MemberAccess::ProviderAccount("kept@example.test".into()))
-            .await,
-        Err(error) if error.failure() == StorageFailure::NotStoreOwner
-    ));
+    Conformance::new(Arc::new(storage))
+        .owner_only_sharing()
+        .await;
 }
 
 #[tokio::test]
 async fn listing_keeps_the_native_publication_metadata() {
     let bridge = Arc::new(Bridge::new(
-        MemoryStorage::new(
-            config(),
-            Arc::new(coven_foundation::clock::FixedClock::new(
-                std::time::SystemTime::UNIX_EPOCH,
-            )),
-        )
-        .unwrap(),
+        MemoryStorage::builder().location(config()).build().unwrap(),
     ));
     let storage = provider(config(), bridge.clone()).unwrap();
-    let path = ObjectPath::device_log(
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
-    storage.create(&path, b"data").await.unwrap();
-    let listed = storage.list(&ObjectPrefix::all()).await.unwrap();
-    assert_eq!(
-        listed,
-        [StoredObject {
-            path,
-            size: 4,
-            stored_at: std::time::SystemTime::UNIX_EPOCH
-        }]
-    );
+    Conformance::new(Arc::new(storage))
+        .listing_times(std::time::SystemTime::UNIX_EPOCH, async {})
+        .await;
 }
 
 #[tokio::test]
@@ -528,15 +450,7 @@ async fn listing_refuses_duplicate_paths_and_objects_outside_the_requested_prefi
         stored_at: std::time::SystemTime::UNIX_EPOCH,
     };
     for listed in [vec![object.clone()], vec![object.clone(), object.clone()]] {
-        let mut bridge = Bridge::new(
-            MemoryStorage::new(
-                config(),
-                Arc::new(coven_foundation::clock::FixedClock::new(
-                    std::time::SystemTime::UNIX_EPOCH,
-                )),
-            )
-            .unwrap(),
-        );
+        let mut bridge = Bridge::new(MemoryStorage::builder().location(config()).build().unwrap());
         bridge.listed = Some(listed.clone());
         let storage = provider(config(), Arc::new(bridge)).unwrap();
         let prefix = if listed.len() == 1 {
@@ -565,13 +479,7 @@ fn permission_error() -> StorageError {
 #[tokio::test]
 async fn recipient_join_accepts_the_native_share_before_reading_the_zone() {
     let bridge = Arc::new(Bridge::new(
-        MemoryStorage::new(
-            config(),
-            Arc::new(coven_foundation::clock::FixedClock::new(
-                std::time::SystemTime::UNIX_EPOCH,
-            )),
-        )
-        .unwrap(),
+        MemoryStorage::builder().location(config()).build().unwrap(),
     ));
     let owner = provider(config(), bridge.clone()).unwrap();
     let path = ObjectPath::store_log(
@@ -629,13 +537,7 @@ async fn recipient_join_accepts_the_native_share_before_reading_the_zone() {
 #[tokio::test]
 async fn bridge_retained_grants_reach_the_owner() {
     let bridge = Arc::new(Bridge::new(
-        MemoryStorage::new(
-            config(),
-            Arc::new(coven_foundation::clock::FixedClock::new(
-                std::time::SystemTime::UNIX_EPOCH,
-            )),
-        )
-        .unwrap(),
+        MemoryStorage::builder().location(config()).build().unwrap(),
     ));
     let retained = RetainedAccess {
         provider_id: "native-owner-participant".into(),
@@ -656,13 +558,7 @@ async fn bridge_retained_grants_reach_the_owner() {
 #[tokio::test]
 async fn forgotten_native_sessions_cannot_abort_their_replacements() {
     let bridge = Arc::new(Bridge::new(
-        MemoryStorage::new(
-            config(),
-            Arc::new(coven_foundation::clock::FixedClock::new(
-                std::time::SystemTime::UNIX_EPOCH,
-            )),
-        )
-        .unwrap(),
+        MemoryStorage::builder().location(config()).build().unwrap(),
     ));
     let storage = provider(config(), bridge.clone()).unwrap();
     let path = ObjectPath::device_log(
@@ -686,15 +582,7 @@ async fn forgotten_native_sessions_cannot_abort_their_replacements() {
 
 #[tokio::test]
 async fn account_identifies_the_signed_in_member_even_when_they_do_not_own_the_zone() {
-    let bridge = Bridge::new(
-        MemoryStorage::new(
-            config(),
-            Arc::new(coven_foundation::clock::FixedClock::new(
-                std::time::SystemTime::UNIX_EPOCH,
-            )),
-        )
-        .unwrap(),
-    );
+    let bridge = Bridge::new(MemoryStorage::builder().location(config()).build().unwrap());
     let recipient = provider(config(), Arc::new(bridge.recipient("member"))).unwrap();
     assert_eq!(recipient.account().await.unwrap(), "member");
 }

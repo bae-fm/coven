@@ -410,8 +410,9 @@ mod memory {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "download::tests::streams::memory::connected_rows_do_not_retain_the_whole_streamed_write_in_memory", "--nocapture"])
             .env(CHILD, "1").output().unwrap();
-            assert!(
-                output.status.success(),
+            assert_eq!(
+                output.status.code(),
+                Some(86),
                 "{}{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
@@ -492,6 +493,7 @@ mod memory {
             assert_eq!(crate::file_write::tests::owned_paths(&sa).len(), usize::from(expected != 0));
         }
     });
+        std::process::exit(86);
     }
 }
 

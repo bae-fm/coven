@@ -22,6 +22,15 @@ impl Drop for StatementProfile<'_> {
 }
 
 impl DatabaseConnection {
+    pub(crate) fn fail_at(&self, name: &str, event: &str, message: &str) {
+        self.batch(&format!(
+            "CREATE TRIGGER {} {event} BEGIN SELECT RAISE(ABORT,'{}'); END",
+            crate::sql::identifier(name),
+            message.replace('\'', "''")
+        ))
+        .unwrap();
+    }
+
     pub(crate) fn record_merge_load(&self, table: &str) {
         *self
             .merge_loads
@@ -461,7 +470,7 @@ async fn restoration_triggers_cannot_leave_invalid_local_references() {
                 .await
                 .unwrap();
             sql(&db,"INSERT INTO notes VALUES('45','Groceries'); INSERT INTO notes VALUES('46','Shopping')").await.unwrap();
-            crate::removal::tests::remove(
+            crate::tests::remote_update(
                 &db,
                 "notes",
                 "46",
@@ -469,8 +478,8 @@ async fn restoration_triggers_cannot_leave_invalid_local_references() {
                     "title",
                     coven_format::value::Value::Text("Groceries".into()),
                 )],
-                [coven_merge::Rule::Unique(["title"].into())].into(),
-            );
+            )
+            .await;
             assert!(
                 sql(&db, "DELETE FROM notes WHERE id='45'").await.is_err(),
                 "{shape}{suffix}"
@@ -487,7 +496,7 @@ async fn restoration_trigger_cannot_orphan_unchanged_local_children() {
     let store = TestStore::new();
     let db=store.schema(vec![SyncedTable::new("notes",RowIdentity::SharedKey)],"CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT UNIQUE); CREATE TABLE folders(id TEXT PRIMARY KEY); CREATE TABLE links(folder TEXT REFERENCES folders(id)); CREATE TRIGGER restore AFTER INSERT ON notes WHEN coven_applying() BEGIN DELETE FROM folders WHERE id='Work'; END").await.unwrap();
     sql(&db,"INSERT INTO folders VALUES('Work'); INSERT INTO links VALUES('Work'); INSERT INTO notes VALUES('45','Groceries'),('46','Shopping')").await.unwrap();
-    crate::removal::tests::remove(
+    crate::tests::remote_update(
         &db,
         "notes",
         "46",
@@ -495,8 +504,8 @@ async fn restoration_trigger_cannot_orphan_unchanged_local_children() {
             "title",
             coven_format::value::Value::Text("Groceries".into()),
         )],
-        [coven_merge::Rule::Unique(["title"].into())].into(),
-    );
+    )
+    .await;
     assert!(sql(&db, "DELETE FROM notes WHERE id='45'").await.is_err());
     assert_eq!(count(&db, "folders"), 1);
     assert_eq!(records(&db).len(), 1);

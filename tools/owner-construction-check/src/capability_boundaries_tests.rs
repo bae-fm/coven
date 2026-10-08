@@ -1,6 +1,22 @@
 use super::*;
 use crate::owner_policy::POLICY;
 
+fn assert_findings(
+    actual: &[Finding],
+    path: &str,
+    lines: &[usize],
+    message: &str,
+    remedy: &'static str,
+) {
+    assert_eq!(
+        actual,
+        lines
+            .iter()
+            .map(|line| Finding::new(path, *line, message, remedy))
+            .collect::<Vec<_>>()
+    );
+}
+
 fn violations(path: &str, source: &str) -> Vec<Finding> {
     find_capability_boundary_violations(&[RustFile::fixture(path, source)], &POLICY)
 }
@@ -94,11 +110,9 @@ fn signing_primitives_are_rejected_outside_coven_crypto() {
         fn forge() { let _ = ed25519_dalek::Signature::from_bytes(&[0; 64]); }
         "#,
     );
-    assert_eq!(violations.len(), 2);
-    assert!(violations.iter().all(
-        |violation| kind(violation) == "signing keys (ed25519-dalek)"
-            && violation.message.contains("(cryptography)")
-    ));
+    assert_findings(&violations, "crates/coven-sync/src/leak.rs", &[2, 3],
+        "signing keys (ed25519-dalek) (cryptography) is used directly only in crates/coven-crypto/src/",
+        "reach a capability through the owner that holds it, given to you when you are built");
 }
 
 #[test]
@@ -120,8 +134,13 @@ fn the_keychain_is_rejected_outside_custody_even_inside_coven_crypto() {
         "crates/coven-crypto/src/keys.rs",
         "use keyring_core::Entry;",
     );
-    assert_eq!(violations.len(), 1);
-    assert_eq!(kind(&violations[0]), "platform keychain");
+    assert_findings(
+        &violations,
+        "crates/coven-crypto/src/keys.rs",
+        &[1],
+        "platform keychain (OS keychain) is used directly only in crates/coven-crypto/src/custody/",
+        "reach a capability through the owner that holds it, given to you when you are built",
+    );
     assert!(kinds(
         "crates/coven-crypto/src/custody/keychain.rs",
         "use keyring_core::Entry;"
@@ -154,10 +173,13 @@ fn runtime_construction_is_rejected_outside_composition_roots() {
         }
         "#,
     );
-    assert!(!violations.is_empty());
-    assert!(violations
-        .iter()
-        .all(|violation| kind(violation) == "runtime construction"));
+    assert_findings(
+        &violations,
+        "crates/coven-sync/src/transfer.rs",
+        &[3, 7],
+        "runtime construction outside a composition root",
+        "start long-lived work only at a listed root, which must retain and stop it",
+    );
 }
 
 #[test]
@@ -202,10 +224,13 @@ fn spawning_work_is_rejected_outside_composition_roots() {
         }
         "#,
     );
-    assert_eq!(violations.len(), 3);
-    assert!(violations
-        .iter()
-        .all(|violation| kind(violation) == "thread or task spawn"));
+    assert_findings(
+        &violations,
+        "crates/coven-sync/src/upload.rs",
+        &[3, 4, 5],
+        "thread or task spawn outside a composition root",
+        "start long-lived work only at a listed root, which must retain and stop it",
+    );
 }
 
 #[test]
@@ -225,8 +250,13 @@ fn runtime_handles_are_injectable_but_not_ambiently_acquired() {
         "crates/coven-sync/src/workflow.rs",
         "fn grab() { let _ = tokio::runtime::Handle::current(); }",
     );
-    assert_eq!(violations.len(), 1);
-    assert_eq!(kind(&violations[0]), "ambient runtime acquisition");
+    assert_findings(
+        &violations,
+        "crates/coven-sync/src/workflow.rs",
+        &[1],
+        "ambient runtime acquisition outside a composition root",
+        "start long-lived work only at a listed root, which must retain and stop it",
+    );
 }
 
 #[test]

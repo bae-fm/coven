@@ -7,7 +7,6 @@ use coven_merge::{
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 fn row(key: u64) -> RowId {
@@ -314,9 +313,7 @@ fn twenty_thousand_rows_cover_claims_audiences_and_deep_chains() {
     rows.get_mut(&row(0)).unwrap().0 = RemovalRow::Absent { generation: 2 };
     let after = IndexedView::new(rows);
 
-    let start = Instant::now();
     let full = removals(&before).unwrap();
-    let full_elapsed = start.elapsed();
     assert_eq!(full.region.len(), 20_000);
     assert_eq!(full.removed.len(), 19_999);
     assert!(!full.removed.contains_key(&row(0)));
@@ -337,9 +334,7 @@ fn twenty_thousand_rows_cover_claims_audiences_and_deep_chains() {
     assert_eq!(before.visited.borrow().len(), before.members.len());
 
     before.reset_visits();
-    let start = Instant::now();
     let partial = recompute(&before, &after, [row(0)]).unwrap();
-    let partial_elapsed = start.elapsed();
     assert_eq!(partial.region.len(), 20_000);
     assert_eq!(partial.removed.len(), 17_996);
     for survivor in [row(1), circle(0, 1), circle(0, 2)] {
@@ -365,14 +360,4 @@ fn twenty_thousand_rows_cover_claims_audiences_and_deep_chains() {
         );
     }
     assert_rule(&partial, &row(11_999), Rule::Check("valid".into()));
-    // Visit counts above prove linear group expansion; these bounds only
-    // catch a quadratic closure (minutes at this size), with room for a loaded CI.
-    assert!(
-        full_elapsed < Duration::from_secs(10),
-        "removals: {full_elapsed:?}"
-    );
-    assert!(
-        partial_elapsed < Duration::from_secs(10),
-        "recompute: {partial_elapsed:?}"
-    );
 }

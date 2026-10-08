@@ -122,7 +122,8 @@ acceptance. Removal while joining returns the provider's permission failure;
 an admin can invite again. The facade verifies coven's identity and commits keys
 and credentials only after bootstrap succeeds.
 
-`MemoryStorage::new` takes an injected `ClockRef` for publication timestamps.
+`MemoryStorage::builder()` supplies a shared test location and byte-sized transfer
+limits; `.clock(...)` controls publication timestamps and token expiry.
 Its `Faults` can lose part or completion replies and expire pending sessions.
 Completed uploads discard pending parts and retain their immutable publication
 identity. `MemoryStorage::for_recipient(owner, email)` shares the backend with a

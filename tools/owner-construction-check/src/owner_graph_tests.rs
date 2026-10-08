@@ -15,6 +15,12 @@ fn constructions(source: &str, policy: &Policy) -> Vec<Finding> {
 }
 const WORKER: &str = "struct Worker { clock: Clock } impl Worker { fn new(clock: Clock) -> Self { Self { clock } } }";
 
+fn finding(caller: &str, owner: &str) -> Finding {
+    Finding::new(PATH, 1,
+        format!("{caller} constructs owner {owner} outside a composition root"),
+        "construct owners and capabilities explicitly at the listed roots; inject them elsewhere; do not implement or derive Default")
+}
+
 #[test]
 fn every_construction_site_requires_a_list_entry() {
     for expression in [
@@ -24,14 +30,13 @@ fn every_construction_site_requires_a_list_entry() {
         "wrap!(Worker::new(clock))",
         "wrap!(label => Worker { clock })",
     ] {
-        for callable in [
-            format!("fn run(clock: Clock) {{ let _ = {expression}; }}"),
-            format!("impl Unrelated {{ fn run(clock: Clock) {{ let _ = {expression}; }} }}"),
-            format!("impl Parent {{ fn new(clock: Clock) -> Self {{ let _ = {expression}; todo!() }} }}"),
+        for (caller, callable) in [
+            ("<free>::run", format!("fn run(clock: Clock) {{ let _ = {expression}; }}")),
+            ("Unrelated::run", format!("impl Unrelated {{ fn run(clock: Clock) {{ let _ = {expression}; }} }}")),
+            ("Parent::new", format!("impl Parent {{ fn new(clock: Clock) -> Self {{ let _ = {expression}; todo!() }} }}")),
         ] {
             let found = constructions(&format!("{WORKER} {callable}"), &POLICY);
-            assert_eq!(found.len(), 1, "{callable}: {found:?}");
-            assert!(found[0].message.contains("constructs owner Worker"));
+            assert_eq!(found, [finding(caller, "Worker")], "{callable}");
         }
         assert!(constructions(
             &format!("{WORKER} fn open(clock: Clock) {{ let _ = {expression}; }}"),
@@ -50,23 +55,29 @@ fn constructors_themselves_require_entries_including_inner_types() {
             ..POLICY
         };
         let found = constructions(&source, &policy);
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert!(found[0]
-            .message
-            .contains(&format!("constructs owner {name}")));
+        assert_eq!(found, [finding(&format!("{name}::new"), name)]);
     }
 }
 
 #[test]
 fn returning_an_owner_does_not_grant_factory_authority() {
-    for source in [
-        "fn build(clock: Clock) -> Worker { Worker { clock } }",
-        "impl Factory { fn build(clock: Clock) -> Worker { Worker { clock } } }",
-        "impl Factory { fn build(&self, clock: Clock) -> Worker { Worker { clock } } }",
+    for (caller, source) in [
+        (
+            "<free>::build",
+            "fn build(clock: Clock) -> Worker { Worker { clock } }",
+        ),
+        (
+            "Factory::build",
+            "impl Factory { fn build(clock: Clock) -> Worker { Worker { clock } } }",
+        ),
+        (
+            "Factory::build",
+            "impl Factory { fn build(&self, clock: Clock) -> Worker { Worker { clock } } }",
+        ),
     ] {
         assert_eq!(
-            constructions(&format!("{WORKER} {source}"), &POLICY).len(),
-            1
+            constructions(&format!("{WORKER} {source}"), &POLICY),
+            [finding(caller, "Worker")]
         );
     }
 }
@@ -81,7 +92,11 @@ fn free_and_associated_factories_cannot_hide_construction() {
         "wrap!(self.build(clock))",
     ] {
         let source = format!("{WORKER} fn build(clock: Clock) -> Worker {{ todo!() }} impl Factory {{ fn build(&self, clock: Clock) -> Worker {{ todo!() }} fn run(&self, clock: Clock) {{ let _ = {expression}; }} }}");
-        assert_eq!(constructions(&source, &POLICY).len(), 1, "{source}");
+        assert_eq!(
+            constructions(&source, &POLICY),
+            [finding("Factory::run", "Worker")],
+            "{source}"
+        );
     }
 }
 
@@ -89,15 +104,17 @@ fn free_and_associated_factories_cannot_hide_construction() {
 fn nested_functions_do_not_inherit_root_authority() {
     let source =
         format!("{WORKER} fn open() {{ fn hidden(clock: Clock) {{ Worker::new(clock); }} }}");
-    assert_eq!(constructions(&source, &POLICY).len(), 1);
+    assert_eq!(
+        constructions(&source, &POLICY),
+        [finding("<free>::hidden", "Worker")]
+    );
 }
 
 #[test]
 fn tasks_compose_but_do_not_construct_owners() {
     let source = format!("{WORKER} struct Pass {{ clock: Clock }} impl Pass {{ fn new(clock: Clock) -> Self {{ Self {{ clock }} }} fn run(&self) {{ Worker::new(clock); }} }}");
     let found = constructions(&source, &POLICY);
-    assert_eq!(found.len(), 1);
-    assert!(found[0].message.contains("constructs owner Worker"));
+    assert_eq!(found, [finding("Pass::run", "Worker")]);
 }
 
 #[test]
@@ -138,10 +155,7 @@ fn enum_variants_and_aliases_are_owner_construction() {
         for value in ["Named { clock }", "Tuple(clock)", "Empty"] {
             let source = format!("enum Choice {{ Named {{ clock: Clock }}, Tuple(Clock), Empty }} type Alias = Choice; fn run(clock: Clock) {{ let _ = {name}::{value}; }}");
             let found = constructions(&source, &POLICY);
-            assert_eq!(found.len(), 1, "{source}: {found:?}");
-            assert!(found[0]
-                .message
-                .contains(&format!("constructs owner {name}")));
+            assert_eq!(found, [finding("<free>::run", name)], "{source}");
         }
     }
 }
@@ -153,7 +167,6 @@ fn nested_and_macro_declared_owners_share_the_inference() {
         "declare! { struct Hidden { clock: Clock } } fn run(clock: Clock) { Hidden { clock }; }",
     ] {
         let found = constructions(source, &POLICY);
-        assert_eq!(found.len(), 1, "{source}: {found:?}");
-        assert!(found[0].message.contains("constructs owner Hidden"));
+        assert_eq!(found, [finding("<free>::run", "Hidden")], "{source}");
     }
 }

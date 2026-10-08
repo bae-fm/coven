@@ -120,13 +120,11 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
     let clock = Arc::new(FixedClock::new(std::time::SystemTime::UNIX_EPOCH));
     let sign_in = SignIn::new(clock.clone()).await;
     let storage = Arc::new(
-        MemoryStorage::new(
-            StorageConfig::Dropbox {
-                namespace_id: "folder".into(),
-            },
-            clock.clone(),
-        )
-        .unwrap(),
+        MemoryStorage::builder()
+            .provider(coven_storage::CloudProvider::Dropbox)
+            .clock(clock.clone())
+            .build()
+            .unwrap(),
     );
     let handle = builder(
         layout.clone(),
@@ -233,13 +231,11 @@ async fn builder_sign_in_is_provider_bound_and_refreshes_before_setup() {
     let clock = Arc::new(FixedClock::new(std::time::SystemTime::UNIX_EPOCH));
     let sign_in = SignIn::new(clock.clone()).await;
     let storage = Arc::new(
-        MemoryStorage::new(
-            StorageConfig::Dropbox {
-                namespace_id: "folder".into(),
-            },
-            clock.clone(),
-        )
-        .unwrap(),
+        MemoryStorage::builder()
+            .provider(coven_storage::CloudProvider::Dropbox)
+            .clock(clock.clone())
+            .build()
+            .unwrap(),
     );
     let mut builder = builder(layout, keychain, clock.clone(), storage.clone(), &sign_in);
     builder

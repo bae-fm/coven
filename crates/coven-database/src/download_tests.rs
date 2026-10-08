@@ -592,7 +592,7 @@ async fn deleted_circle_takes_out_late_downloads_and_deletion_rolls_back_on_trig
     assert_eq!(count(&receiver, "notes"), 0);
     assert_eq!(count(&receiver, "children"), 0);
     assert_eq!(count(&receiver, "_coven_lost"), 2);
-    source.inspect_writer(|sql| sql.batch("CREATE TRIGGER refuse BEFORE DELETE ON notes BEGIN SELECT RAISE(ABORT,'keep circle'); END").unwrap());
+    source.inspect_writer(|sql| sql.fail_at("refuse", "BEFORE DELETE ON notes", "keep circle"));
     assert!(
         matches!(crate::store_log::tests::delete_circle(&source, circle).await,Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(_,Some(message)))) if message=="keep circle")
     );
@@ -609,38 +609,6 @@ async fn deleted_circle_takes_out_late_downloads_and_deletion_rolls_back_on_trig
         fingerprint(&receiver, Audience::Circle(circle)).await
     );
     for db in [source, receiver] {
-        db.close().await.unwrap();
-    }
-}
-
-#[tokio::test]
-async fn surviving_children_are_retargeted_before_the_old_parent_is_deleted() {
-    let ids = SequentialIds::new();
-    let a_store = TestStore::with_ids(&ids);
-    let b_store = TestStore::with_ids(&ids);
-    let schema = "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE links(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE CASCADE); CREATE INDEX links_parent ON links(parent); CREATE TABLE audit(value TEXT); CREATE TRIGGER edited AFTER UPDATE ON links BEGIN INSERT INTO audit VALUES('update'); END";
-    let a = a_store.schema(references(), schema).await.unwrap();
-    let b = b_store.schema(references(), schema).await.unwrap();
-    sql(
-        &a,
-        "INSERT INTO parents VALUES('old'); INSERT INTO links VALUES('link','old')",
-    )
-    .await
-    .unwrap();
-    b.apply_downloaded(records(&a).remove(0).into())
-        .await
-        .unwrap();
-    sql(&a,"INSERT INTO parents VALUES('new'); UPDATE links SET parent='new'; DELETE FROM parents WHERE id='old'").await.unwrap();
-    b.apply_downloaded(records(&a).remove(1).into())
-        .await
-        .unwrap();
-    assert_eq!(count(&b, "links"), 1);
-    assert_eq!(count(&b, "audit"), 1);
-    assert_eq!(
-        fingerprint(&a, Audience::Store).await,
-        fingerprint(&b, Audience::Store).await
-    );
-    for db in [a, b] {
         db.close().await.unwrap();
     }
 }

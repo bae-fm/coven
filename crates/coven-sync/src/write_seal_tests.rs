@@ -15,30 +15,13 @@ pub(super) async fn household(storage: Arc<MemoryStorage>) -> Vec<Device> {
             .identity
             .persist(&identity(number as u8 + 2))
             .unwrap();
-        device.db.close().await.unwrap();
-        device.db=DatabaseBuilder::new(device.directory.clone())
-            .synced_tables(vec![SyncedTable::new("notes",RowIdentity::SharedKey),SyncedTable::new("pins",RowIdentity::IndependentUuid).audience_column("audience")])
-            .migrations(vec![Migration::sql(1,"notes","CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL);"),Migration::sql(2,"circles","CREATE TABLE pins(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,title TEXT NOT NULL);")])
-            .clock(device.clock.clone()).open().await.unwrap();
-        device.sync = DeviceLogSync::new(
-            storage.clone(),
-            device.db.clone(),
-            device.keys.clone(),
-            device.identity.clone(),
-        );
-        device.log = StoreLogSync::new(
-            storage.clone(),
-            device.db.clone(),
-            device.keys.clone(),
-            device.identity.clone(),
-            device.clock.clone(),
-            device.ids.clone(),
-            device.directory.clone(),
-        );
+        device.reopen(storage.clone(),
+            vec![SyncedTable::new("notes", RowIdentity::SharedKey), SyncedTable::new("pins", RowIdentity::IndependentUuid).audience_column("audience")],
+            vec![schema::initial(), Migration::sql(2, "circles", "CREATE TABLE pins(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,title TEXT NOT NULL);")]).await;
         devices.push(device);
     }
     devices[0]
-        .log
+        .sync
         .make_and_upload_entry(StoreChange::CreateStore {
             store: StoreId(Uuid::from_u128(1)),
             name: "Store".into(),
@@ -57,7 +40,7 @@ pub(super) async fn household(storage: Arc<MemoryStorage>) -> Vec<Device> {
     for seed in [4, 5] {
         let identity = identity(seed);
         devices[0]
-            .log
+            .sync
             .make_and_upload_entry(StoreChange::AddMember {
                 keys: MemberPublicKeys {
                     signing: identity.member_id(),
@@ -72,9 +55,9 @@ pub(super) async fn household(storage: Arc<MemoryStorage>) -> Vec<Device> {
             .unwrap();
     }
     for (i, device) in devices.iter_mut().enumerate().skip(1) {
-        device.log.sync_store_log().await.unwrap();
+        device.sync.sync_store_log().await.unwrap();
         device
-            .log
+            .sync
             .make_and_upload_entry(StoreChange::AddDevice {
                 device: DeviceId(i as u64 + 1),
                 name: i.to_string(),
@@ -82,10 +65,10 @@ pub(super) async fn household(storage: Arc<MemoryStorage>) -> Vec<Device> {
             .await
             .unwrap();
     }
-    devices[0].log.sync_store_log().await.unwrap();
+    devices[0].sync.sync_store_log().await.unwrap();
     let circle = CircleId(Uuid::from_u128(10));
     devices[0]
-        .log
+        .sync
         .make_and_upload_entry(StoreChange::CreateCircle {
             circle,
             name: "private".into(),
@@ -94,7 +77,7 @@ pub(super) async fn household(storage: Arc<MemoryStorage>) -> Vec<Device> {
         .await
         .unwrap();
     devices[0]
-        .log
+        .sync
         .make_and_upload_entry(StoreChange::AddCircleMember {
             circle,
             member: identity(4).member_id(),
@@ -102,7 +85,7 @@ pub(super) async fn household(storage: Arc<MemoryStorage>) -> Vec<Device> {
         .await
         .unwrap();
     for device in &mut devices {
-        device.log.sync_store_log().await.unwrap();
+        device.sync.sync_store_log().await.unwrap();
     }
     devices
 }
@@ -117,28 +100,28 @@ async fn unreadable_circle_parts_are_skipped_but_missing_members_keys_wait() {
     let storage = storage();
     let mut devices = household(storage.clone()).await;
     sql(&devices[0].db,"INSERT INTO notes VALUES('one','public','body'); INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','private')").await;
-    devices[0].sync.upload_writes().await.unwrap();
+    devices[0].writes.upload_writes().await.unwrap();
     devices[1]
-        .keys
+        .custody
         .persist(&StoreKeyring::new(StoreKey::from_bytes(
             KeyId(Uuid::from_u128(1)),
             [7; 32],
         )))
         .unwrap();
-    devices[1].sync.download_writes().await.unwrap();
+    devices[1].writes.download_writes().await.unwrap();
     assert!(rows(&devices[1].db).await.is_empty());
     assert!(matches!(
-        devices[1].log.reload_from_snapshots().await,
+        devices[1].sync.reload_from_snapshots().await,
         Err(SyncError::KeyUnavailable(_))
     ));
-    devices[2].sync.download_writes().await.unwrap();
+    devices[2].writes.download_writes().await.unwrap();
     assert_eq!(rows(&devices[2].db).await.len(), 1);
     assert_eq!(count(&devices[2].db).await, 0);
-    devices[2].log.reload_from_snapshots().await.unwrap();
+    devices[2].sync.reload_from_snapshots().await.unwrap();
     assert_eq!(rows(&devices[2].db).await.len(), 1);
     assert_eq!(count(&devices[2].db).await, 0);
-    devices[1].log.sync_store_log().await.unwrap();
-    devices[1].sync.download_writes().await.unwrap();
+    devices[1].sync.sync_store_log().await.unwrap();
+    devices[1].writes.download_writes().await.unwrap();
     assert_eq!(count(&devices[1].db).await, 1);
 }
 
@@ -146,9 +129,9 @@ async fn unreadable_circle_parts_are_skipped_but_missing_members_keys_wait() {
 async fn new_uploads_wait_for_a_current_members_replacement_circle_key() {
     let storage = storage();
     let mut devices = household(storage.clone()).await;
-    let ring = devices[1].keys.unlock().unwrap().unwrap();
+    let ring = devices[1].custody.unlock().unwrap().unwrap();
     devices[0]
-        .log
+        .sync
         .make_and_upload_entry(StoreChange::RemoveCircleMember {
             circle: CircleId(Uuid::from_u128(10)),
             member: identity(3).member_id(),
@@ -156,21 +139,21 @@ async fn new_uploads_wait_for_a_current_members_replacement_circle_key() {
         })
         .await
         .unwrap();
-    devices[1].log.sync_store_log().await.unwrap();
-    devices[1].keys.persist(&ring).unwrap();
+    devices[1].sync.sync_store_log().await.unwrap();
+    devices[1].custody.persist(&ring).unwrap();
     let log = devices[1].db.store_log().await.unwrap();
     assert!(!log.replay.state.circles[&CircleId(Uuid::from_u128(10))].deleted);
     sql(&devices[1].db,"INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','new')").await;
     assert!(
-        matches!(devices[1].sync.upload_writes().await, Err(SyncError::KeyUnavailable(key)) if key == KeyId(Uuid::from_u128(11)))
+        matches!(devices[1].writes.upload_writes().await, Err(SyncError::KeyUnavailable(key)) if key == KeyId(Uuid::from_u128(11)))
     );
     assert!(storage
         .list(&ObjectPrefix::device_logs())
         .await
         .unwrap()
         .is_empty());
-    devices[1].log.sync_store_log().await.unwrap();
-    devices[1].sync.upload_writes().await.unwrap();
+    devices[1].sync.sync_store_log().await.unwrap();
+    devices[1].writes.upload_writes().await.unwrap();
     let path = ObjectPath::device_log(DeviceId(2), 1.try_into().unwrap());
     let bytes = storage.read(&path).await.unwrap();
     let length = coven_format::sealed_write::WriteObjectPrefix::length(&bytes).unwrap();
@@ -187,9 +170,9 @@ async fn a_former_circle_member_still_waits_for_its_missing_earlier_key() {
     let storage = storage();
     let mut devices = household(storage).await;
     sql(&devices[0].db,"INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','old')").await;
-    devices[0].sync.upload_writes().await.unwrap();
+    devices[0].writes.upload_writes().await.unwrap();
     devices[0]
-        .log
+        .sync
         .make_and_upload_entry(StoreChange::RemoveCircleMember {
             circle: CircleId(Uuid::from_u128(10)),
             member: identity(4).member_id(),
@@ -197,18 +180,18 @@ async fn a_former_circle_member_still_waits_for_its_missing_earlier_key() {
         })
         .await
         .unwrap();
-    devices[1].log.sync_store_log().await.unwrap();
+    devices[1].sync.sync_store_log().await.unwrap();
     devices[1]
-        .keys
+        .custody
         .persist(&StoreKeyring::new(StoreKey::from_bytes(
             KeyId(Uuid::from_u128(1)),
             [7; 32],
         )))
         .unwrap();
-    devices[1].sync.download_writes().await.unwrap();
+    devices[1].writes.download_writes().await.unwrap();
     assert_eq!(count(&devices[1].db).await, 0);
-    devices[1].log.sync_store_log().await.unwrap();
-    devices[1].sync.download_writes().await.unwrap();
+    devices[1].sync.sync_store_log().await.unwrap();
+    devices[1].writes.download_writes().await.unwrap();
     assert_eq!(count(&devices[1].db).await, 1);
 }
 
@@ -216,10 +199,10 @@ async fn a_former_circle_member_still_waits_for_its_missing_earlier_key() {
 async fn posted_fingerprints_stop_when_a_member_leaves_the_circle() {
     let storage = storage();
     let mut devices = household(storage.clone()).await;
-    assert!(devices[1].sync.post_positions().await.unwrap());
+    assert!(devices[1].writes.post_positions().await.unwrap());
     assert_eq!(posted(&storage, &devices[1], 2).await.fingerprints.len(), 2);
     devices[0]
-        .log
+        .sync
         .make_and_upload_entry(StoreChange::RemoveCircleMember {
             circle: CircleId(Uuid::from_u128(10)),
             member: identity(4).member_id(),
@@ -227,8 +210,8 @@ async fn posted_fingerprints_stop_when_a_member_leaves_the_circle() {
         })
         .await
         .unwrap();
-    devices[1].log.sync_store_log().await.unwrap();
-    assert!(devices[1].sync.post_positions().await.unwrap());
+    devices[1].sync.sync_store_log().await.unwrap();
+    assert!(devices[1].writes.post_positions().await.unwrap());
     let fingerprints = posted(&storage, &devices[1], 2).await.fingerprints;
     assert_eq!(fingerprints.len(), 1);
     assert_eq!(fingerprints[0].audience, Audience::Store);
@@ -261,7 +244,7 @@ async fn dropped_removal_parts(
         panic!("three members");
     };
     let circle = CircleId(Uuid::from_u128(10));
-    ana.log
+    ana.sync
         .make_and_upload_entry(StoreChange::AddCircleMember {
             circle,
             member: identity(5).member_id(),
@@ -269,7 +252,7 @@ async fn dropped_removal_parts(
         .await
         .unwrap();
     for device in [&mut *ben, &mut *carol] {
-        device.log.sync_store_log().await.unwrap();
+        device.sync.sync_store_log().await.unwrap();
     }
     let removal = |member, number| {
         let key = KeyId(Uuid::from_u128(number));
@@ -292,23 +275,23 @@ async fn dropped_removal_parts(
     };
     ana.clock.set(UNIX_EPOCH + Duration::from_secs(3));
     let dropped = ana
-        .log
+        .sync
         .make_and_upload_entry(removal(identity(4).member_id(), 2))
         .await
         .unwrap();
     sql(&ana.db, "INSERT INTO notes VALUES('one','public','body'); INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','private')").await;
-    let writes = ana.sync.upload_writes().await.unwrap();
+    let writes = ana.writes.upload_writes().await.unwrap();
     assert_eq!(writes.len(), 1);
-    carol.log.sync_store_log().await.unwrap();
+    carol.sync.sync_store_log().await.unwrap();
     if carol_applies_before_drop {
-        carol.sync.download_writes().await.unwrap();
+        carol.writes.download_writes().await.unwrap();
         assert_eq!(count(&carol.db).await, 1);
     }
 
     // Ben authors against his unchanged view, earlier than Ana's removal.
     ben.clock.set(UNIX_EPOCH + Duration::from_secs(2));
     let winner = ben
-        .log
+        .sync
         .make_and_upload_entry(removal(identity(3).member_id(), 3))
         .await
         .unwrap();
@@ -324,32 +307,32 @@ async fn dropped_removal_parts(
         Err(error) if error.failure() == coven_storage::StorageFailure::NotFound
     ));
     if ben_reads_before_copy {
-        ben.log.sync_store_log().await.unwrap();
+        ben.sync.sync_store_log().await.unwrap();
         assert!(matches!(
             ben.db.store_log().await.unwrap().replay.entries[&dropped],
             coven_database::EntryOutcome::Dropped(coven_database::DropReason::BeatenBy(id))
                 if id == winner
         ));
         assert!(!crate::store_log_keys::holds(
-            Some(&ben.keys.unlock().unwrap().unwrap()),
+            Some(&ben.custody.unlock().unwrap().unwrap()),
             &audience,
             dropped_key,
         ));
-        ben.sync.download_writes().await.unwrap();
+        ben.writes.download_writes().await.unwrap();
         ben.clock.set(UNIX_EPOCH + Duration::from_secs(4));
-        ben.sync.download_writes().await.unwrap();
+        ben.writes.download_writes().await.unwrap();
         assert!(rows(&ben.db).await.is_empty());
         assert_eq!(count(&ben.db).await, 0);
         assert!(matches!(
-            ben.log.reload_from_snapshots().await,
+            ben.sync.reload_from_snapshots().await,
             Err(SyncError::KeyUnavailable(_))
         ));
-        assert!(ben.sync.post_positions().await.unwrap());
+        assert!(ben.writes.post_positions().await.unwrap());
         assert!(!posted(&storage, ben, 2).await.writes.covers(writes[0]));
     }
 
     // Carol owns K2 and shares it through StoreLogSync when she learns the drop.
-    carol.log.sync_store_log().await.unwrap();
+    carol.sync.sync_store_log().await.unwrap();
     assert!(!storage.read(&copy).await.unwrap().is_empty());
     assert!(matches!(
         carol.db.store_log().await.unwrap().replay.entries[&dropped],
@@ -360,22 +343,22 @@ async fn dropped_removal_parts(
         assert_eq!(rows(&carol.db).await, rows(&ana.db).await);
         assert_eq!(count(&carol.db).await, 1);
     }
-    ben.log.sync_store_log().await.unwrap();
+    ben.sync.sync_store_log().await.unwrap();
     assert!(crate::store_log_keys::holds(
-        Some(&ben.keys.unlock().unwrap().unwrap()),
+        Some(&ben.custody.unlock().unwrap().unwrap()),
         &audience,
         dropped_key,
     ));
     let expected = rows(&ana.db).await;
     for device in [&mut *ben, &mut *carol] {
-        device.sync.download_writes().await.unwrap();
+        device.writes.download_writes().await.unwrap();
         assert_eq!(rows(&device.db).await, expected);
         assert_eq!(count(&device.db).await, 1);
         assert!(device.db.lost_values().await.unwrap().is_empty());
-        device.log.reload_from_snapshots().await.unwrap();
+        device.sync.reload_from_snapshots().await.unwrap();
         assert_eq!(rows(&device.db).await, expected);
         assert_eq!(count(&device.db).await, 1);
-        assert!(device.sync.post_positions().await.unwrap());
+        assert!(device.writes.post_positions().await.unwrap());
     }
     let ben = posted(&storage, ben, 2).await;
     let carol = posted(&storage, carol, 3).await;
@@ -393,10 +376,10 @@ async fn retention_waits_for_key_copies_without_failing() {
         let storage = storage();
         let mut devices = household(storage.clone()).await;
         sql(&devices[0].db, "INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','private')").await;
-        devices[0].sync.upload_writes().await.unwrap();
-        let keys = devices[reader].keys.unlock().unwrap().unwrap();
+        devices[0].writes.upload_writes().await.unwrap();
+        let keys = devices[reader].custody.unlock().unwrap().unwrap();
         devices[reader]
-            .keys
+            .custody
             .persist(&StoreKeyring::new(StoreKey::from_bytes(
                 KeyId(Uuid::from_u128(1)),
                 [7; 32],
@@ -407,13 +390,13 @@ async fn retention_waits_for_key_copies_without_failing() {
             coven_foundation::id_source::FileId(Uuid::from_u128(99)),
         );
         storage.create(&unused, b"unused").await.unwrap();
-        match devices[reader].log.run_retention().await {
+        match devices[reader].sync.run_retention().await {
             Ok(()) => (),
             Err(error) => failed.push((reader, error)),
         }
         assert_eq!(storage.read(&unused).await.unwrap(), b"unused");
-        devices[reader].keys.persist(&keys).unwrap();
-        devices[reader].log.run_retention().await.unwrap();
+        devices[reader].custody.persist(&keys).unwrap();
+        devices[reader].sync.run_retention().await.unwrap();
         assert!(matches!(
             storage.read(&unused).await,
             Err(error) if error.failure() == coven_storage::StorageFailure::NotFound
@@ -443,14 +426,14 @@ async fn retries_keep_each_parts_keys_across_store_and_circle_rotations() {
             ..Faults::none()
         })
         .await;
-    assert!(ana.sync.upload_writes().await.is_err());
+    assert!(ana.writes.upload_writes().await.is_err());
     let (write, first) = writes::resealed(ana).await;
     sql(
         &ana.db,
         "UPDATE notes SET body='later'; UPDATE pins SET title='later'",
     )
     .await;
-    ben.log
+    ben.sync
         .make_and_upload_entry(StoreChange::RemoveMember {
             member: identity(5).member_id(),
             key: KeyId(Uuid::from_u128(20)),
@@ -458,7 +441,7 @@ async fn retries_keep_each_parts_keys_across_store_and_circle_rotations() {
         })
         .await
         .unwrap();
-    ben.log
+    ben.sync
         .make_and_upload_entry(StoreChange::RemoveCircleMember {
             circle: CircleId(Uuid::from_u128(10)),
             member: identity(4).member_id(),
@@ -466,9 +449,9 @@ async fn retries_keep_each_parts_keys_across_store_and_circle_rotations() {
         })
         .await
         .unwrap();
-    ana.log.sync_store_log().await.unwrap();
+    ana.sync.sync_store_log().await.unwrap();
     assert_eq!(writes::resealed(ana).await.1, first);
-    assert_eq!(ana.sync.upload_writes().await.unwrap().len(), 2);
+    assert_eq!(ana.writes.upload_writes().await.unwrap().len(), 2);
     assert_eq!(
         storage.read(&crate::write_seal::path(write)).await.unwrap(),
         first

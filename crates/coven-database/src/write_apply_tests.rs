@@ -1,4 +1,4 @@
-use crate::tests::TestStore;
+use crate::tests::{contents, TestStore};
 use crate::write::tests::{count, notes, records, sql, NOTES};
 use crate::{ApplyOutcome, DbError};
 use crate::{RowIdentity, SyncedTable};
@@ -94,8 +94,6 @@ async fn a_trigger_ending_the_transaction_returns_its_original_sqlite_error() {
     }
 }
 
-type StoredTables = std::collections::BTreeMap<String, Vec<Vec<crate::types::Value>>>;
-
 #[tokio::test]
 async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifications() {
     use coven_foundation::clock::FixedClock;
@@ -141,7 +139,7 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
             .unwrap();
         db.apply_downloaded(initial.clone().into()).await.unwrap();
         sql(&db, "UPDATE notes SET body='local' WHERE id='a'; INSERT INTO notes VALUES('c','collision','local')").await.unwrap();
-        let before = stored_tables(&db);
+        let before = contents(&db);
         let mut query = db.subscribe(|sql| {
             Ok(
                 sql.query("SELECT id,title,body FROM notes ORDER BY id", [], |r| {
@@ -201,11 +199,7 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
                 Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(_, Some(message))))
                     if message == "injected apply failure" =>
                 {
-                    assert_eq!(
-                        stored_tables(&db),
-                        before,
-                        "streamed={streamed}, step={step}"
-                    );
+                    assert_eq!(contents(&db), before, "streamed={streamed}, step={step}");
                     assert!(
                         !query.is_marked_for_rerun(),
                         "streamed={streamed}, step={step}"
@@ -280,41 +274,12 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
     source.close().await.unwrap();
 }
 
-fn stored_tables(database: &crate::Database) -> StoredTables {
-    database.inspect_writer(|db| {
-        let tables = db
-            .query(
-                "SELECT name FROM main.sqlite_schema WHERE type='table' ORDER BY name",
-                [],
-                |r| r.get::<_, String>(0),
-            )
-            .unwrap();
-        tables
-            .into_iter()
-            .map(|table| {
-                let rows = db
-                    .query(
-                        &format!("SELECT * FROM main.{}", crate::sql::identifier(&table)),
-                        [],
-                        |r| {
-                            (0..r.as_ref().column_count())
-                                .map(|column| r.get(column))
-                                .collect()
-                        },
-                    )
-                    .unwrap();
-                (table, rows)
-            })
-            .collect()
-    })
-}
-
 async fn assert_rejected_download(
     database: &crate::Database,
     record: crate::DownloadedWrite,
     expected: coven_merge::MergeError,
 ) {
-    let before = stored_tables(database);
+    let before = contents(database);
     let mut query = database
         .subscribe(|sql| Ok(sql.query("SELECT * FROM notes", [], |r| r.get::<_, String>(0))?));
     query.next().await.unwrap();
@@ -323,7 +288,7 @@ async fn assert_rejected_download(
         assert!(
             matches!(error, DbError::InvalidWrite { write, error } if write == record.header.position && error == expected)
         );
-        assert_eq!(stored_tables(database), before);
+        assert_eq!(contents(database), before);
         assert!(!query.is_marked_for_rerun());
     }
 }
@@ -418,13 +383,13 @@ async fn a_locally_built_invalid_write_still_panics_and_rolls_back() {
         db.internal_execute("DELETE FROM _coven_positions", [])
             .unwrap()
     });
-    let before = stored_tables(&db);
+    let before = contents(&db);
     let writer = db.clone();
     let panic = tokio::spawn(async move { sql(&writer, "UPDATE notes SET title='invalid'").await })
         .await
         .unwrap_err();
     assert!(panic.is_panic());
-    assert_eq!(stored_tables(&db), before);
+    assert_eq!(contents(&db), before);
     db.close().await.unwrap();
 }
 

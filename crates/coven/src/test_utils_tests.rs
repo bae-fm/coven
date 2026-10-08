@@ -53,18 +53,17 @@ impl Fixture {
         let ids: IdSourceRef = Arc::new(SequentialIds::new());
         let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1000)));
         let storage = Arc::new(
-            MemoryStorage::new(
-                StorageConfig::S3 {
+            MemoryStorage::builder()
+                .location(StorageConfig::S3 {
                     bucket: "guarantees".into(),
                     region: "test".into(),
                     prefix: "store".into(),
                     endpoint: None,
-                },
-                clock.clone(),
-            )
-            .unwrap()
-            .with_transfer_limits(8 * 1024 * 1024, 65536)
-            .unwrap(),
+                })
+                .clock(clock.clone())
+                .transfer_limits(8 * 1024 * 1024, 65536)
+                .build()
+                .unwrap(),
         );
         let directory = app
             .create_store(&layout, "Guarantees", ids.clone())

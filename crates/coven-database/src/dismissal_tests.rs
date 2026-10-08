@@ -244,8 +244,11 @@ async fn a_failed_dismissal_rolls_back_its_delete_losses_position_and_queue() {
         .unwrap();
     let losses = a.lost_values().await.unwrap();
     let before = fingerprint(&a).await;
-    a.inspect_writer(|sql| sql.batch("CREATE TRIGGER refuse BEFORE INSERT ON _coven_uploads BEGIN SELECT RAISE(ABORT,'refuse'); END").unwrap());
-    assert!(a.dismiss_lost_values(&losses).await.is_err());
+    a.inspect_writer(|sql| sql.fail_at("refuse", "BEFORE INSERT ON _coven_uploads", "refuse"));
+    assert!(matches!(
+        a.dismiss_lost_values(&losses).await,
+        Err(crate::CovenError::Database(crate::DbError::Sqlite(_)))
+    ));
     assert_eq!(a.lost_values().await.unwrap(), losses);
     assert_eq!(fingerprint(&a).await, before);
     assert_eq!(records(&a).len(), 1);

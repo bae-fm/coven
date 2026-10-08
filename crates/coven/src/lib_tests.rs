@@ -5,18 +5,21 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
-struct Device {
+#[cfg(test)]
+pub(crate) struct Device {
     app: TestCoven,
-    layout: StoreLayout,
-    store: StoreId,
-    handle: CovenHandle,
-    storage: Arc<MemoryStorage>,
+    pub(crate) layout: StoreLayout,
+    pub(crate) store: StoreId,
+    pub(crate) handle: CovenHandle,
+    pub(crate) storage: Arc<MemoryStorage>,
 }
-struct Network {
+#[cfg(test)]
+pub(crate) struct Network {
     root: tempfile::TempDir,
-    clock: Arc<FixedClock>,
+    pub(crate) clock: Arc<FixedClock>,
     ids: IdSourceRef,
-    devices: Vec<Device>,
+    pub(crate) devices: Vec<Device>,
+    _sign_in: Option<crate::authentication::SignIn>,
 }
 fn tables() -> Vec<SyncedTable> {
     vec![
@@ -39,8 +42,7 @@ fn builder(
     ids: IdSourceRef,
     storage: Arc<MemoryStorage>,
 ) -> CovenBuilder {
-    // Keep timestamps controlled while joining and provider polling use runtime time.
-    let clock = Arc::new(coven_foundation::clock::ClosureClock(move || clock.now()));
+    let clock = Arc::new(PollingClock(clock));
     app.builder(layout)
         .synced_tables(tables())
         .migrations(migrations())
@@ -48,8 +50,40 @@ fn builder(
         .id_source(ids)
         .storage_connector(storage)
 }
+/// Preserve the fixture's timestamps while polling without production delays.
+#[cfg(test)]
+pub(crate) struct PollingClock(pub(crate) ClockRef);
+impl Clock for PollingClock {
+    fn now(&self) -> std::time::SystemTime {
+        self.0.now()
+    }
+    fn sleep(
+        &self,
+        duration: Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        Box::pin(tokio::time::sleep(if duration == Duration::from_secs(1) {
+            Duration::from_millis(1)
+        } else {
+            duration
+        }))
+    }
+}
+
 impl Network {
     async fn new(count: usize) -> Self {
+        let mut network = Self::with_schema(CloudProvider::S3, tables(), migrations()).await;
+        for device in 1..count {
+            network.join(device).await;
+        }
+        network.quiet().await;
+        network
+    }
+
+    pub(crate) async fn with_schema(
+        provider: CloudProvider,
+        tables: Vec<SyncedTable>,
+        migrations: Vec<Migration>,
+    ) -> Self {
         let root = tempfile::tempdir().unwrap();
         let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1000)));
         let ids: IdSourceRef = Arc::new(SequentialIds::new());
@@ -57,47 +91,63 @@ impl Network {
         let directory = app
             .create_store(
                 &StoreLayout::new(root.path().join("0")),
-                "Shared",
+                "Household",
                 ids.clone(),
             )
             .await
             .unwrap();
         let storage = Arc::new(
-            MemoryStorage::new(
-                StorageConfig::S3 {
-                    bucket: "loop".into(),
-                    region: "test".into(),
-                    endpoint: None,
-                    prefix: "store".into(),
-                },
-                clock.clone(),
-            )
-            .unwrap()
-            .with_transfer_limits(1024 * 1024, 65536)
-            .unwrap(),
+            MemoryStorage::builder()
+                .provider(provider)
+                .clock(clock.clone())
+                .transfer_limits(1024 * 1024, 65536)
+                .build()
+                .unwrap(),
         );
-        let handle = builder(
+        let builder = builder(
             &app,
             StoreLayout::new(root.path().join("0")),
             clock.clone(),
             ids.clone(),
             storage.clone(),
         )
-        .open(directory.id())
-        .await
-        .unwrap();
+        .synced_tables(tables)
+        .migrations(migrations);
+        let (builder, sign_in) = if matches!(
+            provider,
+            CloudProvider::GoogleDrive | CloudProvider::Dropbox | CloudProvider::OneDrive
+        ) {
+            let sign_in = crate::authentication::SignIn::new(clock.clone()).await;
+            let mut builder = sign_in.configure(builder);
+            builder.authenticate(provider).await.unwrap();
+            (builder, Some(sign_in))
+        } else {
+            (builder, None)
+        };
+        let handle = builder.open(directory.id()).await.unwrap();
         handle.initialize_identity().unwrap();
-        handle
-            .setup_s3_storage(
-                storage.config(),
-                "Device 0",
-                "owner-key".into(),
-                SecretText::new("secret".into()),
-            )
-            .await
-            .unwrap();
+        match provider {
+            CloudProvider::S3 => handle
+                .setup_s3_storage(
+                    storage.config(),
+                    "Device 0",
+                    "owner-key".into(),
+                    SecretText::new("secret".into()),
+                )
+                .await
+                .unwrap(),
+            CloudProvider::CloudKit => handle
+                .setup_cloudkit_storage(storage.config(), "Device 0")
+                .await
+                .unwrap(),
+            _ => handle
+                .setup_oauth_storage(storage.config(), "Device 0")
+                .await
+                .unwrap(),
+        };
         let initial_layout = StoreLayout::new(root.path().join("0"));
-        let mut network = Self {
+        let network = Self {
+            _sign_in: sign_in,
             root,
             clock,
             ids,
@@ -110,10 +160,6 @@ impl Network {
             }],
         };
         network.sync(0).await;
-        for device in 1..count {
-            network.join(device).await;
-        }
-        network.quiet().await;
         network
     }
     async fn join(&mut self, index: usize) {
@@ -146,17 +192,7 @@ impl Network {
             |_| {},
             &cancel,
         );
-        let mut requests = owner.subscribe_join_requests();
-        let approve = async {
-            let request = loop {
-                if let Some(request) = requests.borrow_and_update().first().cloned() {
-                    break request;
-                }
-                requests.changed().await.unwrap();
-            };
-            owner.approve_join_request(&request).await.unwrap();
-        };
-        let (handle, ()) = tokio::join!(joining, approve);
+        let (handle, _) = join_and_approve(owner, joining, |_| async {}).await;
         let handle = handle.unwrap().unwrap();
         let store = decode_code_info(&invite.code).unwrap().store_id;
         handle.start_sync().await.unwrap();
@@ -169,7 +205,7 @@ impl Network {
         });
         self.sync(index).await;
     }
-    async fn sync(&self, index: usize) {
+    pub(crate) async fn sync(&self, index: usize) {
         let handle = &self.devices[index].handle;
         self.clock.set(self.clock.now() + Duration::from_secs(1));
         let after = self.clock.now();
@@ -261,20 +297,10 @@ impl Network {
     }
     async fn assert_converged(&self) {
         let expected = self.rows(0).await;
-        let state = self.devices[0]
-            .handle
-            .test_sync_state()
-            .await
-            .unwrap()
-            .expect("uploads settled");
+        let state = posted(&self.devices[0]).await;
         for (i, device) in self.devices.iter().enumerate() {
             assert_eq!(self.rows(i).await, expected, "device {i} rows");
-            let other = device
-                .handle
-                .test_sync_state()
-                .await
-                .unwrap()
-                .expect("uploads settled");
+            let other = posted(device).await;
             assert_eq!(other.writes, state.writes, "device {i} write positions");
             assert_eq!(
                 other.store_log, state.store_log,
@@ -295,39 +321,105 @@ impl Network {
             };
         }
     }
-    async fn close(self) {
+    pub(crate) async fn close(self) {
         for device in self.devices {
             device.handle.close().await.unwrap();
         }
     }
 }
 
-#[tokio::test]
-async fn two_and_three_joined_devices_exchange_writes_through_their_loops() {
-    tokio::time::timeout(Duration::from_secs(30), async {
-        for count in [2, 3] {
-            let network = Network::new(count).await;
-            network.devices[0]
-                .handle
-                .write(|sql| {
-                    sql.execute("INSERT INTO parents VALUES('one','first',1)", [])?;
-                    sql.execute("INSERT INTO children VALUES('child','one',2)", [])?;
-                    Ok(())
-                })
-                .await
-                .unwrap();
-            network.quiet().await;
-            let expected = network.rows(0).await;
-            assert_eq!(expected.0.len(), 1);
-            for i in 1..count {
-                assert_eq!(network.rows(i).await, expected);
-            }
-            network.assert_converged().await;
-            network.close().await;
+pub(crate) async fn next_join_request(owner: &CovenHandle) -> JoinRequest {
+    let mut requests = owner.subscribe_join_requests();
+    loop {
+        if let Some(request) = requests.borrow_and_update().first().cloned() {
+            return request;
         }
+        requests.changed().await.unwrap();
+    }
+}
+
+pub(crate) async fn join_with_response<T, U>(
+    joining: impl std::future::Future<Output = T>,
+    response: impl std::future::Future<Output = U>,
+) -> (T, U) {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::join!(joining, response)
     })
     .await
-    .expect("joined loops converged");
+    .unwrap()
+}
+
+pub(crate) async fn join_and_approve<T, F: std::future::Future<Output = ()>>(
+    owner: &CovenHandle,
+    joining: impl std::future::Future<Output = T>,
+    before: impl FnOnce(JoinRequest) -> F,
+) -> (T, MemberId) {
+    join_with_response(joining, async {
+        let request = next_join_request(owner).await;
+        before(request.clone()).await;
+        owner.approve_join_request(&request).await.unwrap();
+        request.member
+    })
+    .await
+}
+
+pub(crate) async fn posted(device: &Device) -> coven_format::objects::PostedPositions {
+    use coven_format::{codes::RestoreCode, sealed_single::SingleChunkObject, Object};
+    let code = RestoreCode::from_text(&device.handle.restore_code().await.unwrap()).unwrap();
+    let member = device
+        .handle
+        .get_members()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|m| m.is_self)
+        .unwrap();
+    let id = device
+        .layout
+        .store_dir(&device.store)
+        .settings()
+        .unwrap()
+        .device_id;
+    let path = ObjectPath::positions(id);
+    let bytes = device.storage.read(&path).await.unwrap();
+    let object = SingleChunkObject::decode(&bytes).unwrap();
+    let SingleChunkObject::PostedPositions {
+        key,
+        chunk,
+        signature,
+    } = &object
+    else {
+        panic!("positions object")
+    };
+    let key_path = ObjectPath::store_key(*key, &member.id);
+    let key = code
+        .member_keys
+        .open_store_key(
+            key_path.as_str(),
+            &device.storage.read(&key_path).await.unwrap(),
+        )
+        .unwrap();
+    let mut hash = coven_crypto::ObjectHasher::new();
+    hash.update(&bytes[..bytes.len() - 64]);
+    member
+        .id
+        .verify_object(path.as_str(), &hash.finish(), signature)
+        .unwrap();
+    let plain = key
+        .derive()
+        .open_object_chunk(
+            path.as_str(),
+            &object.prefix().encode().unwrap(),
+            0,
+            0,
+            chunk,
+        )
+        .unwrap();
+    let Object::PostedPositions(positions) = Object::decode(&plain).unwrap() else {
+        panic!("positions frame")
+    };
+    assert_eq!(positions.device, id);
+    positions
 }
 
 struct Generator(u64);
