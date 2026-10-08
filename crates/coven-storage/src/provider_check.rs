@@ -16,7 +16,7 @@ pub async fn check_provider(
     let end = encrypted_bytes
         .len()
         .checked_sub(1)
-        .ok_or(StorageError::InvalidRange)?;
+        .ok_or(StorageError::Failure(StorageFailure::InvalidRange))?;
     let range = ByteRange::new(1, end as u64)?;
     let created = storage.create(path, encrypted_bytes).await;
     if created
@@ -37,15 +37,19 @@ pub async fn check_provider(
                 if error.failure() == StorageFailure::AlreadyExists
                     && !matches!(error, StorageError::Cleanup { .. }) => {}
             Err(error) => return Err(error),
-            Ok(()) => return Err(StorageError::Protocol("provider accepted a second create")),
+            Ok(()) => {
+                return Err(
+                    StorageFailure::Protocol.with_source("provider accepted a second create")
+                )
+            }
         }
         check = StorageCheck::Read;
         if storage.read(path).await? != encrypted_bytes {
-            return Err(StorageError::Protocol("whole read disagrees with upload"));
+            return Err(StorageFailure::Protocol.with_source("whole read disagrees with upload"));
         }
         check = StorageCheck::ReadRange;
         if storage.read_range(path, range).await? != encrypted_bytes[1..end] {
-            return Err(StorageError::Protocol("range read disagrees with upload"));
+            return Err(StorageFailure::Protocol.with_source("range read disagrees with upload"));
         }
         check = StorageCheck::List;
         if !storage
@@ -54,9 +58,8 @@ pub async fn check_provider(
             .iter()
             .any(|object| &object.path == path && object.size == encrypted_bytes.len() as u64)
         {
-            return Err(StorageError::Protocol(
-                "test object missing or wrong size in listing",
-            ));
+            return Err(StorageFailure::Protocol
+                .with_source("test object missing or wrong size in listing"));
         }
         Ok(())
     }
@@ -66,9 +69,9 @@ pub async fn check_provider(
         match storage.read(path).await {
             Err(error) if error.failure() == StorageFailure::NotFound => Ok(()),
             Err(error) => Err(error),
-            Ok(_) => Err(StorageError::Protocol(
-                "deleted test object is still readable",
-            )),
+            Ok(_) => {
+                Err(StorageFailure::Protocol.with_source("deleted test object is still readable"))
+            }
         }
     }
     .await;
@@ -78,7 +81,9 @@ pub async fn check_provider(
             check = StorageCheck::Delete;
             error
         }
-        (Err(StorageError::InvalidPath), Ok(())) if check == StorageCheck::List => {
+        (Err(error), Ok(()))
+            if check == StorageCheck::List && error.failure() == StorageFailure::InvalidPath =>
+        {
             return Err(StorageSetupError::LocationOccupied);
         }
         (Err(error), Ok(())) => error,

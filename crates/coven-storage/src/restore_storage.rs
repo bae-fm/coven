@@ -2,7 +2,7 @@
 
 use crate::{
     CloudProvider, ConnectionCredentials, S3Credentials, StorageConfig, StorageCredentials,
-    StorageError,
+    StorageError, StorageFailure,
 };
 use coven_crypto::SecretBytes;
 use serde::{Deserialize, Serialize};
@@ -55,9 +55,8 @@ impl RestoreStorage {
                 credentials: StorageCredentials::S3(credentials.clone()),
             }
             .validate(),
-            _ => Err(StorageError::InvalidConfiguration(
-                "S3 restore requires a member key",
-            )),
+            _ => Err(StorageFailure::InvalidConfiguration
+                .with_source("S3 restore requires a member key")),
         }
     }
 
@@ -70,7 +69,7 @@ impl RestoreStorage {
     /// Decode and validate a restore code's provider payload.
     pub fn decode(bytes: &[u8]) -> Result<Self, StorageError> {
         let value: Self = serde_json::from_slice(bytes)
-            .map_err(|error| StorageError::Encoding(Box::new(error)))?;
+            .map_err(|error| StorageFailure::Encoding.with_source(error))?;
         value.validate()?;
         Ok(value)
     }

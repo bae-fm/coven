@@ -22,7 +22,7 @@ pub use coven_sync::{
     QueuedUpload, RecordedUploadFailure, RowsPinnedLiveQuery, TransferLimits, UploadFailure,
     UploadFailures, UploadPhase, UploadQueue, UploadsLiveQuery,
 };
-pub use error::{RecoveryError, StoreCreationError, StoreDeletionError};
+pub use error::{RecoveryError, StoreCreationError, StoreDeletionError, StoreKeyUnlockError};
 pub use handle::CovenHandle;
 pub use read_handle::CovenReadHandle;
 
@@ -83,8 +83,8 @@ pub use coven_storage::providers::DesktopOAuthPresenter;
 mod authentication;
 mod storage;
 pub use coven_storage::providers::StorageConnector;
-pub use coven_storage::{StorageCheck, StorageSetupError, StorageSetupFailure};
-pub use storage::{ConnectedStorage, StoreKeyState, StoreKeyUnlockError};
+pub use coven_storage::{StorageCheck, StorageSetupError};
+pub use storage::{ConnectedStorage, StoreKeyState};
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]

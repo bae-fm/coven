@@ -1,6 +1,8 @@
-//! Failures composing the store's directory and custody capabilities.
+//! Failures composing the store's directory, storage and custody capabilities.
 
-use crate::{FileError, KeyError, StoreLockError};
+use crate::{
+    CryptoError, FileError, KeyError, StorageError, StorageSetupError, StoreLockError, SyncError,
+};
 
 /// Creating a store failed, with publication and rollback made explicit (E1).
 pub type StoreCreationError = coven_foundation::files::StoreCreationError<KeyError>;
@@ -33,3 +35,46 @@ pub enum RecoveryError {
     #[error("recovery requires unlocked store keys")]
     NoStoreKeys,
 }
+
+/// Opening this member's sealed store keys failed.
+#[derive(Debug, thiserror::Error)]
+pub enum StoreKeyUnlockError {
+    /// No stored provider configuration or credentials are available.
+    #[error("no storage configured")]
+    NoStorage,
+    /// The provider refused or failed a request.
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+    /// An authenticated key could not be opened.
+    #[error(transparent)]
+    Crypto(#[from] CryptoError),
+    /// Custody refused to read or persist keys.
+    #[error(transparent)]
+    SecureStorage(#[from] KeyError),
+    /// Store-log validation or local work failed, preserving its cause.
+    #[error("opening store keys: {0}")]
+    Other(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+pub(crate) fn setup_error(error: SyncError) -> StorageSetupError {
+    match error {
+        SyncError::Setup(error) => *error,
+        SyncError::SecureStorage(error) => StorageSetupError::SecureStorage(error),
+        SyncError::Storage(error) => StorageSetupError::Storage(error),
+        error => StorageSetupError::Internal(Box::new(error)),
+    }
+}
+
+pub(crate) fn unlock_error(error: SyncError) -> StoreKeyUnlockError {
+    match error {
+        SyncError::NoStorage => StoreKeyUnlockError::NoStorage,
+        SyncError::SecureStorage(error) => StoreKeyUnlockError::SecureStorage(error),
+        SyncError::Crypto(error) => StoreKeyUnlockError::Crypto(error),
+        SyncError::Storage(error) => StoreKeyUnlockError::Storage(error),
+        error => StoreKeyUnlockError::Other(Box::new(error)),
+    }
+}
+
+#[cfg(test)]
+#[path = "error_tests.rs"]
+mod tests;

@@ -5,6 +5,12 @@ use axum::Router;
 fn typed_provider_error_mapping() {
     let cases = [
         (
+            CloudProvider::Dropbox,
+            416,
+            serde_json::Value::Null,
+            StorageFailure::InvalidRange,
+        ),
+        (
             CloudProvider::GoogleDrive,
             403,
             serde_json::json!({"error":{"errors":[{"reason":"storageQuotaExceeded"}]}}),
@@ -88,7 +94,7 @@ async fn ranged_reads_refuse_ignored_ranges_and_wrong_offsets() {
             Some(ByteRange::new(3, 7).unwrap())
         )
         .await,
-        Err(StorageError::Protocol(_))
+        Err(error) if error.failure() == StorageFailure::Protocol
     ));
     assert!(validate_content_range("bytes 0-3/8", ByteRange::new(3, 7).unwrap()).is_err());
     assert!(validate_content_range("bytes 3-6/6", ByteRange::new(3, 7).unwrap()).is_err());
@@ -267,7 +273,7 @@ async fn ranged_body_must_match_the_entire_requested_interval() {
 fn a_valid_provider_clamp_identifies_a_range_past_eof() {
     assert!(matches!(
         validate_content_range("bytes 3-5/6", ByteRange::new(3, 7).unwrap()),
-        Err(StorageError::InvalidRange)
+        Err(error) if error.failure() == StorageFailure::InvalidRange
     ));
     for header in [
         "bytes 3-4/6",

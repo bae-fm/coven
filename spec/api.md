@@ -1372,7 +1372,7 @@ while let Ok(values) = lost.next().await {
   through whole and interior ranged reads, appear with its size in a listing,
   and disappear after deletion. Cleanup runs even after a lost create reply;
   a path already occupied before the check is left untouched. A failed check
-  returns `StorageSetupFailure::ProviderCheck`, naming the operation and its
+  returns `StorageSetupError::ProviderCheck`, naming the operation and its
   classified cause; the error retains a cleanup failure too if both fail.
 - Setup commits the storage credentials, keys, location and restore code only
   once the connection is ready. Failure preserves their previous values and
@@ -1412,6 +1412,13 @@ while let Ok(values) = lost.next().await {
   and the storage location remain available for the next `start_sync`.
 - `disconnect_storage` also removes this device's storage credentials. It leaves
   storage's contents untouched; syncing requires storage setup again.
+
+Storage failures retain the same `StorageFailure` through setup, sync status,
+uploads, reads and operations. Their `StorageError` carries the native cause
+where one exists; setup adds the failed check or its distinct local failure
+without reclassifying storage failures. Missing member keys are always
+`StorageFailure::MemberKeysMissing`. Recorded upload failures retain this same
+classification when the native cause cannot survive closing the app.
 
 ```rust
 /// The provider holding a store (§4).
@@ -1473,7 +1480,7 @@ pub struct TransferLimits {
     pub downloads: NonZeroUsize,
 }
 
-/// A storage failure the app can act on, classified by `failure()` (§20.3).
+/// The single storage failure classification used by every app-facing error (§20.3).
 pub enum StorageFailure {
     /// No route to the provider, a timeout, or an interrupted response.
     Network,
@@ -1499,55 +1506,60 @@ pub enum StorageFailure {
     Refused,
     /// The response or recorded session is malformed.
     Protocol,
-}
-
-/// A storage error that preserves its typed cause (§4, E5).
-pub enum StorageError {
-    /// A classified provider failure with its original cause.
-    Provider {
-        /// The provider that failed.
-        provider: CloudProvider,
-        /// The failure the app can act on.
-        failure: StorageFailure,
-        /// The original transport, SDK or bridge error.
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
-    /// The location settings are invalid.
-    InvalidConfiguration(&'static str),
     /// An object path is outside the store's layout.
     InvalidPath,
     /// A range is empty, reversed or beyond the object's end.
     InvalidRange,
-    /// An object does not exist.
-    NotFound,
-    /// The path already holds an object; creation never replaces it.
-    AlreadyExists,
     /// Only the account holding the store may change its sharing.
     NotStoreOwner,
-    /// Dropbox cannot upgrade a pending viewer until its account id is available.
+    /// Dropbox cannot upgrade a pending viewer without the recipient's account id.
     AccountIdUnavailable,
     /// The invite belongs to another provider location.
     InvitationMismatch,
-    /// The upload session belongs to another provider or location.
+    /// The session belongs to another provider or location.
     SessionMismatch,
     /// The provider no longer retains the recorded upload.
     SessionExpired,
     /// A part disagrees with the session's offset, size or alignment.
     InvalidPart,
-    /// A posted-positions replacement exceeds the provider's single-request limit.
-    SingleRequestTooLarge { size: u64, limit: u64 },
-    /// A response violates the provider's protocol.
-    Protocol(&'static str),
-    /// Parsing recorded data failed.
-    Encoding(Box<dyn std::error::Error + Send + Sync>),
+    /// A posted-positions replacement exceeds this provider's single-request limit.
+    SingleRequestTooLarge {
+        /// Encrypted body length in bytes.
+        size: u64,
+        /// The adapter's single-request limit in bytes.
+        limit: u64,
+    },
+    /// Parsing recorded provider data failed.
+    Encoding,
     /// Persisting provider settings failed.
-    File(FileError),
-    /// Cleanup failed too; both causes are retained.
+    File,
+    /// This installation has no member keys in custody.
+    MemberKeysMissing,
+}
+
+impl StorageFailure {
+    /// Retain a diagnostic or native cause alongside this classification.
+    pub fn with_source(self, source: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> StorageError;
+}
+
+/// A storage error preserves its classification and typed cause (§4, E5).
+pub enum StorageError {
+    /// A failure with no underlying native error; also constructed by `failure.into()`.
+    Failure(StorageFailure),
+    /// A failure with its diagnostic or original local cause.
+    Caused { failure: StorageFailure, source: Box<dyn std::error::Error + Send + Sync> },
+    /// A provider failure with its original transport, SDK or bridge cause.
+    Provider {
+        provider: CloudProvider,
+        failure: StorageFailure,
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// Cleanup failed too; both causes and their classifications are retained.
     Cleanup { operation: Box<StorageError>, cleanup: Box<StorageError> },
 }
 
 impl StorageError {
-    /// The failure the app can act on.
+    /// The stored classification; for Cleanup, the original operation's failure.
     pub fn failure(&self) -> StorageFailure;
     /// True only for network interruptions and provider throttling.
     pub fn retryable(&self) -> bool;
@@ -1578,8 +1590,6 @@ pub enum StorageSetupError {
     Storage(StorageError),
     /// Sign-in failed or was cancelled.
     OAuth(OAuthError),
-    /// This device does not hold its member's keys.
-    MemberKeysMissing,
     /// Keeping credentials or keys failed.
     SecureStorage(KeyError),
     /// Local setup failed, with its cause.
@@ -1602,40 +1612,10 @@ pub enum StorageCheck {
     Delete,
 }
 
-/// The setup failure the app presents, classified by `failure()` (E5).
-pub enum StorageSetupFailure {
-    /// The failed operation and its cause; contract violations are `Protocol`.
-    ProviderCheck { check: StorageCheck, failure: StorageFailure },
-    /// Sign-in did not complete or the credentials were rejected.
-    Authentication,
-    /// The account lacks access.
-    PermissionDenied,
-    /// The bucket, folder or zone is absent.
-    ContainerNotFound,
-    /// The S3 bucket is in a different region.
-    RegionMismatch,
-    /// The provider's quota is exhausted.
-    QuotaExceeded,
-    /// A provider or sign-in setting is invalid.
-    InvalidConfiguration,
-    /// Another store already occupies this location.
-    LocationOccupied,
-    /// Storage cannot be reached.
-    Network,
-    /// This device lacks its member's keys.
-    MemberKeysMissing,
-    /// Key or credential custody failed.
-    SecureStorage,
-    /// A setup step failed internally.
-    Internal,
-}
-
 /// Opening the member's sealed store key failed (§11, E5).
 pub enum StoreKeyUnlockError {
     /// No storage is connected.
     NoStorage,
-    /// Identity custody has no member keys.
-    MemberKeysMissing,
     /// Reading the sealed key failed.
     Storage(StorageError),
     /// The sealed key could not be opened or checked.
@@ -1650,8 +1630,6 @@ pub enum SyncError {
     Format(coven_format::Error),
     /// A required key is absent from custody, or its material conflicts.
     Key(coven_crypto::MaterialError),
-    /// This install has no member keys in custody.
-    MissingMemberKeys,
     /// A required sealed key has not arrived; retry after acquiring it.
     KeyUnavailable(KeyId),
     /// A key introduction reused an immutable key identity.
@@ -1814,8 +1792,8 @@ pub enum SyncStatus {
     Disconnected,
     /// Storage is set up and syncing is stopped; no provider client is required.
     Stopped,
-    /// Storage hasn't been reached since connecting.
-    Offline,
+    /// Storage hasn't been reached since connecting; retains the network cause.
+    Offline { error: Arc<StorageError> },
     /// The initial sync is queued or a sync is running.
     Syncing,
     /// The last sync finished.
@@ -1833,11 +1811,6 @@ pub struct ConnectedStorage {
 pub enum StoreKeyState {
     Available,
     Locked,
-}
-
-impl StorageSetupError {
-    /// The setup failure the app presents, with its cause retained in this error.
-    pub fn failure(&self) -> StorageSetupFailure;
 }
 
 pub enum SyncFailure {
@@ -1860,7 +1833,7 @@ Example:
 ```rust
 match handle.setup_s3_storage(storage, device_name, access_key_id, SecretText::new(secret_access_key)).await {
     Ok(connected) => remember(connected.storage),
-    Err(error) => return show_setup_failure(error.failure()),
+    Err(error) => return show_setup_error(error),
 }
 
 let mut status = handle.subscribe_sync_status();
@@ -2218,8 +2191,6 @@ impl FileRangeStream<'_> {
 }
 
 pub enum FileReadError {
-    /// The range needs chunks that aren't cached, and storage can't be reached.
-    Offline { id: String },
     /// An uploaded file was read with no storage connected.
     NoStorage,
     /// The file is only on another device, which the app can name.
@@ -2233,7 +2204,7 @@ pub enum FileReadError {
     Integrity { id: String },
     /// The range lies outside the file.
     RangeOutOfBounds { id: String, offset: u64, end: u64, size: u64 },
-    /// Storage refused or failed the request.
+    /// Storage failed, including Network when required chunks aren't cached.
     Storage(StorageError),
     /// The database failed, with its cause.
     Database(DbError),
@@ -2255,7 +2226,7 @@ let header = stream.read_at(0, 64 * 1024).await?;
 let resume_at = position_for(&header, saved_seconds);
 match stream.read_at(resume_at, 256 * 1024).await {
     Ok(bytes) => play(bytes),
-    Err(FileReadError::Offline { .. }) => show_not_downloaded(),
+    Err(FileReadError::Storage(error)) if error.failure() == StorageFailure::Network => show_not_downloaded(),
     Err(error) => return Err(error.into()),
 }
 ```

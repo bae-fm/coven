@@ -112,7 +112,7 @@ impl StorageConnector for TrackingConnector {
             resume.await.unwrap();
         }
         if self.refuse.swap(false, Ordering::SeqCst) {
-            return Err(StorageError::Injected(StorageFailure::Authentication));
+            return Err(StorageError::Failure(StorageFailure::Authentication));
         }
         self.credentials.lock().unwrap().push(credentials.clone());
         let client = self.storage.connect(config, credentials, device).await?;
@@ -471,7 +471,18 @@ async fn reconnect_is_offline_until_reached_and_stop_and_close_finish_the_active
     let before = f.storage.request_count();
     f.handle.start_sync().await.unwrap();
     requests.wait_for(|n| *n > before).await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Offline)).await;
+    status(&f.handle, |s| matches!(s, SyncStatus::Offline { .. })).await;
+    {
+        let subscription = f.handle.subscribe_sync_status();
+        let status = subscription.borrow();
+        let SyncStatus::Offline { error } = &*status else {
+            panic!("offline storage")
+        };
+        assert_eq!(error.failure(), StorageFailure::Network);
+        assert!(std::error::Error::source(error.as_ref())
+            .unwrap()
+            .is::<std::io::Error>());
+    }
     f.storage.set_online(true);
     f.advance(Duration::from_secs(30));
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
@@ -528,7 +539,7 @@ impl StorageConnector for Locations {
             .0
             .iter()
             .find(|storage| storage.config() == config)
-            .ok_or(StorageError::InvalidConfiguration("unknown test location"))?;
+            .ok_or(StorageFailure::InvalidConfiguration.with_source("unknown test location"))?;
         storage.connect(config, credentials, device).await
     }
 }
@@ -671,7 +682,7 @@ async fn a_first_pass_that_reaches_storage_then_loses_network_is_failed() {
     f.storage.set_online(false);
     resume.send(()).unwrap();
     status(&f.handle, |s| {
-        matches!(s, SyncStatus::Failed { .. } | SyncStatus::Offline)
+        matches!(s, SyncStatus::Failed { .. } | SyncStatus::Offline { .. })
     })
     .await;
     assert!(matches!(
@@ -878,12 +889,8 @@ async fn setup_rejects_overwriting_providers_before_committing() {
             ..Faults::none()
         })
         .await;
-    assert_eq!(
-        f.setup().await.unwrap_err().failure(),
-        StorageSetupFailure::ProviderCheck {
-            check: StorageCheck::CreateOnce,
-            failure: StorageFailure::Protocol,
-        }
+    assert!(
+        matches!(f.setup().await.unwrap_err(), StorageSetupError::ProviderCheck { check: StorageCheck::CreateOnce, source } if source.failure() == StorageFailure::Protocol)
     );
     assert_eq!(f.handle.store_key_state().unwrap(), StoreKeyState::Locked);
     assert!(matches!(
@@ -945,12 +952,8 @@ async fn reconnect_checks_the_provider_and_preserves_the_previous_connection() {
         )
         .await
         .unwrap_err();
-    assert_eq!(
-        error.failure(),
-        StorageSetupFailure::ProviderCheck {
-            check: StorageCheck::CreateOnce,
-            failure: StorageFailure::Protocol,
-        }
+    assert!(
+        matches!(error, StorageSetupError::ProviderCheck { check: StorageCheck::CreateOnce, source } if source.failure() == StorageFailure::Protocol)
     );
     assert_eq!(f.handle.restore_code().await.unwrap(), before);
     assert_eq!(settings.read().unwrap(), location);
@@ -971,12 +974,8 @@ async fn reconnect_checks_the_provider_and_preserves_the_previous_connection() {
             ..Faults::none()
         })
         .await;
-    assert_eq!(
-        f.setup().await.unwrap_err().failure(),
-        StorageSetupFailure::ProviderCheck {
-            check: StorageCheck::CreateOnce,
-            failure: StorageFailure::Protocol,
-        }
+    assert!(
+        matches!(f.setup().await.unwrap_err(), StorageSetupError::ProviderCheck { check: StorageCheck::CreateOnce, source } if source.failure() == StorageFailure::Protocol)
     );
     assert!(matches!(
         f.handle.restore_code().await,

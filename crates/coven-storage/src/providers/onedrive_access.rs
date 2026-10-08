@@ -1,5 +1,5 @@
 use super::access::PermissionAccess;
-use crate::{RetainedAccessReason, StorageError};
+use crate::{RetainedAccessReason, StorageError, StorageFailure};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
@@ -23,7 +23,9 @@ impl<'a> AccountPermissions<'a> {
                     .iter()
                     .any(|role| role.as_str().is_none_or(str::is_empty))
             {
-                return Err(StorageError::Protocol("invalid OneDrive permission roles"));
+                return Err(
+                    StorageFailure::Protocol.with_source("invalid OneDrive permission roles")
+                );
             }
             let identities = identities(permission)?;
             let invited = invitation_email(permission)?
@@ -82,7 +84,7 @@ impl<'a> AccountPermissions<'a> {
             }
             if identity
                 .as_object()
-                .ok_or(StorageError::Protocol("invalid OneDrive recipient"))?
+                .ok_or(StorageFailure::Protocol.with_source("invalid OneDrive recipient"))?
                 .keys()
                 .any(|key| !matches!(key.as_str(), "user" | "siteUser" | "@odata.type"))
             {
@@ -94,7 +96,9 @@ impl<'a> AccountPermissions<'a> {
         let broad = match permission.get("link").filter(|value| !value.is_null()) {
             Some(link) => {
                 if !link.is_object() {
-                    return Err(StorageError::Protocol("invalid OneDrive sharing link"));
+                    return Err(
+                        StorageFailure::Protocol.with_source("invalid OneDrive sharing link")
+                    );
                 }
                 match link.get("scope") {
                     Some(scope) => match scope.as_str() {
@@ -107,7 +111,8 @@ impl<'a> AccountPermissions<'a> {
                             ))
                         }
                         None => {
-                            return Err(StorageError::Protocol("invalid OneDrive sharing scope"))
+                            return Err(StorageFailure::Protocol
+                                .with_source("invalid OneDrive sharing scope"))
                         }
                     },
                     None => identities.is_empty(),
@@ -173,9 +178,9 @@ fn identities(permission: &Value) -> Result<Vec<&Value>, StorageError> {
         if let Some(value) = value {
             if multiple {
                 result.extend(
-                    value
-                        .as_array()
-                        .ok_or(StorageError::Protocol("invalid OneDrive recipients"))?,
+                    value.as_array().ok_or(
+                        StorageFailure::Protocol.with_source("invalid OneDrive recipients"),
+                    )?,
                 );
             } else {
                 result.push(value);
@@ -183,7 +188,7 @@ fn identities(permission: &Value) -> Result<Vec<&Value>, StorageError> {
         }
     }
     if result.iter().any(|value| !value.is_object()) {
-        return Err(StorageError::Protocol("invalid OneDrive recipient"));
+        return Err(StorageFailure::Protocol.with_source("invalid OneDrive recipient"));
     }
     Ok(result)
 }

@@ -30,12 +30,12 @@ impl GoogleDriveStorage {
     ) -> Result<Self, StorageError> {
         config.validate()?;
         let StorageConfig::GoogleDrive { folder_id } = &config else {
-            return Err(StorageError::InvalidConfiguration(
-                "expected Google Drive location",
-            ));
+            return Err(
+                StorageFailure::InvalidConfiguration.with_source("expected Google Drive location")
+            );
         };
         if session.provider() != PROVIDER {
-            return Err(StorageError::InvalidConfiguration("wrong OAuth provider"));
+            return Err(StorageFailure::InvalidConfiguration.with_source("wrong OAuth provider"));
         }
         Ok(Self {
             folder: folder_id.clone(),
@@ -150,7 +150,7 @@ impl GoogleDriveStorage {
             .await?;
             if let Some(incomplete) = value.get("incompleteSearch") {
                 if incomplete.as_bool() != Some(false) {
-                    return Err(StorageError::Protocol("Drive search was incomplete"));
+                    return Err(StorageFailure::Protocol.with_source("Drive search was incomplete"));
                 }
             }
             files.extend(http::array(&value, "files")?.iter().cloned());
@@ -160,10 +160,12 @@ impl GoogleDriveStorage {
                     let next = value
                         .as_str()
                         .filter(|s| !s.is_empty())
-                        .ok_or(StorageError::Protocol("invalid Drive page token"))?
+                        .ok_or(StorageFailure::Protocol.with_source("invalid Drive page token"))?
                         .to_owned();
                     if !seen.insert(next.clone()) {
-                        return Err(StorageError::Protocol("repeated Drive page token"));
+                        return Err(
+                            StorageFailure::Protocol.with_source("repeated Drive page token")
+                        );
                     }
                     token = Some(next);
                 }
@@ -176,7 +178,7 @@ impl GoogleDriveStorage {
         path: &ObjectPath,
         range: Option<ByteRange>,
     ) -> Result<Vec<u8>, StorageError> {
-        let item = self.find(path).await?.ok_or(StorageError::NotFound)?;
+        let item = self.find(path).await?.ok_or(StorageFailure::NotFound)?;
         let url = self.url(&["files", http::string(&item, "id")?], &[("alt", "media")])?;
         let headers = range
             .map(|range| vec![("Range", range.header())])
@@ -192,7 +194,7 @@ impl GoogleDriveStorage {
     }
     async fn verify_completed(&self, session: &mut UploadSession) -> Result<(), StorageError> {
         let SessionState::GoogleDrive { file_id, .. } = &session.state else {
-            return Err(StorageError::SessionMismatch);
+            return Err(StorageFailure::SessionMismatch.into());
         };
         let item = http::json(
             PROVIDER,
@@ -210,20 +212,20 @@ impl GoogleDriveStorage {
         let item = match item {
             Ok(item) => item,
             Err(error) if error.failure() == StorageFailure::NotFound => {
-                return Err(StorageError::SessionExpired)
+                return Err(StorageFailure::SessionExpired.with_source(error))
             }
             Err(error) => return Err(error),
         };
         if http::string(&item, "name")? != session.path.as_str()
             || http::string(&item, "size")?
                 .parse::<u64>()
-                .map_err(|_| StorageError::Protocol("invalid Drive size"))?
+                .map_err(|error| StorageFailure::Protocol.with_source(error))?
                 != session.total
             || !http::array(&item, "parents")?
                 .iter()
                 .any(|p| p.as_str() == Some(&self.folder))
         {
-            return Err(StorageError::Protocol("Drive completed another object"));
+            return Err(StorageFailure::Protocol.with_source("Drive completed another object"));
         }
         self.ensure_unique(&session.path, file_id.as_str()).await?;
         session.confirmed = session.total;
@@ -233,12 +235,12 @@ impl GoogleDriveStorage {
     async fn ensure_unique(&self, path: &ObjectPath, file_id: &str) -> Result<(), StorageError> {
         match self.remove_own_duplicates(path).await {
             Ok(Some(found)) if http::string(&found, "id")? == file_id => {}
-            Ok(Some(_)) => return Err(StorageError::AlreadyExists),
+            Ok(Some(_)) => return Err(StorageFailure::AlreadyExists.into()),
             Err(error) => return Err(error),
             _ => {
-                return Err(StorageError::Protocol(
-                    "Drive upload is absent from its path",
-                ))
+                return Err(
+                    StorageFailure::Protocol.with_source("Drive upload is absent from its path")
+                )
             }
         }
         Ok(())
@@ -246,7 +248,7 @@ impl GoogleDriveStorage {
     fn upload_url<'a>(&self, session: &'a UploadSession) -> Result<&'a str, StorageError> {
         session.check(&self.config)?;
         let SessionState::GoogleDrive { url, .. } = &session.state else {
-            return Err(StorageError::SessionMismatch);
+            return Err(StorageFailure::SessionMismatch.into());
         };
         http::same_origin(&self.upload_api, url.as_str())?;
         Ok(url.as_str())
@@ -261,16 +263,16 @@ impl GoogleDriveStorage {
                 None => 0,
                 Some(value) => value
                     .to_str()
-                    .map_err(|_| StorageError::Protocol("invalid Drive range"))?
+                    .map_err(|error| StorageFailure::Protocol.with_source(error))?
                     .strip_prefix("bytes=0-")
-                    .ok_or(StorageError::Protocol("Drive range is not contiguous"))?
+                    .ok_or(StorageFailure::Protocol.with_source("Drive range is not contiguous"))?
                     .parse::<u64>()
-                    .map_err(|_| StorageError::Protocol("invalid Drive range"))?
+                    .map_err(|error| StorageFailure::Protocol.with_source(error))?
                     .checked_add(1)
-                    .ok_or(StorageError::InvalidPart)?,
+                    .ok_or(StorageFailure::InvalidPart)?,
             };
             if confirmed < session.confirmed || confirmed > session.total {
-                return Err(StorageError::Protocol("Drive lost confirmed bytes"));
+                return Err(StorageFailure::Protocol.with_source("Drive lost confirmed bytes"));
             }
             session.confirmed = confirmed;
             Ok(())
@@ -299,7 +301,7 @@ impl GoogleDriveStorage {
             || value["mimeType"].as_str() != Some("application/vnd.google-apps.folder")
             || value["trashed"].as_bool() == Some(true)
         {
-            return Err(StorageError::InvalidPath);
+            return Err(StorageFailure::InvalidPath.into());
         }
         Ok(value)
     }
@@ -308,7 +310,7 @@ impl GoogleDriveStorage {
         if owned_by_account(&value)? {
             Ok(())
         } else {
-            Err(StorageError::NotStoreOwner)
+            Err(StorageFailure::NotStoreOwner.into())
         }
     }
     async fn permissions(&self) -> Result<Vec<Value>, StorageError> {
@@ -340,10 +342,10 @@ impl GoogleDriveStorage {
             let next = next
                 .as_str()
                 .filter(|value| !value.is_empty())
-                .ok_or(StorageError::Protocol("invalid permission page token"))?
+                .ok_or(StorageFailure::Protocol.with_source("invalid permission page token"))?
                 .to_owned();
             if !seen.insert(next.clone()) {
-                return Err(StorageError::Protocol("repeated permission page token"));
+                return Err(StorageFailure::Protocol.with_source("repeated permission page token"));
             }
             token = Some(next);
         }
@@ -351,8 +353,8 @@ impl GoogleDriveStorage {
     }
 }
 fn multipart_content(metadata: &Value, bytes: &[u8]) -> Result<(String, Vec<u8>), StorageError> {
-    let metadata =
-        serde_json::to_vec(metadata).map_err(|error| StorageError::Encoding(Box::new(error)))?;
+    let metadata = serde_json::to_vec(metadata)
+        .map_err(|error| StorageFailure::Encoding.with_source(error))?;
     let mut candidate = 0u64;
     let mut boundary = format!("coven-upload-{candidate:x}");
     while bytes
@@ -364,7 +366,7 @@ fn multipart_content(metadata: &Value, bytes: &[u8]) -> Result<(String, Vec<u8>)
     {
         candidate = candidate
             .checked_add(1)
-            .ok_or(StorageError::Protocol("multipart boundary exhausted"))?;
+            .ok_or(StorageFailure::Protocol.with_source("multipart boundary exhausted"))?;
         boundary = format!("coven-upload-{candidate:x}");
     }
     let mut body = format!("--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n")
@@ -384,7 +386,7 @@ fn owned_by_account(item: &Value) -> Result<bool, StorageError> {
         None | Some(Value::Null) if item["driveId"].as_str().is_some_and(|id| !id.is_empty()) => {
             Ok(false)
         }
-        _ => Err(StorageError::Protocol("Drive omitted account ownership")),
+        _ => Err(StorageFailure::Protocol.with_source("Drive omitted account ownership")),
     }
 }
 fn escape(value: &str) -> String {
@@ -411,7 +413,7 @@ impl Storage for GoogleDriveStorage {
         let _guard = self.create_lock.lock().await;
         crate::transfer::upload_bytes(self, path, bytes, async {
             if self.remove_own_duplicates(path).await?.is_some() {
-                return Err(StorageError::AlreadyExists);
+                return Err(StorageFailure::AlreadyExists.into());
             }
             self.create_request(path, bytes).await
         })
@@ -420,7 +422,7 @@ impl Storage for GoogleDriveStorage {
 
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         if !path.is_replaceable() {
-            return Err(StorageError::InvalidPath);
+            return Err(StorageFailure::InvalidPath.into());
         }
         crate::transfer::check_single_request(bytes.len() as u64, self.single_request_limit())?;
         let Some(item) = self.remove_own_duplicates(path).await? else {
@@ -464,7 +466,7 @@ impl Storage for GoogleDriveStorage {
                 .as_str()
                 .is_some_and(|kind| kind.starts_with("application/vnd.google-apps."))
             {
-                return Err(StorageError::InvalidPath);
+                return Err(StorageFailure::InvalidPath.into());
             }
             let path = ObjectPath::parse(http::string(&item, "name")?)?;
             if prefix.contains(&path) {
@@ -472,7 +474,7 @@ impl Storage for GoogleDriveStorage {
                     path: path.clone(),
                     size: http::string(&item, "size")?
                         .parse()
-                        .map_err(|_| StorageError::Protocol("invalid Drive size"))?,
+                        .map_err(|error| StorageFailure::Protocol.with_source(error))?,
                     stored_at: http::timestamp(&item, "createdTime")?,
                 };
                 let id = http::string(&item, "id")?.to_owned();
@@ -555,7 +557,7 @@ impl Storage for GoogleDriveStorage {
             .iter()
             .any(|permission| access::writable_for(permission, account))
         {
-            return Err(StorageError::Protocol("Drive did not grant write access"));
+            return Err(StorageFailure::Protocol.with_source("Drive did not grant write access"));
         }
         Ok(AccessGrant::Granted {
             invitation: StorageInvitation::for_account(self.config())?,
@@ -563,9 +565,9 @@ impl Storage for GoogleDriveStorage {
     }
     async fn revoke_access(&self, member: &MemberAccess) -> Result<MemberRemoval, StorageError> {
         let MemberAccess::ProviderAccount(email) = member else {
-            return Err(StorageError::InvalidConfiguration(
-                "Drive requires an account",
-            ));
+            return Err(
+                StorageFailure::InvalidConfiguration.with_source("Drive requires an account")
+            );
         };
         self.require_owner().await?;
         let permissions = self.permissions().await?;
@@ -595,9 +597,8 @@ impl Storage for GoogleDriveStorage {
             match access::classify(&permission, email)? {
                 PermissionAccess::Unrelated => {}
                 PermissionAccess::Exclusive => {
-                    return Err(StorageError::Protocol(
-                        "Drive access remains after revocation",
-                    ))
+                    return Err(StorageFailure::Protocol
+                        .with_source("Drive access remains after revocation"))
                 }
                 PermissionAccess::Retained(reason) => shares.push(RetainedAccess {
                     provider_id: http::string(&permission, "id")?.into(),
@@ -617,13 +618,13 @@ impl Storage for GoogleDriveStorage {
         total: u64,
     ) -> Result<UploadSession, StorageError> {
         if path.is_replaceable() {
-            return Err(StorageError::InvalidPath);
+            return Err(StorageFailure::InvalidPath.into());
         }
         if total == 0 {
-            return Err(StorageError::InvalidPart);
+            return Err(StorageFailure::InvalidPart.into());
         }
         if self.remove_own_duplicates(path).await?.is_some() {
-            return Err(StorageError::AlreadyExists);
+            return Err(StorageFailure::AlreadyExists.into());
         }
         let generated = http::json(
             PROVIDER,
@@ -642,7 +643,7 @@ impl Storage for GoogleDriveStorage {
             .first()
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
-            .ok_or(StorageError::Protocol("Drive omitted generated id"))?
+            .ok_or(StorageFailure::Protocol.with_source("Drive omitted generated id"))?
             .to_owned();
         let body = json!({"id":file_id,"name":path.as_str(),"parents":[&self.folder],"properties":{"covenDevice":self.device.0.to_string()}});
         let url = http::endpoint(
@@ -670,7 +671,7 @@ impl Storage for GoogleDriveStorage {
             .headers()
             .get("Location")
             .and_then(|h| h.to_str().ok())
-            .ok_or(StorageError::Protocol("Drive omitted upload URL"))?
+            .ok_or(StorageFailure::Protocol.with_source("Drive omitted upload URL"))?
             .to_owned();
         http::same_origin(&self.upload_api, &url)?;
         Ok(UploadSession {
@@ -729,14 +730,14 @@ impl Storage for GoogleDriveStorage {
             .await?;
         self.progress(session, response).await?;
         if session.confirmed != end {
-            return Err(StorageError::Protocol("Drive did not store the whole part"));
+            return Err(StorageFailure::Protocol.with_source("Drive did not store the whole part"));
         }
         Ok(())
     }
     async fn finish_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
         self.resume_upload(session).await?;
         if !session.is_complete() {
-            return Err(StorageError::InvalidPart);
+            return Err(StorageFailure::InvalidPart.into());
         }
         Ok(())
     }

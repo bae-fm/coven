@@ -4,7 +4,7 @@ use crate::{
     operations::{Begun, Command, Output, Progress},
     *,
 };
-use coven_storage::{MemberRemoval, StorageError};
+use coven_storage::MemberRemoval;
 
 fn file_owner(d: &Device) -> Files {
     Files::new(
@@ -140,7 +140,7 @@ async fn owner_removal_rotates_keys_and_revokes_the_account() {
             storage
                 .read(&keys::path(&audience, key, &b.member.member_id()))
                 .await,
-            Err(StorageError::NotFound)
+            Err(error) if error.failure() == StorageFailure::NotFound
         ));
     }
     assert!(
@@ -198,7 +198,7 @@ async fn another_admin_cannot_share_and_owner_applies_their_revocation() {
                 }
             ))
             .await,
-        Err(SyncError::Storage(StorageError::NotStoreOwner))
+        Err(SyncError::Storage(error)) if error.failure() == StorageFailure::NotStoreOwner
     ));
     assert!(b.db.operations().await.unwrap().is_empty());
     let id = begin(&mut b, Command::RemoveMember(c.member.member_id())).await;
@@ -350,7 +350,7 @@ async fn dropped_removal_restarts_against_the_new_member_list() {
             storage
                 .read(&ObjectPath::store_key(key, &removed.member_id()))
                 .await,
-            Err(StorageError::NotFound)
+            Err(error) if error.failure() == StorageFailure::NotFound
         ));
     }
 }
@@ -430,7 +430,7 @@ async fn permanent_storage_failure_preserves_fixed_bytes_for_retry_and_discard()
         assert_eq!(blocked[0].last_step, 1);
         assert!(matches!(
             storage.read(&object::path(fixed.entry.position)).await,
-            Err(StorageError::NotFound)
+            Err(error) if error.failure() == StorageFailure::NotFound
         ));
         operations.set_storage(Some(storage.clone())).await.unwrap();
         operations.sync_store_log().await.unwrap();

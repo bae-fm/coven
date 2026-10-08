@@ -115,17 +115,16 @@ impl RestoreCodes {
             let old = owner.connection()?.ok_or(SyncError::NoStorage)?;
             let new = RestoreStorage::decode(replacement.storage.as_bytes())?;
             if &old.location != new.location() {
-                return Err(coven_storage::StorageError::InvitationMismatch.into());
+                return Err(coven_storage::StorageFailure::InvitationMismatch.into());
             }
             let RestoreStorage::S3 {
                 location,
                 credentials,
             } = new
             else {
-                return Err(coven_storage::StorageError::InvalidConfiguration(
-                    "account restore codes contain no credentials to replace",
-                )
-                .into());
+                return Err(coven_storage::StorageFailure::InvalidConfiguration
+                    .with_source("account restore codes contain no credentials to replace")
+                    .into());
             };
             owner
                 .install(
@@ -180,7 +179,7 @@ impl RestoreCodes {
             member_keys: owner
                 .identity
                 .unlock()?
-                .ok_or(SyncError::MissingMemberKeys)?,
+                .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?,
             storage: RestoreStorage::from_connection(&data).encode()?,
         };
         let previous = SavedConnection {
@@ -228,13 +227,10 @@ impl RestoreCodes {
         if tokens.expires_at.is_none_or(|expiry| now < expiry) {
             return Ok(());
         }
-        let clients =
-            owner
-                .oauth
-                .as_ref()
-                .ok_or(coven_storage::StorageError::InvalidConfiguration(
-                    "OAuth clients are absent",
-                ))?;
+        let clients = owner.oauth.as_ref().ok_or(
+            coven_storage::StorageFailure::InvalidConfiguration
+                .with_source("OAuth clients are absent"),
+        )?;
         let tokens = clients
             .refresh(location.provider(), &tokens)
             .await
@@ -322,7 +318,7 @@ impl RestoreCodesInner {
         let member_keys = self
             .identity
             .unlock()?
-            .ok_or(SyncError::MissingMemberKeys)?;
+            .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
         Ok(RestoreCode {
             store: store.id,
             name: store.name,

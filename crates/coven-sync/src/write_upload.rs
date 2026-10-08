@@ -5,7 +5,7 @@ use crate::SyncError;
 use coven_database::{DbError, UploadReadError};
 use coven_format::chunks::CHUNK_SIZE;
 use coven_merge::WriteId;
-use coven_storage::{StorageError, StorageFailure, UploadSession};
+use coven_storage::{StorageFailure, UploadSession};
 use tokio::sync::mpsc;
 
 impl DeviceLogSync {
@@ -38,12 +38,12 @@ impl DeviceLogSync {
             Some(bytes) => {
                 let mut session = UploadSession::decode(&bytes)?;
                 if session.path() != &path || session.total_bytes() != total {
-                    return Err(StorageError::SessionMismatch.into());
+                    return Err(StorageFailure::SessionMismatch.into());
                 }
                 match storage.resume_upload(&mut session).await {
                     Ok(()) => (),
                     Err(error) if error.failure() == StorageFailure::AlreadyExists => return Ok(()),
-                    Err(StorageError::SessionExpired) => {
+                    Err(error) if error.failure() == StorageFailure::SessionExpired => {
                         session = match storage.restart_upload(&session).await {
                             Ok(session) => session,
                             Err(error) if error.failure() == StorageFailure::AlreadyExists => {
@@ -107,9 +107,9 @@ impl DeviceLogSync {
                             let previous = session.confirmed_bytes();
                             storage.upload_part(session, &part).await?;
                             if session.confirmed_bytes() <= previous {
-                                return Err(
-                                    StorageError::Protocol("write upload did not advance").into()
-                                );
+                                return Err(StorageFailure::Protocol
+                                    .with_source("write upload did not advance")
+                                    .into());
                             }
                             database
                                 .keep_write_upload_session(
@@ -122,7 +122,7 @@ impl DeviceLogSync {
                     }
                 }
                 if session.confirmed_bytes() != total || !part.is_empty() {
-                    return Err(StorageError::InvalidPart.into());
+                    return Err(StorageFailure::InvalidPart.into());
                 }
                 storage.finish_upload(session).await?;
             } else {
@@ -131,7 +131,7 @@ impl DeviceLogSync {
                     bytes.extend(piece);
                 }
                 if bytes.len() as u64 != total {
-                    return Err(StorageError::InvalidPart.into());
+                    return Err(StorageFailure::InvalidPart.into());
                 }
                 storage.create_once(&path, &bytes).await?;
             }

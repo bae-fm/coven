@@ -24,9 +24,9 @@ impl OAuthSession {
             provider,
             CloudProvider::GoogleDrive | CloudProvider::Dropbox | CloudProvider::OneDrive
         ) {
-            return Err(StorageError::InvalidConfiguration(
-                "provider does not use OAuth",
-            ));
+            return Err(
+                StorageFailure::InvalidConfiguration.with_source("provider does not use OAuth")
+            );
         }
         Ok(Self {
             client: client().map_err(|e| transport(provider, e))?,
@@ -51,9 +51,9 @@ impl OAuthSession {
                 "https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName",
             ),
             _ => {
-                return Err(StorageError::InvalidConfiguration(
-                    "provider does not use OAuth",
-                ))
+                return Err(
+                    StorageFailure::InvalidConfiguration.with_source("provider does not use OAuth")
+                )
             }
         };
         let value = json(
@@ -74,7 +74,7 @@ impl OAuthSession {
             _ => unreachable!("checked OAuth provider"),
         };
         if account.is_empty() {
-            return Err(StorageError::Protocol("empty signed-in account"));
+            return Err(StorageFailure::Protocol.with_source("empty signed-in account"));
         }
         Ok(account.to_ascii_lowercase())
     }
@@ -290,7 +290,7 @@ pub(crate) fn classify(provider: CloudProvider, status: u16, body: &[u8]) -> Sto
         404 => StorageFailure::NotFound,
         409 if provider == CloudProvider::Dropbox => StorageFailure::Refused,
         409 | 412 => StorageFailure::AlreadyExists,
-        416 => StorageFailure::InvalidConfiguration,
+        416 => StorageFailure::InvalidRange,
         429 => StorageFailure::RateLimited,
         507 => StorageFailure::QuotaExceeded,
         408 | 500..=599 => StorageFailure::Network,
@@ -381,20 +381,20 @@ pub(crate) fn string<'a>(value: &'a Value, field: &str) -> Result<&'a str, Stora
     value[field]
         .as_str()
         .filter(|s| !s.is_empty())
-        .ok_or(StorageError::Protocol("missing string field"))
+        .ok_or(StorageFailure::Protocol.with_source("missing string field"))
 }
 pub(crate) fn timestamp(value: &Value, field: &str) -> Result<std::time::SystemTime, StorageError> {
     use aws_sdk_s3::primitives::{DateTime, DateTimeFormat};
     let timestamp = DateTime::from_str(string(value, field)?, DateTimeFormat::DateTimeWithOffset)
-        .map_err(|error| StorageError::Encoding(Box::new(error)))?;
+        .map_err(|error| StorageFailure::Encoding.with_source(error))?;
     timestamp
         .try_into()
-        .map_err(|error| StorageError::Encoding(Box::new(error)))
+        .map_err(|error| StorageFailure::Encoding.with_source(error))
 }
 pub(crate) fn array<'a>(value: &'a Value, field: &str) -> Result<&'a Vec<Value>, StorageError> {
     value[field]
         .as_array()
-        .ok_or(StorageError::Protocol("missing array field"))
+        .ok_or(StorageFailure::Protocol.with_source("missing array field"))
 }
 pub(crate) fn endpoint(
     base: &str,
@@ -402,9 +402,11 @@ pub(crate) fn endpoint(
     query: &[(&str, &str)],
 ) -> Result<String, StorageError> {
     let mut url = url::Url::parse(base)
-        .map_err(|_| StorageError::InvalidConfiguration("provider endpoint"))?;
+        .map_err(|error| StorageFailure::InvalidConfiguration.with_source(error))?;
     url.path_segments_mut()
-        .map_err(|_| StorageError::InvalidConfiguration("provider endpoint cannot hold paths"))?
+        .map_err(|_| {
+            StorageFailure::InvalidConfiguration.with_source("provider endpoint cannot hold paths")
+        })?
         .pop_if_empty()
         .extend(segments);
     if !query.is_empty() {
@@ -414,14 +416,14 @@ pub(crate) fn endpoint(
 }
 pub(crate) fn same_origin(base: &str, target: &str) -> Result<(), StorageError> {
     let base = url::Url::parse(base)
-        .map_err(|_| StorageError::InvalidConfiguration("provider endpoint"))?;
+        .map_err(|error| StorageFailure::InvalidConfiguration.with_source(error))?;
     let target =
-        url::Url::parse(target).map_err(|_| StorageError::Protocol("invalid provider URL"))?;
+        url::Url::parse(target).map_err(|error| StorageFailure::Protocol.with_source(error))?;
     if target.origin() != base.origin()
         || !target.username().is_empty()
         || target.password().is_some()
     {
-        return Err(StorageError::Protocol("provider URL crossed origins"));
+        return Err(StorageFailure::Protocol.with_source("provider URL crossed origins"));
     }
     Ok(())
 }
@@ -433,13 +435,13 @@ pub(crate) async fn bytes(
     let response = checked(provider, response).await?;
     if let Some(range) = range {
         if response.status() != StatusCode::PARTIAL_CONTENT {
-            return Err(StorageError::Protocol("provider ignored byte range"));
+            return Err(StorageFailure::Protocol.with_source("provider ignored byte range"));
         }
         let header = response
             .headers()
             .get("content-range")
             .and_then(|v| v.to_str().ok())
-            .ok_or(StorageError::Protocol("missing Content-Range"))?;
+            .ok_or(StorageFailure::Protocol.with_source("missing Content-Range"))?;
         validate_content_range(header, range)?;
     }
     let data = response
@@ -448,7 +450,7 @@ pub(crate) async fn bytes(
         .map_err(|e| transport(provider, e))?
         .to_vec();
     if range.is_some_and(|r| r.len() != data.len() as u64) {
-        return Err(StorageError::Protocol("short ranged body"));
+        return Err(StorageFailure::Protocol.with_source("short ranged body"));
     }
     Ok(data)
 }
@@ -456,20 +458,18 @@ pub(crate) fn validate_content_range(header: &str, range: ByteRange) -> Result<(
     let (bounds, total) = header
         .strip_prefix("bytes ")
         .and_then(|h| h.split_once('/'))
-        .ok_or(StorageError::Protocol("invalid Content-Range"))?;
+        .ok_or(StorageFailure::Protocol.with_source("invalid Content-Range"))?;
     let total: u64 = total
         .parse()
-        .map_err(|_| StorageError::Protocol("invalid Content-Range total"))?;
+        .map_err(|error| StorageFailure::Protocol.with_source(error))?;
     if range.start() < total
         && range.end() > total
         && bounds == format!("{}-{}", range.start(), total - 1)
     {
-        return Err(StorageError::InvalidRange);
+        return Err(StorageFailure::InvalidRange.into());
     }
     if bounds != format!("{}-{}", range.start(), range.end() - 1) || range.end() > total {
-        return Err(StorageError::Protocol(
-            "Content-Range disagrees with request",
-        ));
+        return Err(StorageFailure::Protocol.with_source("Content-Range disagrees with request"));
     }
     Ok(())
 }
@@ -484,7 +484,7 @@ pub(crate) async fn verify_published_part(
         .read_range(&session.path, ByteRange::new(session.confirmed, end)?)
         .await?;
     if actual != bytes {
-        return Err(StorageError::AlreadyExists);
+        return Err(StorageFailure::AlreadyExists.into());
     }
     session.confirmed = end;
     if end == session.total {

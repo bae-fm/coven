@@ -1,4 +1,4 @@
-use crate::{StorageConfig, StorageError};
+use crate::{StorageConfig, StorageError, StorageFailure};
 use coven_foundation::files::{StoreDir, StoreFile};
 
 /// Storage settings owned by the store directory; credentials never enter this file.
@@ -20,7 +20,7 @@ impl StorageSettings {
             return Ok(None);
         };
         let config: StorageConfig = serde_json::from_slice(&bytes)
-            .map_err(|error| StorageError::Encoding(Box::new(error)))?;
+            .map_err(|error| StorageFailure::Encoding.with_source(error))?;
         config.validate()?;
         Ok(Some(config))
     }
@@ -31,7 +31,7 @@ impl StorageSettings {
             .owned_file(StoreFile::StorageSettings)
             .replace(
                 &serde_json::to_vec(config)
-                    .map_err(|error| StorageError::Encoding(Box::new(error)))?,
+                    .map_err(|error| StorageFailure::Encoding.with_source(error))?,
             )?;
         Ok(())
     }

@@ -43,7 +43,7 @@ impl StorageCredentials {
     /// Decode credentials obtained from device custody.
     pub fn decode(bytes: &[u8]) -> Result<Self, crate::StorageError> {
         serde_json::from_slice(bytes)
-            .map_err(|error| crate::StorageError::Encoding(Box::new(error)))
+            .map_err(|error| crate::StorageFailure::Encoding.with_source(error))
     }
 }
 

@@ -171,7 +171,7 @@ impl CloudKitOps for Bridge {
     ) -> Result<(), StorageError> {
         assert_eq!(location, &config());
         if url.as_str() != "https://icloud.com/share/native" {
-            return Err(StorageError::InvitationMismatch);
+            return Err(StorageFailure::InvitationMismatch.into());
         }
         let email = self
             .recipient
@@ -184,7 +184,7 @@ impl CloudKitOps for Bridge {
         shares.accept_calls += 1;
         shares.accepted.insert(email.clone());
         if std::mem::replace(&mut shares.lose_reply, false) {
-            return Err(StorageError::Injected(StorageFailure::Network));
+            return Err(StorageError::Failure(StorageFailure::Network));
         }
         Ok(())
     }
@@ -216,7 +216,7 @@ impl CloudKitOps for Bridge {
         let mut uploads = self.uploads.lock().await;
         let session = uploads
             .get_mut(id.as_str())
-            .ok_or(StorageError::SessionExpired)?;
+            .ok_or(StorageFailure::SessionExpired)?;
         self.memory.resume_upload(session).await?;
         Ok(if session.is_complete() {
             CloudKitUploadStatus::Complete
@@ -238,7 +238,7 @@ impl CloudKitOps for Bridge {
         let mut uploads = self.uploads.lock().await;
         let session = uploads
             .get_mut(id.as_str())
-            .ok_or(StorageError::SessionExpired)?;
+            .ok_or(StorageFailure::SessionExpired)?;
         assert_eq!(session.confirmed, offset);
         self.memory.upload_part(session, bytes).await
     }
@@ -255,7 +255,7 @@ impl CloudKitOps for Bridge {
                     .lock()
                     .await
                     .get_mut(id.as_str())
-                    .ok_or(StorageError::SessionExpired)?,
+                    .ok_or(StorageFailure::SessionExpired)?,
             )
             .await
     }
@@ -267,7 +267,7 @@ impl CloudKitOps for Bridge {
         assert_eq!(location, &config());
         self.authorize().await?;
         if let Some(failure) = self.abort_failure {
-            return Err(StorageError::Injected(failure));
+            return Err(StorageError::Failure(failure));
         }
         self.memory
             .abort_upload(
@@ -275,7 +275,7 @@ impl CloudKitOps for Bridge {
                     .lock()
                     .await
                     .get(id.as_str())
-                    .ok_or(StorageError::SessionExpired)?,
+                    .ok_or(StorageFailure::SessionExpired)?,
             )
             .await
     }
@@ -352,7 +352,7 @@ async fn expired_bridge_session_restarts_from_retained_bytes() {
     storage.abort_upload(&expired).await.unwrap();
     assert!(matches!(
         storage.resume_upload(&mut expired).await,
-        Err(StorageError::SessionExpired)
+        Err(error) if error.failure() == StorageFailure::SessionExpired
     ));
     let replacement = storage.restart_upload(&expired).await.unwrap();
     assert_eq!(replacement.path(), &path);
@@ -422,11 +422,15 @@ async fn create_respects_the_bridges_single_request_limit() {
     assert_eq!(storage.read(&path).await.unwrap(), [2; 17]);
     let positions = ObjectPath::positions(coven_foundation::id_source::DeviceId(31));
     assert!(matches!(
-        storage.replace(&positions, &[3; 17]).await,
-        Err(StorageError::SingleRequestTooLarge {
+        storage
+            .replace(&positions, &[3; 17])
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageFailure::SingleRequestTooLarge {
             size: 17,
             limit: 16
-        })
+        }
     ));
     assert_eq!(bridge.uploads.lock().await.len(), 1);
 }
@@ -480,13 +484,13 @@ async fn sharing_requires_the_store_owners_account() {
     let storage = CloudKitStorage::new(config(), Arc::new(bridge)).unwrap();
     assert!(matches!(
         storage.grant_access("new@example.test").await,
-        Err(StorageError::NotStoreOwner)
+        Err(error) if error.failure() == StorageFailure::NotStoreOwner
     ));
     assert!(matches!(
         storage
             .revoke_access(&MemberAccess::ProviderAccount("kept@example.test".into()))
             .await,
-        Err(StorageError::NotStoreOwner)
+        Err(error) if error.failure() == StorageFailure::NotStoreOwner
     ));
 }
 
@@ -599,7 +603,7 @@ async fn recipient_join_accepts_the_native_share_before_reading_the_zone() {
     .unwrap();
     assert!(matches!(
         recipient.join(&wrong).await,
-        Err(StorageError::InvitationMismatch)
+        Err(error) if error.failure() == StorageFailure::InvitationMismatch
     ));
     assert_eq!(bridge.shares.lock().await.accept_calls, 0);
     bridge.shares.lock().await.lose_reply = true;

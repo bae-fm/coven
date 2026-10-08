@@ -105,14 +105,10 @@ async fn setup_refuses_other_store_and_retries_its_own_entry() {
         .setup(&path, b"encrypted first entry")
         .await
         .unwrap();
-    assert_eq!(
-        provider
-            .setup(&path, b"other store")
-            .await
-            .unwrap_err()
-            .failure(),
-        StorageSetupFailure::LocationOccupied
-    );
+    assert!(matches!(
+        provider.setup(&path, b"other store").await.unwrap_err(),
+        StorageSetupError::LocationOccupied
+    ));
 }
 #[tokio::test]
 async fn faults_are_counted_and_delay_is_awaited() {
@@ -177,7 +173,7 @@ async fn expired_upload_restarts_with_a_new_recording_at_the_same_destination() 
     storage.abort_upload(&expired).await.unwrap();
     assert!(matches!(
         storage.resume_upload(&mut expired).await,
-        Err(StorageError::SessionExpired)
+        Err(error) if error.failure() == StorageFailure::SessionExpired
     ));
     let replacement = storage.restart_upload(&expired).await.unwrap();
     assert_eq!(replacement.path(), &path);
@@ -197,7 +193,7 @@ async fn expired_upload_restarts_with_a_new_recording_at_the_same_destination() 
     assert_eq!(storage.read(&path).await.unwrap(), b"abcde");
     assert!(matches!(
         storage.restart_upload(&replacement).await,
-        Err(StorageError::InvalidPart)
+        Err(error) if error.failure() == StorageFailure::InvalidPart
     ));
     let other = MemoryStorage::new(
         StorageConfig::Dropbox {
@@ -210,7 +206,7 @@ async fn expired_upload_restarts_with_a_new_recording_at_the_same_destination() 
     .unwrap();
     assert!(matches!(
         other.restart_upload(&expired).await,
-        Err(StorageError::SessionMismatch)
+        Err(error) if error.failure() == StorageFailure::SessionMismatch
     ));
 }
 
@@ -257,13 +253,13 @@ async fn sharing_authority_belongs_to_the_adapters_account() {
         let recipient = MemoryStorage::for_recipient(&owner, "kept@example.test").unwrap();
         assert!(matches!(
             recipient.grant_access("new@example.test").await,
-            Err(StorageError::NotStoreOwner)
+            Err(error) if error.failure() == StorageFailure::NotStoreOwner
         ));
         assert!(matches!(
             recipient
                 .revoke_access(&MemberAccess::ProviderAccount("kept@example.test".into()))
                 .await,
-            Err(StorageError::NotStoreOwner)
+            Err(error) if error.failure() == StorageFailure::NotStoreOwner
         ));
         assert_eq!(
             owner
@@ -322,19 +318,15 @@ async fn reconnect_accepts_its_first_entry_after_the_store_has_uploaded_more() {
         .await
         .unwrap();
     assert_eq!(storage.setup(&first, b"first").await.unwrap(), config());
-    assert_eq!(
-        storage
-            .setup(&first, b"different")
-            .await
-            .unwrap_err()
-            .failure(),
-        StorageSetupFailure::LocationOccupied
-    );
+    assert!(matches!(
+        storage.setup(&first, b"different").await.unwrap_err(),
+        StorageSetupError::LocationOccupied
+    ));
     let other = ObjectPath::store_log(DeviceId(32), std::num::NonZeroU64::MIN);
-    assert_eq!(
-        storage.setup(&other, b"other").await.unwrap_err().failure(),
-        StorageSetupFailure::LocationOccupied
-    );
+    assert!(matches!(
+        storage.setup(&other, b"other").await.unwrap_err(),
+        StorageSetupError::LocationOccupied
+    ));
     assert_eq!(storage.read(&first).await.unwrap(), b"first");
     assert_eq!(storage.read(&later).await.unwrap(), b"later");
 }
@@ -392,19 +384,19 @@ async fn recorded_sessions_cannot_redirect_or_regress_provider_state() {
     for mut invalid in [wrong_path, wrong_size] {
         assert!(matches!(
             storage.resume_upload(&mut invalid).await,
-            Err(StorageError::SessionMismatch)
+            Err(error) if error.failure() == StorageFailure::SessionMismatch
         ));
         assert!(matches!(
             storage.upload_part(&mut invalid, b"next").await,
-            Err(StorageError::SessionMismatch)
+            Err(error) if error.failure() == StorageFailure::SessionMismatch
         ));
         assert!(matches!(
             storage.finish_upload(&mut invalid).await,
-            Err(StorageError::SessionMismatch)
+            Err(error) if error.failure() == StorageFailure::SessionMismatch
         ));
         assert!(matches!(
             storage.abort_upload(&invalid).await,
-            Err(StorageError::SessionMismatch)
+            Err(error) if error.failure() == StorageFailure::SessionMismatch
         ));
     }
     let SessionState::Memory { id, .. } = upload.state else {
@@ -456,13 +448,13 @@ async fn publication_removes_pending_parts_and_verifies_the_exact_session() {
     storage.finish_upload(&mut recorded).await.unwrap();
     assert!(matches!(
         storage.finish_upload(&mut other).await,
-        Err(StorageError::AlreadyExists)
+        Err(error) if error.failure() == StorageFailure::AlreadyExists
     ));
     storage.abort_upload(&other).await.unwrap();
     storage.abort_upload(&other).await.unwrap();
     assert!(matches!(
         storage.resume_upload(&mut other).await,
-        Err(StorageError::AlreadyExists)
+        Err(error) if error.failure() == StorageFailure::AlreadyExists
     ));
     assert_eq!(storage.read(&path).await.unwrap(), b"data");
     assert!(storage.state.lock().await.uploads.is_empty());
@@ -481,7 +473,7 @@ async fn s3_fake_requires_the_members_console_key_for_revocation() {
         storage
             .revoke_access(&MemberAccess::ProviderAccount("member".into()))
             .await,
-        Err(StorageError::InvalidConfiguration(_))
+        Err(error) if error.failure() == StorageFailure::InvalidConfiguration
     ));
 }
 
@@ -565,7 +557,7 @@ async fn lost_publication_replies_and_expired_parts_are_distinct() {
         .await;
     assert!(matches!(
         storage.resume_upload(&mut upload).await,
-        Err(StorageError::SessionExpired)
+        Err(error) if error.failure() == StorageFailure::SessionExpired
     ));
     let mut fresh = storage.restart_upload(&upload).await.unwrap();
     storage.upload_part(&mut fresh, b"data").await.unwrap();
@@ -734,7 +726,7 @@ async fn invalid_account_grants_leave_the_fake_unchanged() {
         .unwrap();
         assert!(matches!(
             owner.grant_access("").await,
-            Err(StorageError::InvalidConfiguration(_))
+            Err(error) if error.failure() == StorageFailure::InvalidConfiguration
         ));
         assert!(owner.state.lock().await.accounts.is_empty());
         assert!(MemoryStorage::for_recipient(&owner, "").is_err());

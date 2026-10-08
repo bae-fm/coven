@@ -1,5 +1,5 @@
 use super::{access::PermissionAccess, http};
-use crate::{RetainedAccessReason, StorageError};
+use crate::{RetainedAccessReason, StorageError, StorageFailure};
 use serde_json::Value;
 
 fn matches_account(permission: &Value, email: &str) -> bool {
@@ -49,13 +49,14 @@ pub(super) fn classify(permission: &Value, email: &str) -> Result<PermissionAcce
     };
     let details = details
         .as_array()
-        .ok_or(StorageError::Protocol("invalid Drive permission details"))?;
+        .ok_or(StorageFailure::Protocol.with_source("invalid Drive permission details"))?;
     let mut direct = false;
     let mut inherited = false;
     for detail in details {
-        match detail["inherited"].as_bool().ok_or(StorageError::Protocol(
-            "Drive omitted permission inheritance",
-        ))? {
+        match detail["inherited"]
+            .as_bool()
+            .ok_or(StorageFailure::Protocol.with_source("Drive omitted permission inheritance"))?
+        {
             true => inherited = true,
             false => direct = true,
         }

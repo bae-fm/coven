@@ -1,6 +1,9 @@
 //! Application storage setup, credential custody and connection control.
 
-use crate::*;
+use crate::{
+    error::{setup_error, unlock_error},
+    *,
+};
 use coven_storage::{
     providers::{OAuthFlow, StorageConnector},
     ConnectionCredentials, S3Credentials, StorageCredentials,
@@ -26,29 +29,6 @@ pub struct ConnectedStorage {
     pub storage: StorageConfig,
     /// This device's key availability.
     pub key_state: StoreKeyState,
-}
-
-/// Opening this member's sealed store keys failed.
-#[derive(Debug, thiserror::Error)]
-pub enum StoreKeyUnlockError {
-    /// No stored provider configuration or credentials are available.
-    #[error("no storage configured")]
-    NoStorage,
-    /// This installation has no member identity.
-    #[error("member keys are missing")]
-    MemberKeysMissing,
-    /// The provider refused or failed a request.
-    #[error(transparent)]
-    Storage(#[from] StorageError),
-    /// An authenticated key could not be opened.
-    #[error(transparent)]
-    Crypto(#[from] CryptoError),
-    /// Custody refused to read or persist keys.
-    #[error(transparent)]
-    SecureStorage(#[from] KeyError),
-    /// Store-log validation or local work failed, preserving its cause.
-    #[error("opening store keys: {0}")]
-    Other(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 pub(crate) struct StorageConnections {
@@ -130,7 +110,9 @@ impl StorageConnections {
         secret_access_key: SecretText,
     ) -> Result<ConnectedStorage, StorageSetupError> {
         if storage.provider() != CloudProvider::S3 {
-            return Err(StorageError::InvalidConfiguration("expected S3 storage").into());
+            return Err(StorageFailure::InvalidConfiguration
+                .with_source("expected S3 storage")
+                .into());
         }
         self.setup(
             storage,
@@ -217,7 +199,9 @@ impl StorageConnections {
         device_name: &str,
     ) -> Result<ConnectedStorage, StorageSetupError> {
         if storage.provider() != CloudProvider::CloudKit {
-            return Err(StorageError::InvalidConfiguration("expected CloudKit storage").into());
+            return Err(StorageFailure::InvalidConfiguration
+                .with_source("expected CloudKit storage")
+                .into());
         }
         self.setup(storage, device_name, StorageCredentials::CloudKit)
             .await
@@ -352,27 +336,6 @@ impl StorageConnections {
         self.closed.store(true, Ordering::Release);
         self.authentication.lock().await.take();
         self.keys.lock().expect("store keys lock poisoned").take();
-    }
-}
-
-fn setup_error(error: SyncError) -> StorageSetupError {
-    match error {
-        SyncError::Setup(error) => *error,
-        SyncError::MissingMemberKeys => StorageSetupError::MemberKeysMissing,
-        SyncError::SecureStorage(error) => StorageSetupError::SecureStorage(error),
-        SyncError::Storage(error) => StorageSetupError::Storage(error),
-        error => StorageSetupError::Internal(Box::new(error)),
-    }
-}
-
-fn unlock_error(error: SyncError) -> StoreKeyUnlockError {
-    match error {
-        SyncError::NoStorage => StoreKeyUnlockError::NoStorage,
-        SyncError::MissingMemberKeys => StoreKeyUnlockError::MemberKeysMissing,
-        SyncError::SecureStorage(error) => StoreKeyUnlockError::SecureStorage(error),
-        SyncError::Crypto(error) => StoreKeyUnlockError::Crypto(error),
-        SyncError::Storage(error) => StoreKeyUnlockError::Storage(error),
-        error => StoreKeyUnlockError::Other(Box::new(error)),
     }
 }
 

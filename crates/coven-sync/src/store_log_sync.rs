@@ -119,7 +119,7 @@ impl StoreLogSync {
         let member = self
             .member_keys
             .unlock()?
-            .ok_or(SyncError::MissingMemberKeys)?;
+            .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
         let mut ring = self.store_keys.unlock()?;
         let mut damages = Vec::new();
         self.check_stopped(&local, &member)?;
@@ -167,7 +167,7 @@ impl StoreLogSync {
         let member = self
             .member_keys
             .unlock()?
-            .ok_or(SyncError::MissingMemberKeys)?;
+            .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
         let mut ring = self.store_keys.unlock()?;
         let mut damages = Vec::new();
         self.check_stopped(&local, &member)?;
@@ -184,11 +184,10 @@ impl StoreLogSync {
         let mut entries = BTreeMap::new();
         for stored in paths {
             let path = stored.path;
-            let (device, number) =
-                path.store_log_position()
-                    .ok_or(coven_storage::StorageError::Protocol(
-                        "store-log listing returned another layout",
-                    ))?;
+            let (device, number) = path.store_log_position().ok_or(
+                coven_storage::StorageFailure::Protocol
+                    .with_source("store-log listing returned another layout"),
+            )?;
             entries.insert(
                 EntryId {
                     device,

@@ -72,13 +72,13 @@ impl S3Storage {
             prefix,
         } = &config
         else {
-            return Err(StorageError::InvalidConfiguration(
-                "expected S3 configuration",
-            ));
+            return Err(
+                StorageFailure::InvalidConfiguration.with_source("expected S3 configuration")
+            );
         };
         if credentials.access_key_id.is_empty() || credentials.secret_access_key.as_str().is_empty()
         {
-            return Err(StorageError::InvalidConfiguration("empty S3 key"));
+            return Err(StorageFailure::InvalidConfiguration.with_source("empty S3 key"));
         }
         let credentials = SigningCredentials(std::sync::Arc::new(std::sync::RwLock::new(
             aws_credentials(credentials),
@@ -137,13 +137,13 @@ impl S3Storage {
             super::http::validate_content_range(
                 response
                     .content_range()
-                    .ok_or(StorageError::Protocol("S3 ignored byte range"))?,
+                    .ok_or(StorageFailure::Protocol.with_source("S3 ignored byte range"))?,
                 range,
             )?;
         }
         let length = response
             .content_length()
-            .ok_or(StorageError::Protocol("S3 omitted content length"))?;
+            .ok_or(StorageFailure::Protocol.with_source("S3 omitted content length"))?;
         let bytes = response
             .body
             .collect()
@@ -155,12 +155,11 @@ impl S3Storage {
             })?
             .into_bytes()
             .to_vec();
-        if u64::try_from(length)
-            .map_err(|_| StorageError::Protocol("negative S3 content length"))?
+        if u64::try_from(length).map_err(|error| StorageFailure::Protocol.with_source(error))?
             != bytes.len() as u64
             || range.is_some_and(|range| range.len() != bytes.len() as u64)
         {
-            return Err(StorageError::Protocol("short S3 body"));
+            return Err(StorageFailure::Protocol.with_source("short S3 body"));
         }
         Ok(bytes)
     }
@@ -168,12 +167,12 @@ impl S3Storage {
         session.check(&self.config)?;
         match &session.state {
             SessionState::S3 { id, .. } => Ok(id.as_str()),
-            _ => Err(StorageError::SessionMismatch),
+            _ => Err(StorageFailure::SessionMismatch.into()),
         }
     }
     async fn completed(&self, session: &mut UploadSession) -> Result<(), StorageError> {
         let SessionState::S3 { token, .. } = &session.state else {
-            return Err(StorageError::SessionMismatch);
+            return Err(StorageFailure::SessionMismatch.into());
         };
         let response = self
             .client
@@ -186,7 +185,7 @@ impl S3Storage {
         let response = match response {
             Ok(response) => response,
             Err(error) if error.failure() == StorageFailure::NotFound => {
-                return Err(StorageError::SessionExpired)
+                return Err(StorageFailure::SessionExpired.with_source(error))
             }
             Err(error) => return Err(error),
         };
@@ -200,7 +199,7 @@ impl S3Storage {
                 .map(String::as_str)
                 != Some(token.as_str())
         {
-            return Err(StorageError::AlreadyExists);
+            return Err(StorageFailure::AlreadyExists.into());
         }
         session.confirmed = session.total;
         session.state = SessionState::Complete;
@@ -213,7 +212,7 @@ impl Storage for S3Storage {
     async fn set_s3_credentials(&self, credentials: S3Credentials) -> Result<(), StorageError> {
         if credentials.access_key_id.is_empty() || credentials.secret_access_key.as_str().is_empty()
         {
-            return Err(StorageError::InvalidConfiguration("empty S3 key"));
+            return Err(StorageFailure::InvalidConfiguration.with_source("empty S3 key"));
         }
         *self
             .credentials
@@ -233,7 +232,7 @@ impl Storage for S3Storage {
     }
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         if !path.is_replaceable() {
-            return Err(StorageError::InvalidPath);
+            return Err(StorageFailure::InvalidPath.into());
         }
         crate::transfer::check_single_request(bytes.len() as u64, self.single_request_limit())?;
         self.put(path, bytes, false).await
@@ -267,23 +266,23 @@ impl Storage for S3Storage {
             for object in response.contents() {
                 let key = object
                     .key()
-                    .ok_or(StorageError::Protocol("S3 list entry omitted key"))?;
+                    .ok_or(StorageFailure::Protocol.with_source("S3 list entry omitted key"))?;
                 let relative = key
                     .strip_prefix(&root)
-                    .ok_or(StorageError::Protocol("S3 listed another location"))?;
+                    .ok_or(StorageFailure::Protocol.with_source("S3 listed another location"))?;
                 let path = ObjectPath::parse(relative)?;
                 if !prefix.contains(&path) {
-                    return Err(StorageError::Protocol("S3 listed outside prefix"));
+                    return Err(StorageFailure::Protocol.with_source("S3 listed outside prefix"));
                 }
                 let size = object
                     .size()
                     .and_then(|size| u64::try_from(size).ok())
-                    .ok_or(StorageError::Protocol("S3 omitted object size"))?;
+                    .ok_or(StorageFailure::Protocol.with_source("S3 omitted object size"))?;
                 let stored_at = (*object
                     .last_modified()
-                    .ok_or(StorageError::Protocol("S3 omitted storage time"))?)
+                    .ok_or(StorageFailure::Protocol.with_source("S3 omitted storage time"))?)
                 .try_into()
-                .map_err(|error| StorageError::Encoding(Box::new(error)))?;
+                .map_err(|error| StorageFailure::Encoding.with_source(error))?;
                 let object = StoredObject {
                     path: path.clone(),
                     size,
@@ -291,23 +290,25 @@ impl Storage for S3Storage {
                 };
                 if let Some(previous) = paths.insert(path, object.clone()) {
                     if previous != object {
-                        return Err(StorageError::Protocol("S3 listed conflicting objects"));
+                        return Err(
+                            StorageFailure::Protocol.with_source("S3 listed conflicting objects")
+                        );
                     }
                 }
             }
             if !response
                 .is_truncated()
-                .ok_or(StorageError::Protocol("S3 omitted page completion"))?
+                .ok_or(StorageFailure::Protocol.with_source("S3 omitted page completion"))?
             {
                 break;
             }
             let next = response
                 .next_continuation_token()
                 .filter(|value| !value.is_empty())
-                .ok_or(StorageError::Protocol("S3 omitted continuation token"))?
+                .ok_or(StorageFailure::Protocol.with_source("S3 omitted continuation token"))?
                 .to_owned();
             if !seen.insert(next.clone()) {
-                return Err(StorageError::Protocol("repeated S3 continuation token"));
+                return Err(StorageFailure::Protocol.with_source("repeated S3 continuation token"));
             }
             marker = Some(next);
         }
@@ -338,9 +339,8 @@ impl Storage for S3Storage {
             MemberAccess::S3AccessKey { access_key_id } => Ok(MemberRemoval::DeleteAccessKey {
                 access_key_id: access_key_id.clone(),
             }),
-            _ => Err(StorageError::InvalidConfiguration(
-                "S3 revocation requires the member's access key",
-            )),
+            _ => Err(StorageFailure::InvalidConfiguration
+                .with_source("S3 revocation requires the member's access key")),
         }
     }
     async fn begin_upload(
@@ -349,7 +349,7 @@ impl Storage for S3Storage {
         total: u64,
     ) -> Result<UploadSession, StorageError> {
         if path.is_replaceable() {
-            return Err(StorageError::InvalidPath);
+            return Err(StorageFailure::InvalidPath.into());
         }
         let part_size = crate::session::s3_part_size(total)?;
         let token = SecretText::new(self.ids.new_id().to_string());
@@ -365,7 +365,7 @@ impl Storage for S3Storage {
         let id = response
             .upload_id()
             .filter(|id| !id.is_empty())
-            .ok_or(StorageError::Protocol("S3 omitted upload id"))?;
+            .ok_or(StorageFailure::Protocol.with_source("S3 omitted upload id"))?;
         Ok(UploadSession {
             location: self.config(),
             path: path.clone(),
@@ -409,47 +409,47 @@ impl Storage for S3Storage {
             for part in response.parts() {
                 let number = part
                     .part_number()
-                    .ok_or(StorageError::Protocol("S3 omitted part number"))?;
+                    .ok_or(StorageFailure::Protocol.with_source("S3 omitted part number"))?;
                 let size = part
                     .size()
                     .and_then(|n| u64::try_from(n).ok())
-                    .ok_or(StorageError::Protocol("S3 omitted part size"))?;
+                    .ok_or(StorageFailure::Protocol.with_source("S3 omitted part size"))?;
                 let etag = part
                     .e_tag()
                     .filter(|value| !value.is_empty())
-                    .ok_or(StorageError::Protocol("S3 omitted part ETag"))?
+                    .ok_or(StorageFailure::Protocol.with_source("S3 omitted part ETag"))?
                     .to_owned();
                 confirmed = confirmed
                     .checked_add(size)
-                    .ok_or(StorageError::InvalidPart)?;
+                    .ok_or(StorageFailure::InvalidPart)?;
                 if number as usize != parts.len() + 1
                     || size == 0
                     || size > session.part_size as u64
                     || confirmed > session.total
                     || (size != session.part_size as u64 && confirmed != session.total)
                 {
-                    return Err(StorageError::Protocol("S3 upload has invalid parts"));
+                    return Err(StorageFailure::Protocol.with_source("S3 upload has invalid parts"));
                 }
                 parts.push(S3Part { number, size, etag });
             }
             if !response
                 .is_truncated()
-                .ok_or(StorageError::Protocol("S3 omitted page completion"))?
+                .ok_or(StorageFailure::Protocol.with_source("S3 omitted page completion"))?
             {
                 break;
             }
             let next = response
                 .next_part_number_marker()
                 .filter(|value| !value.is_empty())
-                .ok_or(StorageError::Protocol("S3 omitted part marker"))?
+                .ok_or(StorageFailure::Protocol.with_source("S3 omitted part marker"))?
                 .to_owned();
             if !seen.insert(next.clone()) {
-                return Err(StorageError::Protocol("repeated S3 part marker"));
+                return Err(StorageFailure::Protocol.with_source("repeated S3 part marker"));
             }
             marker = Some(next);
         }
         if confirmed < session.confirmed {
-            return Err(StorageError::Protocol("S3 lost confirmed parts"));
+            return Err(StorageFailure::Protocol.with_source("S3 lost confirmed parts"));
         }
         if let SessionState::S3 { parts: stored, .. } = &mut session.state {
             *stored = parts;
@@ -465,11 +465,12 @@ impl Storage for S3Storage {
         let end = session.end_of_part(bytes.len())?;
         let id = self.upload_id(session)?;
         let SessionState::S3 { parts, .. } = &session.state else {
-            return Err(StorageError::SessionMismatch);
+            return Err(StorageFailure::SessionMismatch.into());
         };
-        let number = i32::try_from(parts.len() + 1).map_err(|_| StorageError::InvalidPart)?;
+        let number = i32::try_from(parts.len() + 1)
+            .map_err(|error| StorageFailure::InvalidPart.with_source(error))?;
         if number > 10_000 {
-            return Err(StorageError::InvalidPart);
+            return Err(StorageFailure::InvalidPart.into());
         }
         let response = self
             .client
@@ -485,7 +486,7 @@ impl Storage for S3Storage {
         let etag = response
             .e_tag()
             .filter(|value| !value.is_empty())
-            .ok_or(StorageError::Protocol("S3 omitted uploaded ETag"))?
+            .ok_or(StorageFailure::Protocol.with_source("S3 omitted uploaded ETag"))?
             .to_owned();
         if let SessionState::S3 { parts, .. } = &mut session.state {
             parts.push(S3Part {
@@ -503,11 +504,11 @@ impl Storage for S3Storage {
             return Ok(());
         }
         if session.confirmed != session.total {
-            return Err(StorageError::InvalidPart);
+            return Err(StorageFailure::InvalidPart.into());
         }
         let id = self.upload_id(session)?;
         let SessionState::S3 { parts, .. } = &session.state else {
-            return Err(StorageError::SessionMismatch);
+            return Err(StorageFailure::SessionMismatch.into());
         };
         let completed = parts
             .iter()
@@ -597,7 +598,8 @@ where
             StorageFailure::PermissionDenied
         }
         Some("NoSuchBucket") => StorageFailure::ContainerNotFound,
-        Some("NoSuchKey" | "NotFound" | "NoSuchUpload") => StorageFailure::NotFound,
+        Some("NoSuchKey" | "NotFound") => StorageFailure::NotFound,
+        Some("NoSuchUpload") => StorageFailure::SessionExpired,
         Some("PreconditionFailed") => StorageFailure::AlreadyExists,
         Some("ConditionalRequestConflict" | "SlowDown" | "Throttling") => {
             StorageFailure::RateLimited
@@ -611,7 +613,7 @@ where
         Some("OverQuota" | "QuotaExceeded" | "InsufficientStorage") => {
             StorageFailure::QuotaExceeded
         }
-        Some("InvalidRange") => StorageFailure::InvalidConfiguration,
+        Some("InvalidRange") => StorageFailure::InvalidRange,
         _ => match status {
             Some(401) => StorageFailure::Authentication,
             Some(403) => StorageFailure::PermissionDenied,

@@ -64,12 +64,12 @@ impl Pending {
             || self.total != session.total
             || self.part_size != session.part_size
         {
-            return Err(StorageError::SessionMismatch);
+            return Err(StorageFailure::SessionMismatch.into());
         }
         if (self.bytes.len() as u64) < session.confirmed || self.bytes.len() as u64 > self.total {
-            return Err(StorageError::Protocol(
-                "memory provider lost confirmed progress",
-            ));
+            return Err(
+                StorageFailure::Protocol.with_source("memory provider lost confirmed progress")
+            );
         }
         Ok(())
     }
@@ -82,9 +82,9 @@ fn confirm_published(
     let object = state
         .objects
         .get(&session.path)
-        .ok_or(StorageError::SessionExpired)?;
+        .ok_or(StorageFailure::SessionExpired)?;
     if object.upload_id != Some(id) || object.bytes.len() as u64 != session.total {
-        return Err(StorageError::AlreadyExists);
+        return Err(StorageFailure::AlreadyExists.into());
     }
     session.confirmed = session.total;
     session.state = SessionState::Memory { id, complete: true };
@@ -184,9 +184,8 @@ impl MemoryStorage {
     /// S3 keys are administered outside the fake's account-sharing model.
     pub fn for_recipient(owner: &Self, email: &str) -> Result<Self, StorageError> {
         if owner.config.provider() == CloudProvider::S3 || email.is_empty() {
-            return Err(StorageError::InvalidConfiguration(
-                "recipient requires a sharing account",
-            ));
+            return Err(StorageFailure::InvalidConfiguration
+                .with_source("recipient requires a sharing account"));
         }
         Ok(Self {
             config: owner.config(),
@@ -227,7 +226,7 @@ impl MemoryStorage {
         part_size: usize,
     ) -> Result<Self, StorageError> {
         if single_limit == 0 || part_size == 0 {
-            return Err(StorageError::InvalidPart);
+            return Err(StorageFailure::InvalidPart.into());
         }
         self.single_limit = single_limit;
         self.part_size = part_size;
@@ -277,10 +276,10 @@ impl MemoryStorage {
         let byte = state
             .objects
             .get_mut(path)
-            .ok_or(StorageError::NotFound)?
+            .ok_or(StorageFailure::NotFound)?
             .bytes
             .get_mut(offset)
-            .ok_or(StorageError::InvalidRange)?;
+            .ok_or(StorageFailure::InvalidRange)?;
         *byte ^= 1;
         Ok(())
     }
@@ -339,7 +338,8 @@ impl MemoryStorage {
             .fetch_max(active, std::sync::atomic::Ordering::SeqCst);
         self.requests.send_modify(|count| *count += 1);
         if !self.online.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(StorageError::Injected(StorageFailure::Network));
+            return Err(StorageFailure::Network
+                .with_source(std::io::Error::from(std::io::ErrorKind::NotConnected)));
         }
         let (delay, failure) = {
             let mut state = self.state.lock().await;
@@ -358,14 +358,14 @@ impl MemoryStorage {
             self.clock.sleep(delay).await;
         }
         match failure {
-            Some(failure) => Err(StorageError::Injected(failure)),
+            Some(failure) => Err(StorageError::Failure(failure)),
             None => {
                 if self.tokens.lock().await.as_ref().is_some_and(|tokens| {
                     tokens
                         .expires_at
                         .is_some_and(|expiry| self.clock.now() >= expiry)
                 }) {
-                    return Err(StorageError::Injected(StorageFailure::Authentication));
+                    return Err(StorageFailure::Authentication.into());
                 }
                 Ok(())
             }
@@ -383,7 +383,7 @@ impl MemoryStorage {
                 None => false,
             };
             if !allowed {
-                return Err(StorageError::Injected(StorageFailure::PermissionDenied));
+                return Err(StorageFailure::PermissionDenied.into());
             }
         }
         Ok(())
@@ -392,7 +392,7 @@ impl MemoryStorage {
         session.check(&self.config)?;
         match session.state {
             SessionState::Memory { id, .. } => Ok(id),
-            _ => Err(StorageError::SessionMismatch),
+            _ => Err(StorageFailure::SessionMismatch.into()),
         }
     }
 }
@@ -418,7 +418,7 @@ impl Storage for MemoryStorage {
             || credentials.access_key_id.is_empty()
             || credentials.secret_access_key.as_str().is_empty()
         {
-            return Err(StorageError::InvalidConfiguration("invalid S3 key"));
+            return Err(StorageFailure::InvalidConfiguration.with_source("invalid S3 key"));
         }
         *self.s3_key.lock().await = Some(credentials);
         Ok(())
@@ -431,9 +431,9 @@ impl Storage for MemoryStorage {
             self.config.provider(),
             CloudProvider::GoogleDrive | CloudProvider::Dropbox | CloudProvider::OneDrive
         ) {
-            return Err(StorageError::InvalidConfiguration(
-                "provider does not use OAuth",
-            ));
+            return Err(
+                StorageFailure::InvalidConfiguration.with_source("provider does not use OAuth")
+            );
         }
         *self.tokens.lock().await = Some(tokens);
         Ok(())
@@ -456,22 +456,22 @@ impl Storage for MemoryStorage {
             };
             drop(state);
             if let Some(held) = held {
-                held.listed
-                    .send(())
-                    .map_err(|_| StorageError::Protocol("creation observer dropped"))?;
-                held.resume
-                    .await
-                    .map_err(|_| StorageError::Protocol("creation release dropped"))?;
+                held.listed.send(()).map_err(|_| {
+                    StorageFailure::Protocol.with_source("creation observer dropped")
+                })?;
+                held.resume.await.map_err(|_| {
+                    StorageFailure::Protocol.with_source("creation release dropped")
+                })?;
             }
             let mut state = self.state.lock().await;
             if state.objects.contains_key(path) && !state.faults.overwrite_create {
                 if state.faults.fail_duplicate_cleanup {
                     return Err(StorageError::Cleanup {
-                        operation: Box::new(StorageError::AlreadyExists),
-                        cleanup: Box::new(StorageError::Injected(StorageFailure::Network)),
+                        operation: Box::new(StorageError::Failure(StorageFailure::AlreadyExists)),
+                        cleanup: Box::new(StorageError::Failure(StorageFailure::Network)),
                     });
                 }
-                return Err(StorageError::AlreadyExists);
+                return Err(StorageFailure::AlreadyExists.into());
             }
             state.objects.insert(
                 path.clone(),
@@ -488,7 +488,7 @@ impl Storage for MemoryStorage {
 
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         if !path.is_replaceable() {
-            return Err(StorageError::InvalidPath);
+            return Err(StorageFailure::InvalidPath.into());
         }
         crate::transfer::check_single_request(bytes.len() as u64, self.single_request_limit())?;
         self.before().await?;
@@ -509,7 +509,7 @@ impl Storage for MemoryStorage {
             .objects
             .get(path)
             .map(|object| object.bytes.clone())
-            .ok_or(StorageError::NotFound)?;
+            .ok_or(StorageFailure::NotFound)?;
         state.reads.push((path.clone(), 0, bytes.len() as u64));
         Ok(bytes)
     }
@@ -520,7 +520,13 @@ impl Storage for MemoryStorage {
     ) -> Result<Vec<u8>, StorageError> {
         self.before().await?;
         let mut state = self.state.lock().await;
-        let bytes = range.select(&state.objects.get(path).ok_or(StorageError::NotFound)?.bytes)?;
+        let bytes = range.select(
+            &state
+                .objects
+                .get(path)
+                .ok_or(StorageFailure::NotFound)?
+                .bytes,
+        )?;
         state.ranges.push(range);
         state.reads.push((path.clone(), range.start(), range.len()));
         Ok(bytes)
@@ -551,10 +557,10 @@ impl Storage for MemoryStorage {
         if let Some(held) = hold {
             held.listed
                 .send(())
-                .map_err(|_| StorageError::Protocol("listing observer dropped"))?;
+                .map_err(|_| StorageFailure::Protocol.with_source("listing observer dropped"))?;
             held.resume
                 .await
-                .map_err(|_| StorageError::Protocol("listing release dropped"))?;
+                .map_err(|_| StorageFailure::Protocol.with_source("listing release dropped"))?;
         }
         Ok(objects)
     }
@@ -569,10 +575,10 @@ impl Storage for MemoryStorage {
             return Ok(AccessGrant::CreateAccessKey);
         }
         if !matches!(self.account, Account::Owner) {
-            return Err(StorageError::NotStoreOwner);
+            return Err(StorageFailure::NotStoreOwner.into());
         }
         if account.is_empty() {
-            return Err(StorageError::InvalidConfiguration("empty sharing account"));
+            return Err(StorageFailure::InvalidConfiguration.with_source("empty sharing account"));
         }
         self.state
             .lock()
@@ -607,13 +613,13 @@ impl Storage for MemoryStorage {
         }
         if let Acceptance::CloudKitShare { url } = &invitation.acceptance {
             if url.as_str() != "https://icloud.com/share/memory" {
-                return Err(StorageError::InvitationMismatch);
+                return Err(StorageFailure::InvitationMismatch.into());
             }
         }
         if let Account::Recipient(email) = &self.account {
             match &invitation.acceptance {
                 Acceptance::OneDriveShare { token } if token.as_str() != email => {
-                    return Err(StorageError::InvitationMismatch)
+                    return Err(StorageFailure::InvitationMismatch.into())
                 }
                 _ => {}
             }
@@ -621,7 +627,7 @@ impl Storage for MemoryStorage {
             let access = state
                 .accounts
                 .get_mut(email)
-                .ok_or(StorageError::Injected(StorageFailure::PermissionDenied))?;
+                .ok_or(StorageFailure::PermissionDenied)?;
             *access = AccountAccess::Joined;
         }
         self.list(&ObjectPrefix::all()).await?;
@@ -643,7 +649,7 @@ impl Storage for MemoryStorage {
                 MemberAccess::ProviderAccount(account),
             ) => {
                 if !matches!(self.account, Account::Owner) {
-                    return Err(StorageError::NotStoreOwner);
+                    return Err(StorageFailure::NotStoreOwner.into());
                 }
                 let mut state = self.state.lock().await;
                 let account = account.to_ascii_lowercase();
@@ -655,9 +661,7 @@ impl Storage for MemoryStorage {
                 state.accounts.remove(&account);
                 Ok(MemberRemoval::Revoked)
             }
-            _ => Err(StorageError::InvalidConfiguration(
-                "wrong member access kind",
-            )),
+            _ => Err(StorageFailure::InvalidConfiguration.with_source("wrong member access kind")),
         }
     }
     async fn begin_upload(
@@ -666,20 +670,20 @@ impl Storage for MemoryStorage {
         total: u64,
     ) -> Result<UploadSession, StorageError> {
         if path.is_replaceable() {
-            return Err(StorageError::InvalidPath);
+            return Err(StorageFailure::InvalidPath.into());
         }
         self.before().await?;
         if total == 0 {
-            return Err(StorageError::InvalidPart);
+            return Err(StorageFailure::InvalidPart.into());
         }
         let mut state = self.state.lock().await;
         if state.objects.contains_key(path) && !state.faults.overwrite_create {
-            return Err(StorageError::AlreadyExists);
+            return Err(StorageFailure::AlreadyExists.into());
         }
         let id = state.next;
         state.next = id
             .checked_add(1)
-            .ok_or(StorageError::Protocol("session ids exhausted"))?;
+            .ok_or(StorageFailure::Protocol.with_source("session ids exhausted"))?;
         state.uploads.insert(
             id,
             Pending {
@@ -726,22 +730,25 @@ impl Storage for MemoryStorage {
         let id = self.session_id(session)?;
         let end = session.end_of_part(bytes.len())?;
         let mut state = self.state.lock().await;
-        let pending = state.uploads.get(&id).ok_or(StorageError::SessionExpired)?;
+        let pending = state
+            .uploads
+            .get(&id)
+            .ok_or(StorageFailure::SessionExpired)?;
         pending.check(session)?;
         if pending.bytes.len() as u64 != session.confirmed {
-            return Err(StorageError::InvalidPart);
+            return Err(StorageFailure::InvalidPart.into());
         }
         if std::mem::replace(&mut state.faults.drop_part, false) {
-            return Err(StorageError::Injected(StorageFailure::Network));
+            return Err(StorageFailure::Network.into());
         }
         state
             .uploads
             .get_mut(&id)
-            .ok_or(StorageError::SessionExpired)?
+            .ok_or(StorageFailure::SessionExpired)?
             .bytes
             .extend_from_slice(bytes);
         if std::mem::replace(&mut state.faults.lose_part_reply, false) {
-            return Err(StorageError::Injected(StorageFailure::Network));
+            return Err(StorageFailure::Network.into());
         }
         state.sent_bytes += bytes.len() as u64;
         state.largest_part = state.largest_part.max(bytes.len());
@@ -760,15 +767,15 @@ impl Storage for MemoryStorage {
         };
         pending.check(session)?;
         if pending.bytes.len() as u64 != session.total || session.confirmed != session.total {
-            return Err(StorageError::InvalidPart);
+            return Err(StorageFailure::InvalidPart.into());
         }
         if state.objects.contains_key(&session.path) && !state.faults.overwrite_create {
-            return Err(StorageError::AlreadyExists);
+            return Err(StorageFailure::AlreadyExists.into());
         }
         let pending = state
             .uploads
             .remove(&id)
-            .ok_or(StorageError::SessionExpired)?;
+            .ok_or(StorageFailure::SessionExpired)?;
         state.objects.insert(
             pending.path,
             Object {
@@ -778,7 +785,7 @@ impl Storage for MemoryStorage {
             },
         );
         if std::mem::replace(&mut state.faults.lose_completion_reply, false) {
-            return Err(StorageError::Injected(StorageFailure::Network));
+            return Err(StorageFailure::Network.into());
         }
         session.state = SessionState::Memory { id, complete: true };
         Ok(())
@@ -817,12 +824,12 @@ impl Conformance {
         self.storage.create(&path, data).await?;
         self.storage.create(&other, b"other").await?;
         if self.storage.read(&path).await? != data {
-            return Err(StorageError::Protocol("whole read"));
+            return Err(StorageFailure::Protocol.with_source("whole read"));
         }
         for (start, end) in [(0, 3), (4, 8), (12, 15)] {
             let range = ByteRange::new(start, end)?;
             if self.storage.read_range(&path, range).await? != range.select(data)? {
-                return Err(StorageError::Protocol("range read"));
+                return Err(StorageFailure::Protocol.with_source("range read"));
             }
         }
         if self
@@ -831,7 +838,7 @@ impl Conformance {
             .await
             .is_ok()
         {
-            return Err(StorageError::Protocol("past-end range accepted"));
+            return Err(StorageFailure::Protocol.with_source("past-end range accepted"));
         }
         if self
             .storage
@@ -841,7 +848,7 @@ impl Conformance {
             .map(|e| e.failure())
             != Some(StorageFailure::AlreadyExists)
         {
-            return Err(StorageError::Protocol("create-once refusal"));
+            return Err(StorageFailure::Protocol.with_source("create-once refusal"));
         }
         self.storage.create_once(&path, data).await?;
         if self
@@ -853,7 +860,7 @@ impl Conformance {
             .collect::<Vec<_>>()
             != [(path.clone(), data.len() as u64)]
         {
-            return Err(StorageError::Protocol("prefix listing"));
+            return Err(StorageFailure::Protocol.with_source("prefix listing"));
         }
         self.storage.delete(&path).await?;
         self.storage.delete(&path).await?;
@@ -861,39 +868,39 @@ impl Conformance {
         if self.storage.read(&path).await.err().map(|e| e.failure())
             != Some(StorageFailure::NotFound)
         {
-            return Err(StorageError::Protocol("deleted object read"));
+            return Err(StorageFailure::Protocol.with_source("deleted object read"));
         }
         let positions = ObjectPath::positions(DeviceId(31));
         if !matches!(
             self.storage.begin_upload(&positions, 1).await,
-            Err(StorageError::InvalidPath)
+            Err(error) if error.failure() == StorageFailure::InvalidPath
         ) {
-            return Err(StorageError::Protocol(
-                "positions accepted a recorded upload",
-            ));
+            return Err(
+                StorageFailure::Protocol.with_source("positions accepted a recorded upload")
+            );
         }
         if !matches!(
             self.storage.replace(&path, data).await,
-            Err(StorageError::InvalidPath)
+            Err(error) if error.failure() == StorageFailure::InvalidPath
         ) {
-            return Err(StorageError::Protocol(
-                "immutable object accepted replacement",
-            ));
+            return Err(
+                StorageFailure::Protocol.with_source("immutable object accepted replacement")
+            );
         }
         self.storage.replace(&positions, b"first positions").await?;
         self.storage.replace(&positions, b"next positions").await?;
         if self.storage.read(&positions).await? != b"next positions" {
-            return Err(StorageError::Protocol("posted positions replacement"));
+            return Err(StorageFailure::Protocol.with_source("posted positions replacement"));
         }
         self.storage.delete(&positions).await?;
         self.storage.create(&path, &[]).await?;
         self.storage.create_once(&path, &[]).await?;
         if !self.storage.read(&path).await?.is_empty() {
-            return Err(StorageError::Protocol("empty object changed"));
+            return Err(StorageFailure::Protocol.with_source("empty object changed"));
         }
         self.storage.create_once(&path, b"different").await?;
         if !self.storage.read(&path).await?.is_empty() {
-            return Err(StorageError::Protocol("empty immutable object replaced"));
+            return Err(StorageFailure::Protocol.with_source("empty immutable object replaced"));
         }
         self.storage.delete(&path).await?;
         let bytes: Vec<_> = (0..1024 * 1024 + 10)
@@ -906,7 +913,7 @@ impl Conformance {
             .await?
             != bytes[5..1024 * 1024 + 5]
         {
-            return Err(StorageError::Protocol("one MiB range changed"));
+            return Err(StorageFailure::Protocol.with_source("one MiB range changed"));
         }
         if self
             .storage
@@ -917,11 +924,11 @@ impl Conformance {
             .await
             .err()
             .map(|error| error.failure())
-            != Some(StorageFailure::InvalidConfiguration)
+            != Some(StorageFailure::InvalidRange)
         {
-            return Err(StorageError::Protocol(
-                "clipped past-end range misclassified",
-            ));
+            return Err(
+                StorageFailure::Protocol.with_source("clipped past-end range misclassified")
+            );
         }
         self.storage.delete(&path).await?;
         let first = ObjectPath::store_log(DeviceId(31), std::num::NonZeroU64::MIN);
@@ -930,12 +937,12 @@ impl Conformance {
             .await
             .map_err(|error| match error {
                 StorageSetupError::Storage(error) => error,
-                _ => StorageError::Protocol("setup at an empty location failed"),
+                error => StorageFailure::Protocol.with_source(error),
             })?;
         if self.storage.read(&first).await? != data {
-            return Err(StorageError::Protocol(
-                "setup did not create the first entry",
-            ));
+            return Err(
+                StorageFailure::Protocol.with_source("setup did not create the first entry")
+            );
         }
         self.storage.delete(&first).await?;
         Ok(())
@@ -960,9 +967,8 @@ impl crate::providers::StorageConnector for MemoryStorage {
         }
         .validate()?;
         if config != self.config {
-            return Err(StorageError::InvalidConfiguration(
-                "memory connector location mismatch",
-            ));
+            return Err(StorageFailure::InvalidConfiguration
+                .with_source("memory connector location mismatch"));
         }
         let mut connection = self.clone();
         // Candidate setup must not mutate the old adapter's sign-in. Network

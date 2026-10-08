@@ -22,12 +22,12 @@ impl DropboxStorage {
     pub fn new(config: StorageConfig, session: OAuthSession) -> Result<Self, StorageError> {
         config.validate()?;
         let StorageConfig::Dropbox { namespace_id } = &config else {
-            return Err(StorageError::InvalidConfiguration(
-                "expected Dropbox namespace",
-            ));
+            return Err(
+                StorageFailure::InvalidConfiguration.with_source("expected Dropbox namespace")
+            );
         };
         if session.provider() != PROVIDER {
-            return Err(StorageError::InvalidConfiguration("wrong OAuth provider"));
+            return Err(StorageFailure::InvalidConfiguration.with_source("wrong OAuth provider"));
         }
         Ok(Self {
             namespace: namespace_id.clone(),
@@ -88,7 +88,7 @@ impl DropboxStorage {
         session.check(&self.config)?;
         match &session.state {
             SessionState::Dropbox { id } => Ok(id.as_str()),
-            _ => Err(StorageError::SessionMismatch),
+            _ => Err(StorageFailure::SessionMismatch.into()),
         }
     }
     async fn require_owner(&self) -> Result<(), StorageError> {
@@ -99,7 +99,7 @@ impl DropboxStorage {
             )
             .await?;
         if http::string(&value["access_type"], ".tag")? != "owner" {
-            return Err(StorageError::NotStoreOwner);
+            return Err(StorageFailure::NotStoreOwner.into());
         }
         Ok(())
     }
@@ -119,7 +119,7 @@ impl DropboxStorage {
             };
             let cursor = http::string(&value, "cursor")?;
             if !seen.insert(cursor.to_owned()) {
-                return Err(StorageError::Protocol("repeated Dropbox member cursor"));
+                return Err(StorageFailure::Protocol.with_source("repeated Dropbox member cursor"));
             }
             method = "sharing/list_folder_members/continue";
             request = json!({"cursor":cursor});
@@ -128,7 +128,7 @@ impl DropboxStorage {
     async fn remove_member(&self, member: &MemberId) -> Result<Vec<RetainedAccess>, StorageError> {
         let value = self.rpc("sharing/remove_folder_member",json!({"shared_folder_id":self.namespace,"member":member.selector(),"leave_a_copy":false})).await?;
         if http::string(&value, ".tag")? != "async_job_id" {
-            return Err(StorageError::Protocol("invalid Dropbox remove launch"));
+            return Err(StorageFailure::Protocol.with_source("invalid Dropbox remove launch"));
         }
         let job = http::string(&value, "async_job_id")?;
         for _ in 0..60 {
@@ -145,7 +145,11 @@ impl DropboxStorage {
                 "complete" => return remaining_parent_access(&value["complete"], member),
                 "in_progress" => self.session.sleep(std::time::Duration::from_secs(1)).await,
                 "failed" => return Err(original.into_error(PROVIDER)),
-                _ => return Err(StorageError::Protocol("invalid Dropbox remove status")),
+                _ => {
+                    return Err(
+                        StorageFailure::Protocol.with_source("invalid Dropbox remove status")
+                    )
+                }
             }
         }
         Err(StorageError::Provider {
@@ -215,7 +219,7 @@ fn ascii_json(value: &Value) -> String {
 fn check_file(value: &Value, path: &ObjectPath, size: u64) -> Result<(), StorageError> {
     if http::string(value, "path_lower")? != path.absolute() || value["size"].as_u64() != Some(size)
     {
-        return Err(StorageError::Protocol("Dropbox returned another file"));
+        return Err(StorageFailure::Protocol.with_source("Dropbox returned another file"));
     }
     Ok(())
 }
@@ -240,7 +244,7 @@ impl Storage for DropboxStorage {
     }
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         if !path.is_replaceable() {
-            return Err(StorageError::InvalidPath);
+            return Err(StorageFailure::InvalidPath.into());
         }
         crate::transfer::check_single_request(bytes.len() as u64, self.single_request_limit())?;
         self.write(path, bytes, "overwrite").await
@@ -290,31 +294,33 @@ impl Storage for DropboxStorage {
                         crate::path::validate_directory(
                             http::string(entry, "path_lower")?
                                 .strip_prefix('/')
-                                .ok_or(StorageError::InvalidPath)?,
+                                .ok_or(StorageFailure::InvalidPath)?,
                         )?;
                         continue;
                     }
                     "file" => {}
-                    _ => return Err(StorageError::Protocol("unexpected Dropbox listing entry")),
+                    _ => {
+                        return Err(StorageFailure::Protocol
+                            .with_source("unexpected Dropbox listing entry"))
+                    }
                 }
                 let path = ObjectPath::parse(
-                    http::string(entry, "path_lower")?
-                        .strip_prefix('/')
-                        .ok_or(StorageError::Protocol("Dropbox path outside namespace"))?,
+                    http::string(entry, "path_lower")?.strip_prefix('/').ok_or(
+                        StorageFailure::Protocol.with_source("Dropbox path outside namespace"),
+                    )?,
                 )?;
                 if prefix.contains(&path) {
                     let object = StoredObject {
                         path: path.clone(),
-                        size: entry["size"]
-                            .as_u64()
-                            .ok_or(StorageError::Protocol("Dropbox omitted object size"))?,
+                        size: entry["size"].as_u64().ok_or(
+                            StorageFailure::Protocol.with_source("Dropbox omitted object size"),
+                        )?,
                         stored_at: http::timestamp(entry, "server_modified")?,
                     };
                     if let Some(previous) = paths.insert(path, object.clone()) {
                         if previous != object {
-                            return Err(StorageError::Protocol(
-                                "Dropbox listed conflicting objects",
-                            ));
+                            return Err(StorageFailure::Protocol
+                                .with_source("Dropbox listed conflicting objects"));
                         }
                     }
                 }
@@ -322,11 +328,15 @@ impl Storage for DropboxStorage {
             match value["has_more"].as_bool() {
                 Some(false) => break,
                 Some(true) => {}
-                None => return Err(StorageError::Protocol("Dropbox omitted pagination state")),
+                None => {
+                    return Err(
+                        StorageFailure::Protocol.with_source("Dropbox omitted pagination state")
+                    )
+                }
             }
             let cursor = http::string(&value, "cursor")?;
             if !seen.insert(cursor.to_owned()) {
-                return Err(StorageError::Protocol("repeated Dropbox cursor"));
+                return Err(StorageFailure::Protocol.with_source("repeated Dropbox cursor"));
             }
             method = "files/list_folder/continue";
             request = json!({"cursor":cursor});
@@ -366,7 +376,7 @@ impl Storage for DropboxStorage {
         {
             self.rpc("sharing/update_folder_member", json!({"shared_folder_id":self.namespace,"member":member.id.selector(),"access_level":{".tag":"editor"}})).await?;
         } else if !members.direct.is_empty() {
-            return Err(StorageError::AccountIdUnavailable);
+            return Err(StorageFailure::AccountIdUnavailable.into());
         } else {
             self.rpc("sharing/add_folder_member", json!({"shared_folder_id":self.namespace,"members":[{"member":{".tag":"email","email":account},"access_level":{".tag":"editor"}}],"quiet":false})).await?;
         }
@@ -377,9 +387,7 @@ impl Storage for DropboxStorage {
                 .iter()
                 .any(|share| share.reason == RetainedAccessReason::StoreOwner)
         {
-            return Err(StorageError::Protocol(
-                "Dropbox did not grant editor access",
-            ));
+            return Err(StorageFailure::Protocol.with_source("Dropbox did not grant editor access"));
         }
         Ok(AccessGrant::Granted {
             invitation: StorageInvitation::for_account(self.config())?,
@@ -396,7 +404,7 @@ impl Storage for DropboxStorage {
         if response.status().is_success() {
             let value = http::json(PROVIDER, response).await?;
             if http::string(&value, "shared_folder_id")? != self.namespace {
-                return Err(StorageError::InvitationMismatch);
+                return Err(StorageFailure::InvitationMismatch.into());
             }
         } else {
             let error = http::response_error(PROVIDER, response).await;
@@ -421,9 +429,9 @@ impl Storage for DropboxStorage {
     }
     async fn revoke_access(&self, member: &MemberAccess) -> Result<MemberRemoval, StorageError> {
         let MemberAccess::ProviderAccount(email) = member else {
-            return Err(StorageError::InvalidConfiguration(
-                "Dropbox requires an account",
-            ));
+            return Err(
+                StorageFailure::InvalidConfiguration.with_source("Dropbox requires an account")
+            );
         };
         self.require_owner().await?;
         let members = self.members(email, false).await?;
@@ -433,7 +441,7 @@ impl Storage for DropboxStorage {
         }
         let mut remaining = self.members(email, false).await?;
         if !remaining.direct.is_empty() {
-            return Err(StorageError::Protocol("Dropbox direct access remains"));
+            return Err(StorageFailure::Protocol.with_source("Dropbox direct access remains"));
         }
         remaining
             .retained
@@ -457,10 +465,10 @@ impl Storage for DropboxStorage {
         total: u64,
     ) -> Result<UploadSession, StorageError> {
         if path.is_replaceable() {
-            return Err(StorageError::InvalidPath);
+            return Err(StorageFailure::InvalidPath.into());
         }
         if total == 0 {
-            return Err(StorageError::InvalidPart);
+            return Err(StorageFailure::InvalidPart.into());
         }
         let value = http::json(
             PROVIDER,
@@ -511,7 +519,7 @@ impl Storage for DropboxStorage {
                 {
                     Ok(value) => value,
                     Err(error) if error.failure() == StorageFailure::NotFound => {
-                        return Err(StorageError::SessionExpired)
+                        return Err(StorageFailure::SessionExpired.with_source(error))
                     }
                     Err(error) => return Err(error),
                 };
@@ -543,7 +551,7 @@ impl Storage for DropboxStorage {
             return Ok(());
         }
         if session.confirmed != session.total {
-            return Err(StorageError::InvalidPart);
+            return Err(StorageFailure::InvalidPart.into());
         }
         let response = self.content("files/upload_session/finish",json!({"cursor":{"session_id":self.id(session)?,"offset":session.confirmed},"commit":{"path":session.path.absolute(),"mode":"add","autorename":false,"strict_conflict":true,"mute":true}}),Vec::new(),None).await?;
         let value = http::json(PROVIDER, response).await?;

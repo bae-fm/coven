@@ -15,7 +15,7 @@ fn invitation_recordings_are_bound_to_a_valid_provider_and_location() {
         decoded.check(&StorageConfig::Dropbox {
             namespace_id: "other".into()
         }),
-        Err(StorageError::InvitationMismatch)
+        Err(error) if error.failure() == StorageFailure::InvitationMismatch
     ));
     let valid: serde_json::Value = serde_json::from_slice(recorded.as_bytes()).unwrap();
     for acceptance in [

@@ -312,6 +312,8 @@ async fn errors_and_manual_key_instructions() {
         ("InvalidAccessKeyId", 403, StorageFailure::Authentication),
         ("AccessDenied", 403, StorageFailure::PermissionDenied),
         ("NoSuchBucket", 404, StorageFailure::ContainerNotFound),
+        ("NoSuchUpload", 404, StorageFailure::SessionExpired),
+        ("InvalidRange", 416, StorageFailure::InvalidRange),
         ("PermanentRedirect", 301, StorageFailure::RegionMismatch),
         ("QuotaExceeded", 403, StorageFailure::QuotaExceeded),
         ("SlowDown", 503, StorageFailure::RateLimited),
@@ -369,14 +371,10 @@ async fn setup_refuses_an_unrelated_object_in_the_location() {
         coven_foundation::id_source::DeviceId(1),
         std::num::NonZeroU64::MIN,
     );
-    assert_eq!(
-        storage
-            .setup(&path, b"first entry")
-            .await
-            .unwrap_err()
-            .failure(),
-        StorageSetupFailure::LocationOccupied
-    );
+    assert!(matches!(
+        storage.setup(&path, b"first entry").await.unwrap_err(),
+        StorageSetupError::LocationOccupied
+    ));
     assert_eq!(state.lock().unwrap().objects.len(), 1);
 }
 
@@ -391,10 +389,9 @@ async fn missing_session_and_destination_is_expired() {
     );
     let mut upload = storage.begin_upload(&path, 4).await.unwrap();
     state.lock().unwrap().uploads.clear();
-    assert!(matches!(
-        storage.resume_upload(&mut upload).await,
-        Err(StorageError::SessionExpired)
-    ));
+    let error = storage.resume_upload(&mut upload).await.unwrap_err();
+    assert_eq!(error.failure(), StorageFailure::SessionExpired);
+    assert!(std::error::Error::source(&error).is_some());
     let replacement = storage.restart_upload(&upload).await.unwrap();
     assert_eq!(replacement.path(), &path);
     assert_eq!(replacement.total_bytes(), b"data".len() as u64);
@@ -469,15 +466,10 @@ async fn provider_check_cleans_up_after_a_lost_create_reply_and_retains_both_fai
         std::num::NonZeroU64::MIN,
     );
     state.lock().unwrap().lose_create_reply = true;
-    assert_eq!(
-        check_provider(&storage, &path, b"sealed test bytes")
+    assert!(
+        matches!(check_provider(&storage, &path, b"sealed test bytes")
             .await
-            .unwrap_err()
-            .failure(),
-        StorageSetupFailure::ProviderCheck {
-            check: StorageCheck::Create,
-            failure: StorageFailure::Network
-        }
+            .unwrap_err(), StorageSetupError::ProviderCheck { check: StorageCheck::Create, source } if source.failure() == StorageFailure::Network)
     );
     assert!(state.lock().unwrap().objects.is_empty());
     assert_eq!(state.lock().unwrap().deletions, 1);
@@ -504,15 +496,10 @@ async fn provider_check_cleans_up_after_a_lost_create_reply_and_retains_both_fai
     assert!(state.lock().unwrap().objects.is_empty());
     storage.create(&path, b"preexisting").await.unwrap();
     let deletes = state.lock().unwrap().deletions;
-    assert_eq!(
-        check_provider(&storage, &path, b"sealed test bytes")
+    assert!(
+        matches!(check_provider(&storage, &path, b"sealed test bytes")
             .await
-            .unwrap_err()
-            .failure(),
-        StorageSetupFailure::ProviderCheck {
-            check: StorageCheck::Create,
-            failure: StorageFailure::AlreadyExists
-        }
+            .unwrap_err(), StorageSetupError::ProviderCheck { check: StorageCheck::Create, source } if source.failure() == StorageFailure::AlreadyExists)
     );
     assert_eq!(state.lock().unwrap().deletions, deletes);
     assert_eq!(storage.read(&path).await.unwrap(), b"preexisting");
@@ -585,13 +572,13 @@ async fn multipart_publication_and_abort_are_bound_to_the_native_session() {
     assert_eq!(storage.read(&path).await.unwrap(), b"data");
     assert!(matches!(
         storage.finish_upload(&mut other).await,
-        Err(StorageError::AlreadyExists)
+        Err(error) if error.failure() == StorageFailure::AlreadyExists
     ));
     storage.abort_upload(&other).await.unwrap();
     storage.abort_upload(&other).await.unwrap();
     assert!(matches!(
         storage.resume_upload(&mut other).await,
-        Err(StorageError::AlreadyExists)
+        Err(error) if error.failure() == StorageFailure::AlreadyExists
     ));
     assert_eq!(storage.read(&path).await.unwrap(), b"data");
     assert!(state.lock().unwrap().uploads.is_empty());
@@ -798,16 +785,12 @@ async fn provider_check_names_each_failed_operation_and_removes_its_object() {
         let error = check_provider(&storage, &path, b"sealed test bytes")
             .await
             .unwrap_err();
-        assert_eq!(
-            error.failure(),
-            StorageSetupFailure::ProviderCheck {
-                check,
-                failure: if check == StorageCheck::Create {
-                    StorageFailure::PermissionDenied
-                } else {
-                    StorageFailure::Protocol
-                },
-            }
+        assert!(
+            matches!(error, StorageSetupError::ProviderCheck { check: actual, source } if actual == check && source.failure() == if check == StorageCheck::Create {
+                StorageFailure::PermissionDenied
+            } else {
+                StorageFailure::Protocol
+            })
         );
         assert_eq!(
             state.lock().unwrap().objects.len(),
@@ -831,13 +814,12 @@ async fn provider_check_preserves_unrelated_contents_and_reports_occupied() {
         coven_foundation::id_source::DeviceId(31),
         coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xab; 16])),
     );
-    assert_eq!(
+    assert!(matches!(
         check_provider(&storage, &path, b"sealed test bytes")
             .await
-            .unwrap_err()
-            .failure(),
-        StorageSetupFailure::LocationOccupied
-    );
+            .unwrap_err(),
+        StorageSetupError::LocationOccupied
+    ));
     assert_eq!(
         state.lock().unwrap().objects,
         BTreeMap::from([("store/unrelated".into(), b"kept".to_vec())])

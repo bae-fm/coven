@@ -343,10 +343,9 @@ async fn missing_session_and_destination_is_expired() {
     );
     let mut upload = storage.begin_upload(&path, 4).await.unwrap();
     state.lock().unwrap().uploads.clear();
-    assert!(matches!(
-        storage.resume_upload(&mut upload).await,
-        Err(StorageError::SessionExpired)
-    ));
+    let error = storage.resume_upload(&mut upload).await.unwrap_err();
+    assert_eq!(error.failure(), StorageFailure::SessionExpired);
+    assert!(std::error::Error::source(&error).is_some());
     let replacement = storage.restart_upload(&upload).await.unwrap();
     assert_eq!(replacement.path(), &path);
     assert_eq!(replacement.total_bytes(), b"data".len() as u64);
@@ -650,14 +649,14 @@ async fn setup_refuses_a_folder_even_when_its_name_is_an_object_path() {
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
     );
-    assert_eq!(
-        storage.setup(&first, b"first").await.unwrap_err().failure(),
-        StorageSetupFailure::LocationOccupied
-    );
+    assert!(matches!(
+        storage.setup(&first, b"first").await.unwrap_err(),
+        StorageSetupError::LocationOccupied
+    ));
     assert_eq!(state.lock().unwrap().files.len(), 1);
     assert!(matches!(
         storage.list(&ObjectPrefix::all()).await,
-        Err(StorageError::InvalidPath)
+        Err(error) if error.failure() == StorageFailure::InvalidPath
     ));
 }
 
@@ -717,11 +716,11 @@ async fn listing_uses_the_same_copy_as_reads_and_refuses_missing_metadata() {
     state.lock().unwrap().files.get_mut("a-later").unwrap().0["createdTime"] =
         json!("2026-10-06T00:00:00Z");
     assert_eq!(storage.list(&ObjectPrefix::all()).await.unwrap()[0].size, 9);
-    for (field, invalid) in [
-        ("size", json!(null)),
-        ("size", json!("-1")),
-        ("createdTime", json!(null)),
-        ("createdTime", json!("not-time")),
+    for (field, invalid, failure) in [
+        ("size", json!(null), StorageFailure::Protocol),
+        ("size", json!("-1"), StorageFailure::Protocol),
+        ("createdTime", json!(null), StorageFailure::Protocol),
+        ("createdTime", json!("not-time"), StorageFailure::Encoding),
     ] {
         let old = state.lock().unwrap().files["a-later"].0[field].clone();
         state.lock().unwrap().files.get_mut("a-later").unwrap().0[field] = invalid;
@@ -731,7 +730,7 @@ async fn listing_uses_the_same_copy_as_reads_and_refuses_missing_metadata() {
                 .await
                 .unwrap_err()
                 .failure(),
-            StorageFailure::Protocol
+            failure
         );
         state.lock().unwrap().files.get_mut("a-later").unwrap().0[field] = old;
     }
@@ -862,17 +861,16 @@ async fn setup_refuses_native_documents_and_shortcuts_named_like_objects() {
         let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
         assert!(matches!(
             provider(&server.url).list(&ObjectPrefix::all()).await,
-            Err(StorageError::InvalidPath)
+            Err(error) if error.failure() == StorageFailure::InvalidPath
         ));
         let first = ObjectPath::store_log(DeviceId(31), std::num::NonZeroU64::MIN);
-        assert_eq!(
+        assert!(matches!(
             provider(&server.url)
                 .setup(&first, b"first")
                 .await
-                .unwrap_err()
-                .failure(),
-            StorageSetupFailure::LocationOccupied
-        );
+                .unwrap_err(),
+            StorageSetupError::LocationOccupied
+        ));
     }
 }
 

@@ -4,7 +4,7 @@ use super::{
     CloudKitOps, CloudKitStorage, DropboxStorage, GoogleDriveStorage, OAuthSession,
     OneDriveStorage, S3Storage,
 };
-use crate::{Storage, StorageConfig, StorageCredentials, StorageError};
+use crate::{Storage, StorageConfig, StorageCredentials, StorageError, StorageFailure};
 use coven_foundation::{
     clock::ClockRef,
     id_source::{DeviceId, IdSourceRef},
@@ -73,17 +73,13 @@ impl StorageConnector for ProviderConnector {
                 Ok(Arc::new(OneDriveStorage::new(config, session)?))
             }
             (StorageConfig::CloudKit { .. }, StorageCredentials::CloudKit) => {
-                let ops = self
-                    .cloudkit
-                    .clone()
-                    .ok_or(StorageError::InvalidConfiguration(
-                        "CloudKit bridge is absent",
-                    ))?;
+                let ops = self.cloudkit.clone().ok_or(
+                    StorageFailure::InvalidConfiguration.with_source("CloudKit bridge is absent"),
+                )?;
                 Ok(Arc::new(CloudKitStorage::new(config, ops)?))
             }
-            _ => Err(StorageError::InvalidConfiguration(
-                "credentials do not match the provider",
-            )),
+            _ => Err(StorageFailure::InvalidConfiguration
+                .with_source("credentials do not match the provider")),
         }
     }
 }

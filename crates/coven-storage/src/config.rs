@@ -87,7 +87,9 @@ impl StorageConfig {
                         || endpoint.query().is_some()
                         || endpoint.fragment().is_some()
                     {
-                        return Err(crate::StorageError::InvalidConfiguration("S3 endpoint"));
+                        return Err(
+                            crate::StorageFailure::InvalidConfiguration.with_source("S3 endpoint")
+                        );
                     }
                 }
                 crate::path::validate_root(prefix)?;
@@ -109,9 +111,8 @@ impl StorageConfig {
             .iter()
             .any(|value| value.trim().is_empty() || value.chars().any(char::is_control))
         {
-            return Err(crate::StorageError::InvalidConfiguration(
-                "empty or invalid location",
-            ));
+            return Err(crate::StorageFailure::InvalidConfiguration
+                .with_source("empty or invalid location"));
         }
         Ok(())
     }

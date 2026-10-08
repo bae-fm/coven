@@ -200,8 +200,7 @@ async fn sharing_requires_the_store_owners_account() {
             .err()
             .unwrap(),
     ] {
-        assert!(matches!(error, StorageError::NotStoreOwner));
-        assert_eq!(error.failure(), StorageFailure::PermissionDenied);
+        assert_eq!(error.failure(), StorageFailure::NotStoreOwner);
     }
     assert_eq!(
         state

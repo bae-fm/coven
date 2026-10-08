@@ -23,7 +23,7 @@ async fn create_routes_the_boundary_without_starting_the_unused_request() {
         let called = std::sync::atomic::AtomicBool::new(false);
         upload_bytes(&storage, &path, &vec![1; size], async {
             called.store(true, std::sync::atomic::Ordering::SeqCst);
-            Err(StorageError::Injected(StorageFailure::PermissionDenied))
+            Err(StorageError::Failure(StorageFailure::PermissionDenied))
         })
         .await
         .unwrap_err();
@@ -51,7 +51,7 @@ fn positions_limit_accepts_the_boundary_and_rejects_the_next_byte() {
     ] {
         check_single_request(limit, limit).unwrap();
         assert!(
-            matches!(check_single_request(limit + 1, limit), Err(StorageError::SingleRequestTooLarge { size, limit: maximum }) if size == limit + 1 && maximum == limit)
+            matches!(check_single_request(limit + 1, limit).unwrap_err().failure(), StorageFailure::SingleRequestTooLarge { size, limit: maximum } if size == limit + 1 && maximum == limit)
         );
     }
 }

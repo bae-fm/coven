@@ -316,7 +316,7 @@ async fn lost_completion_requires_byte_verification() {
     assert!(!upload.is_complete());
     assert!(matches!(
         storage.upload_part(&mut upload, b"else").await,
-        Err(StorageError::AlreadyExists)
+        Err(error) if error.failure() == StorageFailure::AlreadyExists
     ));
     assert_eq!(upload.confirmed_bytes(), 0);
     let mut upload = UploadSession::decode(upload.encode().unwrap().as_bytes()).unwrap();
@@ -353,10 +353,9 @@ async fn missing_session_and_destination_is_expired() {
     );
     let mut upload = storage.begin_upload(&path, 4).await.unwrap();
     state.lock().unwrap().uploads.clear();
-    assert!(matches!(
-        storage.resume_upload(&mut upload).await,
-        Err(StorageError::SessionExpired)
-    ));
+    let error = storage.resume_upload(&mut upload).await.unwrap_err();
+    assert_eq!(error.failure(), StorageFailure::SessionExpired);
+    assert!(std::error::Error::source(&error).is_some());
     let replacement = storage.restart_upload(&upload).await.unwrap();
     assert_eq!(replacement.path(), &path);
     assert_eq!(replacement.total_bytes(), b"data".len() as u64);
@@ -548,8 +547,7 @@ async fn sharing_requires_the_store_owners_account() {
             .err()
             .unwrap(),
     ] {
-        assert!(matches!(error, StorageError::NotStoreOwner));
-        assert_eq!(error.failure(), StorageFailure::PermissionDenied);
+        assert_eq!(error.failure(), StorageFailure::NotStoreOwner);
     }
     assert_eq!(
         state
@@ -577,10 +575,10 @@ async fn setup_refuses_an_unrelated_empty_folder() {
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
     );
-    assert_eq!(
-        storage.setup(&first, b"first").await.unwrap_err().failure(),
-        StorageSetupFailure::LocationOccupied
-    );
+    assert!(matches!(
+        storage.setup(&first, b"first").await.unwrap_err(),
+        StorageSetupError::LocationOccupied
+    ));
     assert!(state.lock().unwrap().files.is_empty());
 }
 
@@ -654,7 +652,7 @@ async fn recipient_join_redeems_only_the_invited_destination_and_keeps_native_re
     state.lock().unwrap().wrong_share_destination = true;
     assert!(matches!(
         recipient.join(&invitation).await,
-        Err(StorageError::InvitationMismatch)
+        Err(error) if error.failure() == StorageFailure::InvitationMismatch
     ));
     assert!(state.lock().unwrap().redeemed.is_empty());
     state.lock().unwrap().wrong_share_destination = false;
@@ -812,12 +810,11 @@ async fn setup_refuses_native_items_that_are_not_object_files() {
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
     );
-    assert_eq!(
+    assert!(matches!(
         provider(&server.url)
             .setup(&path, b"first")
             .await
-            .unwrap_err()
-            .failure(),
-        StorageSetupFailure::LocationOccupied
-    );
+            .unwrap_err(),
+        StorageSetupError::LocationOccupied
+    ));
 }

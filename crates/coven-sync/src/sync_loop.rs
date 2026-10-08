@@ -3,7 +3,9 @@
 use crate::{Operations, SyncError, SyncFailure};
 use coven_database::{DatabaseChanges, DbError};
 use coven_foundation::{clock::ClockRef, id_source::DeviceId};
-use coven_storage::{providers::StorageConnector, Storage, StorageConnection, StorageFailure};
+use coven_storage::{
+    providers::StorageConnector, Storage, StorageConnection, StorageError, StorageFailure,
+};
 use std::{
     sync::Arc,
     time::{Duration, SystemTime},
@@ -18,7 +20,10 @@ pub enum SyncStatus {
     /// Storage is set up and synchronization is stopped; a client may be absent.
     Stopped,
     /// Storage has not been reached since connecting.
-    Offline,
+    Offline {
+        /// The network failure and its original cause.
+        error: Arc<StorageError>,
+    },
     /// The initial pass is queued or a pass is running.
     Syncing,
     /// The last pass completed.
@@ -404,8 +409,11 @@ impl SyncRun {
                         Err(error) => {
                             let error = SyncFailure::from(error);
                             self.started = !matches!(error, SyncFailure::Removed | SyncFailure::LocationTaken | SyncFailure::UpdateRequired);
-                            let offline = !self.connection.as_ref().is_some_and(|connection| connection.reached()) && matches!(&error, SyncFailure::Storage(error) if error.failure() == StorageFailure::Network);
-                            let status = if offline { SyncStatus::Offline } else { SyncStatus::Failed { error } };
+                            let reached = self.connection.as_ref().is_some_and(|connection| connection.reached());
+                            let status = match error {
+                                SyncFailure::Storage(error) if !reached && error.failure() == StorageFailure::Network => SyncStatus::Offline { error },
+                                error => SyncStatus::Failed { error },
+                            };
                             self.status.send_replace(status);
                         }
                     }

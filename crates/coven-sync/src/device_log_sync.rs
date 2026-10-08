@@ -84,7 +84,7 @@ impl DeviceLogSync {
             let member = self
                 .member_keys
                 .unlock()?
-                .ok_or(SyncError::MissingMemberKeys)?;
+                .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
             crate::write_seal::check_member(&local.log, &member, local.device)?;
             crate::write_seal::check_upload_version(&local.log, state.schema_version)?;
             if state.breaking_version
@@ -145,7 +145,7 @@ impl DeviceLogSync {
         let member = self
             .member_keys
             .unlock()?
-            .ok_or(SyncError::MissingMemberKeys)?;
+            .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
         crate::write_seal::check_member(&local.log, &member, local.device)?;
         let key = local
             .log
@@ -236,7 +236,7 @@ impl DeviceLogSync {
         let member = self
             .member_keys
             .unlock()?
-            .ok_or(SyncError::MissingMemberKeys)?;
+            .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
         let Some(positions) = self.positions_for(&member).await? else {
             return Ok(false);
         };
@@ -299,7 +299,7 @@ impl DeviceLogSync {
                 .await
             {
                 Ok(bytes) => bytes,
-                Err(coven_storage::StorageError::NotFound) => {
+                Err(error) if error.failure() == coven_storage::StorageFailure::NotFound => {
                     tracing::debug!(
                         path = object.path.as_str(),
                         "positions disappeared after listing"
@@ -353,7 +353,7 @@ impl DeviceLogSync {
         let member = self
             .member_keys
             .unlock()?
-            .ok_or(SyncError::MissingMemberKeys)?;
+            .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
         self.positions_for(&member).await
     }
 

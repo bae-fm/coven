@@ -1,4 +1,4 @@
-use crate::{ObjectPath, Storage, StorageError};
+use crate::{ObjectPath, Storage, StorageError, StorageFailure};
 use std::future::Future;
 
 /// Route complete bytes through the provider's single-request call or its
@@ -17,14 +17,14 @@ pub(crate) async fn upload_bytes(
     let upload = async {
         while session.confirmed_bytes() < session.total_bytes() {
             let start = usize::try_from(session.confirmed_bytes())
-                .map_err(|_| StorageError::InvalidPart)?;
-            let remaining = bytes.get(start..).ok_or(StorageError::InvalidPart)?;
+                .map_err(|error| StorageFailure::InvalidPart.with_source(error))?;
+            let remaining = bytes.get(start..).ok_or(StorageFailure::InvalidPart)?;
             let length = remaining.len().min(session.part_size());
             storage
                 .upload_part(&mut session, &remaining[..length])
                 .await?;
             if session.confirmed_bytes() <= start as u64 {
-                return Err(StorageError::Protocol("upload did not advance"));
+                return Err(StorageFailure::Protocol.with_source("upload did not advance"));
             }
         }
         storage.finish_upload(&mut session).await
@@ -44,7 +44,7 @@ pub(crate) async fn upload_bytes(
 
 pub(crate) fn check_single_request(size: u64, limit: u64) -> Result<(), StorageError> {
     if size > limit {
-        return Err(StorageError::SingleRequestTooLarge { size, limit });
+        return Err(StorageFailure::SingleRequestTooLarge { size, limit }.into());
     }
     Ok(())
 }

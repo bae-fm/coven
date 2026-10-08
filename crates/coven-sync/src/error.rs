@@ -3,7 +3,7 @@
 use coven_crypto::{custody::KeyError, CryptoError, MaterialError};
 use coven_database::{DbError, DropReason};
 use coven_foundation::id_source::{KeyId, StoreId};
-use coven_storage::StorageError;
+use coven_storage::{StorageError, StorageFailure};
 use std::sync::Arc;
 
 /// A synchronization request failed; its durable queue, if any, remains retryable.
@@ -108,9 +108,6 @@ pub enum SyncError {
     /// A required key has not arrived or the local key material conflicts.
     #[error(transparent)]
     Key(#[from] MaterialError),
-    /// This install has no member keys in custody.
-    #[error("member keys are absent from custody")]
-    MissingMemberKeys,
     /// A required key's sealed copy has not arrived.
     #[error("key {0} is not available yet")]
     KeyUnavailable(KeyId),
@@ -154,6 +151,12 @@ pub enum SyncFailure {
     /// Any other failure, retaining its typed cause.
     #[error("sync failed: {0}")]
     Other(#[source] Arc<dyn std::error::Error + Send + Sync>),
+}
+
+impl From<StorageFailure> for SyncError {
+    fn from(failure: StorageFailure) -> Self {
+        Self::Storage(failure.into())
+    }
 }
 
 impl From<SyncError> for SyncFailure {

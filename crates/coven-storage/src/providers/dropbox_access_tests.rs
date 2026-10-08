@@ -126,8 +126,7 @@ async fn a_pending_viewer_without_an_account_id_keeps_their_invitation() {
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     let error = storage.grant_access("member").await.err().unwrap();
-    assert!(matches!(error, StorageError::AccountIdUnavailable));
-    assert_eq!(error.failure(), StorageFailure::Refused);
+    assert_eq!(error.failure(), StorageFailure::AccountIdUnavailable);
     assert_eq!(state.lock().unwrap().invitees, [invite]);
     assert!(state.lock().unwrap().sharing_mutations.is_empty());
     assert!(matches!(
@@ -159,8 +158,7 @@ async fn sharing_requires_the_store_owners_account() {
             .err()
             .unwrap(),
     ] {
-        assert!(matches!(error, StorageError::NotStoreOwner));
-        assert_eq!(error.failure(), StorageFailure::PermissionDenied);
+        assert_eq!(error.failure(), StorageFailure::NotStoreOwner);
     }
     assert_eq!(
         state

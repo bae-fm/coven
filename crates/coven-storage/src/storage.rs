@@ -1,6 +1,6 @@
 use crate::{
-    CloudProvider, ObjectPath, ObjectPrefix, StorageConfig, StorageError, StorageSetupError,
-    UploadSession,
+    CloudProvider, ObjectPath, ObjectPrefix, StorageConfig, StorageError, StorageFailure,
+    StorageSetupError, UploadSession,
 };
 use async_trait::async_trait;
 
@@ -14,7 +14,7 @@ impl ByteRange {
     /// Validate the bounds before issuing a ranged request.
     pub fn new(start: u64, end: u64) -> Result<Self, StorageError> {
         if start >= end {
-            return Err(StorageError::InvalidRange);
+            return Err(StorageFailure::InvalidRange.into());
         }
         Ok(Self { start, end })
     }
@@ -39,12 +39,14 @@ impl ByteRange {
     }
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn select(self, bytes: &[u8]) -> Result<Vec<u8>, StorageError> {
-        let start = usize::try_from(self.start).map_err(|_| StorageError::InvalidRange)?;
-        let end = usize::try_from(self.end).map_err(|_| StorageError::InvalidRange)?;
+        let start = usize::try_from(self.start)
+            .map_err(|error| StorageFailure::InvalidRange.with_source(error))?;
+        let end = usize::try_from(self.end)
+            .map_err(|error| StorageFailure::InvalidRange.with_source(error))?;
         bytes
             .get(start..end)
             .map(<[u8]>::to_vec)
-            .ok_or(StorageError::InvalidRange)
+            .ok_or(StorageError::Failure(StorageFailure::InvalidRange))
     }
 }
 
@@ -154,18 +156,14 @@ pub trait Storage: Send + Sync {
         &self,
         _credentials: crate::S3Credentials,
     ) -> Result<(), StorageError> {
-        Err(StorageError::InvalidConfiguration(
-            "provider does not use S3 keys",
-        ))
+        Err(StorageFailure::InvalidConfiguration.with_source("provider does not use S3 keys"))
     }
     /// This provider's nonsecret location settings.
     fn config(&self) -> StorageConfig;
     /// The signed-in sharing account, for the member's store-log access entry.
     /// S3 uses its supplied access key id instead of an account lookup.
     async fn account(&self) -> Result<String, StorageError> {
-        Err(StorageError::InvalidConfiguration(
-            "provider has no sharing account",
-        ))
+        Err(StorageFailure::InvalidConfiguration.with_source("provider has no sharing account"))
     }
     /// Largest complete encrypted body sent in one request, in bytes. Larger
     /// create-once objects use resumable or multipart uploads, for every path kind.
@@ -176,9 +174,7 @@ pub trait Storage: Send + Sync {
     /// Install replacement OAuth tokens after the owner commits them to key custody.
     /// S3 and CloudKit refuse OAuth tokens; they use different account credentials.
     async fn set_oauth_tokens(&self, _tokens: crate::OAuthTokens) -> Result<(), StorageError> {
-        Err(StorageError::InvalidConfiguration(
-            "provider does not use OAuth",
-        ))
+        Err(StorageFailure::InvalidConfiguration.with_source("provider does not use OAuth"))
     }
     /// Create a complete encrypted object, refusing an occupied path.
     /// Bodies above [`Self::single_request_limit`] use a session for any immutable
@@ -186,7 +182,7 @@ pub trait Storage: Send + Sync {
     /// if abort fails too, [`StorageError::Cleanup`] retains both causes.
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError>;
     /// Replace a device's posted positions; immutable paths are refused.
-    /// Always one request; an oversized body returns [`StorageError::SingleRequestTooLarge`].
+    /// Always one request; an oversized body returns [`StorageFailure::SingleRequestTooLarge`].
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError>;
     /// Read the whole encrypted object.
     async fn read(&self, path: &ObjectPath) -> Result<Vec<u8>, StorageError>;
@@ -212,7 +208,7 @@ pub trait Storage: Send + Sync {
     /// S3's console-key instructions need no sharing-account check.
     ///
     /// Dropbox upgrades viewers in place with `update_folder_member`; a pending
-    /// viewer without a native account id gets [`StorageError::AccountIdUnavailable`]
+    /// viewer without a native account id gets [`StorageFailure::AccountIdUnavailable`]
     /// and keeps its invitation. Drive updates direct readers in place and adds a
     /// direct writer grant when read access is inherited.
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError>;
@@ -229,9 +225,9 @@ pub trait Storage: Send + Sync {
             invitation.acceptance,
             crate::invitation::InvitationAcceptance::Granted
         ) {
-            return Err(StorageError::InvalidConfiguration(
-                "provider acceptance required",
-            ));
+            return Err(
+                StorageFailure::InvalidConfiguration.with_source("provider acceptance required")
+            );
         }
         self.list(&ObjectPrefix::all()).await?;
         Ok(())
@@ -260,7 +256,7 @@ pub trait Storage: Send + Sync {
     async fn restart_upload(&self, expired: &UploadSession) -> Result<UploadSession, StorageError> {
         expired.check(&self.config())?;
         if expired.is_complete() {
-            return Err(StorageError::InvalidPart);
+            return Err(StorageFailure::InvalidPart.into());
         }
         self.begin_upload(expired.path(), expired.total_bytes())
             .await
@@ -318,11 +314,13 @@ pub trait Storage: Send + Sync {
     ) -> Result<StorageConfig, StorageSetupError> {
         self.config().validate()?;
         if !first_entry.is_first_store_entry() {
-            return Err(StorageError::InvalidPath.into());
+            return Err(StorageError::Failure(StorageFailure::InvalidPath).into());
         }
         let objects = match self.list(&ObjectPrefix::all()).await {
             Ok(objects) => objects,
-            Err(StorageError::InvalidPath) => return Err(StorageSetupError::LocationOccupied),
+            Err(error) if error.failure() == StorageFailure::InvalidPath => {
+                return Err(StorageSetupError::LocationOccupied)
+            }
             Err(error) => return Err(error.into()),
         };
         if !objects.is_empty() {

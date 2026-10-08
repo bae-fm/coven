@@ -28,7 +28,7 @@ impl StoreLogSync {
                 .state
                 .store
                 .as_ref()
-                .ok_or(coven_storage::StorageError::NotFound)?
+                .ok_or(coven_storage::StorageFailure::NotFound)?
                 .key;
             let keys = self
                 .store_keys
@@ -54,12 +54,14 @@ impl StoreLogSync {
         let member = self
             .member_keys
             .unlock()?
-            .ok_or(SyncError::MissingMemberKeys)?;
+            .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
         let previous = self.store_keys.unlock()?;
         let mut local = self.database.local_store_log().await?;
         let objects = match storage.list(&ObjectPrefix::all()).await {
             Ok(objects) => objects,
-            Err(coven_storage::StorageError::InvalidPath) => return Err(occupied()),
+            Err(error) if error.failure() == coven_storage::StorageFailure::InvalidPath => {
+                return Err(occupied())
+            }
             Err(error) => return Err(error.into()),
         };
         let mut origins = Vec::new();
@@ -163,11 +165,9 @@ impl StoreLogSync {
                     && *reserved_access == access
                     && *reserved_name == device_name => {}
                 _ => {
-                    return Err(SyncError::Setup(Box::new(StorageSetupError::Storage(
-                        coven_storage::StorageError::InvalidConfiguration(
-                            "setup retry must retain its original device name and access",
-                        ),
-                    ))))
+                    return Err(coven_storage::StorageFailure::InvalidConfiguration
+                        .with_source("setup retry must retain its original device name and access")
+                        .into())
                 }
             }
             let bytes = object::seal_upload(upload, previous.as_ref(), &member)?;
@@ -220,11 +220,9 @@ impl StoreLogSync {
             if local.log.replay.state.store.is_none()
                 && !matches!(&entry.change, StoreChange::CreateStore { access: recorded, device_name: name, .. } if recorded == &access && name == &device_name)
             {
-                return Err(SyncError::Setup(Box::new(StorageSetupError::Storage(
-                    coven_storage::StorageError::InvalidConfiguration(
-                        "setup retry must retain its original device name and access",
-                    ),
-                ))));
+                return Err(coven_storage::StorageFailure::InvalidConfiguration
+                    .with_source("setup retry must retain its original device name and access")
+                    .into());
             }
             creation = Some(entry);
         }

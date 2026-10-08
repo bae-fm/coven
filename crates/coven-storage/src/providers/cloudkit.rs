@@ -141,18 +141,18 @@ impl CloudKitStorage {
     pub fn new(config: StorageConfig, ops: Arc<dyn CloudKitOps>) -> Result<Self, StorageError> {
         config.validate()?;
         if !matches!(config, StorageConfig::CloudKit { .. }) {
-            return Err(StorageError::InvalidConfiguration("expected CloudKit zone"));
+            return Err(StorageFailure::InvalidConfiguration.with_source("expected CloudKit zone"));
         }
         if ops.single_request_limit() == 0 {
-            return Err(StorageError::InvalidConfiguration(
-                "zero CloudKit request limit",
-            ));
+            return Err(
+                StorageFailure::InvalidConfiguration.with_source("zero CloudKit request limit")
+            );
         }
         Ok(Self { config, ops })
     }
     async fn require_owner(&self) -> Result<(), StorageError> {
         if !self.ops.is_owner(&self.config).await? {
-            return Err(StorageError::NotStoreOwner);
+            return Err(StorageFailure::NotStoreOwner.into());
         }
         Ok(())
     }
@@ -160,7 +160,7 @@ impl CloudKitStorage {
         session.check(&self.config)?;
         match &session.state {
             SessionState::CloudKit { id } => Ok(id),
-            _ => Err(StorageError::SessionMismatch),
+            _ => Err(StorageFailure::SessionMismatch.into()),
         }
     }
 }
@@ -169,7 +169,7 @@ impl Storage for CloudKitStorage {
     async fn account(&self) -> Result<String, StorageError> {
         let account = self.ops.account(&self.config).await?;
         if account.is_empty() {
-            return Err(StorageError::AccountIdUnavailable);
+            return Err(StorageFailure::AccountIdUnavailable.into());
         }
         Ok(account)
     }
@@ -190,7 +190,7 @@ impl Storage for CloudKitStorage {
     }
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         if !path.is_replaceable() {
-            return Err(StorageError::InvalidPath);
+            return Err(StorageFailure::InvalidPath.into());
         }
         crate::transfer::check_single_request(bytes.len() as u64, self.single_request_limit())?;
         self.ops.replace(&self.config, path, bytes).await
@@ -205,7 +205,7 @@ impl Storage for CloudKitStorage {
     ) -> Result<Vec<u8>, StorageError> {
         let bytes = self.ops.read(&self.config, path, Some(range)).await?;
         if bytes.len() as u64 != range.len() {
-            return Err(StorageError::Protocol("CloudKit returned a short range"));
+            return Err(StorageFailure::Protocol.with_source("CloudKit returned a short range"));
         }
         Ok(bytes)
     }
@@ -216,7 +216,7 @@ impl Storage for CloudKitStorage {
             if !prefix.contains(&object.path)
                 || unique.insert(object.path.clone(), object).is_some()
             {
-                return Err(StorageError::Protocol("invalid CloudKit prefix listing"));
+                return Err(StorageFailure::Protocol.with_source("invalid CloudKit prefix listing"));
             }
         }
         Ok(unique.into_values().collect())
@@ -238,7 +238,7 @@ impl Storage for CloudKitStorage {
         invitation.check(&self.config)?;
         let crate::invitation::InvitationAcceptance::CloudKitShare { url } = &invitation.acceptance
         else {
-            return Err(StorageError::InvitationMismatch);
+            return Err(StorageFailure::InvitationMismatch.into());
         };
         self.ops.accept_share(&self.config, url).await?;
         self.list(&ObjectPrefix::all()).await?;
@@ -246,9 +246,9 @@ impl Storage for CloudKitStorage {
     }
     async fn revoke_access(&self, member: &MemberAccess) -> Result<MemberRemoval, StorageError> {
         let MemberAccess::ProviderAccount(email) = member else {
-            return Err(StorageError::InvalidConfiguration(
-                "CloudKit requires an account",
-            ));
+            return Err(
+                StorageFailure::InvalidConfiguration.with_source("CloudKit requires an account")
+            );
         };
         self.require_owner().await?;
         self.ops.revoke_access(&self.config, email).await
@@ -259,14 +259,14 @@ impl Storage for CloudKitStorage {
         total: u64,
     ) -> Result<UploadSession, StorageError> {
         if path.is_replaceable() {
-            return Err(StorageError::InvalidPath);
+            return Err(StorageFailure::InvalidPath.into());
         }
         if total == 0 {
-            return Err(StorageError::InvalidPart);
+            return Err(StorageFailure::InvalidPart.into());
         }
         let upload = self.ops.begin_upload(&self.config, path, total).await?;
         if upload.part_size == 0 || upload.id.as_str().is_empty() {
-            return Err(StorageError::Protocol("invalid CloudKit session"));
+            return Err(StorageFailure::Protocol.with_source("invalid CloudKit session"));
         }
         Ok(UploadSession {
             location: self.config(),
@@ -293,7 +293,9 @@ impl Storage for CloudKitStorage {
             }
             CloudKitUploadStatus::Uploading { confirmed } => {
                 if confirmed < session.confirmed || confirmed > session.total {
-                    return Err(StorageError::Protocol("CloudKit lost confirmed parts"));
+                    return Err(
+                        StorageFailure::Protocol.with_source("CloudKit lost confirmed parts")
+                    );
                 }
                 session.confirmed = confirmed;
             }
@@ -318,7 +320,7 @@ impl Storage for CloudKitStorage {
             return Ok(());
         }
         if session.confirmed != session.total {
-            return Err(StorageError::InvalidPart);
+            return Err(StorageFailure::InvalidPart.into());
         }
         self.ops
             .finish_upload(&self.config, self.id(session)?)
@@ -332,7 +334,14 @@ impl Storage for CloudKitStorage {
             return Ok(());
         }
         match self.ops.abort_upload(&self.config, self.id(session)?).await {
-            Err(error) if error.failure() == StorageFailure::NotFound => Ok(()),
+            Err(error)
+                if matches!(
+                    error.failure(),
+                    StorageFailure::NotFound | StorageFailure::SessionExpired
+                ) =>
+            {
+                Ok(())
+            }
             result => result,
         }
     }

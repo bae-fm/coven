@@ -7,7 +7,8 @@ use coven_database::Database;
 use coven_format::codes::{InviteCode, RestoreCode};
 use coven_foundation::files::{BootstrapDirectoryError, BootstrapStore, StoreFile};
 use coven_storage::{
-    ConnectionCredentials, InviteStorage, RestoreStorage, StorageCredentials, StorageSettings,
+    ConnectionCredentials, InviteStorage, RestoreStorage, StorageCredentials, StorageFailure,
+    StorageSettings,
 };
 use coven_sync::{JoiningIdentity, StoreLogSync};
 use std::{sync::Arc, time::Duration};
@@ -89,7 +90,7 @@ pub async fn restore_from_code(
         cancel,
     )
     .await?
-    .ok_or_else(|| SyncError::MissingMemberKeys.into())
+    .ok_or_else(|| SyncError::from(StorageFailure::MemberKeysMissing).into())
 }
 
 /// Restore from the one discoverable iCloud code. Multiple stores require the
@@ -304,7 +305,7 @@ async fn prepare_and_load(
     let storage = match &builder.storage {
         Some(storage) => {
             if storage.config() != data.location {
-                return Err(SyncError::Storage(StorageError::InvitationMismatch).into());
+                return Err(SyncError::from(StorageFailure::InvitationMismatch).into());
             }
             if let StorageCredentials::OAuth(tokens) = &data.credentials {
                 storage
@@ -391,7 +392,9 @@ async fn prepare_and_load(
         if !loaded {
             return Ok(None);
         }
-        let ring = ring.unlock()?.ok_or(SyncError::MissingMemberKeys)?;
+        let ring = ring
+            .unlock()?
+            .ok_or(SyncError::from(StorageFailure::MemberKeysMissing))?;
         Ok(Some((
             RestoreCode {
                 store: settings.id,

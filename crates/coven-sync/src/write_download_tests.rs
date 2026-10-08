@@ -406,7 +406,7 @@ async fn retention_waits_for_store_log_entries() {
         devices[1].log.run_retention().await.unwrap();
         assert!(matches!(
             storage.read(&unused).await,
-            Err(coven_storage::StorageError::NotFound)
+            Err(error) if error.failure() == coven_storage::StorageFailure::NotFound
         ));
     }
 }

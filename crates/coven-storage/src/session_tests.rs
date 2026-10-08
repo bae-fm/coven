@@ -49,7 +49,7 @@ fn recorded_upload_refuses_positions_even_when_complete() {
         let bytes = serde_json::to_vec(&session).unwrap();
         assert!(matches!(
             UploadSession::decode(&bytes),
-            Err(StorageError::InvalidPath)
+            Err(error) if error.failure() == StorageFailure::InvalidPath
         ));
     }
 }
@@ -294,6 +294,6 @@ fn completed_and_verifying_recordings_still_obey_their_provider() {
         session.check(&StorageConfig::Dropbox {
             namespace_id: "another".into()
         }),
-        Err(StorageError::SessionMismatch)
+        Err(error) if error.failure() == StorageFailure::SessionMismatch
     ));
 }

@@ -48,7 +48,7 @@ impl StoreLogSync {
                     .as_ref()
                     .is_some_and(|storage| storage.config() != next.location)
                 {
-                    return Err(coven_storage::StorageError::InvitationMismatch.into());
+                    return Err(coven_storage::StorageFailure::InvitationMismatch.into());
                 }
                 let rollback = commit()?;
                 if let Some(storage) = &self.storage {
@@ -428,7 +428,7 @@ impl StoreLogSync {
     pub(super) fn operation_member(&self) -> Result<MemberKeys, SyncError> {
         self.member_keys
             .unlock()?
-            .ok_or(SyncError::MissingMemberKeys)
+            .ok_or_else(|| coven_storage::StorageFailure::MemberKeysMissing.into())
     }
 
     pub(super) fn check_removal(

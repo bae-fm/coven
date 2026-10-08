@@ -1,4 +1,4 @@
-use crate::{CloudProvider, StorageConfig, StorageError};
+use crate::{CloudProvider, StorageConfig, StorageError, StorageFailure};
 use coven_crypto::{SecretBytes, SecretText};
 use serde::{Deserialize, Serialize};
 
@@ -45,9 +45,8 @@ impl StorageInvitation {
         let acceptance = match location.provider() {
             CloudProvider::Dropbox => InvitationAcceptance::DropboxMount,
             CloudProvider::CloudKit => {
-                return Err(StorageError::InvalidConfiguration(
-                    "CloudKit requires a share URL",
-                ))
+                return Err(StorageFailure::InvalidConfiguration
+                    .with_source("CloudKit requires a share URL"))
             }
             _ => InvitationAcceptance::Granted,
         };
@@ -67,23 +66,20 @@ impl StorageInvitation {
             (CloudProvider::OneDrive, InvitationAcceptance::OneDriveShare { token })
                 if !token.as_str().is_empty() => {}
             (CloudProvider::CloudKit, InvitationAcceptance::CloudKitShare { url }) => {
-                let url = url::Url::parse(url.as_str()).map_err(|_| {
-                    StorageError::InvalidConfiguration("invalid CloudKit share URL")
-                })?;
+                let url = url::Url::parse(url.as_str())
+                    .map_err(|error| StorageFailure::InvalidConfiguration.with_source(error))?;
                 if url.scheme() != "https"
                     || url.host_str().is_none()
                     || !url.username().is_empty()
                     || url.password().is_some()
                 {
-                    return Err(StorageError::InvalidConfiguration(
-                        "invalid CloudKit share URL",
-                    ));
+                    return Err(StorageFailure::InvalidConfiguration
+                        .with_source("invalid CloudKit share URL"));
                 }
             }
             _ => {
-                return Err(StorageError::InvalidConfiguration(
-                    "invitation does not match its provider",
-                ))
+                return Err(StorageFailure::InvalidConfiguration
+                    .with_source("invitation does not match its provider"))
             }
         }
         Ok(Self {
@@ -101,11 +97,11 @@ impl StorageInvitation {
     }
     /// Decode and validate an invitation after the facade opens its enclosing code.
     pub fn decode(bytes: &[u8]) -> Result<Self, StorageError> {
-        serde_json::from_slice(bytes).map_err(|error| StorageError::Encoding(Box::new(error)))
+        serde_json::from_slice(bytes).map_err(|error| StorageFailure::Encoding.with_source(error))
     }
     pub(crate) fn check(&self, location: &StorageConfig) -> Result<(), StorageError> {
         if &self.location != location {
-            return Err(StorageError::InvitationMismatch);
+            return Err(StorageFailure::InvitationMismatch.into());
         }
         Ok(())
     }

@@ -1,4 +1,4 @@
-use crate::{CloudProvider, ObjectPath, StorageConfig, StorageError};
+use crate::{CloudProvider, ObjectPath, StorageConfig, StorageError, StorageFailure};
 use coven_crypto::SecretBytes;
 use coven_crypto::SecretText;
 use serde::{Deserialize, Serialize};
@@ -139,20 +139,20 @@ impl UploadSession {
     /// The adapter also checks that it names the adapter's location before any request.
     pub fn decode(bytes: &[u8]) -> Result<Self, StorageError> {
         let value: RecordedUploadSession = serde_json::from_slice(bytes)
-            .map_err(|error| StorageError::Encoding(Box::new(error)))?;
+            .map_err(|error| StorageFailure::Encoding.with_source(error))?;
         value.try_into()
     }
     fn validate(&self) -> Result<(), StorageError> {
         self.location.validate()?;
         if self.path.is_replaceable() {
-            return Err(StorageError::InvalidPath);
+            return Err(StorageFailure::InvalidPath.into());
         }
         if self.part_size == 0
             || self.total == 0
             || self.confirmed > self.total
             || (self.is_complete() && self.confirmed != self.total)
         {
-            return Err(StorageError::InvalidPart);
+            return Err(StorageFailure::InvalidPart.into());
         }
         let provider = self.location.provider();
         match &self.state {
@@ -160,24 +160,24 @@ impl UploadSession {
                 nonempty(id)?;
                 nonempty(token)?;
                 if parts.len() > 10_000 {
-                    return Err(StorageError::InvalidPart);
+                    return Err(StorageFailure::InvalidPart.into());
                 }
                 let mut confirmed = 0u64;
                 for (index, part) in parts.iter().enumerate() {
                     confirmed = confirmed
                         .checked_add(part.size)
-                        .ok_or(StorageError::InvalidPart)?;
+                        .ok_or(StorageFailure::InvalidPart)?;
                     if part.number != index as i32 + 1
                         || part.etag.is_empty()
                         || part.size == 0
                         || part.size > self.part_size as u64
                         || (part.size != self.part_size as u64 && confirmed != self.total)
                     {
-                        return Err(StorageError::InvalidPart);
+                        return Err(StorageFailure::InvalidPart.into());
                     }
                 }
                 if confirmed != self.confirmed {
-                    return Err(StorageError::InvalidPart);
+                    return Err(StorageFailure::InvalidPart.into());
                 }
             }
             SessionState::GoogleDrive { url, file_id }
@@ -195,7 +195,7 @@ impl UploadSession {
                 if matches!(provider, CloudProvider::Dropbox | CloudProvider::OneDrive) =>
             {
                 if self.confirmed == self.total {
-                    return Err(StorageError::InvalidPart);
+                    return Err(StorageFailure::InvalidPart.into());
                 }
             }
             SessionState::Complete => {}
@@ -204,10 +204,10 @@ impl UploadSession {
                 return if *id != 0 {
                     Ok(())
                 } else {
-                    Err(StorageError::InvalidPart)
+                    Err(StorageFailure::InvalidPart.into())
                 };
             }
-            _ => return Err(StorageError::SessionMismatch),
+            _ => return Err(StorageFailure::SessionMismatch.into()),
         }
         let valid_size = match provider {
             CloudProvider::S3 => self.part_size == s3_part_size(self.total)?,
@@ -217,14 +217,14 @@ impl UploadSession {
             CloudProvider::CloudKit => true,
         };
         if !valid_size {
-            return Err(StorageError::InvalidPart);
+            return Err(StorageFailure::InvalidPart.into());
         }
         Ok(())
     }
     pub(crate) fn check(&self, location: &StorageConfig) -> Result<(), StorageError> {
         self.validate()?;
         if &self.location != location {
-            return Err(StorageError::SessionMismatch);
+            return Err(StorageFailure::SessionMismatch.into());
         }
         Ok(())
     }
@@ -232,14 +232,14 @@ impl UploadSession {
         let end = self
             .confirmed
             .checked_add(len as u64)
-            .ok_or(StorageError::InvalidPart)?;
+            .ok_or(StorageFailure::InvalidPart)?;
         if self.is_complete()
             || len == 0
             || len > self.part_size
             || end > self.total
             || (end != self.total && end % self.part_size as u64 != 0)
         {
-            return Err(StorageError::InvalidPart);
+            return Err(StorageFailure::InvalidPart.into());
         }
         Ok(end)
     }
@@ -248,26 +248,27 @@ impl UploadSession {
 pub(crate) fn s3_part_size(total: u64) -> Result<usize, StorageError> {
     let unit = 8 * 1024 * 1024;
     if total == 0 || total > 10_000 * 5 * 1024u64.pow(3) {
-        return Err(StorageError::InvalidPart);
+        return Err(StorageFailure::InvalidPart.into());
     }
     usize::try_from(total.div_ceil(10_000).div_ceil(unit) * unit)
-        .map_err(|_| StorageError::InvalidPart)
+        .map_err(|error| StorageFailure::InvalidPart.with_source(error))
 }
 fn nonempty(id: &SecretText) -> Result<(), StorageError> {
     if id.as_str().is_empty() {
-        return Err(StorageError::SessionMismatch);
+        return Err(StorageFailure::SessionMismatch.into());
     }
     Ok(())
 }
 fn transfer_url(value: &SecretText) -> Result<(), StorageError> {
-    let url = url::Url::parse(value.as_str()).map_err(|_| StorageError::SessionMismatch)?;
+    let url = url::Url::parse(value.as_str())
+        .map_err(|error| StorageFailure::SessionMismatch.with_source(error))?;
     if !matches!(url.scheme(), "https" | "http")
         || url.host_str().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
         || url.fragment().is_some()
     {
-        return Err(StorageError::SessionMismatch);
+        return Err(StorageFailure::SessionMismatch.into());
     }
     Ok(())
 }

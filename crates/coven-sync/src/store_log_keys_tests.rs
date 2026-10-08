@@ -35,11 +35,11 @@ impl Storage for CopyStorage {
             };
             match &self.action {
                 CopyAttempt::InterruptOnce if first => {
-                    return Err(StorageError::Injected(StorageFailure::Network))
+                    return Err(StorageError::Failure(StorageFailure::Network))
                 }
                 CopyAttempt::LoseReplyOnce if first => {
                     self.storage.create(path, bytes).await?;
-                    return Err(StorageError::Injected(StorageFailure::Network));
+                    return Err(StorageError::Failure(StorageFailure::Network));
                 }
                 CopyAttempt::Race(barrier) => {
                     barrier.wait().await;
@@ -187,7 +187,7 @@ async fn dropped_store_removal_key_lets_the_excluded_member_read_later_entries()
         .is_ok());
     assert!(matches!(
         storage.read(&excluded).await,
-        Err(StorageError::NotFound)
+        Err(error) if error.failure() == StorageFailure::NotFound
     ));
 }
 
@@ -216,7 +216,7 @@ async fn a_missing_or_damaged_holder_copy_waits_and_a_later_copy_enables_sharing
         ));
         assert!(matches!(
             storage.read(&recipient).await,
-            Err(StorageError::NotFound)
+            Err(error) if error.failure() == StorageFailure::NotFound
         ));
         storage.delete(&holder).await.unwrap();
         storage.create(&holder, &original).await.unwrap();
@@ -464,7 +464,7 @@ async fn dropped_circle_removals_share_only_with_the_latest_circle_members() {
         );
         assert!(matches!(
             storage.read(&excluded).await,
-            Err(StorageError::NotFound)
+            Err(error) if error.failure() == StorageFailure::NotFound
         ));
         assert_eq!(
             storage
@@ -485,7 +485,7 @@ async fn dropped_circle_removals_share_only_with_the_latest_circle_members() {
         storage.delete(&missing).await.unwrap();
         ana.sync().await;
         assert!(
-            matches!(storage.read(&missing).await, Err(StorageError::NotFound)),
+            matches!(storage.read(&missing).await, Err(error) if error.failure() == StorageFailure::NotFound),
             "deleted circles have no audience for redistribution"
         );
     }

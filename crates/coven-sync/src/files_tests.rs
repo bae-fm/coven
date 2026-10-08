@@ -198,23 +198,19 @@ async fn ranges_authenticate_cache_batch_and_fail_offline() {
     let ranges = f.storage.ranges().await;
     assert!(ranges.iter().all(|range| range.len() <= 1024 * 1024));
     assert_eq!(ranges.len(), 4); // 15 chunks, then ten chunks.
-    f.storage
-        .set_faults(coven_storage::test_utils::Faults {
-            fail_next: 100,
-            ..coven_storage::test_utils::Faults::none()
-        })
-        .await;
-    assert!(matches!(
-        stream.read_at(0, 1).await,
-        Err(FileReadError::Offline { .. })
-    ));
+    f.storage.set_online(false);
+    let Err(FileReadError::Storage(error)) = stream.read_at(0, 1).await else {
+        panic!("read discarded the storage failure")
+    };
+    assert_eq!(error.failure(), coven_storage::StorageFailure::Network);
+    assert!(std::error::Error::source(&error)
+        .unwrap()
+        .is::<std::io::Error>());
     assert_eq!(
         stream.read_at(CHUNK as u64 * 4, 1).await.unwrap(),
         bytes[CHUNK * 4..CHUNK * 4 + 1]
     );
-    f.storage
-        .set_faults(coven_storage::test_utils::Faults::none())
-        .await;
+    f.storage.set_online(true);
     let uploaded = file.uploaded().unwrap().unwrap();
     let path = coven_storage::ObjectPath::file(uploaded.device, uploaded.id);
     f.storage

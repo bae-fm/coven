@@ -28,11 +28,52 @@ pub enum StorageFailure {
     Refused,
     /// The response or recorded session is malformed.
     Protocol,
+    /// An object path is outside the store's layout.
+    InvalidPath,
+    /// A range is empty, reversed or beyond the object's end.
+    InvalidRange,
+    /// Only the account holding the store may change its sharing.
+    NotStoreOwner,
+    /// Dropbox cannot upgrade a pending viewer without the recipient's account id.
+    AccountIdUnavailable,
+    /// The invite belongs to another provider location.
+    InvitationMismatch,
+    /// The session belongs to another provider or location.
+    SessionMismatch,
+    /// The provider no longer retains the recorded upload.
+    SessionExpired,
+    /// A part disagrees with the session's offset, size or alignment.
+    InvalidPart,
+    /// A posted-positions replacement exceeds this provider's single-request limit.
+    SingleRequestTooLarge {
+        /// Encrypted body length in bytes.
+        size: u64,
+        /// The adapter's single-request limit in bytes.
+        limit: u64,
+    },
+    /// Parsing recorded provider data failed.
+    Encoding,
+    /// Persisting provider settings failed.
+    File,
+    /// This installation has no member keys in custody.
+    MemberKeysMissing,
 }
 
 /// A storage error preserves its cause without converting it into text.
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
+    /// A classified failure with no underlying native error.
+    #[error("{0:?}")]
+    Failure(StorageFailure),
+    /// A classified local failure with its diagnostic or native cause.
+    #[error("{failure:?}: {source}")]
+    Caused {
+        /// The failure the app can act on.
+        failure: StorageFailure,
+        /// The diagnostic or original error.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     /// A provider failure, classified for the app, with its original cause.
     #[error("{provider:?}: {failure:?}: {source}")]
     Provider {
@@ -44,60 +85,6 @@ pub enum StorageError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    /// Invalid location settings.
-    #[error("invalid storage configuration: {0}")]
-    InvalidConfiguration(&'static str),
-    /// An object path is outside the store's layout.
-    #[error("invalid storage path")]
-    InvalidPath,
-    /// A range is empty, reversed or beyond the object's end.
-    #[error("invalid byte range")]
-    InvalidRange,
-    /// An object does not exist.
-    #[error("object not found")]
-    NotFound,
-    /// The path already holds an object; creation never replaces it.
-    #[error("object already exists")]
-    AlreadyExists,
-    /// Only the account holding the store may change its sharing.
-    #[error("sharing requires the store owner's account")]
-    NotStoreOwner,
-    /// Dropbox cannot upgrade a pending viewer without the recipient's account id.
-    #[error("the provider has not supplied the account id needed to upgrade this invitation")]
-    AccountIdUnavailable,
-    /// The invite belongs to another provider location.
-    #[error("invitation belongs to another location")]
-    InvitationMismatch,
-    /// The session belongs to another provider or location.
-    #[error("upload session belongs to another location")]
-    SessionMismatch,
-    /// The provider no longer retains the recorded upload.
-    #[error("upload session expired")]
-    SessionExpired,
-    /// A part disagrees with the session's offset, size or alignment.
-    #[error("invalid upload part")]
-    InvalidPart,
-    /// A posted-positions replacement exceeds this provider's single-request limit.
-    #[error("object of {size} bytes exceeds the single-request limit of {limit}")]
-    SingleRequestTooLarge {
-        /// Encrypted body length in bytes.
-        size: u64,
-        /// The adapter's single-request limit in bytes.
-        limit: u64,
-    },
-    /// A response violates the provider's protocol.
-    #[error("invalid provider response: {0}")]
-    Protocol(&'static str),
-    /// Parsing recorded data failed.
-    #[error("invalid storage data: {0}")]
-    Encoding(#[source] Box<dyn std::error::Error + Send + Sync>),
-    /// Persisting provider settings failed.
-    #[error("storage settings: {0}")]
-    File(#[from] coven_foundation::files::FileError),
-    /// A test injected this classified failure.
-    #[cfg(any(test, feature = "test-utils"))]
-    #[error("injected storage failure: {0:?}")]
-    Injected(StorageFailure),
     /// Cleanup failed too; neither cause is hidden.
     #[error("{operation}; cleanup also failed: {cleanup}")]
     Cleanup {
@@ -114,23 +101,8 @@ impl StorageError {
     pub fn failure(&self) -> StorageFailure {
         match self {
             Self::Provider { failure, .. } => *failure,
-            Self::InvalidConfiguration(_)
-            | Self::InvalidPath
-            | Self::InvalidRange
-            | Self::InvalidPart
-            | Self::SingleRequestTooLarge { .. } => StorageFailure::InvalidConfiguration,
-            Self::NotFound | Self::SessionExpired => StorageFailure::NotFound,
-            Self::AlreadyExists => StorageFailure::AlreadyExists,
-            Self::NotStoreOwner => StorageFailure::PermissionDenied,
-            Self::AccountIdUnavailable => StorageFailure::Refused,
-            Self::InvitationMismatch
-            | Self::SessionMismatch
-            | Self::Protocol(_)
-            | Self::Encoding(_)
-            | Self::File(_) => StorageFailure::Protocol,
+            Self::Failure(failure) | Self::Caused { failure, .. } => *failure,
             Self::Cleanup { operation, .. } => operation.failure(),
-            #[cfg(any(test, feature = "test-utils"))]
-            Self::Injected(failure) => *failure,
         }
     }
 
@@ -160,40 +132,6 @@ pub enum StorageCheck {
     Delete,
 }
 
-/// Setup failures shown by the app (E5).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StorageSetupFailure {
-    /// A provider check failed before setup could commit.
-    ProviderCheck {
-        /// The operation that failed.
-        check: StorageCheck,
-        /// The classified cause; contract violations are `Protocol`.
-        failure: StorageFailure,
-    },
-    /// Provider credentials were refused.
-    Authentication,
-    /// The account cannot use this location.
-    PermissionDenied,
-    /// The bucket, folder or zone is missing.
-    ContainerNotFound,
-    /// The configured S3 region is wrong.
-    RegionMismatch,
-    /// Storage has no room left.
-    QuotaExceeded,
-    /// Location settings are invalid.
-    InvalidConfiguration,
-    /// The location holds another store.
-    LocationOccupied,
-    /// The provider cannot be reached.
-    Network,
-    /// The member's keys are absent.
-    MemberKeysMissing,
-    /// Key custody could not commit credentials or keys.
-    SecureStorage,
-    /// Another failure, with its cause in the setup error.
-    Internal,
-}
-
 /// A failed setup commits no local storage settings or credentials.
 #[derive(Debug, thiserror::Error)]
 pub enum StorageSetupError {
@@ -215,9 +153,6 @@ pub enum StorageSetupError {
     /// Sign-in failed or was cancelled before setup could connect.
     #[error(transparent)]
     OAuth(#[from] OAuthError),
-    /// The member's keys have not been created or restored.
-    #[error("member keys are missing")]
-    MemberKeysMissing,
     /// The facade could not commit to key custody.
     #[error("secure storage: {0}")]
     SecureStorage(#[from] KeyError),
@@ -226,51 +161,28 @@ pub enum StorageSetupError {
     Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
-impl StorageSetupError {
-    /// The exact setup classification from E5.
-    pub fn failure(&self) -> StorageSetupFailure {
-        use StorageSetupFailure as S;
-        match self {
-            Self::ProviderCheck { check, source } => S::ProviderCheck {
-                check: *check,
-                failure: source.failure(),
-            },
-            Self::LocationOccupied => S::LocationOccupied,
-            Self::MemberKeysMissing => S::MemberKeysMissing,
-            Self::SecureStorage(_) => S::SecureStorage,
-            Self::Internal(_) => S::Internal,
-            Self::OAuth(error) => match error {
-                OAuthError::Unavailable(_) | OAuthError::InvalidRedirect => S::InvalidConfiguration,
-                OAuthError::StateMismatch
-                | OAuthError::Denied
-                | OAuthError::MissingCode
-                | OAuthError::Cancelled
-                | OAuthError::Timeout
-                | OAuthError::Expired
-                | OAuthError::Reauthorize(_) => S::Authentication,
-                OAuthError::InvalidExpiry | OAuthError::Io(_) | OAuthError::Presentation(_) => {
-                    S::Internal
-                }
-                OAuthError::Storage(error) => Self::storage_failure(error),
-            },
-            Self::Storage(error) => Self::storage_failure(error),
+impl StorageFailure {
+    /// Retain the diagnostic or native cause alongside this classification.
+    pub fn with_source(
+        self,
+        source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+    ) -> StorageError {
+        StorageError::Caused {
+            failure: self,
+            source: source.into(),
         }
     }
+}
 
-    fn storage_failure(error: &StorageError) -> StorageSetupFailure {
-        use StorageFailure as F;
-        use StorageSetupFailure as S;
-        match error.failure() {
-            F::Authentication => S::Authentication,
-            F::PermissionDenied | F::Refused => S::PermissionDenied,
-            F::ContainerNotFound | F::NotFound => S::ContainerNotFound,
-            F::RegionMismatch => S::RegionMismatch,
-            F::QuotaExceeded => S::QuotaExceeded,
-            F::InvalidConfiguration => S::InvalidConfiguration,
-            F::AlreadyExists => S::LocationOccupied,
-            F::Network | F::RateLimited => S::Network,
-            F::Protocol => S::Internal,
-        }
+impl From<StorageFailure> for StorageError {
+    fn from(failure: StorageFailure) -> Self {
+        Self::Failure(failure)
+    }
+}
+
+impl From<coven_foundation::files::FileError> for StorageError {
+    fn from(error: coven_foundation::files::FileError) -> Self {
+        StorageFailure::File.with_source(error)
     }
 }
 
@@ -279,7 +191,7 @@ impl StorageSetupError {
 mod tests;
 
 impl From<coven_format::path::PathError> for StorageError {
-    fn from(_: coven_format::path::PathError) -> Self {
-        Self::InvalidPath
+    fn from(error: coven_format::path::PathError) -> Self {
+        StorageFailure::InvalidPath.with_source(error)
     }
 }

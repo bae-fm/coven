@@ -1,5 +1,5 @@
 use super::http;
-use crate::{RetainedAccess, RetainedAccessReason, StorageError};
+use crate::{RetainedAccess, RetainedAccessReason, StorageError, StorageFailure};
 use serde_json::{json, Value};
 
 pub(super) enum MemberId {
@@ -48,7 +48,7 @@ impl FolderMembers {
         for member in http::array(value, "invitees")? {
             let invitee = &member["invitee"];
             if http::string(invitee, ".tag")? != "email" {
-                return Err(StorageError::Protocol("unknown Dropbox invitee"));
+                return Err(StorageFailure::Protocol.with_source("unknown Dropbox invitee"));
             }
             let invited_email = http::string(invitee, "email")?;
             let user = member.get("user");
@@ -81,7 +81,7 @@ impl FolderMembers {
     ) -> Result<(), StorageError> {
         let role = http::string(&member["access_type"], ".tag")?;
         if !matches!(role, "owner" | "editor" | "viewer" | "viewer_no_comment") {
-            return Err(StorageError::Protocol("unexpected Dropbox account access"));
+            return Err(StorageFailure::Protocol.with_source("unexpected Dropbox account access"));
         }
         let reason = if role == "owner" {
             Some(RetainedAccessReason::StoreOwner)
@@ -109,7 +109,7 @@ pub(super) fn remaining_parent_access(
     member: &MemberId,
 ) -> Result<Vec<RetainedAccess>, StorageError> {
     if !value.is_object() {
-        return Err(StorageError::Protocol("Dropbox omitted removal result"));
+        return Err(StorageFailure::Protocol.with_source("Dropbox omitted removal result"));
     }
     let Some(level) = value.get("access_level") else {
         return Ok(Vec::new());
@@ -119,7 +119,7 @@ pub(super) fn remaining_parent_access(
     if let Some(details) = value.get("access_details") {
         for parent in details
             .as_array()
-            .ok_or(StorageError::Protocol("invalid Dropbox parent access"))?
+            .ok_or(StorageFailure::Protocol.with_source("invalid Dropbox parent access"))?
         {
             retained.push(RetainedAccess {
                 provider_id: http::string(parent, "shared_folder_id")?.into(),

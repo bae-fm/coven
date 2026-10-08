@@ -83,7 +83,7 @@ async fn copy_object(
                 .await?;
             destination.upload_part(&mut session, &bytes).await?;
             if session.confirmed_bytes() <= start {
-                return Err(StorageError::Protocol("copy did not advance"));
+                return Err(StorageFailure::Protocol.with_source("copy did not advance"));
             }
         }
         destination.finish_upload(&mut session).await

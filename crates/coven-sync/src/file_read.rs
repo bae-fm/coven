@@ -11,7 +11,7 @@ use coven_format::{
     file::{FileHeader, FILE_HEADER_LEN},
 };
 use coven_foundation::files::{FileArea, FileName, StoreReadLock};
-use coven_storage::{ByteRange, ObjectPath, StorageFailure};
+use coven_storage::{ByteRange, ObjectPath};
 use std::sync::Arc;
 
 const REQUEST_BYTES: u64 = 1024 * 1024;
@@ -474,14 +474,7 @@ async fn fetch(
         .ok_or(FileReadError::NoStorage)?;
     let bytes = storage
         .read_range(path, ByteRange::new(start, end)?)
-        .await
-        .map_err(|error| {
-            if error.failure() == StorageFailure::Network {
-                FileReadError::Offline { id: file.id() }
-            } else {
-                FileReadError::Storage(error)
-            }
-        })?;
+        .await?;
     if bytes.len() as u64 != end - start {
         return Err(FileReadError::Integrity { id: file.id() });
     }

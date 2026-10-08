@@ -26,7 +26,7 @@ fn settings_use_the_reserved_atomic_file_and_refuse_corrupt_values() {
     file.replace(br#"{"Dropbox":{"namespace_id":"","secret_access_key":"forbidden"}}"#)
         .unwrap();
     let error = settings.read().unwrap_err();
-    assert!(matches!(error, StorageError::Encoding(_)));
+    assert_eq!(error.failure(), StorageFailure::Encoding);
     assert!(error.source().unwrap().is::<serde_json::Error>());
     settings.remove().unwrap();
     assert_eq!(settings.read().unwrap(), None);

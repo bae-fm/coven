@@ -362,7 +362,7 @@ async fn lost_completion_requires_byte_verification() {
     assert_eq!(upload.confirmed_bytes(), 0);
     assert!(matches!(
         storage.upload_part(&mut upload, b"else").await,
-        Err(StorageError::AlreadyExists)
+        Err(error) if error.failure() == StorageFailure::AlreadyExists
     ));
     assert_eq!(upload.confirmed_bytes(), 0);
     let mut upload = UploadSession::decode(upload.encode().unwrap().as_bytes()).unwrap();
@@ -395,10 +395,9 @@ async fn missing_session_and_destination_is_expired() {
     );
     let mut upload = storage.begin_upload(&path, 4).await.unwrap();
     state.lock().unwrap().uploads.clear();
-    assert!(matches!(
-        storage.resume_upload(&mut upload).await,
-        Err(StorageError::SessionExpired)
-    ));
+    let error = storage.resume_upload(&mut upload).await.unwrap_err();
+    assert_eq!(error.failure(), StorageFailure::SessionExpired);
+    assert!(std::error::Error::source(&error).is_some());
     let replacement = storage.restart_upload(&upload).await.unwrap();
     assert_eq!(replacement.path(), &path);
     assert_eq!(replacement.total_bytes(), b"data".len() as u64);
@@ -587,10 +586,10 @@ async fn setup_refuses_unrelated_empty_folders_and_accepts_its_own_parents() {
         "/files/31/00000000-0000-0000-0000-000000000000",
     ] {
         state.lock().unwrap().folders = [folder.into()].into();
-        assert_eq!(
-            storage.setup(&first, b"first").await.unwrap_err().failure(),
-            StorageSetupFailure::LocationOccupied
-        );
+        assert!(matches!(
+            storage.setup(&first, b"first").await.unwrap_err(),
+            StorageSetupError::LocationOccupied
+        ));
         assert!(state.lock().unwrap().objects.is_empty());
     }
     state.lock().unwrap().folders = ["/store-log".into(), "/store-log/31".into()].into();
@@ -802,7 +801,7 @@ async fn recipient_join_mounts_the_invited_namespace_and_retries_a_lost_reply() 
     .unwrap();
     assert!(matches!(
         recipient.join(&elsewhere).await,
-        Err(StorageError::InvitationMismatch)
+        Err(error) if error.failure() == StorageFailure::InvitationMismatch
     ));
     assert_eq!(state.lock().unwrap().mount_requests, 0);
     state.lock().unwrap().lose_mount_reply = true;

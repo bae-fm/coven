@@ -370,7 +370,9 @@ impl OpeningStore {
             .identity
             .unlock()
             .map_err(CovenError::from)?
-            .ok_or(SyncError::MissingMemberKeys)?;
+            .ok_or(SyncError::from(
+                coven_storage::StorageFailure::MemberKeysMissing,
+            ))?;
         storage
             .list(&ObjectPrefix::all())
             .await

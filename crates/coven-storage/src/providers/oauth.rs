@@ -1,5 +1,5 @@
 use super::http;
-use crate::{CloudProvider, OAuthTokens, StorageError};
+use crate::{CloudProvider, OAuthTokens, StorageError, StorageFailure};
 use coven_crypto::{SecretBytes, SecretText};
 use coven_foundation::clock::ClockRef;
 use oauth2::{CsrfToken, PkceCodeChallenge};
@@ -317,11 +317,13 @@ impl OAuthClients {
             token_type: String,
         }
         let tokens: Tokens = serde_json::from_slice(bytes.as_bytes())
-            .map_err(|error| StorageError::Encoding(Box::new(error)))?;
+            .map_err(|error| StorageFailure::Encoding.with_source(error))?;
         if tokens.access_token.as_str().is_empty()
             || !tokens.token_type.eq_ignore_ascii_case("bearer")
         {
-            return Err(StorageError::Protocol("invalid OAuth token response").into());
+            return Err(StorageFailure::Protocol
+                .with_source("invalid OAuth token response")
+                .into());
         }
         let expires_at = tokens
             .expires_in

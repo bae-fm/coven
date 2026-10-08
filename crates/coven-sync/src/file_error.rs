@@ -14,12 +14,6 @@ pub enum FileReadError {
     /// This file uses a newer coven format (§17.2).
     #[error("an update is required to read this file")]
     UpdateRequired,
-    /// Required bytes are uncached and the network is unavailable.
-    #[error("file {id} is unavailable offline")]
-    Offline {
-        /// The row's file id.
-        id: String,
-    },
     /// No storage capability is connected.
     #[error("no storage connected")]
     NoStorage,
@@ -74,7 +68,7 @@ pub enum FileReadError {
     /// The store cannot be retained while opening its file.
     #[error(transparent)]
     Lock(#[from] StoreLockError),
-    /// A provider failure other than an unavailable network.
+    /// A provider failure, retaining its classification and native cause.
     #[error(transparent)]
     Storage(#[from] StorageError),
 }
@@ -177,3 +171,7 @@ impl From<LocalFileError> for UploadFailure {
         Self::File(error.into())
     }
 }
+
+#[cfg(test)]
+#[path = "file_error_tests.rs"]
+mod tests;

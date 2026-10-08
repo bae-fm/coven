@@ -90,7 +90,7 @@ pub(super) async fn range(
         .read_range(path, ByteRange::new(offset, end)?)
         .await
         .map_err(|error| match error {
-            coven_storage::StorageError::InvalidRange => {
+            error if error.failure() == coven_storage::StorageFailure::InvalidRange => {
                 SyncError::Format(coven_format::Error::Truncated)
             }
             error => SyncError::Storage(error),

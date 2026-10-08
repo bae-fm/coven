@@ -82,7 +82,7 @@ impl StoreLogSync {
             let object = objects
                 .iter()
                 .find(|object| object.path == path)
-                .ok_or(coven_storage::StorageError::NotFound)?;
+                .ok_or(coven_storage::StorageFailure::NotFound)?;
             let candidate = self.snapshot_prefix(object, log).await?;
             let clear = candidate.prefix.encode()?;
             saved.push(SavedBoundary {

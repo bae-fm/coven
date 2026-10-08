@@ -321,7 +321,7 @@ async fn dropped_removal_parts(
     let copy = crate::store_log_keys::path(&audience, dropped_key, &identity(4).member_id());
     assert!(matches!(
         storage.read(&copy).await,
-        Err(coven_storage::StorageError::NotFound)
+        Err(error) if error.failure() == coven_storage::StorageFailure::NotFound
     ));
     if ben_reads_before_copy {
         ben.log.sync_store_log().await.unwrap();
@@ -416,7 +416,7 @@ async fn retention_waits_for_key_copies_without_failing() {
         devices[reader].log.run_retention().await.unwrap();
         assert!(matches!(
             storage.read(&unused).await,
-            Err(coven_storage::StorageError::NotFound)
+            Err(error) if error.failure() == coven_storage::StorageFailure::NotFound
         ));
     }
     assert!(

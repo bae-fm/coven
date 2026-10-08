@@ -87,7 +87,7 @@ async fn approve_seals_store_history_and_removes_the_request() {
     assert!(a.sync.current_join_requests().await.unwrap().is_empty());
     assert!(matches!(
         storage.read(&ObjectPath::join_request(invite.id)).await,
-        Err(StorageError::NotFound)
+        Err(error) if error.failure() == StorageFailure::NotFound
     ));
     for key in expected {
         let path = ObjectPath::store_key(key, &keys.member_id());
@@ -137,7 +137,7 @@ async fn decline_cancel_and_expiry_take_access_back() {
         assert!(joining.list(&ObjectPrefix::store_logs()).await.is_err());
         assert!(matches!(
             storage.read(&ObjectPath::join_request(invite.id)).await,
-            Err(StorageError::NotFound)
+            Err(error) if error.failure() == StorageFailure::NotFound
         ));
         assert!(!a
             .log()
@@ -315,7 +315,7 @@ async fn failed_join_request_still_expires_and_live_requests_are_delivered() {
     assert!(joining.list(&ObjectPrefix::store_logs()).await.is_err());
     assert!(matches!(
         storage.read(&ObjectPath::join_request(invite.id)).await,
-        Err(StorageError::NotFound)
+        Err(error) if error.failure() == StorageFailure::NotFound
     ));
     operations.close().await.unwrap();
 }

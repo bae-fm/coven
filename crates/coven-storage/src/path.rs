@@ -1,4 +1,4 @@
-use crate::StorageError;
+use crate::{StorageError, StorageFailure};
 
 pub use coven_format::path::*;
 
@@ -17,7 +17,7 @@ fn segment(part: &str) -> Result<(), StorageError> {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b))
     {
-        return Err(StorageError::InvalidPath);
+        return Err(StorageFailure::InvalidPath.into());
     }
     Ok(())
 }

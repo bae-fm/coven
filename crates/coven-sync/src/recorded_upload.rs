@@ -1,6 +1,6 @@
 //! Resumable publication of repeatable bytes shared by files and snapshots.
 
-use coven_storage::{ObjectPath, Storage, StorageError, UploadSession};
+use coven_storage::{ObjectPath, Storage, StorageError, StorageFailure, UploadSession};
 
 /// Repeatable byte reads, durable session progress, and a caller's pause state.
 pub(crate) trait UploadSource: Send {
@@ -29,12 +29,12 @@ pub(crate) async fn upload<S: UploadSource>(
     let mut session = match recorded {
         Some(mut session) => {
             if session.path() != path || session.total_bytes() != total {
-                return Err(StorageError::SessionMismatch.into());
+                return Err(StorageError::from(StorageFailure::SessionMismatch).into());
             }
             if session.is_at(&storage.config()) {
                 match storage.resume_upload(&mut session).await {
                     Ok(()) => (),
-                    Err(StorageError::SessionExpired) => {
+                    Err(error) if error.failure() == StorageFailure::SessionExpired => {
                         session = storage.restart_upload(&session).await?;
                     }
                     Err(error) => return Err(error.into()),
@@ -44,7 +44,9 @@ pub(crate) async fn upload<S: UploadSource>(
                 // belong to the old location. Send the same bytes in a new one.
                 match storage.begin_upload(path, total).await {
                     Ok(replacement) => session = replacement,
-                    Err(StorageError::AlreadyExists) => return Ok(true),
+                    Err(error) if error.failure() == StorageFailure::AlreadyExists => {
+                        return Ok(true)
+                    }
                     Err(error) => return Err(error.into()),
                 }
             }

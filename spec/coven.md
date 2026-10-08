@@ -2192,8 +2192,8 @@ Carol's tablet:
 - While a file is read in order, coven fetches the chunks ahead of the
   reader, so playback doesn't wait on the network.
 - Seeking costs only the chunks under the new position.
-- Reading a range whose chunks aren't cached, while offline, fails with an
-  error of its own, which the app can show.
+- Reading a range whose chunks aren't cached, while offline, returns the
+  storage network failure and its native cause for the app to show or log.
 - Pinning a file ahead of time is how it becomes available offline.
 
 ### 16.4 Cache

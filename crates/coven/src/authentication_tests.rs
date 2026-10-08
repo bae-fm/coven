@@ -180,7 +180,7 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
     ));
     assert!(matches!(
         handle.update_credentials(&code).await,
-        Err(SyncError::Storage(StorageError::InvalidConfiguration(_)))
+        Err(SyncError::Storage(error)) if error.failure() == StorageFailure::InvalidConfiguration
     ));
     handle.close().await.unwrap();
     scoped.delete_synced_restore_code().unwrap();

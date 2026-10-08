@@ -14,7 +14,7 @@ use coven_format::{
 use coven_foundation::id_source::InviteId;
 use coven_storage::{
     AccessGrant, CloudProvider, InviteStorage, MemberRemoval, ObjectPath, S3Credentials,
-    StorageError, StorageInvitation,
+    StorageFailure, StorageInvitation,
 };
 use std::time::Duration;
 
@@ -32,17 +32,21 @@ impl StoreLogSync {
     ) -> Result<Begun, SyncError> {
         self.require_admin(&local.log.replay.state, me)?;
         if !self.owns_storage(&local.log, me) {
-            return Err(StorageError::NotStoreOwner.into());
+            return Err(StorageFailure::NotStoreOwner.into());
         }
         match &access {
             InviteAccess::ProviderAccount { email } if email.trim().is_empty() => {
-                return Err(StorageError::InvalidConfiguration("invite account is empty").into())
+                return Err(StorageFailure::InvalidConfiguration
+                    .with_source("invite account is empty")
+                    .into())
             }
             InviteAccess::S3AccessKey {
                 access_key_id,
                 secret_access_key,
             } if access_key_id.is_empty() || secret_access_key.as_str().is_empty() => {
-                return Err(StorageError::InvalidConfiguration("invite access key is empty").into())
+                return Err(StorageFailure::InvalidConfiguration
+                    .with_source("invite access key is empty")
+                    .into())
             }
             _ => (),
         }
@@ -62,9 +66,10 @@ impl StoreLogSync {
                 .clock
                 .now()
                 .checked_add(Duration::from_secs(86400))
-                .ok_or(StorageError::InvalidConfiguration(
-                    "clock cannot represent invite expiry",
-                ))?,
+                .ok_or(
+                    StorageFailure::InvalidConfiguration
+                        .with_source("clock cannot represent invite expiry"),
+                )?,
             state: InviteState::Grant,
         });
         Ok(Begun::Operation(
@@ -84,7 +89,7 @@ impl StoreLogSync {
     ) -> Result<Begun, SyncError> {
         self.require_admin(&local.log.replay.state, me)?;
         if !self.owns_storage(&local.log, me) {
-            return Err(StorageError::NotStoreOwner.into());
+            return Err(StorageFailure::NotStoreOwner.into());
         }
         for record in self.database.operations().await? {
             let mut data = Data::read(&record)?;
@@ -150,33 +155,30 @@ impl StoreLogSync {
                 let me = self.operation_member()?.member_id();
                 self.require_admin(&local.log.replay.state, &me)?;
                 if !self.owns_storage(&local.log, &me) {
-                    return Err(StorageError::NotStoreOwner.into());
+                    return Err(StorageFailure::NotStoreOwner.into());
                 }
                 let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
                 let invitation = match &work.access {
                     InviteAccess::ProviderAccount { email } => {
                         if storage.config().provider() == CloudProvider::S3 {
-                            return Err(StorageError::InvalidConfiguration(
-                                "S3 invitation needs its own access key",
-                            )
-                            .into());
+                            return Err(StorageFailure::InvalidConfiguration
+                                .with_source("S3 invitation needs its own access key")
+                                .into());
                         }
                         match storage.grant_access(email).await? {
                             AccessGrant::Granted { invitation } => invitation,
                             AccessGrant::CreateAccessKey => {
-                                return Err(StorageError::InvalidConfiguration(
-                                    "provider requires an access key",
-                                )
-                                .into())
+                                return Err(StorageFailure::InvalidConfiguration
+                                    .with_source("provider requires an access key")
+                                    .into())
                             }
                         }
                     }
                     InviteAccess::S3AccessKey { .. } => {
                         if storage.config().provider() != CloudProvider::S3 {
-                            return Err(StorageError::InvalidConfiguration(
-                                "access-key invitation requires S3",
-                            )
-                            .into());
+                            return Err(StorageFailure::InvalidConfiguration
+                                .with_source("access-key invitation requires S3")
+                                .into());
                         }
                         StorageInvitation::for_account(storage.config())?
                     }
@@ -247,7 +249,7 @@ impl StoreLogSync {
                     .delete(&ObjectPath::join_request(work.id))
                     .await
                 {
-                    Ok(()) | Err(StorageError::NotFound) => (),
+                    Ok(()) => (),
                     Err(error) if error.failure() == coven_storage::StorageFailure::NotFound => (),
                     Err(error) => return Err(error.into()),
                 }

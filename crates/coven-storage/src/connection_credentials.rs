@@ -1,6 +1,6 @@
 //! The configured location and device credentials used to construct a provider.
 
-use crate::{CloudProvider, StorageConfig, StorageCredentials, StorageError};
+use crate::{CloudProvider, StorageConfig, StorageCredentials, StorageError, StorageFailure};
 
 /// Connection data used between coven crates; OAuth tokens never enter restore codes.
 #[derive(Clone)]
@@ -27,9 +27,8 @@ impl ConnectionCredentials {
                 StorageCredentials::OAuth(tokens),
             ) if !tokens.access_token.as_str().is_empty() => Ok(()),
             (CloudProvider::CloudKit, StorageCredentials::CloudKit) => Ok(()),
-            _ => Err(StorageError::InvalidConfiguration(
-                "credentials do not match provider",
-            )),
+            _ => Err(StorageFailure::InvalidConfiguration
+                .with_source("credentials do not match provider")),
         }
     }
 }

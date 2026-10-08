@@ -1,6 +1,6 @@
 //! Provider admission and credentials carried together inside an invite code.
 
-use crate::{S3Credentials, StorageError, StorageInvitation};
+use crate::{S3Credentials, StorageError, StorageFailure, StorageInvitation};
 use coven_crypto::SecretBytes;
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +26,6 @@ impl InviteStorage {
     }
     /// Decode the payload after checking the enclosing invitation.
     pub fn decode(bytes: &[u8]) -> Result<Self, StorageError> {
-        serde_json::from_slice(bytes).map_err(|e| StorageError::Encoding(Box::new(e)))
+        serde_json::from_slice(bytes).map_err(|e| StorageFailure::Encoding.with_source(e))
     }
 }
