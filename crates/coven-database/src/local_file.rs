@@ -153,10 +153,7 @@ pub(crate) fn open(
     reference: &FileRef,
 ) -> Result<LocalFileStream, LocalFileError> {
     super::validate(db, schema, reference)?;
-    let id = match &reference.version.id {
-        coven_format::value::Value::Text(id) => id.clone(),
-        value => format!("{:?}", crate::write_encoding::sql_value(value)),
-    };
+    let id = reference.id();
     if reference.location() != FileLocation::OnDevice(device) {
         return Err(LocalFileError::Unavailable {
             id,
@@ -175,13 +172,13 @@ pub(crate) fn open(
             )
         }
         Provenance::AppProvided => {
-            let identity = coven_format::key::encode_key(&[
-                reference.version.id.clone(),
-                coven_format::value::Value::Integer(
+            let identity = file_row::identity_values(
+                &reference.version.id,
+                &coven_format::value::Value::Integer(
                     i64::try_from(reference.version.size).map_err(|_| DbError::DamagedDatabase)?,
                 ),
-                coven_format::value::Value::Blob(reference.version.hash.as_bytes().to_vec()),
-            ])
+                &coven_format::value::Value::Blob(reference.version.hash.as_bytes().to_vec()),
+            )
             .map_err(DbError::from)?;
             let names = db.query("SELECT path FROM _coven_device_files WHERE table_name=?1 AND key=?2 AND column_name=?3 AND identity=?4", (&reference.row.table, &reference.row.key, &reference.column, identity), |row| row.get::<_, String>(0))?;
             let name = names.into_iter().next().ok_or(DbError::DamagedDatabase)?;

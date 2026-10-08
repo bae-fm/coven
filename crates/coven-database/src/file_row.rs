@@ -164,12 +164,21 @@ pub(crate) fn identity(file: &FileDecl, values: &AppValues) -> Result<Option<Vec
             value: rusqlite::types::Value::Null,
         });
     }
-    encoded(coven_format::key::encode_key(&[
-        values[&file.id].clone(),
-        values[&file.size].clone(),
-        values[&file.hash].clone(),
-    ]))
+    encoded(identity_values(
+        &values[&file.id],
+        &values[&file.size],
+        &values[&file.hash],
+    ))
     .map(Some)
+}
+
+/// Encode the same local byte identity from a row or a checked file reference.
+pub(crate) fn identity_values(
+    id: &Value,
+    size: &Value,
+    hash: &Value,
+) -> Result<Vec<u8>, coven_format::Error> {
+    coven_format::key::encode_key(&[id.clone(), size.clone(), hash.clone()])
 }
 
 #[cfg(test)]

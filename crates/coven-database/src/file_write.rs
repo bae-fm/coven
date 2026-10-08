@@ -260,11 +260,7 @@ impl<'a> FileWrite<'a> {
         }
         let (key, _) = file_row::lookup(db, self.schema, table, &key)?;
         file_row::set(db, self.schema, &key, None, self.device)?;
-        db.internal_execute(
-            "DELETE FROM _coven_user_files
-             WHERE table_name=?1 AND key=?2 AND column_name=?3",
-            (&key.0, &key.1, &file.id),
-        )?;
+        self.forget_original(&key, &file.id)?;
         Ok(())
     }
 
@@ -352,11 +348,7 @@ impl<'a> FileWrite<'a> {
             }
             if new.as_ref().is_none_or(|r| !has_file(r)) {
                 self.forget_owned(key, &file.id)?;
-                db.internal_execute(
-                    "DELETE FROM _coven_user_files
-                     WHERE table_name=?1 AND key=?2 AND column_name=?3",
-                    (&key.0, &key.1, &file.id),
-                )?;
+                self.forget_original(key, &file.id)?;
             }
         }
         Ok(())
@@ -441,11 +433,7 @@ impl<'a> FileWrite<'a> {
                 match file.provenance {
                     Provenance::AppProvided => self.forget_owned(&key, &file.id)?,
                     Provenance::UserProvided => {
-                        db.internal_execute(
-                            "DELETE FROM _coven_user_files
-                             WHERE table_name=?1 AND key=?2 AND column_name=?3",
-                            (&key.0, &key.1, &file.id),
-                        )?;
+                        self.forget_original(&key, &file.id)?;
                     }
                 }
             }
@@ -555,6 +543,14 @@ impl<'a> FileWrite<'a> {
                 )?;
             }
         }
+        Ok(())
+    }
+
+    fn forget_original(&self, key: &AppKey, column: &str) -> Result<(), DbError> {
+        self.database.internal_execute(
+            "DELETE FROM _coven_user_files WHERE table_name=?1 AND key=?2 AND column_name=?3",
+            (&key.0, &key.1, column),
+        )?;
         Ok(())
     }
 
