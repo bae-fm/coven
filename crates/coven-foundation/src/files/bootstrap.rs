@@ -1,6 +1,8 @@
 //! Hidden stores retain interrupted bootstrap work until explicit retry or cancellation.
 
-use super::{creation, lock, FileError, StoreCreationError, StoreDir, StoreLockError};
+use super::{
+    atomic_file::exists, creation, lock, FileError, StoreCreationError, StoreDir, StoreLockError,
+};
 use crate::id_source::{IdSource, StoreId};
 use std::{
     fs, io,
@@ -75,7 +77,7 @@ impl BootstrapStore {
     /// An absent directory succeeds; a published store cannot be cancelled.
     pub fn cancel(&self) -> Result<(), BootstrapDirectoryError> {
         let guard = self.directory().lock_for_deletion()?;
-        if exists(&self.path)? && !is_pending(&self.path)? {
+        if exists("inspect bootstrap path", &self.path)? && !is_pending(&self.path)? {
             return Err(StoreCreationError::AlreadyExists(self.id).into());
         }
         if let Some(guard) = guard {
@@ -91,7 +93,7 @@ pub(super) fn marker(directory: &Path) -> PathBuf {
 }
 
 pub(super) fn is_pending(directory: &Path) -> Result<bool, FileError> {
-    exists(&marker(directory))
+    exists("inspect bootstrap path", &marker(directory))
 }
 
 pub(super) fn reserve_bootstrap_directory(
@@ -110,7 +112,7 @@ pub(super) fn reserve_bootstrap_directory(
         false,
     )?))));
     let path = root.join(id.to_string());
-    if !exists(&path)? {
+    if !exists("inspect bootstrap path", &path)? {
         creation::create(&root, id, name, ids, |_| Ok(()), true)?;
     }
     let metadata = fs::symlink_metadata(&path)
@@ -135,14 +137,6 @@ pub(super) fn reserve_bootstrap_directory(
         .settings()
         .map_err(StoreCreationError::Settings)?;
     Ok(store)
-}
-
-fn exists(path: &Path) -> Result<bool, FileError> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(source) => Err(FileError::at("inspect bootstrap path", path, source)),
-    }
 }
 
 #[cfg(test)]

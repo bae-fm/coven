@@ -66,6 +66,8 @@ pub enum Audience {
 - Store lock files live beside each store directory. Deletion holds the writer
   and reader locks while removing the directory, then releases and removes the
   lock files. Creation and lock-file removal are serialized by the layout.
+- Directory-entry existence checks do not follow symlinks. Only not-found
+  means absent; other failures retain their operation, path and OS cause.
 - Opening a store needs its declared tables ([E2](#e2-declaring-synced-tables))
   and its migrations ([E13](#e13-migrations)).
 - Writable opens always migrate coven's own local tables in place

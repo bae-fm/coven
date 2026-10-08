@@ -1,6 +1,2 @@
-# Clippy reads the nearest clippy.toml up the directory tree, so without this
-# file the root workspace's configuration would apply here. Its one setting —
-# disallowing a hand-rolled fsync outside the root crates' atomic-file helper —
-# is the files capability of §21.2 in this workspace, which the checker
-# enforces: only coven-foundation's file writes and coven-sync's file cache
-# touch files at all.
+# Keep this workspace independent of ancestor Clippy configurations.
+# The owner-construction checker enforces the file capability in §20.2.

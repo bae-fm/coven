@@ -3,7 +3,10 @@ use coven_storage::{
     test_utils::{Faults, MemoryStorage},
     Storage, StorageSettings,
 };
-use std::time::{Duration, UNIX_EPOCH};
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::{Duration, UNIX_EPOCH},
+};
 
 struct Fixture {
     app: TestCoven,

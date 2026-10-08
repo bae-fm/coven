@@ -1,11 +1,14 @@
-use crate::{
-    Cell, LostKey, LostValue, MergeError, Operation, RowId, RowState, Timestamp, Write, WriteId,
-    WriteOracle,
+use crate::{MergeError, RowId, Timestamp, Write, WriteId, WriteOracle};
+use std::collections::BTreeMap;
+#[cfg(test)]
+use {
+    crate::{Cell, LostKey, LostValue, Operation, RowState},
+    std::collections::BTreeSet,
 };
-use std::collections::{BTreeMap, BTreeSet};
 
 /// A finite, causally closed set of writes satisfying Appendix B's four
 /// assumptions. It is also an in-memory oracle for an applied set.
+/// Test support: requires `test-utils` outside this crate's unit tests.
 #[derive(Clone, Debug)]
 pub struct History<V> {
     writes: BTreeMap<WriteId, Write<V>>,
@@ -101,7 +104,8 @@ impl<V> WriteOracle for History<V> {
 /// The merged state as a function of a set alone (Appendix B, B4; Lean
 /// `IsSpec`). This does not call `apply` or sort writes into a causal order.
 /// Each component is selected directly from all setters and deletes.
-pub fn from_writes<V: Clone>(
+#[cfg(test)]
+pub(crate) fn from_writes<V: Clone>(
     history: &History<V>,
 ) -> Result<BTreeMap<RowId, RowState<V>>, MergeError> {
     let rows: BTreeSet<_> = history

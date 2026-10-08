@@ -31,6 +31,16 @@ pub enum ObservationError {
     File(#[from] FileError),
 }
 
+impl ObservationError {
+    pub(super) fn at(operation: &'static str, path: &Path, error: io::Error) -> Self {
+        if error.kind() == io::ErrorKind::NotFound {
+            Self::Missing(path.to_owned())
+        } else {
+            FileError::at(operation, path, error).into()
+        }
+    }
+}
+
 impl ObservedFile {
     /// The original's path.
     pub fn path(&self) -> &Path {
@@ -47,8 +57,8 @@ impl ObservedFile {
 
     /// Refuse a missing, replaced or modified original without reading its bytes.
     pub fn validate(&self) -> Result<(), ObservationError> {
-        let metadata =
-            std::fs::metadata(&self.path).map_err(|e| observation_error(&self.path, e))?;
+        let metadata = std::fs::metadata(&self.path)
+            .map_err(|e| ObservationError::at("read original", &self.path, e))?;
         self.check(&metadata)
     }
 
@@ -87,11 +97,11 @@ pub async fn observe_file(
 ) -> Result<ObservedFile, ObservationError> {
     let mut file = tokio::fs::File::open(path)
         .await
-        .map_err(|e| observation_error(path, e))?;
+        .map_err(|e| ObservationError::at("read original", path, e))?;
     let metadata = file
         .metadata()
         .await
-        .map_err(|e| observation_error(path, e))?;
+        .map_err(|e| ObservationError::at("read original", path, e))?;
     if !metadata.is_file() {
         return Err(FileError::at(
             "read original",
@@ -114,7 +124,7 @@ pub async fn observe_file(
         let read = file
             .read(&mut buffer)
             .await
-            .map_err(|e| observation_error(path, e))?;
+            .map_err(|e| ObservationError::at("read original", path, e))?;
         if read == 0 {
             break;
         }
@@ -128,16 +138,8 @@ pub async fn observe_file(
         &file
             .metadata()
             .await
-            .map_err(|e| observation_error(path, e))?,
+            .map_err(|e| ObservationError::at("read original", path, e))?,
     )?;
     observed.validate()?;
     Ok(observed)
-}
-
-fn observation_error(path: &Path, error: io::Error) -> ObservationError {
-    if error.kind() == io::ErrorKind::NotFound {
-        ObservationError::Missing(path.to_owned())
-    } else {
-        FileError::at("read original", path, error).into()
-    }
 }

@@ -223,3 +223,117 @@ async fn cancelling_the_close_caller_still_closes_all_clones() {
         .unwrap();
     reopened.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn closed_storage_calls_keep_their_public_errors_on_every_clone() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = StoreLayout::new(root.path().to_owned());
+    let app = TestCoven::new();
+    let directory = app
+        .create_store(&layout, "closed", Arc::new(UuidIds))
+        .await
+        .unwrap();
+    let original = builder(&app, layout).open(directory.id()).await.unwrap();
+    let handle = original.clone();
+    assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Locked);
+    original.close().await.unwrap();
+    assert!(matches!(
+        handle.store_key_state(),
+        Err(KeyError::StoreClosed)
+    ));
+    assert!(matches!(
+        handle
+            .setup_s3_storage(
+                StorageConfig::S3 {
+                    bucket: "bucket".into(),
+                    region: "region".into(),
+                    prefix: "store".into(),
+                    endpoint: None,
+                },
+                "Device",
+                "member".into(),
+                SecretText::new("secret".into())
+            )
+            .await,
+        Err(StorageSetupError::SecureStorage(KeyError::StoreClosed))
+    ));
+    assert!(matches!(
+        handle
+            .setup_oauth_storage(
+                StorageConfig::Dropbox {
+                    namespace_id: "folder".into()
+                },
+                "Device"
+            )
+            .await,
+        Err(StorageSetupError::SecureStorage(KeyError::StoreClosed))
+    ));
+    assert!(matches!(
+        handle
+            .setup_cloudkit_storage(
+                StorageConfig::CloudKit {
+                    container: "container".into(),
+                    owner: "owner".into(),
+                    zone: "zone".into(),
+                },
+                "Device"
+            )
+            .await,
+        Err(StorageSetupError::SecureStorage(KeyError::StoreClosed))
+    ));
+    assert!(matches!(
+        handle.authenticate(CloudProvider::Dropbox).await,
+        Err(StorageSetupError::SecureStorage(KeyError::StoreClosed))
+    ));
+    assert!(matches!(
+        handle.unlock_store_key().await,
+        Err(StoreKeyUnlockError::SecureStorage(KeyError::StoreClosed))
+    ));
+    assert!(matches!(
+        handle.disconnect_storage().await,
+        Err(SyncError::SecureStorage(KeyError::StoreClosed))
+    ));
+    assert!(matches!(
+        handle.forget_store_keys().await,
+        Err(KeyError::StoreClosed)
+    ));
+}
+
+#[tokio::test]
+async fn closing_waits_for_setup_after_its_caller_is_cancelled() {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        use coven_storage::{test_utils::MemoryStorage, Storage, StorageSettings};
+        let root = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::new(root.path().to_owned());
+        let app = TestCoven::new();
+        let directory = app.create_store(&layout, "setup", Arc::new(UuidIds)).await.unwrap();
+        let config = StorageConfig::S3 {
+            bucket: "bucket".into(), region: "region".into(), prefix: "store".into(), endpoint: None,
+        };
+        let storage = Arc::new(MemoryStorage::new(config.clone(), Arc::new(SystemClock)).unwrap());
+        let handle = builder(&app, layout).storage_connector(storage.clone()).open(directory.id()).await.unwrap();
+        handle.initialize_identity().unwrap();
+        let (entered, entering) = tokio::sync::oneshot::channel();
+        let (resume, resumed) = tokio::sync::oneshot::channel();
+        storage.hold_next_listing(ObjectPrefix::all(), entered, resumed).await;
+        {
+            let setup = handle.setup_s3_storage(config.clone(), "Device", "member".into(), SecretText::new("secret".into()));
+            tokio::pin!(setup);
+            tokio::select! {
+                result = &mut setup => panic!("setup finished while its provider check was held: {result:?}"),
+                result = entering => result.unwrap(),
+            }
+        }
+        let close = handle.close();
+        tokio::pin!(close);
+        tokio::select! {
+            result = &mut close => panic!("close finished before setup: {result:?}"),
+            _ = tokio::task::yield_now() => {},
+        }
+        resume.send(()).unwrap();
+        close.await.unwrap();
+        assert_eq!(StorageSettings::new(directory).read().unwrap(), Some(config));
+        assert_eq!(storage.list(&ObjectPrefix::store_logs()).await.unwrap().len(), 1);
+        assert!(matches!(handle.store_key_state(), Err(KeyError::StoreClosed)));
+    }).await.expect("cancelled setup finishes before close");
+}

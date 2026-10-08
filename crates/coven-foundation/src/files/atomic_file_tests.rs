@@ -1,6 +1,30 @@
 use super::*;
 
 #[test]
+fn existence_checks_directory_entries_and_preserves_inspection_errors() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = AtomicFile::new(directory.path().join("file"));
+    assert!(!file.exists().unwrap());
+    file.replace(b"present").unwrap();
+    assert!(file.exists().unwrap());
+    assert!(AtomicFile::new(directory.path().to_owned())
+        .exists()
+        .unwrap());
+    let invalid = directory.path().join("file\0suffix");
+    assert!(matches!(
+        exists("inspect store destination", &invalid),
+        Err(FileError::Io { operation: "inspect store destination", path, source })
+            if path == invalid && source.kind() == io::ErrorKind::InvalidInput
+    ));
+    #[cfg(unix)]
+    {
+        let path = directory.path().join("dangling");
+        std::os::unix::fs::symlink(directory.path().join("absent"), &path).unwrap();
+        assert!(AtomicFile::new(path).exists().unwrap());
+    }
+}
+
+#[test]
 fn removal_is_idempotent_and_does_not_hide_operating_system_errors() {
     let directory = tempfile::tempdir().unwrap();
     let file = AtomicFile::new(directory.path().join("secret"));

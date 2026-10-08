@@ -8,10 +8,7 @@ use coven_storage::{
     providers::{OAuthFlow, StorageConnector},
     ConnectionCredentials, S3Credentials, StorageCredentials,
 };
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::{future::Future, sync::Arc};
 
 /// Whether this device's custody holds opened store keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,7 +40,6 @@ pub(crate) struct StorageConnections {
     ids: IdSourceRef,
     clock: ClockRef,
     calls: tokio::sync::Mutex<()>,
-    closed: AtomicBool,
 }
 
 impl StorageConnections {
@@ -71,20 +67,39 @@ impl StorageConnections {
             ids,
             clock,
             calls: tokio::sync::Mutex::new(()),
-            closed: AtomicBool::new(false),
         }
     }
 
-    fn check_open(&self) -> Result<(), KeyError> {
-        if self.closed.load(Ordering::Acquire) {
-            Err(KeyError::StoreClosed)
-        } else {
-            Ok(())
-        }
+    async fn lock_open(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, KeyError> {
+        let call = self.calls.lock().await;
+        self.keys
+            .lock()
+            .expect("store keys lock poisoned")
+            .as_ref()
+            .ok_or(KeyError::StoreClosed)?;
+        Ok(call)
+    }
+
+    // The task owns both the call and its lock until it finishes, even if the
+    // awaiting app future is dropped. Sign-in deliberately does not spawn.
+    async fn call<T, E, F>(
+        self: &Arc<Self>,
+        run: impl FnOnce(Arc<Self>) -> F + Send + 'static,
+    ) -> Result<T, E>
+    where
+        T: Send + 'static,
+        E: From<KeyError> + Send + 'static,
+        F: Future<Output = Result<T, E>> + Send,
+    {
+        let owner = self.clone();
+        crate::coven::completion(tokio::spawn(async move {
+            let _call = owner.lock_open().await?;
+            run(owner.clone()).await
+        }))
+        .await
     }
 
     pub(crate) fn key_state(&self) -> Result<StoreKeyState, KeyError> {
-        self.check_open()?;
         Ok(
             if self
                 .keys
@@ -129,8 +144,7 @@ impl StorageConnections {
         &self,
         provider: CloudProvider,
     ) -> Result<(), StorageSetupError> {
-        let _call = self.calls.lock().await;
-        self.check_open()?;
+        let _call = self.lock_open().await?;
         let flow = self
             .oauth
             .as_ref()
@@ -146,11 +160,8 @@ impl StorageConnections {
         storage: StorageConfig,
         device_name: &str,
     ) -> Result<ConnectedStorage, StorageSetupError> {
-        let owner = self.clone();
         let device_name = device_name.to_owned();
-        crate::coven::completion(tokio::spawn(async move {
-            let _call = owner.calls.lock().await;
-            owner.check_open()?;
+        self.call(move |owner| async move {
             let provider = storage.provider();
             if !matches!(
                 provider,
@@ -189,7 +200,7 @@ impl StorageConnections {
                 .await?;
             held.take();
             Ok(result)
-        }))
+        })
         .await
     }
 
@@ -213,15 +224,12 @@ impl StorageConnections {
         device_name: &str,
         credentials: StorageCredentials,
     ) -> Result<ConnectedStorage, StorageSetupError> {
-        let owner = self.clone();
         let device_name = device_name.to_owned();
-        crate::coven::completion(tokio::spawn(async move {
-            let _call = owner.calls.lock().await;
-            owner.check_open()?;
+        self.call(move |owner| async move {
             owner
                 .setup_connection(config, &device_name, credentials)
                 .await
-        }))
+        })
         .await
     }
 
@@ -278,10 +286,7 @@ impl StorageConnections {
     }
 
     pub(crate) async fn unlock(self: &Arc<Self>) -> Result<ConnectedStorage, StoreKeyUnlockError> {
-        let owner = self.clone();
-        crate::coven::completion(tokio::spawn(async move {
-            let _call = owner.calls.lock().await;
-            owner.check_open()?;
+        self.call(|owner| async move {
             let data = owner
                 .connection()
                 .await
@@ -297,27 +302,21 @@ impl StorageConnections {
                 storage: config,
                 key_state: StoreKeyState::Available,
             })
-        }))
+        })
         .await
     }
 
     pub(crate) async fn disconnect(self: &Arc<Self>) -> Result<(), SyncError> {
-        let owner = self.clone();
-        crate::coven::completion(tokio::spawn(async move {
-            let _call = owner.calls.lock().await;
-            owner.check_open()?;
+        self.call(|owner| async move {
             owner.sync.forget_storage().await?;
             owner.authentication.lock().await.take();
             Ok(())
-        }))
+        })
         .await
     }
 
     pub(crate) async fn forget_store_keys(self: &Arc<Self>) -> Result<(), KeyError> {
-        let owner = self.clone();
-        crate::coven::completion(tokio::spawn(async move {
-            let _call = owner.calls.lock().await;
-            owner.check_open()?;
+        self.call(|owner| async move {
             owner
                 .sync
                 .forget_store_keys()
@@ -327,15 +326,15 @@ impl StorageConnections {
                     SyncError::Database(DbError::StoreClosed) => KeyError::StoreClosed,
                     error => KeyError::Unavailable(Box::new(error)),
                 })
-        }))
+        })
         .await
     }
 
     pub(crate) async fn close(&self) {
         let _call = self.calls.lock().await;
-        self.closed.store(true, Ordering::Release);
+        let keys = self.keys.lock().expect("store keys lock poisoned").take();
         self.authentication.lock().await.take();
-        self.keys.lock().expect("store keys lock poisoned").take();
+        drop(keys);
     }
 }
 

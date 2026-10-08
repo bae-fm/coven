@@ -2780,6 +2780,8 @@ Carol's tablet:
   network.
 - So the merge is tested, and checked against the Lean model of
   [Appendix B](proofs/merge.md), without SQLite or storage.
+- Whole-history construction belongs to test support; production merges
+  arriving writes against the applied metadata without retaining write bodies.
 - Ids shared by several crates (store, device and circle ids) live in
   `coven-foundation`; each concept has one type.
 - Each external dependency's version is set once, in the workspace, and
@@ -2854,6 +2856,10 @@ Carol's tablet:
   field; callers ask it to do the work.
 - E.g. nothing outside coven-database gets the SQLite connection; it asks
   the database owner to run a write.
+- A closed custody owner is represented by the absence of its held custody,
+  without a separate closed flag. Storage calls serialize with closing;
+  calls already started finish even when their app future is dropped. Sign-in
+  remains cancellable while presenting or exchanging credentials (E5).
 - A struct built only to be taken apart again, with every field public
   and no methods, is not used to pass collaborators; they are passed by
   name.

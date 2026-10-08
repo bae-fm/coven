@@ -1,5 +1,31 @@
 use super::*;
 
+#[tokio::test]
+async fn readers_distinguish_missing_files_from_other_errors() {
+    let directory = tempfile::tempdir().unwrap();
+    for name in ["missing", "invalid\0path"] {
+        let path = directory.path().join(name);
+        let range_error = match FileReader::open(&path) {
+            Ok(_) => panic!("invalid path opened"),
+            Err(error) => error,
+        };
+        let original_error = crate::files::observe_file(&path, |_| {}).await.unwrap_err();
+        for (error, expected) in [
+            (range_error, "read file"),
+            (original_error, "read original"),
+        ] {
+            if name == "missing" {
+                assert!(matches!(error, ObservationError::Missing(found) if found == path));
+            } else {
+                assert!(matches!(error,
+                    ObservationError::File(FileError::Io { operation, path: found, source })
+                    if operation == expected && found == path && source.kind() == io::ErrorKind::InvalidInput
+                ));
+            }
+        }
+    }
+}
+
 #[test]
 fn positioned_reads_keep_the_opened_file_after_replacement() {
     let directory = tempfile::tempdir().unwrap();

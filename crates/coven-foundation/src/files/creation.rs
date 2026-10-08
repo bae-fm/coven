@@ -118,12 +118,8 @@ pub(crate) fn create<E: std::error::Error + Send + Sync + 'static>(
         .into_iter()
         .chain(lock::lock_paths(&destination, id))
     {
-        match fs::symlink_metadata(&path) {
-            Ok(_) => return Err(StoreCreationError::AlreadyExists(id)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(source) => {
-                return Err(FileError::at("inspect store destination", &path, source).into())
-            }
+        if super::atomic_file::exists("inspect store destination", &path)? {
+            return Err(StoreCreationError::AlreadyExists(id));
         }
     }
     let stage = tempfile::Builder::new()

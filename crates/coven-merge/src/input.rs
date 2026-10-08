@@ -155,8 +155,9 @@ pub struct Change<V> {
 impl<V> Change<V> {
     /// Validate generation parity, advancement without overflow, and every
     /// written parent's generation and audience for this row (§8.3–§8.4, §14).
-    /// Values and their encodings are opaque here. Generation witnesses and
-    /// causal history require [`crate::History`] or [`crate::apply`].
+    /// Values and their encodings are opaque here. The authoring database
+    /// establishes generation witnesses; [`crate::apply`] checks the received
+    /// change against applied metadata.
     pub fn validate(&self, row: &RowId) -> Result<(), MergeError> {
         self.incarnation()?;
         if self.operation.advances() {

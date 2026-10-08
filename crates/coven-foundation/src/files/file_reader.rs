@@ -32,10 +32,11 @@ impl FileReader {
     }
 
     pub(crate) fn open(path: &Path) -> Result<Self, ObservationError> {
-        let file = File::open(path).map_err(|error| observed_error(path, error))?;
+        let file =
+            File::open(path).map_err(|error| ObservationError::at("read file", path, error))?;
         let metadata = file
             .metadata()
-            .map_err(|error| observed_error(path, error))?;
+            .map_err(|error| ObservationError::at("read file", path, error))?;
         if !metadata.is_file() {
             return Err(FileError::at(
                 "open file for ranges",
@@ -107,7 +108,7 @@ impl FileReader {
         let metadata = self
             .file
             .metadata()
-            .map_err(|error| observed_error(&self.path, error))?;
+            .map_err(|error| ObservationError::at("read file", &self.path, error))?;
         let modified = metadata
             .modified()
             .map_err(|source| FileError::at("read modification time", &self.path, source))?;
@@ -136,18 +137,10 @@ impl FileReader {
                     offset += count as u64;
                 }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                Err(error) => return Err(observed_error(&self.path, error)),
+                Err(error) => return Err(ObservationError::at("read file", &self.path, error)),
             }
         }
         Ok(())
-    }
-}
-
-fn observed_error(path: &Path, error: io::Error) -> ObservationError {
-    if error.kind() == io::ErrorKind::NotFound {
-        ObservationError::Missing(path.to_owned())
-    } else {
-        FileError::at("read file", path, error).into()
     }
 }
 

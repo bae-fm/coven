@@ -220,8 +220,8 @@ pub(crate) fn timestamp(oracle: &impl WriteOracle, id: WriteId) -> Result<Timest
 /// A nonzero generation needs a read at least as recent as its earliest
 /// recorded changer. That is the locally checkable part of assumption 3:
 /// the canonical record cannot tell whether another read write also reached
-/// the generation. Full witness validation is provided by [`crate::History`];
-/// the authoring database establishes it when producing a change. The input
+/// the generation. The authoring database establishes the full witness when
+/// producing a change; test histories validate it explicitly. The input
 /// state is unchanged on every error path.
 pub fn apply<V: Clone + Eq, P: crate::WritePast>(
     state: &RowState<V>,

@@ -77,11 +77,7 @@ impl AtomicFile {
     }
 
     pub(super) fn exists(&self) -> Result<bool, FileError> {
-        match fs::symlink_metadata(&self.path) {
-            Ok(_) => Ok(true),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-            Err(source) => Err(FileError::at("inspect staged file", &self.path, source)),
-        }
+        exists("inspect staged file", &self.path)
     }
 
     /// Read the complete file. Only a missing file is `None`; other errors
@@ -213,6 +209,16 @@ impl FileWriter {
             Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
             Err(error) => panic!("owned file task was cancelled: {error}"),
         }
+    }
+}
+
+/// Inspect the directory entry itself, including dangling symlinks.
+/// Only a missing entry is false; all other failures retain the caller's operation.
+pub(super) fn exists(operation: &'static str, path: &Path) -> Result<bool, FileError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(FileError::at(operation, path, source)),
     }
 }
 

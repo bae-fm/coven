@@ -266,11 +266,7 @@ pub(crate) fn for_deletion(
     if !inspect_directory(&directory)? {
         let mut remaining = false;
         for path in &paths {
-            match std::fs::symlink_metadata(path) {
-                Ok(_) => remaining = true,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(source) => return Err(FileError::at("inspect store lock", path, source).into()),
-            }
+            remaining |= atomic_file::exists("inspect store lock", path)?;
         }
         if !remaining {
             // Retry the durability barrier even if the preceding attempt
