@@ -28,31 +28,6 @@ fn concurrent_rotations_keep_both_generated_keys() {
 }
 
 #[test]
-fn app_data_uses_the_requested_key_and_reports_missing_ids() {
-    let mut ring = StoreKeyring::new(StoreKey::from_bytes(
-        KeyId(uuid::Uuid::from_bytes([2; 16])),
-        [2; 32],
-    ));
-    let selected = KeyId(uuid::Uuid::from_bytes([1; 16]));
-    ring.insert_store_key(StoreKey::from_bytes(selected, [1; 32]))
-        .unwrap();
-    let sealed = ring.seal_app_data(selected, b"field", b"row").unwrap();
-    let selected_only = StoreKeyring::new(StoreKey::from_bytes(selected, [1; 32]));
-    assert_eq!(
-        selected_only.open_app_data(&sealed, b"row").unwrap(),
-        b"field"
-    );
-    let missing = KeyId(uuid::Uuid::from_bytes([3; 16]));
-    assert!(
-        matches!(ring.seal_app_data(missing, b"field", b"row"), Err(SealError::Key(MaterialError::UnknownStoreKey(id))) if id == missing)
-    );
-    let foreign = StoreKeyring::new(StoreKey::from_bytes(missing, [1; 32]));
-    assert!(
-        matches!(foreign.open_app_data(&sealed, b"row"), Err(SealError::Key(MaterialError::UnknownStoreKey(id))) if id == selected)
-    );
-}
-
-#[test]
 fn empty_keyrings_are_malformed_but_zero_ids_are_valid() {
     let mut empty = b"CVKR\x01".to_vec();
     empty.extend_from_slice(&[0; 16]);
@@ -129,40 +104,6 @@ fn conflicts_at_every_secret_byte_preserve_both_key_kinds() {
 }
 
 #[test]
-fn app_data_uses_its_own_key_in_both_directions() {
-    let ring = StoreKeyring::new(StoreKey::from_bytes(
-        KeyId(uuid::Uuid::from_bytes([7; 16])),
-        [17; 32],
-    ));
-    let sealed = ring
-        .seal_app_data(
-            KeyId(uuid::Uuid::from_bytes([7; 16])),
-            b"private field",
-            b"row/42",
-        )
-        .unwrap();
-    assert_eq!(&sealed[..5], b"CVAD\x01");
-    assert_eq!(&sealed[5..21], &[7; 16]);
-    let context = cipher::context(&[&sealed[..21], b"row/42"]);
-    let app_key = derivation::derive_label(&[17; 32], b"coven/app-data/v1");
-    let object_key = derivation::derive_label(&[17; 32], derivation::ENCRYPTION);
-    assert_eq!(
-        cipher::open_random(&app_key, &context, &sealed[21..]).unwrap(),
-        b"private field"
-    );
-    assert!(matches!(
-        cipher::open_random(&object_key, &context, &sealed[21..]),
-        Err(CryptoError::Authentication)
-    ));
-    let mut object_sealed = sealed[..21].to_vec();
-    object_sealed.extend(cipher::seal_random(&object_key, &context, b"private field").unwrap());
-    assert!(matches!(
-        ring.open_app_data(&object_sealed, b"row/42"),
-        Err(SealError::Crypto(CryptoError::Authentication))
-    ));
-}
-
-#[test]
 fn keyring_keeps_store_and_circle_keys_by_id_in_any_insertion_order() {
     let circle = CircleId(Uuid::from_u128(8));
     let mut ring = StoreKeyring::new(StoreKey::from_bytes(
@@ -203,59 +144,6 @@ fn keyring_keeps_store_and_circle_keys_by_id_in_any_insertion_order() {
             KeyId(uuid::Uuid::from_bytes([1; 16]))
         )
         .is_err());
-}
-
-#[test]
-fn app_data_opens_after_key_replacement_but_not_with_another_context() {
-    let key_ids = coven_foundation::id_source::SequentialIds::new();
-    let original = StoreKey::generate(KeyId(key_ids.new_id())).unwrap();
-    let old_id = original.id();
-    let replacement = StoreKey::generate(KeyId(key_ids.new_id())).unwrap();
-    let new_id = replacement.id();
-    let mut ring = StoreKeyring::new(original);
-    let old = ring
-        .seal_app_data(old_id, b"local private field", b"notes/42")
-        .unwrap();
-    ring.insert_store_key(replacement).unwrap();
-    assert_eq!(
-        ring.open_app_data(&old, b"notes/42").unwrap(),
-        b"local private field"
-    );
-    assert!(matches!(
-        ring.open_app_data(&old, b"notes/43"),
-        Err(SealError::Crypto(CryptoError::Authentication))
-    ));
-    let new = ring
-        .seal_app_data(new_id, b"new field", b"notes/42")
-        .unwrap();
-    assert_eq!(ring.open_app_data(&new, b"notes/42").unwrap(), b"new field");
-    for i in 0..old.len() {
-        let mut altered = old.clone();
-        altered[i] ^= 1;
-        assert!(ring.open_app_data(&altered, b"notes/42").is_err());
-        assert!(ring.open_app_data(&old[..i], b"notes/42").is_err());
-    }
-}
-
-#[test]
-fn app_data_authenticates_its_key_id_even_if_key_bytes_repeat() {
-    let mut ring = StoreKeyring::new(StoreKey::from_bytes(
-        KeyId(uuid::Uuid::from_bytes([1; 16])),
-        [17; 32],
-    ));
-    let mut sealed = ring
-        .seal_app_data(KeyId(uuid::Uuid::from_bytes([1; 16])), b"secret", b"row")
-        .unwrap();
-    ring.insert_store_key(StoreKey::from_bytes(
-        KeyId(uuid::Uuid::from_bytes([2; 16])),
-        [17; 32],
-    ))
-    .unwrap();
-    sealed[5..21].copy_from_slice(&[2; 16]);
-    assert!(matches!(
-        ring.open_app_data(&sealed, b"row"),
-        Err(SealError::Crypto(CryptoError::Authentication))
-    ));
 }
 
 #[test]

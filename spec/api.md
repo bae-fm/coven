@@ -280,8 +280,6 @@ pub type CovenResult<T> = Result<T, CovenError>;
 
 /// Failures of opening, reading and writing a store (§5, E1, E3).
 pub enum CovenError {
-    /// App data could not be sealed with the selected store key.
-    Seal(SealError),
     /// Reading device identity or an app callback's custody operation failed.
     Key(KeyError),
     /// An app callback failed and SQLite also failed to roll it back.
@@ -1176,20 +1174,6 @@ pub enum LiveQueryCause {
 /// Retaining a stream prevents store deletion, including after the store closes.
 pub struct FileStream { /* private fields */ }
 
-/// App data could not be sealed or opened with its store key (§11, E11).
-pub enum SealError {
-    /// No applied store-log entry identifies the key for new app data (§11).
-    NoCurrentStoreKey,
-    /// This device has no store keys in custody.
-    NoStoreKeys,
-    /// The keyring lacks the named key or the encoded material is invalid.
-    Key(MaterialError),
-    /// The cipher refused the bytes or their associated data.
-    Crypto(CryptoError),
-    /// Lazy unlocking from custody failed (E1).
-    Custody(KeyError),
-}
-
 impl CovenHandle {
     /// A read of one consistent snapshot, run when awaited. Attach `process`
     /// to work on the result after the connection is released.
@@ -1322,7 +1306,7 @@ pub enum RemovalRule {
 
 /// A handle that only reads, opened with `open_read_only`.
 impl CovenReadHandle {
-    /// Closes every connection and drops unlocked key material on all clones.
+    /// Closes read and cache connections on all clones and releases their store lock.
     /// Reports connection-close failures; cancellation does not stop closing.
     pub async fn close(&self) -> Result<(), DbError>;
 
@@ -1331,7 +1315,6 @@ impl CovenReadHandle {
     pub async fn user_file(&self, table: &str, key: impl Into<RowKey>) -> Result<Option<UserFile>, DbError>;
     pub async fn read_file(&self, file: &FileRef) -> Result<Vec<u8>, FileReadError>;
     pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError>;
-    pub fn open_app_data(&self, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>, SealError>;
 }
 ```
 
@@ -2796,18 +2779,6 @@ impl CovenHandle {
 
     /// Deletes the secret; succeeds if it was never set.
     pub fn delete_host_secret(&self, name: &str) -> Result<(), KeyError>;
-
-    /// Encrypts the app's own data with the current store key, for the app to
-    /// keep in its rows, since the local database is not encrypted. `aad`
-    /// binds it to its place, such as the row's key. Reads the key id from the
-    /// committed store log, then unlocks its bytes from custody. Without a
-    /// selected key, returns `CovenError::Seal(SealError::NoCurrentStoreKey)`.
-    /// Database reads and custody work run off the async executor.
-    pub async fn seal_app_data(&self, plaintext: &[u8], aad: &[u8]) -> CovenResult<Vec<u8>>;
-
-    /// Decrypts what `seal_app_data` made, with the store key it names, so it
-    /// still opens after the key is replaced. Fails with a different `aad`.
-    pub fn open_app_data(&self, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>, SealError>;
 }
 
 /// The app's own store for the store keys and circle keys this device holds.

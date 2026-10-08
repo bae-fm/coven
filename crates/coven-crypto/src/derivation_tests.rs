@@ -13,11 +13,6 @@ fn purpose_labels_and_hkdf_answers_are_pinned() {
             "5c09ce5876164485843f2637bb370094c8dfd799637cda80fbc4c88c5b63229f",
         ),
         (
-            APP_DATA,
-            b"coven/app-data/v1",
-            "cf37721dcdb2ed070d0ce5179c10bfbaa55338c73225231228a9a6a70cd2e59a",
-        ),
-        (
             FINGERPRINTS,
             b"coven/fingerprints/v1",
             "795d9756ca6212a6f38d5cd68fccbd5952ec59e52d8f5aa4bdd76e8bb95ceff6",

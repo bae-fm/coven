@@ -61,23 +61,3 @@ pub enum MaterialError {
         key: coven_foundation::id_source::KeyId,
     },
 }
-
-/// App data could not be sealed or opened with the store key it names (E11).
-#[derive(Debug, thiserror::Error)]
-pub enum SealError {
-    /// No applied store-log entry identifies the key for new app data (§11).
-    #[error("no current store key")]
-    NoCurrentStoreKey,
-    /// This device has no store keys in custody.
-    #[error("no store keys in custody")]
-    NoStoreKeys,
-    /// Reading or keeping key custody failed.
-    #[error(transparent)]
-    Custody(#[from] crate::custody::KeyError),
-    /// The keyring lacks the named key or the encoded material is invalid.
-    #[error("store key unavailable: {0}")]
-    Key(#[from] MaterialError),
-    /// The cipher refused the value or its app-supplied context.
-    #[error("app data cryptography failed: {0}")]
-    Crypto(#[from] CryptoError),
-}

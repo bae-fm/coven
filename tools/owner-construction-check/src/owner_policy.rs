@@ -142,7 +142,6 @@ pub(crate) const POLICY: Policy = Policy {
             "<free>",
             "bootstrap_device",
         ),
-        ("crates/coven/src/builder.rs", "CovenBuilder", "read_graph"),
         (
             "crates/coven/src/builder.rs",
             "CovenBuilder",

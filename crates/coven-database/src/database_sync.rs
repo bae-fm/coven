@@ -257,14 +257,6 @@ impl Database {
         self.read(|sql| sql.store_log()).await
     }
 
-    /// The current store key selected by the committed replay (§11), or `None`
-    /// before creation. Reads only the selected id, without loading entry history.
-    pub async fn current_store_key(
-        &self,
-    ) -> CovenResult<Option<coven_foundation::id_source::KeyId>> {
-        self.read(|sql| sql.current_store_key()).await
-    }
-
     /// Read the schema version, positions and fingerprints from one committed state.
     /// Supply fresh hashers derived from the store or circle keys. Audiences whose
     /// keys are unavailable can be omitted without interrupting sum maintenance.

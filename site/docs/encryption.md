@@ -108,15 +108,7 @@ Losing every usable copy of an encryption key makes data encrypted under that
 key unreadable. Keeping older keyring entries is what lets existing objects
 remain readable after later rotations.
 
-Cloud encryption does not encrypt the local SQLite database. To protect a
-secret stored in an application row, the host can use
-[`CovenHandle::seal_app_data`](rustdoc:method:coven::CovenHandle::seal_app_data)
-and
-[`CovenHandle::open_app_data`](rustdoc:method:coven::CovenHandle::open_app_data).
-They use the Store keyring and record the sealing key's fingerprint. Both take
-the same authentication context, such as a row identifier; opening with a
-different context fails. [Keys](/docs/keys#sealing-your-own-data) describes the
-API and custody requirements.
+Cloud encryption does not encrypt the local SQLite database.
 
 ## Opaque and browsable homes
 

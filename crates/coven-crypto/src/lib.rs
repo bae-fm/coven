@@ -21,7 +21,7 @@ pub mod custody;
 pub use cipher::{FILE_CHUNK_TAG_LEN, SEALED_OBJECT_CHUNK_OVERHEAD};
 pub use coven_foundation::id_source::CircleId;
 pub use derivation::{DerivedKeys, EncryptionKey};
-pub use error::{CryptoError, MaterialError, SealError};
+pub use error::{CryptoError, MaterialError};
 pub use file_key::FileKey;
 pub use hashing::{ContentHash, ContentHasher, Fingerprint, FingerprintHasher};
 pub use keys::{CircleKey, InviteSecret, StoreKey, StoreKeyring};

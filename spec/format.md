@@ -440,9 +440,8 @@
   A number in a context, such as a section or a chunk's index, is one
   string of its 8 bytes, as a `u64`.
 - From a store or circle key, HKDF-SHA256 with no salt derives 32-byte keys
-  by label: `coven/encryption/v1` for sealing objects,
-  `coven/fingerprints/v1` for fingerprints, and `coven/app-data/v1` for the
-  app's own data ([§11](coven.md#11-keys)).
+  by label: `coven/encryption/v1` for sealing objects and
+  `coven/fingerprints/v1` for fingerprints.
 - For each write or store-log chunk, derive its 24-byte nonce as:
 
   ```

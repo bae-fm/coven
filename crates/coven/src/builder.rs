@@ -4,7 +4,6 @@ use crate::authentication::Authentication;
 use crate::*;
 use coven_crypto::custody::{
     InMemoryCustody, Keychain, KeyringCustody, PassphraseCustody, StoreCustody, StoreKeychain,
-    StoreKeys,
 };
 use coven_database::DatabaseBuilder;
 use coven_foundation::files::StoreFile;
@@ -180,7 +179,7 @@ impl CovenBuilder {
         let clock = self.clock.clone();
         let storage = self.storage.clone();
         let limits = self.limits;
-        let (database, keys) = crate::coven::blocking(move || self.read_graph(store)).await?;
+        let database = self.database(directory.clone())?;
         let database = database.open_read_only().await?;
         let files = coven_sync::Files::new(
             coven_database::FileDatabase::read_only(database.clone()),
@@ -190,7 +189,7 @@ impl CovenBuilder {
             ids,
             limits,
         );
-        Ok(CovenReadHandle::new(database, keys, files))
+        Ok(CovenReadHandle::new(database, files))
     }
 
     fn database(&self, directory: StoreDir) -> CovenResult<DatabaseBuilder> {
@@ -260,11 +259,7 @@ impl CovenBuilder {
         Ok(OpeningOwners {
             directory,
             has_storage_credentials,
-            custody: StoreCustody::new(
-                StoreKeys::new(keys.clone()),
-                identity.clone(),
-                keychain.clone(),
-            ),
+            custody: StoreCustody::new(identity.clone(), keychain.clone()),
             keychain,
             connector: match self.connector {
                 Some(connector) => connector,
@@ -305,14 +300,6 @@ impl CovenBuilder {
             IdentityCustody::InMemory => Arc::new(InMemoryCustody::empty()),
             IdentityCustody::Custom(keys) => keys,
         }
-    }
-
-    fn read_graph(self, store: StoreId) -> CovenResult<(DatabaseBuilder, StoreKeys)> {
-        let directory = self.layout.store_dir(&store);
-        let database = self.database(directory.clone())?;
-        let keychain = Arc::new(StoreKeychain::new(self.keychain()?, store));
-        let keys = Self::make_keys(self.keys, &directory, store, keychain);
-        Ok((database, StoreKeys::new(keys)))
     }
 
     fn make_keys(

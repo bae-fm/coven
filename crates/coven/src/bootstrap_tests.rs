@@ -859,14 +859,7 @@ async fn restores_return_session_keys_and_builder_choices_without_reopening() {
                 handle.restore_code().await.unwrap(),
                 owner.code.to_text().unwrap().as_str()
             );
-            let sealed = handle
-                .seal_app_data(b"session", b"notes/new")
-                .await
-                .unwrap();
-            assert_eq!(
-                handle.open_app_data(&sealed, b"notes/new").unwrap(),
-                b"session"
-            );
+            assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
             handle
                 .write(|sql| {
                     sql.execute(
@@ -903,8 +896,8 @@ async fn restores_return_session_keys_and_builder_choices_without_reopening() {
                     .await
                     .unwrap();
                 assert_eq!(
-                    reopened.open_app_data(&sealed, b"notes/new").unwrap(),
-                    b"session"
+                    reopened.store_key_state().unwrap(),
+                    StoreKeyState::Available
                 );
                 reopened.close().await.unwrap();
             }
@@ -948,11 +941,7 @@ async fn joining_retains_the_approved_member_in_session_custody() {
             .member_id(),
         member
     );
-    let sealed = handle.seal_app_data(b"joined", b"notes/new").await.unwrap();
-    assert_eq!(
-        handle.open_app_data(&sealed, b"notes/new").unwrap(),
-        b"joined"
-    );
+    assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
     handle.close().await.unwrap();
     owner.close().await;
 }

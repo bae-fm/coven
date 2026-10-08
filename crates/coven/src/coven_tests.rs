@@ -151,9 +151,6 @@ async fn host_secrets_identity_and_failed_deletion_survive_reopen() {
         .unwrap();
     let key_id = KeyId(UuidIds.new_id());
     let keys = StoreKeyring::new(StoreKey::generate(key_id).unwrap());
-    let sealed = keys
-        .seal_app_data(key_id, b"store secret", b"row/1")
-        .unwrap();
     app.keep_store_keys(&directory, &keys).unwrap();
     let handle = builder(&app, layout.clone())
         .open(directory.id())
@@ -217,10 +214,10 @@ async fn host_secrets_identity_and_failed_deletion_survive_reopen() {
         .await
         .unwrap();
     assert_eq!(replacement.host_secret("token").unwrap(), None);
-    assert!(matches!(
-        replacement.open_app_data(&sealed, b"row/1"),
-        Err(SealError::NoStoreKeys)
-    ));
+    assert_eq!(
+        replacement.store_key_state().unwrap(),
+        StoreKeyState::Locked
+    );
     assert_ne!(replacement.initialize_identity().unwrap(), member);
     replacement.close().await.unwrap();
 }

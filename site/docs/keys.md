@@ -158,36 +158,6 @@ it belongs to, so a restore code or a join for one store carries no authority
 in another, and the same device's pubkey never appears in more than one
 store's membership chain.
 
-## Sealing your own data
-
-A host with its own secret to keep in a row — a password entry's payload, an
-API token synced as app data — has a problem coven's own encryption doesn't
-solve: **the local SQLite database is not encrypted.** coven's encryption is
-at rest *in the cloud* (see [Encryption](/docs/encryption)); the row data
-sitting in the on-device `.sqlite` file is plaintext, the same as any local
-SQLite database.
-
-[`CovenHandle::seal_app_data`](rustdoc:method:coven::CovenHandle::seal_app_data)
-and
-[`CovenHandle::open_app_data`](rustdoc:method:coven::CovenHandle::open_app_data)
-seal under the store's own master keyring instead of a second, hand-rolled
-cipher — the same custody this page describes, no second key to manage:
-
-```rust
-let sealed = handle.seal_app_data(plaintext, row_id.as_bytes())?;
-// ... store `sealed` in a BLOB column ...
-let plaintext = handle.open_app_data(&sealed, row_id.as_bytes())?;
-```
-
-`aad` (the second argument) binds the ciphertext to its context — the row's
-own primary key, say — so a payload moved to a different row does not
-silently open there. The sealed payload records the key generation it was
-sealed under, so it stays openable across any number of later
-[rotations](/docs/sharing#revocation-is-key-rotation).
-[`SealError::Locked`](rustdoc:enum:coven::SealError) if the store has no
-established master key — the same gate `start_sync` applies before it
-seals cloud traffic.
-
 ## Host secrets
 
 A host with its own store-scoped secret that isn't row data — an API key for

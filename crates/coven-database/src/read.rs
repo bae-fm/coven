@@ -75,12 +75,6 @@ impl<'connection> SqlReadContext<'connection> {
     pub(crate) fn store_log(&self) -> CovenResult<crate::StoreLog> {
         Ok(crate::store_log_tables::read(self.database)?)
     }
-
-    pub(crate) fn current_store_key(
-        &self,
-    ) -> CovenResult<Option<coven_foundation::id_source::KeyId>> {
-        Ok(crate::store_log_tables::current_store_key(self.database)?)
-    }
 }
 
 /// A read that starts when polled and retains its store borrow until it ends.

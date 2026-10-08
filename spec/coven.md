@@ -1490,11 +1490,8 @@ Carol's tablet:
   - Devices keep the old keys, to read writes made before.
 - Each device keeps its member's key in the OS keychain.
 - Storage access, not keys, is what keeps a removed device out.
-- The app can use coven's keys for its own data on the device:
-  - it encrypts a value with the current store key, bound to where it is
-    kept, such as a row's key, since the local database isn't encrypted;
-  - it keeps its own secrets, such as an API token, in coven's keychain
-    entry, under the same access policy as coven's keys.
+- The app can keep its own secrets, such as an API token, in coven's
+  keychain entry, under the same access policy as coven's keys.
 
 ### 11.1 Cryptography
 

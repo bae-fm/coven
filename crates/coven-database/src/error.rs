@@ -8,9 +8,6 @@ pub type CovenResult<T> = Result<T, CovenError>;
 /// Failures of opening, reading and writing a store (§5, E1, E3).
 #[derive(Debug, thiserror::Error)]
 pub enum CovenError {
-    /// App data could not be sealed with the selected store key.
-    #[error(transparent)]
-    Seal(#[from] coven_crypto::SealError),
     /// Reading device identity or an app callback's custody operation failed.
     #[error(transparent)]
     Key(#[from] coven_crypto::custody::KeyError),

@@ -8,7 +8,6 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::{cipher, CryptoError, FingerprintHasher};
 
 pub(crate) const ENCRYPTION: &[u8] = b"coven/encryption/v1";
-pub(crate) const APP_DATA: &[u8] = b"coven/app-data/v1";
 pub(crate) const FINGERPRINTS: &[u8] = b"coven/fingerprints/v1";
 pub(crate) const JOIN_REQUEST: &[u8] = b"coven/join-request/v1";
 pub(crate) const SEALED_BOX: &[u8] = b"coven/sealed-box/v1";

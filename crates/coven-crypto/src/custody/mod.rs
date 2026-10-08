@@ -14,7 +14,7 @@ pub use error::{KeyError, KeychainError, SecretNameError};
 pub use keychain::{set_keyring_service, Keychain, KeyringCustody, StoreKeychain};
 pub use memory::InMemoryCustody;
 pub use passphrase::{Passphrase, PassphraseCustody};
-pub use store_custody::{IdentityError, StoreCustody, StoreKeys};
+pub use store_custody::{IdentityError, StoreCustody};
 
 const STORE_KEYS_ENTRY: &str = "store-keys";
 const MEMBER_KEYS_ENTRY: &str = "member-keys";

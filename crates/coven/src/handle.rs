@@ -385,43 +385,6 @@ impl CovenHandle {
             .delete_host_secret(name)
     }
 
-    /// Encrypts the app's own data with the current store key, for the app to
-    /// keep in its rows, since the local database is not encrypted. `aad`
-    /// binds it to its place, such as the row's key. Reads the key id from the
-    /// committed store log, then unlocks its bytes from custody. Without a
-    /// selected key, returns `CovenError::Seal(SealError::NoCurrentStoreKey)`.
-    /// Database reads and custody work run off the async executor.
-    pub async fn seal_app_data(&self, plaintext: &[u8], aad: &[u8]) -> CovenResult<Vec<u8>> {
-        let key = self
-            .database
-            .current_store_key()
-            .await?
-            .ok_or(SealError::NoCurrentStoreKey)?;
-        let custody = self.custody.clone();
-        let plaintext = SecretBytes::new(plaintext.to_vec());
-        let aad = aad.to_vec();
-        crate::coven::blocking(move || {
-            Ok(custody
-                .lock()
-                .expect("custody lock poisoned")
-                .as_ref()
-                .ok_or(KeyError::StoreClosed)?
-                .seal_app_data(key, plaintext.as_bytes(), &aad)?)
-        })
-        .await
-    }
-
-    /// Decrypts what `seal_app_data` made, with the store key it names, so it
-    /// still opens after the key is replaced. Fails with a different `aad`.
-    pub fn open_app_data(&self, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>, SealError> {
-        self.custody
-            .lock()
-            .expect("custody lock poisoned")
-            .as_ref()
-            .ok_or(KeyError::StoreClosed)?
-            .open_app_data(sealed, aad)
-    }
-
     /// Stops operation and file work, closes connections and releases the writer
     /// lock. Open file streams retain their shared deletion guards. Later
     /// database calls on any clone fail with `DbError::StoreClosed`; custody

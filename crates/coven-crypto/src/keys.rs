@@ -8,10 +8,8 @@ use subtle::ConstantTimeEq;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::{cipher, derivation, randomness, wire};
-use crate::{
-    CircleId, CryptoError, DerivedKeys, EncryptionKey, MaterialError, SealError, SecretBytes,
-};
+use crate::{derivation, randomness, wire};
+use crate::{CircleId, CryptoError, DerivedKeys, EncryptionKey, MaterialError, SecretBytes};
 
 /// A store's identified 32-byte key (§11), erased on drop.
 /// Cloning supplies an independent unlocked snapshot to in-memory custody.
@@ -233,40 +231,6 @@ impl StoreKeyring {
         }
         wire::end(bytes)?;
         Ok(Self { stores, circles })
-    }
-
-    /// Encrypt app data with its own key derived from the named store key (E11).
-    /// The app's associated data binds the value to its place.
-    /// The authenticated header records the store key id for later opening.
-    pub fn seal_app_data(
-        &self,
-        key: KeyId,
-        plaintext: &[u8],
-        aad: &[u8],
-    ) -> Result<Vec<u8>, SealError> {
-        let key = self.store_key(key)?;
-        let mut header = b"CVAD\x01".to_vec();
-        header.extend_from_slice(key.id().0.as_bytes());
-        let context = cipher::context(&[&header, aad]);
-        let encryption = derivation::derive_label(&key.bytes, derivation::APP_DATA);
-        let body = cipher::seal_random(&encryption, &context, plaintext)?;
-        header.extend(body);
-        Ok(header)
-    }
-
-    /// Open app data with the store key it names, even after replacement (E11).
-    pub fn open_app_data(&self, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>, SealError> {
-        let mut bytes = sealed;
-        wire::prefix(&mut bytes, b"CVAD\x01")?;
-        let id = KeyId(Uuid::from_bytes(wire::array(&mut bytes)?));
-        let header = sealed.get(..21).ok_or(MaterialError::Encoding)?;
-        let key = self.store_key(id)?;
-        let encryption = derivation::derive_label(&key.bytes, derivation::APP_DATA);
-        Ok(cipher::open_random(
-            &encryption,
-            &cipher::context(&[header, aad]),
-            bytes,
-        )?)
     }
 }
 

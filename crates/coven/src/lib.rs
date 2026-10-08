@@ -31,8 +31,8 @@ pub use coven_crypto::custody::{
     MemberKeyCustody, Passphrase, SecretNameError, StoreKeyCustody,
 };
 pub use coven_crypto::{
-    CircleKey, CryptoError, MaterialError, MemberId, MemberKeys, SealError, SecretBytes,
-    SecretText, StoreKey, StoreKeyring,
+    CircleKey, CryptoError, MaterialError, MemberId, MemberKeys, SecretBytes, SecretText, StoreKey,
+    StoreKeyring,
 };
 pub use coven_database::{
     named_params, params, prepare_user_file, types, CacheFill, ChangeOp, ColumnChange, CovenError,

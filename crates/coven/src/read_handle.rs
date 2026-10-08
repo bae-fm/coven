@@ -1,9 +1,7 @@
 //! The read-only application surface caches files under a shared deletion guard.
 
 use crate::*;
-use coven_crypto::custody::StoreKeys;
 use coven_database::DatabaseReadHandle;
-use std::sync::{Arc, Mutex};
 
 /// A handle that reads synced rows and maintains its local file cache (§5, E1).
 /// Its shared store lock prevents deletion until all its connections close.
@@ -22,20 +20,11 @@ use std::sync::{Arc, Mutex};
 pub struct CovenReadHandle {
     database: DatabaseReadHandle,
     files: coven_sync::Files,
-    keys: Arc<Mutex<Option<StoreKeys>>>,
 }
 
 impl CovenReadHandle {
-    pub(crate) fn new(
-        database: DatabaseReadHandle,
-        keys: StoreKeys,
-        files: coven_sync::Files,
-    ) -> Self {
-        Self {
-            database,
-            files,
-            keys: Arc::new(Mutex::new(Some(keys))),
-        }
+    pub(crate) fn new(database: DatabaseReadHandle, files: coven_sync::Files) -> Self {
+        Self { database, files }
     }
     /// A read of one consistent snapshot, run when awaited.
     pub fn read<F, R>(&self, read: F) -> Read<'_, F>
@@ -68,26 +57,12 @@ impl CovenReadHandle {
     pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError> {
         self.files.open_file_stream(file).await
     }
-    /// Decrypts app data with the retained store key its header names.
-    pub fn open_app_data(&self, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>, SealError> {
-        self.keys
-            .lock()
-            .expect("custody lock poisoned")
-            .as_ref()
-            .ok_or(KeyError::StoreClosed)?
-            .open_app_data(sealed, aad)
-    }
-    /// Closes read and cache connections, releases their shared store lock,
-    /// and drops unlocked keys on all clones. File streams retain their own locks.
+    /// Closes read and cache connections on all clones and releases their shared
+    /// store lock. File streams retain their own locks.
     pub async fn close(&self) -> Result<(), DbError> {
         let handle = self.clone();
         crate::coven::completion(tokio::spawn(async move {
             handle.files.close().await;
-            let custody = handle.keys.clone();
-            crate::coven::blocking(move || {
-                custody.lock().expect("custody lock poisoned").take();
-            })
-            .await;
             handle.database.close().await
         }))
         .await

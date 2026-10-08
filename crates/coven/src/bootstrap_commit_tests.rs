@@ -242,7 +242,6 @@ async fn cleanup_failure_returns_the_open_handle_with_its_session_keys() {
     let code = code(id);
     let key = KeyId(UuidIds.new_id());
     let ring = StoreKeyring::new(StoreKey::generate(key).unwrap());
-    let sealed = ring.seal_app_data(key, b"retained", b"test").unwrap();
     let (pending, owners, database) = prepared(
         &layout,
         id,
@@ -271,7 +270,7 @@ async fn cleanup_failure_returns_the_open_handle_with_its_session_keys() {
         StorageSettings::new(pending.directory()).read().unwrap(),
         Some(location)
     );
-    assert_eq!(handle.open_app_data(&sealed, b"test").unwrap(), b"retained");
+    assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
     handle.read(|_| Ok(())).await.unwrap();
     handle.close().await.unwrap();
 }
