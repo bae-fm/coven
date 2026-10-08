@@ -1,7 +1,7 @@
 use super::*;
 use crate::StoreLogSync;
 use coven_crypto::{custody::InMemoryCustody, MemberKeys, StoreKey, StoreKeyring};
-use coven_database::{CovenMigrationPolicy, DatabaseBuilder, Migration, RowIdentity, SyncedTable};
+use coven_database::{DatabaseBuilder, Migration, RowIdentity, SyncedTable};
 use coven_format::store_log::{MemberPublicKeys, StoreChange};
 use coven_foundation::{
     clock::FixedClock,
@@ -52,7 +52,7 @@ async fn open(directory: StoreDir, clock: Arc<FixedClock>) -> Database {
     DatabaseBuilder::new(directory)
         .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
         .migrations(vec![Migration::sql(1, "notes", "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL);")])
-        .coven_migration_policy(CovenMigrationPolicy::ApplyPending).clock(clock).open().await.unwrap()
+        .clock(clock).open().await.unwrap()
 }
 async fn device(storage: Arc<MemoryStorage>, number: u64) -> Device {
     let temporary = tempfile::tempdir().unwrap();

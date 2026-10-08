@@ -32,10 +32,7 @@ use coven_foundation::id_source::{DeviceId, IdSourceRef, UuidIds};
 use crate::authorization::SqlAuthorization;
 use crate::observation::{CommitObserver, CommitSubscription};
 use crate::sqlite::DatabaseConnection;
-use crate::{
-    CovenError, CovenMigrationPolicy, CovenResult, DbError, Migration, MigrationOutcome,
-    SyncedTable,
-};
+use crate::{CovenError, CovenResult, DbError, Migration, MigrationOutcome, SyncedTable};
 use crate::{LiveQuery, LostValue, Read, ReconfigurableLiveQuery, SqlReadContext};
 
 #[path = "database_builder.rs"]

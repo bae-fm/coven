@@ -83,7 +83,6 @@ impl Owner {
         let db = DatabaseBuilder::new(directory.clone())
             .synced_tables(tables())
             .migrations(migrations())
-            .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
             .clock(clock.clone())
             .open()
             .await
@@ -245,7 +244,6 @@ impl Installation {
             .with_keychain(self.keychain.clone())
             .synced_tables(tables())
             .migrations(migrations())
-            .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
             .clock(clock_with_runtime_waits(&owner.clock))
             .storage(storage.clone())
             .storage_connector(storage)
@@ -320,7 +318,6 @@ impl Installation {
             .with_keychain(self.keychain.clone())
             .synced_tables(tables())
             .migrations(migrations())
-            .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
             .clock(clock_with_runtime_waits(&owner.clock))
             .storage(owner.storage.clone())
             .open(directory.id())

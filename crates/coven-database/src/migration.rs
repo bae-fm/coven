@@ -7,15 +7,6 @@ use rusqlite::{Params, Row};
 use std::cell::RefCell;
 use std::sync::Arc;
 
-/// Whether a writable open may migrate coven's internal schema.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CovenMigrationPolicy {
-    /// Apply each pending internal migration in its own transaction.
-    ApplyPending,
-    /// Refuse an open that needs to migrate coven's tables.
-    RefusePending,
-}
-
 /// How one migration changed the schema and synced rows (§17.1).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MigrationChange {

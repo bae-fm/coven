@@ -68,6 +68,9 @@ pub enum Audience {
   lock files. Creation and lock-file removal are serialized by the layout.
 - Opening a store needs its declared tables ([E2](#e2-declaring-synced-tables))
   and its migrations ([E13](#e13-migrations)).
+- Writable opens always migrate coven's own local tables in place
+  ([§17.2](coven.md#172-covens-schema)). Read-only opens refuse tables that
+  need migrating; any open refuses an internal schema newer than it supports.
 - *Key custody* is where this device keeps the store keys and circle keys
   it has opened ([§11](coven.md#11-keys)): every key it has used, so it reads
   writes made under older ones.
@@ -289,7 +292,7 @@ pub enum CovenError {
     Database(DbError),
     /// An app migration failed or cannot run on this schema.
     Migration(MigrationError),
-    /// Coven's tables need a migration this open cannot run.
+    /// Coven's internal schema is unsupported or its migration cannot run.
     CovenMigration(CovenMigrationError),
     /// The directory's settings could not be read.
     Settings(SettingsError),
@@ -478,8 +481,10 @@ pub enum SchemaError {
 
 /// Coven's local tables cannot be used at this version (§17.2, E1).
 pub enum CovenMigrationError {
-    /// Opening would need to migrate, but this open refuses it.
-    Pending,
+    /// The read-only connection cannot migrate coven's tables.
+    ReadOnly,
+    /// The internal schema requires a newer coven.
+    SchemaTooNew { current: u32, supported: u32 },
     /// A migration failed and its transaction rolled back.
     Failed { source: Box<DbError> },
 }
@@ -736,10 +741,6 @@ impl CovenBuilder {
     /// Required.
     pub fn migrations(self, migrations: Vec<Migration>) -> Self;
 
-    /// Whether opening may migrate coven's own tables to this version of
-    /// coven (§17.2). Required by `open`.
-    pub fn coven_migration_policy(self, policy: CovenMigrationPolicy) -> Self;
-
     /// The wall clock that timestamps use (§7.2). Defaults to the system clock.
     pub fn clock(self, clock: ClockRef) -> Self;
 
@@ -774,9 +775,10 @@ impl CovenBuilder {
     pub fn identity_custody(self, custody: IdentityCustody) -> Self;
 
     /// Opens the store for reading and writing, taking the store's lock.
-    /// Opening runs migrations and resumes unfinished operations and committed
-    /// file work. An empty journal needs no keys; resumed steps read keys when
-    /// needed. Local database calls need no unlocked key. Opening does not start
+    /// Opening always migrates coven's tables before the app's schema, then
+    /// resumes unfinished operations and committed file work. An empty journal
+    /// needs no keys; resumed steps read keys when needed. Local database calls
+    /// need no unlocked key. Opening does not start
     /// the sync loop; `start_sync` starts it. A store with storage set up
     /// opens as `Stopped`; otherwise its status is `Disconnected`.
     pub async fn open(self, store: StoreId) -> CovenResult<CovenHandle>;
@@ -812,13 +814,6 @@ pub enum IdentityCustody {
     Custom(Arc<dyn MemberKeyCustody>),
 }
 
-pub enum CovenMigrationPolicy {
-    /// Migrate coven's tables on open.
-    ApplyPending,
-    /// Fail to open with `CovenMigrationError::Pending` instead.
-    RefusePending,
-}
-
 impl CovenHandle {
     /// Closes the store: stops syncing, operation and file work, closes every
     /// connection and releases the writer lock. Open file streams and outstanding file I/O
@@ -840,7 +835,6 @@ let store_dir = Coven::create_store(&layout, "Household", Arc::new(UuidIds)).awa
 let handle = Coven::builder(layout.clone())
     .synced_tables(tables())                        // E2
     .migrations(migrations())                       // E13
-    .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
     .open(store_dir.id())
     .await?;
 ```
@@ -2501,6 +2495,8 @@ pub enum ProviderSignOut {
   - The builder supplies tables, migrations, custody, clock, id source,
     provider clients and file-transfer limits once. Session-only `InMemory`
     custody lives with the returned handle.
+  - Every call migrates coven's own local tables in place before applying
+    the app's migrations, as a writable open does ([§17.2](coven.md#172-covens-schema)).
   - An unfinished store is created at its permanent path with a durable
     `.coven-bootstrap` marker. Listings hide it and ordinary opens refuse it.
     Bootstrap holds its own directory capability and opens the database once;
@@ -2795,7 +2791,6 @@ let tokens = if info.needs_oauth {
 let builder = Coven::builder(layout.clone())
     .synced_tables(tables())
     .migrations(migrations())
-    .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
     .oauth_clients(oauth_clients.clone())
     .apply_cloudkit_ops(cloudkit_ops.clone())
     .clock(clock.clone())
@@ -2844,7 +2839,6 @@ let tokens = oauth_clients.authorize(CloudProvider::GoogleDrive, cancel_rx.clone
 let builder = Coven::builder(layout.clone())
     .synced_tables(tables())
     .migrations(migrations())
-    .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
     .oauth_clients(oauth_clients.clone());
 match join_with_invite(
     builder,
@@ -2999,6 +2993,8 @@ pub struct CircleMemberInfo {
 
 ### E13 Migrations
 
+- Coven migrates its own local tables automatically before the app's
+  migrations; each internal migration is atomic ([§17.2](coven.md#172-covens-schema)).
 - The app's schema is a list of migrations numbered from 1 with no gaps.
 - Opening runs every migration above the database's version in one
   transaction, so a failure leaves the schema as it was.

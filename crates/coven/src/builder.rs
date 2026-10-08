@@ -14,7 +14,6 @@ use std::sync::Arc;
 pub struct CovenBuilder {
     tables: Option<Vec<SyncedTable>>,
     migrations: Option<Vec<Migration>>,
-    policy: Option<CovenMigrationPolicy>,
     layout: StoreLayout,
     ids: IdSourceRef,
     clock: ClockRef,
@@ -36,7 +35,6 @@ impl CovenBuilder {
         Self {
             tables: None,
             migrations: None,
-            policy: None,
             layout,
             ids,
             clock,
@@ -61,12 +59,6 @@ impl CovenBuilder {
     /// Required.
     pub fn migrations(mut self, migrations: Vec<Migration>) -> Self {
         self.migrations = Some(migrations);
-        self
-    }
-    /// Whether opening may migrate coven's own tables to this version of
-    /// coven (§17.2). Required by `open`.
-    pub fn coven_migration_policy(mut self, policy: CovenMigrationPolicy) -> Self {
-        self.policy = Some(policy);
         self
     }
     /// The wall clock that timestamps use (§7.2). Defaults to the system clock.
@@ -128,9 +120,10 @@ impl CovenBuilder {
     }
 
     /// Opens the store for reading and writing, taking the store's lock.
-    /// Opening runs migrations and resumes unfinished operations and committed
-    /// file work. An empty journal needs no keys; resumed steps read keys when
-    /// needed. No sync loop starts, and local database calls need no unlocked key.
+    /// Opening always migrates coven's tables before the app's schema, then
+    /// resumes unfinished operations and committed file work. An empty journal
+    /// needs no keys; resumed steps read keys when needed. No sync loop starts,
+    /// and local database calls need no unlocked key.
     pub async fn open(self, store: StoreId) -> CovenResult<CovenHandle> {
         crate::coven::blocking(move || self.open_graph(store, false))
             .await?
@@ -185,16 +178,12 @@ impl CovenBuilder {
             .ok_or(CovenError::MissingConfiguration {
                 field: "migrations",
             })?;
-        let mut database = DatabaseBuilder::new(directory)
+        Ok(DatabaseBuilder::new(directory)
             .migration_operation(coven_sync::StoreLogSync::migration_operation)
             .synced_tables(tables)
             .migrations(migrations)
             .clock(self.clock.clone())
-            .id_source(self.ids.clone());
-        if let Some(policy) = self.policy {
-            database = database.coven_migration_policy(policy);
-        }
-        Ok(database)
+            .id_source(self.ids.clone()))
     }
 
     fn keychain(&self) -> Result<Arc<Keychain>, KeyError> {

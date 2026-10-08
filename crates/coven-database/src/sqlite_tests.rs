@@ -172,22 +172,57 @@ async fn integrity_check_notices_btree_damage_in_a_valid_database_file() {
 }
 
 #[tokio::test]
-async fn internal_schema_migrations_obey_policy_and_roll_back_on_failure() {
+async fn internal_schema_migrates_on_open_and_preserves_app_data() {
     let store = TestStore::new();
-    let error = store
-        .builder(vec![], vec![])
-        .coven_migration_policy(CovenMigrationPolicy::RefusePending)
-        .open()
-        .await
-        .err()
-        .unwrap();
-    assert!(matches!(
-        error,
-        crate::CovenError::CovenMigration(CovenMigrationError::Pending)
-    ));
     let raw = Connection::open(store.database_path()).unwrap();
-    raw.execute_batch("CREATE TABLE _coven_columns(sentinel TEXT)")
+    raw.execute_batch("CREATE TABLE local(value TEXT); INSERT INTO local VALUES('kept')")
         .unwrap();
+    drop(raw);
+    for _ in 0..2 {
+        let db = store.builder(vec![], vec![]).open().await.unwrap();
+        db.inspect_writer(|sql| {
+            assert_eq!(
+                sql.query_row("PRAGMA application_id", [], |r| r.get::<_, u32>(0))
+                    .unwrap(),
+                internal_schema::VERSION
+            );
+        });
+        assert_eq!(count(&db, "_coven_writes"), 0);
+        assert_eq!(
+            db.read(|sql| Ok(
+                sql.query_row("SELECT value FROM local", [], |r| r.get::<_, String>(0))?
+            ))
+            .await
+            .unwrap(),
+            "kept"
+        );
+        db.close().await.unwrap();
+    }
+    let reader = store
+        .builder(vec![], vec![])
+        .open_read_only()
+        .await
+        .unwrap();
+    assert_eq!(
+        reader
+            .read(
+                |sql| Ok(sql.query_row("SELECT value FROM local", [], |r| r.get::<_, String>(0))?)
+            )
+            .await
+            .unwrap(),
+        "kept"
+    );
+    reader.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn internal_schema_migrations_roll_back_on_failure() {
+    let store = TestStore::new();
+    let raw = Connection::open(store.database_path()).unwrap();
+    raw.execute_batch(
+        "CREATE TABLE _coven_columns(sentinel TEXT); INSERT INTO _coven_columns VALUES('kept')",
+    )
+    .unwrap();
     drop(raw);
     let error = store.builder(vec![], vec![]).open().await.err().unwrap();
     assert!(matches!(
@@ -201,21 +236,27 @@ async fn internal_schema_migrations_obey_policy_and_roll_back_on_failure() {
         0
     );
     assert_eq!(
-        raw.query_row(
-            "SELECT count(*) FROM sqlite_schema WHERE name = '_coven_writes'",
-            [],
-            |r| r.get::<_, i64>(0)
-        )
-        .unwrap(),
-        0
+        raw.query_row("SELECT count(*) FROM sqlite_schema", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        raw.query_row("SELECT sentinel FROM _coven_columns", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "kept"
     );
 }
 
 #[tokio::test]
-async fn readonly_and_older_coven_refuse_an_internal_version_they_cannot_use() {
+async fn read_only_refuses_internal_migration_without_changing_database() {
     let store = TestStore::new();
     let raw = Connection::open(store.database_path()).unwrap();
+    raw.execute_batch("CREATE TABLE local(value TEXT); INSERT INTO local VALUES('kept')")
+        .unwrap();
     drop(raw);
+    let before = std::fs::read(store.database_path()).unwrap();
     assert!(matches!(
         store
             .builder(vec![], vec![])
@@ -223,17 +264,39 @@ async fn readonly_and_older_coven_refuse_an_internal_version_they_cannot_use() {
             .await
             .err()
             .unwrap(),
-        crate::CovenError::CovenMigration(CovenMigrationError::Pending)
+        crate::CovenError::CovenMigration(CovenMigrationError::ReadOnly)
     ));
+    assert_eq!(std::fs::read(store.database_path()).unwrap(), before);
+}
+
+#[tokio::test]
+async fn newer_internal_schema_is_refused_without_changes() {
+    let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     db.close().await.unwrap();
-    let raw = Connection::open(store.database_path()).unwrap();
-    raw.execute_batch("PRAGMA application_id=2").unwrap();
-    drop(raw);
-    assert!(matches!(
-        store.builder(vec![], vec![]).open().await.err().unwrap(),
-        crate::CovenError::CovenMigration(CovenMigrationError::Pending)
-    ));
+    for version in [internal_schema::VERSION + 1, u32::MAX] {
+        let raw = Connection::open(store.database_path()).unwrap();
+        raw.execute_batch(&format!("PRAGMA application_id={}", version as i32))
+            .unwrap();
+        drop(raw);
+        let before = std::fs::read(store.database_path()).unwrap();
+        for read_only in [false, true] {
+            let builder = store.builder(vec![], vec![]);
+            let result = if read_only {
+                builder.open_read_only().await.map(|_| ())
+            } else {
+                builder.open().await.map(|_| ())
+            };
+            assert!(matches!(
+                result,
+                Err(crate::CovenError::CovenMigration(CovenMigrationError::SchemaTooNew {
+                    current,
+                    supported,
+                })) if current == version && supported == internal_schema::VERSION
+            ));
+            assert_eq!(std::fs::read(store.database_path()).unwrap(), before);
+        }
+    }
 }
 
 #[tokio::test]

@@ -19,7 +19,7 @@ pub(super) async fn household(storage: Arc<MemoryStorage>) -> Vec<Device> {
         device.db=DatabaseBuilder::new(device.directory.clone())
             .synced_tables(vec![SyncedTable::new("notes",RowIdentity::SharedKey),SyncedTable::new("pins",RowIdentity::IndependentUuid).audience_column("audience")])
             .migrations(vec![Migration::sql(1,"notes","CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL);"),Migration::sql(2,"circles","CREATE TABLE pins(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,title TEXT NOT NULL);")])
-            .coven_migration_policy(CovenMigrationPolicy::ApplyPending).clock(device.clock.clone()).open().await.unwrap();
+            .clock(device.clock.clone()).open().await.unwrap();
         device.sync = DeviceLogSync::new(
             storage.clone(),
             device.db.clone(),

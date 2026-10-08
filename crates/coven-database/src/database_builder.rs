@@ -10,7 +10,6 @@ pub struct DatabaseBuilder {
     tables: Option<Vec<SyncedTable>>,
     migrations: Option<Vec<Migration>>,
     migration_operation: Option<Box<MigrationOperation>>,
-    policy: Option<CovenMigrationPolicy>,
     clock: Option<ClockRef>,
     ids: Option<IdSourceRef>,
 }
@@ -23,7 +22,6 @@ impl DatabaseBuilder {
             tables: None,
             migrations: None,
             migration_operation: None,
-            policy: None,
             clock: None,
             ids: None,
         }
@@ -53,12 +51,6 @@ impl DatabaseBuilder {
         self
     }
 
-    /// Required for a writable open; read-only opens always refuse migration.
-    pub fn coven_migration_policy(mut self, policy: CovenMigrationPolicy) -> Self {
-        self.policy = Some(policy);
-        self
-    }
-
     /// The clock used when stamping a local write (§7.2).
     pub fn clock(mut self, clock: ClockRef) -> Self {
         self.clock = Some(clock);
@@ -72,6 +64,7 @@ impl DatabaseBuilder {
     }
 
     /// Open one writer under the store lock and four read-only connections.
+    /// Always migrate coven's internal tables before the app's schema.
     pub async fn open(self) -> CovenResult<Database> {
         finish_blocking(tokio::task::spawn_blocking(move || self.open_graph(None, None)).await)
     }
@@ -114,9 +107,6 @@ impl DatabaseBuilder {
         let migrations = self.migrations.ok_or(CovenError::MissingConfiguration {
             field: "migrations",
         })?;
-        let policy = self.policy.ok_or(CovenError::MissingConfiguration {
-            field: "coven_migration_policy",
-        })?;
         // Refuse a directory that is not a store before creating its database.
         let lock = match lock {
             Some(lock) => {
@@ -148,7 +138,7 @@ impl DatabaseBuilder {
         writer.check_integrity()?;
         writer.enable_wal()?;
         let origin = if let Some(recovery) = recovery.as_ref().filter(|r| r.needs_salvage()) {
-            writer.prepare_internal_schema(policy, false)?;
+            writer.prepare_internal_schema()?;
             let supported = crate::migration::validate_versions(&migrations)?;
             let waiting_version = match DatabaseConnection::open(
                 recovery.source_database_path(),
@@ -184,7 +174,6 @@ impl DatabaseBuilder {
         let migrations = writer.prepare_schema(
             &tables,
             &migrations,
-            policy,
             Some(origin),
             self.migration_operation.as_deref(),
         )?;
@@ -240,13 +229,7 @@ impl DatabaseBuilder {
         let path = self.directory.database_path();
         let first = DatabaseConnection::open(&path, true, SqlAuthorization::new(&tables))?;
         first.check_integrity()?;
-        first.prepare_schema(
-            &tables,
-            &migrations,
-            CovenMigrationPolicy::RefusePending,
-            None,
-            None,
-        )?;
+        first.prepare_schema(&tables, &migrations, None, None)?;
         let schema = crate::write_schema::WriteSchema::read(&first, tables.clone())?;
         let mut readers = vec![Mutex::new(first)];
         for _ in 1..4 {

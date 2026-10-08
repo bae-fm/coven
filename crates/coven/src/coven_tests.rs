@@ -9,7 +9,6 @@ fn builder(app: &TestCoven, layout: StoreLayout) -> CovenBuilder {
             "notes",
             "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL)",
         )])
-        .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
 }
 
 #[tokio::test]
@@ -261,7 +260,6 @@ async fn a_breaking_migration_converts_the_waiting_write() {
         .builder(layout.clone())
         .synced_tables(table())
         .migrations(vec![first()])
-        .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
         .open(directory.id())
         .await
         .unwrap();
@@ -291,7 +289,6 @@ async fn a_breaking_migration_converts_the_waiting_write() {
         .builder(layout.clone())
         .synced_tables(table())
         .migrations(vec![first(), migration])
-        .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
         .open(directory.id())
         .await
         .unwrap();

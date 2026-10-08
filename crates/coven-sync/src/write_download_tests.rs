@@ -157,7 +157,7 @@ async fn newer_write_waits_until_the_app_schema_updates() {
     device.db=DatabaseBuilder::new(device.directory.clone())
         .synced_tables(vec![SyncedTable::new("notes",RowIdentity::SharedKey)])
         .migrations(vec![Migration::sql(1,"notes","CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL);"), Migration::sql(2,"extra","CREATE TABLE extra(value TEXT);")])
-        .coven_migration_policy(CovenMigrationPolicy::ApplyPending).clock(device.clock.clone()).open().await.unwrap();
+        .clock(device.clock.clone()).open().await.unwrap();
     device.sync = DeviceLogSync::new(
         storage,
         device.db.clone(),

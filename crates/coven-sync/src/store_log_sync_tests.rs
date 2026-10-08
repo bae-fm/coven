@@ -1,6 +1,6 @@
 use super::*;
 use coven_crypto::{custody::InMemoryCustody, MemberKeys, StoreKey};
-use coven_database::{CovenMigrationPolicy, DatabaseBuilder};
+use coven_database::DatabaseBuilder;
 use coven_format::store_log::{CircleKeyId, MemberPublicKeys, MemberRole};
 use coven_foundation::{
     clock::FixedClock,
@@ -63,7 +63,6 @@ async fn open(directory: StoreDir, clock: Arc<FixedClock>) -> Database {
     DatabaseBuilder::new(directory)
         .synced_tables(vec![])
         .migrations(vec![])
-        .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
         .clock(clock)
         .open()
         .await

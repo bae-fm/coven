@@ -14,18 +14,14 @@ them) reach teammates; the rest stay on the device that wrote them.
 coven owns the connections. The host opens one handle with
 [`Coven::builder`](rustdoc:struct:coven::Coven), handing over the set of tables
 that sync and the [migration ladder](/docs/schema-evolution) that creates the
-app's own tables. On the first open of a database, coven creates its complete
-bookkeeping schema, version ledger, and initialization marker in one SQLite
-transaction. Every later writer and read-only open requires that marker and an
-exact known bookkeeping schema. The host explicitly authorizes a writer to
-apply pending Coven migrations or requires it to refuse them; readers always
-refuse. The writer advances the Coven ladder before any host migration rungs,
-then seeds its clock off the rows already on disk, attaches the change-capture
-session to the synced tables, and spawns the threads that own the connections —
-one writer and a pool of read-only connections that backs `handle.read`.
+app's own tables. Every writable open automatically migrates coven's own local
+tables in place before the app's migrations. Each internal migration is atomic.
+Read-only opens refuse tables that need migrating; any open refuses an internal
+schema newer than this coven supports. The handle owns one writer and a pool of
+read-only connections that backs `handle.read`.
 
 ```rust
-use coven::{Coven, CovenMigrationPolicy, Migration, RowIdentity, SyncedTable};
+use coven::{Coven, Migration, RowIdentity, SyncedTable};
 
 const SCHEMA: &str = "
 CREATE TABLE workspaces (
@@ -56,7 +52,6 @@ let handle = Coven::builder(layout.clone())
         SyncedTable::new("todos", RowIdentity::IndependentUuid)
             .gated_through("list_id"),
     ])
-    .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
     .migrations(vec![Migration::sql(1, "initial", SCHEMA)])
     .open(store_dir.id()).await?;
 ```

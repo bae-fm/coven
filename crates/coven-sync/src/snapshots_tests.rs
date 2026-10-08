@@ -35,7 +35,7 @@ async fn open_notes(directory: StoreDir, clock: Arc<FixedClock>) -> Database {
     DatabaseBuilder::new(directory)
         .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey).key_columns(["audience", "id"]).audience_column("audience")])
         .migrations(vec![Migration::sql(1, "notes", "CREATE TABLE notes(id TEXT NOT NULL,audience TEXT NOT NULL,title TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(audience,id))")])
-        .coven_migration_policy(CovenMigrationPolicy::ApplyPending).clock(clock).open().await.unwrap()
+        .clock(clock).open().await.unwrap()
 }
 
 async fn notes_device(storage: Arc<MemoryStorage>, n: u64) -> Device {
@@ -577,7 +577,7 @@ async fn newer_schema_snapshot_is_passed_over_for_an_older_supported_one() {
     a.db = DatabaseBuilder::new(a.directory.clone())
         .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey).key_columns(["audience", "id"]).audience_column("audience")])
         .migrations(vec![Migration::sql(1, "notes", "CREATE TABLE notes(id TEXT NOT NULL,audience TEXT NOT NULL,title TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(audience,id))"), Migration::sql(2,"addition","ALTER TABLE notes ADD COLUMN added TEXT")])
-        .coven_migration_policy(CovenMigrationPolicy::ApplyPending).clock(a.clock.clone()).open().await.unwrap();
+        .clock(a.clock.clone()).open().await.unwrap();
     a.sync.database = a.db.clone();
     a.sync.write_snapshot(Audience::Store).await.unwrap();
     let mut c = notes_device(storage.clone(), 3).await;

@@ -63,14 +63,10 @@ both create-once exact slots and provider-enforced conditional replacement.
 The provider compares revisions; Coven constructs and verifies the signed
 history and its authorization.
 
-The signed Store protocol root binds the store id, founder, schema version, and
-the immutable schema-routing contract; open, join, and restore verify it before
-touching storage or local state. On first open, Coven creates its complete
-internal schema, version ledger, and initialization marker in one SQLite
-transaction. Later writer and read-only opens require the marker and an exact
-known internal schema manifest. Writers apply or refuse pending Coven migrations
-according to the host's explicit policy; readers always refuse them. A missing
-or invalid marker fails the open without recreating metadata. Opening works
+Every writable open, including restore and join, automatically migrates coven's
+own local tables before the app's migrations. Each internal migration is atomic.
+Read-only opens refuse tables that need migrating, and any open refuses an
+internal schema newer than this coven supports. Opening works
 without a provider — the store is local-only and complete until one is attached.
 
 A single Store commit may carry an optional Store package and one package per
@@ -88,7 +84,7 @@ cannot happen, because the only connection that can write is the one capture
 is attached to.
 
 The host opens the store once through
-`Coven::builder(layout.clone()).synced_tables(...).coven_migration_policy(...).migrations(...).open(store_dir.id()).await`, declaring
+`Coven::builder(layout.clone()).synced_tables(...).migrations(...).open(store_dir.id()).await`, declaring
 its [synced tables](/docs/local-data), and from then on runs all its writes
 through `handle.write(...)`. The writer connection lives on one dedicated
 thread (an actor). Each host transaction gets a SQLite session attached to every

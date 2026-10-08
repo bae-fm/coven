@@ -5,9 +5,7 @@ use std::{
 
 use crate::effects::tests::snapshot;
 use coven_crypto::MemberId;
-use coven_database::{
-    CovenMigrationPolicy, DatabaseBuilder, DropReason, EntryOutcome, StoreLog, StoreLogReplay,
-};
+use coven_database::{DatabaseBuilder, DropReason, EntryOutcome, StoreLog, StoreLogReplay};
 use coven_format::{
     store_log::{CircleKeyId, MemberPublicKeys, MemberRole, StoreChange, StoreLogEntry},
     value::{EntryId, EntryPositions},
@@ -931,7 +929,6 @@ async fn replay_cost() {
     let database = DatabaseBuilder::new(directory)
         .synced_tables(vec![])
         .migrations(vec![])
-        .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
         .open()
         .await
         .unwrap();

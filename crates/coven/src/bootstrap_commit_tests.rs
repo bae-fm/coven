@@ -52,7 +52,6 @@ async fn prepared(
     let builder = Coven::builder(layout.clone())
         .synced_tables(Vec::new())
         .migrations(Vec::new())
-        .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
         .key_custody(keys)
         .identity_custody(identity);
     let database = builder

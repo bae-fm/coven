@@ -179,7 +179,6 @@ fn crashing_file_writer() {
             DatabaseBuilder::new(layout.store_dir(&store))
                 .synced_tables(tables(Provenance::AppProvided))
                 .migrations(vec![Migration::sql(1, "files", SCHEMA)])
-                .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
                 .open(),
         )
         .unwrap();

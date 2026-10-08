@@ -5,7 +5,7 @@ async fn rows(d: &mut Device) {
     d.db.close().await.unwrap();
     d.db = DatabaseBuilder::new(d.directory.clone()).synced_tables(vec![SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience")])
         .migrations(vec![Migration::sql(1, "notes", "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL, audience TEXT NOT NULL)")])
-        .coven_migration_policy(CovenMigrationPolicy::ApplyPending).clock(d.clock.clone()).open().await.unwrap();
+        .clock(d.clock.clone()).open().await.unwrap();
     d.sync.database = d.db.clone();
 }
 async fn write(d: &Device, circle: CircleId, n: u128) {

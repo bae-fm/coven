@@ -227,7 +227,6 @@ async fn a_file_named_only_by_a_retained_log_write_stays_until_that_log_goes() {
             "files",
             "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)",
         )])
-        .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
         .clock(a.clock.clone())
         .open()
         .await

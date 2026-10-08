@@ -2427,7 +2427,10 @@ Carol's tablet:
   only under `_coven_`. SQL functions such as `coven_applying()` keep their
   names.
 - Coven's own tables in the local database, such as `_coven_rows`, are
-  local only, and a newer coven migrates them in place when the app starts.
+  local only. Opening for writing always migrates them in place before
+  running the app's migrations; each internal migration is atomic.
+  A read-only open refuses tables that need migrating, and any open refuses
+  an internal schema newer than this coven supports.
 - What coven writes to storage has a *format*: write records, store log
   entries, snapshots, paths, every byte of it given in
   [Appendix D](format.md).

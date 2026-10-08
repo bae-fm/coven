@@ -1,7 +1,7 @@
 use super::*;
 use coven_database::{
-    CacheFill, CovenMigrationPolicy, Database, DatabaseBuilder, FileDecl, FileRef, Migration,
-    Provenance, RowIdentity, SyncedTable,
+    CacheFill, Database, DatabaseBuilder, FileDecl, FileRef, Migration, Provenance, RowIdentity,
+    SyncedTable,
 };
 use coven_foundation::{
     clock::ClosureClock,
@@ -163,7 +163,7 @@ fn builder(
     clock: &ClockRef,
     tables: &[SyncedTable],
 ) -> DatabaseBuilder {
-    DatabaseBuilder::new(directory.clone()).id_source(ids.clone()).clock(clock.clone()).synced_tables(tables.to_vec()).migrations(vec![Migration::sql(1,"files","CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT); CREATE TABLE other(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)")]).coven_migration_policy(CovenMigrationPolicy::ApplyPending)
+    DatabaseBuilder::new(directory.clone()).id_source(ids.clone()).clock(clock.clone()).synced_tables(tables.to_vec()).migrations(vec![Migration::sql(1,"files","CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT); CREATE TABLE other(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)")])
 }
 
 #[tokio::test]

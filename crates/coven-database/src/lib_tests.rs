@@ -1,4 +1,4 @@
-use crate::{CovenError, CovenMigrationPolicy, DatabaseBuilder, DbError, Migration, SyncedTable};
+use crate::{CovenError, DatabaseBuilder, DbError, Migration, SyncedTable};
 use coven_foundation::{
     files::{StoreDir, StoreLayout},
     id_source::{IdSource, SequentialIds, StoreId},
@@ -53,7 +53,6 @@ impl TestStore {
         DatabaseBuilder::new(self.directory.clone())
             .synced_tables(tables)
             .migrations(migrations)
-            .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
     }
 
     pub(crate) async fn schema(
@@ -86,12 +85,6 @@ async fn required_builder_choices_are_typed() {
         (
             DatabaseBuilder::new(store.directory.clone()).synced_tables(vec![]),
             "migrations",
-        ),
-        (
-            DatabaseBuilder::new(store.directory.clone())
-                .synced_tables(vec![])
-                .migrations(vec![]),
-            "coven_migration_policy",
         ),
     ] {
         assert!(

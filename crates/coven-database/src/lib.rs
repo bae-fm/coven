@@ -101,9 +101,7 @@ pub use live_query::{
     ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent,
 };
 pub use lost::{Lost, LostCell, LostValue, RemovalRule, Replacement};
-pub use migration::{
-    CovenMigrationPolicy, Migration, MigrationChange, MigrationContext, MigrationOutcome,
-};
+pub use migration::{Migration, MigrationChange, MigrationContext, MigrationOutcome};
 pub use migration_change::{ChangeOp, ColumnChange, RowChange};
 pub use read::{Read, SqlReadContext};
 pub use row_key::RowKey;

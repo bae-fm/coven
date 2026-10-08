@@ -37,7 +37,7 @@ pub enum CovenError {
     /// An app migration failed or cannot run on this schema.
     #[error(transparent)]
     Migration(#[from] MigrationError),
-    /// Coven's tables need a migration this open cannot run.
+    /// Coven's internal schema is unsupported or its migration cannot run.
     #[error(transparent)]
     CovenMigration(#[from] CovenMigrationError),
     /// The directory's settings could not be read.
@@ -681,9 +681,17 @@ pub enum SchemaError {
 /// Coven's local tables cannot be used at this version (§17.2, E1).
 #[derive(Debug, thiserror::Error)]
 pub enum CovenMigrationError {
-    /// Opening would need to migrate, but this open refuses it.
-    #[error("coven's schema requires migration")]
-    Pending,
+    /// The read-only connection cannot migrate coven's tables.
+    #[error("read-only open cannot migrate coven's schema")]
+    ReadOnly,
+    /// The internal schema requires a newer coven.
+    #[error("coven schema version {current} is newer than supported version {supported}")]
+    SchemaTooNew {
+        /// The database's internal schema version.
+        current: u32,
+        /// The internal schema version this coven supports.
+        supported: u32,
+    },
     /// A migration failed and its transaction rolled back.
     #[error("coven migration failed: {source}")]
     Failed {

@@ -17,7 +17,6 @@ A database newer than the registered ladder is refused with
 ```rust
 let handle = Coven::builder(layout.clone())
     .synced_tables(synced_tables)
-    .coven_migration_policy(coven::CovenMigrationPolicy::ApplyPending)
     .migrations(vec![
         Migration::sql(1, "initial", include_str!("migrations/0001_initial.sql")),
         Migration::sql(2, "remove_origin", include_str!("migrations/0002_remove_origin.sql"))
@@ -39,11 +38,10 @@ separate in-memory database. Migration callbacks must therefore operate on the
 provided SQL context; they cannot depend on an external cache or current wall
 clock to determine canonical synced values.
 
-Coven's own bookkeeping tables have a separate ordered ladder and exact schema
-manifest. `ApplyPending` authorizes its pending steps; `RefusePending` refuses
-an existing database that needs them. Read-only opens never migrate. On writer
-open, Coven's migrations precede the host migrations in the same transaction.
-Final validation must succeed before any of those changes commit.
+Coven's own tables use a separate schema version. Every writable open migrates
+them automatically, in place, before the app's migrations; each internal
+migration is atomic. Read-only opens refuse tables that need migrating. Any
+open refuses an internal schema newer than this coven supports.
 
 ## Transform historical writes explicitly
 

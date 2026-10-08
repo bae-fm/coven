@@ -39,7 +39,6 @@ async fn restore_loads_snapshots_and_later_writes_with_identical_fingerprints() 
     let db = DatabaseBuilder::new(directory.clone())
         .synced_tables(tables())
         .migrations(migrations())
-        .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
         .open()
         .await
         .unwrap();
@@ -475,7 +474,6 @@ async fn restore_codes_track_s3_keys_and_oauth_credentials_in_synced_custody() {
             .with_keychain(install.keychain.clone())
             .synced_tables(tables())
             .migrations(migrations())
-            .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
             .clock(owner.clock.clone())
             .open(directory.id())
             .await
@@ -811,7 +809,6 @@ async fn failed_access_publication_retains_credentials_and_retry_finishes_once()
         .with_keychain(install.keychain.clone())
         .synced_tables(tables())
         .migrations(migrations())
-        .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
         .open(directory.id())
         .await
         .unwrap();

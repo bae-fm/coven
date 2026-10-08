@@ -289,7 +289,6 @@ fn crashing_upload_attempt() {
             crate::DatabaseBuilder::new(layout.store_dir(&store))
                 .synced_tables(notes())
                 .migrations(vec![crate::Migration::sql(1, "schema", NOTES)])
-                .coven_migration_policy(crate::CovenMigrationPolicy::ApplyPending)
                 .open(),
         )
         .unwrap();

@@ -355,7 +355,6 @@ fn crashing_writer() {
             crate::DatabaseBuilder::new(layout.store_dir(&store))
                 .synced_tables(tables())
                 .migrations(migrations())
-                .coven_migration_policy(crate::CovenMigrationPolicy::ApplyPending)
                 .open(),
         )
         .unwrap();
@@ -537,7 +536,6 @@ fn crashing_removal_writer() {
                     crate::RowIdentity::SharedKey,
                 )])
                 .migrations(vec![crate::Migration::sql(1, "schema", CRASH_SCHEMA)])
-                .coven_migration_policy(crate::CovenMigrationPolicy::ApplyPending)
                 .open(),
         )
         .unwrap();

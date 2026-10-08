@@ -48,7 +48,6 @@ async fn reopen(
     device.db = DatabaseBuilder::new(device.directory.clone())
         .synced_tables(tables)
         .migrations(migrations)
-        .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
         .clock(device.clock.clone())
         .open()
         .await
@@ -818,7 +817,6 @@ mod recovery {
                                     RowIdentity::SharedKey,
                                 )])
                                 .migrations(recovery_migrations(convert))
-                                .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
                                 .clock(device.clock.clone())
                         };
                         assert!(matches!(

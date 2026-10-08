@@ -1,4 +1,4 @@
-use crate::{CovenMigrationPolicy, DatabaseBuilder, Migration, RowIdentity, SyncedTable};
+use crate::{DatabaseBuilder, Migration, RowIdentity, SyncedTable};
 use coven_foundation::{
     files::{FileName, StoreLayout},
     id_source::{StoreId, UuidIds},
@@ -19,7 +19,6 @@ async fn rebuilding_schema_does_not_author_seed_rows_or_migration_writes() {
             "seed",
             "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); INSERT INTO notes VALUES('seed')",
         )])
-        .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
         .open_reloading_locked(lock, FileName::new("test").unwrap())
         .await
         .unwrap();
@@ -50,7 +49,6 @@ async fn rebuilding_converts_older_waiting_writes_or_marks_them_lost() {
         let builder = || {
             DatabaseBuilder::new(store.clone())
                 .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
-                .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
         };
         let db = builder().migrations(vec![initial()]).open().await.unwrap();
         db.write(|sql| {
@@ -123,7 +121,6 @@ async fn a_failed_rebuild_conversion_retries_from_the_archived_schema() {
     let builder = || {
         DatabaseBuilder::new(store.clone())
             .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
-            .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
     };
     let db = builder().migrations(past()).open().await.unwrap();
     db.write(|sql| {

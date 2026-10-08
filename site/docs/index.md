@@ -79,20 +79,18 @@ returns. Two beats give the flavor; the whole tour, from open to invite, is
 the [Example](/docs/example).
 
 **Open the store.** Declare the tables that sync and the migration ladder that
-builds your schema; also choose whether this writer may apply pending changes
-from Coven's separate bookkeeping-schema ladder. `open` runs the authorized
-Coven migrations before your ladder and returns one handle. Tables you don't
-list stay local to the device.
+builds your schema. `open` automatically migrates coven's own tables before
+running your migrations and returns one handle. Tables you don't list stay
+local to the device.
 
 ```rust
-use coven::{Coven, CovenMigrationPolicy, Migration, RowIdentity, SyncedTable};
+use coven::{Coven, Migration, RowIdentity, SyncedTable};
 
 let handle = Coven::builder(layout.clone())
     .synced_tables(vec![
         SyncedTable::new("todos", RowIdentity::IndependentUuid),
         SyncedTable::new("todo_attachments", RowIdentity::IndependentUuid),
     ])
-    .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
     .migrations(vec![Migration::sql(1, "initial", MY_SCHEMA)])
     .open(store_dir.id()).await?;
 ```

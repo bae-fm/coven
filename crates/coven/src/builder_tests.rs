@@ -59,7 +59,6 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     let db = DatabaseBuilder::new(directory.clone())
         .synced_tables(tables())
         .migrations(migrations())
-        .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
         .clock(clock.clone())
         .open()
         .await
@@ -94,7 +93,6 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         app.builder(layout.clone())
             .synced_tables(tables())
             .migrations(migrations())
-            .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
             .key_custody(KeyCustody::Custom(keys.clone()))
             .identity_custody(IdentityCustody::Custom(identity.clone()))
             .clock(clock.clone())
@@ -244,7 +242,6 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         DatabaseBuilder::new(directory.clone())
             .synced_tables(tables())
             .migrations(updated())
-            .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
             .clock(clock.clone())
     };
     let db = database().open().await.unwrap();
@@ -317,7 +314,6 @@ mod recovery {
             let db = DatabaseBuilder::new(directory.clone())
                 .synced_tables(recovery_tables())
                 .migrations(recovery_migrations())
-                .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
                 .clock(clock.clone())
                 .open()
                 .await
@@ -437,7 +433,6 @@ mod recovery {
                 app.builder(layout.clone())
                     .synced_tables(recovery_tables())
                     .migrations(recovery_migrations())
-                    .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
                     .clock(clock.clone())
                     .key_custody(KeyCustody::Custom(keys.clone()))
                     .identity_custody(IdentityCustody::Custom(identity.clone()))
@@ -558,7 +553,6 @@ mod recovery {
             let db = DatabaseBuilder::new(directory.clone())
                 .synced_tables(recovery_tables())
                 .migrations(recovery_migrations())
-                .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
                 .clock(clock.clone())
                 .open()
                 .await

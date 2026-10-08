@@ -44,7 +44,6 @@ fn builder(
     app.builder(layout)
         .synced_tables(tables())
         .migrations(migrations())
-        .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
         .clock(clock)
         .id_source(ids)
         .storage_connector(storage)

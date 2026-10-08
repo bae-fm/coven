@@ -329,7 +329,6 @@ fn builder(
             "notes",
             "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,body TEXT NOT NULL)",
         )])
-        .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
 }
 
 async fn status(handle: &CovenHandle, expected: impl Fn(&SyncStatus) -> bool) {

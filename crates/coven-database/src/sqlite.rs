@@ -25,8 +25,8 @@ use crate::observation::{CommitObserver, ReadSet};
 use crate::schema::Schema;
 use crate::SqlReadContext;
 use crate::{
-    CovenMigrationError, CovenMigrationPolicy, CovenResult, DbError, Migration, MigrationError,
-    MigrationOutcome, SyncedTable,
+    CovenMigrationError, CovenResult, DbError, Migration, MigrationError, MigrationOutcome,
+    SyncedTable,
 };
 
 pub(crate) struct DatabaseConnection {
@@ -148,20 +148,21 @@ impl DatabaseConnection {
         self.batch("PRAGMA synchronous = FULL;")
     }
 
-    /// Initialize the local journal before recovery restores its waiting work.
-    pub(crate) fn prepare_internal_schema(
-        &self,
-        policy: CovenMigrationPolicy,
-        read_only: bool,
-    ) -> CovenResult<()> {
+    /// Migrate local tables before app migrations or recovery's waiting work.
+    /// Read-only connections require the supported internal version already.
+    pub(crate) fn prepare_internal_schema(&self) -> CovenResult<()> {
         let internal: i32 = self.query_row("PRAGMA application_id", [], |r| r.get(0))?;
         let internal = internal as u32;
-        if internal != internal_schema::VERSION {
-            if read_only
-                || policy == CovenMigrationPolicy::RefusePending
-                || internal > internal_schema::VERSION
-            {
-                return Err(CovenMigrationError::Pending.into());
+        if internal > internal_schema::VERSION {
+            return Err(CovenMigrationError::SchemaTooNew {
+                current: internal,
+                supported: internal_schema::VERSION,
+            }
+            .into());
+        }
+        if internal < internal_schema::VERSION {
+            if self.connection.is_readonly(rusqlite::MAIN_DB)? {
+                return Err(CovenMigrationError::ReadOnly.into());
             }
             // Only the current greenfield schema is supported. An uninitialized
             // database is version zero; an unknown newer schema is never rewritten.
@@ -183,13 +184,12 @@ impl DatabaseConnection {
         &self,
         tables: &[SyncedTable],
         migrations: &[Migration],
-        policy: CovenMigrationPolicy,
         author: Option<crate::migration_run::MigrationOrigin>,
         operation: Option<&crate::migration::MigrationOperation>,
     ) -> CovenResult<Vec<MigrationOutcome>> {
         let read_only = author.is_none();
         let supported = validate_versions(migrations)?;
-        self.prepare_internal_schema(policy, read_only)?;
+        self.prepare_internal_schema()?;
         let current = self.schema_version()?;
         if current > supported {
             return Err(MigrationError::SchemaTooNew { current, supported }.into());

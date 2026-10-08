@@ -18,7 +18,6 @@ fn builder(app: &TestCoven, layout: StoreLayout) -> CovenBuilder {
             "notes",
             "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL)",
         )])
-        .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
 }
 
 #[tokio::test]
@@ -263,7 +262,6 @@ fn key_builder(app: &TestCoven, layout: StoreLayout) -> CovenBuilder {
     app.builder(layout.clone())
         .synced_tables(Vec::new())
         .migrations(Vec::new())
-        .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
 }
 
 // Populate the input through the public replay and database APIs, then let the
@@ -277,7 +275,6 @@ async fn apply_entry(
     let database = DatabaseBuilder::new(directory.clone())
         .synced_tables(Vec::new())
         .migrations(Vec::new())
-        .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
         .open()
         .await
         .unwrap();

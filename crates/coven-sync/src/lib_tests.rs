@@ -8,8 +8,7 @@ use std::{
 
 use coven_crypto::MemberId;
 use coven_database::{
-    CovenMigrationPolicy, DatabaseBuilder, EntryOutcome, StoreLog, StoreLogCheck, StoreLogReplay,
-    StoreLogState,
+    DatabaseBuilder, EntryOutcome, StoreLog, StoreLogCheck, StoreLogReplay, StoreLogState,
 };
 use coven_format::store_log::{CircleKeyId, MemberRole, StoreChange};
 use coven_foundation::{
@@ -352,7 +351,6 @@ async fn open(directory: StoreDir) -> coven_database::Database {
     DatabaseBuilder::new(directory)
         .synced_tables(vec![])
         .migrations(vec![])
-        .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
         .open()
         .await
         .unwrap()

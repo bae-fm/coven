@@ -27,7 +27,7 @@ async fn transfer_limits_bound_requests_and_an_active_batch_keeps_its_limit() {
                 "files", Provenance::AppProvided, CacheFill::CacheLazy,
             ))])
             .migrations(vec![Migration::sql(1, "files", "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)")])
-            .coven_migration_policy(CovenMigrationPolicy::ApplyPending).open(directory.id()).await.unwrap();
+            .open(directory.id()).await.unwrap();
         handle.initialize_identity().unwrap();
         handle.setup_s3_storage(memory.config(), "Test device", "key".into(), SecretText::new("secret".into())).await.unwrap();
         let mut status = handle.subscribe_sync_status();
@@ -128,7 +128,6 @@ fn builder(app: &TestCoven, layout: StoreLayout, ids: IdSourceRef) -> CovenBuild
     app.builder(layout)
         .synced_tables(tables())
         .migrations(vec![Migration::sql(1, "initial", SCHEMA)])
-        .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
         .id_source(ids)
 }
 
