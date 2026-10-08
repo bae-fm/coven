@@ -30,7 +30,7 @@ pub use read_handle::CovenReadHandle;
 
 pub use coven_crypto::custody::{
     set_keyring_service, IdentityCustody, IdentityError, KeyCustody, KeyError, KeychainError,
-    MemberKeyCustody, Passphrase, SecretNameError, StoreKeyCustody,
+    MemberKeyCustody, Passphrase, StoreKeyCustody,
 };
 pub use coven_crypto::{
     CircleKey, CryptoError, MaterialError, MemberId, MemberKeys, SecretBytes, SecretText, StoreKey,

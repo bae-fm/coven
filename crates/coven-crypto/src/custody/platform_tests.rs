@@ -7,7 +7,12 @@ fn native_device_entries_do_not_sync_and_cannot_move_to_another_device() {
 
     // Building entries inspects the real configuration without accessing secrets.
     let native = NativeKeychain::new().unwrap();
-    for account in ["store-keys:1", "member-keys:1", "api-token:1"] {
+    for account in [
+        "store-keys:1",
+        "member-keys:1",
+        "host-secret-names:1",
+        "host-secret-746f6b656e:1",
+    ] {
         let entry = native
             .entry(EntryScope::DeviceOnly, "coven-test", account)
             .unwrap();

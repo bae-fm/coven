@@ -10,7 +10,7 @@ mod passphrase;
 mod platform;
 mod store_custody;
 
-pub use error::{KeyError, KeychainError, SecretNameError};
+pub use error::{KeyError, KeychainError};
 pub use keychain::{set_keyring_service, Keychain, KeyringCustody, StoreKeychain};
 pub use memory::InMemoryCustody;
 pub use passphrase::{Passphrase, PassphraseCustody};

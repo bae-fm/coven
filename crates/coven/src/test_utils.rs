@@ -41,20 +41,11 @@ impl TestCoven {
     }
 
     /// Delete through the same locked directory and keychain path as `Coven`.
-    pub async fn delete_store(
-        &self,
-        directory: &StoreDir,
-        names: &[&str],
-    ) -> Result<(), StoreDeletionError> {
+    pub async fn delete_store(&self, directory: &StoreDir) -> Result<(), StoreDeletionError> {
         let directory = directory.clone();
-        let names = names.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
         let keychain = self.keychain.clone();
         crate::coven::blocking(move || {
-            crate::coven::delete(
-                &directory,
-                &names,
-                StoreKeychain::new(keychain, directory.id()),
-            )
+            crate::coven::delete(&directory, StoreKeychain::new(keychain, directory.id()))
         })
         .await
     }

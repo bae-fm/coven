@@ -278,14 +278,14 @@ async fn originals_owned_copies_ranges_references_and_deletion_use_the_app_api()
     readonly.close().await.unwrap();
     handle.close().await.unwrap();
     assert!(matches!(
-        app.delete_store(&directory, &[]).await,
+        app.delete_store(&directory).await,
         Err(StoreDeletionError::Lock(StoreLockError::AlreadyOpen(_)))
     ));
     assert_eq!(current_stream.read_at(0, 11).await.unwrap(), b"replacement");
     drop(current_stream);
     drop(old_stream);
     drop(stream);
-    app.delete_store(&directory, &[]).await.unwrap();
+    app.delete_store(&directory).await.unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), b"the user's new original");
 }
 
@@ -549,14 +549,14 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
     );
     handle.close().await.unwrap();
     assert!(matches!(
-        app.delete_store(&directory, &[]).await,
+        app.delete_store(&directory).await,
         Err(StoreDeletionError::Lock(StoreLockError::AlreadyOpen(_)))
     ));
     readonly.close().await.unwrap();
     assert!(matches!(
-        app.delete_store(&directory, &[]).await,
+        app.delete_store(&directory).await,
         Err(StoreDeletionError::Lock(StoreLockError::AlreadyOpen(_)))
     ));
     drop(stream);
-    app.delete_store(&directory, &[]).await.unwrap();
+    app.delete_store(&directory).await.unwrap();
 }

@@ -1490,8 +1490,18 @@ Carol's tablet:
   - Devices keep the old keys, to read writes made before.
 - Each device keeps its member's key in the OS keychain.
 - Storage access, not keys, is what keeps a removed device out.
-- The app can keep its own secrets, such as an API token, in coven's
-  keychain entry, under the same access policy as coven's keys.
+- The app can keep each of its own secrets, such as an API token, in a separate
+  keychain entry, under the same access policy as coven's keys and with the
+  platform's per-secret size limit. Names are arbitrary strings, encoded into
+  native account names without colliding with coven's entries. Coven records
+  each store's saved names in another keychain entry, outside the database.
+  Saving adds the name before writing the secret; deleting removes the secret
+  before the name. The list is always a superset of the secrets that exist:
+  failure or a crash between steps can leave only a harmless extra name.
+  Deleting the local store removes every listed secret, then the list and
+  coven's other entries, even when the database is damaged, without the app
+  supplying names. Removing an absent entry succeeds, so retrying after any
+  failure is safe ([E1](api.md#e1-opening), [E11](api.md#e11-keys-and-secrets)).
 
 ### 11.1 Cryptography
 

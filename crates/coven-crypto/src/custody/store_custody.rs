@@ -43,7 +43,9 @@ impl StoreCustody {
         Ok(keys.member_id())
     }
 
-    /// Keeps an app secret under the keychain's device-only access policy.
+    /// Records the name before saving the value in its own device-only entry,
+    /// so deleting the store can remove every saved secret. Names are arbitrary
+    /// strings; each value retains the platform's per-entry size limit.
     pub fn set_host_secret(&self, name: &str, value: &str) -> Result<(), KeyError> {
         self.keychain.set_host_secret(name, value)
     }
@@ -53,7 +55,8 @@ impl StoreCustody {
         self.keychain.host_secret(name)
     }
 
-    /// Deletes the secret; succeeds if it was never set.
+    /// Deletes the secret before its recorded name; succeeds if absent.
+    /// Failure may leave an extra name; retrying is safe.
     pub fn delete_host_secret(&self, name: &str) -> Result<(), KeyError> {
         self.keychain.delete_host_secret(name)
     }

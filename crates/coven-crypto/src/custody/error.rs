@@ -2,23 +2,6 @@
 
 use zeroize::Zeroize;
 
-/// Why an app-supplied host secret name is refused (E11).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum SecretNameError {
-    /// Names cannot be empty.
-    #[error("host secret name is empty")]
-    Empty,
-    /// Colon separates an entry's name from its store id.
-    #[error("host secret name contains ':'")]
-    Separator,
-    /// The name belongs to coven's own entries.
-    #[error("host secret name is reserved for coven")]
-    Reserved,
-    /// A NUL cannot be represented by native credential APIs.
-    #[error("host secret name contains NUL")]
-    Nul,
-}
-
 /// A failure unlocking, keeping or forgetting keys or host secrets (E11).
 #[derive(Debug, thiserror::Error)]
 pub enum KeyError {
@@ -73,12 +56,6 @@ pub enum KeyError {
     /// Multiple accessible keychain groups contain a restore code for one store.
     #[error("multiple synced restore codes for store {0}")]
     AmbiguousRestoreCode(coven_foundation::id_source::StoreId),
-    /// The host name could collide with a coven entry or cannot name an entry.
-    #[error("invalid host secret name: {0}")]
-    SecretName(#[from] SecretNameError),
-    /// An app secret was stored with bytes that are not UTF-8.
-    #[error("host secret is not UTF-8")]
-    HostSecretEncoding,
 }
 
 /// A native keychain error whose diagnostic output never includes secret bytes.

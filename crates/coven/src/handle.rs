@@ -356,8 +356,11 @@ impl CovenHandle {
     }
 
     /// Keeps an app secret, such as an API token, in the same keychain and
-    /// under the same access policy as coven's keys. Names can't be empty,
-    /// contain `:`, or match one of coven's own entries.
+    /// under the same access policy as coven's keys. Names are arbitrary strings.
+    /// Coven records the name in a keychain list before writing the value to its
+    /// own entry, retaining the platform's per-secret size limit. Deleting the
+    /// store removes every listed secret even if its database is damaged.
+    /// Failure may leave an extra name; retrying is safe.
     pub fn set_host_secret(&self, name: &str, value: &str) -> Result<(), KeyError> {
         self.custody
             .lock()
@@ -375,7 +378,8 @@ impl CovenHandle {
             .ok_or(KeyError::StoreClosed)?
             .host_secret(name)
     }
-    /// Deletes the secret; succeeds if it was never set.
+    /// Deletes the secret before its recorded name; succeeds if absent.
+    /// Failure may leave an extra name; retrying is safe.
     pub fn delete_host_secret(&self, name: &str) -> Result<(), KeyError> {
         self.custody
             .lock()

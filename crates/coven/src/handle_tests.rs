@@ -54,11 +54,11 @@ async fn kept_keys_survive_reopen_and_forgetting_preserves_identity() {
     );
     handle.close().await.unwrap();
     app.keep_store_keys(&directory, &keys).unwrap();
-    app.delete_store(&directory, &["token"]).await.unwrap();
+    app.delete_store(&directory).await.unwrap();
     // Deletion removes custody even when no directory remains to open.
     app.fail_next_keychain_operation();
-    assert!(app.delete_store(&directory, &[]).await.is_err());
-    app.delete_store(&directory, &[]).await.unwrap();
+    assert!(app.delete_store(&directory).await.is_err());
+    app.delete_store(&directory).await.unwrap();
 }
 
 struct Keys {

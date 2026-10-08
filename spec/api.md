@@ -590,7 +590,7 @@ pub enum KeyError {
     File(FileError),
     /// A cryptographic service was unavailable or stored bytes failed validation.
     Crypto(CryptoError),
-    /// The opened key material was malformed.
+    /// The stored key or secret material was malformed.
     Material(MaterialError),
     /// The passphrase was wrong or the custody file was altered.
     PassphraseAuthentication,
@@ -610,10 +610,6 @@ pub enum KeyError {
     InvalidServiceName,
     /// This platform has no native credential store.
     UnsupportedKeyringPlatform,
-    /// The host secret name cannot name an app entry.
-    SecretName(SecretNameError),
-    /// A stored host secret is not UTF-8.
-    HostSecretEncoding,
 }
 
 /// Secret bytes crossing custody or code boundaries, erased when dropped (§11, §12).
@@ -638,18 +634,6 @@ impl SecretText {
 
 /// A native keychain cause whose diagnostics do not expose secret bytes (§11).
 pub struct KeychainError(/* private */);
-
-/// A host secret name is invalid (E11).
-pub enum SecretNameError {
-    /// The name is empty.
-    Empty,
-    /// The name contains a colon.
-    Separator,
-    /// The name is reserved for coven.
-    Reserved,
-    /// Native credential APIs cannot represent NUL in a name.
-    Nul,
-}
 
 /// A cryptographic operation failed (§11.1).
 pub enum CryptoError {
@@ -727,14 +711,13 @@ impl Coven {
     pub fn builder(layout: StoreLayout) -> CovenBuilder;
 
     /// Deletes a closed store from this device: every keychain entry coven
-    /// holds for it, including the named host secrets, then its directory.
+    /// holds for it, including every saved host secret, then its directory.
+    /// Deletes all secrets in coven's saved names list before deleting the list
+    /// and its other entries. Needs no app-supplied names and does not open the database.
     /// Refused while a writer, read-only handle, file stream or outstanding
     /// file I/O retains its store lock; storage is untouched. Retrying finishes
     /// a deletion that failed partway.
-    pub async fn delete_store(
-        store_dir: &StoreDir,
-        host_secret_names: &[&str],
-    ) -> Result<(), StoreDeletionError>;
+    pub async fn delete_store(store_dir: &StoreDir) -> Result<(), StoreDeletionError>;
 }
 
 impl CovenBuilder {
@@ -2746,14 +2729,19 @@ impl CovenHandle {
     pub async fn forget_store_keys(&self) -> Result<(), KeyError>;
 
     /// Keeps an app secret, such as an API token, in the same keychain and
-    /// under the same access policy as coven's keys. Names can't be empty,
-    /// contain `:`, or match one of coven's own entries.
+    /// under the same access policy as coven's keys. Coven records the name in a
+    /// separate keychain list before writing the value to its own entry, keeping
+    /// the platform's per-secret size limit. Names are arbitrary strings, encoded
+    /// into native account names without colliding with coven's entries.
+    /// The list always includes every saved secret, even if the database is damaged.
+    /// Failure or a crash between writes may leave an extra name; retrying is safe.
     pub fn set_host_secret(&self, name: &str, value: &str) -> Result<(), KeyError>;
 
     /// The secret, or `None` if it was never set.
     pub fn host_secret(&self, name: &str) -> Result<Option<String>, KeyError>;
 
-    /// Deletes the secret; succeeds if it was never set.
+    /// Deletes the secret before removing its name from the list; succeeds if absent.
+    /// Failure or a crash between these steps may leave an extra name; retrying is safe.
     pub fn delete_host_secret(&self, name: &str) -> Result<(), KeyError>;
 }
 

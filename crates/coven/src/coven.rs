@@ -34,22 +34,15 @@ impl Coven {
     }
 
     /// Deletes a closed store from this device: every keychain entry coven
-    /// holds for it, including the named host secrets, then its directory.
+    /// holds for it, including every saved host secret, then its directory.
+    /// Does not open the database.
     /// Refused while a writer, read-only handle or file stream remains open;
     /// storage is untouched. Retrying finishes a deletion that failed partway.
-    pub async fn delete_store(
-        store_dir: &StoreDir,
-        host_secret_names: &[&str],
-    ) -> Result<(), StoreDeletionError> {
+    pub async fn delete_store(store_dir: &StoreDir) -> Result<(), StoreDeletionError> {
         let directory = store_dir.clone();
-        let names = host_secret_names
-            .iter()
-            .map(|name| (*name).to_owned())
-            .collect::<Vec<_>>();
         blocking(move || {
             delete(
                 &directory,
-                &names,
                 StoreKeychain::new(Keychain::registered()?, directory.id()),
             )
         })
@@ -85,13 +78,9 @@ pub(crate) fn create(
     }
 }
 
-pub(crate) fn delete(
-    directory: &StoreDir,
-    names: &[String],
-    keys: StoreKeychain,
-) -> Result<(), StoreDeletionError> {
+pub(crate) fn delete(directory: &StoreDir, keys: StoreKeychain) -> Result<(), StoreDeletionError> {
     let lock = directory.lock_for_deletion()?;
-    keys.delete_store_entries(&names.iter().map(String::as_str).collect::<Vec<_>>())?;
+    keys.delete_store_entries()?;
     if let Some(lock) = lock {
         lock.remove_directory()?;
     }
