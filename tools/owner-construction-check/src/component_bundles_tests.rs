@@ -23,7 +23,7 @@ fn component_bundle_constructed_only_to_be_destructured_is_rejected() {
 
     let violations = find_component_bundle_violations(&files);
     assert_eq!(violations.len(), 1);
-    assert_eq!(violations[0].bundle, "ComponentBundle");
+    assert!(violations[0].message.starts_with("ComponentBundle "));
 }
 
 #[test]

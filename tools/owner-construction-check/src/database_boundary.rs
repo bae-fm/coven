@@ -6,6 +6,7 @@
 //! of coven's own tables. rusqlite's values, results and parameter macros are
 //! part of the API (Appendix E) and stay allowed.
 
+use crate::finding::Finding;
 use std::collections::BTreeSet;
 
 use proc_macro2::Span;
@@ -23,17 +24,10 @@ pub(crate) const RAW_SQLITE_HANDLES: &[(&str, &str)] = &[
     ("Transaction", "raw SQLite transaction"),
 ];
 
-#[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
-pub(crate) struct DatabaseBoundaryViolation {
-    pub(crate) path: String,
-    pub(crate) line: usize,
-    pub(crate) kind: String,
-}
-
 pub(crate) fn find_database_boundary_violations(
     files: &[RustFile],
     policy: &Policy,
-) -> Vec<DatabaseBoundaryViolation> {
+) -> Vec<Finding> {
     let mut violations = BTreeSet::new();
     let coven_tables = collect_coven_table_names(files, policy);
     for file in files {
@@ -59,16 +53,14 @@ pub(crate) fn find_database_boundary_violations(
 struct DatabaseBoundaryVisitor<'a> {
     path: &'a str,
     coven_tables: &'a BTreeSet<String>,
-    violations: &'a mut BTreeSet<DatabaseBoundaryViolation>,
+    violations: &'a mut BTreeSet<Finding>,
 }
 
 impl DatabaseBoundaryVisitor<'_> {
     fn record(&mut self, kind: &str, span: Span) {
-        self.violations.insert(DatabaseBoundaryViolation {
-            path: self.path.to_string(),
-            line: span.start().line,
-            kind: kind.to_string(),
-        });
+        self.violations.insert(Finding::new(self.path, span.start().line,
+            format!("{kind} is confined to coven-database"),
+            "ask the database owner to run the work; raw SQLite and coven's own SQL live in coven-database"));
     }
 
     fn check_sql(&mut self, literal: &syn::LitStr) {

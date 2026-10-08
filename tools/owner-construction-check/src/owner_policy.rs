@@ -1,14 +1,10 @@
-//! The policy file of §20.2. It names only what exists; each crate's PR adds
-//! the rows for what it introduces. `owner_policy_tests.rs` holds the guard
+//! The policy file of §20.2. `owner_policy_tests.rs` holds the guard
 //! tests that fail when a row names a crate, file, type or method that is not
 //! in the workspace.
 
 use crate::policy::{Capabilities, Capability, Gate, Policy};
 
 pub(crate) const POLICY: Policy = Policy {
-    // Rows are added as crates land, in §20.1's order: coven-foundation,
-    // coven-crypto, coven-merge, coven-format, coven-database, coven-storage,
-    // coven-sync, coven.
     crate_order: &[
         "coven-foundation",
         "coven-crypto",
@@ -25,18 +21,201 @@ pub(crate) const POLICY: Policy = Policy {
         "crates/coven-database/src/internal_schema.rs",
         &["coven_tables"],
     )),
+    // One list for owner construction, runtime acquisition and task starts.
+    // Owner constructors include their private representations; names grant no exemption.
     composition_roots: &[
-        ("crates/coven/src/lib_tests.rs", "Network", "new"),
-        ("crates/coven/src/storage_tests.rs", "Fixture", "new"),
+        (
+            "crates/coven-crypto/src/custody/passphrase.rs",
+            "PassphraseCustody",
+            "new",
+        ),
+        (
+            "crates/coven-crypto/src/custody/store_custody.rs",
+            "StoreCustody",
+            "new",
+        ),
+        ("crates/coven-database/src/database.rs", "<free>", "process"),
+        (
+            "crates/coven-database/src/database.rs",
+            "<free>",
+            "start_call",
+        ),
+        ("crates/coven-database/src/database.rs", "Database", "close"),
+        (
+            "crates/coven-database/src/database.rs",
+            "Database",
+            "finish_recovery",
+        ),
+        (
+            "crates/coven-database/src/database.rs",
+            "Database",
+            "write_with_files",
+        ),
+        (
+            "crates/coven-database/src/database.rs",
+            "DatabaseReadHandle",
+            "close",
+        ),
+        (
+            "crates/coven-database/src/database_builder.rs",
+            "DatabaseBuilder",
+            "new",
+        ),
+        (
+            "crates/coven-database/src/database_builder.rs",
+            "DatabaseBuilder",
+            "open",
+        ),
+        (
+            "crates/coven-database/src/database_builder.rs",
+            "DatabaseBuilder",
+            "open_graph",
+        ),
+        (
+            "crates/coven-database/src/database_builder.rs",
+            "DatabaseBuilder",
+            "open_locked",
+        ),
+        (
+            "crates/coven-database/src/database_builder.rs",
+            "DatabaseBuilder",
+            "open_read_graph",
+        ),
+        (
+            "crates/coven-database/src/database_builder.rs",
+            "DatabaseBuilder",
+            "open_read_only",
+        ),
+        (
+            "crates/coven-database/src/database_builder.rs",
+            "DatabaseBuilder",
+            "open_reloading_locked",
+        ),
+        (
+            "crates/coven-database/src/file_database.rs",
+            "CacheReservation",
+            "publish",
+        ),
+        (
+            "crates/coven-database/src/file_database.rs",
+            "FileDatabase",
+            "new",
+        ),
+        (
+            "crates/coven-database/src/file_database.rs",
+            "FileDatabase",
+            "read_only",
+        ),
+        (
+            "crates/coven-database/src/file_staging.rs",
+            "FileStaging",
+            "write",
+        ),
+        (
+            "crates/coven-database/src/local_file.rs",
+            "LocalFileStream",
+            "read_at",
+        ),
+        ("crates/coven-database/src/read_pool.rs", "ReadPool", "new"),
+        (
+            "crates/coven-foundation/src/files/atomic_file.rs",
+            "FileWriter",
+            "run",
+        ),
+        (
+            "crates/coven-foundation/src/files/bootstrap.rs",
+            "<free>",
+            "reserve_bootstrap_directory",
+        ),
+        (
+            "crates/coven-foundation/src/files/directory.rs",
+            "StoreDir",
+            "recover_database",
+        ),
+        (
+            "crates/coven-foundation/src/files/layout.rs",
+            "StoreLayout",
+            "stores",
+        ),
+        (
+            "crates/coven-foundation/src/files/recovery.rs",
+            "DatabaseRecovery",
+            "begin",
+        ),
+        (
+            "crates/coven-foundation/src/files/recovery.rs",
+            "DatabaseRecovery",
+            "check",
+        ),
+        (
+            "crates/coven-storage/src/providers/cloudkit.rs",
+            "CloudKitStorage",
+            "new",
+        ),
         (
             "crates/coven-storage/src/providers/connector.rs",
             "ProviderConnector",
             "connect",
         ),
         (
+            "crates/coven-storage/src/providers/connector.rs",
+            "ProviderConnector",
+            "new",
+        ),
+        (
+            "crates/coven-storage/src/providers/dropbox.rs",
+            "DropboxStorage",
+            "new",
+        ),
+        (
+            "crates/coven-storage/src/providers/google_drive.rs",
+            "GoogleDriveStorage",
+            "new",
+        ),
+        (
+            "crates/coven-storage/src/providers/oauth.rs",
+            "OAuthFlow",
+            "new",
+        ),
+        (
+            "crates/coven-storage/src/providers/onedrive.rs",
+            "OneDriveStorage",
+            "new",
+        ),
+        (
+            "crates/coven-storage/src/providers/s3.rs",
+            "S3Storage",
+            "new",
+        ),
+        (
+            "crates/coven-storage/src/settings.rs",
+            "StorageSettings",
+            "new",
+        ),
+        (
+            "crates/coven-storage/src/test_utils.rs",
+            "Conformance",
+            "new",
+        ),
+        (
+            "crates/coven-storage/src/test_utils.rs",
+            "MemoryStorage",
+            "clone",
+        ),
+        (
             "crates/coven-storage/src/test_utils.rs",
             "MemoryStorage",
             "connect",
+        ),
+        (
+            "crates/coven-storage/src/test_utils.rs",
+            "MemoryStorage",
+            "for_device",
+        ),
+        (
+            "crates/coven-storage/src/test_utils.rs",
+            "MemoryStorage",
+            "for_recipient",
         ),
         (
             "crates/coven-storage/src/test_utils.rs",
@@ -46,18 +225,65 @@ pub(crate) const POLICY: Policy = Policy {
         (
             "crates/coven-storage/src/test_utils.rs",
             "MemoryStorage",
-            "for_recipient",
+            "with_transfer_limits",
         ),
-        ("crates/coven/tests/fixtures/bootstrap.rs", "Owner", "new"),
+        (
+            "crates/coven-sync/src/device_log_sync.rs",
+            "DeviceLogSync",
+            "disconnected",
+        ),
+        (
+            "crates/coven-sync/src/device_log_sync.rs",
+            "DeviceLogSync",
+            "new",
+        ),
+        (
+            "crates/coven-sync/src/file_read.rs",
+            "FileStream",
+            "read_at",
+        ),
+        (
+            "crates/coven-sync/src/file_read.rs",
+            "UploadedFile",
+            "keep_whole",
+        ),
+        ("crates/coven-sync/src/file_read.rs", "UploadedFile", "open"),
+        ("crates/coven-sync/src/files.rs", "Files", "new"),
+        ("crates/coven-sync/src/operations.rs", "Operations", "new"),
+        (
+            "crates/coven-sync/src/restore_codes.rs",
+            "RestoreCodes",
+            "new",
+        ),
+        (
+            "crates/coven-sync/src/restore_codes.rs",
+            "RestoreCodes",
+            "replace_access_key",
+        ),
+        (
+            "crates/coven-sync/src/restore_codes.rs",
+            "RestoreCodes",
+            "update_credentials",
+        ),
+        (
+            "crates/coven-sync/src/store_log_sync.rs",
+            "StoreLogSync",
+            "disconnected",
+        ),
+        (
+            "crates/coven-sync/src/store_log_sync.rs",
+            "StoreLogSync",
+            "new",
+        ),
+        ("crates/coven-sync/src/sync_loop.rs", "SyncLoop", "new"),
+        ("crates/coven-sync/src/sync_loop.rs", "SyncLoop", "setup"),
+        ("crates/coven-sync/src/sync_loop.rs", "SyncLoop", "unlock"),
+        ("crates/coven-sync/src/sync_loop.rs", "SyncRun", "connect"),
+        ("crates/coven-sync/src/sync_loop.rs", "SyncRun", "setup"),
         (
             "crates/coven/src/bootstrap.rs",
             "<free>",
-            "restore_from_code",
-        ),
-        (
-            "crates/coven/src/bootstrap.rs",
-            "<free>",
-            "restore_from_keychain",
+            "bootstrap_device",
         ),
         (
             "crates/coven/src/bootstrap.rs",
@@ -70,114 +296,71 @@ pub(crate) const POLICY: Policy = Policy {
             "prepare_and_load",
         ),
         (
+            "crates/coven/src/bootstrap.rs",
+            "<free>",
+            "restore_from_code",
+        ),
+        (
+            "crates/coven/src/bootstrap.rs",
+            "<free>",
+            "restore_from_keychain",
+        ),
+        (
             "crates/coven/src/bootstrap_commit.rs",
             "<free>",
             "publish_bootstrap",
         ),
         (
-            "crates/coven-foundation/src/files/bootstrap.rs",
-            "<free>",
-            "reserve_bootstrap_directory",
+            "crates/coven/src/builder.rs",
+            "CovenBuilder",
+            "authenticate",
+        ),
+        ("crates/coven/src/builder.rs", "CovenBuilder", "connector"),
+        ("crates/coven/src/builder.rs", "CovenBuilder", "database"),
+        ("crates/coven/src/builder.rs", "CovenBuilder", "keychain"),
+        (
+            "crates/coven/src/builder.rs",
+            "CovenBuilder",
+            "make_identity",
+        ),
+        ("crates/coven/src/builder.rs", "CovenBuilder", "make_keys"),
+        ("crates/coven/src/builder.rs", "CovenBuilder", "new"),
+        ("crates/coven/src/builder.rs", "CovenBuilder", "oauth_flow"),
+        ("crates/coven/src/builder.rs", "CovenBuilder", "open"),
+        ("crates/coven/src/builder.rs", "CovenBuilder", "open_graph"),
+        (
+            "crates/coven/src/builder.rs",
+            "CovenBuilder",
+            "open_read_only",
         ),
         (
-            "crates/coven-foundation/src/files/recovery.rs",
-            "DatabaseRecovery",
-            "check",
+            "crates/coven/src/builder.rs",
+            "CovenBuilder",
+            "open_reloading",
         ),
+        ("crates/coven/src/builder.rs", "CovenBuilder", "owners"),
+        ("crates/coven/src/builder.rs", "OpeningOwners", "handle"),
+        ("crates/coven/src/builder.rs", "OpeningOwners", "sync"),
         ("crates/coven/src/builder.rs", "OpeningStore", "open"),
         (
             "crates/coven/src/builder.rs",
             "OpeningStore",
             "open_reloading",
         ),
-        ("crates/coven/src/builder.rs", "OpeningOwners", "sync"),
-        ("crates/coven/src/builder.rs", "OpeningOwners", "handle"),
-        (
-            "crates/coven/src/builder.rs",
-            "CovenBuilder",
-            "open_reloading",
-        ),
-        (
-            "crates/coven-database/src/database_builder.rs",
-            "DatabaseBuilder",
-            "open_reloading_locked",
-        ),
-        (
-            "crates/coven-foundation/src/files/recovery.rs",
-            "DatabaseRecovery",
-            "begin",
-        ),
-        (
-            "crates/coven-foundation/src/files/directory.rs",
-            "StoreDir",
-            "recover_database",
-        ),
-        ("crates/coven-sync/src/sync_loop.rs", "SyncLoop", "new"),
-        ("crates/coven-sync/src/sync_loop.rs", "SyncRun", "connect"),
-        ("crates/coven-sync/src/sync_loop.rs", "SyncRun", "setup"),
-        ("crates/coven-sync/src/sync_loop.rs", "SyncLoop", "setup"),
-        ("crates/coven-sync/src/sync_loop.rs", "SyncLoop", "unlock"),
-        ("crates/coven-sync/src/operations.rs", "Operations", "new"),
-        ("crates/coven-sync/src/files_tests.rs", "Fixture", "new"),
-        ("crates/coven-sync/src/files_tests.rs", "Fixture", "reopen"),
-        (
-            "crates/coven-database/src/database_builder.rs",
-            "DatabaseBuilder",
-            "open_locked",
-        ),
-        (
-            "crates/coven-storage/src/providers/s3.rs",
-            "S3Storage",
-            "new",
-        ),
-        (
-            "crates/coven-database/src/database_builder.rs",
-            "DatabaseBuilder",
-            "open_graph",
-        ),
-        (
-            "crates/coven-database/src/database_builder.rs",
-            "DatabaseBuilder",
-            "open_read_graph",
-        ),
-        ("crates/coven/src/builder.rs", "CovenBuilder", "new"),
-        ("crates/coven/src/builder.rs", "CovenBuilder", "connector"),
-        ("crates/coven/src/builder.rs", "CovenBuilder", "oauth_flow"),
-        (
-            "crates/coven/src/builder.rs",
-            "CovenBuilder",
-            "authenticate",
-        ),
-        ("crates/coven/src/builder.rs", "CovenBuilder", "open"),
-        ("crates/coven/src/builder.rs", "CovenBuilder", "open_graph"),
-        ("crates/coven/src/builder.rs", "CovenBuilder", "database"),
-        ("crates/coven/src/builder.rs", "CovenBuilder", "keychain"),
-        ("crates/coven/src/builder.rs", "CovenBuilder", "owners"),
-        (
-            "crates/coven/src/bootstrap.rs",
-            "<free>",
-            "bootstrap_device",
-        ),
-        (
-            "crates/coven/src/builder.rs",
-            "CovenBuilder",
-            "open_read_only",
-        ),
-        ("crates/coven/src/builder.rs", "CovenBuilder", "make_keys"),
-        (
-            "crates/coven/src/builder.rs",
-            "CovenBuilder",
-            "make_identity",
-        ),
+        ("crates/coven/src/coven.rs", "<free>", "blocking"),
         ("crates/coven/src/coven.rs", "Coven", "builder"),
         ("crates/coven/src/coven.rs", "Coven", "create_store"),
         ("crates/coven/src/coven.rs", "Coven", "delete_store"),
-        ("crates/coven/src/test_utils.rs", "TestCoven", "new"),
+        ("crates/coven/src/handle.rs", "CovenHandle", "close"),
+        ("crates/coven/src/handle.rs", "CovenHandle", "new"),
         (
-            "crates/coven/src/test_utils.rs",
-            "TestCoven",
-            "keep_store_keys",
+            "crates/coven/src/read_handle.rs",
+            "CovenReadHandle",
+            "close",
         ),
+        ("crates/coven/src/read_handle.rs", "CovenReadHandle", "new"),
+        ("crates/coven/src/storage.rs", "StorageConnections", "call"),
+        ("crates/coven/src/storage.rs", "StorageConnections", "new"),
         ("crates/coven/src/test_utils.rs", "TestCoven", "builder"),
         (
             "crates/coven/src/test_utils.rs",
@@ -189,13 +372,42 @@ pub(crate) const POLICY: Policy = Policy {
             "TestCoven",
             "delete_store",
         ),
+        (
+            "crates/coven/src/test_utils.rs",
+            "TestCoven",
+            "keep_store_keys",
+        ),
+        ("crates/coven/src/test_utils.rs", "TestCoven", "new"),
     ],
-    lifetime_authorities: &[
-        ("SyncRun", "SyncLoop"),
-        ("OperationRun", "Operations"),
-        ("RunningOperations", "Operations"),
-        ("ReconfigurableLiveQuery", "Database"),
-        ("LiveQuery", "Database"),
+    task_starts: &[
+        Gate {
+            kind: "runtime construction",
+            crates: &[],
+            path_patterns: &[
+                &["Runtime", "new"],
+                &["Builder", "new_current_thread"],
+                &["Builder", "new_multi_thread"],
+            ],
+            method_patterns: &[],
+        },
+        Gate {
+            kind: "ambient runtime acquisition",
+            crates: &[],
+            path_patterns: &[&["Handle", "current"], &["Handle", "try_current"]],
+            method_patterns: &[],
+        },
+        Gate {
+            kind: "thread or task spawn",
+            crates: &[],
+            path_patterns: &[
+                &["tokio", "spawn"],
+                &["task", "spawn"],
+                &["task", "spawn_blocking"],
+                &["task", "spawn_local"],
+                &["thread", "spawn"],
+            ],
+            method_patterns: &["spawn", "spawn_blocking", "spawn_local"],
+        },
     ],
     // These methods derive a scoped capability from their injected directory.
     // They do not acquire an unrelated directory or file for another owner.
@@ -335,6 +547,8 @@ pub(crate) const POLICY: Policy = Policy {
         "DatabaseConnection",
     ],
     non_owner_types: &[
+        // Failure transport may carry a published handle; it does not own store lifetime.
+        "BootstrapError",
         "KeyCustody",
         "IdentityCustody",
         "Command",
@@ -344,6 +558,7 @@ pub(crate) const POLICY: Policy = Policy {
     // Writes and pending deletions borrow the database's retained connection,
     // StoreDir and id source; app SQL receives none of those dependencies.
     borrowed_facade_types: &[
+        "SnapshotMetadata",
         "Circles",
         "FileWrite",
         "FileRemovals",
@@ -362,21 +577,10 @@ pub(crate) const POLICY: Policy = Policy {
         "DatabaseRemovalView",
         "WriteApply",
     ],
-    root_owner_types: &[
-        "StorageConnections",
-        "SyncLoop",
-        "Operations",
-        "Database",
-        "DatabaseReadHandle",
-        "StoreLogSync",
-        "DeviceLogSync",
-        "RestoreCodes",
-        "CovenHandle",
-        "CovenReadHandle",
-        "Files",
-        "FileDatabase",
-    ],
     task_types: &[
+        "OpenFile",
+        "LocalFileReader",
+        "LockedWriter",
         "UploadActivity",
         "SyncRun",
         "OperationRun",
@@ -413,7 +617,6 @@ pub(crate) const POLICY: Policy = Policy {
         "WriteApply",
     ],
     internal_dependency_types: &["DatabaseConnection"],
-    always_forbidden_returns: &[],
     closed_session_types: &[
         "FileWrite",
         "FileRemovals",
@@ -426,11 +629,6 @@ pub(crate) const POLICY: Policy = Policy {
         "DatabaseRemovalView",
         "WriteApply",
     ],
-    field_capability_types: &[],
-    raw_provider_operations: &[],
-    derived_services: &[],
-    unexported_capability_types: &[],
-    exportable_capability_outputs: &[],
 };
 
 /// §20.2's table. Each capability's homes are the paths the spec assigns it;
@@ -606,60 +804,6 @@ const CAPABILITIES: Capabilities = Capabilities {
             ],
             method_patterns: &[],
         }],
-    },
-    // Database calls await blocking work while retaining the database owner.
-    // The operation owner also retains and stops its journal worker.
-    // File work is owned by Files and advances on commits or explicit requests.
-    runtimes: Capability {
-        name: "runtimes and spawned work",
-        homes: &[
-            "crates/coven-database/src/database.rs",
-            "crates/coven-sync/src/sync_loop.rs",
-            "crates/coven-sync/src/operations.rs",
-            "crates/coven-sync/src/restore_codes.rs",
-            "crates/coven-database/src/file_staging.rs",
-            "crates/coven-database/src/file_database.rs",
-            "crates/coven-sync/src/files.rs",
-            "crates/coven-sync/src/file_read.rs",
-            "crates/coven-database/src/database_builder.rs",
-            "crates/coven-database/src/local_file.rs",
-            "crates/coven-foundation/src/files/layout.rs",
-            "crates/coven-foundation/src/files/atomic_file.rs",
-            "crates/coven/src/storage.rs",
-            "crates/coven/src/coven.rs",
-            "crates/coven/src/handle.rs",
-            "crates/coven/src/read_handle.rs",
-        ],
-        gates: &[
-            Gate {
-                kind: "runtime construction",
-                crates: &[],
-                path_patterns: &[
-                    &["Runtime", "new"],
-                    &["Builder", "new_current_thread"],
-                    &["Builder", "new_multi_thread"],
-                ],
-                method_patterns: &[],
-            },
-            Gate {
-                kind: "ambient runtime acquisition",
-                crates: &[],
-                path_patterns: &[&["Handle", "current"], &["Handle", "try_current"]],
-                method_patterns: &[],
-            },
-            Gate {
-                kind: "thread or task spawn",
-                crates: &[],
-                path_patterns: &[
-                    &["tokio", "spawn"],
-                    &["task", "spawn"],
-                    &["task", "spawn_blocking"],
-                    &["task", "spawn_local"],
-                    &["thread", "spawn"],
-                ],
-                method_patterns: &["spawn", "spawn_blocking", "spawn_local"],
-            },
-        ],
     },
 };
 

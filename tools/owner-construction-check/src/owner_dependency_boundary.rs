@@ -14,312 +14,148 @@ use syn::spanned::Spanned;
 use syn::visit::Visit;
 
 use crate::database_boundary::RAW_SQLITE_HANDLES;
+use crate::finding::Finding;
+use crate::owner_graph::OwnerGraph;
 use crate::policy::Policy;
 use crate::syntax::{
-    collect_declared_types, is_test_only, is_test_source, type_name, type_names,
-    visibility_crosses_owner, RustFile, StructInfo,
+    is_test_only, is_test_source, type_name, type_names, visibility_crosses_owner, RustFile,
 };
 
-#[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
-pub(crate) enum OwnerDependencyLeak {
-    Field {
-        path: String,
-        line: usize,
-        owner: String,
-        field: String,
-    },
-    CrateRootSessionField {
-        path: String,
-        line: usize,
-        session: String,
-        dependency: String,
-    },
-    Return {
-        path: String,
-        line: usize,
-        owner: String,
-        method: String,
-        dependency: String,
-    },
-    Parameter {
-        path: String,
-        line: usize,
-        owner: String,
-        method: String,
-        dependency: String,
-    },
-    RawProviderOperation {
-        path: String,
-        line: usize,
-        owner: String,
-        method: String,
-    },
-    FreeReturn {
-        path: String,
-        line: usize,
-        function: String,
-        dependency: String,
-    },
-    FreeParameter {
-        path: String,
-        line: usize,
-        function: String,
-        dependency: String,
-    },
-}
-
-struct ReceiverMethod {
+struct OwnerMethod {
     path: String,
     line: usize,
     owner: String,
     method: String,
     output: BTreeSet<String>,
     parameters: BTreeSet<String>,
-    returns_owner: bool,
     mutates_owner: bool,
     consumes_owner: bool,
     borrows_output: bool,
-}
-
-fn names(lists: &[&[&str]]) -> BTreeSet<String> {
-    lists
-        .iter()
-        .flat_map(|list| list.iter())
-        .map(|name| (*name).to_string())
-        .collect()
+    public: bool,
 }
 
 pub(crate) fn find_owner_dependency_leaks(
     files: &[RustFile],
     policy: &Policy,
-) -> Vec<OwnerDependencyLeak> {
-    let methods = collect_receiver_methods(files);
-    let declared_types = collect_declared_types(files);
-    let raw_database_types = RAW_SQLITE_HANDLES
+    graph: &OwnerGraph,
+) -> Vec<Finding> {
+    let methods = collect_owner_methods(files);
+    let raw = RAW_SQLITE_HANDLES
         .iter()
-        .map(|(handle, _)| (*handle).to_string())
+        .map(|(name, _)| name.to_string())
         .collect::<BTreeSet<_>>();
-    let unexported_capability_types = names(&[policy.unexported_capability_types]);
-    let capability_types = names(&[policy.capability_types, policy.unexported_capability_types]);
-    let exportable_capability_outputs = names(&[policy.exportable_capability_outputs]);
-    let mut internal_dependencies = names(&[policy.internal_dependency_types]);
-    internal_dependencies.extend(raw_database_types.iter().cloned());
-    let mut always_forbidden_returns = names(&[policy.always_forbidden_returns]);
-    always_forbidden_returns.extend(raw_database_types.iter().cloned());
-    let retained_dependencies = declared_types
-        .keys()
-        .map(|owner| {
-            (
-                owner.clone(),
-                transitive_field_types(owner, &declared_types),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    let service_owners = infer_field_owners(&declared_types, &capability_types, policy);
-    let retained_service_types = service_owners
+    let capabilities = policy
+        .capability_types
         .iter()
+        .map(|name| name.to_string())
+        .collect::<BTreeSet<_>>();
+    let services = graph
+        .owners
+        .union(&capabilities)
         .cloned()
-        .chain(capability_types.iter().cloned())
         .collect::<BTreeSet<_>>();
-    let mut exposed_dependencies = BTreeMap::<String, BTreeSet<String>>::new();
+    let internal = policy
+        .internal_dependency_types
+        .iter()
+        .map(|name| name.to_string())
+        .chain(raw.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    let retained = methods
+        .iter()
+        .map(|method| (method.owner.clone(), graph.retained(&method.owner)))
+        .collect::<BTreeMap<_, _>>();
+    let mut leaks = BTreeSet::new();
+    collect_retained_service_owner_fields(files, graph, &graph.owners, &services, &mut leaks);
+    collect_crate_root_session_fields(files, &internal, policy, &mut leaks);
+    collect_database_callables(files, &raw, policy, &mut leaks);
+    // A wrapper's getters expose the same dependencies as returning them directly.
+    let mut exposed = BTreeMap::<String, BTreeSet<String>>::new();
     loop {
-        let before = exposed_dependencies.clone();
+        let before = exposed.clone();
         for method in &methods {
-            if method.returns_owner {
-                continue;
-            }
-            let is_composition_root = composition_root_matches(method, policy);
-            let owner_is_service =
-                service_owners.contains(&method.owner) || capability_types.contains(&method.owner);
-            let retained = retained_dependencies
-                .get(&method.owner)
-                .cloned()
-                .unwrap_or_default();
-            let exposed = exposed_dependencies
-                .entry(method.owner.clone())
-                .or_default();
+            let held = &retained[&method.owner];
+            let rooted = policy.is_composition_root(&method.path, &method.owner, &method.method);
             for output in &method.output {
-                if always_forbidden_returns.contains(output)
-                    || (internal_dependencies.contains(output) && retained.contains(output))
-                    || (owner_is_service
-                        && !is_composition_root
-                        && retained_service_types.contains(output)
-                        && retained.contains(output)
-                        && !transfers_task(method, output, policy))
-                {
-                    exposed.insert(output.clone());
+                let retained_service = services.contains(output)
+                    && held.contains(output)
+                    && !transfers_task(method, output, policy);
+                let new_service = method.public
+                    && graph.owners.contains(output)
+                    && !policy.task_types.contains(&output.as_str())
+                    && !capabilities.contains(output);
+                let leaks_directly = raw.contains(output)
+                    || (internal.contains(output) && held.contains(output))
+                    || (services.contains(&method.owner)
+                        && !rooted
+                        && (retained_service || new_service));
+                let nested = before
+                    .get(output)
+                    .into_iter()
+                    .flatten()
+                    .filter(|name| held.contains(*name))
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                if leaks_directly || nested.iter().any(|name| raw.contains(name) || !rooted) {
+                    leaks.insert(Finding::new(
+                        &method.path,
+                        method.line,
+                        format!(
+                            "{}::{} returns retained dependency {output}",
+                            method.owner, method.method
+                        ),
+                        REMEDY,
+                    ));
                 }
-                if let Some(nested) = before.get(output) {
-                    exposed.extend(nested.intersection(&retained).cloned());
+                let entry = exposed.entry(method.owner.clone()).or_default();
+                if leaks_directly {
+                    entry.insert(output.clone());
                 }
+                entry.extend(nested);
             }
         }
-        if exposed_dependencies == before {
+        if exposed == before {
             break;
         }
     }
-
-    let mut leaks = BTreeSet::new();
-    collect_retained_service_owner_fields(
-        files,
-        &declared_types,
-        &service_owners,
-        &retained_service_types,
-        &mut leaks,
-    );
-    collect_crate_root_session_fields(files, &internal_dependencies, policy, &mut leaks);
-    collect_database_callables(files, &raw_database_types, policy, &mut leaks);
-    for method in methods {
-        let is_composition_root = composition_root_matches(&method, policy);
-        let owner_is_service =
-            service_owners.contains(&method.owner) || capability_types.contains(&method.owner);
-        let retained = retained_dependencies
-            .get(&method.owner)
-            .cloned()
-            .unwrap_or_default();
-        if policy
-            .raw_provider_operations
-            .iter()
-            .any(|(owner, methods)| {
-                method.owner == *owner && methods.contains(&method.method.as_str())
-            })
-        {
-            leaks.insert(OwnerDependencyLeak::RawProviderOperation {
-                path: method.path.clone(),
-                line: method.line,
-                owner: method.owner.clone(),
-                method: method.method.clone(),
-            });
-        }
-        if !method.returns_owner {
-            for output in &method.output {
-                let returns_retained_dependency = always_forbidden_returns.contains(output)
-                    || (internal_dependencies.contains(output) && retained.contains(output))
-                    || (owner_is_service
-                        && !is_composition_root
-                        && unexported_capability_types.contains(output)
-                        && !exportable_capability_outputs.contains(output))
-                    || (owner_is_service
-                        && !is_composition_root
-                        && retained_service_types.contains(output)
-                        && retained.contains(output)
-                        && !transfers_task(&method, output, policy))
-                    || (owner_is_service
-                        && !is_composition_root
-                        && returns_derived_service(&method.owner, output, &retained, policy));
-                let returns_leaking_wrapper =
-                    exposed_dependencies.get(output).is_some_and(|nested| {
-                        let leaked = nested.intersection(&retained).collect::<BTreeSet<_>>();
-                        leaked
-                            .iter()
-                            .any(|dependency| always_forbidden_returns.contains(*dependency))
-                            || (!is_composition_root && !leaked.is_empty())
-                    });
-                if returns_retained_dependency || returns_leaking_wrapper {
-                    leaks.insert(OwnerDependencyLeak::Return {
-                        path: method.path.clone(),
-                        line: method.line,
-                        owner: method.owner.clone(),
-                        method: method.method.clone(),
-                        dependency: output.clone(),
-                    });
-                }
-            }
-        }
-        for dependency in method
-            .parameters
-            .intersection(&retained)
-            .filter(|dependency| {
-                unexported_capability_types.contains(*dependency)
-                    && always_forbidden_returns.contains(*dependency)
-            })
-        {
-            leaks.insert(OwnerDependencyLeak::Parameter {
-                path: method.path.clone(),
-                line: method.line,
-                owner: method.owner.clone(),
-                method: method.method.clone(),
-                dependency: dependency.clone(),
-            });
-        }
+    for method in &methods {
         if method.mutates_owner {
-            for dependency in method.parameters.intersection(&raw_database_types) {
-                leaks.insert(OwnerDependencyLeak::Parameter {
-                    path: method.path.clone(),
-                    line: method.line,
-                    owner: method.owner.clone(),
-                    method: method.method.clone(),
-                    dependency: dependency.clone(),
-                });
+            for dependency in method.parameters.intersection(&raw) {
+                leaks.insert(Finding::new(
+                    &method.path,
+                    method.line,
+                    format!(
+                        "{}::{} accepts raw dependency {dependency}",
+                        method.owner, method.method
+                    ),
+                    REMEDY,
+                ));
             }
         }
     }
     leaks.into_iter().collect()
 }
 
+const REMEDY: &str = "an owner never hands out what it holds; callers ask it to do the work";
+
 /// A consumed task can hand its owned permit or prepared result to the next
 /// task. Borrowed getters and wrappers exposing raw dependencies
 /// still answer to the ordinary leak rules.
-fn transfers_task(method: &ReceiverMethod, output: &str, policy: &Policy) -> bool {
+fn transfers_task(method: &OwnerMethod, output: &str, policy: &Policy) -> bool {
     method.consumes_owner && !method.borrows_output && policy.task_types.contains(&output)
-}
-
-fn composition_root_matches(method: &ReceiverMethod, policy: &Policy) -> bool {
-    policy.composition_roots.iter().any(|(path, owner, name)| {
-        method.path == *path && method.owner == *owner && method.method == *name
-    })
-}
-
-fn infer_field_owners(
-    types: &BTreeMap<String, StructInfo>,
-    capability_types: &BTreeSet<String>,
-    policy: &Policy,
-) -> BTreeSet<String> {
-    let capabilities = capability_types
-        .iter()
-        .cloned()
-        .chain(
-            policy
-                .field_capability_types
-                .iter()
-                .map(|name| (*name).to_string()),
-        )
-        .collect::<BTreeSet<_>>();
-    let mut owners = BTreeSet::new();
-    loop {
-        let before = owners.len();
-        for (name, info) in types {
-            if policy.non_owner_types.contains(&name.as_str())
-                || policy.borrowed_facade_types.contains(&name.as_str())
-            {
-                continue;
-            }
-            if info
-                .field_types
-                .iter()
-                .any(|field| capabilities.contains(field) || owners.contains(field))
-            {
-                owners.insert(name.clone());
-            }
-        }
-        if owners.len() == before {
-            return owners;
-        }
-    }
 }
 
 fn collect_retained_service_owner_fields(
     files: &[RustFile],
-    declared_types: &BTreeMap<String, StructInfo>,
+    graph: &OwnerGraph,
     service_owners: &BTreeSet<String>,
     retained_service_types: &BTreeSet<String>,
-    leaks: &mut BTreeSet<OwnerDependencyLeak>,
+    leaks: &mut BTreeSet<Finding>,
 ) {
     for file in files {
         collect_retained_service_owner_fields_in_items(
             &file.relative_path,
             &file.syntax.items,
-            declared_types,
+            graph,
             service_owners,
             retained_service_types,
             leaks,
@@ -330,10 +166,10 @@ fn collect_retained_service_owner_fields(
 fn collect_retained_service_owner_fields_in_items(
     path: &str,
     items: &[syn::Item],
-    declared_types: &BTreeMap<String, StructInfo>,
+    graph: &OwnerGraph,
     service_owners: &BTreeSet<String>,
     retained_service_types: &BTreeSet<String>,
-    leaks: &mut BTreeSet<OwnerDependencyLeak>,
+    leaks: &mut BTreeSet<Finding>,
 ) {
     for item in items {
         match item {
@@ -345,21 +181,22 @@ fn collect_retained_service_owner_fields_in_items(
                     }
                     let exposes_service = type_names(&field.ty).iter().any(|name| {
                         retained_service_types.contains(name)
-                            || !transitive_field_types(name, declared_types)
-                                .is_disjoint(retained_service_types)
+                            || !graph.retained(name).is_disjoint(retained_service_types)
                     });
                     if !service_owners.contains(&owner) && !exposes_service {
                         continue;
                     }
-                    leaks.insert(OwnerDependencyLeak::Field {
-                        path: path.to_string(),
-                        line: field.span().start().line,
-                        owner: owner.clone(),
-                        field: field
-                            .ident
-                            .as_ref()
-                            .map_or_else(|| index.to_string(), ToString::to_string),
-                    });
+                    let line = field.span().start().line;
+                    let field = field
+                        .ident
+                        .as_ref()
+                        .map_or_else(|| index.to_string(), ToString::to_string);
+                    leaks.insert(Finding::new(
+                        path,
+                        line,
+                        format!("service owner {owner} exposes field {field}"),
+                        REMEDY,
+                    ));
                 }
             }
             syn::Item::Mod(item) if !is_test_only(&item.attrs) => {
@@ -367,7 +204,7 @@ fn collect_retained_service_owner_fields_in_items(
                     collect_retained_service_owner_fields_in_items(
                         path,
                         items,
-                        declared_types,
+                        graph,
                         service_owners,
                         retained_service_types,
                         leaks,
@@ -379,27 +216,13 @@ fn collect_retained_service_owner_fields_in_items(
     }
 }
 
-fn returns_derived_service(
-    owner: &str,
-    output: &str,
-    retained: &BTreeSet<String>,
-    policy: &Policy,
-) -> bool {
-    policy
-        .derived_services
-        .iter()
-        .filter(|(derived, _)| *derived == output)
-        .flat_map(|(_, sources)| sources.iter())
-        .any(|source| owner == *source || retained.contains(*source))
-}
-
 /// The SQLite homes' callables: none returns a raw handle, and none reachable
 /// outside its crate takes one.
 fn collect_database_callables(
     files: &[RustFile],
     raw_database_types: &BTreeSet<String>,
     policy: &Policy,
-    leaks: &mut BTreeSet<OwnerDependencyLeak>,
+    leaks: &mut BTreeSet<Finding>,
 ) {
     for file in files {
         if is_test_source(&file.relative_path)
@@ -425,7 +248,7 @@ fn collect_database_callables_in_items(
     path: &str,
     items: &[syn::Item],
     raw_database_types: &BTreeSet<String>,
-    leaks: &mut BTreeSet<OwnerDependencyLeak>,
+    leaks: &mut BTreeSet<Finding>,
 ) {
     for item in items {
         match item {
@@ -498,27 +321,20 @@ fn collect_database_signature(
     signature: &syn::Signature,
     expose_parameters: bool,
     raw_database_types: &BTreeSet<String>,
-    leaks: &mut BTreeSet<OwnerDependencyLeak>,
+    leaks: &mut BTreeSet<Finding>,
 ) {
     let callable = signature.ident.to_string();
     let line = signature.ident.span().start().line;
     if let syn::ReturnType::Type(_, output) = &signature.output {
         for dependency in type_names(output).intersection(raw_database_types) {
-            leaks.insert(match owner {
-                None => OwnerDependencyLeak::FreeReturn {
-                    path: path.to_string(),
-                    line,
-                    function: callable.clone(),
-                    dependency: dependency.clone(),
-                },
-                Some(owner) => OwnerDependencyLeak::Return {
-                    path: path.to_string(),
-                    line,
-                    owner: owner.to_string(),
-                    method: callable.clone(),
-                    dependency: dependency.clone(),
-                },
-            });
+            let callable =
+                owner.map_or_else(|| callable.clone(), |owner| format!("{owner}::{callable}"));
+            leaks.insert(Finding::new(
+                path,
+                line,
+                format!("{callable} returns retained dependency {dependency}"),
+                REMEDY,
+            ));
         }
     }
     if !expose_parameters {
@@ -529,21 +345,14 @@ fn collect_database_signature(
             continue;
         };
         for dependency in type_names(&input.ty).intersection(raw_database_types) {
-            leaks.insert(match owner {
-                None => OwnerDependencyLeak::FreeParameter {
-                    path: path.to_string(),
-                    line,
-                    function: callable.clone(),
-                    dependency: dependency.clone(),
-                },
-                Some(owner) => OwnerDependencyLeak::Parameter {
-                    path: path.to_string(),
-                    line,
-                    owner: owner.to_string(),
-                    method: callable.clone(),
-                    dependency: dependency.clone(),
-                },
-            });
+            let callable =
+                owner.map_or_else(|| callable.clone(), |owner| format!("{owner}::{callable}"));
+            leaks.insert(Finding::new(
+                path,
+                line,
+                format!("{callable} accepts raw dependency {dependency}"),
+                REMEDY,
+            ));
         }
     }
 }
@@ -552,7 +361,7 @@ fn collect_crate_root_session_fields(
     files: &[RustFile],
     internal_dependencies: &BTreeSet<String>,
     policy: &Policy,
-    leaks: &mut BTreeSet<OwnerDependencyLeak>,
+    leaks: &mut BTreeSet<Finding>,
 ) {
     for file in files {
         if is_test_source(&file.relative_path)
@@ -572,34 +381,26 @@ fn collect_crate_root_session_fields(
             }
             for field in &item.fields {
                 for dependency in type_names(&field.ty).intersection(internal_dependencies) {
-                    leaks.insert(OwnerDependencyLeak::CrateRootSessionField {
-                        path: file.relative_path.clone(),
-                        line: item.ident.span().start().line,
-                        session: session.clone(),
-                        dependency: dependency.clone(),
-                    });
+                    leaks.insert(Finding::new(&file.relative_path, item.ident.span().start().line,
+                        format!("crate-root {session} exposes internal dependency {dependency} to every module"), REMEDY));
                 }
             }
         }
     }
 }
 
-fn collect_receiver_methods(files: &[RustFile]) -> Vec<ReceiverMethod> {
+fn collect_owner_methods(files: &[RustFile]) -> Vec<OwnerMethod> {
     let mut methods = Vec::new();
     for file in files {
         if is_test_source(&file.relative_path) {
             continue;
         }
-        collect_receiver_methods_in_items(&file.relative_path, &file.syntax.items, &mut methods);
+        collect_owner_methods_in_items(&file.relative_path, &file.syntax.items, &mut methods);
     }
     methods
 }
 
-fn collect_receiver_methods_in_items(
-    path: &str,
-    items: &[syn::Item],
-    methods: &mut Vec<ReceiverMethod>,
-) {
+fn collect_owner_methods_in_items(path: &str, items: &[syn::Item], methods: &mut Vec<OwnerMethod>) {
     for item in items {
         match item {
             syn::Item::Impl(item) => {
@@ -610,10 +411,12 @@ fn collect_receiver_methods_in_items(
                     let syn::ImplItem::Fn(method) = item else {
                         continue;
                     };
-                    if method.sig.receiver().is_none() {
-                        continue;
-                    }
-                    methods.push(receiver_method(path, &owner, &method.sig));
+                    methods.push(owner_method(
+                        path,
+                        &owner,
+                        &method.sig,
+                        visibility_crosses_owner(&method.vis),
+                    ));
                 }
             }
             syn::Item::Trait(item) => {
@@ -622,15 +425,12 @@ fn collect_receiver_methods_in_items(
                     let syn::TraitItem::Fn(method) = item else {
                         continue;
                     };
-                    if method.sig.receiver().is_none() {
-                        continue;
-                    }
-                    methods.push(receiver_method(path, &owner, &method.sig));
+                    methods.push(owner_method(path, &owner, &method.sig, true));
                 }
             }
             syn::Item::Mod(item) if !is_test_only(&item.attrs) => {
                 if let Some((_, items)) = &item.content {
-                    collect_receiver_methods_in_items(path, items, methods);
+                    collect_owner_methods_in_items(path, items, methods);
                 }
             }
             _ => {}
@@ -638,11 +438,13 @@ fn collect_receiver_methods_in_items(
     }
 }
 
-fn receiver_method(path: &str, owner: &str, signature: &syn::Signature) -> ReceiverMethod {
-    let output = match &signature.output {
+fn owner_method(path: &str, owner: &str, signature: &syn::Signature, public: bool) -> OwnerMethod {
+    let mut output = match &signature.output {
         syn::ReturnType::Default => BTreeSet::new(),
         syn::ReturnType::Type(_, output) => type_names(output),
     };
+    output.remove("Self");
+    output.remove(owner);
     let parameters = signature
         .inputs
         .iter()
@@ -651,12 +453,12 @@ fn receiver_method(path: &str, owner: &str, signature: &syn::Signature) -> Recei
             syn::FnArg::Typed(input) => type_names(&input.ty),
         })
         .collect();
-    ReceiverMethod {
+    OwnerMethod {
+        public,
         path: path.to_string(),
         line: signature.ident.span().start().line,
         owner: owner.to_string(),
         method: signature.ident.to_string(),
-        returns_owner: output.contains("Self") || output.contains(owner),
         mutates_owner: signature.receiver().is_some_and(|receiver| {
             receiver.mutability.is_some()
                 || matches!(&receiver.kind, syn::ReceiverKind::Reference(_, _, Some(_)))
@@ -686,25 +488,6 @@ impl Visit<'_> for BorrowedOutput {
     fn visit_type_ptr(&mut self, _: &syn::TypePtr) {
         self.0 = true;
     }
-}
-
-fn transitive_field_types(
-    owner: &str,
-    declared_types: &BTreeMap<String, StructInfo>,
-) -> BTreeSet<String> {
-    let mut fields = BTreeSet::new();
-    let mut pending = vec![owner.to_string()];
-    while let Some(current) = pending.pop() {
-        let Some(info) = declared_types.get(&current) else {
-            continue;
-        };
-        for field in &info.field_types {
-            if fields.insert(field.clone()) && declared_types.contains_key(field) {
-                pending.push(field.clone());
-            }
-        }
-    }
-    fields
 }
 
 #[cfg(test)]

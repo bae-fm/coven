@@ -1,9 +1,18 @@
 use super::*;
 
+fn find_unique_type_name_violations(files: &[RustFile], policy: &Policy) -> Vec<Finding> {
+    super::find_unique_type_name_violations(files, policy, &OwnerGraph::collect(files, policy))
+}
+
+fn duplicate_at(name: &str, paths: &[&str]) -> Vec<Finding> {
+    vec![Finding::new(paths[0], 1, format!("type {name} is declared more than once: {}", paths.join(", ")),
+        "type names used by the policy, construction-only capabilities and inferred owners must be unique across crates/")]
+}
+
 const FIRST: &str = "crates/first/src/lib.rs";
 const SECOND: &str = "crates/second/src/lib.rs";
 
-fn violations(first: &str, second: &str, policy: &Policy) -> Vec<UniqueTypeNameViolation> {
+fn violations(first: &str, second: &str, policy: &Policy) -> Vec<Finding> {
     find_unique_type_name_violations(
         &[
             RustFile::fixture(FIRST, first),
@@ -13,11 +22,8 @@ fn violations(first: &str, second: &str, policy: &Policy) -> Vec<UniqueTypeNameV
     )
 }
 
-fn duplicate(name: &str) -> Vec<UniqueTypeNameViolation> {
-    vec![UniqueTypeNameViolation {
-        name: name.to_string(),
-        paths: vec![FIRST.to_string(), SECOND.to_string()],
-    }]
+fn duplicate(name: &str) -> Vec<Finding> {
+    duplicate_at(name, &[FIRST, SECOND])
 }
 
 #[test]
@@ -44,10 +50,6 @@ fn every_type_bearing_policy_row_requires_unique_names() {
             ..Policy::EMPTY
         },
         Policy {
-            root_owner_types: &["Subject"],
-            ..Policy::EMPTY
-        },
-        Policy {
             task_types: &["Subject"],
             ..Policy::EMPTY
         },
@@ -56,35 +58,11 @@ fn every_type_bearing_policy_row_requires_unique_names() {
             ..Policy::EMPTY
         },
         Policy {
-            always_forbidden_returns: &["Subject"],
-            ..Policy::EMPTY
-        },
-        Policy {
             closed_session_types: &["Subject"],
             ..Policy::EMPTY
         },
         Policy {
-            field_capability_types: &["Subject"],
-            ..Policy::EMPTY
-        },
-        Policy {
-            unexported_capability_types: &["Subject"],
-            ..Policy::EMPTY
-        },
-        Policy {
-            exportable_capability_outputs: &["Subject"],
-            ..Policy::EMPTY
-        },
-        Policy {
             composition_roots: &[(FIRST, "Subject", "open")],
-            ..Policy::EMPTY
-        },
-        Policy {
-            lifetime_authorities: &[("Subject", "Authority")],
-            ..Policy::EMPTY
-        },
-        Policy {
-            lifetime_authorities: &[("Service", "Subject")],
             ..Policy::EMPTY
         },
         Policy {
@@ -93,18 +71,6 @@ fn every_type_bearing_policy_row_requires_unique_names() {
         },
         Policy {
             capability_factories: &[(FIRST, "Factory", "build", "Subject")],
-            ..Policy::EMPTY
-        },
-        Policy {
-            raw_provider_operations: &[("Subject", &["read"])],
-            ..Policy::EMPTY
-        },
-        Policy {
-            derived_services: &[("Subject", &["Source"])],
-            ..Policy::EMPTY
-        },
-        Policy {
-            derived_services: &[("Product", &["Source", "Subject"])],
             ..Policy::EMPTY
         },
     ];
@@ -160,9 +126,11 @@ fn capability_trait_implementations_need_no_explicit_type_row() {
             impl<T> foundation::Clock for SuppliedClock<T> {}
         }
     "#;
+    let mut expected = duplicate("SuppliedClock");
+    expected[0].line = 5;
     assert_eq!(
         violations(source, "struct SuppliedClock;", &POLICY),
-        duplicate("SuppliedClock"),
+        expected
     );
 }
 
@@ -308,10 +276,7 @@ fn repeated_declarations_in_one_file_are_not_collapsed_before_counting() {
             "",
             &POLICY
         ),
-        vec![UniqueTypeNameViolation {
-            name: "Subject".into(),
-            paths: vec![FIRST.into()]
-        }],
+        duplicate_at("Subject", &[FIRST]),
     );
 }
 
@@ -331,10 +296,7 @@ fn every_declaring_file_is_reported_in_path_order() {
             ],
             &POLICY,
         ),
-        vec![UniqueTypeNameViolation {
-            name: "Subject".into(),
-            paths: vec![FIRST.into(), SECOND.into(), third.into()]
-        }],
+        duplicate_at("Subject", &[FIRST, SECOND, third]),
     );
 }
 

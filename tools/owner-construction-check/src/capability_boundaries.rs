@@ -14,31 +14,16 @@ use proc_macro2::Span;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
+use crate::finding::Finding;
 use crate::macros::{parse_macro_body, token_paths};
 use crate::policy::{Capability, Gate, Policy};
-use crate::syntax::{flatten_use_tree, is_test_only, is_test_source, RustFile};
-
-#[derive(Debug)]
-pub(crate) struct CapabilityBoundaryViolation {
-    pub(crate) path: String,
-    pub(crate) line: usize,
-    pub(crate) capability: &'static str,
-    pub(crate) kind: &'static str,
-    pub(crate) homes: &'static [&'static str],
-}
-
-impl CapabilityBoundaryViolation {
-    fn key(&self) -> (String, usize, &'static str) {
-        (self.path.clone(), self.line, self.kind)
-    }
-}
+use crate::syntax::{flatten_use_tree, is_test_only, is_test_source, type_name, RustFile};
 
 pub(crate) fn find_capability_boundary_violations(
     files: &[RustFile],
     policy: &Policy,
-) -> Vec<CapabilityBoundaryViolation> {
-    let mut violations = Vec::new();
-    let mut seen = BTreeSet::new();
+) -> Vec<Finding> {
+    let mut violations = BTreeSet::new();
     for file in files {
         if is_test_source(&file.relative_path) {
             continue;
@@ -55,43 +40,64 @@ pub(crate) fn find_capability_boundary_violations(
             })
             .flat_map(|capability| capability.gates.iter().map(move |gate| (capability, gate)))
             .collect::<Vec<_>>();
-        if gated.is_empty() {
-            continue;
-        }
         let mut visitor = CapabilityBoundaryVisitor {
             path: &file.relative_path,
             gated: &gated,
             violations: &mut violations,
-            seen: &mut seen,
+            policy,
+            current_type: "<free>".into(),
+            rooted: false,
         };
         visitor.visit_file(&file.syntax);
     }
-    violations.sort_by_key(CapabilityBoundaryViolation::key);
-    violations
+    violations.into_iter().collect()
 }
 
 struct CapabilityBoundaryVisitor<'a, 'p> {
     path: &'a str,
     gated: &'a [(&'p Capability, &'p Gate)],
-    violations: &'a mut Vec<CapabilityBoundaryViolation>,
-    seen: &'a mut BTreeSet<(String, usize, &'static str)>,
+    violations: &'a mut BTreeSet<Finding>,
+    policy: &'p Policy,
+    current_type: String,
+    rooted: bool,
 }
 
 impl<'p> CapabilityBoundaryVisitor<'_, 'p> {
     fn record(&mut self, capability: &'p Capability, gate: &'p Gate, span: Span) {
-        let violation = CapabilityBoundaryViolation {
-            path: self.path.to_string(),
-            line: span.start().line,
-            capability: capability.name,
-            kind: gate.kind,
-            homes: capability.homes,
-        };
-        if self.seen.insert(violation.key()) {
-            self.violations.push(violation);
-        }
+        self.violations.insert(Finding::new(
+            self.path,
+            span.start().line,
+            format!(
+                "{} ({}) is used directly only in {}",
+                gate.kind,
+                capability.name,
+                if capability.homes.is_empty() {
+                    "no file yet".to_string()
+                } else {
+                    capability.homes.join(", ")
+                }
+            ),
+            "reach a capability through the owner that holds it, given to you when you are built",
+        ));
+    }
+
+    fn record_task_start(&mut self, gate: &Gate, span: Span) {
+        self.violations.insert(Finding::new(
+            self.path,
+            span.start().line,
+            format!("{} outside a composition root", gate.kind),
+            "start long-lived work only at a listed root, which must retain and stop it",
+        ));
     }
 
     fn check_method(&mut self, name: &str, span: Span) {
+        if !self.rooted {
+            for gate in self.policy.task_starts {
+                if gate.method_patterns.contains(&name) {
+                    self.record_task_start(gate, span);
+                }
+            }
+        }
         for &(capability, gate) in self.gated {
             if gate.method_patterns.contains(&name) {
                 self.record(capability, gate, span);
@@ -104,24 +110,42 @@ impl<'p> CapabilityBoundaryVisitor<'_, 'p> {
     /// crate; in an expression, a single-segment path (`open(...)`) is a local
     /// item and must not match a gated crate of the same name.
     fn check_segments(&mut self, segments: &[String], is_import: bool, span: Span) {
+        if !self.rooted {
+            for gate in self.policy.task_starts {
+                if gate_matches(gate, segments, is_import) {
+                    self.record_task_start(gate, span);
+                }
+            }
+        }
         for &(capability, gate) in self.gated {
-            let first_is_gated_crate = (is_import || segments.len() >= 2)
-                && segments
-                    .first()
-                    .is_some_and(|first| gate.crates.iter().any(|name| first == name));
-            let contains_pattern = gate.path_patterns.iter().any(|pattern| {
-                segments
-                    .windows(pattern.len())
-                    .any(|window| window.iter().zip(pattern.iter()).all(|(a, b)| a == b))
-            });
-            if first_is_gated_crate || contains_pattern {
+            if gate_matches(gate, segments, is_import) {
                 self.record(capability, gate, span);
             }
         }
     }
 }
 
+fn gate_matches(gate: &Gate, segments: &[String], is_import: bool) -> bool {
+    let first_is_gated_crate = (is_import || segments.len() >= 2)
+        && segments
+            .first()
+            .is_some_and(|first| gate.crates.iter().any(|name| first == name));
+    let contains_pattern = gate.path_patterns.iter().any(|pattern| {
+        segments
+            .windows(pattern.len())
+            .any(|window| window.iter().zip(pattern.iter()).all(|(a, b)| a == b))
+    });
+    first_is_gated_crate || contains_pattern
+}
+
 impl<'ast> Visit<'ast> for CapabilityBoundaryVisitor<'_, '_> {
+    fn visit_item(&mut self, node: &'ast syn::Item) {
+        let previous = self.rooted;
+        self.rooted = false;
+        visit::visit_item(self, node);
+        self.rooted = previous;
+    }
+
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         self.check_method(&node.method.to_string(), node.method.span());
         visit::visit_expr_method_call(self, node);
@@ -145,21 +169,38 @@ impl<'ast> Visit<'ast> for CapabilityBoundaryVisitor<'_, '_> {
         if is_test_only(&node.attrs) {
             return;
         }
+        let previous = std::mem::replace(
+            &mut self.current_type,
+            type_name(&node.self_ty).unwrap_or_else(|| "<impl>".into()),
+        );
         visit::visit_item_impl(self, node);
+        self.current_type = previous;
     }
 
     fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
         if is_test_only(&node.attrs) {
             return;
         }
+        let previous = self.rooted;
+        self.rooted =
+            self.policy
+                .is_composition_root(self.path, "<free>", &node.sig.ident.to_string());
         visit::visit_item_fn(self, node);
+        self.rooted = previous;
     }
 
     fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
         if is_test_only(&node.attrs) {
             return;
         }
+        let previous = self.rooted;
+        self.rooted = self.policy.is_composition_root(
+            self.path,
+            &self.current_type,
+            &node.sig.ident.to_string(),
+        );
         visit::visit_impl_item_fn(self, node);
+        self.rooted = previous;
     }
 
     fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {

@@ -15,6 +15,7 @@
 
 use std::collections::BTreeSet;
 
+use crate::finding::Finding;
 use crate::policy::Policy;
 use crate::sources::{Manifest, Workspace};
 
@@ -23,34 +24,12 @@ const DEPENDENCY_TABLES: &[&str] = &["dependencies", "dev-dependencies", "build-
 /// What a member may say about a dependency besides `workspace = true`.
 const MEMBER_DEPENDENCY_KEYS: &[&str] = &["workspace", "features", "optional"];
 
-#[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
-pub(crate) enum CrateDependencyViolation {
-    /// A member sets its own version, path or source for a dependency.
-    NotFromWorkspace {
-        manifest: String,
-        dependency: String,
-        keys: Vec<String>,
-    },
-    /// A crate under `crates/` with no row in the policy's `crate_order`.
-    Unplaced { manifest: String, package: String },
-    /// A crate depends on one at or below it in the order.
-    Upward {
-        manifest: String,
-        from: String,
-        to: String,
-    },
-    /// A crate depends on one it is separated from.
-    Separated {
-        manifest: String,
-        from: String,
-        to: String,
-    },
-}
+const REMEDY: &str = "each crate depends only on crates above it in §20.1's list, and each external dependency's version is set once in [workspace.dependencies]";
 
 pub(crate) fn find_crate_dependency_violations(
     workspace: &Workspace,
     policy: &Policy,
-) -> Vec<CrateDependencyViolation> {
+) -> Vec<Finding> {
     let mut violations = BTreeSet::new();
     for manifest in &workspace.manifests {
         let is_crate = manifest.relative_path.starts_with("crates/");
@@ -59,10 +38,12 @@ pub(crate) fn find_crate_dependency_violations(
             .as_deref()
             .and_then(|package| policy.crate_order.iter().position(|name| *name == package));
         if let (true, Some(package), None) = (is_crate, &package, rank) {
-            violations.insert(CrateDependencyViolation::Unplaced {
-                manifest: manifest.relative_path.clone(),
-                package: package.clone(),
-            });
+            violations.insert(Finding::new(
+                &manifest.relative_path,
+                1,
+                format!("crate {package} has no row in the policy's crate_order"),
+                REMEDY,
+            ));
         }
         for (dependency, entry) in dependency_entries(&manifest.table) {
             let keys = entry_keys(entry);
@@ -75,11 +56,7 @@ pub(crate) fn find_crate_dependency_violations(
                     .iter()
                     .all(|key| MEMBER_DEPENDENCY_KEYS.contains(&key.as_str()));
             if !from_workspace {
-                violations.insert(CrateDependencyViolation::NotFromWorkspace {
-                    manifest: manifest.relative_path.clone(),
-                    dependency: dependency.clone(),
-                    keys,
-                });
+                violations.insert(Finding::new(&manifest.relative_path, 1, format!("dependency {dependency} sets [{}] itself instead of `workspace = true` with only features or optional", keys.join(", ")), REMEDY));
             }
             let (Some(from), Some(from_rank)) = (&package, rank) else {
                 continue;
@@ -91,17 +68,19 @@ pub(crate) fn find_crate_dependency_violations(
             if policy.separated_crates.iter().any(|pair| {
                 *pair == (from.as_str(), to.as_str()) || *pair == (to.as_str(), from.as_str())
             }) {
-                violations.insert(CrateDependencyViolation::Separated {
-                    manifest: manifest.relative_path.clone(),
-                    from: from.clone(),
-                    to,
-                });
+                violations.insert(Finding::new(
+                    &manifest.relative_path,
+                    1,
+                    format!("{from} depends on {to}; the two never depend on each other"),
+                    REMEDY,
+                ));
             } else if to_rank >= from_rank {
-                violations.insert(CrateDependencyViolation::Upward {
-                    manifest: manifest.relative_path.clone(),
-                    from: from.clone(),
-                    to,
-                });
+                violations.insert(Finding::new(
+                    &manifest.relative_path,
+                    1,
+                    format!("{from} depends on {to}, which is not above it in crate_order"),
+                    REMEDY,
+                ));
             }
         }
     }

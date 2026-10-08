@@ -1,13 +1,13 @@
 use super::*;
 
-fn conventions(files: &[(&str, &str)]) -> Vec<(String, usize, Convention)> {
+fn conventions(files: &[(&str, &str)]) -> Vec<(String, usize, String)> {
     let files = files
         .iter()
         .map(|(path, source)| RustFile::fixture(path, source))
         .collect::<Vec<_>>();
     find_test_layout_violations(&files)
         .into_iter()
-        .map(|violation| (violation.path, violation.line, violation.convention))
+        .map(|violation| (violation.path, violation.line, violation.message))
         .collect()
 }
 
@@ -44,9 +44,9 @@ fn a_singular_test_file_is_rejected_with_its_rename() {
     let files = [RustFile::fixture("crates/coven-sync/src/pull_test.rs", "")];
     let violations = find_test_layout_violations(&files);
     assert_eq!(violations.len(), 1);
-    assert_eq!(violations[0].convention, Convention::SingularTestFile);
+    assert_eq!(violations[0].remedy, Convention::SingularTestFile.remedy());
     assert_eq!(
-        violations[0].message(),
+        violations[0].message,
         "test files are named <name>_tests.rs; rename pull_test.rs to pull_tests.rs"
     );
 }
@@ -61,7 +61,7 @@ fn a_test_file_without_its_subject_is_rejected() {
         vec![(
             "crates/coven-sync/src/pull_tests.rs".to_string(),
             1,
-            Convention::OrphanTestFile
+            Convention::OrphanTestFile.message("pull_tests.rs")
         )],
     );
 }
@@ -88,12 +88,12 @@ fn an_inline_test_module_is_rejected() {
             (
                 "crates/coven-sync/src/pull.rs".to_string(),
                 4,
-                Convention::InlineTestModule
+                Convention::InlineTestModule.message("pull.rs")
             ),
             (
                 "crates/coven-sync/src/pull.rs".to_string(),
                 10,
-                Convention::InlineTestModule
+                Convention::InlineTestModule.message("pull.rs")
             ),
         ],
     );
@@ -115,12 +115,12 @@ fn a_test_module_declared_elsewhere_than_the_sibling_is_rejected() {
     assert_eq!(
         violations
             .iter()
-            .map(|(_, line, convention)| (*line, *convention))
+            .map(|(_, line, convention)| (*line, convention.clone()))
             .collect::<Vec<_>>(),
         vec![
-            (3, Convention::MisplacedTestModule),
-            (6, Convention::MisplacedTestModule),
-            (9, Convention::MisplacedTestModule),
+            (3, Convention::MisplacedTestModule.message("pull.rs")),
+            (6, Convention::MisplacedTestModule.message("pull.rs")),
+            (9, Convention::MisplacedTestModule.message("pull.rs")),
         ],
     );
 }

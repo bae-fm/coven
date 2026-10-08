@@ -20,7 +20,12 @@ const POLICY: Policy = Policy {
 fn kinds(path: &str, source: &str) -> BTreeSet<String> {
     find_database_boundary_violations(&[RustFile::fixture(path, source)], &POLICY)
         .into_iter()
-        .map(|violation| violation.kind)
+        .map(|violation| {
+            violation
+                .message
+                .trim_end_matches(" is confined to coven-database")
+                .to_string()
+        })
         .collect()
 }
 
@@ -138,7 +143,12 @@ fn coven_owned_sql_is_rejected_outside_the_database_crate() {
 
     let kinds = find_database_boundary_violations(&files, &POLICY)
         .into_iter()
-        .map(|violation| violation.kind)
+        .map(|violation| {
+            violation
+                .message
+                .trim_end_matches(" is confined to coven-database")
+                .to_string()
+        })
         .collect::<BTreeSet<_>>();
     assert_eq!(
         kinds,
@@ -178,7 +188,15 @@ fn raw_handles_and_coven_sql_inside_macro_calls_are_rejected() {
 
     let violations = find_database_boundary_violations(&files, &POLICY)
         .into_iter()
-        .map(|violation| (violation.line, violation.kind))
+        .map(|violation| {
+            (
+                violation.line,
+                violation
+                    .message
+                    .trim_end_matches(" is confined to coven-database")
+                    .to_string(),
+            )
+        })
         .collect::<Vec<_>>();
     assert_eq!(
         violations,

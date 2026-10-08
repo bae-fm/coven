@@ -11,10 +11,11 @@ use std::collections::BTreeSet;
 
 use syn::visit::{self, Visit};
 
-use crate::conventions::{Convention, ConventionViolation};
+use crate::conventions::Convention;
+use crate::finding::Finding;
 use crate::syntax::{is_integration_test_source, is_test_only, is_test_source, RustFile};
 
-pub(crate) fn find_test_layout_violations(files: &[RustFile]) -> Vec<ConventionViolation> {
+pub(crate) fn find_test_layout_violations(files: &[RustFile]) -> Vec<Finding> {
     let paths = files
         .iter()
         .map(|file| file.relative_path.as_str())
@@ -45,19 +46,15 @@ pub(crate) fn find_test_layout_violations(files: &[RustFile]) -> Vec<ConventionV
     violations
 }
 
-fn violation(path: &str, line: usize, convention: Convention) -> ConventionViolation {
-    ConventionViolation {
-        path: path.to_string(),
-        line,
-        convention,
-    }
+fn violation(path: &str, line: usize, convention: Convention) -> Finding {
+    convention.finding(path, line)
 }
 
 struct TestModuleVisitor<'a> {
     path: &'a str,
     /// `<name>_tests.rs` for this file's `<name>.rs`.
     expected_path: String,
-    violations: &'a mut Vec<ConventionViolation>,
+    violations: &'a mut Vec<Finding>,
 }
 
 impl<'ast> Visit<'ast> for TestModuleVisitor<'_> {

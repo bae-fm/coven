@@ -41,7 +41,7 @@ fn workspace(manifests: Vec<Manifest>) -> Workspace {
     }
 }
 
-fn violations(manifests: Vec<Manifest>) -> Vec<CrateDependencyViolation> {
+fn violations(manifests: Vec<Manifest>) -> Vec<Finding> {
     find_crate_dependency_violations(&workspace(manifests), &POLICY)
 }
 
@@ -71,11 +71,12 @@ fn a_crate_may_not_depend_on_a_crate_below_it_even_for_tests() {
             coven-sync.workspace = true
             "#,
         )]),
-        vec![CrateDependencyViolation::Upward {
-            manifest: "crates/coven-foundation/Cargo.toml".to_string(),
-            from: "coven-foundation".to_string(),
-            to: "coven-sync".to_string(),
-        }],
+        vec![Finding::new(
+            "crates/coven-foundation/Cargo.toml",
+            1,
+            "coven-foundation depends on coven-sync, which is not above it in crate_order",
+            REMEDY
+        )],
     );
 }
 
@@ -94,9 +95,9 @@ fn the_database_and_storage_never_depend_on_each_other() {
         ),
     ]);
     assert_eq!(violations.len(), 2);
-    assert!(violations
-        .iter()
-        .all(|violation| matches!(violation, CrateDependencyViolation::Separated { .. })));
+    assert!(violations.iter().all(|violation| violation
+        .message
+        .contains("the two never depend on each other")));
 }
 
 #[test]
@@ -124,10 +125,12 @@ fn a_renamed_workspace_dependency_resolves_to_its_package() {
 fn a_crate_without_a_row_is_unplaced() {
     assert_eq!(
         violations(vec![manifest("crates/coven-extra", "coven-extra", "")]),
-        vec![CrateDependencyViolation::Unplaced {
-            manifest: "crates/coven-extra/Cargo.toml".to_string(),
-            package: "coven-extra".to_string(),
-        }],
+        vec![Finding::new(
+            "crates/coven-extra/Cargo.toml",
+            1,
+            "crate coven-extra has no row in the policy's crate_order",
+            REMEDY
+        )],
     );
     assert!(violations(vec![manifest("tools/report", "report", "")]).is_empty());
 }
@@ -151,9 +154,12 @@ fn members_take_every_dependency_from_the_workspace() {
     )]);
     let named = violations
         .iter()
-        .map(|violation| match violation {
-            CrateDependencyViolation::NotFromWorkspace { dependency, .. } => dependency.as_str(),
-            other => panic!("unexpected finding: {other:?}"),
+        .map(|violation| {
+            violation
+                .message
+                .split(' ')
+                .nth(1)
+                .expect("dependency name")
         })
         .collect::<BTreeSet<_>>();
     assert_eq!(

@@ -102,19 +102,15 @@ fn a_home_is_skipped_until_its_crate_lands_and_checked_after() {
     assert_eq!(stranded, foundation_homes);
 }
 
-fn declared_methods(
-    files: &[RustFile],
-    include_tests: bool,
-) -> BTreeMap<(String, String, String), syn::Signature> {
+fn declared_methods(files: &[RustFile]) -> BTreeMap<(String, String, String), syn::Signature> {
     struct MethodCollector<'a> {
         path: &'a str,
         methods: &'a mut BTreeMap<(String, String, String), syn::Signature>,
-        include_tests: bool,
     }
 
     impl Visit<'_> for MethodCollector<'_> {
         fn visit_item_fn(&mut self, node: &syn::ItemFn) {
-            if self.include_tests || !is_test_only(&node.attrs) {
+            if !is_test_only(&node.attrs) {
                 self.methods.insert(
                     (
                         self.path.to_string(),
@@ -127,13 +123,13 @@ fn declared_methods(
             }
         }
         fn visit_item_mod(&mut self, node: &syn::ItemMod) {
-            if self.include_tests || !is_test_only(&node.attrs) {
+            if !is_test_only(&node.attrs) {
                 visit::visit_item_mod(self, node);
             }
         }
 
         fn visit_item_impl(&mut self, node: &syn::ItemImpl) {
-            if !self.include_tests && is_test_only(&node.attrs) {
+            if is_test_only(&node.attrs) {
                 return;
             }
             let Some(owner) = type_name(&node.self_ty) else {
@@ -141,7 +137,7 @@ fn declared_methods(
             };
             for item in &node.items {
                 if let syn::ImplItem::Fn(method) = item {
-                    if self.include_tests || !is_test_only(&method.attrs) {
+                    if !is_test_only(&method.attrs) {
                         self.methods.insert(
                             (
                                 self.path.to_string(),
@@ -160,12 +156,11 @@ fn declared_methods(
     let mut methods = BTreeMap::new();
     for file in files
         .iter()
-        .filter(|file| include_tests || !is_test_source(&file.relative_path))
+        .filter(|file| !is_test_source(&file.relative_path))
     {
         MethodCollector {
             path: &file.relative_path,
             methods: &mut methods,
-            include_tests,
         }
         .visit_file(&file.syntax);
     }
@@ -175,7 +170,7 @@ fn declared_methods(
 #[test]
 fn every_composition_root_names_an_existing_method() {
     let workspace = load(&workspace_root()).expect("read the workspace");
-    let methods = declared_methods(&workspace.files, true);
+    let methods = declared_methods(&workspace.files);
     let missing = POLICY
         .composition_roots
         .iter()
@@ -196,31 +191,19 @@ fn every_composition_root_names_an_existing_method() {
 }
 
 #[test]
-fn composition_root_guards_can_name_test_fixture_methods() {
-    let path = "crates/coven/src/builder_tests.rs";
-    let files = [RustFile::fixture(path, "impl Fixture { fn open() {} }")];
-    assert!(declared_methods(&files, true).contains_key(&(
-        path.into(),
-        "Fixture".into(),
-        "open".into()
-    )));
-    assert!(declared_methods(&files, false).is_empty());
-}
-
-#[test]
 fn composition_root_guards_resolve_free_functions() {
     let path = "crates/coven/src/bootstrap.rs";
     let files = [RustFile::fixture(
         path,
         "fn restore() {} #[cfg(test)] fn fixture() {}",
     )];
-    let methods = declared_methods(&files, false);
+    let methods = declared_methods(&files);
     assert!(methods.contains_key(&(path.into(), "<free>".into(), "restore".into())));
     assert!(!methods.contains_key(&(path.into(), "<free>".into(), "fixture".into())));
 }
 
 fn invalid_capability_factories(files: &[RustFile], policy: &Policy) -> Vec<String> {
-    let methods = declared_methods(files, false);
+    let methods = declared_methods(files);
     let capabilities = construction_only_types(files, policy);
     policy
         .capability_factories
@@ -324,11 +307,15 @@ fn native_keychain_acquisition_is_checked_at_its_real_factory_use_site() {
         .filter(RustFile::is_crate_source)
         .collect::<Vec<_>>();
     files.push(RustFile::fixture("crates/coven/src/builder.rs", "impl Builder {\n    fn open() { let _ = Keychain::registered(); }\n    fn run(&self) { let _ = Keychain::registered(); }\n}"));
-    let violations = find_capability_construction_violations(&files, &rooted);
+    let violations = find_capability_construction_violations(
+        &files,
+        &rooted,
+        &crate::owner_graph::OwnerGraph::collect(&files, &rooted),
+    );
     assert_eq!(violations.len(), 1, "{violations:?}");
     assert_eq!(violations[0].path, "crates/coven/src/builder.rs");
     assert_eq!(violations[0].line, 3);
-    assert_eq!(violations[0].capability, "Keychain");
+    assert!(violations[0].message.contains("capability Keychain"));
 }
 
 #[test]

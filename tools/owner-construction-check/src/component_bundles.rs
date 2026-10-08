@@ -6,6 +6,7 @@
 //! one inherent method: an associated `new` returning it. Building one with
 //! `Bundle::new(…)` straight into a destructuring `let` is the violation.
 
+use crate::finding::Finding;
 use std::collections::{BTreeMap, BTreeSet};
 
 use syn::spanned::Spanned;
@@ -17,13 +18,6 @@ use crate::syntax::{
     RustFile,
 };
 
-#[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
-pub(crate) struct ComponentBundleViolation {
-    pub(crate) path: String,
-    pub(crate) line: usize,
-    pub(crate) bundle: String,
-}
-
 #[derive(Default)]
 struct BundleTypeInfo {
     public_fields: usize,
@@ -32,9 +26,7 @@ struct BundleTypeInfo {
     inherent_methods: Vec<(String, bool, bool)>,
 }
 
-pub(crate) fn find_component_bundle_violations(
-    files: &[RustFile],
-) -> Vec<ComponentBundleViolation> {
+pub(crate) fn find_component_bundle_violations(files: &[RustFile]) -> Vec<Finding> {
     let bundle_types = collect_bundle_types(files);
     let mut violations = BTreeSet::new();
     for file in files {
@@ -114,7 +106,7 @@ fn collect_bundle_type_info(items: &[syn::Item], types: &mut BTreeMap<String, Bu
 struct ComponentBundleVisitor<'a> {
     path: &'a str,
     bundle_types: &'a BTreeSet<String>,
-    violations: &'a mut BTreeSet<ComponentBundleViolation>,
+    violations: &'a mut BTreeSet<Finding>,
 }
 
 impl<'ast> Visit<'ast> for ComponentBundleVisitor<'_> {
@@ -149,11 +141,9 @@ impl<'ast> Visit<'ast> for ComponentBundleVisitor<'_> {
             && owner.ident == bundle
             && self.bundle_types.contains(&bundle)
         {
-            self.violations.insert(ComponentBundleViolation {
-                path: self.path.to_string(),
-                line: node.span().start().line,
-                bundle,
-            });
+            self.violations.insert(Finding::new(self.path, node.span().start().line,
+                format!("{bundle} only bundles components to be destructured"),
+                "pass collaborators by name; a bundle type needs behavior or an invariant of its own"));
         }
         visit::visit_local(self, node);
     }

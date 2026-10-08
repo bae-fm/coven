@@ -1,9 +1,10 @@
-//! Capabilities are acquired at composition roots (§20.2). The policy names
+//! Owners and capabilities are constructed at composition roots (§20.2). The policy names
 //! interfaces; every implementation, including feature-gated fakes, contributes
 //! a construction-only type. Explicit non-trait capabilities join the same set.
 //!
-//! Factory definitions may build their declared result, and their use sites are
-//! checked. Only the policy's named receiver factories may derive capabilities
+//! Capability factory definitions may build their declared result; owner factories
+//! require a root entry themselves. Both have their use sites checked.
+//! Only the policy's named receiver factories may derive capabilities
 //! from an injected owner. Test sources and `cfg(test)` items may assemble capabilities.
 //! `Default` is forbidden on capability types: inferred `Default::default()`
 //! cannot be resolved by a syntax checker.
@@ -14,26 +15,20 @@ use proc_macro2::Span;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
+use crate::factories::{collect_associated_factories, collect_free_constructors};
+use crate::finding::Finding;
 use crate::macros::{parse_macro_body, token_paths};
-use crate::owner_construction::{collect_associated_factories, collect_free_constructors};
+use crate::owner_graph::OwnerGraph;
 use crate::policy::Policy;
 use crate::syntax::{
-    could_be_free_function_path, is_test_only, is_test_source, path_names, type_name, type_names,
-    RustFile,
+    could_be_free_function_path, could_be_local_associated_function_path, is_test_only,
+    is_test_source, path_names, type_name, type_names, RustFile,
 };
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) enum ConstructionKind {
     Value,
     DefaultImplementation,
-}
-
-#[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub(crate) struct CapabilityConstructionViolation {
-    pub(crate) path: String,
-    pub(crate) line: usize,
-    pub(crate) capability: String,
-    pub(crate) kind: ConstructionKind,
 }
 
 /// Read implementations before inspecting use sites, across every source and
@@ -86,10 +81,21 @@ impl<'ast> Visit<'ast> for ImplementationCollector<'_> {
 pub(crate) fn find_capability_construction_violations(
     files: &[RustFile],
     policy: &Policy,
-) -> Vec<CapabilityConstructionViolation> {
+    graph: &OwnerGraph,
+) -> Vec<Finding> {
     let capabilities = construction_only_types(files, policy);
-    let associated_factories = collect_associated_factories(files, &capabilities);
-    let free_factories = collect_free_constructors(files, &capabilities);
+    let owners = graph
+        .owners
+        .iter()
+        .filter(|name| {
+            !policy.task_types.contains(&name.as_str())
+                && !policy.capability_types.contains(&name.as_str())
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let constructed = capabilities.union(&owners).cloned().collect();
+    let associated_factories = collect_associated_factories(files, &constructed);
+    let free_factories = collect_free_constructors(files, &constructed);
     let mut violations = BTreeSet::new();
     for file in files {
         if is_test_source(&file.relative_path) {
@@ -99,9 +105,11 @@ pub(crate) fn find_capability_construction_violations(
             path: &file.relative_path,
             policy,
             capabilities: &capabilities,
+            owners: &owners,
             associated_factories: &associated_factories,
             free_factories: &free_factories,
             current_type: None,
+            current_method: None,
             bindings: BTreeSet::new(),
             scope: ConstructionScope::Outside,
             violations: &mut violations,
@@ -121,12 +129,14 @@ struct ConstructionVisitor<'a> {
     path: &'a str,
     policy: &'a Policy,
     capabilities: &'a BTreeSet<String>,
+    owners: &'a BTreeSet<String>,
     associated_factories: &'a BTreeMap<(String, String), BTreeSet<String>>,
     free_factories: &'a BTreeMap<String, BTreeSet<String>>,
     current_type: Option<String>,
+    current_method: Option<String>,
     bindings: BTreeSet<String>,
     scope: ConstructionScope,
-    violations: &'a mut BTreeSet<CapabilityConstructionViolation>,
+    violations: &'a mut BTreeSet<Finding>,
 }
 
 impl ConstructionVisitor<'_> {
@@ -139,29 +149,41 @@ impl ConstructionVisitor<'_> {
 
     fn record(&mut self, name: &str, span: Span, kind: ConstructionKind) {
         let name = self.resolve_self(name);
-        if !self.capabilities.contains(name) {
+        if !self.capabilities.contains(name) && !self.owners.contains(name) {
             return;
         }
         if kind == ConstructionKind::Value {
             match &self.scope {
                 ConstructionScope::CompositionRoot => return,
-                ConstructionScope::Factory(results) if results.contains(name) => return,
+                ConstructionScope::Factory(results)
+                    if !self.owners.contains(name) && results.contains(name) =>
+                {
+                    return
+                }
                 _ => {}
             }
         }
-        self.violations.insert(CapabilityConstructionViolation {
-            path: self.path.to_string(),
-            line: span.start().line,
-            capability: name.to_string(),
-            kind,
-        });
+        let subject = if self.owners.contains(name) {
+            "owner"
+        } else {
+            "capability"
+        };
+        let message = match kind {
+            ConstructionKind::Value => format!("{}::{} constructs {subject} {name} outside a composition root", self.current_type.as_deref().unwrap_or("<free>"), self.current_method.as_deref().unwrap_or("<item>")),
+            ConstructionKind::DefaultImplementation => format!("implements Default for {subject} {name}, which permits implicit construction through Default::default()"),
+        };
+        self.violations.insert(Finding::new(self.path, span.start().line, message,
+            "construct owners and capabilities explicitly at the listed roots; inject them elsewhere; do not implement or derive Default"));
     }
 
     fn check_value_path(&mut self, segments: &[String], span: Span) {
         if matches!(segments, [name] if self.bindings.contains(name)) {
             return;
         }
-        if let Some(name) = segments.last() {
+        if let Some(name) = segments
+            .last()
+            .filter(|_| could_be_free_function_path(segments))
+        {
             // Unit values and tuple constructors, including constructor values
             // passed to another function without immediately being called.
             self.record(name, span, ConstructionKind::Value);
@@ -178,11 +200,14 @@ impl ConstructionVisitor<'_> {
                 for result in results {
                     // A declared receiver factory uses an already supplied
                     // owner, including when called as Owner::method(&owner).
-                    if !self.policy.capability_factories.iter().any(
-                        |(_, factory, name, product)| {
-                            *factory == owner && *name == method && *product == result
-                        },
-                    ) {
+                    if (!self.owners.contains(result)
+                        || could_be_local_associated_function_path(segments))
+                        && !self.policy.capability_factories.iter().any(
+                            |(_, factory, name, product)| {
+                                *factory == owner && *name == method && *product == result
+                            },
+                        )
+                    {
                         self.record(result, span, ConstructionKind::Value);
                     }
                 }
@@ -195,6 +220,21 @@ impl ConstructionVisitor<'_> {
             {
                 for result in results {
                     self.record(result, span, ConstructionKind::Value);
+                }
+            }
+        }
+    }
+
+    fn check_own_method(&mut self, method: &str, span: Span) {
+        if let Some(owner) = &self.current_type {
+            if let Some(results) = self
+                .associated_factories
+                .get(&(owner.clone(), method.into()))
+            {
+                for result in results {
+                    if self.owners.contains(result) {
+                        self.record(result, span, ConstructionKind::Value);
+                    }
                 }
             }
         }
@@ -332,21 +372,21 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
 
     fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
         if !is_test_only(&node.attrs) {
-            let rooted = self
-                .policy
-                .composition_roots
-                .iter()
-                .any(|(path, owner, name)| {
-                    *path == self.path && *owner == "<free>" && node.sig.ident == *name
-                });
+            let rooted =
+                self.policy
+                    .is_composition_root(self.path, "<free>", &node.sig.ident.to_string());
             let scope = if rooted {
                 ConstructionScope::CompositionRoot
             } else {
                 ConstructionScope::Factory(self.factory_results(&node.sig))
             };
             let previous = std::mem::replace(&mut self.scope, scope);
+            let current_type = self.current_type.take();
+            let method = self.current_method.replace(node.sig.ident.to_string());
             self.bind_inputs(&node.sig);
             visit::visit_item_fn(self, node);
+            self.current_type = current_type;
+            self.current_method = method;
             self.scope = previous;
         }
     }
@@ -414,15 +454,11 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
             return;
         }
         let method = node.sig.ident.to_string();
-        let allowed = self
-            .policy
-            .composition_roots
-            .iter()
-            .any(|(path, owner, name)| {
-                *path == self.path
-                    && self.current_type.as_deref() == Some(*owner)
-                    && *name == method
-            });
+        let allowed = self.policy.is_composition_root(
+            self.path,
+            self.current_type.as_deref().unwrap_or("<impl>"),
+            &method,
+        );
         let scope = if allowed {
             ConstructionScope::CompositionRoot
         } else {
@@ -430,8 +466,10 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
         };
         let previous = std::mem::replace(&mut self.scope, scope);
         let bindings = std::mem::take(&mut self.bindings);
+        let method = self.current_method.replace(node.sig.ident.to_string());
         self.bind_inputs(&node.sig);
         visit::visit_impl_item_fn(self, node);
+        self.current_method = method;
         self.bindings = bindings;
         self.scope = previous;
     }
@@ -494,6 +532,13 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
         self.bindings = bindings;
     }
 
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if matches!(node.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident("self")) {
+            self.check_own_method(&node.method.to_string(), node.span());
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+
     fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
         let segments = match &node.qself {
             Some(qself) => type_name(&qself.ty).map(|owner| {
@@ -516,13 +561,7 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
     }
 
     fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
-        if let Some(segment) = node.path.segments.last() {
-            self.record(
-                &segment.ident.to_string(),
-                node.span(),
-                ConstructionKind::Value,
-            );
-        }
+        self.check_value_path(&path_names(&node.path), node.span());
         visit::visit_expr_struct(self, node);
     }
 
@@ -531,7 +570,12 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
             Some(body) => body.visit(self),
             None => {
                 for path in token_paths(node.tokens.clone()) {
-                    if !path.after_dot {
+                    if path.after_dot
+                        && path.receiver.as_deref() == Some("self")
+                        && path.followed_by == Some(proc_macro2::Delimiter::Parenthesis)
+                    {
+                        self.check_own_method(&path.segments[0], path.span);
+                    } else if !path.after_dot {
                         self.check_value_path(&path.segments, path.span);
                     }
                 }

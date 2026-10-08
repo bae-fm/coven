@@ -1,5 +1,5 @@
 use super::*;
-use crate::owner_construction::{collect_constructors, infer_owners};
+use crate::owner_graph::OwnerGraph;
 
 #[test]
 fn callbacks_consume_the_retained_capability_but_factories_supply_one() {
@@ -23,11 +23,20 @@ fn callbacks_consume_the_retained_capability_but_factories_supply_one() {
         }
         "#,
     )];
-    let owners = infer_owners(&crate::syntax::collect_structs(&files), &POLICY);
-    let constructors = collect_constructors(&files, &owners);
-    let violations =
-        find_retained_capability_parameter_violations(&files, &owners, &constructors, &POLICY);
-    let methods: BTreeSet<_> = violations.iter().map(|v| v.method.as_str()).collect();
+    let graph = OwnerGraph::collect(&files, &POLICY);
+    let violations = find_retained_capability_parameter_violations(&files, &graph.owners, &POLICY);
+    let methods: BTreeSet<_> = violations
+        .iter()
+        .map(|v| {
+            v.message
+                .split("::")
+                .nth(1)
+                .unwrap()
+                .split(' ')
+                .next()
+                .unwrap()
+        })
+        .collect();
     assert_eq!(methods, ["supply", "supply_pointer", "mixed"].into());
 }
 
@@ -54,16 +63,13 @@ fn retained_owner_runtime_method_cannot_accept_the_store_directory() {
         }
         "#,
     )];
-    let structs = crate::syntax::collect_structs(&files);
-    let owners = infer_owners(&structs, &POLICY);
-    let constructors = collect_constructors(&files, &owners);
-    let violations =
-        find_retained_capability_parameter_violations(&files, &owners, &constructors, &POLICY);
+    let graph = OwnerGraph::collect(&files, &POLICY);
+    let violations = find_retained_capability_parameter_violations(&files, &graph.owners, &POLICY);
 
     assert_eq!(violations.len(), 1);
-    assert_eq!(violations[0].owner, "Rows");
-    assert_eq!(violations[0].method, "execute");
-    assert_eq!(violations[0].capability, "StoreDir");
+    assert!(violations[0].message.contains("Rows"));
+    assert!(violations[0].message.contains("execute"));
+    assert!(violations[0].message.contains("StoreDir"));
 }
 
 #[test]
@@ -95,11 +101,9 @@ fn trait_implementations_have_the_same_parameter_boundary_as_explicit_capabiliti
         "#,
         ),
     ];
-    let owners = infer_owners(&crate::syntax::collect_structs(&files), &POLICY);
-    let constructors = collect_constructors(&files, &owners);
-    let violations =
-        find_retained_capability_parameter_violations(&files, &owners, &constructors, &POLICY);
+    let graph = OwnerGraph::collect(&files, &POLICY);
+    let violations = find_retained_capability_parameter_violations(&files, &graph.owners, &POLICY);
     assert_eq!(violations.len(), 1, "{violations:?}");
-    assert_eq!(violations[0].capability, "SuppliedClock");
-    assert_eq!(violations[0].method, "run");
+    assert!(violations[0].message.contains("SuppliedClock"));
+    assert!(violations[0].message.contains("run"));
 }

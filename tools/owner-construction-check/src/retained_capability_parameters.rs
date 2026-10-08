@@ -8,25 +8,17 @@ use std::collections::BTreeSet;
 use syn::spanned::Spanned;
 
 use crate::capability_construction::construction_only_types;
-use crate::owner_construction::Constructor;
+use crate::finding::Finding;
 use crate::policy::Policy;
-use crate::syntax::{is_test_only, is_test_source, supplied_type_names, type_name, RustFile};
-
-#[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
-pub(crate) struct RetainedCapabilityParameterViolation {
-    pub(crate) path: String,
-    pub(crate) line: usize,
-    pub(crate) owner: String,
-    pub(crate) method: String,
-    pub(crate) capability: String,
-}
+use crate::syntax::{
+    is_test_only, is_test_source, output_contains_owner, supplied_type_names, type_name, RustFile,
+};
 
 pub(crate) fn find_retained_capability_parameter_violations(
     files: &[RustFile],
     owners: &BTreeSet<String>,
-    constructors: &BTreeSet<Constructor>,
     policy: &Policy,
-) -> Vec<RetainedCapabilityParameterViolation> {
+) -> Vec<Finding> {
     let capabilities = construction_only_types(files, policy);
     let mut violations = BTreeSet::new();
     for file in files {
@@ -37,7 +29,6 @@ pub(crate) fn find_retained_capability_parameter_violations(
             &file.relative_path,
             &file.syntax.items,
             owners,
-            constructors,
             policy,
             &capabilities,
             &mut violations,
@@ -50,10 +41,9 @@ fn find_in_items(
     path: &str,
     items: &[syn::Item],
     owners: &BTreeSet<String>,
-    constructors: &BTreeSet<Constructor>,
     policy: &Policy,
     capabilities: &BTreeSet<String>,
-    violations: &mut BTreeSet<RetainedCapabilityParameterViolation>,
+    violations: &mut BTreeSet<Finding>,
 ) {
     for item in items {
         match item {
@@ -74,18 +64,8 @@ fn find_in_items(
                     if is_test_only(&method.attrs) {
                         continue;
                     }
-                    let callable = Constructor {
-                        owner: owner.clone(),
-                        method: method.sig.ident.to_string(),
-                    };
-                    if constructors.contains(&callable)
-                        || policy.composition_roots.iter().any(
-                            |(root_path, root_owner, root_method)| {
-                                path == *root_path
-                                    && owner == *root_owner
-                                    && method.sig.ident == *root_method
-                            },
-                        )
+                    if output_contains_owner(&method.sig.output, &owner)
+                        || policy.is_composition_root(path, &owner, &method.sig.ident.to_string())
                     {
                         continue;
                     }
@@ -96,13 +76,9 @@ fn find_in_items(
                         let names = supplied_type_names(&input.ty);
                         for capability in capabilities {
                             if names.contains(capability) {
-                                violations.insert(RetainedCapabilityParameterViolation {
-                                    path: path.to_string(),
-                                    line: input.span().start().line,
-                                    owner: owner.clone(),
-                                    method: method.sig.ident.to_string(),
-                                    capability: capability.clone(),
-                                });
+                                violations.insert(Finding::new(path, input.span().start().line,
+                                    format!("{owner}::{} accepts construction-only capability {capability} at runtime", method.sig.ident),
+                                    "a method never takes a raw capability; it uses the one its owner was built with"));
                             }
                         }
                     }
@@ -113,15 +89,7 @@ fn find_in_items(
                     continue;
                 }
                 if let Some((_, items)) = &item.content {
-                    find_in_items(
-                        path,
-                        items,
-                        owners,
-                        constructors,
-                        policy,
-                        capabilities,
-                        violations,
-                    );
+                    find_in_items(path, items, owners, policy, capabilities, violations);
                 }
             }
             _ => {}

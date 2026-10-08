@@ -49,7 +49,7 @@ fn duplicate_capability_and_owner_names_report_every_declaration() {
         assert_eq!(
             report.lines(),
             [
-                format!("type {name} is declared more than once: crates/first/src/lib.rs, crates/second/src/lib.rs"),
+                format!("crates/first/src/lib.rs:1: type {name} is declared more than once: crates/first/src/lib.rs, crates/second/src/lib.rs"),
                 "type names used by the policy, construction-only capabilities and inferred owners must be unique across crates/".to_string(),
             ],
         );
@@ -113,8 +113,7 @@ fn tools_answer_to_the_conventions_but_not_to_the_capability_table() {
         )]),
         &POLICY,
     );
-    assert!(report.capability_boundaries.is_empty());
-    assert_eq!(report.conventions.len(), 1);
+    assert_eq!(report.0.len(), 1);
     assert_eq!(
         report.lines(),
         vec![
@@ -215,9 +214,47 @@ fn inferred_default_construction_is_prevented_at_its_implementation() {
         &POLICY,
     );
     assert!(!report.is_empty());
-    assert_eq!(report.capability_construction.len(), 1);
+    assert_eq!(report.0.len(), 1);
     assert!(report
         .lines()
         .iter()
         .any(|line| line.contains("implements Default for capability SuppliedClock")));
+}
+
+#[test]
+fn one_exact_list_entry_allows_construction_and_task_starts() {
+    const PATH: &str = "crates/coven-sync/src/fixture.rs";
+    const ROOTED: Policy = Policy {
+        capability_types: &["Clock"],
+        composition_roots: &[(PATH, "Worker", "open")],
+        task_starts: POLICY.task_starts,
+        ..Policy::EMPTY
+    };
+    for (path, owner, method, allowed) in [
+        (PATH, "Worker", "open", true),
+        (PATH, "Worker", "other", false),
+        (PATH, "Other", "open", false),
+        (
+            "crates/coven-sync/src/elsewhere.rs",
+            "Worker",
+            "open",
+            false,
+        ),
+    ] {
+        let source = format!("struct Worker {{ clock: Clock }} impl {owner} {{ fn {method}(clock: Clock) {{ let _ = Worker {{ clock }}; tokio::spawn(async {{}}); }} }}");
+        let report = check(&workspace(vec![RustFile::fixture(path, &source)]), &ROOTED);
+        assert_eq!(
+            report.0.len(),
+            if allowed { 0 } else { 2 },
+            "{:?}",
+            report.lines()
+        );
+    }
+    let source = "struct Worker { clock: Clock } impl Worker { fn open() { fn hidden(clock: Clock) { Worker { clock }; tokio::spawn(async {}); } } }";
+    assert_eq!(
+        check(&workspace(vec![RustFile::fixture(PATH, source)]), &ROOTED)
+            .0
+            .len(),
+        2
+    );
 }

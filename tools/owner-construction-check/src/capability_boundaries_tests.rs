@@ -1,14 +1,24 @@
 use super::*;
 use crate::owner_policy::POLICY;
 
-fn violations(path: &str, source: &str) -> Vec<CapabilityBoundaryViolation> {
+fn violations(path: &str, source: &str) -> Vec<Finding> {
     find_capability_boundary_violations(&[RustFile::fixture(path, source)], &POLICY)
 }
 
-fn kinds(path: &str, source: &str) -> BTreeSet<&'static str> {
+fn kind(finding: &Finding) -> &str {
+    finding
+        .message
+        .rsplit_once(" (")
+        .map_or(finding.message.as_str(), |(message, _)| message)
+        .split(" outside")
+        .next()
+        .unwrap()
+}
+
+fn kinds(path: &str, source: &str) -> BTreeSet<String> {
     violations(path, source)
         .into_iter()
-        .map(|violation| violation.kind)
+        .map(|violation| kind(&violation).to_string())
         .collect()
 }
 
@@ -24,7 +34,9 @@ fn network_crates_are_rejected_outside_the_providers() {
             async fn connect() { let _ = tokio::net::TcpStream::connect("host:443").await; }
             "#,
         ),
-        BTreeSet::from(["HTTP client (reqwest)", "HTTP server (axum)", "sockets"]),
+        BTreeSet::from(
+            ["HTTP client (reqwest)", "HTTP server (axum)", "sockets"].map(str::to_string)
+        ),
     );
 }
 
@@ -51,7 +63,7 @@ fn network_crates_are_allowed_in_the_providers() {
 fn network_crates_are_rejected_in_storage_outside_the_providers() {
     assert_eq!(
         kinds("crates/coven-storage/src/upload.rs", "use reqwest::Client;"),
-        BTreeSet::from(["HTTP client (reqwest)"]),
+        BTreeSet::from(["HTTP client (reqwest)"].map(str::to_string)),
     );
 }
 
@@ -83,10 +95,10 @@ fn signing_primitives_are_rejected_outside_coven_crypto() {
         "#,
     );
     assert_eq!(violations.len(), 2);
-    assert!(violations
-        .iter()
-        .all(|violation| violation.kind == "signing keys (ed25519-dalek)"
-            && violation.capability == "cryptography"));
+    assert!(violations.iter().all(
+        |violation| kind(violation) == "signing keys (ed25519-dalek)"
+            && violation.message.contains("(cryptography)")
+    ));
 }
 
 #[test]
@@ -109,7 +121,7 @@ fn the_keychain_is_rejected_outside_custody_even_inside_coven_crypto() {
         "use keyring_core::Entry;",
     );
     assert_eq!(violations.len(), 1);
-    assert_eq!(violations[0].kind, "platform keychain");
+    assert_eq!(kind(&violations[0]), "platform keychain");
     assert!(kinds(
         "crates/coven-crypto/src/custody/keychain.rs",
         "use keyring_core::Entry;"
@@ -124,12 +136,12 @@ fn sqlite_beneath_rusqlite_is_rejected_outside_coven_database() {
             "crates/coven-sync/src/leak.rs",
             "fn open() { unsafe { libsqlite3_sys::sqlite3_initialize(); } }",
         ),
-        BTreeSet::from(["SQLite library (rusqlite / libsqlite3-sys)"]),
+        BTreeSet::from(["SQLite library (rusqlite / libsqlite3-sys)"].map(str::to_string)),
     );
 }
 
 #[test]
-fn runtime_construction_is_rejected_outside_lifetime_authorities() {
+fn runtime_construction_is_rejected_outside_composition_roots() {
     let violations = violations(
         "crates/coven-sync/src/transfer.rs",
         r#"
@@ -145,19 +157,13 @@ fn runtime_construction_is_rejected_outside_lifetime_authorities() {
     assert!(!violations.is_empty());
     assert!(violations
         .iter()
-        .all(|violation| violation.kind == "runtime construction"));
+        .all(|violation| kind(violation) == "runtime construction"));
 }
 
 #[test]
 fn a_lifetime_authority_starts_its_work() {
     const AUTHORITY: Policy = Policy {
-        capabilities: crate::policy::Capabilities {
-            runtimes: Capability {
-                homes: &["crates/coven-sync/src/sync_loop.rs"],
-                ..POLICY.capabilities.runtimes
-            },
-            ..POLICY.capabilities
-        },
+        composition_roots: &[("crates/coven-sync/src/sync_loop.rs", "<free>", "start")],
         ..POLICY
     };
     let source = r#"
@@ -176,16 +182,16 @@ fn a_lifetime_authority_starts_its_work() {
     let elsewhere =
         find_capability_boundary_violations(&file("crates/coven-sync/src/upload.rs"), &AUTHORITY)
             .into_iter()
-            .map(|violation| violation.kind)
+            .map(|violation| kind(&violation).to_string())
             .collect::<BTreeSet<_>>();
     assert_eq!(
         elsewhere,
-        BTreeSet::from(["runtime construction", "thread or task spawn"])
+        BTreeSet::from(["runtime construction", "thread or task spawn"].map(str::to_string))
     );
 }
 
 #[test]
-fn spawning_work_is_rejected_outside_lifetime_authorities() {
+fn spawning_work_is_rejected_outside_composition_roots() {
     let violations = violations(
         "crates/coven-sync/src/upload.rs",
         r#"
@@ -199,7 +205,7 @@ fn spawning_work_is_rejected_outside_lifetime_authorities() {
     assert_eq!(violations.len(), 3);
     assert!(violations
         .iter()
-        .all(|violation| violation.kind == "thread or task spawn"));
+        .all(|violation| kind(violation) == "thread or task spawn"));
 }
 
 #[test]
@@ -220,7 +226,7 @@ fn runtime_handles_are_injectable_but_not_ambiently_acquired() {
         "fn grab() { let _ = tokio::runtime::Handle::current(); }",
     );
     assert_eq!(violations.len(), 1);
-    assert_eq!(violations[0].kind, "ambient runtime acquisition");
+    assert_eq!(kind(&violations[0]), "ambient runtime acquisition");
 }
 
 #[test]
@@ -235,7 +241,7 @@ fn time_ids_and_randomness_are_rejected_outside_their_homes() {
             fn entropy() { use rand::RngCore; rand::rng().fill_bytes(&mut [0u8; 8]); }
             "#,
         ),
-        BTreeSet::from(["system clock", "id generation (uuid)", "randomness"]),
+        BTreeSet::from(["system clock", "id generation (uuid)", "randomness"].map(str::to_string)),
     );
 }
 
@@ -269,7 +275,7 @@ fn timers_belong_to_the_injected_clock() {
     ] {
         assert_eq!(
             kinds("crates/coven-sync/src/operations.rs", source),
-            BTreeSet::from(["system clock"]),
+            BTreeSet::from(["system clock"].map(str::to_string)),
             "{source}",
         );
         assert!(kinds("crates/coven-foundation/src/clock.rs", source).is_empty());
@@ -293,7 +299,7 @@ fn files_are_rejected_outside_foundations_file_boundary() {
             async fn read() { let _ = tokio::fs::read("path").await; }
             "#,
         ),
-        BTreeSet::from(["filesystem"]),
+        BTreeSet::from(["filesystem"].map(str::to_string)),
     );
     assert!(kinds(
         "crates/coven-foundation/src/files/atomic_file.rs",
@@ -310,7 +316,7 @@ fn platform_file_operations_obey_the_same_filesystem_boundary() {
     ] {
         assert_eq!(
             kinds("crates/coven-sync/src/leak.rs", source),
-            BTreeSet::from(["filesystem"]),
+            BTreeSet::from(["filesystem"].map(str::to_string)),
         );
         assert!(kinds("crates/coven-foundation/src/files/atomic_file.rs", source).is_empty());
     }
@@ -329,7 +335,7 @@ fn a_local_item_sharing_a_gated_crate_name_is_not_a_crate_reference() {
 
     assert_eq!(
         kinds("crates/coven-crypto/src/sealing.rs", "use open;"),
-        BTreeSet::from(["browser opener (open)"])
+        BTreeSet::from(["browser opener (open)"].map(str::to_string))
     );
 }
 
@@ -359,7 +365,7 @@ fn a_capability_used_inside_a_macro_call_is_a_direct_use() {
     let source = r#"fn label() -> String { format!("{}", uuid::Uuid::new_v4()) }"#;
     assert_eq!(
         kinds("crates/coven-sync/src/label.rs", source),
-        BTreeSet::from(["id generation (uuid)"])
+        BTreeSet::from(["id generation (uuid)"].map(str::to_string))
     );
     assert!(kinds("crates/coven-foundation/src/id_source.rs", source).is_empty());
 }
@@ -376,7 +382,7 @@ fn nested_macro_calls_and_method_calls_inside_them_are_read() {
             }
             "#,
         ),
-        BTreeSet::from(["system clock", "thread or task spawn"])
+        BTreeSet::from(["system clock", "thread or task spawn"].map(str::to_string))
     );
 }
 
@@ -393,7 +399,7 @@ fn a_macro_rules_body_is_read_as_tokens() {
             }
             "#,
         ),
-        BTreeSet::from(["filesystem", "system clock", "thread or task spawn"])
+        BTreeSet::from(["filesystem", "system clock", "thread or task spawn"].map(str::to_string))
     );
 }
 
@@ -402,7 +408,16 @@ fn rusqlite_is_used_only_by_the_database_crate() {
     let source = "use rusqlite::Connection; fn open() { let _ = Connection::open_in_memory(); }";
     assert_eq!(
         kinds("crates/coven-storage/src/leak.rs", source),
-        BTreeSet::from(["SQLite library (rusqlite / libsqlite3-sys)"])
+        BTreeSet::from(["SQLite library (rusqlite / libsqlite3-sys)"].map(str::to_string))
     );
     assert!(kinds("crates/coven-database/src/sqlite.rs", source).is_empty());
+}
+
+#[test]
+fn an_unlisted_function_in_an_authoritys_file_cannot_spawn() {
+    assert!(!violations(
+        "crates/coven-sync/src/sync_loop.rs",
+        "fn unrelated() { tokio::spawn(async {}); }"
+    )
+    .is_empty());
 }

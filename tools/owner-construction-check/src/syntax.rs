@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::macros::parse_macro_body;
 use syn::visit::{self, Visit};
 
 #[derive(Clone)]
@@ -100,99 +101,122 @@ pub(crate) fn supplied_type_names(ty: &syn::Type) -> BTreeSet<String> {
 #[derive(Clone)]
 pub(crate) struct StructInfo {
     pub(crate) field_types: BTreeSet<String>,
-}
-
-pub(crate) fn collect_structs(files: &[RustFile]) -> BTreeMap<String, StructInfo> {
-    let mut structs = BTreeMap::new();
-    for file in files {
-        for item in &file.syntax.items {
-            collect_structs_from_item(item, &mut structs);
-        }
-    }
-    structs
-}
-
-fn collect_structs_from_item(item: &syn::Item, structs: &mut BTreeMap<String, StructInfo>) {
-    match item {
-        syn::Item::Struct(item) => {
-            let mut field_types = TypeNames::default();
-            for field in &item.fields {
-                field_types.visit_type(&field.ty);
-            }
-            structs.insert(
-                item.ident.to_string(),
-                StructInfo {
-                    field_types: field_types.names,
-                },
-            );
-        }
-        syn::Item::Mod(item) => {
-            if let Some((_, items)) = &item.content {
-                for item in items {
-                    collect_structs_from_item(item, structs);
-                }
-            }
-        }
-        _ => {}
-    }
+    pub(crate) declarations: Vec<(String, usize)>,
 }
 
 /// Structs, enums, aliases, traits and unions, with the type names their
 /// fields mention.
 pub(crate) fn collect_declared_types(files: &[RustFile]) -> BTreeMap<String, StructInfo> {
     let mut types = BTreeMap::new();
-    for file in files {
-        for item in &file.syntax.items {
-            collect_declared_types_from_item(item, &mut types);
+    for file in files
+        .iter()
+        .filter(|file| !is_test_source(&file.relative_path) && !is_test_only(&file.syntax.attrs))
+    {
+        DeclarationCollector {
+            path: &file.relative_path,
+            types: &mut types,
         }
+        .visit_file(&file.syntax);
     }
     types
 }
 
-fn collect_declared_types_from_item(item: &syn::Item, types: &mut BTreeMap<String, StructInfo>) {
-    let (name, field_types) = match item {
-        syn::Item::Struct(item) => {
-            let mut names = TypeNames::default();
-            for field in &item.fields {
-                names.visit_type(&field.ty);
-            }
-            (item.ident.to_string(), names.names)
-        }
-        syn::Item::Enum(item) => {
-            let mut names = TypeNames::default();
-            for variant in &item.variants {
-                for field in &variant.fields {
-                    names.visit_type(&field.ty);
-                }
-            }
-            (item.ident.to_string(), names.names)
-        }
-        syn::Item::Type(item) => (item.ident.to_string(), type_names(&item.ty)),
-        syn::Item::Trait(item) => (item.ident.to_string(), BTreeSet::new()),
-        syn::Item::Union(item) => {
-            let mut names = TypeNames::default();
-            for field in &item.fields.named {
-                names.visit_type(&field.ty);
-            }
-            (item.ident.to_string(), names.names)
-        }
-        syn::Item::Mod(item) => {
-            if let Some((_, items)) = &item.content {
-                for item in items {
-                    collect_declared_types_from_item(item, types);
-                }
-            }
+struct DeclarationCollector<'a> {
+    path: &'a str,
+    types: &'a mut BTreeMap<String, StructInfo>,
+}
+
+impl<'ast> Visit<'ast> for DeclarationCollector<'_> {
+    fn visit_item(&mut self, node: &'ast syn::Item) {
+        let (attrs, name) = match node {
+            syn::Item::Struct(item) => (&item.attrs, Some(&item.ident)),
+            syn::Item::Enum(item) => (&item.attrs, Some(&item.ident)),
+            syn::Item::Union(item) => (&item.attrs, Some(&item.ident)),
+            syn::Item::Trait(item) => (&item.attrs, Some(&item.ident)),
+            syn::Item::Type(item) => (&item.attrs, Some(&item.ident)),
+            syn::Item::Mod(item) => (&item.attrs, None),
+            syn::Item::Fn(item) => (&item.attrs, None),
+            syn::Item::Impl(item) => (&item.attrs, None),
+            syn::Item::Const(item) => (&item.attrs, None),
+            syn::Item::Static(item) => (&item.attrs, None),
+            syn::Item::ForeignMod(item) => (&item.attrs, None),
+            syn::Item::Macro(item) => (&item.attrs, None),
+            _ => return,
+        };
+        if is_test_only(attrs) {
             return;
         }
-        _ => return,
-    };
-    types
-        .entry(name)
-        .or_insert_with(|| StructInfo {
-            field_types: BTreeSet::new(),
-        })
-        .field_types
-        .extend(field_types);
+        if let Some(name) = name {
+            let fields = match node {
+                syn::Item::Struct(item) => item
+                    .fields
+                    .iter()
+                    .flat_map(|field| type_names(&field.ty))
+                    .collect(),
+                syn::Item::Enum(item) => item
+                    .variants
+                    .iter()
+                    .flat_map(|variant| {
+                        variant
+                            .fields
+                            .iter()
+                            .flat_map(|field| type_names(&field.ty))
+                    })
+                    .collect(),
+                syn::Item::Union(item) => item
+                    .fields
+                    .named
+                    .iter()
+                    .flat_map(|field| type_names(&field.ty))
+                    .collect(),
+                syn::Item::Type(item) => type_names(&item.ty),
+                _ => BTreeSet::new(),
+            };
+            let info = self
+                .types
+                .entry(name.to_string())
+                .or_insert_with(|| StructInfo {
+                    field_types: BTreeSet::new(),
+                    declarations: Vec::new(),
+                });
+            info.field_types.extend(fields);
+            info.declarations
+                .push((self.path.to_string(), name.span().start().line));
+        }
+        visit::visit_item(self, node);
+    }
+
+    fn visit_impl_item(&mut self, node: &'ast syn::ImplItem) {
+        let attrs = match node {
+            syn::ImplItem::Fn(item) => &item.attrs,
+            syn::ImplItem::Const(item) => &item.attrs,
+            syn::ImplItem::Type(item) => &item.attrs,
+            syn::ImplItem::Macro(item) => &item.attrs,
+            _ => return,
+        };
+        if !is_test_only(attrs) {
+            visit::visit_impl_item(self, node);
+        }
+    }
+
+    fn visit_trait_item(&mut self, node: &'ast syn::TraitItem) {
+        let attrs = match node {
+            syn::TraitItem::Fn(item) => &item.attrs,
+            syn::TraitItem::Const(item) => &item.attrs,
+            syn::TraitItem::Type(item) => &item.attrs,
+            syn::TraitItem::Macro(item) => &item.attrs,
+            _ => return,
+        };
+        if !is_test_only(attrs) {
+            visit::visit_trait_item(self, node);
+        }
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        if let Some(body) = parse_macro_body(node) {
+            body.visit(self);
+        }
+    }
 }
 
 pub(crate) fn type_name(ty: &syn::Type) -> Option<String> {

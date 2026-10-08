@@ -1,5 +1,13 @@
 use super::*;
 
+fn find_capability_construction_violations(files: &[RustFile], policy: &Policy) -> Vec<Finding> {
+    super::find_capability_construction_violations(
+        files,
+        policy,
+        &OwnerGraph::collect(files, policy),
+    )
+}
+
 const POLICY: Policy = Policy {
     capability_traits: &["Clock", "IdSource"],
     construction_only_capability_types: &["StoreDir", "AtomicFile", "ClockRef", "IdSourceRef"],
@@ -7,7 +15,7 @@ const POLICY: Policy = Policy {
     ..Policy::EMPTY
 };
 
-fn check(path: &str, source: &str) -> Vec<CapabilityConstructionViolation> {
+fn check(path: &str, source: &str) -> Vec<Finding> {
     find_capability_construction_violations(
         &[
             RustFile::fixture("crates/coven-foundation/src/capabilities.rs", CAPABILITIES),
@@ -50,15 +58,12 @@ fn test_factories_do_not_assign_capability_types_to_production_values() {
         ),
     ];
     let violations = find_capability_construction_violations(&files, &POLICY);
-    assert_eq!(
-        violations,
-        [CapabilityConstructionViolation {
-            path: "crates/coven/src/work.rs".into(),
-            line: 4,
-            capability: "AtomicFile".into(),
-            kind: ConstructionKind::Value,
-        }]
-    );
+    assert_eq!(violations.len(), 1);
+    assert_eq!(violations[0].path, "crates/coven/src/work.rs");
+    assert_eq!(violations[0].line, 4);
+    assert!(violations[0]
+        .message
+        .contains("constructs capability AtomicFile"));
 }
 
 #[test]
@@ -103,7 +108,9 @@ fn local_bindings_shadow_factory_names_but_factory_references_still_count() {
     let violations = check("crates/coven/src/work.rs", source);
     assert_eq!(violations.len(), 1, "{violations:?}");
     assert_eq!(violations[0].line, 6);
-    assert_eq!(violations[0].capability, "AtomicFile");
+    assert!(violations[0]
+        .message
+        .contains(&format!("capability {}", "AtomicFile")));
 }
 
 #[test]
@@ -179,11 +186,8 @@ fn injected_owner_factory_authority_is_explicit_and_limited_to_its_product() {
         &DERIVED,
     );
     assert_eq!(
-        violations
-            .iter()
-            .map(|v| (v.line, v.capability.as_str()))
-            .collect::<Vec<_>>(),
-        [(4, "StoreDir"), (5, "AtomicFile")]
+        violations.iter().map(|v| v.line).collect::<Vec<_>>(),
+        [4, 5]
     );
 }
 
@@ -215,7 +219,9 @@ fn unit_value_paths_and_empty_literals_are_construction() {
             let source = format!("fn acquire() {{ let _ = {expression}; }}");
             let violations = check("crates/coven/src/runtime.rs", &source);
             assert_eq!(violations.len(), 1, "{expression}: {violations:?}");
-            assert_eq!(violations[0].capability, capability);
+            assert!(violations[0]
+                .message
+                .contains(&format!("capability {}", capability)));
         }
     }
 }
@@ -280,7 +286,9 @@ fn self_does_not_hide_construction_in_a_runtime_method() {
         "impl SystemClock { fn run(&self) { let _ = Self; } }",
     );
     assert_eq!(violations.len(), 1);
-    assert_eq!(violations[0].capability, "SystemClock");
+    assert!(violations[0]
+        .message
+        .contains(&format!("capability {}", "SystemClock")));
 }
 
 #[test]
@@ -329,7 +337,9 @@ fn assert_root_only(statement: &str, capability: &str) {
             assert!(violations.is_empty(), "{source}: {violations:?}");
         } else {
             assert_eq!(violations.len(), 1, "{source}: {violations:?}");
-            assert_eq!(violations[0].capability, capability, "{source}");
+            assert!(violations[0]
+                .message
+                .contains(&format!("capability {}", capability)));
         }
     }
 }
@@ -509,9 +519,9 @@ fn default_cannot_make_capability_construction_implicit() {
     ] {
         let violations = check("crates/coven-foundation/src/fakes.rs", definition);
         assert!(!violations.is_empty(), "accepted {definition}");
-        assert!(violations
-            .iter()
-            .all(|violation| violation.kind == ConstructionKind::DefaultImplementation));
+        assert!(violations.iter().all(|violation| violation
+            .message
+            .starts_with("implements Default for capability")));
     }
     assert!(check(
         "crates/coven-foundation/src/values.rs",
@@ -528,7 +538,9 @@ fn default_is_forbidden_even_when_declared_inside_a_root_but_test_items_are_exem
         &format!("impl Builder {{ fn open() {{ {declaration} }} }}"),
     );
     assert_eq!(violations.len(), 1, "{violations:?}");
-    assert_eq!(violations[0].kind, ConstructionKind::DefaultImplementation);
+    assert!(violations[0]
+        .message
+        .starts_with("implements Default for capability"));
     for source in [
         format!("#[cfg(test)] {declaration}"),
         "#[cfg(test)] #[derive(Default)] struct FixedClock(u64);".to_string(),
@@ -547,7 +559,9 @@ fn associated_constants_are_not_composition_roots() {
     ] {
         let violations = check("crates/coven-foundation/src/fakes.rs", source);
         assert_eq!(violations.len(), 1, "{source}: {violations:?}");
-        assert_eq!(violations[0].capability, "FixedClock");
+        assert!(violations[0]
+            .message
+            .contains(&format!("capability {}", "FixedClock")));
     }
 }
 
@@ -572,7 +586,9 @@ fn trait_implementations_are_collected_across_crates_modules_and_features() {
     ];
     let violations = find_capability_construction_violations(&files, &POLICY);
     assert_eq!(violations.len(), 1, "{violations:?}");
-    assert_eq!(violations[0].capability, "Provider");
+    assert!(violations[0]
+        .message
+        .contains(&format!("capability {}", "Provider")));
 }
 
 #[test]

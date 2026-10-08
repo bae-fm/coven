@@ -2828,20 +2828,23 @@ Carol's tablet:
   ([§18](#18-operations)).
 - A task borrows the owners it needs for that work, and holds nothing
   past it.
-- An owner never builds another owner; it is given its collaborators.
+- Owners receive their collaborators when they are built.
 - E.g. the sync owner takes the database owner and the storage owner as
   arguments, and doesn't open either itself.
-- Owners are built only at *composition roots*, listed in one policy
-  file:
-  - the builder's `open`;
-  - the calls that open a store on a new device: `restore_from_code`,
-    `restore_from_keychain` and `join_with_invite`;
-  - provider connection construction for starting sync, storage setup, key
-    unlocking, recovery and file reads, through the built-in connector assembled
-    at opening;
-  - the test fixtures that build the same graph.
-- Each long-lived task has one *lifetime authority*, the only owner that
-  may start it, and that stops it when it is dropped.
+- One authoritative list in the checker's policy names every place allowed
+  to construct owners or start long-lived work. Each entry names an exact
+  source file, type and method (or free function), not a whole file or a
+  type-name suffix. These *composition roots* include opening and bootstrap,
+  provider connection construction, owner constructors and task starts.
+- The checker infers owners from retained capabilities and other owners.
+  Every owner construction outside a listed root fails the check, including
+  construction of an owner's private representation. Runtime acquisition
+  and thread or task spawning use the same list. A legitimate new place
+  must be added deliberately; returning an owner grants no construction
+  permission. Test-only sources and items may assemble their own graphs.
+- Each long-lived task has one owner responsible for starting and stopping
+  it, including when that owner is dropped. Its start sites belong to the
+  same list; there is no separate list of lifetime authorities.
 - E.g. only the sync owner starts the sync loop, so closing the store stops
   it, and nothing else can leave one running.
 - Opening leaves configured storage `Stopped`, or `Disconnected` when none is

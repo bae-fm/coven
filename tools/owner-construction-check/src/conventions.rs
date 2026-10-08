@@ -13,6 +13,7 @@ use proc_macro2::Span;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
+use crate::finding::Finding;
 use crate::macros::token_paths;
 use crate::syntax::RustFile;
 use crate::test_layout::find_test_layout_violations;
@@ -63,17 +64,14 @@ impl Convention {
     }
 }
 
-#[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
-pub(crate) struct ConventionViolation {
-    pub(crate) path: String,
-    pub(crate) line: usize,
-    pub(crate) convention: Convention,
-}
+impl Convention {
+    pub(crate) fn finding(self, path: &str, line: usize) -> Finding {
+        Finding::new(path, line, self.message(path), self.remedy())
+    }
 
-impl ConventionViolation {
-    pub(crate) fn message(&self) -> String {
-        let file = self.path.rsplit('/').next().unwrap_or(&self.path);
-        match self.convention {
+    pub(crate) fn message(self, path: &str) -> String {
+        let file = path.rsplit('/').next().unwrap_or(path);
+        match self {
             Convention::DeepParentPath => {
                 "paths cannot skip over the immediate parent module with super::super".to_string()
             }
@@ -104,15 +102,14 @@ impl ConventionViolation {
     }
 }
 
-pub(crate) fn find_convention_violations(files: &[RustFile]) -> Vec<ConventionViolation> {
+pub(crate) fn find_convention_violations(files: &[RustFile]) -> Vec<Finding> {
     let mut violations = BTreeSet::new();
     for file in files {
         if file.lines > MAX_FILE_LINES {
-            violations.insert(ConventionViolation {
-                path: file.relative_path.clone(),
-                line: MAX_FILE_LINES + 1,
-                convention: Convention::LongFile { lines: file.lines },
-            });
+            violations.insert(
+                Convention::LongFile { lines: file.lines }
+                    .finding(&file.relative_path, MAX_FILE_LINES + 1),
+            );
         }
         let mut visitor = ConventionVisitor {
             path: &file.relative_path,
@@ -126,16 +123,13 @@ pub(crate) fn find_convention_violations(files: &[RustFile]) -> Vec<ConventionVi
 
 struct ConventionVisitor<'a> {
     path: &'a str,
-    violations: &'a mut BTreeSet<ConventionViolation>,
+    violations: &'a mut BTreeSet<Finding>,
 }
 
 impl ConventionVisitor<'_> {
     fn record(&mut self, convention: Convention, span: Span) {
-        self.violations.insert(ConventionViolation {
-            path: self.path.to_string(),
-            line: span.start().line,
-            convention,
-        });
+        self.violations
+            .insert(convention.finding(self.path, span.start().line));
     }
 
     fn check_tokens(&mut self, tokens: proc_macro2::TokenStream) {
