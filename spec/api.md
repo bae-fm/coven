@@ -12,7 +12,7 @@
 
 ```rust
 // External types used by the declarations below.
-use std::{collections::HashMap, future::Future, num::{NonZeroU64, NonZeroUsize},
+use std::{collections::HashMap, future::Future, num::NonZeroUsize,
           path::{Path, PathBuf}, pin::Pin, sync::Arc, time::SystemTime};
 use async_trait::async_trait;
 use rusqlite::{Params, ToSql};
@@ -75,6 +75,8 @@ pub enum Audience {
   ([§11.1](coven.md#111-cryptography)).
 - The app's `CloudKitOps` maps paths to stable record names in the configured
   container, owner and zone; all bytes it receives are encrypted.
+  Paths expose `as_str`, `parse` for returned names, and `is_replaceable`;
+  prefixes expose `as_str`. The bridge receives locations chosen by coven.
 - The bridge creates objects once and replaces posted positions atomically.
   Large uploads use bounded CKAssets, keep their ids and parts across
   restarts, and publish a record only after all parts are stored.
@@ -172,60 +174,20 @@ pub struct OAuthClients { /* private fields */ }
 pub struct ObjectPath { /* private fields */ }
 
 impl ObjectPath {
-    /// A device's create-once write record (§6).
-    pub fn device_log(device: DeviceId, number: NonZeroU64) -> Self;
-    /// A device's create-once store log entry (§9).
-    pub fn store_log(device: DeviceId, number: NonZeroU64) -> Self;
-    /// A snapshot written by a device (§15).
-    pub fn snapshot(audience: Audience, device: DeviceId, number: NonZeroU64) -> Self;
-    /// A device's posted positions (§6).
-    pub fn positions(device: DeviceId) -> Self;
-    /// A sealed store key for a member (§11).
-    pub fn store_key(key: KeyId, member: &MemberId) -> Self;
-    /// A sealed circle key for a member (§14.3).
-    pub fn circle_key(circle: CircleId, key: KeyId, member: &MemberId) -> Self;
-    /// An uploaded file's encrypted bytes, under its random id (§16.2).
-    pub fn file(device: DeviceId, id: FileId) -> Self;
-    /// An encrypted join request under its invite id (§12.2).
-    pub fn join_request(invite: InviteId) -> Self;
     /// Parses a listed or recorded path, refusing paths outside the store's layout.
     pub fn parse(value: &str) -> Result<Self, StorageError>;
     /// The path bound into the object's encryption.
     pub fn as_str(&self) -> &str;
     /// Whether this is a posted-positions path, the only kind that may be replaced.
     pub fn is_replaceable(&self) -> bool;
-    /// The device named by a log, snapshot, file or positions path.
-    pub fn device(&self) -> Option<DeviceId>;
 }
 
 /// A prefix of the validated object layout (§4).
 pub struct ObjectPrefix { /* private fields */ }
 
 impl ObjectPrefix {
-    /// Every object in the store's location.
-    pub fn all() -> Self;
-    /// Every write of a device.
-    pub fn device_log(device: DeviceId) -> Self;
-    /// Every device's writes, to find devices not yet known (§6).
-    pub fn device_logs() -> Self;
-    /// Every store log entry of a device.
-    pub fn store_log(device: DeviceId) -> Self;
-    /// Every device's store log entries (§6, §9).
-    pub fn store_logs() -> Self;
-    /// Every snapshot.
-    pub fn snapshots() -> Self;
-    /// Every stored file.
-    pub fn files() -> Self;
-    /// Every waiting join request.
-    pub fn join_requests() -> Self;
-    /// Every sealed key.
-    pub fn keys() -> Self;
-    /// Every device's posted positions.
-    pub fn positions() -> Self;
     /// The prefix supplied to the provider.
     pub fn as_str(&self) -> &str;
-    /// Whether a validated path is under this prefix.
-    pub fn contains(&self, path: &ObjectPath) -> bool;
 }
 
 /// A nonempty byte range, including its start and excluding its end (§16.3).
