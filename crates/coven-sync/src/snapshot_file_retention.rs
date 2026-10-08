@@ -174,18 +174,23 @@ impl StoreLogSync {
         }
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let ring = self.store_keys.unlock()?;
-        let opened = crate::write_object::open(storage, object, ring.as_ref(), &self.reads).await?;
-        let ring = ring.as_ref().expect("opened header has its store key");
-        crate::write_object::require_history(log, &opened.header.header)?;
-        let author = crate::write_object::authority(log, replays, &opened.header.header)
-            .map_err(|failure| crate::write_object::damaged(&object.path, failure))?;
-        let mut opens = crate::write_object::parts(
-            &opened,
-            ring,
+        let crate::write_object::ReadyWrite {
+            opened,
+            author,
+            parts: mut opens,
+        } = crate::write_object::download(
+            storage,
+            object,
+            ring.as_ref(),
+            &self.reads,
             log,
             replays,
-            &self.operation_member()?.member_id(),
-        )?;
+            || Ok(self.operation_member()?.member_id()),
+        )
+        .await?
+        .map_err(coven_database::SnapshotError::WriteWaiting)
+        .map_err(coven_database::DbError::Snapshot)?;
+        let ring = ring.as_ref().expect("opened header has its store key");
         for (opens, part) in opens.iter_mut().zip(&opened.header.parts) {
             *opens &= readable.contains(&part.audience);
         }

@@ -2,7 +2,7 @@
 
 use crate::{replay_cache::ReplayCache, DamagedObject, ObjectCheckFailure, SyncError};
 use coven_crypto::{MemberId, ObjectHasher, StoreKeyring};
-use coven_database::StoreLog;
+use coven_database::{StoreLog, WriteWait};
 use coven_format::sealed_write::{WriteObjectLayout, WriteObjectPrefix};
 use coven_format::write_stream::WriteHeaderFrame;
 use coven_storage::{ByteRange, ObjectPath, StoredObject};
@@ -42,16 +42,14 @@ async fn piece(
     if end > object.size {
         return Err(damaged(&object.path, parse(coven_format::Error::Truncated)));
     }
-    let bytes = storage
-        .read_range(&object.path, ByteRange::new(offset, end)?)
-        .await?;
-    if bytes.len() != length {
-        return Err(damaged(
-            &object.path,
-            invalid("range response has the wrong length"),
-        ));
-    }
-    Ok(bytes)
+    crate::object_range::read(storage, &object.path, ByteRange::new(offset, end)?)
+        .await
+        .map_err(|error| match error {
+            crate::object_range::ReadError::Storage(error) => error.into(),
+            crate::object_range::ReadError::Length => {
+                damaged(&object.path, invalid("range response has the wrong length"))
+            }
+        })
 }
 
 pub(crate) async fn open(
@@ -149,7 +147,7 @@ async fn read_header(
     Ok(bytes)
 }
 
-pub(crate) fn parts(
+fn parts(
     opened: &OpenedWrite,
     ring: &StoreKeyring,
     log: &StoreLog,
@@ -277,13 +275,26 @@ fn key_audience_contains(
         })
 }
 
-/// Reload and retention require the header's declared store-log history before
-/// checking its author. Ordinary downloads instead report this as a wait.
-pub(crate) fn require_history(
+/// The header is authenticated before history, author and audience checks.
+pub(crate) struct ReadyWrite {
+    pub(crate) opened: OpenedWrite,
+    pub(crate) author: MemberId,
+    pub(crate) parts: Vec<bool>,
+}
+
+pub(crate) async fn download(
+    storage: &dyn coven_storage::Storage,
+    object: &StoredObject,
+    ring: Option<&StoreKeyring>,
+    reads: &crate::pass_reads::PassReads,
     log: &StoreLog,
-    header: &coven_format::write::WriteHeader,
-) -> Result<(), SyncError> {
-    let missing: Vec<_> = header
+    replays: &mut ReplayCache<'_>,
+    member: impl FnOnce() -> Result<MemberId, SyncError>,
+) -> Result<Result<ReadyWrite, WriteWait>, SyncError> {
+    let opened = open(storage, object, ring, reads).await?;
+    let missing: Vec<_> = opened
+        .header
+        .header
         .store_log_read
         .0
         .iter()
@@ -291,17 +302,25 @@ pub(crate) fn require_history(
         .filter(|id| !log.replay.entries.contains_key(id))
         .collect();
     if !missing.is_empty() {
-        return Err(coven_database::DbError::Snapshot(
-            coven_database::SnapshotError::WriteWaiting(coven_database::WriteWait::StoreLog(
-                missing,
-            )),
-        )
-        .into());
+        return Ok(Err(WriteWait::StoreLog(missing)));
     }
-    Ok(())
+    let author = authority(log, replays, &opened.header.header)
+        .map_err(|failure| damaged(&object.path, failure))?;
+    let parts = parts(
+        &opened,
+        ring.expect("opened header has its store key"),
+        log,
+        replays,
+        &member()?,
+    )?;
+    Ok(Ok(ReadyWrite {
+        opened,
+        author,
+        parts,
+    }))
 }
 
-pub(crate) fn authority(
+fn authority(
     log: &StoreLog,
     replays: &mut ReplayCache<'_>,
     header: &coven_format::write::WriteHeader,

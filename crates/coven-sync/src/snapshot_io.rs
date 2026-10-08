@@ -86,19 +86,17 @@ pub(super) async fn range(
     let end = offset
         .checked_add(length as u64)
         .ok_or(coven_format::Error::Truncated)?;
-    let bytes = storage
-        .read_range(path, ByteRange::new(offset, end)?)
+    crate::object_range::read(storage, path, ByteRange::new(offset, end)?)
         .await
         .map_err(|error| match error {
-            error if error.failure() == coven_storage::StorageFailure::InvalidRange => {
-                SyncError::Format(coven_format::Error::Truncated)
+            crate::object_range::ReadError::Length => coven_format::Error::Truncated.into(),
+            crate::object_range::ReadError::Storage(error)
+                if error.failure() == coven_storage::StorageFailure::InvalidRange =>
+            {
+                coven_format::Error::Truncated.into()
             }
-            error => SyncError::Storage(error),
-        })?;
-    if bytes.len() != length {
-        return Err(coven_format::Error::Truncated.into());
-    }
-    Ok(bytes)
+            crate::object_range::ReadError::Storage(error) => error.into(),
+        })
 }
 
 /// Snapshot loading writes retained plaintext; reference checking sends it

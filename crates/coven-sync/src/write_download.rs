@@ -4,11 +4,11 @@ use super::DeviceLogSync;
 use crate::stream_input::{ChannelParts, WithReferences};
 use crate::{
     replay_cache::ReplayCache,
-    write_object::{authority, damaged},
+    write_object::{damaged, ReadyWrite},
     ObjectCheckFailure, SyncError,
 };
 use coven_crypto::{MemberId, StoreKeyring};
-use coven_database::{ApplyOutcome, DbError, StoreLog, WriteWait};
+use coven_database::{ApplyOutcome, DbError, StoreLog};
 use coven_storage::StoredObject;
 use std::{io, sync::Arc};
 use tokio::sync::oneshot;
@@ -22,26 +22,24 @@ impl DeviceLogSync {
         replays: &mut ReplayCache<'_>,
         member: &MemberId,
     ) -> Result<ApplyOutcome, SyncError> {
-        let opened = crate::write_object::open(
+        let ReadyWrite {
+            opened,
+            author,
+            parts: opens,
+        } = match crate::write_object::download(
             self.storage.as_deref().ok_or(SyncError::NoStorage)?,
             object,
             Some(ring),
             &self.reads,
+            log,
+            replays,
+            || Ok(member.clone()),
         )
-        .await?;
-        let header = &opened.header.header;
-        let missing: Vec<_> = header
-            .store_log_read
-            .0
-            .iter()
-            .copied()
-            .filter(|id| !log.replay.entries.contains_key(id))
-            .collect();
-        if !missing.is_empty() {
-            return Ok(ApplyOutcome::Waiting(WriteWait::StoreLog(missing)));
-        }
-        let author = authority(log, replays, header).map_err(|e| damaged(&object.path, e))?;
-        let opens = crate::write_object::parts(&opened, ring, log, replays, member)?;
+        .await?
+        {
+            Ok(ready) => ready,
+            Err(reason) => return Ok(ApplyOutcome::Waiting(reason)),
+        };
         let (primary, download) = ChannelParts::new(opened.header.clone(), &opens);
         let (references, input) = ChannelParts::new(opened.header.clone(), &opens);
         let (validation, validated) = oneshot::channel();

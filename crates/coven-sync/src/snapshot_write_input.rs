@@ -36,18 +36,23 @@ impl StoreLogSync {
     ) -> Result<SavedWrite, SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let ring = self.store_keys.unlock()?;
-        let opened = crate::write_object::open(storage, object, ring.as_ref(), &self.reads).await?;
-        let ring = ring.as_ref().expect("opened header has its store key");
-        crate::write_object::require_history(log, &opened.header.header)?;
-        let author = crate::write_object::authority(log, replays, &opened.header.header)
-            .map_err(|failure| crate::write_object::damaged(&object.path, failure))?;
-        let eligible = crate::write_object::parts(
-            &opened,
-            ring,
+        let crate::write_object::ReadyWrite {
+            opened,
+            author,
+            parts: eligible,
+        } = crate::write_object::download(
+            storage,
+            object,
+            ring.as_ref(),
+            &self.reads,
             log,
             replays,
-            &self.operation_member()?.member_id(),
-        )?;
+            || Ok(self.operation_member()?.member_id()),
+        )
+        .await?
+        .map_err(coven_database::SnapshotError::WriteWaiting)
+        .map_err(coven_database::DbError::Snapshot)?;
+        let ring = ring.as_ref().expect("opened header has its store key");
         let mut files = Vec::new();
         let mut targets = Vec::new();
         for (part, eligible) in opened.header.parts.iter().zip(eligible) {

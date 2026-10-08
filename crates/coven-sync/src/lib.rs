@@ -18,6 +18,7 @@ mod tests;
 
 mod error;
 mod object_author;
+mod object_range;
 mod posted_positions;
 mod store_log_keys;
 mod store_log_object;

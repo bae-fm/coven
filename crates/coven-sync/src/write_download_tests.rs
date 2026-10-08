@@ -344,6 +344,23 @@ async fn missing_read_view_waits_then_replays_after_the_store_log_arrives() {
         devices[0].sync.upload_writes().await.unwrap();
         sql(&devices[0].db, "UPDATE notes SET title='after'").await;
         devices[0].sync.upload_writes().await.unwrap();
+        let object = storage
+            .list(&ObjectPrefix::device_logs())
+            .await
+            .unwrap()
+            .remove(0);
+        let log = devices[1].db.store_log().await.unwrap();
+        let ring = devices[1].keys.unlock().unwrap().unwrap();
+        let mut replays = crate::replay_cache::ReplayCache::new(&log);
+        let result = devices[1]
+            .sync
+            .receive_write(&object, &ring, &log, &mut replays, &member().member_id())
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, ApplyOutcome::Waiting(coven_database::WriteWait::StoreLog(ref missing))
+            if missing.len() == 1 && missing[0].device == DeviceId(1) && missing[0].number == 3)
+        );
         devices[1].sync.download_writes().await.unwrap();
         assert!(rows(&devices[1].db).await.is_empty());
         if reload {
