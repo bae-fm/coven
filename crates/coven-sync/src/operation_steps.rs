@@ -17,7 +17,7 @@ use coven_format::{
     MemberAccess,
 };
 use coven_foundation::id_source::KeyId;
-use coven_storage::{MemberRemoval, ObjectPath};
+use coven_storage::MemberRemoval;
 
 impl StoreLogSync {
     pub(crate) async fn operation_step(
@@ -195,17 +195,11 @@ impl StoreLogSync {
             }
             match record.last_step {
                 n if n == data.entry_step_number(1) => {
-                    for key in &upload.sealing.keys {
-                        self.storage
-                            .as_deref()
-                            .ok_or(SyncError::NoStorage)?
-                            .create_once(
-                                &ObjectPath::parse(&key.path)
-                                    .map_err(coven_storage::StorageError::from)?,
-                                &key.bytes,
-                            )
-                            .await?;
-                    }
+                    crate::store_log_object::upload_keys(
+                        self.storage.as_deref(),
+                        &upload.sealing.keys,
+                    )
+                    .await?;
                     self.database
                         .advance_operation(data.update(record, data.entry_step_number(2))?)
                         .await?;

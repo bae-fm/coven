@@ -235,6 +235,26 @@ async fn restart_after_each_step_uses_the_committed_entry_and_keys() {
         let before = a.db.local_store_log().await.unwrap().upload;
         let expected = before.as_ref().map(|upload| a.reseal(upload));
         let record = a.db.operations().await.unwrap().remove(0);
+        if let Some(upload) = &before {
+            for key in &upload.sealing.keys {
+                let stored = storage.read(&ObjectPath::parse(&key.path).unwrap()).await;
+                if record.last_step >= 2 {
+                    assert_eq!(stored.unwrap(), key.bytes);
+                } else {
+                    assert!(
+                        matches!(stored, Err(error) if error.failure() == StorageFailure::NotFound)
+                    );
+                }
+            }
+            let stored = storage.read(&object::path(upload.entry.position)).await;
+            if record.last_step >= 3 {
+                assert_eq!(stored.unwrap(), *expected.as_ref().unwrap());
+            } else {
+                assert!(
+                    matches!(stored, Err(error) if error.failure() == StorageFailure::NotFound)
+                );
+            }
+        }
         a.restart(storage.clone()).await;
         let resumed = a.db.operations().await.unwrap().remove(0);
         assert_eq!(record.last_step, resumed.last_step);

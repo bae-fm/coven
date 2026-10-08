@@ -171,17 +171,7 @@ impl StoreLogSync {
                 }
             }
             let bytes = object::seal_upload(upload, previous.as_ref(), &member)?;
-            for key in &upload.sealing.keys {
-                storage
-                    .create_once(
-                        &ObjectPath::parse(&key.path).map_err(coven_storage::StorageError::from)?,
-                        &key.bytes,
-                    )
-                    .await?;
-            }
-            storage
-                .create_once(&object::path(upload.entry.position), &bytes)
-                .await?;
+            object::upload(Some(storage.as_ref()), upload, &bytes).await?;
             // Read what storage actually retained, including a lost-reply retry.
             let path = object::path(upload.entry.position);
             let bytes = storage.read(&path).await?;

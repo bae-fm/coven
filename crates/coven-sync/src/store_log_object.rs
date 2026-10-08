@@ -2,7 +2,7 @@
 
 use crate::{ObjectCheckFailure, SyncError};
 use coven_crypto::{MemberKeys, ObjectHasher, StoreKey, StoreKeyring};
-use coven_database::{DbError, StoreLog, StoreLogUpload};
+use coven_database::{DbError, StoreLog, StoreLogKeyUpload, StoreLogUpload};
 use coven_format::{
     sealed_single::{SingleChunkObject, SingleChunkPrefix, StoreOrigin},
     store_log::{StoreChange, StoreLogEntry},
@@ -10,7 +10,7 @@ use coven_format::{
     Object,
 };
 use coven_foundation::id_source::StoreId;
-use coven_storage::ObjectPath;
+use coven_storage::{ObjectPath, Storage};
 use std::sync::Arc;
 
 #[derive(Debug, thiserror::Error)]
@@ -61,6 +61,37 @@ pub(crate) fn seal_upload(
         ring.ok_or(SyncError::KeyUnavailable(id))?.store_key(id)?
     };
     seal(&upload.entry, key, member)
+}
+
+/// Publish the sealed copies before the entry that introduces or shares them.
+pub(crate) async fn upload(
+    storage: Option<&dyn Storage>,
+    upload: &StoreLogUpload,
+    bytes: &[u8],
+) -> Result<(), SyncError> {
+    upload_keys(storage, &upload.sealing.keys).await?;
+    storage
+        .ok_or(SyncError::NoStorage)?
+        .create_once(&path(upload.entry.position), bytes)
+        .await?;
+    Ok(())
+}
+
+/// Journaled operations commit this step separately from entry publication.
+pub(crate) async fn upload_keys(
+    storage: Option<&dyn Storage>,
+    keys: &[StoreLogKeyUpload],
+) -> Result<(), SyncError> {
+    for key in keys {
+        storage
+            .ok_or(SyncError::NoStorage)?
+            .create_once(
+                &ObjectPath::parse(&key.path).map_err(coven_storage::StorageError::from)?,
+                &key.bytes,
+            )
+            .await?;
+    }
+    Ok(())
 }
 
 pub(crate) fn seal(

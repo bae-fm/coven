@@ -398,21 +398,7 @@ impl StoreLogSync {
     ) -> Result<(), SyncError> {
         if let Some(upload) = local.upload.take() {
             let bytes = object::seal_upload(&upload, ring.as_ref(), member)?;
-            for key in &upload.sealing.keys {
-                self.storage
-                    .as_deref()
-                    .ok_or(SyncError::NoStorage)?
-                    .create_once(
-                        &ObjectPath::parse(&key.path).map_err(coven_storage::StorageError::from)?,
-                        &key.bytes,
-                    )
-                    .await?;
-            }
-            self.storage
-                .as_deref()
-                .ok_or(SyncError::NoStorage)?
-                .create_once(&object::path(upload.entry.position), &bytes)
-                .await?;
+            object::upload(self.storage.as_deref(), &upload, &bytes).await?;
             self.apply(local, upload.entry, member, ring, damages)
                 .await?;
         }
