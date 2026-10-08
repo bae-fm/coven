@@ -202,13 +202,15 @@ impl DatabaseBuilder {
             file_tasks: Arc::new(tokio::sync::RwLock::new(())),
             inner: Arc::new(RwLock::new(Some(DatabaseInner {
                 observer,
-                writer: Mutex::new(writer),
-                readers: ReadPool::new(readers),
+                access: DatabaseAccess {
+                    writer: Mutex::new(writer),
+                    readers: ReadPool::new(readers),
+                    write_schema,
+                    directory: self.directory,
+                    device: settings.device_id,
+                    lock,
+                },
                 migrations,
-                lock,
-                write_schema,
-                directory: self.directory,
-                device: settings.device_id,
                 clock,
                 ids,
                 staging: Mutex::new(BTreeSet::new()),
@@ -240,15 +242,15 @@ impl DatabaseBuilder {
             )?));
         }
         Ok(DatabaseReadHandle {
-            inner: Arc::new(RwLock::new(Some(ReadOnlyInner {
-                cache_writer: Mutex::new(DatabaseConnection::open(
+            inner: Arc::new(RwLock::new(Some(DatabaseAccess {
+                writer: Mutex::new(DatabaseConnection::open(
                     &path,
                     false,
                     SqlAuthorization::new(&tables),
                 )?),
                 readers: ReadPool::new(readers),
                 lock,
-                schema,
+                write_schema: schema,
                 directory: self.directory,
                 device: settings.device_id,
             }))),

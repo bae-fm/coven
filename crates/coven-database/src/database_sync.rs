@@ -19,17 +19,17 @@ impl Database {
         F: FnOnce() -> Result<(), DbError> + Send + 'static,
     {
         self.call(move |inner| {
-            let reader = inner.readers.acquire_reader();
+            let reader = inner.access.readers.acquire_reader();
             inner.with_files(Vec::new(), |writer, files| {
                 reader.with_reader(|reader| {
                     reader.read_transaction(|| {
-                        inner.write_schema.prepare(reader)?;
+                        inner.access.write_schema.prepare(reader)?;
                         // Pin the before view before the streamed transaction changes merge state.
                         reader.schema_version()?;
                         write.apply(
                             writer,
                             reader,
-                            &inner.write_schema,
+                            &inner.access.write_schema,
                             inner.clock.now(),
                             files,
                             &store_log,
@@ -88,7 +88,13 @@ impl Database {
     ) -> Result<crate::ApplyOutcome, DbError> {
         self.call(move |inner| {
             inner.with_files(Vec::new(), |writer, files| {
-                crate::download::apply(writer, &inner.write_schema, inner.clock.now(), write, files)
+                crate::download::apply(
+                    writer,
+                    &inner.access.write_schema,
+                    inner.clock.now(),
+                    write,
+                    files,
+                )
             })
         })
         .await
@@ -107,7 +113,7 @@ impl Database {
         E: Send + 'static,
     {
         self.call(move |inner| {
-            let reader = inner.readers.acquire_reader();
+            let reader = inner.access.readers.acquire_reader();
             reader.with_reader(|reader| {
                 reader.read_transaction(|| crate::upload::read(reader, consume))
             })
@@ -167,8 +173,8 @@ impl Database {
         self.call(move |inner| {
             inner.with_writer(|writer| {
                 Ok(crate::LocalStoreLog {
-                    store: inner.directory.id(),
-                    device: inner.device,
+                    store: inner.access.directory.id(),
+                    device: inner.access.device,
                     log: crate::store_log_tables::read(writer)?,
                     upload: crate::store_log_upload::read(writer)?,
                 })
@@ -200,7 +206,7 @@ impl Database {
             inner.with_writer(|writer| {
                 crate::store_log_upload::prepare(
                     writer,
-                    inner.device,
+                    inner.access.device,
                     inner.clock.now(),
                     author,
                     change,
@@ -276,7 +282,7 @@ impl Database {
                     })
                     .collect::<Result<_, _>>()?;
                 Ok(crate::SyncState {
-                    device: inner.device,
+                    device: inner.access.device,
                     store_log: crate::store_log::positions(writer)?,
                     uploads_pending: writer.query_row(
                         "SELECT EXISTS(SELECT 1 FROM _coven_uploads)",

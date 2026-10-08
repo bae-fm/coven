@@ -19,7 +19,7 @@ impl Database {
             inner.with_files(Vec::new(), |writer, files| {
                 crate::store_log::apply(
                     writer,
-                    &inner.write_schema,
+                    &inner.access.write_schema,
                     entry,
                     replay,
                     files,
@@ -53,7 +53,7 @@ impl Database {
             inner.with_writer(|writer| {
                 crate::store_log_upload::prepare(
                     writer,
-                    inner.device,
+                    inner.access.device,
                     inner.clock.now(),
                     author,
                     change,
@@ -83,8 +83,8 @@ impl Database {
                 writer.transaction(|db| {
                     let write = crate::circle_deletion::write(
                         db,
-                        &inner.write_schema,
-                        inner.device,
+                        &inner.access.write_schema,
+                        inner.access.device,
                         inner.clock.now(),
                         circle,
                         files,

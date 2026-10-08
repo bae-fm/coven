@@ -52,18 +52,80 @@ pub struct Database {
 
 struct DatabaseInner {
     observer: CommitObserver,
-    // Drop every SQLite connection before releasing the writer lock.
-    writer: Mutex<DatabaseConnection>,
-    readers: ReadPool,
+    access: DatabaseAccess<StoreLock>,
     migrations: Vec<MigrationOutcome>,
-    lock: StoreLock,
-    write_schema: crate::write_schema::WriteSchema,
-    directory: StoreDir,
-    device: DeviceId,
     clock: ClockRef,
     ids: IdSourceRef,
     staging: Mutex<BTreeSet<coven_foundation::files::FileName>>,
     recovery: Option<coven_foundation::files::DatabaseRecovery>,
+}
+
+// The lock outlives every connection, including when the last handle is dropped.
+struct DatabaseAccess<L> {
+    writer: Mutex<DatabaseConnection>,
+    readers: ReadPool,
+    write_schema: crate::write_schema::WriteSchema,
+    directory: StoreDir,
+    device: DeviceId,
+    lock: L,
+}
+
+impl<L> DatabaseAccess<L> {
+    fn open_local_file(
+        &self,
+        reference: &crate::FileRef,
+    ) -> Result<crate::LocalFileStream, crate::LocalFileError> {
+        self.readers.acquire_reader().local_file(
+            &self.write_schema,
+            &self.directory,
+            self.device,
+            reference,
+        )
+    }
+
+    fn file_ref(&self, table: &str, key: &crate::RowKey) -> Result<crate::FileRef, DbError> {
+        self.readers
+            .acquire_reader()
+            .read_snapshot(|sql| sql.file_ref(&self.write_schema, table, key))
+            .0
+    }
+
+    fn user_file(
+        &self,
+        table: &str,
+        key: &crate::RowKey,
+    ) -> Result<Option<crate::UserFile>, DbError> {
+        self.readers
+            .acquire_reader()
+            .read_snapshot(|sql| sql.user_file(&self.write_schema, table, key))
+            .0
+    }
+
+    fn read<R>(&self, read: impl FnOnce(SqlReadContext<'_>) -> CovenResult<R>) -> CovenResult<R> {
+        self.readers.acquire_reader().read_snapshot(read).0
+    }
+
+    fn schema_version(&self) -> Result<u32, DbError> {
+        self.readers.acquire_reader().schema_version()
+    }
+
+    fn close(self) -> Result<(), DbError> {
+        let mut failures = self.readers.close();
+        if let Err(error) = self
+            .writer
+            .into_inner()
+            .expect("database connection lock poisoned")
+            .close()
+        {
+            failures.push(error);
+        }
+        drop(self.lock);
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(DbError::Closing { failures })
+        }
+    }
 }
 
 // SQLite rolls back before this boundary catches an unwind. Releasing the
@@ -85,7 +147,7 @@ fn with_connection<R>(
 
 impl DatabaseInner {
     fn with_writer<R>(&self, run: impl FnOnce(&DatabaseConnection) -> R) -> R {
-        with_connection(&self.writer, run)
+        with_connection(&self.access.writer, run)
     }
 
     fn with_files<R, E: crate::WriteFailure>(
@@ -96,9 +158,9 @@ impl DatabaseInner {
         self.with_writer(|writer| {
             let files = crate::file_write::FileWrite::new(
                 writer,
-                &self.directory,
-                &self.write_schema,
-                self.device,
+                &self.access.directory,
+                &self.access.write_schema,
+                self.access.device,
                 &self.staging,
                 staged,
             );
@@ -176,7 +238,7 @@ impl Database {
                     inner.with_writer(|writer| {
                         crate::file_removals::FileRemovals::new(
                             writer,
-                            &inner.directory,
+                            &inner.access.directory,
                             &BTreeSet::new(),
                         )
                         .finish(Ok::<_, DbError>(()))?;
@@ -197,16 +259,8 @@ impl Database {
         reference: &crate::FileRef,
     ) -> Result<crate::LocalFileStream, crate::LocalFileError> {
         let reference = reference.clone();
-        self.call(move |inner| {
-            let reader = inner.readers.acquire_reader();
-            reader.local_file(
-                &inner.write_schema,
-                &inner.directory,
-                inner.device,
-                &reference,
-            )
-        })
-        .await
+        self.call(move |inner| inner.access.open_local_file(&reference))
+            .await
     }
 
     /// The row's file, audience and version from one committed state.
@@ -217,13 +271,8 @@ impl Database {
     ) -> Result<crate::FileRef, DbError> {
         let table = table.to_owned();
         let key = key.into();
-        self.call(move |inner| {
-            let reader = inner.readers.acquire_reader();
-            reader
-                .read_snapshot(|sql| sql.file_ref(&inner.write_schema, &table, &key))
-                .0
-        })
-        .await
+        self.call(move |inner| inner.access.file_ref(&table, &key))
+            .await
     }
 
     /// The recorded original's path, size and modification time; never reread its bytes.
@@ -234,13 +283,8 @@ impl Database {
     ) -> Result<Option<crate::UserFile>, DbError> {
         let table = table.to_owned();
         let key = key.into();
-        self.call(move |inner| {
-            let reader = inner.readers.acquire_reader();
-            reader
-                .read_snapshot(|sql| sql.user_file(&inner.write_schema, &table, &key))
-                .0
-        })
-        .await
+        self.call(move |inner| inner.access.user_file(&table, &key))
+            .await
     }
 
     /// Run ordinary SQL against one consistent snapshot when awaited.
@@ -293,8 +337,8 @@ impl Database {
             inner.with_files(Vec::new(), |writer, files| {
                 crate::dismissal::dismiss(
                     writer,
-                    &inner.write_schema,
-                    inner.device,
+                    &inner.access.write_schema,
+                    inner.access.device,
                     inner.clock.now(),
                     &values,
                     files,
@@ -315,9 +359,7 @@ impl Database {
         F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static,
     {
-        start_call(self.inner.clone(), move |inner| {
-            inner.readers.acquire_reader().read_snapshot(read).0
-        })
+        start_call(self.inner.clone(), move |inner| inner.access.read(read))
     }
 
     pub(crate) async fn observed_read<F, R>(
@@ -330,7 +372,7 @@ impl Database {
         R: Send + 'static,
     {
         self.call(move |inner| {
-            let (result, reads) = inner.readers.acquire_reader().read_snapshot(read);
+            let (result, reads) = inner.access.readers.acquire_reader().read_snapshot(read);
             commits.finish(reads);
             result
         })
@@ -381,11 +423,7 @@ impl Database {
 
     /// The committed app schema version, read on a read-only connection.
     pub async fn schema_version(&self) -> Result<u32, DbError> {
-        self.call(move |inner| {
-            let reader = inner.readers.acquire_reader();
-            reader.schema_version()
-        })
-        .await
+        self.call(|inner| inner.access.schema_version()).await
     }
 
     /// The migrations this open committed, classified individually.
@@ -411,26 +449,7 @@ impl Database {
                     return Err(DbError::StoreClosed);
                 };
                 inner.observer.close();
-                let DatabaseInner {
-                    writer,
-                    readers,
-                    lock,
-                    ..
-                } = inner;
-                let mut failures = readers.close();
-                if let Err(error) = writer
-                    .into_inner()
-                    .expect("writer connection lock poisoned")
-                    .close()
-                {
-                    failures.push(error);
-                }
-                drop(lock);
-                if failures.is_empty() {
-                    Ok(())
-                } else {
-                    Err(DbError::Closing { failures })
-                }
+                inner.access.close()
             })
             .await,
         )
@@ -463,23 +482,13 @@ impl Database {
 /// ```
 #[derive(Clone)]
 pub struct DatabaseReadHandle {
-    inner: Arc<RwLock<Option<ReadOnlyInner>>>,
-}
-
-struct ReadOnlyInner {
-    cache_writer: Mutex<DatabaseConnection>,
-    directory: StoreDir,
-    device: DeviceId,
-    readers: ReadPool,
-    // Connections must drop before deletion is allowed, including implicit drop.
-    lock: StoreReadLock,
-    schema: crate::write_schema::WriteSchema,
+    inner: Arc<RwLock<Option<DatabaseAccess<StoreReadLock>>>>,
 }
 
 impl DatabaseReadHandle {
     async fn call<R, E>(
         &self,
-        run: impl FnOnce(&ReadOnlyInner) -> Result<R, E> + Send + 'static,
+        run: impl FnOnce(&DatabaseAccess<StoreReadLock>) -> Result<R, E> + Send + 'static,
     ) -> Result<R, E>
     where
         R: Send + 'static,
@@ -493,11 +502,8 @@ impl DatabaseReadHandle {
         reference: &crate::FileRef,
     ) -> Result<crate::LocalFileStream, crate::LocalFileError> {
         let reference = reference.clone();
-        self.call(move |inner| {
-            let reader = inner.readers.acquire_reader();
-            reader.local_file(&inner.schema, &inner.directory, inner.device, &reference)
-        })
-        .await
+        self.call(move |inner| inner.open_local_file(&reference))
+            .await
     }
 
     /// The row's file, audience and version from one committed state.
@@ -508,13 +514,7 @@ impl DatabaseReadHandle {
     ) -> Result<crate::FileRef, DbError> {
         let table = table.to_owned();
         let key = key.into();
-        self.call(move |inner| {
-            let reader = inner.readers.acquire_reader();
-            reader
-                .read_snapshot(|sql| sql.file_ref(&inner.schema, &table, &key))
-                .0
-        })
-        .await
+        self.call(move |inner| inner.file_ref(&table, &key)).await
     }
 
     /// The recorded original's path, size and modification time; never reread its bytes.
@@ -525,13 +525,7 @@ impl DatabaseReadHandle {
     ) -> Result<Option<crate::UserFile>, DbError> {
         let table = table.to_owned();
         let key = key.into();
-        self.call(move |inner| {
-            let reader = inner.readers.acquire_reader();
-            reader
-                .read_snapshot(|sql| sql.user_file(&inner.schema, &table, &key))
-                .0
-        })
-        .await
+        self.call(move |inner| inner.user_file(&table, &key)).await
     }
 
     /// Read one consistent snapshot when awaited.
@@ -553,15 +547,12 @@ impl DatabaseReadHandle {
         F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static,
     {
-        start_call(self.inner.clone(), move |inner| {
-            inner.readers.acquire_reader().read_snapshot(read).0
-        })
+        start_call(self.inner.clone(), move |inner| inner.read(read))
     }
 
     /// The committed app schema version.
     pub async fn schema_version(&self) -> Result<u32, DbError> {
-        self.call(|inner| inner.readers.acquire_reader().schema_version())
-            .await
+        self.call(|inner| inner.schema_version()).await
     }
 
     /// Wait for active calls and close every clone of this handle.
@@ -570,22 +561,7 @@ impl DatabaseReadHandle {
         finish_blocking(
             tokio::task::spawn_blocking(move || {
                 let mut slot = handle.inner.write().expect("database lock poisoned");
-                let readers = slot.take().ok_or(DbError::StoreClosed)?;
-                let mut failures = readers.readers.close();
-                if let Err(error) = readers
-                    .cache_writer
-                    .into_inner()
-                    .expect("cache connection lock poisoned")
-                    .close()
-                {
-                    failures.push(error);
-                }
-                drop(readers.lock);
-                if failures.is_empty() {
-                    Ok(())
-                } else {
-                    Err(DbError::Closing { failures })
-                }
+                slot.take().ok_or(DbError::StoreClosed)?.close()
             })
             .await,
         )

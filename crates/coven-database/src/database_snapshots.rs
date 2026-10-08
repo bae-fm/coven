@@ -10,7 +10,7 @@ impl Database {
         &self,
     ) -> Result<Vec<coven_format::write_stream::WriteHeaderFrame>, DbError> {
         self.call(move |inner| {
-            let reader = inner.readers.acquire_reader();
+            let reader = inner.access.readers.acquire_reader();
             reader.with_reader(|db| {
                 db.read_transaction(|| {
                     let mut headers = Vec::new();
@@ -37,16 +37,16 @@ impl Database {
         DbError,
     > {
         self.call(move |inner| {
-            let reader = inner.readers.acquire_reader();
+            let reader = inner.access.readers.acquire_reader();
             reader.with_reader(|reader| reader.read_transaction(|| {
                 let waiting = reader.query("SELECT device,number FROM _coven_uploads ORDER BY device,number", [], |r| Ok(coven_merge::WriteId {
                     device: coven_foundation::id_source::DeviceId(crate::write_encoding::counter(r.get(0)?)),
                     number: crate::write_encoding::counter(r.get(1)?),
                 }))?;
                 let mut required = std::collections::BTreeMap::<_, u64>::new();
-                reader.for_each("SELECT number,had_read FROM _coven_writes WHERE substr(timestamp,9,8)=?1 ORDER BY number DESC LIMIT 1", [inner.device.0.to_be_bytes().as_slice()], |r| {
+                reader.for_each("SELECT number,had_read FROM _coven_writes WHERE substr(timestamp,9,8)=?1 ORDER BY number DESC LIMIT 1", [inner.access.device.0.to_be_bytes().as_slice()], |r| {
                     let number = crate::write_encoding::counter(r.get(0)?);
-                    required.insert(inner.device, number);
+                    required.insert(inner.access.device, number);
                     let past = crate::write_encoding::decoded(coven_format::merge_fields::decode_write_positions(&r.get::<_, Vec<u8>>(1)?))?;
                     for id in past.0 { required.entry(id.device).and_modify(|n| *n = (*n).max(id.number)).or_insert(id.number); }
                     Ok::<_, DbError>(())
@@ -76,15 +76,23 @@ impl Database {
             inner.with_writer(|writer| {
                 writer.read_transaction(|| {
                     crate::snapshot_state::create_tables(writer)?;
-                    crate::snapshot_load::read(writer, &inner.write_schema, &id, prefix, input)?;
-                    let files =
-                        super::file_retention::snapshot_references(writer, &inner.write_schema)
-                            .map_err(|error| match error {
-                                DbError::DamagedDatabase => crate::snapshot_error::invalid(
-                                    "snapshot file location is invalid",
-                                ),
-                                error => error,
-                            })?;
+                    crate::snapshot_load::read(
+                        writer,
+                        &inner.access.write_schema,
+                        &id,
+                        prefix,
+                        input,
+                    )?;
+                    let files = super::file_retention::snapshot_references(
+                        writer,
+                        &inner.access.write_schema,
+                    )
+                    .map_err(|error| match error {
+                        DbError::DamagedDatabase => {
+                            crate::snapshot_error::invalid("snapshot file location is invalid")
+                        }
+                        error => error,
+                    })?;
                     Ok(files)
                 })
             })
@@ -108,10 +116,16 @@ impl Database {
         E: Send + 'static,
     {
         self.call(move |inner| {
-            let reader = inner.readers.acquire_reader();
+            let reader = inner.access.readers.acquire_reader();
             reader.with_reader(|reader| {
                 reader.read_transaction(|| {
-                    crate::snapshot_write::write(reader, &inner.write_schema, id, begin, emit)
+                    crate::snapshot_write::write(
+                        reader,
+                        &inner.access.write_schema,
+                        id,
+                        begin,
+                        emit,
+                    )
                 })
             })
         })
@@ -140,18 +154,18 @@ impl Database {
         self.call(move |inner| {
             // Reserve a reader before locking the writer: snapshot consumers
             // may be waiting for a commit before releasing their readers.
-            let reader = inner.readers.acquire_reader();
+            let reader = inner.access.readers.acquire_reader();
             inner.with_files(Vec::new(), |writer, files| {
                 reader.with_reader(|reader| {
                     reader.read_transaction(|| {
-                        inner.write_schema.prepare(reader)?;
+                        inner.access.write_schema.prepare(reader)?;
                         crate::snapshot_load::load(
                             writer,
                             reader,
-                            &inner.write_schema,
+                            &inner.access.write_schema,
                             reload,
                             files,
-                            (inner.device, inner.clock.now()),
+                            (inner.access.device, inner.clock.now()),
                         )
                     })
                 })?;

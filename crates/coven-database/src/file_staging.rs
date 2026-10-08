@@ -44,7 +44,7 @@ impl FileStaging {
                         let active = inner.staging.lock().expect("file staging lock poisoned");
                         let failures = crate::file_removals::FileRemovals::new(
                             writer,
-                            &inner.directory,
+                            &inner.access.directory,
                             &active,
                         )
                         .remove_unused();
@@ -67,7 +67,7 @@ impl FileStaging {
                                 if !identities.insert((namespace.clone(), id.clone())) {
                                     return Err(DbError::FileBatchDuplicate { namespace, id });
                                 }
-                                if !inner.write_schema.declarations.iter().any(|d| {
+                                if !inner.access.write_schema.declarations.iter().any(|d| {
                                     d.files.as_ref().is_some_and(|f| {
                                         f.namespace == namespace
                                             && f.provenance == Provenance::AppProvided
@@ -102,7 +102,7 @@ impl FileStaging {
                         let active = inner.staging.lock().expect("file staging lock poisoned");
                         return crate::file_removals::FileRemovals::new(
                             writer,
-                            &inner.directory,
+                            &inner.access.directory,
                             &active,
                         )
                         .finish(Err(error));
@@ -141,8 +141,9 @@ impl FileStaging {
                     let writer = (|| -> Result<_, DbError> {
                         let slot = self.database.inner.read().expect("database lock poisoned");
                         let inner = slot.as_ref().expect("staging holds close guard");
-                        let lock = inner.directory.lock_read_only()?;
+                        let lock = inner.access.directory.lock_read_only()?;
                         Ok(inner
+                            .access
                             .directory
                             .file(FileArea::AppProvided, &file_name)
                             .create_writer(lock)?)
@@ -195,8 +196,8 @@ impl FileStaging {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 prepared?;
                 writer.local_write(
-                    &inner.write_schema,
-                    inner.device,
+                    &inner.access.write_schema,
+                    inner.access.device,
                     inner.clock.now(),
                     files,
                     sql,

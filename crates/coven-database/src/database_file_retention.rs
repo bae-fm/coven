@@ -39,10 +39,10 @@ impl Database {
     /// must either remain in this queue or have a committed row/write reference.
     pub async fn retained_files(&self) -> Result<FileRetention, DbError> {
         self.call(move |inner| {
-            let reader = inner.readers.acquire_reader();
+            let reader = inner.access.readers.acquire_reader();
             reader.with_reader(|db| {
                 db.read_transaction(|| {
-                    let schema = &inner.write_schema;
+                    let schema = &inner.access.write_schema;
                     let mut references = BTreeSet::new();
                     for table in &schema.declarations {
                         let Some(file) = &table.files else {
@@ -101,6 +101,7 @@ impl Database {
             let mut references = BTreeSet::new();
             write.header.encode()?;
             if !inner
+                .access
                 .write_schema
                 .versions
                 .contains(&write.header.header.schema_version)
@@ -119,7 +120,7 @@ impl Database {
                 };
                 crate::download_stream::read_part(input, header, &write.header.header, |frame| {
                     if let coven_format::dismissal::WriteFrame::Change(row) = frame {
-                        retain_change(&inner.write_schema, &row, &mut references)?;
+                        retain_change(&inner.access.write_schema, &row, &mut references)?;
                     }
                     Ok::<_, DbError>(())
                 })?;

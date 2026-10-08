@@ -14,13 +14,13 @@ impl Database {
     ) -> T {
         let slot = self.inner.read().unwrap();
         let inner = slot.as_ref().unwrap();
-        let writer = inner.writer.lock().unwrap();
-        inspect(&writer, &inner.write_schema)
+        let writer = inner.access.writer.lock().unwrap();
+        inspect(&writer, &inner.access.write_schema)
     }
 
     pub(crate) fn inspect_writer<T>(&self, inspect: impl FnOnce(&DatabaseConnection) -> T) -> T {
         let inner = self.inner.read().unwrap();
-        let writer = inner.as_ref().unwrap().writer.lock().unwrap();
+        let writer = inner.as_ref().unwrap().access.writer.lock().unwrap();
         inspect(&writer)
     }
 }
@@ -85,14 +85,14 @@ async fn read_connections_are_read_only_and_run_concurrently() {
         .unwrap();
     {
         let slot = database.inner.read().unwrap();
-        slot.as_ref().unwrap().readers.assert_read_only();
+        slot.as_ref().unwrap().access.readers.assert_read_only();
     }
     let hold_reader = |database: Database| {
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let held = std::thread::spawn(move || {
             let slot = database.inner.read().unwrap();
-            let _reader = slot.as_ref().unwrap().readers.acquire_reader();
+            let _reader = slot.as_ref().unwrap().access.readers.acquire_reader();
             entered_tx.send(()).unwrap();
             release_rx
                 .recv_timeout(std::time::Duration::from_secs(10))
@@ -160,7 +160,7 @@ async fn closing_waits_for_a_borrowed_connection_before_releasing_the_lock() {
     let clone = database.clone();
     let worker = std::thread::spawn(move || {
         let slot = clone.inner.read().unwrap();
-        let reader = slot.as_ref().unwrap().readers.acquire_reader();
+        let reader = slot.as_ref().unwrap().access.readers.acquire_reader();
         entered_tx.send(()).unwrap();
         release_rx
             .recv_timeout(std::time::Duration::from_secs(10))
@@ -292,8 +292,8 @@ async fn opening_checks_integrity_once_for_all_its_connections() {
     {
         let slot = database.inner.read().unwrap();
         let inner = slot.as_ref().unwrap();
-        let checks =
-            inner.readers.integrity_checks() + inner.writer.lock().unwrap().integrity_checks();
+        let checks = inner.access.readers.integrity_checks()
+            + inner.access.writer.lock().unwrap().integrity_checks();
         assert_eq!(checks, 1);
         let slot = reader.inner.read().unwrap();
         assert_eq!(slot.as_ref().unwrap().readers.integrity_checks(), 1);

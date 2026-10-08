@@ -54,7 +54,12 @@ impl FileDatabase {
                 database
                     .call(move |inner| {
                         inner.with_writer(|writer| {
-                            run(writer, &inner.write_schema, &inner.directory, inner.device)
+                            run(
+                                writer,
+                                &inner.access.write_schema,
+                                &inner.access.directory,
+                                inner.access.device,
+                            )
                         })
                     })
                     .await
@@ -62,8 +67,8 @@ impl FileDatabase {
             FileDatabaseAccess::Reader(database) => {
                 database
                     .call(move |inner| {
-                        super::with_connection(&inner.cache_writer, |writer| {
-                            run(writer, &inner.schema, &inner.directory, inner.device)
+                        super::with_connection(&inner.writer, |writer| {
+                            run(writer, &inner.write_schema, &inner.directory, inner.device)
                         })
                     })
                     .await
@@ -256,8 +261,8 @@ impl FileDatabase {
             .call(move |inner| {
                 inner.with_files(Vec::new(), |writer, files| {
                     writer.local_write(
-                        &inner.write_schema,
-                        inner.device,
+                        &inner.access.write_schema,
+                        inner.access.device,
                         inner.clock.now(),
                         files,
                         |sql| {
@@ -268,7 +273,7 @@ impl FileDatabase {
                             )? {
                                 return Err(DbError::DamagedDatabase);
                             }
-                            match file_ref::validate(writer, &inner.write_schema, &file) {
+                            match file_ref::validate(writer, &inner.access.write_schema, &file) {
                                 Err(DbError::FileRefChanged { .. }) => {
                                     writer.internal_execute(
                                         "UPDATE _coven_file_uploads SET unused=1 WHERE id=?1",
@@ -355,6 +360,7 @@ impl FileDatabase {
                     };
                 };
                 let reads = inner
+                    .access
                     .write_schema
                     .declarations
                     .iter()
@@ -535,14 +541,18 @@ impl CacheReservation {
                     let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
                     inner.with_writer(|writer| {
                         writer.transaction(|db| {
-                            file_ref::validate(db, &inner.write_schema, &file)?;
-                            cache::publish(db, &inner.directory, &file, &pending.name)
+                            file_ref::validate(db, &inner.access.write_schema, &file)?;
+                            cache::publish(db, &inner.access.directory, &file, &pending.name)
                         })?;
                         let mut active = inner.staging.lock().expect("staging lock poisoned");
                         active.remove(&pending.name);
                         pending.lease.take();
-                        crate::file_removals::FileRemovals::new(writer, &inner.directory, &active)
-                            .finish(Ok::<_, DbError>(()))
+                        crate::file_removals::FileRemovals::new(
+                            writer,
+                            &inner.access.directory,
+                            &active,
+                        )
+                        .finish(Ok::<_, DbError>(()))
                     })?;
                 }
                 Ok(())
