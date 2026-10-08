@@ -15,7 +15,7 @@ use rusqlite::{params, types::Type, Row};
 use crate::{
     sqlite::DatabaseConnection,
     store_log::*,
-    write_encoding::{audience, audience_text, counter, decoded},
+    write_encoding::{audience, audience_text, counter, decode_failure, decoded},
     DbError, ReplayEntry, StoreLogCheck,
 };
 
@@ -27,9 +27,8 @@ pub(crate) fn entry_id(row: &Row<'_>, start: usize) -> rusqlite::Result<EntryId>
 }
 
 fn member(row: &Row<'_>, column: usize) -> rusqlite::Result<MemberId> {
-    MemberId::from_bytes(row.get(column)?).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(column, Type::Blob, Box::new(error))
-    })
+    MemberId::from_bytes(row.get(column)?)
+        .map_err(|error| decode_failure(column, Type::Blob, error))
 }
 
 fn circle(text: String) -> rusqlite::Result<CircleId> {
@@ -78,9 +77,8 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
                 return Err(rusqlite::Error::InvalidQuery);
             };
             let outcome = outcome(row, 1)?;
-            let check = StoreLogCheck::decode(&row.get::<_, Vec<u8>>(4)?).map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(4, Type::Blob, Box::new(error))
-            })?;
+            let check = StoreLogCheck::decode(&row.get::<_, Vec<u8>>(4)?)
+                .map_err(|error| decode_failure(4, Type::Blob, error))?;
             Ok((ReplayEntry { entry, check }, outcome))
         },
     )? {
@@ -105,15 +103,8 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
                         sealing: SealingPublicKey::from_bytes(row.get(1)?),
                         role,
                         removed: row.get(3)?,
-                        access: serde_json::from_slice(&row.get::<_, Vec<u8>>(4)?).map_err(
-                            |e| {
-                                rusqlite::Error::FromSqlConversionFailure(
-                                    4,
-                                    Type::Blob,
-                                    Box::new(e),
-                                )
-                            },
-                        )?,
+                        access: serde_json::from_slice(&row.get::<_, Vec<u8>>(4)?)
+                            .map_err(|error| decode_failure(4, Type::Blob, error))?,
                     },
                 ))
             },
@@ -170,9 +161,8 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
     state.store = database
         .query("SELECT id,name,key FROM _coven_store", [], |row| {
             let text: String = row.get(0)?;
-            let id = uuid::Uuid::parse_str(&text).map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
-            })?;
+            let id = uuid::Uuid::parse_str(&text)
+                .map_err(|error| decode_failure(0, Type::Text, error))?;
             Ok(StoreIdentity {
                 id: StoreId(id),
                 name: row.get(1)?,

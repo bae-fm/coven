@@ -25,8 +25,15 @@ pub(crate) fn encoded<T>(result: Result<T, coven_format::Error>) -> Result<T, Db
 }
 
 pub(crate) fn decoded<T>(result: Result<T, coven_format::Error>) -> rusqlite::Result<T> {
-    result
-        .map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, Type::Blob, Box::new(error)))
+    result.map_err(|error| decode_failure(0, Type::Blob, error))
+}
+
+pub(crate) fn decode_failure(
+    column: usize,
+    kind: Type,
+    error: impl std::error::Error + Send + Sync + 'static,
+) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(column, kind, Box::new(error))
 }
 
 /// Writes and entries share a clock; fixed local entries count even before upload.
@@ -107,9 +114,7 @@ pub(crate) fn audience(text: &str) -> rusqlite::Result<Audience> {
     } else {
         uuid::Uuid::parse_str(text)
             .map(|id| Audience::Circle(coven_foundation::id_source::CircleId(id)))
-            .map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
-            })
+            .map_err(|error| decode_failure(0, Type::Text, error))
     }
 }
 

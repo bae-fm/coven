@@ -238,7 +238,7 @@ impl Database {
                     [],
                     |r| Ok(crate::AccessKeyToDelete {
                         access_key_id: r.get(0)?,
-                        member: r.get::<_, Option<[u8; 32]>>(1)?.map(coven_crypto::MemberId::from_bytes).transpose().map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Blob, Box::new(e)))?,
+                        member: r.get::<_, Option<[u8; 32]>>(1)?.map(coven_crypto::MemberId::from_bytes).transpose().map_err(|e| crate::write_encoding::decode_failure(1, rusqlite::types::Type::Blob, e))?,
                     }),
                 )
             })
