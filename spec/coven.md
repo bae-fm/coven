@@ -2197,8 +2197,8 @@ Carol's tablet:
     chunks, checks its content hash, and syncs it before publishing the pin.
     Publication replaces the separate cached chunks atomically. Cancellation
     or a crash leaves no partially downloaded file exempt from eviction.
-- The app can also fetch an uploaded file into the cache ahead of reading
-  it, or remove it from the cache, which never touches storage.
+- The app can remove an uploaded file from the cache, which never touches
+  storage.
 
 ### 16.5 Uploads and deletion
 

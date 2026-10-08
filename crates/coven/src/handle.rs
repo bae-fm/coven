@@ -314,12 +314,6 @@ impl CovenHandle {
         self.files.open_file_stream(file).await
     }
 
-    /// Checks a local file, or downloads and checks an uploaded file through
-    /// the cache. Missing chunks require connected storage.
-    pub async fn ensure_file_on_device(&self, file: &FileRef) -> Result<(), FileReadError> {
-        self.files.ensure_file_on_device(file).await
-    }
-
     /// The path, size and modification time coven recorded for a row's
     /// user-provided file, or `None` when the row has none.
     pub async fn user_file(

@@ -206,7 +206,6 @@ async fn originals_owned_copies_ranges_references_and_deletion_use_the_app_api()
         stream.read_at(u64::MAX, 2).await,
         Err(FileReadError::RangeOutOfBounds { .. })
     ));
-    handle.ensure_file_on_device(&recording).await.unwrap();
     let note = note_id.clone();
     let thumbnail = thumbnail_id.clone();
     let supplied = thumbnail.clone();

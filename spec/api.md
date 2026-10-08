@@ -2232,10 +2232,6 @@ impl CovenHandle {
     /// Its shared store lock prevents deletion until it and its I/O finish.
     pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError>;
 
-    /// Makes sure a file's bytes are on this device: an uploaded file is
-    /// downloaded into the cache, and one waiting to upload here is checked.
-    pub async fn ensure_file_on_device(&self, file: &FileRef) -> Result<(), FileReadError>;
-
     /// The path, size and modification time coven recorded for a row's
     /// user-provided file, or `None` when the row has none.
     pub async fn user_file(&self, table: &str, key: impl Into<RowKey>) -> Result<Option<UserFile>, DbError>;

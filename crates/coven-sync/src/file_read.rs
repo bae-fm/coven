@@ -82,13 +82,6 @@ impl Files {
             .read_at(0, file.plaintext_size())
             .await
     }
-    /// Fetch an uploaded file through the cache, or check its declared local copy.
-    pub async fn ensure_file_on_device(&self, file: &FileRef) -> Result<(), FileReadError> {
-        let stream = self.open_file_stream(file).await?;
-        let mut range = stream.read_range(0, stream.plaintext_size())?;
-        while range.next().await?.is_some() {}
-        Ok(())
-    }
 }
 impl FileStream {
     /// Complete plaintext size.
