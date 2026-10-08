@@ -1322,7 +1322,6 @@ impl CovenReadHandle {
     pub async fn user_file(&self, table: &str, key: impl Into<RowKey>) -> Result<Option<UserFile>, DbError>;
     pub async fn read_file(&self, file: &FileRef) -> Result<Vec<u8>, FileReadError>;
     pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError>;
-    pub async fn is_pinned(&self, files: &[FileRef]) -> Result<bool, FileReadError>;
     pub fn open_app_data(&self, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>, SealError>;
 }
 ```
@@ -2247,9 +2246,6 @@ impl CovenHandle {
 
     /// Stops keeping files; they stay in the cache until the budget evicts them.
     pub async fn unpin(&self, files: &[FileRef]) -> Result<(), FileReadError>;
-
-    /// Whether every file in `files` is pinned. An empty set is pinned.
-    pub async fn is_pinned(&self, files: &[FileRef]) -> Result<bool, FileReadError>;
 
     /// Whether each row's file is pinned, one answer per key in order, or
     /// `None` for a key with no row carrying a file. A file not yet uploaded

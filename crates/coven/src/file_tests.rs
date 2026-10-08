@@ -404,6 +404,8 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
     let thumbnail = ids.new_id().to_string();
     let supplied = thumbnail.clone();
     let row = thumbnail.clone();
+    let unattached = ids.new_id().to_string();
+    let empty_row = unattached.clone();
     handle
         .write_with_files(
             move |batch| {
@@ -416,6 +418,10 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
                     "INSERT INTO thumbnails(id,note_id,title) VALUES(?1,?2,'preview')",
                     (&row, &note),
                 )?;
+                sql.execute(
+                    "INSERT INTO thumbnails(id,note_id,title) VALUES(?1,?2,'without file')",
+                    (&empty_row, &note),
+                )?;
                 Ok(())
             },
         )
@@ -423,6 +429,24 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         .unwrap();
     let mut uploads = handle.subscribe_uploads();
     assert_eq!(uploads.next().await.unwrap().files.len(), 1);
+    let keys = vec![
+        "absent".into(),
+        unattached.as_str().into(),
+        thumbnail.as_str().into(),
+        thumbnail.as_str().into(),
+    ];
+    assert_eq!(
+        handle
+            .rows_pinned("thumbnails", keys.clone())
+            .await
+            .unwrap(),
+        vec![None, None, Some(false), Some(false)]
+    );
+    assert!(handle
+        .rows_pinned("thumbnails", vec![])
+        .await
+        .unwrap()
+        .is_empty());
     handle.set_uploads_paused(false);
     handle.retry_uploads_now().await.unwrap();
     let file = handle
@@ -441,6 +465,16 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         .unwrap();
     assert_eq!(pins.next().await.unwrap(), vec![Some(true), None]);
     assert_eq!(
+        handle.rows_pinned("thumbnails", keys).await.unwrap(),
+        vec![None, None, Some(true), Some(true)]
+    );
+    pins.set_rows(
+        "thumbnails",
+        vec!["absent".into(), thumbnail.as_str().into()],
+    )
+    .unwrap();
+    assert_eq!(pins.next().await.unwrap(), vec![None, Some(true)]);
+    assert_eq!(
         handle
             .file_ref("thumbnails", thumbnail.as_str())
             .await
@@ -455,7 +489,7 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
     let stream = readonly.open_file_stream(&file).await.unwrap();
     assert_eq!(stream.read_at(1234, 37).await.unwrap(), vec![42; 37]);
     handle.evict_file(&file).await.unwrap();
-    assert_eq!(pins.next().await.unwrap(), vec![Some(false), None]);
+    assert_eq!(pins.next().await.unwrap(), vec![None, Some(false)]);
     assert_eq!(
         handle
             .file_ref("thumbnails", thumbnail.as_str())

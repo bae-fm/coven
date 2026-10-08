@@ -141,16 +141,6 @@ impl Files {
         self.inner.notify();
         Ok(())
     }
-    /// Whether every supplied uploaded file has a complete pin.
-    pub async fn is_pinned(&self, files: &[FileRef]) -> Result<bool, FileReadError> {
-        self.inner.check_open()?;
-        for file in files {
-            if !self.inner.database.is_pinned(file).await? {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
     /// Pin answers in key order; an absent row or unattached file is `None`.
     pub async fn rows_pinned(
         &self,

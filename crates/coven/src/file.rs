@@ -26,10 +26,6 @@ impl CovenHandle {
     pub async fn unpin(&self, files: &[FileRef]) -> Result<(), FileReadError> {
         self.files.unpin(files).await
     }
-    /// Whether every requested file is pinned; an empty list is pinned.
-    pub async fn is_pinned(&self, files: &[FileRef]) -> Result<bool, FileReadError> {
-        self.files.is_pinned(files).await
-    }
     /// Pin state in key order; absent files produce `None`.
     pub async fn rows_pinned(
         &self,

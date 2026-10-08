@@ -259,21 +259,25 @@ async fn budgets_pins_eviction_and_second_device_reads() {
         })
         .await
         .unwrap();
-    assert!(f
-        .files
-        .is_pinned(std::slice::from_ref(&file))
-        .await
-        .unwrap());
+    assert_eq!(
+        f.files
+            .rows_pinned("files", vec!["first".into()])
+            .await
+            .unwrap(),
+        vec![Some(true)]
+    );
     assert_eq!(progress.lock().unwrap().last().unwrap().files_completed, 1);
     let requests = f.storage.request_count();
     assert_eq!(f.files.read_file(&file).await.unwrap(), bytes);
     assert_eq!(f.storage.request_count(), requests);
     f.files.unpin(std::slice::from_ref(&file)).await.unwrap();
-    assert!(!f
-        .files
-        .is_pinned(std::slice::from_ref(&file))
-        .await
-        .unwrap());
+    assert_eq!(
+        f.files
+            .rows_pinned("files", vec!["first".into()])
+            .await
+            .unwrap(),
+        vec![Some(false)]
+    );
     let stream = f.files.open_file_stream(&file).await.unwrap();
     stream.read_at(CHUNK as u64, 1).await.unwrap();
     let before = f.storage.request_count();
@@ -520,7 +524,13 @@ async fn whole_reads_and_pins_check_the_row_hash_after_authenticating_chunks() {
         files.pin(std::slice::from_ref(&file), &|_| {}).await,
         Err(FileReadError::Integrity { .. })
     ));
-    assert!(!files.is_pinned(&[file]).await.unwrap());
+    assert_eq!(
+        files
+            .rows_pinned("files", vec!["hash".into()])
+            .await
+            .unwrap(),
+        vec![Some(false)]
+    );
     files.close().await;
     b.close().await;
     a.close().await;
