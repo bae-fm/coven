@@ -81,7 +81,7 @@ pub use coven_sync::{
 
 mod storage;
 pub use coven_storage::providers::StorageConnector;
-pub use coven_storage::{StorageSetupError, StorageSetupFailure};
+pub use coven_storage::{StorageCheck, StorageSetupError, StorageSetupFailure};
 pub use storage::{ConnectedStorage, StoreKeyState, StoreKeyUnlockError};
 
 #[cfg(test)]

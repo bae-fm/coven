@@ -422,7 +422,7 @@ async fn conformance_ranges_pagination_and_account_sharing() {
         .run()
         .await
         .unwrap();
-    assert_eq!(state.lock().unwrap().range_reads, 7);
+    assert_eq!(state.lock().unwrap().range_reads, 6);
     assert!(matches!(
         storage.grant_access("member@example.com").await.unwrap(),
         AccessGrant::Granted { .. }

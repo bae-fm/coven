@@ -25,6 +25,10 @@ pub struct Faults {
     pub lose_completion_reply: bool,
     /// Expire all pending sessions before the next call.
     pub expire_uploads: bool,
+    /// Accept creates at occupied paths, violating the provider contract.
+    pub overwrite_create: bool,
+    /// Refuse a duplicate create but fail to abort its upload session.
+    pub fail_duplicate_cleanup: bool,
 }
 impl Faults {
     /// No failures or delays.
@@ -37,6 +41,8 @@ impl Faults {
             lose_part_reply: false,
             lose_completion_reply: false,
             expire_uploads: false,
+            overwrite_create: false,
+            fail_duplicate_cleanup: false,
         }
     }
 }
@@ -458,7 +464,13 @@ impl Storage for MemoryStorage {
                     .map_err(|_| StorageError::Protocol("creation release dropped"))?;
             }
             let mut state = self.state.lock().await;
-            if state.objects.contains_key(path) {
+            if state.objects.contains_key(path) && !state.faults.overwrite_create {
+                if state.faults.fail_duplicate_cleanup {
+                    return Err(StorageError::Cleanup {
+                        operation: Box::new(StorageError::AlreadyExists),
+                        cleanup: Box::new(StorageError::Injected(StorageFailure::Network)),
+                    });
+                }
                 return Err(StorageError::AlreadyExists);
             }
             state.objects.insert(
@@ -661,7 +673,7 @@ impl Storage for MemoryStorage {
             return Err(StorageError::InvalidPart);
         }
         let mut state = self.state.lock().await;
-        if state.objects.contains_key(path) {
+        if state.objects.contains_key(path) && !state.faults.overwrite_create {
             return Err(StorageError::AlreadyExists);
         }
         let id = state.next;
@@ -750,7 +762,7 @@ impl Storage for MemoryStorage {
         if pending.bytes.len() as u64 != session.total || session.confirmed != session.total {
             return Err(StorageError::InvalidPart);
         }
-        if state.objects.contains_key(&session.path) {
+        if state.objects.contains_key(&session.path) && !state.faults.overwrite_create {
             return Err(StorageError::AlreadyExists);
         }
         let pending = state
@@ -912,7 +924,6 @@ impl Conformance {
             ));
         }
         self.storage.delete(&path).await?;
-        self.storage.probe(&path, data).await?;
         let first = ObjectPath::store_log(DeviceId(31), std::num::NonZeroU64::MIN);
         self.storage
             .setup(&first, data)

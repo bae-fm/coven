@@ -56,7 +56,7 @@ impl CovenHandle {
         self.files.set_transfer_limits(limits);
     }
 
-    /// Set up and connect an S3 location using this member's own access key.
+    /// Check provider operations, then set up S3 using this member's own access key.
     pub async fn setup_s3_storage(
         &self,
         storage: StorageConfig,
@@ -68,7 +68,7 @@ impl CovenHandle {
             .setup_s3(storage, device_name, access_key_id, secret_access_key)
             .await
     }
-    /// Sign in and set up a Google Drive, Dropbox or OneDrive location.
+    /// Sign in, check provider operations and set up Google Drive, Dropbox or OneDrive.
     pub async fn setup_oauth_storage(
         &self,
         storage: StorageConfig,
@@ -77,17 +77,13 @@ impl CovenHandle {
     ) -> Result<ConnectedStorage, StorageSetupError> {
         self.storage.setup_oauth(storage, device_name, cancel).await
     }
-    /// Set up an iCloud location through the configured native bridge.
+    /// Check provider operations and set up iCloud through the configured native bridge.
     pub async fn setup_cloudkit_storage(
         &self,
         storage: StorageConfig,
         device_name: &str,
     ) -> Result<ConnectedStorage, StorageSetupError> {
         self.storage.setup_cloudkit(storage, device_name).await
-    }
-    /// Check provider operations using this device's stored credentials.
-    pub async fn probe_storage(&self, storage: &StorageConfig) -> Result<(), SyncError> {
-        self.storage.probe(storage).await
     }
     /// Open this member's sealed keys and connect without starting the loop.
     pub async fn unlock_store_key(&self) -> Result<ConnectedStorage, StoreKeyUnlockError> {

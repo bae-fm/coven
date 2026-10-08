@@ -1374,6 +1374,15 @@ while let Ok(values) = lost.next().await {
     `LocationOccupied`.
   - Creating uploads the store's first entry and its key sealed to this
     member; waiting writes then go up through sync like any others.
+- Every setup, including reconnection, reaches the candidate provider with the
+  newly supplied credentials and checks it before reserving or publishing a
+  store entry or committing local state. A fresh sealed test object must be
+  created once, refuse a second create at that path, return the original bytes
+  through whole and interior ranged reads, appear with its size in a listing,
+  and disappear after deletion. Cleanup runs even after a lost create reply;
+  a path already occupied before the check is left untouched. A failed check
+  returns `StorageSetupFailure::ProviderCheck`, naming the operation and its
+  classified cause; the error retains a cleanup failure too if both fail.
 - Setup commits the storage credentials, keys, location and restore code only
   once the connection is ready. Failure preserves their previous values and
   the previous connection. The fixed first-entry or access-update attempt stays
@@ -1564,6 +1573,8 @@ impl ProviderResponse {
 
 /// Storage setup failed before committing credentials and keys (E5).
 pub enum StorageSetupError {
+    /// A provider check failed; cleanup failures retain both causes.
+    ProviderCheck { check: StorageCheck, source: StorageError },
     /// Another store already occupies the location.
     LocationOccupied,
     /// The provider refused or failed setup.
@@ -1578,8 +1589,26 @@ pub enum StorageSetupError {
     Internal(Box<dyn std::error::Error + Send + Sync>),
 }
 
+/// The provider operation checked before setup commits anything (E5).
+pub enum StorageCheck {
+    /// Create a fresh sealed object.
+    Create,
+    /// Refuse a second create at the same path.
+    CreateOnce,
+    /// Read the original bytes in full.
+    Read,
+    /// Read exactly an interior byte range.
+    ReadRange,
+    /// Include the object and its size in a listing.
+    List,
+    /// Delete the object and confirm it is absent.
+    Delete,
+}
+
 /// The setup failure the app presents, classified by `failure()` (E5).
 pub enum StorageSetupFailure {
+    /// The failed operation and its cause; contract violations are `Protocol`.
+    ProviderCheck { check: StorageCheck, failure: StorageFailure },
     /// Sign-in did not complete or the credentials were rejected.
     Authentication,
     /// The account lacks access.
@@ -1805,10 +1834,6 @@ impl CovenHandle {
         storage: StorageConfig,
         device_name: &str,
     ) -> Result<ConnectedStorage, StorageSetupError>;
-
-    /// Checks that the storage `storage` describes can be reached and used,
-    /// without connecting to it.
-    pub async fn probe_storage(&self, storage: &StorageConfig) -> Result<(), SyncError>;
 
     /// Opens the current store key from its copy sealed to this member in
     /// storage (§11), keeps it in key custody, and connects, without

@@ -104,7 +104,7 @@ pub enum StorageError {
         /// The original failure.
         #[source]
         operation: Box<StorageError>,
-        /// Failure removing the probe or unfinished upload.
+        /// Failure removing the setup test object or unfinished upload.
         cleanup: Box<StorageError>,
     },
 }
@@ -143,9 +143,33 @@ impl StorageError {
     }
 }
 
+/// The provider operation checked before setup commits anything (E5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StorageCheck {
+    /// Create a fresh sealed object.
+    Create,
+    /// Refuse a second create at the same path.
+    CreateOnce,
+    /// Read the original bytes in full.
+    Read,
+    /// Read exactly an interior byte range.
+    ReadRange,
+    /// Include the object and its size in a listing.
+    List,
+    /// Delete the object and confirm it is absent.
+    Delete,
+}
+
 /// Setup failures shown by the app (E5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StorageSetupFailure {
+    /// A provider check failed before setup could commit.
+    ProviderCheck {
+        /// The operation that failed.
+        check: StorageCheck,
+        /// The classified cause; contract violations are `Protocol`.
+        failure: StorageFailure,
+    },
     /// Provider credentials were refused.
     Authentication,
     /// The account cannot use this location.
@@ -173,6 +197,15 @@ pub enum StorageSetupFailure {
 /// A failed setup commits no local storage settings or credentials.
 #[derive(Debug, thiserror::Error)]
 pub enum StorageSetupError {
+    /// A provider check failed; cleanup failures retain both causes.
+    #[error("storage check {check:?}: {source}")]
+    ProviderCheck {
+        /// The operation that failed.
+        check: StorageCheck,
+        /// The original failure, including cleanup if that also failed.
+        #[source]
+        source: StorageError,
+    },
     /// The location already contains another store.
     #[error("storage location is occupied")]
     LocationOccupied,
@@ -198,6 +231,10 @@ impl StorageSetupError {
     pub fn failure(&self) -> StorageSetupFailure {
         use StorageSetupFailure as S;
         match self {
+            Self::ProviderCheck { check, source } => S::ProviderCheck {
+                check: *check,
+                failure: source.failure(),
+            },
             Self::LocationOccupied => S::LocationOccupied,
             Self::MemberKeysMissing => S::MemberKeysMissing,
             Self::SecureStorage(_) => S::SecureStorage,

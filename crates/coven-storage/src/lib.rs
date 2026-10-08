@@ -9,6 +9,8 @@ mod credentials;
 mod error;
 mod invitation;
 mod path;
+mod provider_check;
+pub use provider_check::check_provider;
 pub mod providers;
 mod restore_storage;
 mod secret_json;

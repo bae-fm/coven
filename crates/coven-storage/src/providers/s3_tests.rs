@@ -1,5 +1,6 @@
 use super::*;
 use crate::providers::tests::{query, read, response, TestServer};
+use crate::{check_provider, StorageCheck};
 use axum::{
     body::{Body, Bytes},
     extract::State,
@@ -31,6 +32,7 @@ struct Remote {
     deletions: usize,
     fail_completion_reply: bool,
     setup_barrier: Option<Arc<tokio::sync::Barrier>>,
+    broken_check: Option<StorageCheck>,
     forced_error: Option<(&'static str, u16)>,
 }
 async fn endpoint(
@@ -146,6 +148,12 @@ fn respond(
         return response(204, Vec::new());
     }
     if q.contains_key("list-type") {
+        if state.broken_check == Some(StorageCheck::List) {
+            return response(
+                200,
+                "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>",
+            );
+        }
         let prefix = &q["prefix"];
         let after = q.get("continuation-token");
         let entries: Vec<_> = state
@@ -172,7 +180,13 @@ fn respond(
     }
     match method {
         Method::PUT => {
-            if headers.get("if-none-match").is_some() && state.objects.contains_key(&key) {
+            if state.broken_check == Some(StorageCheck::Create) {
+                return response(403, "<Error><Code>AccessDenied</Code></Error>");
+            }
+            if headers.get("if-none-match").is_some()
+                && state.objects.contains_key(&key)
+                && state.broken_check != Some(StorageCheck::CreateOnce)
+            {
                 return response(412, "<Error><Code>PreconditionFailed</Code></Error>");
             }
             state.objects.insert(key, body.to_vec());
@@ -182,6 +196,14 @@ fn respond(
             response(200, Vec::new())
         }
         Method::GET => match state.objects.get(&key) {
+            Some(bytes) if state.broken_check == Some(StorageCheck::Read) => {
+                let mut damaged = bytes.clone();
+                damaged[0] ^= 1;
+                read(&damaged, &headers)
+            }
+            Some(bytes) if state.broken_check == Some(StorageCheck::ReadRange) => {
+                response(200, bytes.clone())
+            }
             Some(bytes) => read(bytes, &headers),
             None => response(404, "<Error><Code>NoSuchKey</Code></Error>"),
         },
@@ -205,7 +227,9 @@ fn respond(
             if state.refuse_delete {
                 return response(403, "<Error><Code>AccessDenied</Code></Error>");
             }
-            state.objects.remove(&key);
+            if state.broken_check != Some(StorageCheck::Delete) {
+                state.objects.remove(&key);
+            }
             response(204, Vec::new())
         }
         _ => panic!("unexpected S3 request: {uri}"),
@@ -436,7 +460,7 @@ async fn simultaneous_setups_expose_both_first_entries_for_sync() {
 }
 
 #[tokio::test]
-async fn probe_cleans_up_after_a_lost_create_reply_and_retains_both_failures() {
+async fn provider_check_cleans_up_after_a_lost_create_reply_and_retains_both_failures() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
@@ -446,15 +470,25 @@ async fn probe_cleans_up_after_a_lost_create_reply_and_retains_both_failures() {
     );
     state.lock().unwrap().lose_create_reply = true;
     assert_eq!(
-        storage.probe(&path, b"probe").await.unwrap_err().failure(),
-        StorageFailure::Network
+        check_provider(&storage, &path, b"sealed test bytes")
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageSetupFailure::ProviderCheck {
+            check: StorageCheck::Create,
+            failure: StorageFailure::Network
+        }
     );
     assert!(state.lock().unwrap().objects.is_empty());
     assert_eq!(state.lock().unwrap().deletions, 1);
     state.lock().unwrap().lose_create_reply = true;
     state.lock().unwrap().refuse_delete = true;
-    let StorageError::Cleanup { operation, cleanup } =
-        storage.probe(&path, b"probe").await.unwrap_err()
+    let StorageSetupError::ProviderCheck {
+        check: StorageCheck::Create,
+        source: StorageError::Cleanup { operation, cleanup },
+    } = check_provider(&storage, &path, b"sealed test bytes")
+        .await
+        .unwrap_err()
     else {
         panic!("both failures must reach the caller")
     };
@@ -464,13 +498,21 @@ async fn probe_cleans_up_after_a_lost_create_reply_and_retains_both_failures() {
     assert!(matches!(*cleanup, StorageError::Provider { .. }));
     state.lock().unwrap().refuse_delete = false;
     storage.delete(&path).await.unwrap();
-    storage.probe(&path, b"probe").await.unwrap();
+    check_provider(&storage, &path, b"sealed test bytes")
+        .await
+        .unwrap();
     assert!(state.lock().unwrap().objects.is_empty());
     storage.create(&path, b"preexisting").await.unwrap();
     let deletes = state.lock().unwrap().deletions;
     assert_eq!(
-        storage.probe(&path, b"probe").await.unwrap_err().failure(),
-        StorageFailure::AlreadyExists
+        check_provider(&storage, &path, b"sealed test bytes")
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageSetupFailure::ProviderCheck {
+            check: StorageCheck::Create,
+            failure: StorageFailure::AlreadyExists
+        }
     );
     assert_eq!(state.lock().unwrap().deletions, deletes);
     assert_eq!(storage.read(&path).await.unwrap(), b"preexisting");
@@ -732,4 +774,72 @@ async fn replacement_key_signs_the_next_request_on_the_existing_client() {
     let signatures = signatures.lock().unwrap();
     assert!(signatures[0].contains("Credential=access/"));
     assert!(signatures[1].contains("Credential=replacement/"));
+}
+
+#[tokio::test]
+async fn provider_check_names_each_failed_operation_and_removes_its_object() {
+    for check in [
+        StorageCheck::Create,
+        StorageCheck::CreateOnce,
+        StorageCheck::Read,
+        StorageCheck::ReadRange,
+        StorageCheck::List,
+        StorageCheck::Delete,
+    ] {
+        let state = Arc::new(Mutex::new(Remote::default()));
+        let server =
+            TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+        let storage = provider(&server.url);
+        let path = ObjectPath::file(
+            coven_foundation::id_source::DeviceId(31),
+            coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xab; 16])),
+        );
+        state.lock().unwrap().broken_check = Some(check);
+        let error = check_provider(&storage, &path, b"sealed test bytes")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.failure(),
+            StorageSetupFailure::ProviderCheck {
+                check,
+                failure: if check == StorageCheck::Create {
+                    StorageFailure::PermissionDenied
+                } else {
+                    StorageFailure::Protocol
+                },
+            }
+        );
+        assert_eq!(
+            state.lock().unwrap().objects.len(),
+            usize::from(check == StorageCheck::Delete)
+        );
+        assert_eq!(state.lock().unwrap().deletions, 1);
+    }
+}
+
+#[tokio::test]
+async fn provider_check_preserves_unrelated_contents_and_reports_occupied() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    state
+        .lock()
+        .unwrap()
+        .objects
+        .insert("store/unrelated".into(), b"kept".to_vec());
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let path = ObjectPath::file(
+        coven_foundation::id_source::DeviceId(31),
+        coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xab; 16])),
+    );
+    assert_eq!(
+        check_provider(&storage, &path, b"sealed test bytes")
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageSetupFailure::LocationOccupied
+    );
+    assert_eq!(
+        state.lock().unwrap().objects,
+        BTreeMap::from([("store/unrelated".into(), b"kept".to_vec())])
+    );
 }

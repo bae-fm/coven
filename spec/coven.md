@@ -140,8 +140,9 @@
 - Every member reaches the storage using their own provider account.
 - On S3, each member has their own access key.
 - What coven needs from a provider:
-  - create an object, in one request or, past the provider's single
-    request limit, through its resumable upload;
+  - create an object, refusing an existing path without replacing its bytes,
+    in one request or, past the provider's single request limit, through its
+    resumable upload;
   - read it, whole and by range;
   - list a prefix, with when storage stored each object;
   - delete;
@@ -174,6 +175,13 @@
   - Taking access back removes only what grants that one account; a share
     that also grants others is left, and reported to the owner, who
     changes it in the provider.
+- Every storage setup, including reconnecting an existing device, checks the
+  candidate provider with the supplied credentials before reserving a store-log
+  entry or committing credentials, keys, location or restore code. It creates a
+  fresh sealed test object, requires a second create to be refused, verifies
+  whole and ranged reads and listing, then deletes the object and checks it is
+  absent. A failure names the failed check and preserves the previous connection
+  ([E5](api.md#e5-storage-and-sync)).
 - Setting up a store refuses a location that already holds another store,
   or anything that isn't a coven store.
   - Two devices setting up different stores in one empty location at the

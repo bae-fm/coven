@@ -303,57 +303,6 @@ pub trait Storage: Send + Sync {
         }
     }
 
-    /// Check create, read, range, list and delete using a fresh encrypted probe
-    /// supplied by the caller. The probe path must be unused; no connection or
-    /// local settings are committed. A failed cleanup is returned too.
-    /// Cleanup runs even after a lost create reply; an already-occupied path is
-    /// left intact. [`StorageError::Cleanup`] retains both failures when necessary.
-    async fn probe(&self, path: &ObjectPath, encrypted_bytes: &[u8]) -> Result<(), StorageError> {
-        let range = ByteRange::new(0, encrypted_bytes.len() as u64)?;
-        let created = self.create(path, encrypted_bytes).await;
-        if created
-            .as_ref()
-            .is_err_and(|error| error.failure() == crate::StorageFailure::AlreadyExists)
-        {
-            return created;
-        }
-        let check = async {
-            created?;
-            if self.read(path).await? != encrypted_bytes
-                || self.read_range(path, range).await? != encrypted_bytes
-            {
-                return Err(StorageError::Protocol("probe read disagrees with upload"));
-            }
-            match self.create(path, encrypted_bytes).await {
-                Err(error) if error.failure() == crate::StorageFailure::AlreadyExists => {}
-                Err(error) => return Err(error),
-                Ok(()) => {
-                    return Err(StorageError::Protocol(
-                        "provider overwrote a create-once path",
-                    ))
-                }
-            }
-            if !self
-                .list(&ObjectPrefix::all())
-                .await?
-                .iter()
-                .any(|object| &object.path == path)
-            {
-                return Err(StorageError::Protocol("probe absent from listing"));
-            }
-            Ok(())
-        }
-        .await;
-        match (check, self.delete(path).await) {
-            (Ok(()), cleanup) => cleanup,
-            (Err(error), Ok(())) => Err(error),
-            (Err(operation), Err(cleanup)) => Err(StorageError::Cleanup {
-                operation: Box::new(operation),
-                cleanup: Box::new(cleanup),
-            }),
-        }
-    }
-
     /// Create the store's first encrypted store-log entry at an empty location.
     /// Reconnect when the location contains that same entry, including when later
     /// objects have been uploaded. The facade commits settings and credentials

@@ -184,6 +184,18 @@ impl StorageConnections {
                 .connector
                 .connect(config.clone(), credentials.clone(), owner.device)
                 .await?;
+            let path = ObjectPath::file(owner.device, FileId(owner.ids.new_id()));
+            let plaintext = b"coven storage check";
+            let header = coven_format::file::FileHeader::new(plaintext.len() as u64);
+            let key = coven_crypto::FileKey::generate()
+                .map_err(|error| StorageSetupError::Internal(Box::new(error)))?;
+            let mut bytes = header.encode().to_vec();
+            bytes.extend(
+                header
+                    .seal_chunk(&key, path.as_str(), 0, plaintext)
+                    .map_err(|error| StorageSetupError::Internal(Box::new(error)))?,
+            );
+            coven_storage::check_provider(storage.as_ref(), &path, &bytes).await?;
             let access = match &credentials {
                 StorageCredentials::S3(keys) => coven_format::MemberAccess::S3AccessKey {
                     access_key_id: keys.access_key_id.clone(),
@@ -265,32 +277,6 @@ impl StorageConnections {
                     SyncError::Database(DbError::StoreClosed) => KeyError::StoreClosed,
                     error => KeyError::Unavailable(Box::new(error)),
                 })
-        }))
-        .await
-    }
-
-    pub(crate) async fn probe(self: &Arc<Self>, config: &StorageConfig) -> Result<(), SyncError> {
-        let owner = self.clone();
-        let config = config.clone();
-        crate::coven::completion(tokio::spawn(async move {
-            let _call = owner.calls.lock().await;
-            owner.check_open()?;
-            let data = owner.connection().await?.ok_or(SyncError::NoStorage)?;
-            let storage = owner
-                .connector
-                .connect(config.clone(), data.credentials, owner.device)
-                .await?;
-            let path = ObjectPath::file(owner.device, FileId(owner.ids.new_id()));
-            let plaintext = b"coven storage probe";
-            let header = coven_format::file::FileHeader::new(plaintext.len() as u64);
-            let key = coven_crypto::FileKey::generate()?;
-            let mut bytes = header.encode().to_vec();
-            bytes.extend(
-                header
-                    .seal_chunk(&key, path.as_str(), 0, plaintext)
-                    .map_err(|error| SyncFailure::Other(Arc::new(error)))?,
-            );
-            Ok(storage.probe(&path, &bytes).await?)
         }))
         .await
     }

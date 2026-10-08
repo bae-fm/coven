@@ -1,7 +1,7 @@
 use super::*;
 use coven_storage::{
     test_utils::{Faults, MemoryStorage},
-    Storage,
+    Storage, StorageSettings,
 };
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -427,70 +427,12 @@ async fn stop_start_idle_tick_offline_recovery_and_close_use_the_injected_clock(
 }
 
 #[tokio::test]
-async fn setup_network_failure_preserves_keys_and_connection_then_retry_succeeds() {
-    let f = Fixture::new().await;
-    f.storage
-        .set_faults(Faults {
-            fail_next: 1,
-            ..Faults::none()
-        })
-        .await;
-    assert_eq!(
-        f.setup().await.unwrap_err().failure(),
-        StorageSetupFailure::Network
-    );
-    assert_eq!(f.handle.store_key_state().unwrap(), StoreKeyState::Locked);
-    assert!(matches!(
-        &*f.handle.subscribe_sync_status().borrow(),
-        SyncStatus::Disconnected
-    ));
-    f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced(_))).await;
-    f.handle.stop_sync();
-    status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
-    f.app.fail_next_keychain_operation();
-    assert!(f.handle.disconnect_storage().await.is_err());
-    assert!(matches!(
-        &*f.handle.subscribe_sync_status().borrow(),
-        SyncStatus::Stopped
-    ));
-    f.handle.disconnect_storage().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Disconnected)).await;
-    f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced(_))).await;
-    f.handle.close().await.unwrap();
-    let reopened = builder(
-        &f.app,
-        StoreLayout::new(f._root.path().into()),
-        f.clock.clone(),
-        f.storage.clone(),
-    )
-    .open(f.directory.id())
-    .await
-    .unwrap();
-    assert!(matches!(
-        &*reopened.subscribe_sync_status().borrow(),
-        SyncStatus::Stopped
-    ));
-    reopened.start_sync().await.unwrap();
-    status(&reopened, |s| matches!(s, SyncStatus::Synced(_))).await;
-    reopened.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn probing_and_unlocking_preserve_the_requested_connection_lifetime() {
+async fn unlocking_preserves_the_requested_connection_lifetime() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced(_))).await;
     f.handle.stop_sync();
     status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
-    let objects = f.storage.list(&ObjectPrefix::all()).await.unwrap();
-    f.handle.probe_storage(&f.storage.config()).await.unwrap();
-    assert_eq!(objects, f.storage.list(&ObjectPrefix::all()).await.unwrap());
-    assert!(matches!(
-        &*f.handle.subscribe_sync_status().borrow(),
-        SyncStatus::Stopped
-    ));
     f.app.fail_next_keychain_operation();
     assert!(f.handle.forget_store_keys().await.is_err());
     assert_eq!(
@@ -648,21 +590,36 @@ async fn moving_storage_retries_a_partial_copy_before_committing_the_new_locatio
     .await
     .unwrap();
     let before = handle.restore_code().await.unwrap();
+    let (listed, listing) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    destination
+        .hold_next_listing(ObjectPrefix::all(), listed, resumed)
+        .await;
+    let setup = handle.setup_s3_storage(
+        config.clone(),
+        "Test device",
+        "member-key".into(),
+        SecretText::new("secret".into()),
+    );
+    tokio::pin!(setup);
+    tokio::select! {
+        result = &mut setup => panic!("setup finished while its provider check was held: {result:?}"),
+        _ = listing => {}
+    }
+    // Lose a history copy's reply after the check's test upload has completed.
     destination
         .set_faults(Faults {
             lose_completion_reply: true,
             ..Faults::none()
         })
         .await;
-    assert!(handle
-        .setup_s3_storage(
-            config.clone(),
-            "Test device",
-            "member-key".into(),
-            SecretText::new("secret".into())
-        )
+    resume.send(()).unwrap();
+    assert!(setup.await.is_err());
+    assert!(!destination
+        .list(&ObjectPrefix::all())
         .await
-        .is_err());
+        .unwrap()
+        .is_empty());
     assert_eq!(handle.restore_code().await.unwrap(), before);
     assert!(matches!(
         &*handle.subscribe_sync_status().borrow(),
@@ -909,4 +866,127 @@ async fn custody_failure_rolls_back_credentials_and_the_reserved_creation_requir
     setup("original").await.unwrap();
     assert_eq!(f.storage.read(&path).await.unwrap(), original);
     handle.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn setup_rejects_overwriting_providers_before_committing() {
+    let f = Fixture::new().await;
+    f.storage
+        .set_faults(Faults {
+            overwrite_create: true,
+            ..Faults::none()
+        })
+        .await;
+    assert_eq!(
+        f.setup().await.unwrap_err().failure(),
+        StorageSetupFailure::ProviderCheck {
+            check: StorageCheck::CreateOnce,
+            failure: StorageFailure::Protocol,
+        }
+    );
+    assert_eq!(f.handle.store_key_state().unwrap(), StoreKeyState::Locked);
+    assert!(matches!(
+        f.handle.restore_code().await,
+        Err(SyncError::NoStorage)
+    ));
+    assert!(matches!(
+        &*f.handle.subscribe_sync_status().borrow(),
+        SyncStatus::Disconnected
+    ));
+    assert!(f
+        .storage
+        .list(&ObjectPrefix::all())
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(f.handle.get_members().await.unwrap().is_empty());
+    assert_eq!(
+        StorageSettings::new(f.directory.clone()).read().unwrap(),
+        None
+    );
+    f.storage.set_faults(Faults::none()).await;
+    f.handle
+        .setup_s3_storage(
+            f.storage.config(),
+            "Another name",
+            "another-key".into(),
+            SecretText::new("another secret".into()),
+        )
+        .await
+        .unwrap();
+    f.handle.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn reconnect_checks_the_provider_and_preserves_the_previous_connection() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced(_))).await;
+    f.handle.stop_sync();
+    status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
+    let before = f.handle.restore_code().await.unwrap();
+    let settings = StorageSettings::new(f.directory.clone());
+    let location = settings.read().unwrap();
+    let objects = f.storage.list(&ObjectPrefix::all()).await.unwrap();
+    f.storage
+        .set_faults(Faults {
+            overwrite_create: true,
+            ..Faults::none()
+        })
+        .await;
+    let error = f
+        .handle
+        .setup_s3_storage(
+            f.storage.config(),
+            "Ignored name",
+            "replacement".into(),
+            SecretText::new("new secret".into()),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.failure(),
+        StorageSetupFailure::ProviderCheck {
+            check: StorageCheck::CreateOnce,
+            failure: StorageFailure::Protocol,
+        }
+    );
+    assert_eq!(f.handle.restore_code().await.unwrap(), before);
+    assert_eq!(settings.read().unwrap(), location);
+    assert_eq!(
+        f.handle.store_key_state().unwrap(),
+        StoreKeyState::Available
+    );
+    assert_eq!(f.storage.list(&ObjectPrefix::all()).await.unwrap(), objects);
+    assert!(matches!(
+        &*f.handle.subscribe_sync_status().borrow(),
+        SyncStatus::Stopped
+    ));
+    f.storage.set_faults(Faults::none()).await;
+    f.handle.disconnect_storage().await.unwrap();
+    f.storage
+        .set_faults(Faults {
+            overwrite_create: true,
+            ..Faults::none()
+        })
+        .await;
+    assert_eq!(
+        f.setup().await.unwrap_err().failure(),
+        StorageSetupFailure::ProviderCheck {
+            check: StorageCheck::CreateOnce,
+            failure: StorageFailure::Protocol,
+        }
+    );
+    assert!(matches!(
+        f.handle.restore_code().await,
+        Err(SyncError::NoStorage)
+    ));
+    assert!(matches!(
+        &*f.handle.subscribe_sync_status().borrow(),
+        SyncStatus::Disconnected
+    ));
+    assert_eq!(f.storage.list(&ObjectPrefix::all()).await.unwrap(), objects);
+    f.storage.set_faults(Faults::none()).await;
+    f.setup().await.unwrap();
+    f.handle.close().await.unwrap();
 }
