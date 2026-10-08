@@ -44,13 +44,8 @@ fn metadata_fields_are_the_bytes_in_snapshot_merge_records() {
         &fixture::oracle(),
     )
     .unwrap();
-    merged.removed = BTreeSet::from([
-        Rule::ForeignKey(coven_merge::ForeignKey::new(["parent_fk"], "t", ["id"])),
-        Rule::Check("valid".into()),
-        Rule::Unique(["distinct"].into()),
-    ]);
     let mut header = fixture::snapshot_header();
-    header.counts = [0, 0, 0, 1, 0, 0];
+    header.counts = [0, 0, 0, 1, 0];
     let (mut encoder, _) = SnapshotEncoder::start(header).unwrap();
     let frame = encoder
         .record(SnapshotRecord::Merge(merged.clone()))
@@ -88,34 +83,12 @@ fn metadata_fields_are_the_bytes_in_snapshot_merge_records() {
             decode_column_value,
         );
     }
-    assert_eq!(
-        u32::get(&mut input).unwrap() as usize,
-        merged.state.lost().len()
-    );
-    for (key, lost) in merged.state.lost() {
-        assert_eq!(String::get(&mut input).unwrap(), key.column);
-        take_field(&mut input, &key.write, encode_write_id, decode_write_id);
-        assert_eq!(u64::get(&mut input).unwrap(), lost.incarnation);
-        take_field(
-            &mut input,
-            &lost.value,
-            encode_column_value,
-            decode_column_value,
-        );
-        take_field(
-            &mut input,
-            &lost.replaced_by,
-            encode_write_id,
-            decode_write_id,
-        );
-    }
-    take_field(&mut input, &merged.removed, encode_rules, decode_rules);
     input.finish().unwrap();
     encoder.finish().unwrap();
 }
 
 #[test]
-fn applied_write_and_lost_write_fields_match_snapshot_records() {
+fn applied_write_and_loss_fields_match_snapshot_records() {
     let (mut encoder, _) = SnapshotEncoder::start(fixture::snapshot_header()).unwrap();
     for record in fixture::snapshot_records() {
         let bytes = encoder.record(record.clone()).unwrap();
@@ -137,21 +110,12 @@ fn applied_write_and_lost_write_fields_match_snapshot_records() {
                 );
                 input.finish().unwrap();
             }
-            SnapshotRecord::LostWrite(write) => {
+            SnapshotRecord::Loss(loss) => {
                 assert_eq!(
-                    crate::write::WriteHeader::get(&mut input).unwrap(),
-                    write.header
-                );
-                assert_eq!(
-                    coven_merge::Audience::get(&mut input).unwrap(),
-                    write.audience
-                );
-                assert_eq!(u64::get(&mut input).unwrap(), write.row_count);
-                take_field(
-                    &mut input,
-                    &write.cause,
-                    encode_lost_write_cause,
-                    decode_lost_write_cause,
+                    input
+                        .take(bytes.len() - crate::FRAME_PREFIX_LEN - 1)
+                        .unwrap(),
+                    encode_loss(&loss).unwrap()
                 );
                 input.finish().unwrap();
             }
@@ -160,10 +124,7 @@ fn applied_write_and_lost_write_fields_match_snapshot_records() {
                 take_field(&mut input, &row.columns, encode_columns, decode_columns);
                 input.finish().unwrap();
             }
-            SnapshotRecord::Column(_)
-            | SnapshotRecord::Merge(_)
-            | SnapshotRecord::LostWriteRow(_)
-            | SnapshotRecord::RetainedLoss(_) => {}
+            SnapshotRecord::Column(_) | SnapshotRecord::Merge(_) => {}
         }
     }
     encoder.finish().unwrap();

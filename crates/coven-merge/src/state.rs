@@ -91,41 +91,55 @@ impl<V> RowState<V> {
                 parent.validate_written(&row)?;
             }
         }
-        for (key, value) in &lost {
-            let invalid = || MergeError::InvalidLostValue(key.clone());
-            let inc = value.incarnation;
-            if inc.is_multiple_of(2) || inc > generation {
-                return Err(invalid());
-            }
-            let start = generations.get(&inc).ok_or_else(invalid)?;
-            let setter_stamp = timestamp(oracle, key.write)?;
-            if setter_stamp < timestamp(oracle, *start)? {
-                return Err(invalid());
-            }
-            let canonical = if inc < generation {
-                let delete = inc.checked_add(1).ok_or(MergeError::GenerationExhausted)?;
-                *generations.get(&delete).ok_or_else(invalid)?
-            } else {
-                let cell = cells.get(&key.column).ok_or_else(invalid)?;
-                if timestamp(oracle, cell.write)? <= setter_stamp {
-                    return Err(invalid());
-                }
-                cell.write
-            };
-            if value.replaced_by != canonical || oracle.had_read(canonical, key.write)? {
-                return Err(invalid());
-            }
-            for parent in value.value.parents.values() {
-                parent.validate_written(&row)?;
-            }
-        }
-        Ok(Self {
+        let state = Self {
             row,
             generation,
             generations,
             cells,
             lost,
-        })
+        };
+        for (key, value) in &state.lost {
+            state.validate_loss(key, value, oracle)?;
+        }
+        Ok(state)
+    }
+
+    /// Validate an independently decoded cell loss against this row's validated
+    /// generations and winning cells. The oracle is the causally closed applied
+    /// set, as for `from_parts`; existing losses do not affect this check.
+    pub fn validate_loss(
+        &self,
+        key: &LostKey,
+        value: &LostValue<V>,
+        oracle: &impl WriteOracle,
+    ) -> Result<(), MergeError> {
+        let invalid = || MergeError::InvalidLostValue(key.clone());
+        let inc = value.incarnation;
+        if inc.is_multiple_of(2) || inc > self.generation {
+            return Err(invalid());
+        }
+        let start = self.generations.get(&inc).ok_or_else(invalid)?;
+        let setter_stamp = timestamp(oracle, key.write)?;
+        if setter_stamp < timestamp(oracle, *start)? {
+            return Err(invalid());
+        }
+        let canonical = if inc < self.generation {
+            let delete = inc.checked_add(1).ok_or(MergeError::GenerationExhausted)?;
+            *self.generations.get(&delete).ok_or_else(invalid)?
+        } else {
+            let cell = self.cells.get(&key.column).ok_or_else(invalid)?;
+            if timestamp(oracle, cell.write)? <= setter_stamp {
+                return Err(invalid());
+            }
+            cell.write
+        };
+        if value.replaced_by != canonical || oracle.had_read(canonical, key.write)? {
+            return Err(invalid());
+        }
+        for parent in value.value.parents.values() {
+            parent.validate_written(&self.row)?;
+        }
+        Ok(())
     }
 
     /// The table, key and audience this state belongs to.

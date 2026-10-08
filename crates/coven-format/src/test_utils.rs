@@ -239,32 +239,13 @@ pub fn merge_row() -> MergeRow {
                 value: column(Value::Integer(2)),
             },
         )]),
-        BTreeMap::from([(
-            LostKey {
-                column: "x".into(),
-                write: WriteId {
-                    device: DeviceId(2),
-                    number: 1,
-                },
-            },
-            LostValue {
-                incarnation: 1,
-                value: column(Value::Integer(1)),
-                replaced_by: WriteId {
-                    device: DeviceId(1),
-                    number: 2,
-                },
-            },
-        )]),
+        BTreeMap::new(),
         &oracle(),
     )
     .unwrap();
-    MergeRow {
-        state,
-        removed: Default::default(),
-    }
+    MergeRow { state }
 }
-/// The header for the fixture's six snapshot sections.
+/// The header for the fixture's five snapshot sections.
 pub fn snapshot_header() -> SnapshotHeader {
     SnapshotHeader {
         id: SnapshotId {
@@ -281,7 +262,7 @@ pub fn snapshot_header() -> SnapshotHeader {
             },
         ]),
         store_log: EntryPositions(vec![loss_entry()]),
-        counts: [1, 3, 1, 1, 1, 2],
+        counts: [1, 4, 1, 1, 4],
     }
 }
 /// The sealed prefix carrying a snapshot's coverage, with a fixed test key.
@@ -299,63 +280,98 @@ pub fn snapshot_records() -> Vec<SnapshotRecord> {
         row: row(),
         columns: BTreeMap::from([("x".into(), column(Value::Integer(2)))]),
     })];
-    records.extend(oracle().writes.into_values().map(SnapshotRecord::Write));
+    let mut writes = oracle().writes;
+    let header = write().header;
+    writes.insert(
+        header.position,
+        AppliedWrite {
+            id: header.position,
+            timestamp: header.timestamp,
+            had_read: header.had_read,
+        },
+    );
+    records.extend(writes.into_values().map(SnapshotRecord::Write));
     records.push(SnapshotRecord::Column(SyncedColumn {
         table: "t".into(),
         column: "x".into(),
     }));
     records.push(SnapshotRecord::Merge(merge_row()));
-    records.push(SnapshotRecord::LostWrite(lost_write()));
-    records.push(SnapshotRecord::LostWriteRow(lost_write_row()));
     records.extend(
         retained_losses()
             .into_iter()
-            .map(SnapshotRecord::RetainedLoss),
+            .chain([concurrent_loss(), excluded_loss()])
+            .map(SnapshotRecord::Loss),
     );
     records
 }
+/// A concurrent cell loss of the fixture row.
+pub fn concurrent_loss() -> crate::loss::Loss {
+    crate::loss::Loss::cell(
+        row(),
+        LostKey {
+            column: "x".into(),
+            write: WriteId {
+                device: DeviceId(2),
+                number: 1,
+            },
+        },
+        LostValue {
+            incarnation: 1,
+            value: column(Value::Integer(1)),
+            replaced_by: WriteId {
+                device: DeviceId(1),
+                number: 2,
+            },
+        },
+    )
+}
 /// Both kinds of loss after their row's merge history has been discarded.
-pub fn retained_losses() -> Vec<crate::retained_loss::RetainedLoss> {
-    use crate::retained_loss::{RetainedLoss, RetainedValues};
-    let merged = merge_row();
-    let (key, value) = merged.state.lost().first_key_value().unwrap();
+pub fn retained_losses() -> Vec<crate::loss::Loss> {
+    use crate::loss::Loss;
     let row = RowId {
         table: "removed".into(),
         ..row()
     };
-    let mut cells = merged.state.cells().clone();
-    cells.get_mut("x").unwrap().value = column(Value::Null);
-    vec![
-        RetainedLoss {
-            row: row.clone(),
-            values: RetainedValues::Cell {
-                key: key.clone(),
-                value: value.clone(),
-            },
-        },
-        RetainedLoss {
-            row,
-            values: RetainedValues::Row {
-                generation: merged.state.generation(),
-                cells,
-                replaced_by: [coven_merge::Rule::Check("valid".into())].into(),
-            },
-        },
-    ]
+    let mut cell = concurrent_loss();
+    cell.row = row.clone();
+    cell.retired = true;
+    let mut removed = Loss::removed(
+        &merge_row().state,
+        [coven_merge::Rule::Check("valid".into())].into(),
+    );
+    removed.row = row;
+    removed.retired = true;
+    vec![cell, removed]
 }
-/// Header of the fixture's excluded write.
-pub fn lost_write() -> LostWrite {
-    LostWrite {
-        header: write().header,
-        audience: coven_merge::Audience::Store,
-        row_count: 1,
-        cause: LostWriteCause::SchemaChange(2),
-    }
-}
-/// The fixture's excluded row, following its lost-write header.
-pub fn lost_write_row() -> LostWriteRow {
-    LostWriteRow {
-        change: write().parts.remove(0).rows.remove(0),
+/// The row values of a write excluded by a schema change.
+pub fn excluded_loss() -> crate::loss::Loss {
+    use crate::loss::{Loss, LossCause, LossValues};
+    let change = write().parts.remove(0).rows.remove(0);
+    let Operation::Update(values) = change.change.operation else {
+        unreachable!()
+    };
+    Loss {
+        row: change.row,
+        generation: change.change.generation,
+        retired: true,
+        values: LossValues::Row(
+            values
+                .into_iter()
+                .map(|(name, value)| {
+                    (
+                        name,
+                        Cell {
+                            write: position(),
+                            value,
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        cause: LossCause::Excluded {
+            write: write().header.position,
+            cause: LostWriteCause::SchemaChange(2),
+        },
     }
 }
 /// A plaintext queue value produced by the format's queue encoder.

@@ -8,7 +8,7 @@ use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{audience_text, encoded};
 use crate::DbError;
 use coven_crypto::{ContentHasher, FingerprintHasher};
-use coven_format::merge_fields;
+use coven_format::{loss::Loss, merge_fields};
 use coven_merge::{Audience, ColumnValue, RemovalResult};
 use rusqlite::params;
 use std::collections::BTreeMap;
@@ -42,7 +42,7 @@ pub(crate) fn update(
             fields.push(generation.to_be_bytes().to_vec());
             fields.push(encoded(merge_fields::encode_write_id(write))?);
         }
-        // Length framing separates generations, cells, visible values and losses.
+        // Length framing separates generations, cells and visible values.
         let setters = state
             .cells()
             .iter()
@@ -74,101 +74,61 @@ pub(crate) fn update(
             BTreeMap::new()
         };
         fields.push(encoded(merge_fields::encode_columns(&values))?);
-        if let Some(rules) = result.removed.get(id) {
-            let columns = state
-                .cells()
-                .iter()
-                .map(|(name, cell)| (name.clone(), cell.value.clone()))
-                .collect();
-            fields.push(encoded(merge_fields::encode_columns(&columns))?);
-            fields.push(encoded(merge_fields::encode_rules(rules))?);
-        } else {
-            fields.push(Vec::new());
-            fields.push(Vec::new());
-        }
-        fields.push((state.lost().len() as u64).to_be_bytes().to_vec());
-        for (key, lost) in state.lost() {
-            fields.push(key.column.as_bytes().to_vec());
-            fields.push(encoded(merge_fields::encode_write_id(&key.write))?);
-            fields.push(lost.incarnation.to_be_bytes().to_vec());
-            fields.push(encoded(merge_fields::encode_column_value(&lost.value))?);
-            fields.push(encoded(merge_fields::encode_write_id(&lost.replaced_by))?);
-        }
         let leaf = hash(&fields.iter().map(Vec::as_slice).collect::<Vec<_>>());
         let key = hash(&[b"row", id.table.as_bytes(), &id.key]);
-        put(database, &id.audience, key, leaf)?;
+        put(database, &id.audience, key, leaf, None)?;
+        forget_merge_losses(database, id)?;
+        for (lost_key, value) in state.lost() {
+            loss(
+                database,
+                &Loss::cell(id.clone(), lost_key.clone(), value.clone()),
+            )?;
+        }
+        if let Some(rules) = result.removed.get(id) {
+            loss(database, &Loss::removed(&state, rules.clone()))?;
+        }
     }
     Ok(())
 }
 
-pub(crate) fn excluded(
-    database: &DatabaseConnection,
-    row: &coven_merge::RowId,
-    setter: &[u8],
-    fields: &[&[u8]],
-) -> Result<(), DbError> {
+pub(crate) fn loss(database: &DatabaseConnection, loss: &Loss) -> Result<(), DbError> {
+    let identity = encoded(merge_fields::encode_loss_identity(loss))?;
+    let value = encoded(merge_fields::encode_loss(loss))?;
     put(
         database,
-        &row.audience,
-        hash(&[b"excluded", row.table.as_bytes(), &row.key, setter]),
-        hash(fields),
+        &loss.row.audience,
+        hash(&[b"loss", &identity]),
+        hash(&[&value]),
+        (!loss.retired).then(|| hash(&[b"row", loss.row.table.as_bytes(), &loss.row.key])),
     )
 }
 
-pub(crate) fn forget_excluded(
-    database: &DatabaseConnection,
-    row: &coven_merge::RowId,
-    setter: &[u8],
-) -> Result<(), DbError> {
-    forget(
-        database,
-        &row.audience,
-        hash(&[b"excluded", row.table.as_bytes(), &row.key, setter]),
-    )
+pub(crate) fn forget_loss(database: &DatabaseConnection, loss: &Loss) -> Result<(), DbError> {
+    let identity = encoded(merge_fields::encode_loss_identity(loss))?;
+    forget(database, &loss.row.audience, hash(&[b"loss", &identity]))
 }
 
-pub(crate) fn forget_retired(
+fn forget_merge_losses(
     database: &DatabaseConnection,
     row: &coven_merge::RowId,
-    generation: &[u8],
-    column: &str,
-    setter: &[u8],
 ) -> Result<(), DbError> {
-    forget(
-        database,
-        &row.audience,
-        hash(&[
-            b"retired",
-            row.table.as_bytes(),
-            &row.key,
-            generation,
-            column.as_bytes(),
-            setter,
-        ]),
-    )
-}
-
-pub(crate) fn retired(
-    database: &DatabaseConnection,
-    row: &coven_merge::RowId,
-    generation: &[u8],
-    column: &str,
-    setter: &[u8],
-    fields: &[&[u8]],
-) -> Result<(), DbError> {
-    put(
-        database,
-        &row.audience,
-        hash(&[
-            b"retired",
-            row.table.as_bytes(),
-            &row.key,
-            generation,
-            column.as_bytes(),
-            setter,
-        ]),
-        hash(fields),
-    )
+    let key = hash(&[b"row", row.table.as_bytes(), &row.key]);
+    let audience = audience_text(&row.audience);
+    // Finish reading the leaf cursor before deleting from its table.
+    database.visit(
+        "SELECT hash FROM _coven_fingerprint_leaves WHERE audience=?1 AND merge_row=?2",
+        params![audience, key.as_slice()],
+        |r| {
+            let hash: [u8; 32] = r.get(0)?;
+            database.internal_execute("UPDATE _coven_fingerprint_sums SET sum=_coven_fingerprint_replace(sum,?2,zeroblob(32)) WHERE audience=?1",params![audience,hash.as_slice()])?;
+            Ok(())
+        },
+    )?;
+    database.internal_execute(
+        "DELETE FROM _coven_fingerprint_leaves WHERE audience=?1 AND merge_row=?2",
+        params![audience, key.as_slice()],
+    )?;
+    Ok(())
 }
 
 fn forget(
@@ -192,28 +152,9 @@ pub(crate) fn forget_rows<'a>(
     for row in rows {
         let key = hash(&[b"row", row.table.as_bytes(), &row.key]);
         forget(database, &row.audience, key)?;
+        forget_merge_losses(database, row)?;
     }
     Ok(())
-}
-
-pub(crate) fn retire_losses(
-    database: &DatabaseConnection,
-    row: &coven_merge::RowId,
-) -> Result<(), DbError> {
-    database.visit("SELECT id FROM _coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND retired=0 AND replacement_kind IN ('rules','write')", params![row.table,row.key,audience_text(&row.audience)], |r| retained(database,r.get(0)?))
-}
-
-pub(crate) fn retained(database: &DatabaseConnection, ordinal: i64) -> Result<(), DbError> {
-    let (row,generation,column,value,setter,kind,cause)=database.query_row("SELECT l.table_name,l.key,l.audience,l.generation,c.column_name,l.value,l.set_by,l.replacement_kind,l.replaced_by FROM _coven_lost l LEFT JOIN _coven_columns c ON c.id=l.column_id WHERE l.id=?1",[ordinal],|r|Ok((crate::row_queries::read_identity(r)?,r.get::<_,Vec<u8>>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,Vec<u8>>(5)?,r.get::<_,Vec<u8>>(6)?,r.get::<_,String>(7)?,r.get::<_,Vec<u8>>(8)?)))?;
-    let column = column.unwrap_or_default();
-    retired(
-        database,
-        &row,
-        &generation,
-        &column,
-        &setter,
-        &[&value, &setter, kind.as_bytes(), &cause],
-    )
 }
 
 pub(crate) fn read(
@@ -250,6 +191,7 @@ fn put(
     audience: &Audience,
     key: [u8; 32],
     leaf: [u8; 32],
+    merge_row: Option<[u8; 32]>,
 ) -> Result<(), DbError> {
     let audience = audience_text(audience);
     // The sum must bind each leaf to its identity, including excluded writes.
@@ -263,9 +205,14 @@ fn put(
         params![audience, key.as_slice(), leaf.as_slice()],
     )?;
     database.internal_execute(
-        "INSERT INTO _coven_fingerprint_leaves(audience,key,hash) VALUES(?1,?2,?3)
-         ON CONFLICT(audience,key) DO UPDATE SET hash=excluded.hash",
-        params![audience, key.as_slice(), leaf.as_slice()],
+        "INSERT INTO _coven_fingerprint_leaves(audience,key,hash,merge_row) VALUES(?1,?2,?3,?4)
+         ON CONFLICT(audience,key) DO UPDATE SET hash=excluded.hash,merge_row=excluded.merge_row",
+        params![
+            audience,
+            key.as_slice(),
+            leaf.as_slice(),
+            merge_row.as_ref().map(|key| key.as_slice())
+        ],
     )?;
     Ok(())
 }

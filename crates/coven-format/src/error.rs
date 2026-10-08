@@ -29,8 +29,6 @@ pub enum Rule {
     NullKey,
     /// A key has a noncanonical numeric or escaped byte representation.
     KeyEncoding,
-    /// A lost write's disposition disagrees with its recorded cause.
-    LostWriteCause,
     /// A snapshot record was outside the positions the snapshot covers.
     Coverage,
     /// Snapshot sections, counts or their end marker did not match the header.

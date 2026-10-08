@@ -10,7 +10,7 @@ use coven_format::{
     merge_fields,
     snapshot_rows::{MergeRow, SyncedRow},
 };
-use coven_merge::{Audience, LostChange, RowId, RowState, RowUpdate, WriteId};
+use coven_merge::{Audience, RowId, RowState, RowUpdate, WriteId};
 use rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -38,7 +38,6 @@ pub(crate) fn begin(
     for table in [
         "_coven_rows",
         "_coven_lost",
-        "_coven_excluded_writes",
         "_coven_fingerprint_leaves",
         "_coven_fingerprint_sums",
     ] {
@@ -115,14 +114,7 @@ pub(crate) fn merged(
     if state.generations().is_empty() {
         return Err(invalid("merge row has no generations"));
     }
-    for (key, lost) in state.lost() {
-        schema.row_column(table, &key.column, &lost.value)?;
-    }
-    for name in state
-        .cells()
-        .keys()
-        .chain(state.lost().keys().map(|key| &key.column))
-    {
+    for name in state.cells().keys() {
         let declared: bool=database.query_row("SELECT EXISTS(SELECT 1 FROM temp._coven_snapshot_columns WHERE table_name=?1 AND column_name=?2)",params![row.table,name],|r| r.get(0))?;
         if !declared {
             return Err(invalid("merge cell has no column record"));
@@ -136,8 +128,10 @@ pub(crate) fn merged(
         )?
         .into_iter()
         .next();
-    if state.present() && merged.removed.is_empty() {
-        let synced = synced.ok_or_else(|| invalid("visible merge row has no synced row"))?;
+    if let Some(synced) = synced {
+        if !state.present() {
+            return Err(invalid("deleted merge row also has a synced row"));
+        }
         if state
             .cells()
             .iter()
@@ -161,38 +155,18 @@ pub(crate) fn merged(
             "UPDATE temp._coven_snapshot_values SET matched=1 WHERE table_name=?1 AND key=?2 AND audience=?3",
             params![row.table, row.key, audience_text(&row.audience)],
         )?;
-    } else if synced.is_some() {
-        return Err(invalid("hidden merge row also has a synced row"));
-    }
-    let removed = if merged.removed.is_empty() {
-        None
-    } else {
+    } else if state.present() {
         let columns = state
             .cells()
             .iter()
             .map(|(name, cell)| (name.clone(), cell.value.clone()))
             .collect();
-        let setters = state
-            .cells()
-            .iter()
-            .map(|(name, cell)| (name.clone(), cell.write))
-            .collect();
-        Some((
-            state.generation(),
-            encoded(merge_fields::encode_columns(&columns))?,
-            encoded(merge_fields::encode_setters(&setters))?,
-            encoded(merge_fields::encode_rules(&merged.removed))?,
-        ))
-    };
+        database.internal_execute("INSERT INTO temp._coven_snapshot_values(table_name,key,columns,audience,matched) VALUES(?1,?2,?3,?4,2)",params![row.table,row.key,encoded(merge_fields::encode_columns(&columns))?,audience_text(&row.audience)])?;
+    }
     let row = row.clone();
-    let lost_changes = state
-        .lost()
-        .iter()
-        .map(|(key, value)| LostChange::Put(key.clone(), value.clone()))
-        .collect();
     let update = RowUpdate {
         state: merged.state,
-        lost_changes,
+        lost_changes: Vec::new(),
     };
     crate::write_commit::persist(
         database,
@@ -207,58 +181,59 @@ pub(crate) fn merged(
         },
         |write| ordinal(database, write),
     )?;
-    if let Some((generation, columns, setters, rules)) = removed {
-        database.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,?5,?6,'rules',?7)",params![row.table,row.key,audience_text(&row.audience),generation.to_be_bytes().as_slice(),columns,setters,rules])?;
-    }
     Ok(row)
 }
 
-/// Retain frozen losses in `_coven_lost` and the fingerprint without restoring
-/// discarded merge records or recomputing their original replacement reasons.
-pub(crate) fn retained(
+/// Validate live losses against the merged row before storing the common record.
+pub(crate) fn loss(
     database: &DatabaseConnection,
-    loss: coven_format::retained_loss::RetainedLoss,
+    schema: &WriteSchema,
+    loss: coven_format::loss::Loss,
+    metadata: &impl coven_merge::WriteOracle,
+    cached: &mut Option<RowState<coven_format::value::Value>>,
 ) -> Result<(), DbError> {
-    use coven_format::retained_loss::RetainedValues;
-    let row = loss.row;
-    let (generation, column, value, setter, kind, cause) = match loss.values {
-        RetainedValues::Cell { key, value } => (
-            value.incarnation,
-            Some(crate::write_commit::column(
-                database,
-                &row.table,
-                &key.column,
-            )?),
-            encoded(merge_fields::encode_column_value(&value.value))?,
-            encoded(merge_fields::encode_write_id(&key.write))?,
-            "write",
-            encoded(merge_fields::encode_write_id(&value.replaced_by))?,
-        ),
-        RetainedValues::Row {
-            generation,
-            cells,
-            replaced_by,
-        } => {
-            let values = cells
-                .iter()
-                .map(|(name, cell)| (name.clone(), cell.value.clone()))
-                .collect();
-            let setters = cells
-                .iter()
-                .map(|(name, cell)| (name.clone(), cell.write))
-                .collect();
-            (
-                generation,
-                None,
-                encoded(merge_fields::encode_columns(&values))?,
-                encoded(merge_fields::encode_setters(&setters))?,
-                "rules",
-                encoded(merge_fields::encode_rules(&replaced_by))?,
-            )
+    use coven_format::loss::{LossCause, LossValues};
+    if !loss.retired {
+        // Loss records are ordered by row; keep only this row's immutable state.
+        if cached.as_ref().is_none_or(|state| state.row() != &loss.row) {
+            let audiences = BTreeSet::from([loss.row.audience.clone()]);
+            let store =
+                crate::merge_store::MergeStore::from_snapshot(database, &schema.schema, &audiences);
+            *cached = Some(store.row_without_losses(&loss.row)?.state);
         }
-    };
-    let ordinal=database.query_row("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by,retired) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,1) RETURNING id",params![row.table,row.key,audience_text(&row.audience),generation.to_be_bytes().as_slice(),column,value,setter,kind,cause],|r|r.get(0))?;
-    crate::fingerprint::retained(database, ordinal)
+        let state = cached.as_ref().expect("loaded the loss's row");
+        match (&loss.values, &loss.cause) {
+            (LossValues::Cell { column, cell }, LossCause::Write(write)) => {
+                schema.row_column(schema.row_table(&loss.row)?, column, &cell.value)?;
+                let declared: bool = database.query_row("SELECT EXISTS(SELECT 1 FROM temp._coven_snapshot_columns WHERE table_name=?1 AND column_name=?2)",params![loss.row.table,column],|r| r.get(0))?;
+                if !declared {
+                    return Err(invalid("lost cell has no column record"));
+                }
+                state
+                    .validate_loss(
+                        &coven_merge::LostKey {
+                            column: column.clone(),
+                            write: cell.write,
+                        },
+                        &coven_merge::LostValue {
+                            incarnation: loss.generation,
+                            value: cell.value.clone(),
+                            replaced_by: *write,
+                        },
+                        metadata,
+                    )
+                    .map_err(|error| {
+                        crate::SnapshotError::Format(coven_format::Error::Merge(error))
+                    })?;
+            }
+            (LossValues::Row(cells), LossCause::Rules(_))
+                if state.present()
+                    && state.generation() == loss.generation
+                    && state.cells() == cells => {}
+            _ => return Err(invalid("active loss disagrees with merge state")),
+        }
+    }
+    crate::loss_record::put(database, &loss, None)
 }
 
 pub(crate) fn ordinal(database: &DatabaseConnection, id: WriteId) -> Result<i64, DbError> {
@@ -274,7 +249,8 @@ pub(crate) fn ordinal(database: &DatabaseConnection, id: WriteId) -> Result<i64,
 
 pub(crate) fn finish(database: &DatabaseConnection) -> Result<(), DbError> {
     let unmatched: bool = database.query_row(
-        "SELECT EXISTS(SELECT 1 FROM temp._coven_snapshot_values WHERE matched=0)",
+        "SELECT EXISTS(SELECT 1 FROM temp._coven_snapshot_values v WHERE matched=0
+         OR (matched=2) != EXISTS(SELECT 1 FROM _coven_lost l WHERE l.table_name=v.table_name AND l.key=v.key AND l.audience=v.audience AND l.retired=0 AND l.replacement_kind='rules'))",
         [],
         |r| r.get(0),
     )?;
@@ -305,3 +281,7 @@ pub(crate) fn values(
 pub(crate) fn drop_tables(database: &DatabaseConnection) -> Result<(), DbError> {
     database.batch("DROP TABLE temp._coven_snapshot_values; DROP TABLE temp._coven_snapshot_writes; DROP TABLE temp._coven_snapshot_columns")
 }
+
+#[cfg(test)]
+#[path = "snapshot_state_tests.rs"]
+mod tests;

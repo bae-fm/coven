@@ -225,7 +225,7 @@
 
 - A snapshot's plaintext is a header frame, its record frames in order,
   then an end frame (kind 7).
-- The header (kind 5): `id:SnapshotId | schema_version:u32 | counts:6×u64`,
+- The header (kind 5): `id:SnapshotId | schema_version:u32 | counts:5×u64`,
   one count per section below. Its positions are in its sealed prefix (D9).
 - Records (kind 6) are `section:u8 | record`, sections in order, each
   ordered as shown:
@@ -235,68 +235,62 @@
   | 0 | Synced row: `row:RowId \| columns:map<name, ColumnValue>` | `RowId` |
   | 1 | Applied write: `id:WriteId \| timestamp:Timestamp \| had_read:WritePositions` | `WriteId` |
   | 2 | Synced column: `table:name \| column:name` | table, column |
-  | 3 | Merge row (below) | `RowId` |
-  | 4 | Lost write: `header` (D5's header fields through `disposition`, inclusive) `\| audience:Audience \| rows:u64 \| cause` | `WriteId` |
-  | 5 | Kept loss: `row:RowId \| values` (below) | row, incarnation, loss identity |
+  | 3 | Merge row: `row:RowId \| generations:map<u64, WriteId> \| cells:map<name, Cell>` | `RowId` |
+  | 4 | Loss: `row:RowId \| generation:u64 \| frozen:bool \| values \| cause` | identity below |
 
-  - Empty sections emit nothing. A synced row's columns are nonempty. An
-    applied write's timestamp names its device; its had-read positions name
-    other devices only, with own earlier writes implicit.
-  - A lost write is followed at once by `rows` records of tag `6`, each a
-    row change (D5) of its write, in increasing `RowId` order; the count
-    in the header counts lost writes, not their rows. Dismissed cells are
-    absent from these changes (including an update's or delete's old values);
-    rows and lost-write headers emptied by dismissal are omitted. `rows`
-    is positive, covers only this audience, and its row records cannot be
-    interrupted by another record or the end marker. Extra rows are refused.
-    A lost-write header cannot have the migration disposition.
-  - `cause` is `0 | version:u32`, lost to a schema change, or
-    `1 | entry:EntryId`, lost to a reset. A schema-change version is positive
-    and at most the snapshot's schema version; a reset entry is covered by
-    its store-log positions. A header with lost disposition `v` requires
-    schema-change cause `v`. These writes were excluded from merge, so they
-    are distinct from concurrent lost cells; neither replaces the other.
-  - A kept loss is a removed row's loss whose merge records a breaking
-    change forgot ([§17.1](coven.md#171-host-application)).
-    Its values are `0 | key:LostKey | value:LostValue` for a displaced cell,
-    or `1 | generation:u64 | cells:map<name, write:WriteId | value:ColumnValue>
-    | replaced_by:set<Rule>` for a removed row. Written values are frozen
-    at the migration, with empty parent maps. Within a row and
-    incarnation, cells precede rows; cell losses order by `LostKey`, removed
-    rows by their column-to-setter maps. Duplicate identities are refused.
-    Incarnations are positive and odd; a removed row has nonempty cells and
-    removal rules. Names, values, write identities and circle-only rules
-    have the same checks as merged rows.
-- A merge row is merge's state of one row ([§8](coven.md#8-merge)):
-
-  ```
-  row          RowId
-  generations  map<u64, WriteId>              the write that started each
-  cells        map<name, write:WriteId | value:ColumnValue>
-  lost         map<LostKey, LostValue>
-  removed      set<Rule>
-  ```
-
-  - `LostKey` is `column:name | write:WriteId`; `LostValue` is
-    `incarnation:u64 | value:ColumnValue | replaced_by:WriteId`.
-    Lost cells and removed rows carry their values as written, without
-    foreign-key null substitution.
-  - `Rule` is `0 | ForeignKey`, `1 | check:text` (its name, or its
-    expression when unnamed), `2` deleted circle, `3` another audience's
-    row, or `4 | Unique`. Rules order by tag, then the foreign-key identity,
-    CHECK text or unique identity. Another audience's row names no winner
-    and imposes no ordering on which circle can win.
-- Synced-row references obey merge's written-parent checks. A merge row
-  must have contiguous generations, valid transition and cell timestamps,
-  no cells when deleted, valid parent generations/audiences, and valid lost
-  incarnations and replacing writes that had not read the lost values (§8).
-  A removed row is present in merge state; deleted-circle and other-audience
-  rules require a circle.
-- All row records, lost-write headers and the plaintext header have the
-  sealed prefix's audience. Every write id named by applied/merge/kept-loss
-  records or lost-write headers is covered by its write positions. Applied
-  writes' read positions are covered too; excluded writes' dependencies need
-  not be. Positions describe consumed writes, including excluded ones.
+  Empty sections emit nothing. `Cell` is `write:WriteId | value:ColumnValue`.
+  Synced-row columns are nonempty. Applied-write timestamps name their
+  devices; had-read positions name other devices only, with own earlier
+  writes implicit.
+- Every loss uses section 4, whether a cell lost concurrently, removal rules
+  hid a row, a schema change or reset excluded a write, or a breaking
+  migration froze a removed row's losses ([§17.1](coven.md#171-host-application)).
+  - `values` is `0 | column:name | cell:Cell` for a cell or
+    `1 | cells:map<name, Cell>` for a whole row. All values are as written,
+    without foreign-key null substitution. Dismissed cells are absent;
+    dismissal that empties a row removes its record.
+  - `cause` is `0 | replacing:WriteId`, `1 | rules:set<Rule>`, or
+    `2 | excluded:WriteId | boundary`, where `boundary` is
+    `0 | version:u32` for a schema change or `1 | entry:EntryId` for a reset.
+    A replacing write requires cell values; rules and boundaries require
+    row values. Each excluded cell's setter is the excluded write. Its ID
+    remains even for a deletion with no old values.
+  - A cell's generation is its incarnation; a removed row's is its generation
+    when captured. Both are positive and odd. A removed row's
+    cells and rules are nonempty. An excluded row keeps the generation of
+    its row change; inserts and updates keep their new values and parents,
+    deletes their old scalar values with empty parent maps.
+  - `frozen` is true for excluded writes and for losses frozen by a breaking
+    migration. Migration-frozen values have empty parent maps, keeping their
+    written scalar values and names independently of the current schema.
+    Active losses follow merge and removal rules; frozen ones do not.
+  - A schema-change version is positive and at most the snapshot's schema
+    version; a reset entry is covered by its store-log positions.
+  - Loss identity orders by row, generation, values identity, frozen flag,
+    cause tag, then excluded write ID when present. Values identity is
+    `0 | column:name | setter:WriteId` for a cell or
+    `1 | setters:map<name, WriteId>` for a row. Columns and maps compare
+    logically as in D2. Duplicate identities are refused.
+- `Rule` is `0 | ForeignKey`, `1 | check:text` (its name, or its expression
+  when unnamed), `2` deleted circle, `3` another audience's row, or
+  `4 | Unique`. Rules order by tag, then the foreign-key identity, CHECK
+  text or unique identity. Another audience's row names no winner and
+  imposes no ordering on which circle can win. Deleted-circle and
+  other-audience rules require a circle.
+- Synced-row references obey merge's written-parent checks. A merge row must
+  have contiguous generations, valid transition and cell timestamps, no
+  cells when deleted, and valid parent generations/audiences. Active cell
+  losses must have valid incarnations and replacing writes that had not read
+  their setters (§8), with at most one per row, column and setter. An active
+  removed-row loss must match its present
+  merge row's generation and cells. A present merge row has a synced row
+  exactly when it has no active removed-row loss. Frozen losses need no
+  merge row or current schema columns.
+- All rows and the plaintext header have the sealed prefix's audience.
+  Every named write ID and applied write's read positions are covered by
+  the prefix's write positions. Positions describe consumed writes,
+  including excluded ones; excluded writes' headers and dependencies are
+  not retained in loss records.
 - The decoder refuses incorrect section/record order, duplicate identities,
   mismatched counts, audiences and coverage. EOF without the end marker is
   truncation; no records may follow the marker.
@@ -503,28 +497,13 @@
     4. only the cells with nonempty parent maps, as
        `map<name, ColumnValue>`, retaining their values and references as written;
     5. the app-visible values as `map<name, ColumnValue>`, with empty parent
-       maps; an encoded empty map if the row is deleted or removed;
-    6. if a rule removed the row, its cells as `map<name, ColumnValue>` with
-       written values and parent maps, then its `set<Rule>`;
-       otherwise two zero-length context fields, not encoded empty collections;
-    7. the lost-cell count, then, in `LostKey` order, each loss's column,
-       setting `WriteId`, incarnation, written `ColumnValue`, and replacing
-       `WriteId`, each a separate field.
-  - Each row of an excluded write part has its own leaf. Its identity hash
-    has fields `excluded`, table, key, and the write's `WriteId`. Its value
-    hash has fields generation, values as `map<name, ColumnValue>`, setters
-    as `map<name, WriteId>`, and cause (`0 | version:u32` or `1 | EntryId`).
-    A delete uses its old scalar values with empty parent maps; every setter
-    names the excluded write. Values and setters omit dismissed cells.
-  - Each kept loss from D7 section 5 has its own leaf. Its identity hash has
-    fields `retired`, table, key, incarnation, column, setter. A cell uses
-    its column and setting `WriteId`; a removed row uses an empty column
-    field and its `map<name, WriteId>` of setters. Its value hash has fields
-    value, setter, replacement kind, replacement. For a cell these are its
-    frozen `ColumnValue`, setting `WriteId`, raw UTF-8 `write`, and replacing
-    `WriteId`. For a removed row they are its frozen
-    `map<name, ColumnValue>`, setters map, raw UTF-8 `rules`, and `set<Rule>`.
-    All these frozen values have empty parent maps, as in D7.
+       maps; an encoded empty map if the row is deleted or removed.
+  - Every loss has one leaf. Its identity hash has fields `loss` and its
+    D7 identity bytes: row, generation, values identity, frozen flag, cause
+    tag, and excluded write ID when present, concatenated using D2/D7
+    encodings. Its value hash has one field: the complete D7 loss record,
+    without the section tag or frame envelope. Thus every retained value,
+    setter and cause participates, with dismissed cells absent.
   - Replacing a leaf subtracts its previous hash and adds its new hash in the
     same transaction as the state change. Rows are counted as if a key in
     two audiences were shown in both
@@ -579,7 +558,7 @@
   - all fourteen store-log change tags, including both member-access variants
     across creation and addition, and a removal replacing two circles' keys;
   - a dismissal frame;
-  - a snapshot with every section, a lost write and a kept loss;
+  - a snapshot with every section and active, frozen and excluded losses;
   - a migration write.
 - Every successful decode re-encodes to the same bytes; tests decode every
   truncation and single-bit change of every fixture without panicking.

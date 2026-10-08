@@ -20,8 +20,8 @@ the rules remove.
   recorded for each removed row.
 * `removed_has_rule`: every removed row has a rule recorded.
 * `device_converges`: two devices that applied the same writes in causal
-  orders hold the same merged state, the same view, and the same `_coven_lost`
-  rows for removed rows.
+  orders hold the same merged state, the same view, and the same loss records
+  for displaced cells and removed rows.
 * `unique_with_others`: run as one more rule among the others, the unique
   rule can end two ways from one state; the reason it is judged once.
 -/
@@ -217,16 +217,37 @@ end
 
 /-! ## End to end -/
 
-/-- A device's whole state: the merged state, what the app sees, and the
-`_coven_lost` rows for removed rows: each cell's value, the write that set it,
-and the rules that removed the row. -/
+/-- The causes of active losses modeled by the merge proof. Schema changes,
+resets and frozen history are outside this model (Appendix B11). -/
+inductive LossCause (W : Type) where
+  | write (setter : W)
+  | rules (reasons : List Rule)
+  deriving DecidableEq, Repr
+
+/-- One loss record. Values are identified with their setters, as in `St`:
+a cell names its column; a whole row has no column. -/
+structure LossRecord (W Row Col : Type) where
+  row : Row
+  generation : Nat
+  column : Option Col
+  values : Col → Option W
+  cause : LossCause W
+
+/-- A device's merged state, view and common records for active losses. -/
 structure Device (W Row Col : Type) where
   merged : St W Row Col
   view : View Row
-  removedLost : Row → Col → Option (W × List Rule)
+  losses : Row → Option (Col × W) → Option (LossRecord W Row Col)
 
 section
-variable {W Row Col K : Type} [DecidableEq W] [DecidableEq Row] [DecidableEq K]
+variable {W Row Col K : Type} [DecidableEq W] [DecidableEq Row] [DecidableEq Col] [DecidableEq K]
+
+/-- Project a lost cell or removed row into the same record shape. -/
+def lossRecord (st : St W Row Col) (v : View Row) (r : Row) :
+    Option (Col × W) → Option (LossRecord W Row Col)
+  | some (c, w) => (st.lost r c w).map fun (g, x) =>
+      ⟨r, g, some c, (fun col => if col = c then some w else none), .write x⟩
+  | none => if v.removed r then some ⟨r, st.gen r, none, st.cell r, .rules (v.rules r)⟩ else none
 
 /-- The device a list of writes, applied in order, gives, with the removal
 rules reading `inputs` of the merged state. -/
@@ -234,9 +255,7 @@ def device (M : Writes W Row Col) (inputs : St W Row Col → Inputs Row K) (L : 
     Device W Row Col :=
   let st := L.foldl (step M) St.init
   let v := view (inputs st)
-  { merged := st
-    view := v
-    removedLost := fun r c => if v.removed r then (st.cell r c).map (fun w => (w, v.rules r)) else none }
+  { merged := st, view := v, losses := lossRecord st v }
 
 /-- **Convergence, end to end.** Two devices that applied the same writes,
 each in an order that respects causality, hold the same merged state, show

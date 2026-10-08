@@ -10,8 +10,8 @@ use rusqlite::params;
 use std::cell::RefCell;
 
 /// Section 1 supplies causal metadata for every consumed write, including
-/// writes whose rows were excluded. Section 4 must agree with that metadata;
-/// its rows do not enter merge state or supply additional oracle entries.
+/// writes whose rows were excluded. Losses name these writes without repeating
+/// their headers or supplying additional oracle entries.
 pub(crate) struct SnapshotMetadata<'a> {
     database: &'a DatabaseConnection,
     failure: RefCell<Option<DbError>>,
@@ -28,21 +28,6 @@ impl<'a> SnapshotMetadata<'a> {
     pub(crate) fn put(&self, write: &AppliedWrite) -> Result<(), DbError> {
         self.database.internal_execute("INSERT INTO temp._coven_snapshot_writes(device,number,timestamp,had_read) VALUES(?1,?2,?3,?4)", params![write.id.device.0.to_be_bytes().as_slice(),write.id.number.to_be_bytes().as_slice(),encoded(merge_fields::encode_timestamp(&write.timestamp))?,encoded(merge_fields::encode_write_positions(&write.had_read))?])?;
         crate::write_commit::retain_metadata(self.database, write)?;
-        Ok(())
-    }
-
-    pub(crate) fn check_header(
-        &self,
-        header: &coven_format::write::WriteHeader,
-    ) -> Result<(), DbError> {
-        let write = self
-            .read(header.position)?
-            .ok_or_else(|| invalid("excluded write has no applied identity"))?;
-        if write.timestamp != header.timestamp || write.had_read != header.had_read {
-            return Err(invalid(
-                "excluded write disagrees with its applied identity",
-            ));
-        }
         Ok(())
     }
 

@@ -7,13 +7,9 @@ use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_format::merge_fields;
 use coven_format::snapshot::{SnapshotEncoder, SnapshotHeader, SnapshotRecord};
-use coven_format::snapshot_rows::{
-    AppliedWrite, LostWrite, LostWriteRow, MergeRow, SyncedColumn, SyncedRow,
-};
+use coven_format::snapshot_rows::{AppliedWrite, MergeRow, SyncedColumn, SyncedRow};
 use coven_format::store_log::SnapshotId;
 use coven_format::value::{EntryId, EntryPositions};
-use coven_format::write::RowChange;
-use coven_format::write_stream::WriteHeaderFrame;
 use coven_foundation::id_source::DeviceId;
 use coven_merge::{Audience, ColumnValue, WriteId};
 
@@ -45,7 +41,7 @@ pub(crate) fn write<E>(
 ) -> Result<(), SnapshotWriteError<E>> {
     let audience = audience_text(&id.audience);
     let selected = id.audience.clone();
-    let mut counts = [0; 6];
+    let mut counts = [0; 5];
     visit_rows(database, schema, &id.audience, |row| {
         counts[3] += 1;
         if row.state.present() && row.loss.is_none() {
@@ -74,11 +70,10 @@ pub(crate) fn write<E>(
         |r| r.get::<_, i64>(0).map(|n| n as u64),
     )?;
     counts[4] = database.query_row(
-        "SELECT count(*) FROM _coven_excluded_writes WHERE audience=?1",
+        "SELECT count(*) FROM _coven_lost WHERE audience=?1",
         [&audience],
         |r| r.get::<_, i64>(0).map(|n| n as u64),
     )?;
-    counts[5] = crate::snapshot_loss::count(database, &selected)?;
     let header = SnapshotHeader {
         id,
         schema_version: database.schema_version()?,
@@ -153,34 +148,12 @@ pub(crate) fn write<E>(
         },
     )?;
     visit_rows(database, schema, &selected, |stored| {
-        let removed = match stored.loss {
-            Some(loss) => database.query_row(
-                "SELECT replaced_by FROM _coven_lost WHERE id=?1",
-                [loss],
-                |r| decoded(merge_fields::decode_rules(&r.get::<_, Vec<u8>>(0)?)),
-            )?,
-            None => Default::default(),
-        };
         record(SnapshotRecord::Merge(MergeRow {
             state: stored.state,
-            removed,
         }))
     })?;
-    database.for_each("SELECT id,header,cause FROM _coven_excluded_writes WHERE audience=?1 ORDER BY device,number", [&audience], |r| {
-        let (ordinal, frame, cause) = (|| Ok::<_, rusqlite::Error>((
-            r.get::<_, i64>(0)?,
-            decoded(WriteHeaderFrame::decode(&r.get::<_, Vec<u8>>(1)?))?,
-            decoded(merge_fields::decode_lost_write_cause(&r.get::<_, Vec<u8>>(2)?))?,
-        )))().map_err(DbError::from)?;
-        let part = &frame.parts[0];
-        record(SnapshotRecord::LostWrite(LostWrite { header: frame.header, audience: part.audience.clone(), row_count: part.record_count, cause }))?;
-        database.for_each("SELECT record FROM _coven_excluded_rows WHERE write_id=?1 ORDER BY table_name,key", [ordinal], |r| {
-            let change = (|| decoded(RowChange::decode(&r.get::<_, Vec<u8>>(0)?)))().map_err(DbError::from)?;
-            record(SnapshotRecord::LostWriteRow(LostWriteRow { change }))
-        })
-    })?;
-    crate::snapshot_loss::visit(database, &selected, |loss| {
-        record(SnapshotRecord::RetainedLoss(loss))
+    crate::loss_record::visit(database, &selected, |loss| {
+        record(SnapshotRecord::Loss(loss))
     })?;
     emit(encoder.finish()?).map_err(SnapshotWriteError::Output)
 }
@@ -198,7 +171,7 @@ fn visit_rows<E: From<DbError>>(
             let row = crate::row_queries::read_identity(r).map_err(DbError::from)?;
             // Each row's causal metadata and values die before reading the next.
             let store = MergeStore::from_schema(database, &schema.schema);
-            visit(store.row(&row)?)
+            visit(store.row_without_losses(&row)?)
         },
     )
 }

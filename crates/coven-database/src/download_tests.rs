@@ -4,6 +4,7 @@ use crate::write::tests::{count, notes, records, sql, NOTES};
 use crate::{Database, Migration, RowIdentity, SyncedTable};
 use coven_foundation::id_source::{CircleId, KeyId};
 use coven_foundation::{clock::FixedClock, id_source::SequentialIds};
+use rusqlite::params;
 use std::sync::Arc;
 use std::time::Duration;
 

@@ -149,7 +149,7 @@ write 11 arrives; Ben's phone never removes it. Link 6 stays, its reference
 null, whichever order the writes arrived in. -/
 theorem example_8_4 :
     (device M inputs [1, 7, 10]).view.removed 9 = true ∧
-    (device M inputs [1, 7, 10]).removedLost 9 0 = some (10, [Rule.foreignKey]) ∧
+    ((device M inputs [1, 7, 10]).losses 9 none).map (fun l => (l.values 0, l.cause)) = some (some 10, LossCause.rules [Rule.foreignKey]) ∧
     (device M inputs [1, 7, 10, 11]).view.shown 9 = true ∧
     (device M inputs [1, 10, 11, 7]).view.shown 9 = true ∧
     (device M inputs [1, 7, 10, 11]).view.removed 9 = false ∧
@@ -380,8 +380,8 @@ circle, with its title in `_coven_lost`, in either arrival order. -/
 theorem example_14_7 :
     (device M inputs [1, 31, 5]).merged.gen 7 = 2 ∧
     (device M inputs [1, 5, 31]).merged.gen 8 = 2 ∧
-    (device M inputs [1, 31, 5]).removedLost 9 0 = some (5, [Rule.deletedCircle]) ∧
-    (device M inputs [1, 5, 31]).removedLost 9 0 = some (5, [Rule.deletedCircle]) := by decide
+    ((device M inputs [1, 31, 5]).losses 9 none).map (fun l => (l.values 0, l.cause)) = some (some 5, LossCause.rules [Rule.deletedCircle]) ∧
+    ((device M inputs [1, 5, 31]).losses 9 none).map (fun l => (l.values 0, l.cause)) = some (some 5, LossCause.rules [Rule.deletedCircle]) := by decide
 
 end DeletedCircle
 

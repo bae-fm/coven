@@ -567,14 +567,20 @@ Two mechanisms order writes:
     reference reads differently from what was written (§8.4),
     `_coven_reference_values` keeps the written value by cell until the
     two agree again.
-  - `_coven_lost`, one row per lost value or removed row, naming:
-    - the cell, or the row;
+  - `_coven_lost`, one record for every kind of loss, naming:
+    - the table, key and audience;
+    - the column for a cell, or no column for a whole row;
+    - the incarnation, or an excluded row change's generation;
     - the value that lost, or every value of the removed row;
     - the write that set each value;
     - what replaced it: a write that hadn't read it, the rules that removed
       the row, or a breaking change or reset its write hadn't read;
-    - whether a breaking migration has retired its row from the merge
-      ([§17.1](#171-host-application)), keeping the loss as history.
+    - whether its values are frozen: excluded writes, and removed rows'
+      losses retired from merge by a breaking migration
+      ([§17.1](#171-host-application)), keep their history;
+    - for an excluded write, its identity even if a deletion has no old values.
+    All losses use this record, one snapshot section and one fingerprint
+    leaf shape; excluded writes need no duplicate header or row changes.
 - Store-log publication uses `_coven_store_log_uploads`: the next local entry's
   number, canonical plaintext record and sealing key id.
   `_coven_store_log_key_uploads` holds its prerequisite sealed-key paths and fixed
@@ -595,7 +601,7 @@ Two mechanisms order writes:
     judged against it ([§17.1](#171-host-application),
     [§19.3](#193-resetting-a-store)).
 - Fingerprints ([§19.1](#191-noticing)) are kept incrementally:
-  `_coven_fingerprint_leaves` holds one hash per row and per lost write in
+  `_coven_fingerprint_leaves` holds one hash per row and per loss in
   each audience, and `_coven_fingerprint_sums` their sum per audience, so
   a write updates only the hashes of the rows it changed.
 - Note 42 on Ben's phone, after Ana's write 4 and its own write 9:
@@ -2010,10 +2016,11 @@ Carol's tablet:
   records; other audiences keep theirs, and the removal rules run again on
   rows that point at changed ones, as after any write
   ([§8.4](#84-foreign-keys)).
-- Losses kept after their row's merge records are discarded (§17.1) have
-  their own snapshot records, ordered by row, retaining each cell's frozen
-  written value, setter and replacement. Loading preserves those losses in
-  `_coven_lost`, and they count in its audience's fingerprint (§19.1).
+- Every loss travels in the same snapshot section ([D7](format.md#d7-snapshots)),
+  retaining the row, column when present, written values, setters and cause.
+  Losses frozen by a breaking migration survive without their row's merge
+  records or schema columns. Loading preserves them in `_coven_lost`, and
+  every loss counts in its audience's fingerprint (§19.1).
 - Each device posts its positions only after uploading its own earlier
   writes.
 - A log object is deleted once snapshots cover every part of it, and either

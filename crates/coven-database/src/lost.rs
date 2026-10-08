@@ -1,9 +1,12 @@
 //! Decoding the durable lost-value fields into the read API.
 
 use crate::{DbError, EntryId, RowKey, WriteId};
-use coven_format::{merge_fields::*, snapshot_rows::LostWriteCause};
+use coven_format::{
+    loss::{Loss, LossCause, LossValues},
+    snapshot_rows::LostWriteCause,
+};
 use coven_merge::Rule;
-use rusqlite::{types::Value, Row};
+use rusqlite::types::Value;
 
 /// One durable lost cell or removed row.
 #[derive(Clone, Debug, PartialEq)]
@@ -94,84 +97,36 @@ pub enum RemovalRule {
     },
 }
 
-pub(crate) struct LostRecord {
-    table: String,
-    key: Vec<u8>,
-    column_id: Option<i64>,
-    column_table: Option<String>,
-    column_name: Option<String>,
-    value: Vec<u8>,
-    setters: Vec<u8>,
-    kind: String,
-    replacement: Vec<u8>,
-    audience: String,
-    generation: Vec<u8>,
-    retired: bool,
-}
-
-impl LostRecord {
-    pub(crate) fn read(row: &Row<'_>) -> rusqlite::Result<Self> {
-        Ok(Self {
-            table: row.get(0)?,
-            key: row.get(1)?,
-            column_id: row.get(2)?,
-            column_table: row.get(3)?,
-            column_name: row.get(4)?,
-            value: row.get(5)?,
-            setters: row.get(6)?,
-            kind: row.get(7)?,
-            replacement: row.get(8)?,
-            audience: row.get(9)?,
-            generation: row.get(10)?,
-            retired: row.get(11)?,
-        })
-    }
-
-    pub(crate) fn decode(self) -> Result<LostValue, DbError> {
+impl LostValue {
+    pub(crate) fn from_record(record: Loss) -> Result<Self, DbError> {
         let key = RowKey(
-            decoded(coven_format::key::decode_key(&self.key))?
+            coven_format::key::decode_key(&record.row.key)
+                .map_err(|_| DbError::DamagedDatabase)?
                 .iter()
                 .map(crate::write_encoding::sql_value)
                 .collect(),
         );
-        let lost = match self.column_id {
-            Some(_) => {
-                let column = self
-                    .column_name
-                    .filter(|_| self.column_table.as_ref() == Some(&self.table))
-                    .ok_or(DbError::DamagedDatabase)?;
-                Lost::Cell(LostCell {
-                    column,
-                    value: crate::write_encoding::sql_value(
-                        &decoded(decode_column_value(&self.value))?.value,
-                    ),
-                    set_by: decoded(decode_write_id(&self.setters))?,
-                })
-            }
-            None => {
-                let values = decoded(decode_columns(&self.value))?;
-                let setters = decoded(decode_setters(&self.setters))?;
-                if !values.keys().eq(setters.keys()) {
-                    return Err(DbError::DamagedDatabase);
-                }
-                Lost::Row(
-                    values
-                        .into_iter()
-                        .map(|(column, value)| LostCell {
-                            set_by: setters[&column],
-                            column,
-                            value: crate::write_encoding::sql_value(&value.value),
-                        })
-                        .collect(),
-                )
-            }
+        let cell = |column, cell: coven_merge::Cell<coven_format::value::Value>| LostCell {
+            column,
+            value: crate::write_encoding::sql_value(&cell.value.value),
+            set_by: cell.write,
         };
-        let replaced_by = match self.kind.as_str() {
-            "write" if self.column_id.is_some() => {
-                Replacement::Write(decoded(decode_write_id(&self.replacement))?)
-            }
-            "rules" if self.column_id.is_none() => Replacement::Rules(
-                decoded(decode_rules(&self.replacement))?
+        let lost = match record.values {
+            LossValues::Cell {
+                column,
+                cell: value,
+            } => Lost::Cell(cell(column, value)),
+            LossValues::Row(cells) => Lost::Row(
+                cells
+                    .into_iter()
+                    .map(|(column, value)| cell(column, value))
+                    .collect(),
+            ),
+        };
+        let replaced_by = match record.cause {
+            LossCause::Write(write) => Replacement::Write(write),
+            LossCause::Rules(rules) => Replacement::Rules(
+                rules
                     .into_iter()
                     .map(|rule| match rule {
                         Rule::ForeignKey(key) => RemovalRule::ForeignKey {
@@ -189,21 +144,20 @@ impl LostRecord {
                     })
                     .collect(),
             ),
-            "excluded" => match decoded(decode_lost_write_cause(&self.replacement))? {
-                LostWriteCause::SchemaChange(version) => Replacement::SchemaChange { version },
-                LostWriteCause::Reset(entry) => Replacement::Reset(entry),
-            },
-            _ => return Err(DbError::DamagedDatabase),
+            LossCause::Excluded {
+                cause: LostWriteCause::SchemaChange(version),
+                ..
+            } => Replacement::SchemaChange { version },
+            LossCause::Excluded {
+                cause: LostWriteCause::Reset(entry),
+                ..
+            } => Replacement::Reset(entry),
         };
-        let row = coven_merge::RowId {
-            table: self.table.clone(),
-            key: self.key,
-            audience: crate::write_encoding::audience(&self.audience)?,
-        };
-        let target = if self.kind == "rules" && !self.retired {
+        let row = record.row;
+        let target = if matches!(replaced_by, Replacement::Rules(_)) && !record.retired {
             LossTarget::Removed {
-                row,
-                generation: crate::write_encoding::counter(self.generation),
+                row: row.clone(),
+                generation: record.generation,
             }
         } else {
             let cells = match &lost {
@@ -222,17 +176,13 @@ impl LostRecord {
             )
         };
         Ok(LostValue {
-            table: self.table,
+            table: row.table,
             key,
             lost,
             replaced_by,
             target,
         })
     }
-}
-
-fn decoded<T>(result: Result<T, coven_format::Error>) -> Result<T, DbError> {
-    result.map_err(|_| DbError::DamagedDatabase)
 }
 
 #[cfg(test)]

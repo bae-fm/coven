@@ -21,10 +21,8 @@ pub(crate) fn carry(
     db.visit("SELECT table_name,key,audience FROM temp._coven_migration_retired", [], |r| {
         let id = crate::row_queries::read_identity(r)?;
         freeze_losses(db, &id)?;
-        crate::fingerprint::retire_losses(db, &id)?;
         crate::fingerprint::forget_rows(db, std::iter::once(&id))?;
         let audience = audience_text(&id.audience);
-        db.internal_execute("UPDATE _coven_lost SET retired=1 WHERE table_name=?1 AND key=?2 AND audience=?3 AND retired=0 AND replacement_kind IN ('rules','write')",params![id.table,id.key,audience])?;
         for table in ["_coven_references", "_coven_cells", "_coven_claims"] {
             db.internal_execute(&format!("DELETE FROM {table} WHERE row_id IN (SELECT id FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3)"),params![id.table,id.key,audience])?;
         }
@@ -61,7 +59,10 @@ pub(crate) fn carry(
                 db.internal_execute(&format!("DELETE FROM {child} WHERE row_id IN (SELECT id FROM _coven_rows WHERE table_name=?1)"), [&table.name])?;
             }
             db.internal_execute("DELETE FROM _coven_rows WHERE table_name=?1", [&table.name])?;
-            db.internal_execute("DELETE FROM _coven_lost WHERE table_name=?1 AND retired=0 AND replacement_kind IN ('rules','write')",[&table.name])?;
+            db.internal_execute(
+                "DELETE FROM _coven_lost WHERE table_name=?1 AND retired=0",
+                [&table.name],
+            )?;
         }
     }
     columns(db, names)?;
@@ -81,21 +82,29 @@ pub(crate) fn carry(
 
 /// Retired losses keep their written values without active reference metadata.
 fn freeze_losses(db: &DatabaseConnection, row: &coven_merge::RowId) -> Result<(), DbError> {
-    db.visit("SELECT id,replacement_kind,value FROM _coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND retired=0 AND replacement_kind IN ('rules','write')", params![row.table,row.key,audience_text(&row.audience)], |r| {
-        let id: i64 = r.get(0)?;
-        let bytes: Vec<u8> = r.get(2)?;
-        let value = if r.get::<_,String>(1)? == "rules" {
-            let mut columns = decoded(merge_fields::decode_columns(&bytes))?;
-            for value in columns.values_mut() { value.parents.clear(); }
-            encoded(merge_fields::encode_columns(&columns))?
-        } else {
-            let mut value = decoded(merge_fields::decode_column_value(&bytes))?;
-            value.parents.clear();
-            encoded(merge_fields::encode_column_value(&value))?
-        };
-        db.internal_execute("UPDATE _coven_lost SET value=?2 WHERE id=?1",params![id,value])?;
-        Ok(())
-    })
+    let ids = db.query(
+        "SELECT id FROM _coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND retired=0",
+        params![row.table, row.key, audience_text(&row.audience)],
+        |r| r.get::<_, i64>(0),
+    )?;
+    for id in ids {
+        let mut loss = db.query_row(
+            &format!("{} WHERE l.id=?1", crate::loss_record::SELECT),
+            [id],
+            crate::loss_record::read,
+        )?;
+        loss.retired = true;
+        match &mut loss.values {
+            coven_format::loss::LossValues::Cell { cell, .. } => cell.value.parents.clear(),
+            coven_format::loss::LossValues::Row(cells) => {
+                for cell in cells.values_mut() {
+                    cell.value.parents.clear();
+                }
+            }
+        }
+        crate::loss_record::put(db, &loss, Some(id))?;
+    }
+    Ok(())
 }
 
 fn rename_table(db: &DatabaseConnection, old: &str, new: &str) -> Result<(), DbError> {
@@ -135,7 +144,11 @@ fn columns(db: &DatabaseConnection, names: &MigrationMatch) -> Result<(), DbErro
             db.internal_execute("DELETE FROM _coven_columns WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM _coven_lost WHERE column_id=?1)",[id])?;
             continue;
         };
-        let retained: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_lost WHERE column_id=?1 AND (retired=1 OR replacement_kind='excluded'))",[id],|r|r.get(0))?;
+        let retained: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM _coven_lost WHERE column_id=?1 AND retired=1)",
+            [id],
+            |r| r.get(0),
+        )?;
         let stage = format!("coven_migration_column_{id}");
         let active = if retained {
             db.internal_execute(

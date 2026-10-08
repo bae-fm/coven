@@ -1,6 +1,6 @@
 use super::*;
 use crate::{tests::TestStore, CovenError, Database};
-use coven_format::{key::encode_key, value::Value as WireValue};
+use coven_format::{key::encode_key, merge_fields::*, value::Value as WireValue};
 use coven_foundation::id_source::DeviceId;
 use coven_merge::ColumnValue;
 use std::collections::{BTreeMap, BTreeSet};
@@ -36,8 +36,8 @@ fn insert(
     replacement: Vec<u8>,
 ) {
     db.commit_writer(|sql| {
-        sql.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES ('notes',?1,'store',?2,?3,?4,?5,?6,?7)",
-            (key(), 0u64.to_be_bytes().to_vec(), column, value, setters, kind, replacement)).unwrap();
+        sql.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by,retired) VALUES ('notes',?1,'store',?2,?3,?4,?5,?6,?7,?8)",
+            (key(), 0u64.to_be_bytes().to_vec(), column, value, setters, kind, replacement, kind == "excluded")).unwrap();
     });
 }
 
@@ -98,7 +98,7 @@ async fn losses_preserve_storage_classes_each_setter_and_every_replacement() {
             encode_columns(&values).unwrap(),
             encode_setters(&setters).unwrap(),
             "excluded",
-            encode_lost_write_cause(&cause).unwrap(),
+            encode_exclusion(setter(1), cause).unwrap(),
         );
     }
     let losses = db.lost_values().await.unwrap();

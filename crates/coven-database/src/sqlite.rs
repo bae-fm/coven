@@ -74,7 +74,7 @@ impl DatabaseConnection {
             FunctionFlags::SQLITE_UTF8
                 | FunctionFlags::SQLITE_DETERMINISTIC
                 | FunctionFlags::SQLITE_DIRECTONLY,
-            |ctx| crate::snapshot_loss::sort_key(ctx.get(0)?, &ctx.get::<Vec<u8>>(1)?),
+            |ctx| crate::loss_record::sort_key(ctx.get(0)?, &ctx.get::<Vec<u8>>(1)?),
         )?;
         connection.create_scalar_function(
             "_coven_fingerprint_replace",
@@ -717,12 +717,13 @@ impl DatabaseConnection {
 
     pub(crate) fn lost_values(&self) -> CovenResult<Vec<crate::LostValue>> {
         let records = self.query(
-            "SELECT l.table_name,l.key,l.column_id,c.table_name,c.column_name,l.value,l.set_by,l.replacement_kind,l.replaced_by,l.audience,l.generation,l.retired FROM _coven_lost l LEFT JOIN _coven_columns c ON c.id=l.column_id ORDER BY l.id",
-            [], crate::lost::LostRecord::read,
+            &format!("{} ORDER BY l.id", crate::loss_record::SELECT),
+            [],
+            crate::loss_record::read,
         )?;
         records
             .into_iter()
-            .map(|record| record.decode().map_err(Into::into))
+            .map(|record| crate::LostValue::from_record(record).map_err(Into::into))
             .collect()
     }
 

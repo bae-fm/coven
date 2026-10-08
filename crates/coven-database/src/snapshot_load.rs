@@ -5,15 +5,12 @@ use crate::removal_view::DatabaseRemovalView;
 use crate::snapshot_error::{invalid, SnapshotError};
 use crate::snapshot_metadata::SnapshotMetadata;
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::{audience_text, encoded};
 use crate::write_rows::AppView;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_format::snapshot::{SnapshotHeader, SnapshotRecord};
-use coven_format::snapshot_rows::LostWrite;
 use coven_format::snapshot_stream::SnapshotChunkDecoder;
 use coven_format::store_log::SnapshotId;
-use coven_format::write_stream::{PartHeader, WriteHeaderFrame};
 use coven_merge::RowId;
 use rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
@@ -136,7 +133,7 @@ pub(crate) fn read(
     let metadata = SnapshotMetadata::new(database);
     let mut decoder = SnapshotChunkDecoder::new(prefix);
     let mut checked_header = false;
-    let mut excluded = None;
+    let mut loss_state = None;
     let mut chunk = [0; coven_format::chunks::CHUNK_SIZE];
     loop {
         let length = match input.read(&mut chunk) {
@@ -181,69 +178,8 @@ pub(crate) fn read(
                 SnapshotRecord::Merge(row) => {
                     touched.insert(crate::snapshot_state::merged(database, schema, row)?);
                 }
-                SnapshotRecord::LostWrite(write) => {
-                    metadata.check_header(&write.header)?;
-                    if let Some(previous) = excluded.take() {
-                        finish_excluded(database, previous)?;
-                    }
-                    database.internal_execute(
-                        "INSERT INTO _coven_excluded_writes(audience,device,number,header,cause)
-                             VALUES(?1,?2,?3,x'',?4)",
-                        params![
-                            audience_text(&write.audience),
-                            write.header.position.device.0.to_be_bytes().as_slice(),
-                            write.header.position.number.to_be_bytes().as_slice(),
-                            encoded(coven_format::merge_fields::encode_lost_write_cause(
-                                &write.cause
-                            ))?,
-                        ],
-                    )?;
-                    excluded = Some(PendingExcluded { write, bytes: 0 });
-                }
-                SnapshotRecord::LostWriteRow(row) => {
-                    let pending = excluded
-                        .as_mut()
-                        .ok_or_else(|| invalid("excluded row has no header"))?;
-                    let bytes = encoded(row.change.encode())?;
-                    pending.bytes = pending
-                        .bytes
-                        .checked_add(bytes.len() as u64)
-                        .ok_or_else(|| invalid("excluded write length overflow"))?;
-                    database.internal_execute(
-                        "INSERT INTO _coven_excluded_rows(write_id,table_name,key,record)
-                             VALUES((SELECT id FROM _coven_excluded_writes
-                                     WHERE audience=?1 AND device=?2 AND number=?3),?4,?5,?6)",
-                        params![
-                            audience_text(&pending.write.audience),
-                            pending
-                                .write
-                                .header
-                                .position
-                                .device
-                                .0
-                                .to_be_bytes()
-                                .as_slice(),
-                            pending
-                                .write
-                                .header
-                                .position
-                                .number
-                                .to_be_bytes()
-                                .as_slice(),
-                            row.change.row.table,
-                            row.change.row.key,
-                            bytes,
-                        ],
-                    )?;
-                    crate::download::exclude_row(
-                        database,
-                        &pending.write.header,
-                        pending.write.cause,
-                        &row.change,
-                    )?;
-                }
-                SnapshotRecord::RetainedLoss(loss) => {
-                    crate::snapshot_state::retained(database, loss)?
+                SnapshotRecord::Loss(loss) => {
+                    crate::snapshot_state::loss(database, schema, loss, &metadata, &mut loss_state)?
                 }
             }
         }
@@ -253,9 +189,6 @@ pub(crate) fn read(
         .header()
         .ok_or_else(|| invalid("snapshot has no header"))?;
     check_header(database, schema, expected, header)?;
-    if let Some(pending) = excluded {
-        finish_excluded(database, pending)?;
-    }
     metadata.validate(&header.writes)?;
     crate::snapshot_state::finish(database)?;
     database.batch(
@@ -296,32 +229,6 @@ fn check_header(
     if !missing.is_empty() {
         return Err(SnapshotError::StoreLog { missing }.into());
     }
-    Ok(())
-}
-
-struct PendingExcluded {
-    write: LostWrite,
-    bytes: u64,
-}
-
-fn finish_excluded(database: &DatabaseConnection, pending: PendingExcluded) -> Result<(), DbError> {
-    let header = WriteHeaderFrame {
-        header: pending.write.header,
-        parts: vec![PartHeader {
-            audience: pending.write.audience.clone(),
-            record_count: pending.write.row_count,
-            plaintext_length: pending.bytes,
-        }],
-    };
-    database.internal_execute(
-        "UPDATE _coven_excluded_writes SET header=?1 WHERE audience=?2 AND device=?3 AND number=?4",
-        params![
-            header.encode().map_err(SnapshotError::Format)?,
-            audience_text(&pending.write.audience),
-            header.header.position.device.0.to_be_bytes().as_slice(),
-            header.header.position.number.to_be_bytes().as_slice()
-        ],
-    )?;
     Ok(())
 }
 

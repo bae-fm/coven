@@ -191,6 +191,20 @@ impl<'a> MergeStore<'a> {
                 return Ok(row.clone());
             }
         }
+        let row = self.read_row(id, true)?;
+        if let Some(rows) = &self.rows {
+            rows.borrow_mut().insert(id.clone(), row.clone());
+        }
+        Ok(row)
+    }
+
+    /// Snapshot merge records and loss validation read generations and winning
+    /// cells independently of the loss section, without loading prior losses.
+    pub(crate) fn row_without_losses(&self, id: &RowId) -> Result<StoredRow, DbError> {
+        self.read_row(id, false)
+    }
+
+    fn read_row(&self, id: &RowId, with_losses: bool) -> Result<StoredRow, DbError> {
         #[cfg(test)]
         self.database.record_merge_load(&id.table);
         let audience = audience_text(&id.audience);
@@ -259,12 +273,25 @@ impl<'a> MergeStore<'a> {
         }
         let mut lost = BTreeMap::new();
         let mut lost_ids = BTreeMap::new();
-        for (ordinal, generation, column, value, set_by, replaced_by) in self.database.query("SELECT l.id,l.generation,c.column_name,l.value,l.set_by,l.replaced_by FROM _coven_lost l JOIN _coven_columns c ON c.id=l.column_id WHERE l.table_name=?1 AND l.key=?2 AND l.audience=?3 AND l.column_id IS NOT NULL AND l.replacement_kind='write' AND l.retired=0", params![id.table,id.key,audience], |r| Ok((r.get::<_,i64>(0)?, counter(r.get(1)?),r.get::<_,String>(2)?,decoded(merge_fields::decode_column_value(&r.get::<_,Vec<u8>>(3)?))?,decoded(merge_fields::decode_write_id(&r.get::<_,Vec<u8>>(4)?))?,decoded(merge_fields::decode_write_id(&r.get::<_,Vec<u8>>(5)?))?)))? {
-            self.metadata.load(set_by)?;
-            self.metadata.load(replaced_by)?;
-            let key = LostKey { column, write:set_by };
-            lost_ids.insert(key.clone(), ordinal);
-            lost.insert(key, LostValue { incarnation:generation, value, replaced_by });
+        if with_losses {
+            let records = self.database.query("SELECT l.id,l.generation,c.column_name,l.value,l.set_by,l.replaced_by FROM _coven_lost l JOIN _coven_columns c ON c.id=l.column_id WHERE l.table_name=?1 AND l.key=?2 AND l.audience=?3 AND l.column_id IS NOT NULL AND l.replacement_kind='write' AND l.retired=0", params![id.table,id.key,audience], |r| Ok((r.get::<_,i64>(0)?, counter(r.get(1)?),r.get::<_,String>(2)?,decoded(merge_fields::decode_column_value(&r.get::<_,Vec<u8>>(3)?))?,decoded(merge_fields::decode_write_id(&r.get::<_,Vec<u8>>(4)?))?,decoded(merge_fields::decode_write_id(&r.get::<_,Vec<u8>>(5)?))?)))?;
+            for (ordinal, generation, column, value, set_by, replaced_by) in records {
+                self.metadata.load(set_by)?;
+                self.metadata.load(replaced_by)?;
+                let key = LostKey {
+                    column,
+                    write: set_by,
+                };
+                lost_ids.insert(key.clone(), ordinal);
+                lost.insert(
+                    key,
+                    LostValue {
+                        incarnation: generation,
+                        value,
+                        replaced_by,
+                    },
+                );
+            }
         }
         let state = coven_merge::RowState::from_parts(
             id.clone(),
@@ -274,16 +301,12 @@ impl<'a> MergeStore<'a> {
             &self.metadata,
         )
         .expect("stored merge state satisfies its invariants");
-        let row = StoredRow {
+        Ok(StoredRow {
             state,
             ordinal: current.map(|(id, _)| id),
             loss,
             lost_ids,
-        };
-        if let Some(rows) = &self.rows {
-            rows.borrow_mut().insert(id.clone(), row.clone());
-        }
-        Ok(row)
+        })
     }
 
     pub(crate) fn apply(

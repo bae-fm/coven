@@ -3,7 +3,7 @@
 use crate::error::Error;
 use crate::value::{name, positive, row, Value};
 use crate::wire::{wire_struct, Decoder, Encoder, Wire};
-use coven_merge::{Cell, ColumnValue, LostKey, LostValue, Parent, Rule};
+use coven_merge::{Cell, ColumnValue, Parent, Rule};
 use std::collections::{BTreeMap, BTreeSet};
 
 wire_struct!(coven_merge::ForeignKey, columns, parent => crate::wire::get_name, parent_columns);
@@ -36,8 +36,6 @@ impl Wire for coven_merge::UniqueConstraint {
 wire_struct!(Parent, row, generation);
 wire_struct!(ColumnValue<Value>, value, parents);
 wire_struct!(Cell<Value>, write, value);
-wire_struct!(LostKey, column => crate::wire::get_name, write);
-wire_struct!(LostValue<Value>, incarnation, value, replaced_by);
 
 impl Wire for Rule {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {

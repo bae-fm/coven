@@ -188,7 +188,7 @@ async fn authentication_failure_rolls_back_rows_positions_losses_and_observation
 }
 
 #[tokio::test]
-async fn streamed_excluded_rows_accumulate_under_one_snapshot_header() {
+async fn streamed_excluded_rows_use_the_common_snapshot_loss_section() {
     let ids = SequentialIds::new();
     let sa = TestStore::with_ids(&ids);
     let sb = TestStore::with_ids(&ids);
@@ -211,19 +211,16 @@ async fn streamed_excluded_rows_accumulate_under_one_snapshot_header() {
     .unwrap();
     assert_eq!(count(&b, "notes"), 0);
     assert_eq!(count(&b, "_coven_lost"), 2);
-    b.inspect_writer(|sql| {
-        let bytes: Vec<u8> = sql
-            .query_row("SELECT header FROM _coven_excluded_writes", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        let header = coven_format::write_stream::WriteHeaderFrame::decode(&bytes).unwrap();
-        assert_eq!(header.parts[0].record_count, 2);
-        assert_eq!(
-            header.parts[0].plaintext_length,
-            WriteEncoder::new(&record).unwrap().header().parts[0].plaintext_length
-        );
-    });
+    let snapshot = crate::snapshot_write::tests::frames(&b, Audience::Store).await;
+    let (header, records) = crate::snapshot_write::tests::decode(&snapshot);
+    assert_eq!(header.counts[4], 2);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(record, coven_format::snapshot::SnapshotRecord::Loss(_)))
+            .count(),
+        2
+    );
 }
 
 #[tokio::test]

@@ -176,6 +176,62 @@ pub fn decode_lost_write_cause(bytes: &[u8]) -> Result<LostWriteCause, Error> {
     Ok(value)
 }
 
+/// Encode the excluded write and the boundary that displaced it.
+pub fn encode_exclusion(write: WriteId, cause: LostWriteCause) -> Result<Vec<u8>, Error> {
+    let mut bytes = encode_write_id(&write)?;
+    bytes.extend(encode_lost_write_cause(&cause)?);
+    Ok(bytes)
+}
+
+/// Decode an excluded write's identity and boundary from its loss record.
+pub fn decode_exclusion(bytes: &[u8]) -> Result<(WriteId, LostWriteCause), Error> {
+    let (write, cause): (WriteId, LostWriteCause) =
+        decode_with(bytes, |input| Ok((Wire::get(input)?, Wire::get(input)?)))?;
+    crate::value::positive(write.number)?;
+    cause.validate()?;
+    Ok((write, cause))
+}
+
+/// Encode one loss using the same bytes as the snapshot loss section.
+pub fn encode_loss(value: &crate::loss::Loss) -> Result<Vec<u8>, Error> {
+    value.validate()?;
+    encode(value)
+}
+
+/// Encode a loss identity without its values or changing replacement details.
+pub fn encode_loss_identity(value: &crate::loss::Loss) -> Result<Vec<u8>, Error> {
+    use crate::loss::{LossCause, LossValues};
+    let mut out = Encoder::new();
+    value.row.put(&mut out)?;
+    value.generation.put(&mut out)?;
+    match &value.values {
+        LossValues::Cell { column, cell } => {
+            0u8.put(&mut out)?;
+            column.put(&mut out)?;
+            cell.write.put(&mut out)?;
+        }
+        LossValues::Row(cells) => {
+            1u8.put(&mut out)?;
+            cells
+                .iter()
+                .map(|(n, c)| (n.clone(), c.write))
+                .collect::<BTreeMap<_, _>>()
+                .put(&mut out)?;
+        }
+    }
+    u8::from(value.retired).put(&mut out)?;
+    match value.cause {
+        LossCause::Write(_) => 0u8,
+        LossCause::Rules(_) => 1,
+        LossCause::Excluded { .. } => 2,
+    }
+    .put(&mut out)?;
+    if let LossCause::Excluded { write, .. } = value.cause {
+        write.put(&mut out)?;
+    }
+    Ok(out.bytes)
+}
+
 #[cfg(test)]
 #[path = "merge_fields_tests.rs"]
 mod tests;

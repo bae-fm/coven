@@ -234,15 +234,6 @@ fn only_migration_writes_have_no_parts() {
         );
     }
     write.header.disposition = WriteDisposition::Migration;
-    let mut lost = test_utils::lost_write();
-    lost.header = write.header.clone();
-    assert_eq!(
-        lost.validate(),
-        Err(Error::Invalid {
-            field: "migration write parts",
-            rule: Rule::StreamLength,
-        })
-    );
     let bytes = test_utils::write_plaintext(&write).unwrap();
     assert_eq!(decode_plaintext(&bytes).unwrap(), write);
     assert_eq!(

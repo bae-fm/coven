@@ -191,7 +191,7 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
     let (header, snapshot) = decode(&frames(&receiver, Audience::Store).await);
     assert_eq!(header.schema_version, 1);
     assert_eq!(header.writes.0, [excluded.header.position]);
-    assert_eq!(header.counts, [1, 5, 3, 1, 1, 0]);
+    assert_eq!(header.counts, [1, 5, 3, 1, 1]);
     let synced = snapshot
         .iter()
         .find_map(|record| match record {
@@ -216,19 +216,16 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
     let lost = snapshot
         .iter()
         .find_map(|record| match record {
-            SnapshotRecord::LostWrite(write) => Some(write),
+            SnapshotRecord::Loss(loss) => Some(loss),
             _ => None,
         })
         .unwrap();
-    assert_eq!(lost.header, excluded.header);
-    let lost_row = snapshot
-        .iter()
-        .find_map(|record| match record {
-            SnapshotRecord::LostWriteRow(row) => Some(row),
-            _ => None,
-        })
-        .unwrap();
-    assert_eq!(lost_row.change, excluded.parts[0].rows[0]);
+    assert_eq!(lost.row, excluded.parts[0].rows[0].row);
+    let coven_format::loss::LossValues::Row(cells) = &lost.values else {
+        panic!("row loss")
+    };
+    assert_eq!(cells["title"].write, excluded.header.position);
+    assert_eq!(cells["title"].value.value, Value::Text("excluded".into()));
     assert_eq!(count(&source, "_coven_uploads"), 5);
     assert_eq!(count(&receiver, "_coven_uploads"), 0);
     assert_loaded_losses(&receiver, &source).await;
@@ -436,11 +433,11 @@ async fn a_migration_preserves_removed_rows_and_their_concurrent_losses_in_snaps
     let (header, snapshot) = decode(&frames(&a, Audience::Store).await);
     assert_eq!(header.schema_version, 2);
     assert_eq!(header.counts[3], 1);
-    assert_eq!(header.counts[5], 2);
+    assert_eq!(header.counts[4], 2);
     let retained: Vec<_> = snapshot
         .into_iter()
         .filter_map(|record| match record {
-            SnapshotRecord::RetainedLoss(loss) => Some(loss),
+            SnapshotRecord::Loss(loss) => Some(loss),
             _ => None,
         })
         .collect();
@@ -452,10 +449,10 @@ async fn a_migration_preserves_removed_rows_and_their_concurrent_losses_in_snaps
         );
     }
     assert!(
-        matches!(&retained[0].values, coven_format::retained_loss::RetainedValues::Cell { key, .. } if key.column=="body")
+        matches!(&retained[0].values, coven_format::loss::LossValues::Cell { column, .. } if column=="body")
     );
     assert!(
-        matches!(&retained[1].values, coven_format::retained_loss::RetainedValues::Row { cells, .. } if cells.contains_key("body") && !cells.contains_key("content"))
+        matches!(&retained[1].values, coven_format::loss::LossValues::Row(cells) if cells.contains_key("body") && !cells.contains_key("content"))
     );
     // Retired history also survives a new incarnation with the same identity.
     sql(
@@ -497,12 +494,12 @@ async fn a_migration_preserves_removed_rows_and_their_concurrent_losses_in_snaps
         .collect();
     a.dismiss_lost_values(&cells).await.unwrap();
     assert_loaded_losses(&a, &d).await;
-    assert_eq!(decode(&frames(&d, Audience::Store).await).0.counts[5], 1);
+    assert_eq!(decode(&frames(&d, Audience::Store).await).0.counts[4], 1);
     a.dismiss_lost_values(&a.lost_values().await.unwrap())
         .await
         .unwrap();
     assert_loaded_losses(&a, &d).await;
-    assert_eq!(decode(&frames(&d, Audience::Store).await).0.counts[5], 0);
+    assert_eq!(decode(&frames(&d, Audience::Store).await).0.counts[4], 0);
     assert_eq!(count(&d, "notes"), 2);
     for database in [a, b, c, d] {
         database.close().await.unwrap();
@@ -582,7 +579,6 @@ async fn snapshots_keep_the_written_reference_when_the_app_reads_null() {
 #[tokio::test]
 async fn excluded_snapshots_keep_only_undismissed_cells_and_rows() {
     use coven_format::{dismissal::Dismissal, write::WriteDisposition};
-    use coven_merge::Operation;
     for (operation, lost_dismissal) in ["insert", "update", "delete"]
         .into_iter()
         .flat_map(|operation| [false, true].map(|lost| (operation, lost)))
@@ -639,36 +635,30 @@ async fn excluded_snapshots_keep_only_undismissed_cells_and_rows() {
         }
         receiver.apply_downloaded(dismissal.into()).await.unwrap();
         let (header, snapshot) = decode(&frames(&receiver, Audience::Store).await);
-        assert_eq!(header.counts[4], 1);
+        assert_eq!(header.counts[4], 2);
         let rows: Vec<_> = snapshot
             .into_iter()
             .filter_map(|r| match r {
-                SnapshotRecord::LostWriteRow(row) => Some(row.change),
+                SnapshotRecord::Loss(loss) => Some(loss),
                 _ => None,
             })
             .collect();
         assert_eq!(rows.len(), 2);
-        match &rows[0].change.operation {
-            Operation::Insert(values) => assert_eq!(
-                values.keys().map(String::as_str).collect::<Vec<_>>(),
-                ["body", "id"]
-            ),
-            Operation::Update(values) => {
-                assert_eq!(
-                    values.keys().map(String::as_str).collect::<Vec<_>>(),
-                    ["body"]
-                );
-                assert_eq!(
-                    rows[0].old.keys().map(String::as_str).collect::<Vec<_>>(),
-                    ["body"]
-                );
+        let coven_format::loss::LossValues::Row(cells) = &rows[0].values else {
+            panic!("row loss")
+        };
+        assert_eq!(
+            cells.keys().map(String::as_str).collect::<Vec<_>>(),
+            if operation == "update" {
+                vec!["body"]
+            } else {
+                vec!["body", "id"]
             }
-            Operation::Delete => assert_eq!(
-                rows[0].old.keys().map(String::as_str).collect::<Vec<_>>(),
-                ["body", "id"]
-            ),
-        }
-        assert_eq!(rows[1], excluded.parts[0].rows[1]);
+        );
+        assert!(cells
+            .values()
+            .all(|cell| cell.write == excluded.header.position));
+        assert_eq!(rows[1].row, excluded.parts[0].rows[1].row);
         let target_store = TestStore::with_ids(&ids);
         let target = if operation == "insert" {
             target_store.schema(Vec::new(), "SELECT 1").await.unwrap()
@@ -682,12 +672,9 @@ async fn excluded_snapshots_keep_only_undismissed_cells_and_rows() {
             .unwrap();
         let (header, snapshot) = decode(&frames(&receiver, Audience::Store).await);
         assert_eq!(header.counts[4], 0);
-        assert!(!snapshot.iter().any(|record| matches!(
-            record,
-            SnapshotRecord::LostWrite(_) | SnapshotRecord::LostWriteRow(_)
-        )));
-        assert_eq!(count(&receiver, "_coven_excluded_writes"), 0);
-        assert_eq!(count(&receiver, "_coven_excluded_rows"), 0);
+        assert!(!snapshot
+            .iter()
+            .any(|record| matches!(record, SnapshotRecord::Loss(_))));
         assert_loaded_losses(&receiver, &target).await;
         target.close().await.unwrap();
         source.close().await.unwrap();
@@ -727,4 +714,65 @@ pub(crate) async fn assert_loaded_losses(source: &Database, target: &Database) {
             .unwrap()
             .fingerprints,
     );
+}
+
+#[tokio::test]
+async fn excluded_deletions_without_old_values_keep_distinct_write_identities() {
+    use coven_format::loss::{LossCause, LossValues};
+    let ids = SequentialIds::new();
+    let source_store = TestStore::with_ids(&ids);
+    let receiver_store = TestStore::with_ids(&ids);
+    let target_store = TestStore::with_ids(&ids);
+    let source = source_store.schema(notes(), NOTES).await.unwrap();
+    let receiver = receiver_store.schema(notes(), NOTES).await.unwrap();
+    let target = target_store.schema(notes(), NOTES).await.unwrap();
+    sql(&source, "INSERT INTO notes VALUES('n','value','body')")
+        .await
+        .unwrap();
+    receiver
+        .apply_downloaded(records(&source)[0].clone().into())
+        .await
+        .unwrap();
+    sql(&source, "DELETE FROM notes").await.unwrap();
+    let mut deletion = records(&source).pop().unwrap();
+    deletion.header.disposition = coven_format::write::WriteDisposition::Lost(1);
+    deletion.parts[0].rows[0].old.clear();
+    receiver
+        .apply_downloaded(deletion.clone().into())
+        .await
+        .unwrap();
+    let first = deletion.header.position;
+    // Excluded writes do not run merge: another deletion at the same generation
+    // remains a distinct loss even when neither carries an old cell value.
+    deletion.header.position.number += 1;
+    deletion.header.timestamp = Timestamp::new(
+        deletion.header.timestamp.milliseconds() + 1,
+        0,
+        deletion.header.position.device,
+    )
+    .unwrap();
+    receiver
+        .apply_downloaded(deletion.clone().into())
+        .await
+        .unwrap();
+    let (header, snapshot) = decode(&frames(&receiver, Audience::Store).await);
+    assert_eq!(header.counts[4], 2);
+    let writes: Vec<_> = snapshot
+        .into_iter()
+        .filter_map(|record| match record {
+            SnapshotRecord::Loss(loss) => {
+                assert_eq!(loss.values, LossValues::Row(BTreeMap::new()));
+                let LossCause::Excluded { write, .. } = loss.cause else {
+                    panic!("excluded loss")
+                };
+                Some(write)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(writes, [first, deletion.header.position]);
+    assert_loaded_losses(&receiver, &target).await;
+    for database in [source, receiver, target] {
+        database.close().await.unwrap();
+    }
 }

@@ -387,6 +387,7 @@ async fn row_state_round_trips_from_app_values_or_removed_values() {
         db.inspect_writer(|sql| {
             sql.transaction(|sql| {
                 put_state(sql, &state, &oracle, &rules);
+                assert!(sql.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) SELECT table_name,key,audience,?1,column_id,value,set_by,replacement_kind,replaced_by FROM _coven_lost WHERE column_id IS NOT NULL LIMIT 1", [5u64.to_be_bytes().as_slice()]).is_err(), "a cell and setter cannot have two active loss records");
                 assert_eq!(
                     sql.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))
                         .unwrap(),
@@ -493,8 +494,6 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_constraints",
                 "_coven_device_files",
                 "_coven_devices",
-                "_coven_excluded_rows",
-                "_coven_excluded_writes",
                 "_coven_file_chunks",
                 "_coven_file_removals",
                 "_coven_file_upload_chunks",
@@ -573,10 +572,11 @@ async fn a_lost_row_does_not_require_an_accepted_generation() {
         LostWriteCause::Reset(entry),
     ] {
         db.inspect_writer(|sql| {
-            sql.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,value,set_by,replacement_kind,replaced_by) VALUES (?1,?2,?3,?4,?5,?6,'excluded',?7)",
-                (&state.row().table, &state.row().key, audience(&state.row().audience), 0u64.to_be_bytes().to_vec(), encode_columns(&values).unwrap(), encode_setters(&setters).unwrap(), encode_lost_write_cause(&cause).unwrap())).unwrap();
+            sql.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,value,set_by,replacement_kind,replaced_by,retired) VALUES (?1,?2,?3,?4,?5,?6,'excluded',?7,1)",
+                (&state.row().table, &state.row().key, audience(&state.row().audience), 0u64.to_be_bytes().to_vec(), encode_columns(&values).unwrap(), encode_setters(&setters).unwrap(), encode_exclusion(state.cells().values().next().unwrap().write, cause).unwrap())).unwrap();
             let stored = sql.query_row("SELECT replaced_by FROM _coven_lost WHERE id=last_insert_rowid()", [], |r| r.get::<_, Vec<u8>>(0)).unwrap();
-            assert_eq!(decode_lost_write_cause(&stored).unwrap(), cause);
+            assert_eq!(decode_exclusion(&stored).unwrap().1, cause);
+            assert!(sql.internal_execute("UPDATE _coven_lost SET retired=0 WHERE id=last_insert_rowid()", []).is_err());
             assert_eq!(sql.query_row("SELECT count(*) FROM _coven_rows", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
         });
     }

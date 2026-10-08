@@ -1,9 +1,9 @@
-//! Snapshots stream a header, six ordered sections and an end marker (§15).
+//! Snapshots stream a header, five ordered sections and an end marker (§15).
 //! The caller stages records and supplies the applied write metadata to merge.
 
 use crate::encode_frame_with;
 use crate::error::{require, Error, Rule};
-use crate::retained_loss::{LossIdentity, RetainedLoss};
+use crate::loss::{Loss, LossCause, LossIdentity};
 use crate::snapshot_rows::*;
 use crate::store_log::SnapshotId;
 use crate::value::{name, positive, EntryPositions, WritePositions};
@@ -21,11 +21,10 @@ pub struct SnapshotHeader {
     pub writes: WritePositions,
     /// Consumed store-log positions from the sealed prefix.
     pub store_log: EntryPositions,
-    /// Counts: synced rows, applied writes, columns, merged rows, lost writes,
-    /// and losses retained without merge records.
-    pub counts: [u64; 6],
+    /// Counts: synced rows, applied writes, columns, merged rows and losses.
+    pub counts: [u64; 5],
 }
-impl Wire for [u64; 6] {
+impl Wire for [u64; 5] {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {
         for n in self {
             n.put(out)?;
@@ -34,7 +33,6 @@ impl Wire for [u64; 6] {
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
         Ok([
-            Wire::get(input)?,
             Wire::get(input)?,
             Wire::get(input)?,
             Wire::get(input)?,
@@ -60,30 +58,20 @@ pub enum SnapshotRecord {
     Write(AppliedWrite),
     /// A synced column.
     Column(SyncedColumn),
-    /// One row's complete merge state and removal rules.
+    /// One row's generations and winning cells; losses travel separately.
     Merge(MergeRow),
-    /// Header and cause of a write excluded from merge; its row records follow.
-    LostWrite(LostWrite),
-    /// One row of the immediately preceding excluded write.
-    LostWriteRow(LostWriteRow),
-    /// A loss retained after its row's merge records were discarded.
-    RetainedLoss(RetainedLoss),
+    /// A displaced cell, removed row or excluded write's row.
+    Loss(Loss),
 }
 impl SnapshotRecord {
     pub(crate) fn put(&self, out: &mut Encoder) -> Result<(), Error> {
-        let tag = match self {
-            Self::LostWriteRow(_) => 6,
-            _ => self.section(),
-        };
-        tag.put(out)?;
+        self.section().put(out)?;
         match self {
             Self::Synced(v) => v.put(out),
             Self::Write(v) => v.put(out),
             Self::Column(v) => v.put(out),
             Self::Merge(v) => v.put(out),
-            Self::LostWrite(v) => v.put(out),
-            Self::LostWriteRow(v) => v.put(out),
-            Self::RetainedLoss(v) => v.put(out),
+            Self::Loss(v) => v.put(out),
         }
     }
     pub(crate) fn get(input: &mut Decoder<'_>, oracle: &impl WriteOracle) -> Result<Self, Error> {
@@ -92,9 +80,7 @@ impl SnapshotRecord {
             1 => Ok(Self::Write(Wire::get(input)?)),
             2 => Ok(Self::Column(Wire::get(input)?)),
             3 => Ok(Self::Merge(MergeRow::get(input, oracle)?)),
-            4 => Ok(Self::LostWrite(Wire::get(input)?)),
-            5 => Ok(Self::RetainedLoss(Wire::get(input)?)),
-            6 => Ok(Self::LostWriteRow(Wire::get(input)?)),
+            4 => Ok(Self::Loss(Wire::get(input)?)),
             tag => Err(Error::UnknownTag {
                 field: "snapshot section",
                 tag,
@@ -110,9 +96,7 @@ impl SnapshotRecord {
                 name(&v.column)
             }
             Self::Merge(v) => v.validate(),
-            Self::LostWrite(v) => v.validate(),
-            Self::LostWriteRow(v) => v.change.validate(),
-            Self::RetainedLoss(v) => v.validate(),
+            Self::Loss(v) => v.validate(),
         }
     }
     fn section(&self) -> u8 {
@@ -121,8 +105,7 @@ impl SnapshotRecord {
             Self::Write(_) => 1,
             Self::Column(_) => 2,
             Self::Merge(_) => 3,
-            Self::LostWrite(_) | Self::LostWriteRow(_) => 4,
-            Self::RetainedLoss(_) => 5,
+            Self::Loss(_) => 4,
         }
     }
     fn key(&self) -> RecordKey {
@@ -131,9 +114,7 @@ impl SnapshotRecord {
             Self::Write(v) => RecordKey::Write(v.id),
             Self::Column(v) => RecordKey::Column(v.clone()),
             Self::Merge(v) => RecordKey::Row(v.state.row().clone()),
-            Self::LostWrite(v) => RecordKey::Write(v.header.position),
-            Self::LostWriteRow(v) => RecordKey::Row(v.change.row.clone()),
-            Self::RetainedLoss(v) => RecordKey::Loss(v.key()),
+            Self::Loss(v) => RecordKey::Loss(v.key()),
         }
     }
     fn check_header(&self, h: &SnapshotHeader) -> Result<(), Error> {
@@ -147,7 +128,6 @@ impl SnapshotRecord {
         };
         match self {
             Self::Synced(v) => audience(&v.row),
-            Self::LostWriteRow(v) => audience(&v.change.row),
             Self::Write(v) => {
                 covered(v.id)?;
                 for p in &v.had_read.0 {
@@ -156,9 +136,20 @@ impl SnapshotRecord {
                 Ok(())
             }
             Self::Column(_) => Ok(()),
-            Self::RetainedLoss(v) => {
+            Self::Loss(v) => {
                 audience(&v.row)?;
-                require(v.covered(&h.writes), "retained loss writes", Rule::Coverage)
+                require(v.covered(&h.writes), "loss writes", Rule::Coverage)?;
+                if let LossCause::Excluded { cause, .. } = v.cause {
+                    require(
+                        match cause {
+                            LostWriteCause::SchemaChange(version) => version <= h.schema_version,
+                            LostWriteCause::Reset(entry) => h.store_log.covers(entry),
+                        },
+                        "loss cause",
+                        Rule::Coverage,
+                    )?;
+                }
+                Ok(())
             }
             Self::Merge(v) => {
                 audience(v.state.row())?;
@@ -168,31 +159,7 @@ impl SnapshotRecord {
                 for cell in v.state.cells().values() {
                     covered(cell.write)?;
                 }
-                for (key, value) in v.state.lost() {
-                    covered(key.write)?;
-                    covered(value.replaced_by)?;
-                }
                 Ok(())
-            }
-            Self::LostWrite(v) => {
-                covered(v.header.position)?;
-                require(
-                    match v.cause {
-                        crate::snapshot_rows::LostWriteCause::SchemaChange(version) => {
-                            version <= h.schema_version
-                        }
-                        crate::snapshot_rows::LostWriteCause::Reset(entry) => {
-                            h.store_log.covers(entry)
-                        }
-                    },
-                    "lost write cause",
-                    Rule::Coverage,
-                )?;
-                require(
-                    v.audience == h.id.audience,
-                    "lost write audience",
-                    Rule::Audience,
-                )
             }
         }
     }
@@ -203,18 +170,13 @@ enum RecordKey {
     Row(RowId),
     Write(WriteId),
     Column(SyncedColumn),
-    Loss((RowId, u64, LossIdentity)),
+    Loss((RowId, u64, LossIdentity, bool, u8, Option<WriteId>)),
 }
 struct StreamState {
     header: SnapshotHeader,
-    remaining: [u64; 6],
+    remaining: [u64; 5],
     previous: Option<(u8, RecordKey)>,
     ended: bool,
-    lost_rows: Option<LostRows>,
-}
-struct LostRows {
-    remaining: u64,
-    previous: Option<RowId>,
 }
 impl StreamState {
     fn new(header: SnapshotHeader) -> Self {
@@ -223,36 +185,10 @@ impl StreamState {
             header,
             previous: None,
             ended: false,
-            lost_rows: None,
         }
     }
     fn accept(&mut self, record: &SnapshotRecord) -> Result<(), Error> {
         record.check_header(&self.header)?;
-        if let SnapshotRecord::LostWriteRow(row) = record {
-            let pending = self.lost_rows.as_mut().ok_or(Error::Invalid {
-                field: "lost write row without header",
-                rule: Rule::SnapshotSequence,
-            })?;
-            require(
-                pending
-                    .previous
-                    .as_ref()
-                    .is_none_or(|previous| *previous < row.change.row),
-                "lost write row order",
-                Rule::Order,
-            )?;
-            pending.remaining -= 1;
-            pending.previous = Some(row.change.row.clone());
-            if pending.remaining == 0 {
-                self.lost_rows = None;
-            }
-            return Ok(());
-        }
-        require(
-            self.lost_rows.is_none(),
-            "unfinished lost write rows",
-            Rule::SnapshotSequence,
-        )?;
         let section = record.section();
         require(
             !self.ended && self.remaining.iter().position(|n| *n > 0) == Some(section as usize),
@@ -269,17 +205,11 @@ impl StreamState {
         }
         self.remaining[section as usize] -= 1;
         self.previous = Some((section, key));
-        if let SnapshotRecord::LostWrite(write) = record {
-            self.lost_rows = Some(LostRows {
-                remaining: write.row_count,
-                previous: None,
-            });
-        }
         Ok(())
     }
     fn end(&mut self) -> Result<(), Error> {
         require(
-            !self.ended && self.remaining == [0; 6] && self.lost_rows.is_none(),
+            !self.ended && self.remaining == [0; 5],
             "snapshot end",
             Rule::SnapshotSequence,
         )?;
@@ -323,8 +253,8 @@ impl SnapshotEncoder {
 /// Decodes a snapshot without retaining its rows or write history. The caller
 /// stages records and commits only after `finish` succeeds. Its oracle must
 /// describe the causally closed applied writes recorded by this snapshot.
-/// Populate that oracle from section 1; lost-write records add no oracle
-/// metadata, and frozen kept losses need no oracle. Only the header, counts and
+/// Populate that oracle from section 1. Loss records add no oracle metadata;
+/// the consumer validates active losses against merge rows. Only the header, counts and
 /// previous record identities are retained between frames. The database consumer
 /// checks cross-section completeness, SQL schema rules and app-row visibility;
 /// merge's removal computation checks which removal rules actually hold.

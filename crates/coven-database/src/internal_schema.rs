@@ -145,33 +145,15 @@ macro_rules! coven_tables {
                 audience TEXT PRIMARY KEY NOT NULL
             ) STRICT, WITHOUT ROWID;
         ");
-        $visit!(_coven_excluded_writes, "
-            CREATE TABLE _coven_excluded_writes (
-                id INTEGER PRIMARY KEY,
-                audience TEXT NOT NULL,
-                device BLOB NOT NULL CHECK(length(device)=8),
-                number BLOB NOT NULL CHECK(length(number)=8),
-                header BLOB NOT NULL,
-                cause BLOB NOT NULL,
-                UNIQUE(audience,device,number)
-            ) STRICT;
-        ");
-        $visit!(_coven_excluded_rows, "
-            CREATE TABLE _coven_excluded_rows (
-                write_id INTEGER NOT NULL REFERENCES _coven_excluded_writes(id) ON DELETE CASCADE,
-                table_name TEXT NOT NULL,
-                key BLOB NOT NULL,
-                record BLOB NOT NULL,
-                PRIMARY KEY(write_id,table_name,key)
-            ) STRICT, WITHOUT ROWID;
-        ");
         $visit!(_coven_fingerprint_leaves, "
             CREATE TABLE _coven_fingerprint_leaves (
                 audience TEXT NOT NULL,
                 key BLOB NOT NULL CHECK(length(key)=32),
                 hash BLOB NOT NULL CHECK(length(hash)=32),
+                merge_row BLOB CHECK(merge_row IS NULL OR length(merge_row)=32),
                 PRIMARY KEY(audience,key)
             ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_fingerprint_merge ON _coven_fingerprint_leaves(audience,merge_row);
         ");
         $visit!(_coven_fingerprint_sums, "
             CREATE TABLE _coven_fingerprint_sums (
@@ -286,9 +268,11 @@ macro_rules! coven_tables {
                 retired INTEGER NOT NULL DEFAULT 0 CHECK(retired IN (0,1)),
                 replacement_kind TEXT NOT NULL CHECK(replacement_kind IN ('write', 'rules', 'excluded')),
                 replaced_by BLOB NOT NULL,
-                CHECK((replacement_kind != 'write' OR column_id IS NOT NULL) AND (replacement_kind != 'rules' OR column_id IS NULL))
+                CHECK((replacement_kind='write') = (column_id IS NOT NULL)),
+                CHECK(replacement_kind!='excluded' OR retired=1)
             ) STRICT;
             CREATE INDEX _coven_lost_row ON _coven_lost(table_name,key,audience,generation,column_id);
+            CREATE UNIQUE INDEX _coven_lost_live_cell ON _coven_lost(table_name,key,audience,column_id,set_by) WHERE retired=0 AND replacement_kind='write';
             CREATE INDEX _coven_lost_removed ON _coven_lost(table_name,key,audience) WHERE retired=0 AND replacement_kind='rules';
             CREATE INDEX _coven_lost_column ON _coven_lost(column_id);
         ");

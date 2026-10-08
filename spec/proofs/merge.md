@@ -307,8 +307,10 @@ at.
   row names the foreign key and the CHECK, on every device, whichever rule a
   device ran first. Lean: `example_8`.
 - **End to end**: the merged state converges ([B6](#b6-proof-for-the-merged-state)), and the rules, and
-  therefore the app's tables and the removed rows' `_coven_lost` rows, are
-  functions of it and the store log. Lean: `device_converges`,
+  therefore the app's tables and all active loss records, are functions of
+  it and the store log. `LossRecord` gives cells and removed rows one shape:
+  row, generation, optional column, written values/setters and cause. Lean:
+  `lossRecord`, `device_converges`,
   `rule_order_converges`.
 - E.g. Lean runs the writes of [§8.4](../coven.md#84-foreign-keys), [§8.5](../coven.md#85-keys-and-uniqueness), [§8.6](../coven.md#86-check-constraints) and [§14.7](../coven.md#147-deleting-a-circle), with the
   rules reading the merged state it computes, in more than one arrival

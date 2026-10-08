@@ -1,19 +1,17 @@
 //! Authenticated, decoded writes at the sync/database boundary.
 use crate::merge_store::MergeStore;
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::{audience_text, counter, encoded};
+use crate::write_encoding::counter;
 use crate::write_rows::AppView;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_format::{
-    merge_fields,
     snapshot_rows::LostWriteCause,
     value::WritePositions,
     write::{WriteDisposition, WriteHeader, WritePart, WriteRecord},
 };
 use coven_foundation::id_source::{CircleId, DeviceId};
 use coven_merge::{Audience, ColumnValue, Operation, Timestamp, WriteId};
-use rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -251,17 +249,6 @@ fn exclude(
     part: &WritePart,
     cause: LostWriteCause,
 ) -> Result<(), DbError> {
-    if !part.rows.is_empty() {
-        let record = WriteRecord {
-            header: header.clone(),
-            parts: vec![WritePart {
-                audience: part.audience.clone(),
-                rows: part.rows.clone(),
-                dismissals: Vec::new(),
-            }],
-        };
-        crate::excluded_write::retain(database, &record, cause)?;
-    }
     for change in &part.rows {
         exclude_row(database, header, cause, change)?;
     }
@@ -274,8 +261,6 @@ pub(crate) fn exclude_row(
     reason: LostWriteCause,
     change: &coven_format::write::RowChange,
 ) -> Result<(), DbError> {
-    let cause = encoded(merge_fields::encode_lost_write_cause(&reason))?;
-    let setter = encoded(merge_fields::encode_write_id(&header.position))?;
     let values = match &change.change.operation {
         Operation::Insert(values) | Operation::Update(values) => values.clone(),
         Operation::Delete => change
@@ -292,26 +277,33 @@ pub(crate) fn exclude_row(
             })
             .collect(),
     };
-    let setters = values
-        .keys()
-        .map(|name| (name.clone(), header.position))
-        .collect();
-    let values = encoded(merge_fields::encode_columns(&values))?;
-    let setters = encoded(merge_fields::encode_setters(&setters))?;
-    let audience = audience_text(&change.row.audience);
-    database.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,NULL,?5,?6,'excluded',?7)", params![change.row.table,change.row.key,audience,change.change.generation.to_be_bytes().as_slice(),values,setters,cause])?;
-    crate::fingerprint::excluded(
+    crate::loss_record::put(
         database,
-        &change.row,
-        &setter,
-        &[
-            &change.change.generation.to_be_bytes(),
-            &values,
-            &setters,
-            &cause,
-        ],
-    )?;
-    Ok(())
+        &coven_format::loss::Loss {
+            row: change.row.clone(),
+            generation: change.change.generation,
+            retired: true,
+            values: coven_format::loss::LossValues::Row(
+                values
+                    .into_iter()
+                    .map(|(name, value)| {
+                        (
+                            name,
+                            coven_merge::Cell {
+                                write: header.position,
+                                value,
+                            },
+                        )
+                    })
+                    .collect(),
+            ),
+            cause: coven_format::loss::LossCause::Excluded {
+                write: header.position,
+                cause: reason,
+            },
+        },
+        None,
+    )
 }
 
 /// Agreement state read atomically for sync to post.

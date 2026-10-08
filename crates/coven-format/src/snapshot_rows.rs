@@ -1,12 +1,10 @@
-//! Snapshot rows use merge's state; writes excluded by schema changes or resets
-//! have a separate record because they were never applied to that state.
+//! Snapshot rows carry app values and merge generations; losses travel separately.
 
 use crate::error::{require, Error, Rule as FormatRule};
 use crate::value::{positive, row, EntryId, Value, WritePositions};
 use crate::wire::{wire_struct, Decoder, Encoder, Wire};
-use crate::write::{RowChange, WriteDisposition, WriteHeader};
-use coven_merge::{ColumnValue, RowId, RowState, Rule, Timestamp, WriteId, WriteOracle};
-use std::collections::{BTreeMap, BTreeSet};
+use coven_merge::{ColumnValue, RowId, RowState, Timestamp, WriteId, WriteOracle};
+use std::collections::BTreeMap;
 
 /// One app-visible row, with its original reference metadata.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,51 +69,33 @@ wire_struct!(SyncedColumn, table => crate::wire::get_name, column => crate::wire
 /// A row's merge state, retained even while removal rules hide it from the app.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MergeRow {
-    /// Merge owns the generations, winning cells and concurrently lost values.
+    /// Generations and winning cells only; losses occupy the loss section.
     pub state: RowState<Value>,
-    /// Every removal rule holding for this row, in merge's rule order.
-    pub removed: BTreeSet<Rule>,
 }
 impl MergeRow {
     pub(crate) fn put(&self, out: &mut Encoder) -> Result<(), Error> {
         self.state.row().put(out)?;
         self.state.generations().put(out)?;
-        self.state.cells().put(out)?;
-        self.state.lost().put(out)?;
-        self.removed.put(out)
+        self.state.cells().put(out)
     }
     pub(crate) fn get(input: &mut Decoder<'_>, oracle: &impl WriteOracle) -> Result<Self, Error> {
         let state = RowState::from_parts(
             Wire::get(input)?,
             Wire::get(input)?,
             crate::wire::get_name_map(input)?,
-            Wire::get(input)?,
+            BTreeMap::new(),
             oracle,
         )
         .map_err(Error::Merge)?;
-        Ok(Self {
-            state,
-            removed: Wire::get(input)?,
-        })
+        Ok(Self { state })
     }
     pub(crate) fn validate(&self) -> Result<(), Error> {
         crate::merge_wire::state(&self.state)?;
         require(
-            self.removed.is_empty() || self.state.present(),
-            "removed row",
-            FormatRule::Generation,
+            self.state.lost().is_empty(),
+            "merge losses belong in the loss section",
+            FormatRule::Required,
         )?;
-        crate::merge_wire::rules(&self.removed)?;
-        for rule in &self.removed {
-            match rule {
-                Rule::ForeignKey(_) | Rule::Check(_) | Rule::Unique(_) => {}
-                Rule::DeletedCircle | Rule::OtherAudience => require(
-                    matches!(self.state.row().audience, coven_merge::Audience::Circle(_)),
-                    "removed audience",
-                    FormatRule::Audience,
-                )?,
-            }
-        }
         Ok(())
     }
 }
@@ -162,41 +142,3 @@ impl Wire for LostWriteCause {
         }
     }
 }
-
-/// Header of an excluded write, followed by its declared row-change records.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LostWrite {
-    /// The original write header.
-    pub header: WriteHeader,
-    /// The snapshot audience whose excluded rows follow.
-    pub audience: coven_merge::Audience,
-    /// Number of following row records, without a per-write collection bound.
-    pub row_count: u64,
-    /// The breaking schema version or reset entry that excluded it.
-    pub cause: LostWriteCause,
-}
-wire_struct!(LostWrite, header, audience, row_count, cause);
-impl LostWrite {
-    pub(crate) fn validate(&self) -> Result<(), Error> {
-        self.header.validate()?;
-        self.header.disposition.validate_parts(1)?;
-        require(self.row_count > 0, "lost write rows", FormatRule::Required)?;
-        self.cause.validate()?;
-        if let WriteDisposition::Lost(version) = self.header.disposition {
-            require(
-                self.cause == LostWriteCause::SchemaChange(version),
-                "lost write disposition",
-                FormatRule::LostWriteCause,
-            )?;
-        }
-        Ok(())
-    }
-}
-
-/// One row belonging to the immediately preceding lost-write header.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LostWriteRow {
-    /// Its next row change in strictly increasing row-identity order.
-    pub change: RowChange,
-}
-wire_struct!(LostWriteRow, change);
