@@ -48,7 +48,7 @@ mod sync_loop;
 pub use sync_loop::{SyncLoop, SyncStatus};
 
 /// Compensation retained until setup has committed its keys and applied origin.
-pub type StorageRollback = Box<dyn FnOnce() -> Result<(), SyncError> + Send>;
+type StorageRollback = Box<dyn FnOnce() -> Result<(), SyncError> + Send>;
 /// Credential/settings commit performed after remote setup has succeeded.
 pub type StorageCommit = Box<dyn FnOnce() -> Result<StorageRollback, SyncError> + Send>;
 pub use joining_identity::JoiningIdentity;

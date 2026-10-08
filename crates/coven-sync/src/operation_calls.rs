@@ -114,6 +114,7 @@ impl StoreLogSync {
                     self.database.access_keys_to_delete().await?,
                 )))
             }
+            #[cfg(any(test, feature = "test-utils"))]
             Command::Sync => {
                 self.sync_store_log().await?;
                 return Ok(Begun::Value(Output::Unit));

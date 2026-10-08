@@ -15,8 +15,8 @@ use std::{
 use tokio::sync::{mpsc, oneshot, watch};
 
 /// Owns the operation worker and its lifetime. It starts retained work on opening;
-/// it does not run the store's sync loop. The sync owner calls `sync_store_log`
-/// when remote entries may have arrived, and `set_storage` when a provider connects.
+/// it does not run the store's sync loop. The sync owner calls `sync` for a pass
+/// and `set_storage` when a provider connects.
 #[derive(Clone)]
 pub struct Operations {
     inner: Arc<RunningOperations>,
@@ -60,6 +60,7 @@ pub(crate) enum Command {
     InspectPositions,
     CheckKeys,
     ForgetKeys,
+    #[cfg(any(test, feature = "test-utils"))]
     Sync,
     SyncAll,
     Unlock(Arc<dyn Storage>),
@@ -206,6 +207,7 @@ impl Operations {
         self.unit(Command::Storage(storage)).await
     }
     /// Download and replay available store-log entries, then wake operation work.
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn sync_store_log(&self) -> Result<(), SyncError> {
         self.unit(Command::Sync).await
     }

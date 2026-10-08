@@ -275,7 +275,7 @@ impl DeviceLogSync {
     /// Only equal write positions, store-log positions, schema versions and
     /// fingerprint keys are comparable. Damage counts as no post (§19.1).
     /// No database state is changed and no recovery operation is started.
-    pub async fn compare_fingerprints(&mut self) -> Result<(), SyncError> {
+    async fn compare_fingerprints(&mut self) -> Result<(), SyncError> {
         let Some(own) = self.current_positions().await? else {
             return Ok(());
         };
