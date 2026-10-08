@@ -186,6 +186,8 @@ async fn opening_and_sql_do_not_unlock_custody_and_callback_failures_roll_back()
             .unwrap(),
         0
     );
+    assert!(handle.access_keys_to_delete().await.unwrap().is_empty());
+    assert!(handle.blocked_operations().await.unwrap().is_empty());
     assert_eq!(keys.unlocks.load(Ordering::SeqCst), 0);
     assert_eq!(identity.unlocks.load(Ordering::SeqCst), 0);
     handle.initialize_identity().unwrap();

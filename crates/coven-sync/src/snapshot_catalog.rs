@@ -2,7 +2,7 @@
 
 use super::{io, StoreLogSync};
 use crate::write_object::{checked, damaged};
-use crate::{snapshot_data::SavedSnapshot, SyncError, SyncResults};
+use crate::{snapshot_data::SavedSnapshot, DamagedObject, SyncError};
 use coven_crypto::{MemberId, ObjectHasher, Signature};
 use coven_database::{EntryOutcome, StoreLog};
 use coven_format::sealed_snapshot::{SnapshotObjectLayout, SnapshotObjectPrefix};
@@ -31,7 +31,7 @@ impl StoreLogSync {
         &self,
         audience: &Audience,
         log: &StoreLog,
-        report: &mut SyncResults,
+        damages: &mut Vec<DamagedObject>,
     ) -> Result<Catalog, SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let keys: BTreeSet<_> = log
@@ -52,7 +52,7 @@ impl StoreLogSync {
                 Ok(candidate) => candidate,
                 Err(error) => {
                     unreadable_prefix = true;
-                    snapshot_damage(report, &object.path, error)?;
+                    snapshot_damage(damages, &object.path, error)?;
                     continue;
                 }
             };
@@ -60,7 +60,7 @@ impl StoreLogSync {
             if prefix.audience != *audience {
                 unreadable_prefix = true;
                 snapshot_damage(
-                    report,
+                    damages,
                     &object.path,
                     inconsistent("snapshot path and audience differ"),
                 )?;
@@ -107,9 +107,9 @@ impl StoreLogSync {
         &self,
         audience: &Audience,
         log: &StoreLog,
-        report: &mut SyncResults,
+        damages: &mut Vec<DamagedObject>,
     ) -> Result<Catalog, SyncError> {
-        let mut catalog = self.snapshot_candidates(audience, log, report).await?;
+        let mut catalog = self.snapshot_candidates(audience, log, damages).await?;
         catalog.candidates.retain(|candidate| {
             super::boundaries::allows(
                 log,
@@ -184,7 +184,7 @@ impl StoreLogSync {
         &self,
         candidates: Vec<Candidate>,
         files: &mut impl Iterator<Item = String>,
-        report: &mut SyncResults,
+        damages: &mut Vec<DamagedObject>,
     ) -> Result<Option<SavedSnapshot>, SyncError> {
         for candidate in candidates {
             let file = files.next().expect("reserved snapshot candidates");
@@ -206,7 +206,7 @@ impl StoreLogSync {
                         "snapshot schema is outside the app's supported range"
                     );
                 }
-                Err(error) => snapshot_damage(report, &candidate.object.path, error)?,
+                Err(error) => snapshot_damage(damages, &candidate.object.path, error)?,
             }
             io::remove(&self.directory, &file)?;
         }
@@ -333,7 +333,7 @@ pub(super) fn inconsistent(reason: &'static str) -> SyncError {
 }
 
 pub(super) fn snapshot_damage(
-    report: &mut SyncResults,
+    damages: &mut Vec<DamagedObject>,
     path: &ObjectPath,
     error: SyncError,
 ) -> Result<(), SyncError> {
@@ -363,5 +363,5 @@ pub(super) fn snapshot_damage(
         }
         error => return Err(error),
     };
-    StoreLogSync::damage(report, path, failure)
+    StoreLogSync::damage(damages, path, failure)
 }

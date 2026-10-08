@@ -1396,8 +1396,14 @@ while let Ok(values) = lost.next().await {
     are then uploaded before snapshot writing, retention and posted positions.
   - Retention uses previously confirmed posted positions; the new position is
     published last, after every preceding step has completed. File transfer
-    failures remain visible through their file status and operation reports.
-  - A fingerprint disagreement is reported without an automatic reload (§19.1).
+    failures remain visible through their file status and blocked operations.
+  - Coven tracks per-device progress, waiting writes, damaged objects,
+    fingerprint disagreements and dropped entries internally; these are not yet
+    exposed to the app (§9, §19.1). A disagreement never triggers a reload.
+  - A finished pass publishes its completion time, without a sync report or row
+    changes. Live queries notify the app when their rows change (E4).
+  - Revocation actions remain available through `access_keys_to_delete` (E9)
+    and `blocked_operations` (E6).
 - A device that isn't connected still reads and writes
   ([§3](coven.md#3-guarantees)); its writes wait in `_coven_uploads`.
 - `start_sync` builds the provider client if absent, reading credentials from
@@ -1701,14 +1707,6 @@ pub enum SyncError {
     OperationData(serde_json::Error),
 }
 
-/// How far this device has applied one device's writes (§6, E5).
-pub struct DeviceActivity {
-    /// The authoring device.
-    pub device: DeviceId,
-    /// The last applied write number; zero means none.
-    pub applied_through: u64,
-}
-
 /// An object that failed a check when read (§19.1).
 pub struct DamagedObject {
     /// The object's path in storage.
@@ -1727,30 +1725,6 @@ pub enum ObjectCheckFailure {
     Parse(Arc<dyn std::error::Error + Send + Sync>),
 }
 
-/// Two devices differ after applying the same history (§19.1).
-pub struct Disagreement {
-    /// Both devices in id order; neither is presumed correct.
-    pub devices: [DeviceId; 2],
-    /// The audience compared.
-    pub audience: Audience,
-    /// The last applied write of each log included in the comparison.
-    pub positions: Vec<WriteId>,
-    /// The common store-log positions.
-    pub store_log: Vec<EntryId>,
-    /// The common app schema version.
-    pub schema_version: u32,
-}
-
-/// This member's store log entry that was dropped during replay (§9).
-pub struct DroppedEntry {
-    /// The dropped entry.
-    pub entry: EntryId,
-    /// What it would have done.
-    pub change: StoreLogChange,
-    /// Why the replay dropped it.
-    pub reason: DropReason,
-}
-
 /// Why a store log entry was dropped (§9).
 pub enum DropReason {
     /// A conflicting concurrent entry beat it.
@@ -1765,40 +1739,6 @@ pub enum DropReason {
     /// A removal's replaced circle keys didn't name exactly the circles the
     /// removed member shared with others, in its author's view (§13).
     WrongCircleKeys,
-}
-
-pub use coven_format::store_log::SnapshotId;
-
-/// What a dropped store log entry would have changed, for its author to see (§9).
-pub enum StoreLogChange {
-    /// Creates the store, names its first admin and registers the writing device.
-    CreateStore { store: StoreId, name: String, admin: MemberId, device_name: String },
-    /// Adds a member with this role.
-    AddMember { member: MemberId, role: MemberRole },
-    /// Removes the member and their devices (§13).
-    RemoveMember { member: MemberId },
-    /// Sets the member's role.
-    SetMemberRole { member: MemberId, role: MemberRole },
-    /// Records the entry author’s current storage access (§9).
-    SetAccess { access: MemberAccess },
-    /// Adds a device belonging to the entry's author (§10).
-    AddDevice { device: DeviceId },
-    /// Removes a device.
-    RemoveDevice { device: DeviceId },
-    /// Makes a named circle with the entry's author as its first member (E12).
-    CreateCircle { circle: CircleId, name: String },
-    /// Renames a circle (E12).
-    RenameCircle { circle: CircleId, name: String },
-    /// Deletes a circle (§14.7).
-    DeleteCircle { circle: CircleId },
-    /// Adds a store member to a circle (§14.3).
-    AddCircleMember { circle: CircleId, member: MemberId },
-    /// Removes a circle member and replaces its key (§14.6).
-    RemoveCircleMember { circle: CircleId, member: MemberId },
-    /// Raises the schema version of the snapshot's audience (§17.1).
-    SchemaChange { version: u32, snapshot: SnapshotId },
-    /// Resets the snapshot's audience to that snapshot (§19.3).
-    Reset { snapshot: SnapshotId },
 }
 
 impl CovenHandle {
@@ -1877,51 +1817,9 @@ pub enum SyncStatus {
     /// The initial sync is queued or a sync is running.
     Syncing,
     /// The last sync finished.
-    Synced(SyncReport),
+    Synced { finished_at: SystemTime },
     /// The last sync failed as a whole.
     Failed { error: SyncFailure },
-}
-
-/// The store-log step fills `damaged_objects` and `dropped_entries`.
-/// The complete sync assembles the other results from their respective steps.
-pub struct SyncReport {
-    pub finished_at: SystemTime,
-    /// How far this device has applied each other device's log.
-    pub devices: Vec<DeviceActivity>,
-    /// Writes this device holds back, the writes they wait for, and since
-    /// when (§19.1).
-    pub waiting: Vec<WaitingWrite>,
-    /// Objects that failed their check when read (§19.1).
-    pub damaged_objects: Vec<DamagedObject>,
-    /// Devices whose fingerprints differ from this device's at the same
-    /// positions (§19.1).
-    pub disagreements: Vec<Disagreement>,
-    /// Operations that failed for good (§18).
-    pub blocked_operations: Vec<BlockedOperation>,
-    /// This member's store log entries dropped during replay, with their reasons (§9).
-    pub dropped_entries: Vec<DroppedEntry>,
-    /// S3 keys an admin must delete in the provider's console, until the
-    /// admin confirms each is gone (§13).
-    pub access_keys_to_delete: Vec<AccessKeyToDelete>,
-    /// The rows the sync's writes changed, as a hint for refreshing views
-    /// that aren't live queries. Not a complete list.
-    pub row_changes: Option<Vec<RowChange>>,
-}
-
-/// An S3 key whose member no longer has access, or whose invite ended (§13).
-pub struct AccessKeyToDelete {
-    pub access_key_id: String,
-    pub member: Option<MemberId>,
-}
-
-// These notices live in the device-local _coven_access_keys_to_delete table,
-// outside the operation journal. confirm_access_key_deleted marks the key as
-// confirmed; reports omit it, and later records cannot make it pending again.
-
-pub struct WaitingWrite {
-    pub write: WriteId,
-    pub waiting_for: Vec<WriteId>,
-    pub since: SystemTime,
 }
 
 /// Storage this device has set up, with whether it holds the store key.
@@ -1966,7 +1864,6 @@ match handle.setup_s3_storage(storage, device_name, access_key_id, SecretText::n
 let mut status = handle.subscribe_sync_status();
 loop {
     match &*status.borrow_and_update() {
-        SyncStatus::Synced(report) if !report.waiting.is_empty() => show_waiting(&report.waiting),
         SyncStatus::Failed { error } => show_sync_error(error),
         other => show_status(other),
     }
@@ -1981,7 +1878,8 @@ loop {
 - Every unfinished operation is a row in `_coven_operations`
   ([§18](coven.md#18-operations)).
 - A failed step goes to the app call that started its operation while
-  that call waits; otherwise it is reported in the sync status.
+  that call waits. Permanent failures remain available through
+  `blocked_operations`, including when no app call is waiting.
 
 ```rust
 /// The local integer primary key of one unfinished operation (§18).
@@ -2025,6 +1923,10 @@ pub enum StartedBy {
 pub type OperationError = SyncError;
 
 impl CovenHandle {
+    /// Operations whose steps failed permanently (§18), including revocations
+    /// that need the owner's action (§13).
+    pub async fn blocked_operations(&self) -> Result<Vec<BlockedOperation>, OperationError>;
+
     /// Runs a failed operation again from the step after its last completed
     /// one. An operation whose cause still stands fails again.
     pub async fn retry_blocked_operation(&self, operation: OperationId) -> Result<(), OperationError>;
@@ -2398,8 +2300,12 @@ impl CovenHandle {
     /// Changes a member's role, as an admin (§9).
     pub async fn set_member_role(&self, member: &MemberId, role: MemberRole) -> Result<(), SyncError>;
 
+    /// S3 keys an admin must delete in the provider's console (§13), until
+    /// their deletion is confirmed. Available without running a sync pass.
+    pub async fn access_keys_to_delete(&self) -> Result<Vec<AccessKeyToDelete>, SyncError>;
+
     /// Records that the admin deleted an S3 key in the provider's console,
-    /// so the sync status stops asking for it (§13).
+    /// so access_keys_to_delete stops listing it (§13).
     pub async fn confirm_access_key_deleted(&self, access_key_id: &str) -> Result<(), SyncError>;
 
     /// Removes a member and all their devices, rotates the store key, and
@@ -2414,6 +2320,16 @@ impl CovenHandle {
     /// again on the devices they keep (§13).
     pub async fn remove_device(&self, device: DeviceId) -> Result<ProviderSignOut, SyncError>;
 }
+
+/// An S3 key whose member no longer has access, or whose invite ended (§13).
+pub struct AccessKeyToDelete {
+    pub access_key_id: String,
+    pub member: Option<MemberId>,
+}
+
+// These notices live in the device-local _coven_access_keys_to_delete table,
+// outside the operation journal. confirm_access_key_deleted marks the key as
+// confirmed; access_keys_to_delete omits it, and later records cannot make it pending again.
 
 /// Revoked sharing or remaining owner actions (§13).
 pub enum MemberRemoval {

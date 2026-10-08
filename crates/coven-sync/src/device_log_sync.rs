@@ -1,8 +1,8 @@
 //! One upload, download or position-posting step; scheduling belongs to the caller.
 
-use crate::{DeviceActivity, SyncError, SyncFailure, SyncResults, WaitingWrite};
+use crate::{SyncError, SyncFailure};
 use coven_crypto::custody::{MemberKeyCustody, StoreKeyCustody};
-use coven_database::{ApplyOutcome, Database, DbError, WriteWait};
+use coven_database::{ApplyOutcome, Database, DbError};
 use coven_format::{
     objects::{Fingerprint, PostedPositions},
     sealed_single::SingleChunkPrefix,
@@ -137,8 +137,8 @@ impl DeviceLogSync {
 
     /// List device logs and apply ready writes until no further listed write can
     /// advance. Damage blocks that device's successors, while independent devices
-    /// continue. A later call rereads damaged objects and retains waiting start times.
-    pub async fn download_writes(&mut self) -> Result<SyncResults, SyncError> {
+    /// continue. A later call rereads damaged objects and retries waiting writes.
+    pub async fn download_writes(&mut self) -> Result<(), SyncError> {
         let _reads = self.reads.enter();
         let local = self.database.local_store_log().await?;
         let state = self.database.sync_state(Vec::new()).await?;
@@ -160,7 +160,6 @@ impl DeviceLogSync {
             .unlock()?
             .ok_or(SyncError::KeyUnavailable(key))?;
         let mut objects = BTreeMap::new();
-        let mut devices: BTreeSet<_> = local.log.replay.state.devices.keys().copied().collect();
         for object in self
             .storage
             .as_deref()
@@ -169,7 +168,6 @@ impl DeviceLogSync {
             .await?
         {
             let (device, number) = object.path.write_position().expect("device-log prefix");
-            devices.insert(device);
             let write = WriteId {
                 device,
                 number: number.get(),
@@ -178,9 +176,7 @@ impl DeviceLogSync {
                 objects.insert(write, object);
             }
         }
-        let mut report = SyncResults::default();
         let mut damaged = BTreeSet::new();
-        let mut waiting = BTreeMap::new();
         let mut positions = state.positions;
         let mut replays = crate::replay_cache::ReplayCache::new(&local.log);
         loop {
@@ -194,7 +190,6 @@ impl DeviceLogSync {
                     ..*write
                 };
                 if write.number > 1 && !positions.covers(previous) {
-                    waiting.insert(*write, vec![previous]);
                     continue;
                 }
                 if damaged.contains(&write.device) {
@@ -212,24 +207,17 @@ impl DeviceLogSync {
                                 positions.0.sort_by_key(|p| p.device);
                             }
                         }
-                        waiting.remove(write);
                         progressed = true;
                     }
                     Ok(ApplyOutcome::Waiting(reason)) => {
-                        waiting.insert(
-                            *write,
-                            match reason {
-                                WriteWait::Writes(writes) => writes,
-                                _ => Vec::new(),
-                            },
-                        );
+                        tracing::debug!(?write, ?reason, "write is waiting for its prerequisites");
                     }
                     Err(SyncError::Damaged(object)) => {
                         damaged.insert(write.device);
-                        report.damaged_objects.push(object);
+                        tracing::warn!(error = %object, "damaged write; will reread on sync");
                     }
-                    Err(SyncError::KeyUnavailable(_)) => {
-                        waiting.insert(*write, Vec::new());
+                    Err(SyncError::KeyUnavailable(key)) => {
+                        tracing::debug!(?write, ?key, "write key is unavailable");
                     }
                     Err(error) => return Err(error),
                 }
@@ -238,34 +226,7 @@ impl DeviceLogSync {
                 break;
             }
         }
-        let since = self
-            .database
-            .waiting_writes(waiting.keys().copied().collect())
-            .await?;
-        report.waiting = since
-            .into_iter()
-            .map(|(write, since)| WaitingWrite {
-                write,
-                waiting_for: waiting.remove(&write).expect("recorded waiting write"),
-                since,
-            })
-            .collect();
-        report.devices = devices
-            .into_iter()
-            .filter(|id| *id != local.device)
-            .map(|device| DeviceActivity {
-                device,
-                applied_through: positions
-                    .0
-                    .iter()
-                    .find(|p| p.device == device)
-                    .map_or(0, |p| p.number),
-            })
-            .collect();
-        let comparison = self.compare_fingerprints().await?;
-        report.disagreements = comparison.disagreements;
-        report.damaged_objects.extend(comparison.damaged_objects);
-        Ok(report)
+        self.compare_fingerprints().await
     }
 
     /// Replace this device's authenticated D8 object from one committed database
@@ -314,10 +275,9 @@ impl DeviceLogSync {
     /// Only equal write positions, store-log positions, schema versions and
     /// fingerprint keys are comparable. Damage counts as no post (§19.1).
     /// No database state is changed and no recovery operation is started.
-    pub async fn compare_fingerprints(&mut self) -> Result<SyncResults, SyncError> {
-        let mut report = SyncResults::default();
+    pub async fn compare_fingerprints(&mut self) -> Result<(), SyncError> {
         let Some(own) = self.current_positions().await? else {
-            return Ok(report);
+            return Ok(());
         };
         let ring = self.store_keys.unlock()?;
         let log = self.database.local_store_log().await?.log;
@@ -352,7 +312,7 @@ impl DeviceLogSync {
                 match crate::posted_positions::open(&bytes, &object.path, ring.as_ref(), &log) {
                     Ok(peer) => peer,
                     Err(SyncError::Damaged(object)) => {
-                        report.damaged_objects.push(object);
+                        tracing::warn!(error = %object, "damaged positions count as not posted");
                         continue;
                     }
                     Err(SyncError::KeyUnavailable(key)) => {
@@ -377,22 +337,16 @@ impl DeviceLogSync {
                         && other.key == fingerprint.key
                         && other.bytes != fingerprint.bytes
                 }) {
-                    let mut devices = [own.device, peer.device];
-                    devices.sort();
-                    report.disagreements.push(crate::Disagreement {
-                        devices,
-                        audience: fingerprint.audience.clone(),
-                        positions: own.writes.0.clone(),
-                        store_log: own.store_log.0.clone(),
-                        schema_version: own.schema_version,
-                    });
+                    tracing::warn!(
+                        device = ?own.device,
+                        peer = ?peer.device,
+                        audience = ?fingerprint.audience,
+                        "fingerprints disagree at matching positions and schema"
+                    );
                 }
             }
         }
-        report
-            .disagreements
-            .sort_by(|a, b| (&a.devices, &a.audience).cmp(&(&b.devices, &b.audience)));
-        Ok(report)
+        Ok(())
     }
 
     pub(crate) async fn current_positions(&self) -> Result<Option<PostedPositions>, SyncError> {

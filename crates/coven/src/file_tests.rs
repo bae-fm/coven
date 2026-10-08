@@ -31,7 +31,7 @@ async fn transfer_limits_bound_requests_and_an_active_batch_keeps_its_limit() {
         handle.initialize_identity().unwrap();
         handle.setup_s3_storage(memory.config(), "Test device", "key".into(), SecretText::new("secret".into())).await.unwrap();
         let mut status = handle.subscribe_sync_status();
-        status.wait_for(|s| matches!(s, SyncStatus::Synced(_))).await.unwrap();
+        status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await.unwrap();
         handle.stop_sync();
         status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
         handle.unlock_store_key().await.unwrap();

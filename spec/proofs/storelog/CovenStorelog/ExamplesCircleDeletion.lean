@@ -35,8 +35,7 @@ theorem shared_key_conflict :
 /-- The earlier circle removal wins; Ana's store removal drops and Gifts stays. -/
 theorem earlier_rotation_applies : EveryOrder history 7 (List.range 7) (fun r =>
     admin r.state 0 = true ∧ admin r.state 1 = true ∧
-    lookup r.state.circles 0 = some ⟨"Gifts", [0]⟩ ∧ r.dropped = [6] ∧
-    reports history r 0 = [6]) := by
+    lookup r.state.circles 0 = some ⟨"Gifts", [0]⟩ ∧ r.dropped = [6]) := by
   apply every_order; decide
 
 /-- Ben is alone in his circle. He renames it while Ana, concurrently,
@@ -59,7 +58,7 @@ theorem alone_conflict :
 
 theorem removal_beats_rename : EveryOrder alone 6 (List.range 6) (fun r =>
     member r.state 1 = false ∧ lookup r.state.circles 0 = none ∧
-    r.dropped = [4] ∧ reports alone r 1 = [4]) := by
+    r.dropped = [4]) := by
   apply every_order; decide
 
 end CovenStorelog.Examples.CircleDeletion

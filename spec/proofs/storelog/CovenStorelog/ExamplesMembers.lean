@@ -81,7 +81,7 @@ theorem member_examples_valid :
 /-- Both changes concern Ben; the admin grant loses to the device addition. -/
 theorem opening_log : EveryOrder openingLog 4 (List.range 4) (fun r =>
     lookup r.state.members 1 = some .member ∧ lookup r.state.devices 2 = some 1 ∧
-    r.dropped = [3] ∧ reports openingLog r 0 = [3]) := by
+    r.dropped = [3]) := by
   apply every_order; decide
 
 /-- §9 table, row 1. -/
@@ -92,7 +92,7 @@ theorem example_add_and_promote : EveryOrder both 6 (List.range 6) (fun r =>
 /-- §9 table, row 2: removing Ben defeats his concurrent phone addition. -/
 theorem example_member_removal_beats_phone : EveryOrder phoneAndRemoval 5 (List.range 5) (fun r =>
     member r.state 1 = false ∧ lookup r.state.devices 4 = none ∧
-    4 ∈ r.kept ∧ r.dropped = [3] ∧ reports phoneAndRemoval r 1 = [3]) := by
+    4 ∈ r.kept ∧ r.dropped = [3]) := by
   apply every_order; decide
 
 /-- §12.1: the new phone registers itself before the concurrent removal arrives. -/
@@ -120,24 +120,22 @@ theorem example_mutual_removal : EveryOrder mutualRemovals 5 (List.range 5) (fun
 
 /-- §9 table, row 5, and §13. -/
 theorem example_carol : EveryOrder carol 6 (List.range 6) (fun r =>
-    member r.state 2 = false ∧ member r.state 3 = false ∧ r.dropped = [4] ∧
-    reports carol r 0 = [4]) := by
+    member r.state 2 = false ∧ member r.state 3 = false ∧ r.dropped = [4]) := by
   apply every_order; decide
 
 theorem carol_device : EveryOrder carol 7 (List.range 7) (fun r =>
     member r.state 2 = false ∧ lookup r.state.devices 2 = none ∧
-    r.dropped = [6, 4] ∧ reports carol r 0 = [4] ∧ reports carol r 2 = [6]) := by
+    r.dropped = [6, 4]) := by
   apply every_order; decide
 
-/-- Equal effects keep both identities and have no drop reports. -/
+/-- Equal effects keep both identities and drop neither. -/
 theorem equal_adds_combine : EveryOrder equalAdds 5 (List.range 5) (fun r =>
     lookup r.state.members 3 = some .member ∧ 3 ∈ r.kept ∧ 4 ∈ r.kept ∧ r.dropped = []) := by
   apply every_order; decide
 
 theorem three_admins : EveryOrder threeRemovals 8 (List.range 8) (fun r =>
     r.state.members = [(2, .admin), (0, .admin)] ∧
-    r.state.devices = [(2, 2), (0, 0)] ∧ 5 ∈ r.kept ∧ r.dropped = [7, 6] ∧
-    reports threeRemovals r 1 = [6] ∧ reports threeRemovals r 2 = [7]) := by
+    r.state.devices = [(2, 2), (0, 0)] ∧ 5 ∈ r.kept ∧ r.dropped = [7, 6]) := by
   apply every_order; decide
 
 /-- Ben's concurrent role change still has authority after Ana removes him. -/

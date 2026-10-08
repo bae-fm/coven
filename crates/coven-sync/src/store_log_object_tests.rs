@@ -75,10 +75,10 @@ async fn damaged_entries_block_only_their_device_and_retain_each_cause() {
         }
         storage.delete(&path).await.unwrap();
         storage.create(&path, &bytes).await.unwrap();
-        let report = c.sync().await;
-        assert_eq!(report.damaged_objects.len(), 1, "{damage}");
-        assert_eq!(report.damaged_objects[0].path, path.as_str());
-        match (&report.damaged_objects[0].failure, damage) {
+        let damages = c.sync.step().await.unwrap();
+        assert_eq!(damages.len(), 1, "{damage}");
+        assert_eq!(damages[0].path, path.as_str());
+        match (&damages[0].failure, damage) {
             (ObjectCheckFailure::Decryption(_), "decryption" | "moved")
             | (ObjectCheckFailure::Signature(_), "signature")
             | (ObjectCheckFailure::Parse(_), "parse") => (),
@@ -191,13 +191,10 @@ async fn invalid_causal_past_and_timestamps_are_damaged() {
             bytes.extend_from_slice(signer.sign_object(path.as_str(), &hash.finish()).as_bytes());
         }
         storage.create(&path, &bytes).await.unwrap();
-        let mut c = device(storage.clone(), 3, member(1), store(1)).await;
-        let report = c.sync().await;
-        assert_eq!(report.damaged_objects.len(), 1, "{defect}");
-        assert_eq!(report.damaged_objects[0].path, path.as_str());
-        assert!(matches!(
-            report.damaged_objects[0].failure,
-            ObjectCheckFailure::Parse(_)
-        ));
+        let c = device(storage.clone(), 3, member(1), store(1)).await;
+        let damages = c.sync.step().await.unwrap();
+        assert_eq!(damages.len(), 1, "{defect}");
+        assert_eq!(damages[0].path, path.as_str());
+        assert!(matches!(damages[0].failure, ObjectCheckFailure::Parse(_)));
     }
 }

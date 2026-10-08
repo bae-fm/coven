@@ -95,7 +95,7 @@ theorem seal_then_entry :
     joinRun carolAdmission [.approve, .seal ⟨2, 0⟩, .publish] .requested = none := by decide
 
 theorem carol_join_declined : EveryOrder carol 6 [0, 1, 2, 3, 4, 5] (fun r =>
-    joinOutcome r 4 = .declined ∧ reports carol r 0 = [4]) := by
+    joinOutcome r 4 = .declined) := by
   apply every_order
   decide
 

@@ -113,24 +113,11 @@ theorem settleN_accounting (M : Log) (views : Nat → State) (entries : List Nat
           exact ih (by simpa [he, Accounted] using hs) h
 
 /-- Every received entry has exactly one disposition. Restarts cannot lose
-an identity or report an entry outside the received set. -/
+an identity or include an entry outside the received set. -/
 theorem resolve_partition (M : Log) (n : Nat) (S : EntrySet) (w : Nat) :
     (w < n ∧ S w = true ↔ w ∈ (resolve M n S).kept ∨ w ∈ (resolve M n S).dropped) ∧
     (w ∈ (resolve M n S).kept → w ∉ (resolve M n S).dropped) := by
   have h := settleN_accounting M (authorViews M n) ((List.range n).filter S)
     ((List.nodup_range (n := n)).filter S) (by simp) (settle_eq_some M _ _)
   exact ⟨by simpa [resolve, materialize] using h.covered w, fun hw => (h.separate w hw).2⟩
-
-theorem report_exactly_dropped (M : Log) (n : Nat) (S : EntrySet) (w : Nat) :
-    w ∈ reports M (resolve M n S) (M w).author ↔
-      w < n ∧ S w = true ∧ w ∉ (resolve M n S).kept := by
-  rw [reported_to_author]
-  have h := resolve_partition M n S w
-  constructor
-  · intro hd
-    have hs := h.1.mpr (Or.inr hd)
-    exact ⟨hs.1, hs.2, fun hk => h.2 hk hd⟩
-  · rintro ⟨hw, hs, hk⟩
-    exact (h.1.mp ⟨hw, hs⟩).resolve_left hk
-
 end CovenStorelog

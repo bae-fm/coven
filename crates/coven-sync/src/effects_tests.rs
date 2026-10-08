@@ -32,7 +32,7 @@ fn equal_raises_combine_and_different_snapshots_use_the_earlier_entry() {
                 (version.number, version.snapshot.number, version.entry),
                 (2, 30, h.entries[3].position)
             );
-            assert_eq!(h.reports(r, 1), if second == 30 { vec![] } else { vec![4] });
+            assert_eq!(h.drops(r), if second == 30 { vec![] } else { vec![4] });
         });
         h.push(1, 1, &[0, 1, 2, 4], raise(3, 50, Audience::Store));
         h.every_order(|r| {

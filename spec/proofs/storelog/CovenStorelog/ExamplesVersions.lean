@@ -24,11 +24,10 @@ theorem version_examples_valid :
     validCheck (updates 30) 5 = true := by decide
 
 /-- §17: ordinary members can raise the schema version. Different snapshots for
-the same concurrent raise conflict, and the later entry is reported. -/
+the same concurrent raise conflict, and the later entry is dropped. -/
 theorem same_version_snapshot :
     EveryOrder (updates 40) 5 (List.range 5) (fun r =>
-      lookup r.state.versions .store = some ⟨2, 30, 3⟩ ∧ r.dropped = [4] ∧
-      reports (updates 40) r 1 = [4]) := by
+      lookup r.state.versions .store = some ⟨2, 30, 3⟩ ∧ r.dropped = [4]) := by
   apply every_order
   decide
 
@@ -84,7 +83,7 @@ theorem concurrent_reset_and_raise (resetFirst same : Bool) :
       lookup r.state.versions .store = (if resetFirst then none else some ⟨2, 30, 5⟩) ∧
       lookup r.state.resets .store =
         (if resetFirst then some (if same then 30 else 50) else none) ∧
-      r.dropped = [6] ∧ reports (resetAndRaise resetFirst .store false same) r 1 = [6]) := by
+      r.dropped = [6]) := by
   apply every_order
   cases resetFirst <;> cases same <;> decide
 

@@ -4,19 +4,6 @@ use super::Database;
 use crate::{CovenResult, DbError};
 
 impl Database {
-    /// Keep first-observed times for exactly the writes still waiting after a
-    /// download step. Resolved waits are removed in the same transaction.
-    pub async fn waiting_writes(
-        &self,
-        writes: Vec<crate::WriteId>,
-    ) -> Result<Vec<(crate::WriteId, std::time::SystemTime)>, DbError> {
-        self.call(move |inner| {
-            inner.with_writer(|writer| {
-                crate::waiting_write::record(writer, writes, inner.clock.now())
-            })
-        })
-        .await
-    }
     /// Consume bounded plaintext streams inside one transaction. `authenticate`
     /// runs after every stream ends and must confirm the complete sealed object,
     /// including its signature. Any stream or final-check error rolls back all

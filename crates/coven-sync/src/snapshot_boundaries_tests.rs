@@ -56,7 +56,7 @@ async fn unusable_snapshots_do_not_turn_deleted_history_into_an_empty_audience()
             }
             assert_eq!(tables(&b).await, before);
         } else {
-            assert_eq!(result.unwrap().damaged_objects.len(), 1);
+            assert_eq!(result.unwrap().len(), 1);
             let mut expected = tables(&a).await;
             expected.extend(before);
             assert_eq!(tables(&b).await, expected);
@@ -97,11 +97,7 @@ async fn a_removed_device_cannot_start_or_resume_snapshot_publication() {
                         .find(|r| r.id == id)
                         .unwrap();
                 a.sync
-                    .operation_step(
-                        &record,
-                        Data::read(&record).unwrap(),
-                        &mut crate::SyncResults::default(),
-                    )
+                    .operation_step(&record, Data::read(&record).unwrap())
                     .await
                     .unwrap();
             }
@@ -162,10 +158,7 @@ async fn reload_retries_with_the_stored_copy_when_a_waiting_write_finishes_uploa
             .into_iter()
             .find(|r| r.id == id)
             .unwrap();
-    a.sync
-        .operation_step(&record, data, &mut crate::SyncResults::default())
-        .await
-        .unwrap();
+    a.sync.operation_step(&record, data).await.unwrap();
     upload(&a, &storage).await;
     let record =
         a.db.operations()
@@ -176,11 +169,7 @@ async fn reload_retries_with_the_stored_copy_when_a_waiting_write_finishes_uploa
             .unwrap();
     assert!(matches!(
         a.sync
-            .operation_step(
-                &record,
-                Data::read(&record).unwrap(),
-                &mut crate::SyncResults::default()
-            )
+            .operation_step(&record, Data::read(&record).unwrap())
             .await,
         Err(SyncError::Database(coven_database::DbError::Snapshot(
             coven_database::SnapshotError::MissingWrites { .. }
@@ -359,11 +348,7 @@ mod reset {
                 .find(|r| r.id == id)
                 .unwrap();
         d.sync
-            .operation_step(
-                &record,
-                Data::read(&record).unwrap(),
-                &mut crate::SyncResults::default(),
-            )
+            .operation_step(&record, Data::read(&record).unwrap())
             .await
             .unwrap()
     }
@@ -474,47 +459,6 @@ mod reset {
         );
         assert_eq!(tables(&a).await, tables(&b).await);
         assert_eq!(fingerprint(&a).await, fingerprint(&b).await);
-    }
-
-    #[tokio::test]
-    async fn app_reload_reports_damaged_snapshot_skipped_by_operation_worker() {
-        let storage = snapshot_storage();
-        let mut a = notes_device(storage.clone(), 1).await;
-        a.create(key(1)).await;
-        write_rows(&a, 1, 1, 7, Audience::Store).await;
-        upload(&a, &storage).await;
-        a.sync.write_snapshot(Audience::Store).await.unwrap();
-        write_rows(&a, 2, 1, 7, Audience::Store).await;
-        upload(&a, &storage).await;
-        let bad = a.sync.write_snapshot(Audience::Store).await.unwrap();
-        let path = ObjectPath::snapshot(
-            bad.audience,
-            bad.device,
-            NonZeroU64::new(bad.number).unwrap(),
-        );
-        let bytes = storage.read(&path).await.unwrap();
-        storage.corrupt_byte(&path, bytes.len() - 1).await.unwrap();
-        let files = crate::Files::new(
-            coven_database::FileDatabase::new(a.db.clone()),
-            a.directory.clone(),
-            Some(storage),
-            a.clock.clone(),
-            a.sync.ids.clone(),
-            crate::TransferLimits::default(),
-        );
-        let operations = {
-            let writes = a.writes();
-            crate::Operations::new(a.sync, files, writes, a.clock.clone())
-        };
-        operations.reload_from_snapshot().await.unwrap();
-        assert!(operations
-            .report()
-            .await
-            .unwrap()
-            .damaged_objects
-            .iter()
-            .any(|d| d.path == path.as_str()));
-        operations.close().await.unwrap();
     }
 
     #[tokio::test]

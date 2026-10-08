@@ -55,8 +55,7 @@ dropped. This is the result in every causal arrival order. -/
 theorem losing_removal_discards_add :
     EveryOrder losingRemoval 7 (List.range 7) (fun r =>
       admin r.state 0 = true ∧ lookup r.state.members 1 = some .member ∧
-      member r.state 2 = false ∧ r.dropped = [6, 4] ∧
-      reports losingRemoval r 0 = [4] ∧ reports losingRemoval r 1 = [6]) := by
+      member r.state 2 = false ∧ r.dropped = [6, 4]) := by
   apply every_order
   decide
 
@@ -70,7 +69,7 @@ theorem add_has_no_surviving_opponent :
 
 /-- At the final state Carol's add has authority, would change the state,
 preserves an admin, and has no surviving concurrent opponent. It is still
-reported as dropped because drops persist through the restart. -/
+dropped because drops persist through the restart. -/
 theorem dropped_add_meets_conditions :
     let r := resolve losingRemoval 7 (entrySet (List.range 7))
     4 ∈ r.dropped ∧

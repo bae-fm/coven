@@ -35,11 +35,7 @@ async fn unsigned_positions_cannot_authorize_log_deletion() {
     forged.extend_from_slice(other.sign_object(path.as_str(), &hash.finish()).as_bytes());
     for damaged in [unsigned, forged] {
         storage.replace(&path, &damaged).await.unwrap();
-        let report = a.sync.run_retention().await.unwrap();
-        assert!(report
-            .damaged_objects
-            .iter()
-            .any(|object| object.path == path.as_str()));
+        a.sync.run_retention().await.unwrap();
         assert_eq!(
             storage
                 .list(&ObjectPrefix::device_logs())
@@ -50,13 +46,7 @@ async fn unsigned_positions_cannot_authorize_log_deletion() {
         );
     }
     storage.replace(&path, &bytes).await.unwrap();
-    assert!(a
-        .sync
-        .run_retention()
-        .await
-        .unwrap()
-        .damaged_objects
-        .is_empty());
+    a.sync.run_retention().await.unwrap();
     assert!(storage
         .list(&ObjectPrefix::device_logs())
         .await

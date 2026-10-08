@@ -4,7 +4,7 @@ use super::{
     catalog::{inconsistent, snapshot_damage},
     snapshot_path, StoreLogSync,
 };
-use crate::{SyncError, SyncResults};
+use crate::{DamagedObject, SyncError};
 use coven_database::{EntryOutcome, StoreLog};
 use coven_format::{store_log::StoreChange, value::WritePositions};
 use coven_foundation::id_source::DeviceId;
@@ -17,7 +17,7 @@ use std::{
 impl StoreLogSync {
     pub(super) async fn retain_snapshot_objects(
         &self,
-        report: &mut SyncResults,
+        damages: &mut Vec<DamagedObject>,
     ) -> Result<(), SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let local = self.database.local_store_log().await?;
@@ -58,7 +58,7 @@ impl StoreLogSync {
         }
         for audience in &readable {
             let candidates = self
-                .snapshot_candidates(audience, &local.log, report)
+                .snapshot_candidates(audience, &local.log, damages)
                 .await?
                 .candidates;
             let older: Vec<_> = candidates
@@ -89,7 +89,7 @@ impl StoreLogSync {
                 coverage.insert(audience.clone(), prefix.writes);
             }
         }
-        let positions = self.retention_positions(&local.log, report).await?;
+        let positions = self.retention_positions(&local.log, damages).await?;
         for object in storage.list(&ObjectPrefix::device_logs()).await? {
             let id = object
                 .path
@@ -102,7 +102,7 @@ impl StoreLogSync {
                 Ok(header) => header,
                 Err(error) if waiting(&object.path, &error) => return Ok(()),
                 Err(error) => {
-                    snapshot_damage(report, &object.path, error)?;
+                    snapshot_damage(damages, &object.path, error)?;
                     continue;
                 }
             };
@@ -130,7 +130,7 @@ impl StoreLogSync {
         for path in superseded {
             storage.delete(&path).await?;
         }
-        self.retain_uploaded_files(report).await
+        self.retain_uploaded_files(damages).await
     }
 
     pub(super) fn can_delete_device(
@@ -181,7 +181,7 @@ impl StoreLogSync {
     async fn retention_positions(
         &self,
         log: &StoreLog,
-        report: &mut SyncResults,
+        damages: &mut Vec<DamagedObject>,
     ) -> Result<BTreeMap<DeviceId, WritePositions>, SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let mut positions = BTreeMap::new();
@@ -190,7 +190,7 @@ impl StoreLogSync {
                 Ok((device, writes)) => {
                     positions.insert(device, writes);
                 }
-                Err(error) => snapshot_damage(report, &object.path, error)?,
+                Err(error) => snapshot_damage(damages, &object.path, error)?,
             }
         }
         Ok(positions)

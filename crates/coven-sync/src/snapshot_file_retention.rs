@@ -1,14 +1,14 @@
 //! Prove absence across retained data before deleting an uploader's files.
 
 use super::{catalog::snapshot_damage, StoreLogSync};
-use crate::{replay_cache::ReplayCache, SyncError, SyncResults};
+use crate::{replay_cache::ReplayCache, DamagedObject, SyncError};
 use coven_storage::{ObjectPath, ObjectPrefix};
 use std::collections::{BTreeMap, BTreeSet};
 
 impl StoreLogSync {
     pub(super) async fn retain_uploaded_files(
         &self,
-        report: &mut SyncResults,
+        damages: &mut Vec<DamagedObject>,
     ) -> Result<(), SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         // List first: publication fixes an identity in the local queue before
@@ -82,13 +82,11 @@ impl StoreLogSync {
             audiences.insert(id.audience);
         }
         for audience in audiences {
-            let damaged = report.damaged_objects.len();
+            let damaged = damages.len();
             let candidates = self
-                .snapshot_candidates(&audience, &local.log, report)
+                .snapshot_candidates(&audience, &local.log, damages)
                 .await?;
-            if report.damaged_objects.len() != damaged
-                || candidates.listed != candidates.candidates.len()
-            {
+            if damages.len() != damaged || candidates.listed != candidates.candidates.len() {
                 tracing::debug!(
                     ?audience,
                     "excluded retained snapshots prevent proving file absence"
@@ -112,7 +110,7 @@ impl StoreLogSync {
                         return Ok(());
                     }
                     Err(error) => {
-                        snapshot_damage(report, &candidate.object.path, error)?;
+                        snapshot_damage(damages, &candidate.object.path, error)?;
                         // Damaged or unsupported data cannot establish absence.
                         return Ok(());
                     }
@@ -142,7 +140,7 @@ impl StoreLogSync {
                 }
                 Err(error) if super::retention::waiting(&object.path, &error) => return Ok(()),
                 Err(error) => {
-                    snapshot_damage(report, &object.path, error)?;
+                    snapshot_damage(damages, &object.path, error)?;
                     return Ok(());
                 }
             };

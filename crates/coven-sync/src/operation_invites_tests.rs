@@ -309,17 +309,9 @@ async fn failed_join_request_still_expires_and_live_requests_are_delivered() {
         .create(&ObjectPath::join_request(invite.id), &[0])
         .await
         .unwrap();
-    assert_eq!(
-        operations.report().await.unwrap().blocked_operations.len(),
-        1
-    );
+    assert_eq!(operations.blocked_operations().await.unwrap().len(), 1);
     a.clock.set(invite.expires_at);
-    assert!(operations
-        .report()
-        .await
-        .unwrap()
-        .blocked_operations
-        .is_empty());
+    assert!(operations.blocked_operations().await.unwrap().is_empty());
     assert!(joining.list(&ObjectPrefix::store_logs()).await.is_err());
     assert!(matches!(
         storage.read(&ObjectPath::join_request(invite.id)).await,
@@ -359,13 +351,13 @@ async fn cancelling_keeps_retained_provider_grants_visible_until_acknowledged() 
         operations.cancel_invite(&invite.id).await,
         Err(SyncError::AccessRemains(_))
     ));
-    let report = operations.report().await.unwrap();
-    assert_eq!(report.blocked_operations.len(), 1);
+    let blocked = operations.blocked_operations().await.unwrap();
+    assert_eq!(blocked.len(), 1);
     storage
         .set_retained_access("join@example.com", Vec::new())
         .await;
     operations
-        .retry_blocked_operation(report.blocked_operations[0].id)
+        .retry_blocked_operation(blocked[0].id)
         .await
         .unwrap();
     assert!(a.db.operations().await.unwrap().is_empty());

@@ -68,7 +68,6 @@ mod store_log_tables;
 mod store_log_upload;
 mod upload;
 mod user_file;
-mod waiting_write;
 mod write;
 mod write_apply;
 mod write_batch;

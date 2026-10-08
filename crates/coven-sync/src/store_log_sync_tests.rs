@@ -1,6 +1,6 @@
 use super::*;
 use coven_crypto::{custody::InMemoryCustody, MemberKeys, StoreKey};
-use coven_database::DatabaseBuilder;
+use coven_database::{DatabaseBuilder, EntryOutcome};
 use coven_format::store_log::{CircleKeyId, MemberPublicKeys, MemberRole};
 use coven_foundation::{
     clock::FixedClock,
@@ -150,8 +150,8 @@ impl Device {
             .await
             .unwrap()
     }
-    async fn sync(&mut self) -> SyncResults {
-        self.sync.sync_store_log().await.unwrap()
+    async fn sync(&mut self) {
+        self.sync.sync_store_log().await.unwrap();
     }
     async fn log(&self) -> StoreLog {
         self.db.local_store_log().await.unwrap().log
@@ -197,7 +197,7 @@ async fn three_devices_publish_concurrent_changes_and_converge() {
             .unwrap();
     }
     for device in [&mut a, &mut b, &mut c] {
-        assert!(device.sync().await.damaged_objects.is_empty());
+        device.sync().await;
     }
     assert_eq!(a.log().await, b.log().await);
     assert_eq!(b.log().await, c.log().await);
@@ -382,7 +382,7 @@ async fn own_device_removal_and_setup_race_stop_sync() {
         b.sync.sync_store_log().await,
         Err(SyncFailure::LocationTaken)
     ));
-    assert!(a.sync().await.damaged_objects.is_empty());
+    a.sync().await;
     let own = a.device().await;
     assert!(matches!(
         a.sync
@@ -406,16 +406,16 @@ async fn missing_or_damaged_sealed_keys_wait_without_advancing_the_entry() {
     let original = storage.read(&path).await.unwrap();
     storage.delete(&path).await.unwrap();
     let mut b = device(storage.clone(), 2, member(1), store(1)).await;
-    assert!(b.sync().await.damaged_objects.is_empty());
+    b.sync().await;
     assert!(b.log().await.entries.is_empty());
     let mut damaged = original.clone();
     let last = damaged.len() - 1;
     damaged[last] ^= 1;
     storage.create(&path, &damaged).await.unwrap();
-    let report = b.sync().await;
-    assert_eq!(report.damaged_objects[0].path, path.as_str());
+    let damages = b.sync.step().await.unwrap();
+    assert_eq!(damages[0].path, path.as_str());
     assert!(matches!(
-        report.damaged_objects[0].failure,
+        damages[0].failure,
         ObjectCheckFailure::Decryption(_)
     ));
     assert!(b.log().await.entries.is_empty());
@@ -428,58 +428,13 @@ async fn missing_or_damaged_sealed_keys_wait_without_advancing_the_entry() {
     .unwrap();
     storage.create(&path, &wrong).await.unwrap();
     assert!(matches!(
-        b.sync().await.damaged_objects[0].failure,
+        b.sync.step().await.unwrap()[0].failure,
         ObjectCheckFailure::Parse(_)
     ));
     storage.delete(&path).await.unwrap();
     storage.create(&path, &original).await.unwrap();
-    assert!(b.sync().await.damaged_objects.is_empty());
-    assert_eq!(a.log().await, b.log().await);
-}
-
-#[tokio::test]
-async fn dropped_concurrent_role_change_is_reported_to_its_author() {
-    let storage = storage();
-    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
-    let mut b = device(storage.clone(), 2, member(2), store(1)).await;
-    let mut c = device(storage.clone(), 3, member(3), store(1)).await;
-    a.create(key(1)).await;
-    a.add(&b.member, MemberRole::Member).await;
-    a.add(&c.member, MemberRole::Admin).await;
     b.sync().await;
-    c.sync().await;
-    let lost = a
-        .sync
-        .make_and_upload_entry(StoreChange::ChangeRole {
-            member: b.member.member_id(),
-            role: MemberRole::Admin,
-        })
-        .await
-        .unwrap();
-    let winner = c
-        .sync
-        .make_and_upload_entry(StoreChange::ChangeRole {
-            member: b.member.member_id(),
-            role: MemberRole::Member,
-        })
-        .await
-        .unwrap();
-    let report = a.sync().await;
-    assert_eq!(
-        report.dropped_entries,
-        vec![DroppedEntry {
-            entry: lost,
-            change: crate::StoreLogChange::SetMemberRole {
-                member: b.member.member_id(),
-                role: MemberRole::Admin
-            },
-            reason: coven_database::DropReason::BeatenBy(winner)
-        }]
-    );
-    assert!(b.sync().await.dropped_entries.is_empty());
-    assert!(c.sync().await.dropped_entries.is_empty());
     assert_eq!(a.log().await, b.log().await);
-    assert_eq!(b.log().await, c.log().await);
 }
 
 #[tokio::test]
@@ -498,7 +453,7 @@ async fn future_entry_waits_and_a_restored_device_starts_at_one() {
         })
         .await
         .unwrap();
-    assert!(b.sync().await.damaged_objects.is_empty());
+    b.sync().await;
     assert!(!b.log().await.replay.entries.contains_key(&future));
     b.clock.set(UNIX_EPOCH + Duration::from_secs(2));
     b.sync().await;
@@ -786,11 +741,7 @@ async fn section_nine_examples_converge_for_every_concurrent_upload_order() {
             for index in &order {
                 let (path, bytes) = &objects[*index];
                 storage.create(path, bytes).await.unwrap();
-                let report = left.sync().await;
-                assert!(
-                    report.damaged_objects.is_empty(),
-                    "case {case}, {order:?}: {report:?}"
-                );
+                left.sync().await;
             }
             right.sync().await;
             let left = left.log().await;
@@ -823,7 +774,7 @@ async fn only_newer_envelopes_require_an_update() {
             if version == 2 {
                 assert!(matches!(result, Err(SyncFailure::UpdateRequired)));
             } else {
-                assert_eq!(result.unwrap().damaged_objects[0].path, path.as_str());
+                assert_eq!(result.unwrap()[0].path, path.as_str());
             }
             assert!(b.log().await.entries.is_empty());
             assert!(b.db.operations().await.unwrap().is_empty());
@@ -835,8 +786,7 @@ async fn only_newer_envelopes_require_an_update() {
             assert_eq!(storage.read(&path).await.unwrap(), bytes);
             storage.delete(&path).await.unwrap();
             storage.create(&path, &original).await.unwrap();
-            let report = b.sync().await;
-            assert!(report.damaged_objects.is_empty());
+            b.sync().await;
             assert_eq!(b.log().await, a.log().await);
             assert!(b.db.operations().await.unwrap().is_empty());
         }

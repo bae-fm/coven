@@ -39,11 +39,11 @@ theorem first_pass :
     scan history (authorViews history 7) (List.range 7) ⟨State.empty, [], []⟩ =
       .restart [4] := by decide
 
-/-- §9's Gifts example, including kept identities and the report to Ana. -/
+/-- §9's Gifts example, including kept and dropped identities. -/
 theorem carol_stays : EveryOrder history 7 (List.range 7) (fun r =>
     lookup r.state.circles 0 = some ⟨"Gifts", [2, 0]⟩ ∧
     member r.state 1 = false ∧ member r.state 2 = true ∧
-    5 ∈ r.kept ∧ 6 ∈ r.kept ∧ r.dropped = [4] ∧ reports history r 0 = [4]) := by
+    5 ∈ r.kept ∧ 6 ∈ r.kept ∧ r.dropped = [4]) := by
   apply every_order; decide
 
 end CovenStorelog.Examples.Gifts

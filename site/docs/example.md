@@ -206,16 +206,16 @@ every write without checking.
 
 The host reads the current `SyncStatus` through
 `handle.subscribe_sync_status()`. The receiver immediately contains the current
-value and may coalesce intermediate values. A successful pass's `row_changes`
-is a refresh hint: re-read the named rows instead of treating it as a complete
-history.
+value and may coalesce intermediate values. A successful pass supplies its
+completion time. Use live queries to refresh views when their rows change;
+query `blocked_operations()` and `access_keys_to_delete()` for pending actions.
 
 ```rust
 let mut status = handle.subscribe_sync_status();
 loop {
     match &*status.borrow_and_update() {
-        coven::SyncStatus::Synced(report) => {
-            // Refresh views and show waiting writes or blocked operations.
+        coven::SyncStatus::Synced { finished_at } => {
+            // Show when the last sync pass finished.
         }
         coven::SyncStatus::Failed { error } => {
             // Show the failure and its typed cause.

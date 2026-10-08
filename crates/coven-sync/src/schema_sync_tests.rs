@@ -80,9 +80,7 @@ async fn sync_all(devices: &mut [Device]) {
         device.sync.upload_writes().await.unwrap();
     }
     for device in &mut *devices {
-        let report = device.sync.download_writes().await.unwrap();
-        assert!(report.damaged_objects.is_empty(), "{report:?}");
-        assert!(report.waiting.is_empty(), "{report:?}");
+        device.sync.download_writes().await.unwrap();
     }
 }
 
@@ -113,20 +111,10 @@ async fn adding_color_accepts_older_edits_without_raising_the_store() {
     devices[0].log.sync_store_log().await.unwrap();
     sql(&devices[0].db, "UPDATE notes SET color='blue'").await;
     devices[0].sync.upload_writes().await.unwrap();
-    assert_eq!(
-        devices[1]
-            .sync
-            .download_writes()
-            .await
-            .unwrap()
-            .waiting
-            .len(),
-        1
-    );
+    devices[1].sync.download_writes().await.unwrap();
     sql(&devices[1].db, "UPDATE notes SET title='Shopping'").await;
     devices[1].sync.upload_writes().await.unwrap();
-    let report = devices[0].sync.download_writes().await.unwrap();
-    assert!(report.damaged_objects.is_empty(), "{report:?}");
+    devices[0].sync.download_writes().await.unwrap();
     assert_eq!(rows(&devices[0].db).await[0].1, "Shopping");
     assert!(devices[0]
         .db
@@ -182,9 +170,7 @@ async fn rename_holds_uploads_then_converts_or_loses_offline_edits_everywhere() 
                 device.sync.upload_writes().await.unwrap();
             }
             for device in &mut devices {
-                let report = device.sync.download_writes().await.unwrap();
-                assert!(report.damaged_objects.is_empty(), "{report:?}");
-                assert!(report.waiting.is_empty(), "{report:?}");
+                device.sync.download_writes().await.unwrap();
                 assert_eq!(
                     name(&device.db).await,
                     if convert { "Shopping" } else { "Groceries" }
@@ -307,11 +293,7 @@ async fn a_raise_resumes_after_reopening_at_every_publication_step() {
                 .unwrap();
             device
                 .log
-                .operation_step(
-                    &record,
-                    crate::operation_data::Data::read(&record).unwrap(),
-                    &mut crate::SyncResults::default(),
-                )
+                .operation_step(&record, crate::operation_data::Data::read(&record).unwrap())
                 .await
                 .unwrap();
         }
@@ -521,11 +503,7 @@ async fn concurrent_raises_to_different_versions_are_both_kept() {
             .unwrap();
         devices[1]
             .log
-            .operation_step(
-                &record,
-                crate::operation_data::Data::read(&record).unwrap(),
-                &mut crate::SyncResults::default(),
-            )
+            .operation_step(&record, crate::operation_data::Data::read(&record).unwrap())
             .await
             .unwrap();
     }
@@ -579,13 +557,10 @@ async fn reference_checks_do_not_reject_writes_from_before_a_table_rename() {
         ],
     )
     .await;
-    let report = devices[0].sync.download_writes().await.unwrap();
-    assert!(report.damaged_objects.is_empty(), "{report:?}");
-    assert_eq!(report.waiting.len(), 1);
+    devices[0].sync.download_writes().await.unwrap();
+    assert!(devices[0].db.lost_values().await.unwrap().is_empty());
     devices[0].log.sync_store_log().await.unwrap();
-    let report = devices[0].sync.download_writes().await.unwrap();
-    assert!(report.damaged_objects.is_empty(), "{report:?}");
-    assert!(report.waiting.is_empty(), "{report:?}");
+    devices[0].sync.download_writes().await.unwrap();
     assert_eq!(devices[0].db.lost_values().await.unwrap().len(), 1);
     let title: String = devices[0]
         .db
@@ -664,11 +639,7 @@ async fn a_migration_waits_for_an_operation_that_already_reserved_the_entry_numb
                 .unwrap();
             device
                 .log
-                .operation_step(
-                    &record,
-                    Data::read(&record).unwrap(),
-                    &mut crate::SyncResults::default(),
-                )
+                .operation_step(&record, Data::read(&record).unwrap())
                 .await
                 .unwrap();
         } else {
@@ -701,12 +672,7 @@ async fn a_migration_waits_for_an_operation_that_already_reserved_the_entry_numb
         let operations =
             crate::Operations::new(device.log, files.clone(), device.sync, device.clock.clone());
         operations.get_members().await.unwrap();
-        assert!(operations
-            .report()
-            .await
-            .unwrap()
-            .blocked_operations
-            .is_empty());
+        assert!(operations.blocked_operations().await.unwrap().is_empty());
         assert_eq!(operations.circles().await.unwrap()[0].name, "waiting");
         assert_eq!(
             device.db.store_log().await.unwrap().replay.state.schema[&Audience::Store].number,
@@ -746,7 +712,7 @@ mod recovery {
                     let storage = storage();
                     let mut devices = group(storage.clone(), 3).await;
                     seed(&mut devices).await;
-                    // Detect the disagreement before the device authors offline work.
+                    // Damage the fingerprint before the device authors offline work.
                     devices[1]
                         .db
                         .test_damage_fingerprint(Audience::Store)
@@ -755,15 +721,21 @@ mod recovery {
                     for device in &mut devices {
                         device.sync.post_positions().await.unwrap();
                     }
-                    assert_eq!(
+                    assert_ne!(
                         devices[1]
                             .sync
-                            .compare_fingerprints()
+                            .current_positions()
                             .await
                             .unwrap()
-                            .disagreements
-                            .len(),
-                        2
+                            .unwrap()
+                            .fingerprints,
+                        devices[0]
+                            .sync
+                            .current_positions()
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .fingerprints
                     );
                     devices[1].clock.set(UNIX_EPOCH + Duration::from_secs(2));
                     sql(&devices[1].db, "UPDATE notes SET title='Shopping'").await;
@@ -909,14 +881,24 @@ mod recovery {
                         assert_eq!(device.db.lost_values().await.unwrap(), losses);
                         device.sync.post_positions().await.unwrap();
                     }
+                    let expected = devices[0]
+                        .sync
+                        .current_positions()
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .fingerprints;
                     for device in &mut devices {
-                        assert!(device
-                            .sync
-                            .compare_fingerprints()
-                            .await
-                            .unwrap()
-                            .disagreements
-                            .is_empty());
+                        assert_eq!(
+                            device
+                                .sync
+                                .current_positions()
+                                .await
+                                .unwrap()
+                                .unwrap()
+                                .fingerprints,
+                            expected
+                        );
                         device.db.close().await.unwrap();
                     }
                 }

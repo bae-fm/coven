@@ -125,29 +125,20 @@ async fn unreadable_circle_parts_are_skipped_but_missing_members_keys_wait() {
             [7; 32],
         )))
         .unwrap();
-    let report = devices[1].sync.download_writes().await.unwrap();
-    assert_eq!(report.waiting.len(), 1, "{report:?}");
+    devices[1].sync.download_writes().await.unwrap();
     assert!(rows(&devices[1].db).await.is_empty());
     assert!(matches!(
         devices[1].log.reload_from_snapshots().await,
         Err(SyncError::KeyUnavailable(_))
     ));
-    let report = devices[2].sync.download_writes().await.unwrap();
-    assert!(report.waiting.is_empty());
-    assert!(report.damaged_objects.is_empty());
+    devices[2].sync.download_writes().await.unwrap();
     assert_eq!(rows(&devices[2].db).await.len(), 1);
     assert_eq!(count(&devices[2].db).await, 0);
     devices[2].log.reload_from_snapshots().await.unwrap();
     assert_eq!(rows(&devices[2].db).await.len(), 1);
     assert_eq!(count(&devices[2].db).await, 0);
     devices[1].log.sync_store_log().await.unwrap();
-    assert!(devices[1]
-        .sync
-        .download_writes()
-        .await
-        .unwrap()
-        .waiting
-        .is_empty());
+    devices[1].sync.download_writes().await.unwrap();
     assert_eq!(count(&devices[1].db).await, 1);
 }
 
@@ -214,24 +205,10 @@ async fn a_former_circle_member_still_waits_for_its_missing_earlier_key() {
             [7; 32],
         )))
         .unwrap();
-    assert_eq!(
-        devices[1]
-            .sync
-            .download_writes()
-            .await
-            .unwrap()
-            .waiting
-            .len(),
-        1
-    );
+    devices[1].sync.download_writes().await.unwrap();
+    assert_eq!(count(&devices[1].db).await, 0);
     devices[1].log.sync_store_log().await.unwrap();
-    assert!(devices[1]
-        .sync
-        .download_writes()
-        .await
-        .unwrap()
-        .waiting
-        .is_empty());
+    devices[1].sync.download_writes().await.unwrap();
     assert_eq!(count(&devices[1].db).await, 1);
 }
 
@@ -324,9 +301,7 @@ async fn dropped_removal_parts(
     assert_eq!(writes.len(), 1);
     carol.log.sync_store_log().await.unwrap();
     if carol_applies_before_drop {
-        let report = carol.sync.download_writes().await.unwrap();
-        assert!(report.waiting.is_empty(), "{report:?}");
-        assert!(report.damaged_objects.is_empty(), "{report:?}");
+        carol.sync.download_writes().await.unwrap();
         assert_eq!(count(&carol.db).await, 1);
     }
 
@@ -360,17 +335,9 @@ async fn dropped_removal_parts(
             &audience,
             dropped_key,
         ));
-        let report = ben.sync.download_writes().await.unwrap();
-        assert!(report.damaged_objects.is_empty(), "{report:?}");
-        assert_eq!(report.waiting.len(), 1, "{report:?}");
-        assert_eq!(report.waiting[0].write, writes[0]);
-        assert!(report.waiting[0].waiting_for.is_empty());
-        let since = report.waiting[0].since;
+        ben.sync.download_writes().await.unwrap();
         ben.clock.set(UNIX_EPOCH + Duration::from_secs(4));
-        assert_eq!(
-            ben.sync.download_writes().await.unwrap().waiting[0].since,
-            since
-        );
+        ben.sync.download_writes().await.unwrap();
         assert!(rows(&ben.db).await.is_empty());
         assert_eq!(count(&ben.db).await, 0);
         assert!(matches!(
@@ -401,9 +368,7 @@ async fn dropped_removal_parts(
     ));
     let expected = rows(&ana.db).await;
     for device in [&mut *ben, &mut *carol] {
-        let report = device.sync.download_writes().await.unwrap();
-        assert!(report.waiting.is_empty(), "{report:?}");
-        assert!(report.damaged_objects.is_empty(), "{report:?}");
+        device.sync.download_writes().await.unwrap();
         assert_eq!(rows(&device.db).await, expected);
         assert_eq!(count(&device.db).await, 1);
         assert!(device.db.lost_values().await.unwrap().is_empty());
@@ -443,13 +408,12 @@ async fn retention_waits_for_key_copies_without_failing() {
         );
         storage.create(&unused, b"unused").await.unwrap();
         match devices[reader].log.run_retention().await {
-            Ok(report) => assert!(report.damaged_objects.is_empty(), "{report:?}"),
+            Ok(()) => (),
             Err(error) => failed.push((reader, error)),
         }
         assert_eq!(storage.read(&unused).await.unwrap(), b"unused");
         devices[reader].keys.persist(&keys).unwrap();
-        let report = devices[reader].log.run_retention().await.unwrap();
-        assert!(report.damaged_objects.is_empty(), "{report:?}");
+        devices[reader].log.run_retention().await.unwrap();
         assert!(matches!(
             storage.read(&unused).await,
             Err(coven_storage::StorageError::NotFound)

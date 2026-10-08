@@ -24,13 +24,12 @@ impl StoreLogSync {
         &mut self,
         record: &OperationRecord,
         mut data: Data,
-        report: &mut SyncResults,
     ) -> Result<Progress, SyncError> {
         if let Data::PublishSchema { version } = data {
             return self.schema_publication_step(record, version).await;
         }
         if let Data::Snapshots(task) = data {
-            return self.snapshot_step(record, task, report).await;
+            return self.snapshot_step(record, task, &mut Vec::new()).await;
         }
         if matches!(data, Data::Invite(_)) {
             return self.invite_step(record, data).await;
@@ -167,10 +166,10 @@ impl StoreLogSync {
                 }
             }
             let mut ring = self.store_keys.unlock()?;
-            let mut report = SyncResults::default();
-            self.update_keys(&local.log, &member, &mut ring, &mut report)
+            let mut damages = Vec::new();
+            self.update_keys(&local.log, &member, &mut ring, &mut damages)
                 .await?;
-            if let Some(damaged) = report.damaged_objects.into_iter().next() {
+            if let Some(damaged) = damages.into_iter().next() {
                 return Err(damaged.into());
             }
             crate::store_log_keys::check_shared_keys(&local.log, &change, &ring)?;
@@ -236,7 +235,7 @@ impl StoreLogSync {
                             entry.clone(),
                             &member,
                             &mut ring,
-                            &mut SyncResults::default(),
+                            &mut Vec::new(),
                         )
                         .await
                     {
@@ -483,7 +482,7 @@ impl StoreLogSync {
                 current_result = Some(result);
             }
         }
-        // The app call describes the replay's current access; its report contains
+        // The app call describes the replay's current access; the deletion list contains
         // every S3 key. Retained grants from any account block the whole operation.
         let result = if retained.is_empty() {
             current_result.ok_or(coven_database::DbError::DamagedDatabase)?

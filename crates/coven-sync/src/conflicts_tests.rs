@@ -68,7 +68,7 @@ fn store_removal_beats_a_later_concurrent_circle_rotation() {
             [member(0), member(1)].into()
         );
         assert_eq!(r.state.circles[&circle(0)].key, key(200));
-        assert_eq!(h.reports(r, 2), [12]);
+        assert_eq!(h.drops(r), [12]);
     });
 }
 
@@ -167,7 +167,7 @@ fn concurrent_audience_reset_and_version_raise_use_the_earlier_entry() {
                         r.state.resets.get(&audience).map(|s| s.number),
                         reset_first.then_some(number)
                     );
-                    assert_eq!(h.reports(r, 1), [base + 1]);
+                    assert_eq!(h.drops(r), [base + 1]);
                     assert_eq!(
                         r.entries[&h.entries[base + 1].position],
                         EntryOutcome::Dropped(DropReason::BeatenBy(h.entries[base].position))

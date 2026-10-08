@@ -89,9 +89,7 @@ async fn step(d: &mut Device, id: OperationId) -> Result<Progress, SyncError> {
             .find(|r| r.id == id)
             .unwrap();
     let data = Data::read(&row)?;
-    d.sync
-        .operation_step(&row, data, &mut crate::SyncResults::default())
-        .await
+    d.sync.operation_step(&row, data).await
 }
 async fn finish(d: &mut Device, id: OperationId) -> Output {
     for _ in 0..30 {
@@ -307,17 +305,12 @@ async fn cancelled_app_future_keeps_running_and_permanent_failure_retries_or_dis
         operations.create_circle("").await,
         Err(SyncError::Database(_))
     ));
-    let report = operations.report().await.unwrap();
-    assert_eq!(report.blocked_operations.len(), 1);
-    let blocked = report.blocked_operations[0].id;
+    let blocked = operations.blocked_operations().await.unwrap();
+    assert_eq!(blocked.len(), 1);
+    let blocked = blocked[0].id;
     assert!(operations.retry_blocked_operation(blocked).await.is_err());
     operations.discard_blocked_operation(blocked).await.unwrap();
-    assert!(operations
-        .report()
-        .await
-        .unwrap()
-        .blocked_operations
-        .is_empty());
+    assert!(operations.blocked_operations().await.unwrap().is_empty());
     operations.close().await.unwrap();
 }
 
@@ -432,23 +425,16 @@ async fn permanent_storage_failure_preserves_fixed_bytes_for_retry_and_discard()
             let writes = a.writes();
             crate::Operations::new(a.sync, files, writes, a.clock.clone())
         };
-        let report = operations.report().await.unwrap();
-        assert_eq!(report.blocked_operations.len(), 1);
-        assert_eq!(report.blocked_operations[0].last_step, 1);
+        let blocked = operations.blocked_operations().await.unwrap();
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0].last_step, 1);
         assert!(matches!(
             storage.read(&object::path(fixed.entry.position)).await,
             Err(StorageError::NotFound)
         ));
         operations.set_storage(Some(storage.clone())).await.unwrap();
-        assert_eq!(
-            operations
-                .sync_store_log()
-                .await
-                .unwrap()
-                .blocked_operations
-                .len(),
-            1
-        );
+        operations.sync_store_log().await.unwrap();
+        assert_eq!(operations.blocked_operations().await.unwrap().len(), 1);
         assert!(a.db.local_store_log().await.unwrap().upload.is_some());
         if discard {
             operations.discard_blocked_operation(id).await.unwrap();
@@ -501,9 +487,9 @@ async fn retained_provider_grants_block_both_requested_and_remote_revocations() 
                 }
             );
         }
-        let report = operations.report().await.unwrap();
-        assert_eq!(report.blocked_operations.len(), 1);
-        let id = report.blocked_operations[0].id;
+        let blocked = operations.blocked_operations().await.unwrap();
+        assert_eq!(blocked.len(), 1);
+        let id = blocked[0].id;
         assert!(
             matches!(operations.retry_blocked_operation(id).await, Err(SyncError::AccessRemains(found)) if found == shares)
         );
@@ -516,12 +502,7 @@ async fn retained_provider_grants_block_both_requested_and_remote_revocations() 
             .set_retained_access("cat@example.com", Vec::new())
             .await;
         operations.retry_blocked_operation(id).await.unwrap();
-        assert!(operations
-            .report()
-            .await
-            .unwrap()
-            .blocked_operations
-            .is_empty());
+        assert!(operations.blocked_operations().await.unwrap().is_empty());
         assert!(MemoryStorage::for_recipient(&storage, "cat@example.com")
             .unwrap()
             .list(&ObjectPrefix::all())

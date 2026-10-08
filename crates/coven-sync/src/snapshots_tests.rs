@@ -147,13 +147,7 @@ async fn threshold_snapshot_and_later_writes_reload_on_a_new_device() {
         .is_empty());
     write_rows(&a, 10, 30, 32768, Audience::Store).await;
     upload(&a, &storage).await;
-    assert!(a
-        .sync
-        .write_snapshots()
-        .await
-        .unwrap()
-        .damaged_objects
-        .is_empty());
+    a.sync.write_snapshots().await.unwrap();
     assert_eq!(
         storage
             .list(&ObjectPrefix::snapshots())
@@ -204,11 +198,7 @@ async fn writing_resumes_after_each_recorded_step_with_identical_ciphertext() {
                     .unwrap();
             assert!(matches!(
                 a.sync
-                    .operation_step(
-                        &record,
-                        Data::read(&record).unwrap(),
-                        &mut crate::SyncResults::default()
-                    )
+                    .operation_step(&record, Data::read(&record).unwrap())
                     .await
                     .unwrap(),
                 Progress::Advanced
@@ -466,11 +456,7 @@ async fn selected_snapshot(device: &mut Device) -> ObjectPath {
         .into_iter()
         .find(|r| r.id == id)
         .unwrap();
-    device
-        .sync
-        .operation_step(&record, data, &mut crate::SyncResults::default())
-        .await
-        .unwrap();
+    device.sync.operation_step(&record, data).await.unwrap();
     let record = device
         .db
         .operations()
@@ -533,11 +519,8 @@ async fn selection_orders_coverage_then_path_and_passes_over_damaged_objects() {
         .corrupt_byte(&newer, size as usize - 1)
         .await
         .unwrap();
-    let report = c.sync.reload_from_snapshots().await.unwrap();
-    assert!(report
-        .damaged_objects
-        .iter()
-        .any(|d| d.path == newer.as_str()));
+    let damages = c.sync.reload_from_snapshots().await.unwrap();
+    assert!(damages.iter().any(|d| d.path == newer.as_str()));
     assert_eq!(selected_snapshot(&mut c).await, path(b_id));
     assert_eq!(tables(&a).await, tables(&c).await);
     // A malformed clear prefix is also passed over without reading a body.
@@ -552,7 +535,6 @@ async fn selection_orders_coverage_then_path_and_passes_over_damaged_objects() {
         .reload_from_snapshots()
         .await
         .unwrap()
-        .damaged_objects
         .iter()
         .any(|d| d.path == malformed.as_str()));
 }
@@ -737,10 +719,7 @@ async fn reload_reselects_after_store_log_changes_and_preserves_interleaved_app_
             .into_iter()
             .find(|r| r.id == id)
             .unwrap();
-    a.sync
-        .operation_step(&record, data, &mut crate::SyncResults::default())
-        .await
-        .unwrap();
+    a.sync.operation_step(&record, data).await.unwrap();
     assert!(matches!(
         a.sync
             .make_and_upload_entry(StoreChange::AddDevice {
@@ -769,11 +748,7 @@ async fn reload_reselects_after_store_log_changes_and_preserves_interleaved_app_
             .find(|r| r.id == id)
             .unwrap();
     a.sync
-        .operation_step(
-            &record,
-            Data::read(&record).unwrap(),
-            &mut crate::SyncResults::default(),
-        )
+        .operation_step(&record, Data::read(&record).unwrap())
         .await
         .unwrap();
     let record =
@@ -842,8 +817,7 @@ async fn idle_pass_reads_only_snapshot_prefixes_and_log_headers() {
     let mut excess_reads = 0;
     for pass in 0..2 {
         let start = storage.reads().await.len();
-        let report = operations.sync().await.unwrap();
-        assert!(report.damaged_objects.is_empty(), "{report:?}");
+        operations.sync().await.unwrap();
         let reads = storage.reads().await;
         let reads = &reads[start..];
         let bytes: u64 = reads.iter().map(|(_, _, size)| size).sum();
@@ -920,9 +894,8 @@ async fn a_pass_reuses_loaded_snapshot_and_write_references() {
         let database = a.db.clone();
         let operations = crate::Operations::new(a.sync, files.clone(), writes, a.clock.clone());
         let start = storage.reads().await.len();
-        let report = operations.sync().await.unwrap();
-        assert!(report.damaged_objects.is_empty(), "{report:?}");
-        assert!(report.blocked_operations.is_empty(), "{report:?}");
+        operations.sync().await.unwrap();
+        assert!(operations.blocked_operations().await.unwrap().is_empty());
         let reads = storage.reads().await;
         let object = &objects[0];
         let bytes: u64 = reads[start..]

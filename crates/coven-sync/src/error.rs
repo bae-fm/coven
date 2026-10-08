@@ -79,7 +79,7 @@ pub enum SyncError {
     RecoveryBlocked {
         /// The failed reload operation.
         operation: crate::OperationId,
-        /// Its retained cause, also available in the blocked-operation report.
+        /// Its retained cause, also available through `Operations::blocked_operations`.
         failure: String,
     },
     /// Decoding persisted operation data failed; its cause remains available.
@@ -177,4 +177,29 @@ impl From<coven_format::Error> for SyncError {
             error => Self::Format(error),
         }
     }
+}
+
+/// An object whose checks failed (§19.1).
+#[derive(Debug, thiserror::Error)]
+#[error("damaged object at {path}: {failure}")]
+pub struct DamagedObject {
+    /// The exact path read from storage.
+    pub path: String,
+    /// The failed check and its cause.
+    #[source]
+    pub failure: ObjectCheckFailure,
+}
+
+/// Authentication and parsing failures retain their original causes.
+#[derive(Debug, thiserror::Error)]
+pub enum ObjectCheckFailure {
+    /// Opening the object or its authenticated path failed.
+    #[error("decryption failed: {0}")]
+    Decryption(#[source] CryptoError),
+    /// The author's signature did not verify.
+    #[error("signature failed: {0}")]
+    Signature(#[source] CryptoError),
+    /// The bytes or their causal metadata violate the format.
+    #[error("parse failed: {0}")]
+    Parse(#[source] Arc<dyn std::error::Error + Send + Sync>),
 }

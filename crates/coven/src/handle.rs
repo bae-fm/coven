@@ -154,14 +154,18 @@ impl CovenHandle {
         self.operations.set_member_role(member, role).await
     }
     /// Remove a member, rotate keys and revoke every recorded access (§13).
-    /// The result describes current access and any retained grants; the sync
-    /// report lists all recorded S3 keys until each deletion is confirmed.
+    /// The result describes current access and any retained grants;
+    /// `access_keys_to_delete` lists S3 keys until each deletion is confirmed.
     pub async fn remove_member(&self, member: &MemberId) -> Result<MemberRemoval, SyncError> {
         self.operations.remove_member(member).await
     }
     /// Remove a device and return instructions for its provider sign-out.
     pub async fn remove_device(&self, device: DeviceId) -> Result<ProviderSignOut, SyncError> {
         self.operations.remove_device(device).await
+    }
+    /// S3 keys awaiting deletion in the provider console, also available while stopped.
+    pub async fn access_keys_to_delete(&self) -> Result<Vec<AccessKeyToDelete>, SyncError> {
+        self.operations.access_keys_to_delete().await
     }
     /// Confirm deletion of an S3 key in the provider console.
     pub async fn confirm_access_key_deleted(&self, key: &str) -> Result<(), SyncError> {
@@ -174,6 +178,10 @@ impl CovenHandle {
     /// Reset the store audience from this device as an admin, then reload locally (§19.3).
     pub async fn reset_store(&self) -> Result<(), SyncError> {
         self.operations.reset_store().await
+    }
+    /// Permanently failed operations awaiting retry or discard, also available while stopped.
+    pub async fn blocked_operations(&self) -> Result<Vec<BlockedOperation>, OperationError> {
+        self.operations.blocked_operations().await
     }
     /// Retry a permanently failed operation from its next unfinished step.
     pub async fn retry_blocked_operation(

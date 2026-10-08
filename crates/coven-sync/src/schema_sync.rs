@@ -5,7 +5,7 @@ use crate::{
     operation_data::Data,
     operations::{Output, Progress},
     snapshot_data::*,
-    SyncError, SyncResults,
+    SyncError,
 };
 use coven_database::{OperationRecord, StoreLogState};
 use coven_format::store_log::{SnapshotId, StoreChange};
@@ -141,17 +141,17 @@ impl StoreLogSync {
         let mut local = self.database.local_store_log().await?;
         let member = self.operation_member()?;
         let mut ring = self.store_keys.unlock()?;
-        let mut report = SyncResults::default();
-        self.update_keys(&local.log, &member, &mut ring, &mut report)
+        let mut damages = Vec::new();
+        self.update_keys(&local.log, &member, &mut ring, &mut damages)
             .await?;
         // A plain app call may have fixed the next entry before this open ran
         // migrations. Its reserved number must finish before preparing a raise.
-        self.publish(&mut local, &member, &mut ring, &mut report)
+        self.publish(&mut local, &member, &mut ring, &mut damages)
             .await?;
         if local.upload.is_some() {
             return Ok(Progress::Waiting);
         }
-        if let Some(damaged) = report.damaged_objects.into_iter().next() {
+        if let Some(damaged) = damages.into_iter().next() {
             return Err(damaged.into());
         }
         if schema_in_place(&local.log.replay.state, &snapshot.audience, version) {

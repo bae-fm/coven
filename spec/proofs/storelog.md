@@ -2,7 +2,7 @@
 
 - Lean checks the store log's replay against
   [§9](../coven.md#9-members-and-roles): it terminates, every
-  causal arrival order ends in the same state and reports, and §9's
+  causal arrival order ends in the same state and entry dispositions, and §9's
   invariants and examples hold.
 - The development is in `spec/proofs/storelog/`, without Mathlib, using
   the toolchain pinned by [Appendix B](merge.md).
@@ -28,8 +28,8 @@
   `Examples.CircleDeletion.shared_key_conflict`, `earlier_rotation_applies`.
 - E.g. Ben is alone in his circle and renames it while Ana removes him
   from the store. In Ana's view the removal takes the circle's only
-  member, so it deletes the circle and beats the rename, which is dropped
-  and shown to Ben. Lean: `Examples.CircleDeletion.alone_conflict`,
+  member, so it deletes the circle and beats the rename, which is dropped.
+  Lean: `Examples.CircleDeletion.alone_conflict`,
   `removal_beats_rename`.
 
 ### C2 The claim and the model
@@ -38,7 +38,7 @@
   with the same members, roles, storage access, devices, circles and circle
   memberships,
   each audience's schema versions, reset snapshots, kept identities,
-  and dropped identities. Lean: `storelog_converges`, `reports_converge`.
+  and dropped identities. Lean: `storelog_converges`.
 - An entry records its signature's author, writing device, had-read set,
   and action. Its identifier is its unique timestamp. Finite histories
   are numbered from zero without changing timestamp order.
@@ -89,7 +89,7 @@
 - Each new arrival starts a new replay of the entire received set with
   no drops. Drops persist through restarts within that replay.
 - Equal effects keep both identities. E.g. Ana and Ben both add Dan:
-  Dan is added once, both identities are kept, and neither is reported.
+  Dan is added once, both identities are kept, and neither is dropped.
   Lean: `Examples.equal_adds_combine`.
 - Authority comes first even for unchanged effects. E.g. Gifts belongs
   to Ben and is already named Gifts. Ana, an admin outside it, cannot
@@ -133,8 +133,8 @@
   because both entries concern Ben. Lean: `Examples.Gifts.removal_names_no_circle`,
   `conflicts`.
 - The first pass drops Ben's addition and restarts. Carol's addition
-  applies; Gifts ends with Ana and Carol. Ana is shown Ben's dropped
-  addition. This holds in every causal arrival order. Lean:
+  applies; Gifts ends with Ana and Carol. Ben's addition stays dropped.
+  This holds in every causal arrival order. Lean:
   `Examples.Gifts.first_pass`, `carol_stays`.
 - E.g. instead Carol already shares Gifts with Ben, and Ana removes Carol
   from the store while Ben adds Dan to Gifts. Ana's removal names Gifts,
@@ -171,12 +171,12 @@
 
 - The removal first drops Carol's addition. After restarting, removing
   Ana would leave no admin, so the removal drops too. Carol stays absent;
-  Ana sees her dropped addition and Ben his removal. Lean:
+  both the addition and the removal stay dropped. Lean:
   `Examples.first_pass_drops_add`, `second_pass_drops_removal`,
   `losing_removal_discards_add`. The last theorem covers every causal
   arrival order.
 
-### C6 Convergence and reports
+### C6 Convergence and entry accounting
 
 - `resolve` is a function of the received set: sort its identities by
   timestamp and run the terminating replay.
@@ -187,20 +187,19 @@
   definition. Two bounds containing the same received set give the same
   result. Lean: `resolve_bound_independent`.
 - **One arrival:** `step` inserts the identity and publishes the resolved
-  state and reports together. Lean: `step_spec`.
+  state and entry dispositions together. Lean: `step_spec`.
 - **Induction:** a causal arrival sequence maintains that function's
   result and a closed received set. Lean: `run_isSpec`, `causal_ready`.
 - **Uniqueness:** two results for that function and set are equal.
   Lean: `isSpec_unique`.
 - **Convergence:** two causal orders of one set agree on the entire state,
-  kept and dropped identities, and every author's reports.
-  Lean: `storelog_converges`, `reports_converge`.
+  kept and dropped identities.
+  Lean: `storelog_converges`.
 - Timestamp order is itself a causal order of every closed received set.
   Lean: `timestampOrder_causal`, `full_history_causal`.
-- Every received identity is kept or dropped, never both; no other
-  identity is reported. Each author receives exactly their dropped
-  identities. Lean: `resolve_partition`, `reported_to_author`,
-  `report_only_author`, `report_exactly_dropped`.
+- Every received identity is kept or dropped, never both; no other identity
+  appears in either list. Lean: `resolve_partition`. These dispositions remain
+  tracked internally and are not yet exposed to the app.
 - E.g. Ana removes Ben while Ben makes Carol a member. Ben's role change
   is judged in the view where he was still an admin, whatever the arrival order.
   Lean: `Examples.removed_author_view`.
@@ -258,7 +257,7 @@
   - Ana adds Dan while Ben promotes Carol: both apply.
     Lean: `Examples.example_add_and_promote`.
   - Ben adds his phone while Ana removes Ben: the removal wins, and the
-    phone addition is dropped and reported to Ben.
+    phone addition is dropped.
     Lean: `Examples.example_member_removal_beats_phone`.
   - Ben is concurrently made admin and member: member wins.
     Lean: `Examples.example_lower_role`.
@@ -287,7 +286,7 @@
   `member_removal_updates_circles`, `store_removal_beats_circle_add`.
 - [§14.3](../coven.md#143-circles): an ordinary member makes
   a circle and becomes its first member; concurrent different names use
-  the later timestamp, keeping both rename entries and reporting neither.
+  the later timestamp, keeping both rename entries.
   Lean: `Examples.circle_created_by_member`,
   `circle_renamed`.
 - [§14.6](../coven.md#146-leaving-a-circle): Ana removes Ben
@@ -300,7 +299,7 @@
   associated row deletion and loss of Ana's concurrent note.
 - [§17](../coven.md#17-schema-changes): the schema version can
   be raised by an ordinary member; different snapshots for the same
-  concurrent raise use the earlier entry and report the other. Identical
+  concurrent raise use the earlier entry and drop the other. Identical
   raises keep both identities; a later raise advances the version.
   Lean: `Examples.same_version_snapshot`, `identical_version_raises`,
   `version_raised`.
@@ -320,7 +319,7 @@
   `removed_circle_member_can_raise_concurrently`, `explicit_circle_deletion_beats_raise`,
   `derived_circle_deletion_beats_raise`.
 - [§19.3](../coven.md#193-resetting-a-store): concurrent store
-  or circle resets use the earlier snapshot and report the other entry;
+  or circle resets use the earlier snapshot and drop the other entry;
   identical resets keep both identities; a later causal reset supersedes
   them. Lean: `Examples.store_reset_tie`, `circle_reset_tie`,
   `equal_resets_combine`, `later_reset`.
@@ -336,7 +335,7 @@
 ### C9 What Lean checks, and what is prose
 
 - Lean checks the modeled replay, termination, convergence, invariants,
-  reports, admission ordering, and store-log example outcomes above.
+  entry accounting, admission ordering, and store-log example outcomes above.
   `CovenStorelog/Axioms.lean` prints the theorems' axioms; their union is
   `propext`, `Classical.choice`, and `Quot.sound`. No axioms are declared
   by this development.

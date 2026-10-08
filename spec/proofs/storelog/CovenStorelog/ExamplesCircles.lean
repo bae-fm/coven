@@ -124,8 +124,7 @@ theorem member_removal_updates_circles : EveryOrder carolsCircles 9 (List.range 
 theorem store_removal_beats_circle_add :
     EveryOrder removeCarolAndAddDan 10 (List.range 10) (fun r =>
       member r.state 2 = false ∧ member r.state 3 = true ∧
-      lookup r.state.circles 0 = some ⟨"Gifts", [1]⟩ ∧ r.dropped = [8] ∧
-      reports removeCarolAndAddDan r 1 = [8]) := by
+      lookup r.state.circles 0 = some ⟨"Gifts", [1]⟩ ∧ r.dropped = [8]) := by
   apply every_order; decide
 
 end CovenStorelog.Examples

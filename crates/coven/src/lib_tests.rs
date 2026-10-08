@@ -181,9 +181,7 @@ impl Network {
             loop {
                 status.changed().await.unwrap();
                 match &*status.borrow_and_update() {
-                    SyncStatus::Synced(report) if report.finished_at >= after => {
-                        assert!(report.damaged_objects.is_empty(), "{report:?}");
-                        assert!(report.blocked_operations.is_empty(), "{report:?}");
+                    SyncStatus::Synced { finished_at } if *finished_at >= after => {
                         break;
                     }
                     SyncStatus::Failed { error } => panic!("device {index}: {error:?}"),
@@ -198,6 +196,7 @@ impl Network {
                 &*status.borrow()
             )
         });
+        assert!(handle.blocked_operations().await.unwrap().is_empty());
     }
 
     async fn quiet(&self) {
@@ -292,11 +291,9 @@ impl Network {
             );
             let status = device.handle.subscribe_sync_status();
             let value = status.borrow();
-            let SyncStatus::Synced(report) = &*value else {
+            let SyncStatus::Synced { .. } = &*value else {
                 panic!("{value:?}")
             };
-            assert!(report.waiting.is_empty(), "{report:?}");
-            assert!(report.disagreements.is_empty(), "{report:?}");
         }
     }
     async fn close(self) {
@@ -530,6 +527,29 @@ async fn reconnecting_with_a_replacement_key_records_the_access_that_removal_rev
             access_key_id: "replacement-key".into()
         }
     );
+    let owner = &network.devices[0].handle;
+    owner.stop_sync();
+    owner
+        .subscribe_sync_status()
+        .wait_for(|s| matches!(s, SyncStatus::Stopped))
+        .await
+        .unwrap();
+    assert_eq!(
+        owner.access_keys_to_delete().await.unwrap(),
+        ["member-1", "replacement-key"].map(|key| AccessKeyToDelete {
+            access_key_id: key.into(),
+            member: Some(member.clone()),
+        })
+    );
+    owner.confirm_access_key_deleted("member-1").await.unwrap();
+    assert_eq!(
+        owner.access_keys_to_delete().await.unwrap(),
+        vec![AccessKeyToDelete {
+            access_key_id: "replacement-key".into(),
+            member: Some(member),
+        }]
+    );
+    assert!(owner.blocked_operations().await.unwrap().is_empty());
     network.close().await;
 }
 

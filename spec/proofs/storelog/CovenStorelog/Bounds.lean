@@ -82,7 +82,7 @@ theorem range_filter_bound (S : EntrySet) {n m : Nat} (hnm : n ≤ m)
       simp [hf, ih]
 
 /-- Different finite bounds containing the same received set give the same
-state and reports; the bound cannot hide a dependency on receipt order. -/
+state and entry dispositions; the bound cannot hide a dependency on receipt order. -/
 theorem resolve_bound_independent (M : Log) (S : EntrySet) (n m : Nat)
     (hn : ∀ w, S w = true → w < n) (hm : ∀ w, S w = true → w < m) :
     resolve M n S = resolve M m S := by

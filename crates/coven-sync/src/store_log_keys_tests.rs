@@ -164,11 +164,10 @@ async fn dropped_store_removal_key_lets_the_excluded_member_read_later_entries()
         key(3)
     );
     erin.sync().await;
-    let report = ben.sync().await;
-    assert_eq!(report.dropped_entries[0].entry, dropped);
+    ben.sync().await;
     assert_eq!(
-        report.dropped_entries[0].reason,
-        coven_database::DropReason::BeatenBy(winner)
+        ben.log().await.replay.entries[&dropped],
+        EntryOutcome::Dropped(coven_database::DropReason::BeatenBy(winner))
     );
     assert_eq!(ana.log().await, erin.log().await);
     assert_eq!(ana.log().await, ben.log().await);
@@ -206,10 +205,10 @@ async fn a_missing_or_damaged_holder_copy_waits_and_a_later_copy_enables_sharing
         if damaged {
             storage.create(&holder, b"damaged").await.unwrap();
         }
-        let report = ana.sync().await;
-        assert_eq!(report.damaged_objects.len(), usize::from(damaged));
+        let damages = ana.sync.step().await.unwrap();
+        assert_eq!(damages.len(), usize::from(damaged));
         if damaged {
-            assert_eq!(report.damaged_objects[0].path, holder.as_str());
+            assert_eq!(damages[0].path, holder.as_str());
         }
         assert!(matches!(
             ana.log().await.replay.entries[&dropped],
@@ -221,7 +220,7 @@ async fn a_missing_or_damaged_holder_copy_waits_and_a_later_copy_enables_sharing
         ));
         storage.delete(&holder).await.unwrap();
         storage.create(&holder, &original).await.unwrap();
-        assert!(ana.sync().await.damaged_objects.is_empty());
+        ana.sync().await;
         let copy = storage.read(&recipient).await.unwrap();
         assert_eq!(
             erin.member
@@ -236,16 +235,16 @@ async fn a_missing_or_damaged_holder_copy_waits_and_a_later_copy_enables_sharing
 #[tokio::test]
 async fn occupied_recipient_path_is_preserved_and_damage_is_reported_by_its_recipient() {
     let storage = storage();
-    let [mut ana, mut ben, dan, mut erin] = household(&storage).await;
+    let [mut ana, mut ben, dan, erin] = household(&storage).await;
     remove(&mut ana, &dan.member, key(2)).await;
     remove(&mut ben, &erin.member, key(3)).await;
     let path = ObjectPath::store_key(key(3), &erin.member.member_id());
     storage.create(&path, b"damaged").await.unwrap();
-    assert!(ana.sync().await.damaged_objects.is_empty());
+    ana.sync().await;
     assert_eq!(storage.read(&path).await.unwrap(), b"damaged");
-    let report = erin.sync().await;
-    assert_eq!(report.damaged_objects.len(), 1);
-    assert_eq!(report.damaged_objects[0].path, path.as_str());
+    let damages = erin.sync.step().await.unwrap();
+    assert_eq!(damages.len(), 1);
+    assert_eq!(damages[0].path, path.as_str());
 }
 
 #[tokio::test]
@@ -268,8 +267,8 @@ async fn two_holders_race_to_store_the_same_key_for_one_member() {
     })
     .await
     .expect("both holders must attempt the missing copy");
-    assert!(a.unwrap().damaged_objects.is_empty());
-    assert!(b.unwrap().damaged_objects.is_empty());
+    assert!(a.unwrap().is_empty());
+    assert!(b.unwrap().is_empty());
     let stored = storage.read(&path).await.unwrap();
     {
         let attempts = racing.attempts.lock().unwrap();

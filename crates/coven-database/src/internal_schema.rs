@@ -294,14 +294,6 @@ macro_rules! coven_tables {
                 FOREIGN KEY(device,number) REFERENCES _coven_uploads(device,number) ON DELETE CASCADE
             ) STRICT, WITHOUT ROWID;
         ");
-        $visit!(_coven_waiting_writes, "
-            CREATE TABLE _coven_waiting_writes (
-                device BLOB NOT NULL CHECK(length(device)=8),
-                number BLOB NOT NULL CHECK(length(number)=8),
-                since BLOB NOT NULL CHECK(length(since)=12),
-                PRIMARY KEY(device,number)
-            ) STRICT, WITHOUT ROWID;
-        ");
         $visit!(_coven_user_files, "
             CREATE TABLE _coven_user_files (
                 table_name TEXT NOT NULL,

@@ -1,6 +1,7 @@
 //! The joining device's store-log and snapshot steps (§12).
 
 use super::*;
+use coven_database::EntryOutcome;
 use coven_storage::StorageInvitation;
 
 /// The joining member's outcome after checking storage (§12.2).
@@ -34,8 +35,8 @@ impl StoreLogSync {
     /// false until membership is effective; damaged required objects fail loudly.
     /// Snapshot work waits until the member has actually been admitted.
     pub async fn bootstrap_member(&mut self) -> Result<bool, SyncError> {
-        let report = self.step().await?;
-        if let Some(damage) = report.damaged_objects.into_iter().next() {
+        let damages = self.step().await?;
+        if let Some(damage) = damages.into_iter().next() {
             return Err(damage.into());
         }
         let local = self.database.local_store_log().await?;
@@ -91,8 +92,8 @@ impl StoreLogSync {
         if crate::effects::member(&local.log.replay.state, &member.member_id()).is_none() {
             return Err(SyncError::NotStoreMember(member.member_id()));
         }
-        let report = self.resume_snapshots().await?;
-        if let Some(damage) = report.damaged_objects.into_iter().next() {
+        let damages = self.resume_snapshots().await?;
+        if let Some(damage) = damages.into_iter().next() {
             return Err(damage.into());
         }
         match local.log.replay.state.devices.get(&local.device) {
@@ -108,8 +109,8 @@ impl StoreLogSync {
                 .await?;
             }
         }
-        let report = self.reload_from_snapshots().await?;
-        if let Some(damage) = report.damaged_objects.into_iter().next() {
+        let damages = self.reload_from_snapshots().await?;
+        if let Some(damage) = damages.into_iter().next() {
             return Err(damage.into());
         }
         Ok(())

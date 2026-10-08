@@ -382,7 +382,7 @@ pub enum SyncStatus {
     Stopped,
     Offline,
     Syncing,
-    Synced(SyncReport),
+    Synced { finished_at: SystemTime },
     Failed { error: SyncFailure },
 }
 ```
@@ -394,9 +394,11 @@ opens as `Stopped`, whether a provider client exists yet or not. Stopping report
 Once any provider operation succeeds, a later failed pass reports `Failed`.
 
 The receiver immediately contains the current value and survives starts and
-stops. Intermediate values may be coalesced, so `SyncReport.row_changes` is a
-refresh hint. `Failed` preserves the typed cause of a whole-pass failure;
-`Synced` carries the report, including waiting writes, damaged objects, device
-activity and blocked operations. Removal, a location taken by another store,
+stops. Intermediate values may be coalesced. `Failed` preserves the typed cause
+of a whole-pass failure; `Synced` carries only the pass's completion time. Live
+queries notify the app when rows change. Waiting writes, damaged objects,
+fingerprint disagreements and device progress remain internal. The handle's
+`blocked_operations()` and `access_keys_to_delete()` calls expose failures and
+revocation actions that need attention. Removal, a location taken by another store,
 or a required update stops further passes; other pass failures retry on the idle
 interval or an explicit request.

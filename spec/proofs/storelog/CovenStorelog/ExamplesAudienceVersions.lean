@@ -44,8 +44,7 @@ theorem circle_higher_version_wins (higherFirst : Bool) :
 theorem circle_equal_version_snapshots (same : Bool) :
     EveryOrder (circleUpdates false true same) 13 (List.range 13) (fun r =>
       lookup r.state.versions (.circle 0) = some ⟨2, 30, 11⟩ ∧
-      r.dropped = (if same then [] else [12]) ∧
-      reports (circleUpdates false true same) r 2 = (if same then [] else [12])) := by
+      r.dropped = (if same then [] else [12])) := by
   apply every_order
   cases same <;> decide
 

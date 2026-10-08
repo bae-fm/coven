@@ -11,7 +11,7 @@ structure Device where
 
 def initial (M : Log) (n : Nat) : Device := ⟨fun _ => false, resolve M n (fun _ => false)⟩
 
-/-- A receipt publishes the newly resolved state and the new reports together.
+/-- A receipt publishes the newly resolved state and entry dispositions together.
 There is no interval containing a member list for a different received set.
 `Ready` is the precondition at the caller, not a timestamp-based wait. -/
 def step (M : Log) (n : Nat) (d : Device) (w : Nat) : Device :=
@@ -131,14 +131,5 @@ theorem storelog_converges (M : Log) (n : Nat) {A B : List Nat}
     A.foldl (step M n) (initial M n) = B.foldl (step M n) (initial M n) := by
   have he : entrySet A = entrySet B := by funext w; simp [entrySet, hset w]
   exact isSpec_unique M n (he ▸ (run_isSpec M n ha).1) (run_isSpec M n hb).1
-
-/-- Receipt order affects neither the historical authority decision nor the
-notification to any author, even when that author is absent in the result. -/
-theorem reports_converge (M : Log) (n : Nat) {A B : List Nat}
-    (ha : CausalOrder M A) (hb : CausalOrder M B)
-    (hset : ∀ w, w ∈ A ↔ w ∈ B) (author : Nat) :
-    reports M (A.foldl (step M n) (initial M n)).result author =
-      reports M (B.foldl (step M n) (initial M n)).result author := by
-  rw [storelog_converges M n ha hb hset]
 
 end CovenStorelog

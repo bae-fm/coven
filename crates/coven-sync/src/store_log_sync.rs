@@ -1,14 +1,14 @@
 //! The owner of the store-log storage step; no background tasks or sync loop.
 
 use crate::{
-    store_log_keys as keys, store_log_object as object, DamagedObject, DroppedEntry,
-    ObjectCheckFailure, SyncError, SyncFailure, SyncResults,
+    store_log_keys as keys, store_log_object as object, DamagedObject, ObjectCheckFailure,
+    SyncError, SyncFailure,
 };
 use coven_crypto::{
     custody::{MemberKeyCustody, StoreKeyCustody},
     seal_circle_key, seal_store_key, CryptoError, MemberKeys, SealedKey, StoreKeyring,
 };
-use coven_database::{Database, EntryOutcome, LocalStoreLog, StoreLog};
+use coven_database::{Database, LocalStoreLog, StoreLog};
 use coven_format::{
     sealed_single::SingleChunkObject,
     store_log::{StoreChange, StoreLogEntry},
@@ -94,18 +94,15 @@ impl StoreLogSync {
 
     /// Publish entries, replay downloads, acquire keys and resume snapshot work.
     /// A missing dependency or sealed copy waits solely in storage for a later call.
-    pub async fn sync_store_log(&mut self) -> Result<SyncResults, SyncFailure> {
+    /// Returns skipped damage so connecting storage can reject incomplete key setup.
+    pub async fn sync_store_log(&mut self) -> Result<Vec<DamagedObject>, SyncFailure> {
         let _reads = self.reads.enter();
-        let mut report = self.step().await.map_err(SyncFailure::from)?;
+        let mut damages = self.step().await.map_err(SyncFailure::from)?;
         self.schedule_version_changes()
             .await
             .map_err(SyncFailure::from)?;
-        let snapshots = self.resume_snapshots().await.map_err(SyncFailure::from)?;
-        report.damaged_objects.extend(snapshots.damaged_objects);
-        let operations = self.operation_report().await.map_err(SyncFailure::from)?;
-        report.blocked_operations = operations.blocked_operations;
-        report.access_keys_to_delete = operations.access_keys_to_delete;
-        Ok(report)
+        damages.extend(self.resume_snapshots().await.map_err(SyncFailure::from)?);
+        Ok(damages)
     }
 
     /// Fix and publish a new entry. Existing queued entries go first. The change's
@@ -124,13 +121,13 @@ impl StoreLogSync {
             .unlock()?
             .ok_or(SyncError::MissingMemberKeys)?;
         let mut ring = self.store_keys.unlock()?;
-        let mut report = SyncResults::default();
+        let mut damages = Vec::new();
         self.check_stopped(&local, &member)?;
-        self.update_keys(&local.log, &member, &mut ring, &mut report)
+        self.update_keys(&local.log, &member, &mut ring, &mut damages)
             .await?;
-        self.publish(&mut local, &member, &mut ring, &mut report)
+        self.publish(&mut local, &member, &mut ring, &mut damages)
             .await?;
-        if let Some(damaged) = report.damaged_objects.into_iter().next() {
+        if let Some(damaged) = damages.into_iter().next() {
             return Err(damaged.into());
         }
         if let Some(id) = self.pending_reload().await? {
@@ -156,27 +153,27 @@ impl StoreLogSync {
         // every retry and never depends on a callback's transient return value.
         local = self.database.local_store_log().await?;
         let mut ring = self.store_keys.unlock()?;
-        let mut report = SyncResults::default();
-        self.publish(&mut local, &member, &mut ring, &mut report)
+        let mut damages = Vec::new();
+        self.publish(&mut local, &member, &mut ring, &mut damages)
             .await?;
-        if let Some(damaged) = report.damaged_objects.into_iter().next() {
+        if let Some(damaged) = damages.into_iter().next() {
             return Err(damaged.into());
         }
         Ok(id)
     }
 
-    async fn step(&self) -> Result<SyncResults, SyncError> {
+    async fn step(&self) -> Result<Vec<DamagedObject>, SyncError> {
         let mut local = self.database.local_store_log().await?;
         let member = self
             .member_keys
             .unlock()?
             .ok_or(SyncError::MissingMemberKeys)?;
         let mut ring = self.store_keys.unlock()?;
-        let mut report = SyncResults::default();
+        let mut damages = Vec::new();
         self.check_stopped(&local, &member)?;
-        self.update_keys(&local.log, &member, &mut ring, &mut report)
+        self.update_keys(&local.log, &member, &mut ring, &mut damages)
             .await?;
-        self.publish(&mut local, &member, &mut ring, &mut report)
+        self.publish(&mut local, &member, &mut ring, &mut damages)
             .await?;
         let paths = self
             .storage
@@ -219,13 +216,13 @@ impl StoreLogSync {
                         }
                     }
                     Err(failure) => {
-                        Self::damage(&mut report, path, failure)?;
+                        Self::damage(&mut damages, path, failure)?;
                         blocked.insert(id.device);
                     }
                 },
                 Err(error) => {
                     Self::damage(
-                        &mut report,
+                        &mut damages,
                         path,
                         ObjectCheckFailure::Parse(Arc::new(error)),
                     )?;
@@ -279,7 +276,7 @@ impl StoreLogSync {
                     Ok(envelope) => envelope,
                     Err(error) => {
                         Self::damage(
-                            &mut report,
+                            &mut damages,
                             path,
                             ObjectCheckFailure::Parse(Arc::new(error)),
                         )?;
@@ -288,7 +285,7 @@ impl StoreLogSync {
                     }
                 };
                 if let Err(failure) = object::check_origin(&envelope, path) {
-                    Self::damage(&mut report, path, failure)?;
+                    Self::damage(&mut damages, path, failure)?;
                     blocked.insert(id.device);
                     continue;
                 }
@@ -303,7 +300,7 @@ impl StoreLogSync {
                     continue;
                 }
                 if !self
-                    .acquire(&Audience::Store, *key, &member, &mut ring, &mut report)
+                    .acquire(&Audience::Store, *key, &member, &mut ring, &mut damages)
                     .await?
                 {
                     continue;
@@ -315,7 +312,7 @@ impl StoreLogSync {
                 ) {
                     Ok(entry) => entry,
                     Err(failure) => {
-                        Self::damage(&mut report, path, failure)?;
+                        Self::damage(&mut damages, path, failure)?;
                         blocked.insert(id.device);
                         continue;
                     }
@@ -325,12 +322,12 @@ impl StoreLogSync {
                 }
                 match object::ready(&local.log, &entry, local.store) {
                     Ok(true) => {
-                        self.apply(&mut local, entry, &member, &mut ring, &mut report)
+                        self.apply(&mut local, entry, &member, &mut ring, &mut damages)
                             .await?
                     }
                     Ok(false) => continue,
                     Err(failure) => {
-                        Self::damage(&mut report, path, failure)?;
+                        Self::damage(&mut damages, path, failure)?;
                         blocked.insert(id.device);
                         continue;
                     }
@@ -341,21 +338,7 @@ impl StoreLogSync {
                 break;
             }
         }
-        report.dropped_entries = local
-            .log
-            .entries
-            .iter()
-            .filter(|e| e.entry.author == member.member_id())
-            .filter_map(|e| match &local.log.replay.entries[&e.entry.position] {
-                EntryOutcome::Kept => None,
-                EntryOutcome::Dropped(reason) => Some(DroppedEntry {
-                    entry: e.entry.position,
-                    change: (&e.entry.change).into(),
-                    reason: reason.clone(),
-                }),
-            })
-            .collect();
-        Ok(report)
+        Ok(damages)
     }
 
     fn check_stopped(&self, local: &LocalStoreLog, member: &MemberKeys) -> Result<(), SyncError> {
@@ -376,7 +359,7 @@ impl StoreLogSync {
         local: &mut LocalStoreLog,
         member: &MemberKeys,
         ring: &mut Option<StoreKeyring>,
-        report: &mut SyncResults,
+        damages: &mut Vec<DamagedObject>,
     ) -> Result<(), SyncError> {
         if let Some(upload) = &local.upload {
             // Recovery can retain a fixed entry before restoring its past.
@@ -404,7 +387,7 @@ impl StoreLogSync {
                 }
             }
         }
-        self.publish_queued(local, member, ring, report).await
+        self.publish_queued(local, member, ring, damages).await
     }
 
     async fn publish_queued(
@@ -412,7 +395,7 @@ impl StoreLogSync {
         local: &mut LocalStoreLog,
         member: &MemberKeys,
         ring: &mut Option<StoreKeyring>,
-        report: &mut SyncResults,
+        damages: &mut Vec<DamagedObject>,
     ) -> Result<(), SyncError> {
         if let Some(upload) = local.upload.take() {
             let bytes = object::seal_upload(&upload, ring.as_ref(), member)?;
@@ -431,7 +414,7 @@ impl StoreLogSync {
                 .ok_or(SyncError::NoStorage)?
                 .create_once(&object::path(upload.entry.position), &bytes)
                 .await?;
-            self.apply(local, upload.entry, member, ring, report)
+            self.apply(local, upload.entry, member, ring, damages)
                 .await?;
         }
         Ok(())
@@ -443,7 +426,7 @@ impl StoreLogSync {
         entry: StoreLogEntry,
         member: &MemberKeys,
         ring: &mut Option<StoreKeyring>,
-        report: &mut SyncResults,
+        damages: &mut Vec<DamagedObject>,
     ) -> Result<(), SyncError> {
         let (entry, replay) = crate::replay_entry(&local.log, entry);
         let mut operations = self
@@ -509,7 +492,7 @@ impl StoreLogSync {
         local.log.entries.sort_by_key(|e| e.entry.timestamp);
         local.log.replay = replay;
         self.check_stopped(local, member)?;
-        self.update_keys(&local.log, member, ring, report).await
+        self.update_keys(&local.log, member, ring, damages).await
     }
 
     async fn update_keys(
@@ -517,10 +500,10 @@ impl StoreLogSync {
         log: &StoreLog,
         member: &MemberKeys,
         ring: &mut Option<StoreKeyring>,
-        report: &mut SyncResults,
+        damages: &mut Vec<DamagedObject>,
     ) -> Result<(), SyncError> {
         for (audience, key) in keys::needed(log) {
-            self.acquire(&audience, key, member, ring, report).await?;
+            self.acquire(&audience, key, member, ring, damages).await?;
         }
         self.share_dropped_keys(log, ring).await
     }
@@ -604,24 +587,20 @@ impl StoreLogSync {
         key: KeyId,
         member: &MemberKeys,
         ring: &mut Option<StoreKeyring>,
-        report: &mut SyncResults,
+        damages: &mut Vec<DamagedObject>,
     ) -> Result<bool, SyncError> {
         if keys::holds(ring, audience, key) {
             return Ok(true);
         }
         let path = keys::path(audience, key, &member.member_id());
-        if report
-            .damaged_objects
-            .iter()
-            .any(|damage| damage.path == path.as_str())
-        {
+        if damages.iter().any(|damage| damage.path == path.as_str()) {
             return Ok(false);
         }
         let Some(bytes) = self.read(&path).await? else {
             return Ok(false);
         };
         if let Err(error) = SealedKey::decode(&bytes) {
-            Self::damage(report, &path, ObjectCheckFailure::Parse(Arc::new(error)))?;
+            Self::damage(damages, &path, ObjectCheckFailure::Parse(Arc::new(error)))?;
             return Ok(false);
         }
         let opened = match audience {
@@ -656,11 +635,11 @@ impl StoreLogSync {
         };
         match opened {
             Err(error) => {
-                Self::damage(report, &path, ObjectCheckFailure::Decryption(error))?;
+                Self::damage(damages, &path, ObjectCheckFailure::Decryption(error))?;
                 Ok(false)
             }
             Ok(Err(failure)) => {
-                Self::damage(report, &path, failure)?;
+                Self::damage(damages, &path, failure)?;
                 Ok(false)
             }
             Ok(Ok(())) => {
@@ -672,7 +651,7 @@ impl StoreLogSync {
     }
 
     fn damage(
-        report: &mut SyncResults,
+        damages: &mut Vec<DamagedObject>,
         path: &ObjectPath,
         failure: ObjectCheckFailure,
     ) -> Result<(), SyncError> {
@@ -687,12 +666,9 @@ impl StoreLogSync {
                 return Err(SyncFailure::UpdateRequired.into());
             }
         }
-        if !report
-            .damaged_objects
-            .iter()
-            .any(|object| object.path == path.as_str())
-        {
-            report.damaged_objects.push(DamagedObject {
+        tracing::warn!(path = path.as_str(), error = %failure, "damaged object; will reread on sync");
+        if !damages.iter().any(|object| object.path == path.as_str()) {
+            damages.push(DamagedObject {
                 path: path.as_str().to_owned(),
                 failure,
             });

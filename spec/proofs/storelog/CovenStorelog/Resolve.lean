@@ -40,15 +40,4 @@ theorem authorViews_at (M : Log) {n w : Nat} (h : w < n) :
       · subst w; simp [authorViews, authorView, resolve]
       · simp only [authorViews, he, ite_false]
         exact ih (by omega)
-
-def reports (M : Log) (r : Result) (author : Nat) : List Nat :=
-  r.dropped.filter (fun w => (M w).author == author)
-
-theorem reported_to_author (M : Log) (r : Result) (w : Nat) :
-    w ∈ reports M r (M w).author ↔ w ∈ r.dropped := by simp [reports]
-
-theorem report_only_author (M : Log) (r : Result) (w a : Nat)
-    (h : w ∈ reports M r a) : (M w).author = a := by
-  simpa [reports] using (List.mem_filter.mp h).2
-
 end CovenStorelog

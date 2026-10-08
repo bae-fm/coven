@@ -17,8 +17,8 @@ impl StoreLogSync {
     ) -> Result<(), SyncError> {
         let previous = self.storage.replace(storage);
         let result = async {
-            let report = self.sync_store_log().await?;
-            if let Some(damage) = report.damaged_objects.into_iter().next() {
+            let damages = self.sync_store_log().await?;
+            if let Some(damage) = damages.into_iter().next() {
                 return Err(SyncError::Damaged(damage));
             }
             let local = self.database.local_store_log().await?;

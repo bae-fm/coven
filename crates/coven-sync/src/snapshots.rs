@@ -5,7 +5,7 @@ use crate::{
     operation_data::Data,
     operations::{Output, Progress},
     snapshot_data::*,
-    SyncError, SyncResults,
+    DamagedObject, SyncError,
 };
 use coven_database::{OperationRecord, StoreLog};
 use coven_format::{store_log::SnapshotId, value::WritePositions};
@@ -36,9 +36,9 @@ impl StoreLogSync {
     /// A signed snapshot prefix may require a reload, but never authorizes rows.
     /// The reload authenticates the complete snapshot and its intervening writes
     /// before its atomic database replacement (§15, §19.1).
-    pub(crate) async fn reload_deleted_history(&mut self) -> Result<SyncResults, SyncError> {
+    pub(crate) async fn reload_deleted_history(&mut self) -> Result<(), SyncError> {
         let _reads = self.reads.enter();
-        let mut report = SyncResults::default();
+        let mut damages = Vec::new();
         let local = self.database.local_store_log().await?;
         let state = self.database.sync_state(Vec::new()).await?;
         let listed: std::collections::BTreeSet<_> = self
@@ -52,7 +52,7 @@ impl StoreLogSync {
             .collect();
         for audience in self.snapshot_audiences(&local.log)?.into_keys() {
             let catalog = self
-                .current_snapshot_candidates(&audience, &local.log, &mut report)
+                .current_snapshot_candidates(&audience, &local.log, &mut damages)
                 .await?;
             for covered in &catalog.required_positions.0 {
                 let after = point(&state.positions, covered.device);
@@ -66,22 +66,22 @@ impl StoreLogSync {
                         })
                         .count() as u64;
                     if present < covered.number - after {
-                        report.append(self.reload_from_snapshots().await?);
-                        return Ok(report);
+                        self.reload_from_snapshots().await?;
+                        return Ok(());
                     }
                 }
             }
         }
-        Ok(report)
+        Ok(())
     }
 
     /// Resume retained snapshot work, then write each readable audience whose
     /// encoded parts since its latest signed snapshot prefix exceed the listed
-    /// plaintext size, or 1 MiB when it has none (§15). Returns damaged objects
-    /// passed over during selection. Uploads always use the recorded disk bytes.
-    pub async fn write_snapshots(&mut self) -> Result<SyncResults, SyncError> {
+    /// plaintext size, or 1 MiB when it has none (§15). Uploads always use the
+    /// recorded disk bytes.
+    pub async fn write_snapshots(&mut self) -> Result<(), SyncError> {
         let _reads = self.reads.enter();
-        let mut report = self.resume_snapshots().await?;
+        let mut damages = self.resume_snapshots().await?;
         if let Some(id) = self.pending_reload().await? {
             return Err(SyncError::ReloadPending(id));
         }
@@ -96,35 +96,35 @@ impl StoreLogSync {
                     session: None,
                 })
                 .await?;
-            self.drive_snapshot(record.id, &mut report).await?;
+            self.drive_snapshot(record.id, &mut damages).await?;
         }
-        Ok(report)
+        Ok(())
     }
 
     /// Reload all readable audiences from validated snapshots and authenticated
     /// device writes, preserving queued plaintext, write numbers and key ids (§15).
     /// Joining, missing-history recovery and explicit recovery call this method.
-    pub async fn reload_from_snapshots(&mut self) -> Result<SyncResults, SyncError> {
+    pub async fn reload_from_snapshots(&mut self) -> Result<Vec<DamagedObject>, SyncError> {
         let _reads = self.reads.enter();
-        let mut report = self.resume_snapshots().await?;
+        let mut damages = self.resume_snapshots().await?;
         let record = self
             .start_snapshot_task(SnapshotJob::Reload {
                 scope: crate::snapshot_data::ReloadScope::All,
                 files: None,
             })
             .await?;
-        self.drive_snapshot(record.id, &mut report).await?;
-        Ok(report)
+        self.drive_snapshot(record.id, &mut damages).await?;
+        Ok(damages)
     }
 
     /// Delete covered logs, this device's superseded snapshots, and eligible
     /// unreferenced uploaded files under §§15 and 16.5. No timer is installed.
-    pub async fn run_retention(&mut self) -> Result<SyncResults, SyncError> {
+    pub async fn run_retention(&mut self) -> Result<(), SyncError> {
         let _reads = self.reads.enter();
-        let mut report = self.resume_snapshots().await?;
+        let mut damages = self.resume_snapshots().await?;
         let record = self.start_snapshot_task(SnapshotJob::Retain).await?;
-        self.drive_snapshot(record.id, &mut report).await?;
-        Ok(report)
+        self.drive_snapshot(record.id, &mut damages).await?;
+        Ok(())
     }
 
     /// Write and publish a requested audience snapshot regardless of growth.
@@ -149,8 +149,7 @@ impl StoreLogSync {
                 session: None,
             })
             .await?;
-        self.drive_snapshot(record.id, &mut SyncResults::default())
-            .await?;
+        self.drive_snapshot(record.id, &mut Vec::new()).await?;
         Ok(SnapshotId {
             audience,
             device: local.device,
@@ -177,9 +176,9 @@ impl StoreLogSync {
         self.snapshot_record(id).await
     }
 
-    pub(super) async fn resume_snapshots(&mut self) -> Result<SyncResults, SyncError> {
+    pub(super) async fn resume_snapshots(&mut self) -> Result<Vec<DamagedObject>, SyncError> {
         let _reads = self.reads.enter();
-        let mut report = SyncResults::default();
+        let mut damages = Vec::new();
         loop {
             let mut work = Vec::new();
             for record in self.database.operations().await? {
@@ -217,13 +216,13 @@ impl StoreLogSync {
                 {
                     continue;
                 }
-                advanced |= self.drive_snapshot(record.id, &mut report).await?;
+                advanced |= self.drive_snapshot(record.id, &mut damages).await?;
             }
             if !advanced {
                 break;
             }
         }
-        Ok(report)
+        Ok(damages)
     }
 
     pub(crate) async fn pending_reload(&self) -> Result<Option<crate::OperationId>, SyncError> {
@@ -272,14 +271,14 @@ impl StoreLogSync {
     async fn drive_snapshot(
         &mut self,
         id: crate::OperationId,
-        report: &mut SyncResults,
+        damages: &mut Vec<DamagedObject>,
     ) -> Result<bool, SyncError> {
         loop {
             let record = self.snapshot_record(id).await?;
             let Data::Snapshots(task) = Data::read(&record)? else {
                 return Err(coven_database::DbError::DamagedDatabase.into());
             };
-            match self.snapshot_step(&record, task, report).await? {
+            match self.snapshot_step(&record, task, damages).await? {
                 Progress::Finished(_) => return Ok(true),
                 Progress::Waiting => return Ok(false),
                 Progress::Advanced => (),
@@ -292,7 +291,7 @@ impl StoreLogSync {
         &mut self,
         record: &OperationRecord,
         mut task: SnapshotTask,
-        report: &mut SyncResults,
+        damages: &mut Vec<DamagedObject>,
     ) -> Result<Progress, SyncError> {
         let _reads = self.reads.enter();
         match task.job.clone() {
@@ -344,7 +343,7 @@ impl StoreLogSync {
                         self.clear_snapshot_files(record, &mut task).await?;
                         if matches!(trigger, SnapshotTrigger::Growth) {
                             let candidates = self
-                                .current_snapshot_candidates(&audience, &local.log, report)
+                                .current_snapshot_candidates(&audience, &local.log, damages)
                                 .await?;
                             let (positions, threshold) = match candidates.candidates.first() {
                                 Some(latest) => (
@@ -457,7 +456,7 @@ impl StoreLogSync {
                                 .await?;
                             return Ok(Progress::Advanced);
                         }
-                        self.retain_snapshot_objects(report).await?;
+                        self.retain_snapshot_objects(damages).await?;
                         self.clear_snapshot_files(record, &mut task).await?;
                         self.database.finish_operation(record.id).await?;
                         return Ok(Progress::Finished(Output::Unit));
@@ -466,11 +465,11 @@ impl StoreLogSync {
                 }
             }
             SnapshotJob::Reload { .. } => {
-                return self.reload_snapshot_step(record, task, report).await
+                return self.reload_snapshot_step(record, task, damages).await
             }
             SnapshotJob::Retain => {
                 self.clear_snapshot_files(record, &mut task).await?;
-                self.retain_snapshot_objects(report).await?;
+                self.retain_snapshot_objects(damages).await?;
                 self.database.finish_operation(record.id).await?;
                 return Ok(Progress::Finished(Output::Unit));
             }

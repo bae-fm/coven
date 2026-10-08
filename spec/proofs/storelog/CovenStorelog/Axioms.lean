@@ -48,7 +48,6 @@ import CovenStorelog
 #print axioms CovenStorelog.scan_accounting
 #print axioms CovenStorelog.settleN_accounting
 #print axioms CovenStorelog.resolve_partition
-#print axioms CovenStorelog.report_exactly_dropped
 
 #print axioms CovenStorelog.step_spec
 #print axioms CovenStorelog.closed_insert
@@ -61,7 +60,6 @@ import CovenStorelog
 #print axioms CovenStorelog.author_past_causal
 #print axioms CovenStorelog.isSpec_unique
 #print axioms CovenStorelog.storelog_converges
-#print axioms CovenStorelog.reports_converge
 
 #print axioms CovenStorelog.Examples.circle_examples_valid
 #print axioms CovenStorelog.Examples.circle_created_by_member
@@ -164,8 +162,6 @@ import CovenStorelog
 
 #print axioms CovenStorelog.settle_eq_some
 #print axioms CovenStorelog.authorViews_at
-#print axioms CovenStorelog.reported_to_author
-#print axioms CovenStorelog.report_only_author
 
 #print axioms CovenStorelog.Examples.audience_updates_valid
 #print axioms CovenStorelog.Examples.each_audience_has_its_version

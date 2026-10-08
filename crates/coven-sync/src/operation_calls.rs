@@ -104,12 +104,19 @@ impl StoreLogSync {
                 self.database.confirm_access_key_deleted(key).await?;
                 return Ok(Begun::Value(Output::Unit));
             }
-            Command::Report => {
-                return Ok(Begun::Value(Output::Report(self.operation_report().await?)))
+            Command::BlockedOperations => {
+                return Ok(Begun::Value(Output::BlockedOperations(
+                    self.blocked_operations().await?,
+                )))
+            }
+            Command::AccessKeysToDelete => {
+                return Ok(Begun::Value(Output::AccessKeysToDelete(
+                    self.database.access_keys_to_delete().await?,
+                )))
             }
             Command::Sync => {
-                let report = self.sync_store_log().await?;
-                return Ok(Begun::Value(Output::Report(report)));
+                self.sync_store_log().await?;
+                return Ok(Begun::Value(Output::Unit));
             }
             Command::Retry(id) => {
                 let record = self.blocked(id).await?;
@@ -163,13 +170,8 @@ impl StoreLogSync {
                     let member = self.operation_member()?;
                     let mut local = self.database.local_store_log().await?;
                     let mut ring = self.store_keys.unlock()?;
-                    self.publish_queued(
-                        &mut local,
-                        &member,
-                        &mut ring,
-                        &mut SyncResults::default(),
-                    )
-                    .await?;
+                    self.publish_queued(&mut local, &member, &mut ring, &mut Vec::new())
+                        .await?;
                 }
                 self.database.finish_operation(id).await?;
                 return Ok(Begun::Value(Output::Unit));
@@ -269,8 +271,8 @@ impl StoreLogSync {
             Command::SetAccess(access) => {
                 // Publish a previously reserved attempt and read concurrent removals
                 // before deciding whether this key still needs a new entry.
-                let report = self.step().await?;
-                if let Some(damaged) = report.damaged_objects.into_iter().next() {
+                let damages = self.step().await?;
+                if let Some(damaged) = damages.into_iter().next() {
                     return Err(damaged.into());
                 }
                 let latest = self.database.local_store_log().await?;
@@ -546,11 +548,11 @@ impl StoreLogSync {
             .ok_or(SyncError::NotBlocked(id))
     }
 
-    pub(crate) async fn operation_report(&self) -> Result<SyncResults, SyncError> {
-        let mut report = SyncResults::default();
+    pub(crate) async fn blocked_operations(&self) -> Result<Vec<BlockedOperation>, SyncError> {
+        let mut operations = Vec::new();
         for record in self.database.operations().await? {
             if let Some(failure) = &record.failure {
-                report.blocked_operations.push(BlockedOperation {
+                operations.push(BlockedOperation {
                     id: record.id,
                     kind: Data::read(&record)?.kind(),
                     last_step: record.last_step,
@@ -563,24 +565,7 @@ impl StoreLogSync {
                 });
             }
         }
-        report.access_keys_to_delete = self.database.access_keys_to_delete().await?;
-        let local = self.database.local_store_log().await?;
-        if let Some(device) = local.log.replay.state.devices.get(&local.device) {
-            for entry in &local.log.entries {
-                if entry.entry.author == device.member {
-                    if let Some(coven_database::EntryOutcome::Dropped(reason)) =
-                        local.log.replay.entries.get(&entry.entry.position)
-                    {
-                        report.dropped_entries.push(DroppedEntry {
-                            entry: entry.entry.position,
-                            change: (&entry.entry.change).into(),
-                            reason: reason.clone(),
-                        });
-                    }
-                }
-            }
-        }
-        Ok(report)
+        Ok(operations)
     }
 
     pub(crate) async fn current_join_requests(&self) -> Result<Vec<JoinRequest>, SyncError> {

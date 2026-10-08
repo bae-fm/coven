@@ -69,7 +69,8 @@ pub(crate) enum Command {
         String,
         crate::StorageCommit,
     ),
-    Report,
+    BlockedOperations,
+    AccessKeysToDelete,
     Storage(Option<Arc<dyn Storage>>),
     Close,
 }
@@ -85,7 +86,8 @@ pub(crate) enum Output {
     Circles(Vec<Circle>),
     CircleMembers(Vec<CircleMemberInfo>),
     Invite(Invite),
-    Report(SyncResults),
+    BlockedOperations(Vec<BlockedOperation>),
+    AccessKeysToDelete(Vec<AccessKeyToDelete>),
 }
 
 type Reply = oneshot::Sender<Result<Output, SyncError>>;
@@ -114,7 +116,6 @@ struct OperationRun {
     commands: mpsc::UnboundedReceiver<Request>,
     joins: watch::Sender<Vec<JoinRequest>>,
     waiters: BTreeMap<OperationId, Reply>,
-    notices: SyncResults,
 }
 
 impl Operations {
@@ -132,7 +133,6 @@ impl Operations {
             commands: receiver,
             joins,
             waiters: BTreeMap::new(),
-            notices: SyncResults::default(),
         };
         Self {
             inner: Arc::new(RunningOperations {
@@ -206,25 +206,26 @@ impl Operations {
         self.unit(Command::Storage(storage)).await
     }
     /// Download and replay available store-log entries, then wake operation work.
-    pub async fn sync_store_log(&self) -> Result<SyncResults, SyncError> {
-        match self.call(Command::Sync).await? {
-            Output::Report(report) => Ok(report),
-            _ => unreachable!("sync result"),
-        }
+    pub async fn sync_store_log(&self) -> Result<(), SyncError> {
+        self.unit(Command::Sync).await
     }
     /// Run one entire pass under the operation worker's serialization. Replay,
     /// reloads, writes and snapshots cannot interleave with another operation.
-    pub async fn sync(&self) -> Result<SyncResults, SyncError> {
-        match self.call(Command::SyncAll).await? {
-            Output::Report(report) => Ok(report),
-            _ => unreachable!("sync result"),
+    pub async fn sync(&self) -> Result<(), SyncError> {
+        self.unit(Command::SyncAll).await
+    }
+    /// Read permanently failed operations from the journal, including while stopped.
+    pub async fn blocked_operations(&self) -> Result<Vec<BlockedOperation>, SyncError> {
+        match self.call(Command::BlockedOperations).await? {
+            Output::BlockedOperations(operations) => Ok(operations),
+            _ => unreachable!("blocked operations result"),
         }
     }
-    /// Read retained failures, manual key deletions and this member's dropped entries.
-    pub async fn report(&self) -> Result<SyncResults, SyncError> {
-        match self.call(Command::Report).await? {
-            Output::Report(report) => Ok(report),
-            _ => unreachable!("report result"),
+    /// Read S3 key deletions still awaiting confirmation, including while stopped.
+    pub async fn access_keys_to_delete(&self) -> Result<Vec<AccessKeyToDelete>, SyncError> {
+        match self.call(Command::AccessKeysToDelete).await? {
+            Output::AccessKeysToDelete(keys) => Ok(keys),
+            _ => unreachable!("access keys result"),
         }
     }
     /// Active members and devices from the local store log.
@@ -252,7 +253,7 @@ impl Operations {
     }
     /// Remove the member, rotate audience keys and revoke every recorded access.
     /// Returns current access's result, or retained grants from any account.
-    /// The sync report lists all recorded S3 keys until confirmed deleted.
+    /// `access_keys_to_delete` lists all recorded S3 keys until confirmed deleted.
     pub async fn remove_member(&self, member: &MemberId) -> Result<MemberRemoval, SyncError> {
         match self.call(Command::RemoveMember(member.clone())).await {
             Ok(Output::Removal(value)) => Ok(value),
@@ -419,6 +420,7 @@ impl OperationRun {
         let mut retry = self.clock.sleep(Duration::ZERO);
         loop {
             let mut response = None;
+            let mut query = None;
             tokio::select! {
                 command = self.commands.recv() => {
                     let Some(Request { command, reply }) = command else { break; };
@@ -454,8 +456,10 @@ impl OperationRun {
                             self.writes.set_storage(Some(storage));
                         }
                         let _ = reply.send(result.map(|()| Output::Unit));
+                    } else if matches!(command, Command::BlockedOperations | Command::AccessKeysToDelete) {
+                        query = Some((reply, command));
                     } else if matches!(command, Command::SyncAll) {
-                        response = Some((reply, self.sync_pass().await.map(Output::Report)));
+                        response = Some((reply, self.sync_pass().await.map(|()| Output::Unit)));
                     } else {
                         match self.sync.begin_operation_call(command).await {
                             Ok(Begun::Value(value)) => response = Some((reply, Ok(value))),
@@ -480,54 +484,53 @@ impl OperationRun {
                 if let Some((reply, _)) = response.take() {
                     let _ = reply.send(Err(shared.clone().into()));
                 }
+                if let Some((reply, _)) = query.take() {
+                    let _ = reply.send(Err(shared.clone().into()));
+                }
                 for (_, reply) in std::mem::take(&mut self.waiters) {
                     let _ = reply.send(Err(shared.clone().into()));
                 }
                 break;
             }
-            if let Some((reply, mut result)) = response {
-                if let Ok(Output::Report(report)) = &mut result {
-                    report
-                        .damaged_objects
-                        .append(&mut self.notices.damaged_objects);
-                    match self.sync.operation_report().await {
-                        Ok(current) => {
-                            report.blocked_operations = current.blocked_operations;
-                            report.access_keys_to_delete = current.access_keys_to_delete;
-                            report.dropped_entries = current.dropped_entries;
-                        }
-                        Err(error) => result = Err(error),
-                    }
-                }
+            if let Some((reply, command)) = query {
+                let result = self.sync.begin_operation_call(command).await.map(|begun| {
+                    let Begun::Value(value) = begun else {
+                        unreachable!("read-only query")
+                    };
+                    value
+                });
+                let _ = reply.send(result);
+            }
+            if let Some((reply, result)) = response {
                 let _ = reply.send(result);
             }
         }
     }
 
-    async fn sync_pass(&mut self) -> Result<SyncResults, SyncError> {
+    async fn sync_pass(&mut self) -> Result<(), SyncError> {
         let _reads = self.sync.begin_pass(&mut self.writes);
-        let mut report = self.sync.sync_store_log().await?;
+        self.sync.sync_store_log().await?;
         self.drive().await?;
         // A blocked reload leaves its operation visible, without publishing a
         // snapshot or applying further writes over the unreloaded audience.
         if self.sync.pending_reload().await?.is_some() {
-            return Ok(report);
+            return Ok(());
         }
-        report.append(self.sync.reload_deleted_history().await?);
+        self.sync.reload_deleted_history().await?;
         self.writes.upload_writes().await?;
         // Deleting a circle waits for its row deletion's write to be uploaded.
         self.drive().await?;
-        report.append(self.writes.download_writes().await?);
+        self.writes.download_writes().await?;
         self.drive().await?;
         if self.sync.pending_reload().await?.is_some() {
-            return Ok(report);
+            return Ok(());
         }
         self.files.sync_files().await?;
         self.writes.upload_writes().await?;
-        report.append(self.sync.write_snapshots().await?);
-        report.append(self.sync.run_retention().await?);
+        self.sync.write_snapshots().await?;
+        self.sync.run_retention().await?;
         self.writes.post_positions().await?;
-        Ok(report)
+        Ok(())
     }
 
     async fn drive(&mut self) -> Result<(), SyncError> {
@@ -585,10 +588,7 @@ impl OperationRun {
                 {
                     continue;
                 }
-                let step = self
-                    .sync
-                    .operation_step(&record, data, &mut self.notices)
-                    .await;
+                let step = self.sync.operation_step(&record, data).await;
                 match step {
                     Ok(Progress::Waiting) => (),
                     Ok(Progress::Advanced) => advanced = true,

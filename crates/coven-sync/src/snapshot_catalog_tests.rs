@@ -97,11 +97,7 @@ async fn unsigned_snapshot_cannot_replace_rows_or_authorize_log_deletion() {
     storage.delete(&path).await.unwrap();
     storage.create(&path, &unsigned).await.unwrap();
     a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
-    let report = a.sync.run_retention().await.unwrap();
-    assert!(report
-        .damaged_objects
-        .iter()
-        .any(|object| object.path == path.as_str()));
+    a.sync.run_retention().await.unwrap();
     assert_eq!(
         storage
             .list(&ObjectPrefix::device_logs())
@@ -112,11 +108,8 @@ async fn unsigned_snapshot_cannot_replace_rows_or_authorize_log_deletion() {
     );
     let mut b = notes_device(storage.clone(), 2).await;
     add_device(&mut b).await;
-    let report = b.sync.reload_from_snapshots().await.unwrap();
-    assert!(report
-        .damaged_objects
-        .iter()
-        .any(|object| object.path == path.as_str()));
+    let damages = b.sync.reload_from_snapshots().await.unwrap();
+    assert!(damages.iter().any(|object| object.path == path.as_str()));
     assert_eq!(tables(&b).await[0].1, "note 0");
     assert_eq!(
         b.db.sync_state(Vec::new()).await.unwrap().positions.0[0].number,
@@ -151,12 +144,7 @@ async fn another_members_snapshot_signatures_never_authorize_selection_loading_o
         storage.delete(&path).await.unwrap();
         storage.create(&path, &forged).await.unwrap();
         a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
-        let report = a.sync.run_retention().await.unwrap();
-        assert!(report
-            .damaged_objects
-            .iter()
-            .any(|object| object.path == path.as_str()
-                && matches!(object.failure, crate::ObjectCheckFailure::Signature(_))));
+        a.sync.run_retention().await.unwrap();
         assert_eq!(
             storage
                 .list(&ObjectPrefix::device_logs())
@@ -185,15 +173,7 @@ async fn another_members_snapshot_signatures_never_authorize_selection_loading_o
                 .into_iter()
                 .find(|r| r.id == operation)
                 .unwrap();
-        let mut report = crate::SyncResults::default();
-        b.sync
-            .operation_step(&record, data, &mut report)
-            .await
-            .unwrap();
-        assert!(report
-            .damaged_objects
-            .iter()
-            .any(|object| object.path == path.as_str()));
+        b.sync.operation_step(&record, data).await.unwrap();
         let record =
             b.db.operations()
                 .await
@@ -243,13 +223,7 @@ async fn coverage_checks_read_exactly_the_signed_prefix_without_an_audience_key(
         .remove(0);
     a.custody.forget().unwrap();
     let before = storage.ranges().await.len();
-    assert!(a
-        .sync
-        .reload_deleted_history()
-        .await
-        .unwrap()
-        .damaged_objects
-        .is_empty());
+    a.sync.reload_deleted_history().await.unwrap();
     let ranges = storage.ranges().await;
     assert_eq!(ranges.len() - before, 4);
     assert_eq!(ranges[before].start(), 0);
@@ -263,13 +237,6 @@ async fn coverage_checks_read_exactly_the_signed_prefix_without_an_audience_key(
         (length + 64) as u64
     );
     assert_eq!(ranges.last().unwrap().end(), (length + 64) as u64);
-    storage.corrupt_byte(&object.path, length).await.unwrap();
-    let report = a.sync.reload_deleted_history().await.unwrap();
-    assert_eq!(report.damaged_objects.len(), 1);
-    assert!(matches!(
-        report.damaged_objects[0].failure,
-        crate::ObjectCheckFailure::Signature(_)
-    ));
 }
 
 #[tokio::test]
@@ -293,21 +260,9 @@ async fn signed_coverage_does_not_require_opening_the_body_but_loading_does() {
         .create(&object.path, &wrong_body_signature)
         .await
         .unwrap();
-    assert!(a
-        .sync
-        .write_snapshots()
-        .await
-        .unwrap()
-        .damaged_objects
-        .is_empty());
+    a.sync.write_snapshots().await.unwrap();
     a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
-    assert!(a
-        .sync
-        .run_retention()
-        .await
-        .unwrap()
-        .damaged_objects
-        .is_empty());
+    a.sync.run_retention().await.unwrap();
     assert!(storage
         .list(&ObjectPrefix::device_logs())
         .await
@@ -393,46 +348,33 @@ async fn authors_must_be_in_the_applied_store_log_and_remain_known_after_removal
     add_device(&mut b).await;
     b.sync.write_snapshot(Audience::Store).await.unwrap();
     super::retention::post(&b, &storage).await;
-    let snapshot = storage
-        .list(&ObjectPrefix::snapshots())
-        .await
-        .unwrap()
-        .remove(0);
     let path = ObjectPath::positions(b.device().await);
     let bytes = storage.read(&path).await.unwrap();
-    let ring = a.custody.unlock().unwrap().unwrap();
-    let report = a.sync.reload_deleted_history().await.unwrap();
-    assert!(report
-        .damaged_objects
-        .iter()
-        .any(|object| object.path == snapshot.path.as_str()));
-    assert!(
-        matches!(crate::posted_positions::open(&bytes, &path, Some(&ring), &before),
-        Err(SyncError::Damaged(object)) if object.path == path.as_str())
-    );
+    assert!(matches!(
+        a.sync.reload_from_snapshots().await,
+        Err(SyncError::Database(coven_database::DbError::Snapshot(
+            coven_database::SnapshotError::Inconsistent(_)
+        )))
+    ));
+    {
+        let ring = a.custody.unlock().unwrap().unwrap();
+        assert!(
+            matches!(crate::posted_positions::open(&bytes, &path, Some(&ring), &before),
+            Err(SyncError::Damaged(object)) if object.path == path.as_str())
+        );
+    }
     a.sync().await;
     let registered = a.log().await;
-    assert!(a
-        .sync
-        .reload_deleted_history()
-        .await
-        .unwrap()
-        .damaged_objects
-        .is_empty());
+    assert!(a.sync.reload_from_snapshots().await.unwrap().is_empty());
     a.sync
         .make_and_upload_entry(StoreChange::RemoveDevice {
             device: b.device().await,
         })
         .await
         .unwrap();
+    assert!(a.sync.reload_from_snapshots().await.unwrap().is_empty());
+    let ring = a.custody.unlock().unwrap().unwrap();
     for log in [registered, a.log().await] {
         crate::posted_positions::open(&bytes, &path, Some(&ring), &log).unwrap();
     }
-    assert!(a
-        .sync
-        .reload_deleted_history()
-        .await
-        .unwrap()
-        .damaged_objects
-        .is_empty());
 }

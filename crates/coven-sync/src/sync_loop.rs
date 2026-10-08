@@ -1,10 +1,13 @@
 //! The open store's sync lifetime. The operation worker owns each complete pass.
 
-use crate::{Operations, SyncError, SyncFailure, SyncReport};
+use crate::{Operations, SyncError, SyncFailure};
 use coven_database::{DatabaseChanges, DbError};
 use coven_foundation::{clock::ClockRef, id_source::DeviceId};
 use coven_storage::{providers::StorageConnector, Storage, StorageConnection, StorageFailure};
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 use tokio::sync::{mpsc, oneshot, watch};
 
 /// Current connection and synchronization state (E5).
@@ -19,7 +22,10 @@ pub enum SyncStatus {
     /// The initial pass is queued or a pass is running.
     Syncing,
     /// The last pass completed.
-    Synced(SyncReport),
+    Synced {
+        /// The injected wall clock after every step completed.
+        finished_at: SystemTime,
+    },
     /// The last pass failed as a whole.
     Failed {
         /// The failure and its original cause.
@@ -392,8 +398,8 @@ impl SyncRun {
                         self.operations.sync().await
                     }.await;
                     match result {
-                        Ok(results) => {
-                            self.status.send_replace(SyncStatus::Synced(results.finish(self.clock.now())));
+                        Ok(()) => {
+                            self.status.send_replace(SyncStatus::Synced { finished_at: self.clock.now() });
                         }
                         Err(error) => {
                             let error = SyncFailure::from(error);

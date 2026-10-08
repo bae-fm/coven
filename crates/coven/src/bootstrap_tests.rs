@@ -229,7 +229,7 @@ async fn declined_and_expired_requests_finish_without_committing_custody() {
             let request = next_request(&mut requests).await;
             if expiry {
                 owner.clock.set(invite.expires_at);
-                owner.operations.report().await.unwrap();
+                owner.operations.blocked_operations().await.unwrap();
             } else {
                 owner
                     .operations
@@ -735,12 +735,7 @@ async fn removal_lists_every_recorded_key_including_a_dropped_replacement() {
             }
         );
         assert_eq!(
-            owner
-                .operations
-                .report()
-                .await
-                .unwrap()
-                .access_keys_to_delete,
+            owner.operations.access_keys_to_delete().await.unwrap(),
             ["invited-key", "new-member-key"].map(|key| AccessKeyToDelete {
                 access_key_id: key.into(),
                 member: Some(member.clone())

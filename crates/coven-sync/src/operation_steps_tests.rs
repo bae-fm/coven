@@ -393,13 +393,13 @@ async fn a_retained_grant_on_old_access_blocks_removal_until_explicit_retry() {
             .await
             .is_err()
     );
-    let report = operations.report().await.unwrap();
-    assert_eq!(report.blocked_operations.len(), 1);
+    let blocked = operations.blocked_operations().await.unwrap();
+    assert_eq!(blocked.len(), 1);
     storage
         .set_retained_access("ben@example.com", Vec::new())
         .await;
     operations
-        .retry_blocked_operation(report.blocked_operations[0].id)
+        .retry_blocked_operation(blocked[0].id)
         .await
         .unwrap();
     assert!(MemoryStorage::for_recipient(&storage, "ben@example.com")

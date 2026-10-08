@@ -519,7 +519,6 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_uploads",
                 "_coven_user_files",
                 "_coven_versions",
-                "_coven_waiting_writes",
                 "_coven_write_upload_sessions",
                 "_coven_writes",
                 "sqlite_sequence"

@@ -19,17 +19,12 @@ mod tests;
 mod error;
 mod object_author;
 mod posted_positions;
-mod report;
 mod store_log_keys;
 mod store_log_object;
 mod store_log_sync;
 pub use coven_database::DropReason;
 pub use device_log_sync::DeviceLogSync;
-pub use error::{SyncError, SyncFailure};
-pub use report::{
-    DamagedObject, DeviceActivity, Disagreement, DroppedEntry, ObjectCheckFailure, StoreLogChange,
-    SyncReport, SyncResults, WaitingWrite,
-};
+pub use error::{DamagedObject, ObjectCheckFailure, SyncError, SyncFailure};
 pub use store_log_sync::{JoinOutcome, StoreLogSync};
 
 mod operation_types;

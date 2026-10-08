@@ -49,37 +49,14 @@ async fn damaged_objects_roll_back_and_block_only_their_device() {
         }
         storage.delete(&path).await.unwrap();
         storage.create(&path, &bytes).await.unwrap();
-        let report = devices[2].sync.download_writes().await.unwrap();
-        assert_eq!(report.damaged_objects.len(), 1, "{failure}: {report:?}");
-        assert_eq!(report.damaged_objects[0].path, path.as_str());
-        assert!(
-            matches!(
-                (&report.damaged_objects[0].failure, failure),
-                (
-                    crate::ObjectCheckFailure::Decryption(_),
-                    "decryption" | "moved"
-                ) | (crate::ObjectCheckFailure::Signature(_), "signature")
-                    | (crate::ObjectCheckFailure::Parse(_), "parse")
-            ),
-            "{failure}: {report:?}"
-        );
-        assert_eq!(report.waiting.len(), 1);
-        assert_eq!(
-            report.waiting[0].write,
-            WriteId {
-                device: DeviceId(1),
-                number: 2
-            }
-        );
+        devices[2].sync.download_writes().await.unwrap();
         assert_eq!(
             rows(&devices[2].db).await,
             vec![("independent".into(), "good".into(), "body".into())]
         );
         storage.delete(&path).await.unwrap();
         publish(&storage, &record).await;
-        let report = devices[2].sync.download_writes().await.unwrap();
-        assert!(report.damaged_objects.is_empty(), "{report:?}");
-        assert!(report.waiting.is_empty());
+        devices[2].sync.download_writes().await.unwrap();
         assert_eq!(rows(&devices[2].db).await.len(), 2);
     }
 }
@@ -103,8 +80,7 @@ async fn removal_checks_the_authors_past_not_the_receivers_present() {
         .await
         .unwrap();
     devices[2].log.sync_store_log().await.unwrap();
-    let report = devices[2].sync.download_writes().await.unwrap();
-    assert!(report.damaged_objects.is_empty(), "{report:?}");
+    devices[2].sync.download_writes().await.unwrap();
     assert_eq!(rows(&devices[2].db).await[0].1, "before");
     devices[2].log.reload_from_snapshots().await.unwrap();
     assert_eq!(rows(&devices[2].db).await[0].1, "before");
@@ -123,8 +99,7 @@ async fn removal_checks_the_authors_past_not_the_receivers_present() {
     );
     after.header.timestamp = Timestamp::new(2_000, 0, DeviceId(1)).unwrap();
     publish(&storage, &after).await;
-    let report = devices[2].sync.download_writes().await.unwrap();
-    assert_eq!(report.damaged_objects.len(), 1, "{report:?}");
+    devices[2].sync.download_writes().await.unwrap();
     assert_eq!(rows(&devices[2].db).await[0].1, "before");
     assert!(matches!(
         devices[2].log.reload_from_snapshots().await,
@@ -148,9 +123,7 @@ async fn newer_write_waits_until_the_app_schema_updates() {
     let mut record = queued(&devices[0].db).await;
     record.header.schema_version = 2;
     publish(&storage, &record).await;
-    let report = devices[1].sync.download_writes().await.unwrap();
-    assert_eq!(report.waiting.len(), 1);
-    assert!(report.waiting[0].waiting_for.is_empty());
+    devices[1].sync.download_writes().await.unwrap();
     assert!(rows(&devices[1].db).await.is_empty());
     let device = &mut devices[1];
     device.db.close().await.unwrap();
@@ -164,18 +137,12 @@ async fn newer_write_waits_until_the_app_schema_updates() {
         device.keys.clone(),
         device.identity.clone(),
     );
-    assert!(device
-        .sync
-        .download_writes()
-        .await
-        .unwrap()
-        .waiting
-        .is_empty());
+    device.sync.download_writes().await.unwrap();
     assert_eq!(rows(&device.db).await[0].1, "new");
 }
 
 #[tokio::test]
-async fn newer_store_stops_uploads_but_reports_newer_downloads_as_waiting() {
+async fn newer_store_stops_uploads_and_waits_for_newer_downloads() {
     let storage = storage();
     let mut devices = group(storage.clone(), 2).await;
     sql(
@@ -211,8 +178,11 @@ async fn newer_store_stops_uploads_but_reports_newer_downloads_as_waiting() {
         devices[1].sync.upload_writes().await,
         Err(SyncError::Stopped(SyncFailure::UpdateRequired))
     ));
-    let report = devices[1].sync.download_writes().await.unwrap();
-    assert_eq!(report.waiting.len(), 1);
+    devices[1].sync.download_writes().await.unwrap();
+    assert_eq!(
+        rows(&devices[1].db).await,
+        vec![("local".into(), "old".into(), "body".into())]
+    );
 }
 
 #[tokio::test]
@@ -251,7 +221,7 @@ async fn only_a_newer_format_requires_an_update() {
                 Err(SyncError::Stopped(SyncFailure::UpdateRequired))
             ));
         } else {
-            assert_eq!(result.unwrap().damaged_objects.len(), 1);
+            result.unwrap();
         }
         assert_eq!(
             devices[1]
@@ -273,9 +243,7 @@ async fn only_a_newer_format_requires_an_update() {
         assert_eq!(storage.read(&path).await.unwrap(), bytes);
         storage.delete(&path).await.unwrap();
         storage.create(&path, &original).await.unwrap();
-        let report = devices[1].sync.download_writes().await.unwrap();
-        assert!(report.damaged_objects.is_empty());
-        assert!(report.waiting.is_empty());
+        devices[1].sync.download_writes().await.unwrap();
         assert_eq!(rows(&devices[1].db).await.len(), 2);
         assert_eq!(queued(&devices[1].db).await, waiting);
     }
@@ -284,7 +252,7 @@ async fn only_a_newer_format_requires_an_update() {
 #[tokio::test]
 async fn a_newer_schema_does_not_hide_a_damaged_signature() {
     let storage = storage();
-    let mut devices = group(storage.clone(), 2).await;
+    let devices = group(storage.clone(), 2).await;
     devices[0]
         .db
         .write(|sql| {
@@ -303,9 +271,25 @@ async fn a_newer_schema_does_not_hide_a_damaged_signature() {
     let last = bytes.len() - 1;
     bytes[last] ^= 1;
     storage.create(&path, &bytes).await.unwrap();
-    let report = devices[1].sync.download_writes().await.unwrap();
-    assert_eq!(report.damaged_objects.len(), 1, "{report:?}");
-    assert!(report.waiting.is_empty());
+    let object = storage
+        .list(&ObjectPrefix::device_logs())
+        .await
+        .unwrap()
+        .remove(0);
+    let log = devices[1].db.store_log().await.unwrap();
+    let ring = devices[1].keys.unlock().unwrap().unwrap();
+    let mut replays = crate::replay_cache::ReplayCache::new(&log);
+    assert!(matches!(
+        devices[1]
+            .sync
+            .receive_write(&object, &ring, &log, &mut replays, &member().member_id())
+            .await,
+        Err(SyncError::Damaged(crate::DamagedObject {
+            failure: crate::ObjectCheckFailure::Signature(_),
+            ..
+        }))
+    ));
+
     assert!(rows(&devices[1].db).await.is_empty());
 }
 
@@ -325,16 +309,7 @@ async fn a_cached_read_view_still_checks_each_writes_timestamp() {
     assert_eq!(first.header.store_log_read, second.header.store_log_read);
     second.header.timestamp = Timestamp::new(0, 0, DeviceId(1)).unwrap();
     publish(&storage, &second).await;
-    let report = devices[1].sync.download_writes().await.unwrap();
-    assert_eq!(report.damaged_objects.len(), 1, "{report:?}");
-    assert_eq!(
-        report.damaged_objects[0].path,
-        crate::write_seal::path(second.header.position).as_str()
-    );
-    assert!(report.damaged_objects[0]
-        .failure
-        .to_string()
-        .contains("timestamp"));
+    devices[1].sync.download_writes().await.unwrap();
     assert_eq!(rows(&devices[1].db).await[0].1, "before");
     let error = devices[1].log.reload_from_snapshots().await.unwrap_err();
     let SyncError::Damaged(damaged) = error else {
@@ -369,9 +344,7 @@ async fn missing_read_view_waits_then_replays_after_the_store_log_arrives() {
         devices[0].sync.upload_writes().await.unwrap();
         sql(&devices[0].db, "UPDATE notes SET title='after'").await;
         devices[0].sync.upload_writes().await.unwrap();
-        let report = devices[1].sync.download_writes().await.unwrap();
-        assert_eq!(report.waiting.len(), 2, "{report:?}");
-        assert!(report.damaged_objects.is_empty(), "{report:?}");
+        devices[1].sync.download_writes().await.unwrap();
         assert!(rows(&devices[1].db).await.is_empty());
         if reload {
             assert!(matches!(
@@ -389,16 +362,13 @@ async fn missing_read_view_waits_then_replays_after_the_store_log_arrives() {
             devices[1].log.reload_from_snapshots().await.unwrap();
             assert_eq!(rows(&devices[1].db).await[0].1, "after");
         }
-        let report = devices[1].sync.download_writes().await.unwrap();
-        assert!(report.waiting.is_empty(), "{report:?}");
-        assert!(report.damaged_objects.is_empty(), "{report:?}");
+        devices[1].sync.download_writes().await.unwrap();
         assert_eq!(rows(&devices[1].db).await[0].1, "after");
     }
 }
 
 #[tokio::test]
-async fn retention_waits_for_store_log_entries_without_reporting_damage() {
-    let mut damaged = Vec::new();
+async fn retention_waits_for_store_log_entries() {
     for removed in [false, true] {
         let storage = storage();
         let mut devices = group(storage.clone(), 2).await;
@@ -430,21 +400,13 @@ async fn retention_waits_for_store_log_entries_without_reporting_damage() {
             coven_foundation::id_source::FileId(Uuid::from_u128(99)),
         );
         storage.create(&unused, b"unused").await.unwrap();
-        let report = devices[1].log.run_retention().await.unwrap();
-        if !report.damaged_objects.is_empty() {
-            damaged.push((removed, report));
-        }
+        devices[1].log.run_retention().await.unwrap();
         assert_eq!(storage.read(&unused).await.unwrap(), b"unused");
         devices[1].log.sync_store_log().await.unwrap();
-        let report = devices[1].log.run_retention().await.unwrap();
-        assert!(report.damaged_objects.is_empty(), "{report:?}");
+        devices[1].log.run_retention().await.unwrap();
         assert!(matches!(
             storage.read(&unused).await,
             Err(coven_storage::StorageError::NotFound)
         ));
     }
-    assert!(
-        damaged.is_empty(),
-        "waiting writes were reported damaged: {damaged:?}"
-    );
 }

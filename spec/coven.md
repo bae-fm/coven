@@ -1297,7 +1297,7 @@ Carol's tablet:
 - Then, an entry whose change is already in place applies and changes
   nothing.
   - E.g. Ana and Ben both add Dan: both apply, Dan is added once, and
-    neither is reported.
+    neither is dropped.
 - Otherwise it applies only if:
   - what it needs exists: the member it changes, the device it removes,
     the member a new device belongs to, the circle it changes, the circle
@@ -1309,7 +1309,8 @@ Carol's tablet:
   replay starts again without them.
   - A dropped entry stays dropped until that replay ends; the next arrival
     starts a new replay with every entry.
-- A dropped entry is shown to its author.
+- Dropped entries and their reasons remain tracked in the replay; they are
+  not yet exposed to the app.
 - Whose entry it is comes from its signature, not from the device it was
   written from, so a new device adds itself, signed with its member's key
   ([§12.1](#121-a-persons-new-device)).
@@ -1386,8 +1387,7 @@ Carol's tablet:
   - Ben's removal beats Carol's add, which is dropped, and the replay
     starts again; now removing Ana would leave no admin, so Ben's removal
     is dropped too.
-  - Carol isn't added. Ana is shown her dropped add and invites Carol
-    again.
+  - Carol isn't added. Ana can invite Carol again.
 
 ## 10. Device identity
 
@@ -1678,8 +1678,8 @@ Carol's tablet:
 - The member whose provider account holds the store can't be removed:
   the store would go with their account. Removing them fails with
   `SyncError::StoreOwner`.
-- On S3, a key the admin must delete is shown in the sync status until
-  the admin confirms it's gone ([E5](api.md#e5-storage-and-sync)), however
+- On S3, `access_keys_to_delete()` lists keys the admin must delete until
+  the admin confirms they are gone ([E9](api.md#e9-members-and-devices)), however
   the removal or expiry that needs it came about. The device retains the
   confirmation by key id: another entry, invite, retry or restart cannot
   bring that deletion notice back.
@@ -1700,7 +1700,7 @@ Carol's tablet:
   - Otherwise the new member would hold only the old key, and couldn't
     read anything written after the rotation.
   - E.g. Ana adds Carol while Ben, offline, removes Dan: on every device
-    Carol's add is dropped, Ana is shown it, and she invites Carol again.
+    Carol's add is dropped and tracked in the replay. Ana can invite Carol again.
   - Carol's phone shows the join as dropped; Ana invites her again, or
     cancels the invite, which takes back the storage access it granted
     ([§12.2](#122-adding-a-person)).
@@ -2525,7 +2525,8 @@ Carol's tablet:
 - A step that fails for good, rather than for lack of network, stops its
   operation, and sets its `failure`.
   - The failure goes to the app call that started it while that call
-    waits; otherwise it is reported in the sync status.
+    waits; it remains available through `blocked_operations()`
+    ([E6](api.md#e6-operations-and-recovery)).
   - The app can retry or abandon it.
 - An operation's row is deleted when its last step completes.
 
@@ -2622,11 +2623,11 @@ Carol's tablet:
     arrives;
   - rarely it never does: someone with storage access deleted it ([§2](#2-threat-model)), or
     the provider lost it;
-  - a device can't tell the two apart, so it waits, and the app sees which
-    writes it is waiting for, and for how long.
+  - a device can't tell the two apart, so it tracks the missing prerequisites
+    and waits. Waiting writes are not yet exposed to the app.
   - E.g. Ben's write 9 had read Ana's log up to 4, but storage shows Carol's
     tablet only Ana's writes 1 to 3; Carol's tablet holds back Ben's write
-    9, and its app shows it is waiting for Ana's write 4.
+    9 until Ana's write 4 arrives.
 - An object that fails its check when read: it won't decrypt, its
   signature doesn't match, it doesn't parse, or its write breaks the
   merge's rules, such as a timestamp no later than a write it had read.
@@ -2666,10 +2667,12 @@ Carol's tablet:
     one of them wrong;
   - on different versions they can't compare: an added column exists on
     one device only.
-- The app sees each of these, and which devices are involved; nothing
-  reloads on its own after a mismatch, since neither device can tell which
-  is wrong. The person picks, as in [§19.3](#193-resetting-a-store), or
-  reloads one device ([§19.2](#192-recovering-one-device)).
+- Waiting writes, damaged remote objects and fingerprint disagreements are
+  tracked internally and are not yet exposed as app-facing diagnostics. A
+  damaged local database still fails to open. Nothing reloads on its own after
+  a mismatch, since neither device can tell which is wrong. Explicit reset
+  ([§19.3](#193-resetting-a-store)) and reload
+  ([§19.2](#192-recovering-one-device)) remain available.
 
 ### 19.2 Recovering one device
 
@@ -2833,10 +2836,10 @@ Carol's tablet:
     private.
 - Errors are typed enums per crate; an error is never turned into text
   to be passed on, and nothing returns `Result<_, String>`.
-- Every failure reaches the app as an error it can tell apart and act on,
-  such as a damaged database, a file on another device, or storage that
-  can't be reached; none is dropped, and a retry shows in the upload queue
-  or the sync status.
+- Failed app calls and whole-pass sync failures retain typed causes, such as
+  a damaged database, a file on another device, or unreachable storage.
+  Permanently failed operations remain available through `blocked_operations()`;
+  waiting writes and skipped damaged remote objects remain internal (§19.1).
 - A source file holds at most 1,000 lines, and its tests live beside it
   in `<name>_tests.rs`.
 - Each crate offers a `test-utils` feature with its fakes, such as an
