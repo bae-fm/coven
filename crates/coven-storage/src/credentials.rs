@@ -12,7 +12,7 @@ pub struct S3Credentials {
     pub secret_access_key: SecretText,
 }
 
-/// Provider tokens returned to the facade for key custody (E10).
+/// Device sign-in tokens exchanged between provider code and credential custody.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OAuthTokens {
@@ -24,7 +24,7 @@ pub struct OAuthTokens {
     pub expires_at: Option<std::time::SystemTime>,
 }
 
-/// Credentials carried by restore codes and committed separately from settings.
+/// Device credentials committed separately from provider settings.
 #[derive(Clone, Serialize, Deserialize)]
 pub enum StorageCredentials {
     /// A member's manually created S3 key.
@@ -40,7 +40,7 @@ impl StorageCredentials {
     pub fn encode(&self) -> Result<SecretBytes, crate::StorageError> {
         crate::secret_json::encode(self)
     }
-    /// Decode credentials obtained from key custody or an opened restore code.
+    /// Decode credentials obtained from device custody.
     pub fn decode(bytes: &[u8]) -> Result<Self, crate::StorageError> {
         serde_json::from_slice(bytes)
             .map_err(|error| crate::StorageError::Encoding(Box::new(error)))

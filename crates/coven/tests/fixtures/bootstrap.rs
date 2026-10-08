@@ -10,14 +10,6 @@ fn migrations() -> Vec<Migration> {
     )]
 }
 
-fn tokens(value: &str) -> OAuthTokens {
-    OAuthTokens {
-        access_token: SecretText::new(value.into()),
-        refresh_token: Some(SecretText::new("refresh".into())),
-        expires_at: None,
-    }
-}
-
 // These integration fixtures control timestamps while approval polling uses runtime time.
 fn clock_with_runtime_waits(time: &Arc<FixedClock>) -> ClockRef {
     let time = time.clone();
@@ -148,24 +140,22 @@ impl Owner {
         .await
         .unwrap();
         writes.upload_writes().await.unwrap();
-        let credentials = match provider {
-            CloudProvider::S3 => StorageCredentials::S3(S3Credentials {
-                access_key_id: "owner-key".into(),
-                secret_access_key: SecretText::new("owner-secret".into()),
-            }),
-            CloudProvider::CloudKit => StorageCredentials::CloudKit,
-            _ => StorageCredentials::OAuth(tokens("owner-token")),
+        let restore = if provider == CloudProvider::S3 {
+            RestoreStorage::S3 {
+                location: config,
+                credentials: S3Credentials {
+                    access_key_id: "owner-key".into(),
+                    secret_access_key: SecretText::new("owner-secret".into()),
+                },
+            }
+        } else {
+            RestoreStorage::Account(config)
         };
         let code = RestoreCode {
             store: directory.id(),
             name: "Household".into(),
             member_keys: member.clone(),
-            storage: RestoreStorage {
-                location: config,
-                credentials,
-            }
-            .encode()
-            .unwrap(),
+            storage: restore.encode().unwrap(),
         };
         let files = Files::new(
             FileDatabase::new(db.clone()),
@@ -249,6 +239,24 @@ impl Installation {
             .storage_connector(storage)
     }
 
+    async fn authenticated_builder(
+        &self,
+        owner: &Owner,
+        storage: Arc<MemoryStorage>,
+    ) -> CovenBuilder {
+        let mut builder = self.builder(owner, storage);
+        let provider = owner.storage.config().provider();
+        if matches!(
+            provider,
+            CloudProvider::GoogleDrive | CloudProvider::Dropbox | CloudProvider::OneDrive
+        ) {
+            let sign_in = crate::authentication::SignIn::new(owner.clock.clone()).await;
+            builder = sign_in.configure(builder);
+            builder.authenticate(provider).await.unwrap();
+        }
+        builder
+    }
+
     async fn run(
         &self,
         owner: &Owner,
@@ -258,9 +266,8 @@ impl Installation {
         status: impl Fn(&str),
     ) -> Result<Option<CovenHandle>, BootstrapError> {
         bootstrap_device(
-            self.builder(owner, storage),
+            self.authenticated_builder(owner, storage).await,
             request,
-            Some(tokens("joining-token")),
             status,
             cancel,
         )
@@ -270,10 +277,9 @@ impl Installation {
     async fn restore(&self, owner: &Owner) -> CovenHandle {
         let (_, cancel) = watch::channel(false);
         restore_from_code(
-            self.builder(owner, owner.storage.clone()),
+            self.authenticated_builder(owner, owner.storage.clone()).await,
             &owner.code.to_text().unwrap(),
             "Ana’s laptop",
-            Some(tokens("joining-token")),
             |_| {},
             &cancel,
         )

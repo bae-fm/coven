@@ -138,6 +138,15 @@
 - A store lives on one provider: S3, Google Drive, Dropbox, OneDrive, or
   iCloud through CloudKit.
 - Every member reaches the storage using their own provider account.
+- For Google Drive, Dropbox and OneDrive, the app triggers `authenticate` on
+  the builder or open handle. Coven builds the sign-in request, checks the
+  redirect, exchanges the code and holds the tokens; none pass through the app.
+  - The builder takes one presenter: open this authorization URL and return the
+    provider's redirect or cancellation. Coven supplies the desktop browser and
+    local listener; iOS and Android apps supply their platform sign-in sheet.
+  - Before storage setup or bootstrap publishes a store, the sign-in lives in
+    coven's session custody. Publication commits it to device custody. Coven
+    refreshes expired tokens and commits replacements before using them.
 - On S3, each member has their own access key.
 - What coven needs from a provider:
   - create an object, refusing an existing path without replacing its bytes,
@@ -1538,7 +1547,7 @@ Carol's tablet:
 - A person's new device needs their *restore code*, which holds:
   - their member key, which gets it the store key ([§11](#11-keys));
   - the store's id and name;
-  - storage credentials.
+  - the storage location and, on S3, the member's access key.
 - It gets the code in one of three ways:
   - by scanning it as a QR code on one of the person's devices that has
     the store open;
@@ -1548,14 +1557,16 @@ Carol's tablet:
   - by the person typing it in.
 - The QR code is blurred until the person taps to show it.
 - Where storage needs a sign-in, such as Google Drive, the new device
-  signs in to the person's own account first.
+  asks coven to sign in to the person's own account first, through the builder's
+  presenter. Restore and join use coven's held tokens. Restore codes never
+  carry OAuth tokens.
 - The new device then adds itself to the store log, signing with the
   member key ([§9](#9-members-and-roles)).
 - The person writes the code down when they create or join a store, as
   part of setup.
 - On Apple platforms, coven writes the code to iCloud Keychain whenever it
   changes: when the person creates or joins a store, and when their S3
-  key or credentials change ([E9](api.md#e9-members-and-devices)).
+  key changes ([E9](api.md#e9-members-and-devices)).
 
 ### 12.2 Adding a person
 
@@ -2777,7 +2788,7 @@ Carol's tablet:
 - Everything else reaches a capability through the object that owns it,
   given to it when it is built.
   - The clock, the id source, key custody, the CloudKit calls and the
-    OAuth clients are all set on the builder ([E1](api.md#e1-opening)), so
+    OAuth clients and presenter are all set on the builder ([E1](api.md#e1-opening)), so
     a test replaces each one.
   - E.g. the snapshot writer never calls the system clock; it asks the
     clock it was given, and a test gives it a fixed one.

@@ -954,7 +954,7 @@ impl crate::providers::StorageConnector for MemoryStorage {
         credentials: StorageCredentials,
         _device: coven_foundation::id_source::DeviceId,
     ) -> Result<Arc<dyn Storage>, StorageError> {
-        crate::RestoreStorage {
+        crate::ConnectionCredentials {
             location: config.clone(),
             credentials: credentials.clone(),
         }

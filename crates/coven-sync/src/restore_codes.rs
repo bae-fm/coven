@@ -8,7 +8,8 @@ use coven_crypto::{
 use coven_database::{Database, DbError};
 use coven_format::codes::RestoreCode;
 use coven_storage::{
-    RestoreStorage, S3Credentials, Storage, StorageConfig, StorageCredentials, StorageSettings,
+    ConnectionCredentials, RestoreStorage, S3Credentials, Storage, StorageConfig,
+    StorageCredentials, StorageSettings,
 };
 use std::sync::Arc;
 
@@ -24,7 +25,7 @@ struct RestoreCodesInner {
     keychain: Arc<StoreKeychain>,
     settings: StorageSettings,
     operations: crate::Operations,
-    oauth: Option<coven_storage::providers::OAuthClients>,
+    oauth: Option<coven_storage::providers::OAuthFlow>,
 }
 
 impl RestoreCodes {
@@ -36,7 +37,7 @@ impl RestoreCodes {
         keychain: Arc<StoreKeychain>,
         settings: StorageSettings,
         operations: crate::Operations,
-        oauth: Option<coven_storage::providers::OAuthClients>,
+        oauth: Option<coven_storage::providers::OAuthFlow>,
     ) -> Self {
         Self {
             inner: Arc::new(tokio::sync::Mutex::new(Some(RestoreCodesInner {
@@ -50,7 +51,7 @@ impl RestoreCodes {
         }
     }
 
-    /// Encode this member's current identity and committed provider credentials.
+    /// Encode this member's identity, location and S3 key where required.
     pub async fn restore_code(&self) -> Result<String, SyncError> {
         let guard = self.inner.lock().await;
         let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
@@ -71,15 +72,13 @@ impl RestoreCodes {
         crate::files::join(tokio::spawn(async move {
             let guard = inner.lock().await;
             let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
-            let mut code = owner.code().await?;
-            let mut data = RestoreStorage::decode(code.storage.as_bytes())?;
+            let mut data = owner.connection()?.ok_or(SyncError::NoStorage)?;
             data.credentials = StorageCredentials::S3(S3Credentials {
                 access_key_id: access_key_id.clone(),
                 secret_access_key,
             });
-            code.storage = data.encode()?;
-            let text = code.to_text()?.to_string();
-            owner.install(code, true).await?;
+            owner.install(data, true).await?;
+            let text = owner.code().await?.to_text()?.to_string();
             owner
                 .operations
                 .set_access(coven_format::MemberAccess::S3AccessKey { access_key_id })
@@ -89,7 +88,7 @@ impl RestoreCodes {
         .await
     }
 
-    /// Keep only the credentials from a code for this store and this member.
+    /// Keep only the S3 key from a code for this store and this member.
     /// A provider location change is refused; this call cannot redirect a store.
     /// Disconnected handles commit custody for their next connection.
     pub async fn update_credentials(&self, code: &str) -> Result<(), SyncError> {
@@ -98,7 +97,7 @@ impl RestoreCodes {
         crate::files::join(tokio::spawn(async move {
             let guard = inner.lock().await;
             let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
-            let mut current = owner.code().await?;
+            let current = owner.code().await?;
             if current.store != replacement.store {
                 return Err(SyncError::WrongStore {
                     expected: current.store,
@@ -113,33 +112,38 @@ impl RestoreCodes {
             {
                 return Err(SyncError::WrongMember { expected, actual });
             }
-            let old = RestoreStorage::decode(current.storage.as_bytes())?;
+            let old = owner.connection()?.ok_or(SyncError::NoStorage)?;
             let new = RestoreStorage::decode(replacement.storage.as_bytes())?;
-            if old.location != new.location {
+            if &old.location != new.location() {
                 return Err(coven_storage::StorageError::InvitationMismatch.into());
             }
-            current.storage = replacement.storage;
-            owner.install(current, false).await
+            let RestoreStorage::S3 {
+                location,
+                credentials,
+            } = new
+            else {
+                return Err(coven_storage::StorageError::InvalidConfiguration(
+                    "account restore codes contain no credentials to replace",
+                )
+                .into());
+            };
+            owner
+                .install(
+                    ConnectionCredentials {
+                        location,
+                        credentials: StorageCredentials::S3(credentials),
+                    },
+                    false,
+                )
+                .await
         }))
         .await
     }
 
     /// Read committed provider data without exposing custody or a connection.
-    pub async fn connection(&self) -> Result<Option<RestoreStorage>, SyncError> {
+    pub async fn connection(&self) -> Result<Option<ConnectionCredentials>, SyncError> {
         let guard = self.inner.lock().await;
-        let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
-        let Some(location) = owner.settings.read()? else {
-            return Ok(None);
-        };
-        let Some(bytes) = owner.keychain.storage_credentials()? else {
-            return Ok(None);
-        };
-        let data = RestoreStorage {
-            location,
-            credentials: StorageCredentials::decode(bytes.as_bytes())?,
-        };
-        data.validate()?;
-        Ok(Some(data))
+        guard.as_ref().ok_or(DbError::StoreClosed)?.connection()
     }
 
     /// Remove local credentials before disconnecting; failed removal changes no connection.
@@ -158,7 +162,7 @@ impl RestoreCodes {
     /// compensation remains available until store keys and the origin are applied.
     pub(crate) async fn prepare_setup(
         &self,
-        data: RestoreStorage,
+        data: ConnectionCredentials,
         initial_name: String,
     ) -> Result<crate::StorageCommit, SyncError> {
         data.validate()?;
@@ -177,7 +181,7 @@ impl RestoreCodes {
                 .identity
                 .unlock()?
                 .ok_or(SyncError::MissingMemberKeys)?,
-            storage: data.encode()?,
+            storage: RestoreStorage::from_connection(&data).encode()?,
         };
         let previous = SavedConnection {
             location: owner.settings.read()?,
@@ -190,7 +194,7 @@ impl RestoreCodes {
         };
         Ok(Box::new(move || {
             let owner = guard.as_ref().expect("reserved credential owner");
-            commit_restore_code(&owner.keychain, &code)?;
+            commit_credentials(&owner.keychain, &data.credentials, Some(&code))?;
             if let Err(error) = owner.settings.commit(&data.location) {
                 return Err(match owner.restore_connection(previous) {
                     Ok(()) => error.into(),
@@ -207,7 +211,7 @@ impl RestoreCodes {
     }
 
     /// Refresh expired credentials before a connection or sync pass. Commit
-    /// refreshed tokens and their restore code before installing the live session.
+    /// refreshed tokens before installing the live session; the code stays unchanged.
     pub async fn refresh_if_expired(&self, now: std::time::SystemTime) -> Result<(), SyncError> {
         let guard = self.inner.lock().await;
         let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
@@ -242,13 +246,15 @@ impl RestoreCodes {
                     source: Box::new(error),
                 },
             })?;
-        let mut code = owner.code().await?;
-        code.storage = RestoreStorage {
-            location,
-            credentials: StorageCredentials::OAuth(tokens),
-        }
-        .encode()?;
-        owner.install(code, false).await
+        owner
+            .install(
+                ConnectionCredentials {
+                    location,
+                    credentials: StorageCredentials::OAuth(tokens),
+                },
+                false,
+            )
+            .await
     }
 
     /// Finish the current update, then release custody and connection owners.
@@ -294,15 +300,25 @@ impl RestoreCodesInner {
         }
     }
 
+    fn connection(&self) -> Result<Option<ConnectionCredentials>, SyncError> {
+        let Some(location) = self.settings.read()? else {
+            return Ok(None);
+        };
+        let Some(bytes) = self.keychain.storage_credentials()? else {
+            return Ok(None);
+        };
+        let data = ConnectionCredentials {
+            location,
+            credentials: StorageCredentials::decode(bytes.as_bytes())?,
+        };
+        data.validate()?;
+        Ok(Some(data))
+    }
+
     async fn code(&self) -> Result<RestoreCode, SyncError> {
         let local = self.database.local_store_log().await?;
         let store = local.log.replay.state.store.ok_or(SyncError::NoStorage)?;
-        let location = self.settings.read()?.ok_or(SyncError::NoStorage)?;
-        let bytes = self
-            .keychain
-            .storage_credentials()?
-            .ok_or(SyncError::NoStorage)?;
-        let credentials = StorageCredentials::decode(bytes.as_bytes())?;
+        let data = self.connection()?.ok_or(SyncError::NoStorage)?;
         let member_keys = self
             .identity
             .unlock()?
@@ -311,18 +327,31 @@ impl RestoreCodesInner {
             store: store.id,
             name: store.name,
             member_keys,
-            storage: RestoreStorage {
-                location,
-                credentials,
-            }
-            .encode()?,
+            storage: RestoreStorage::from_connection(&data).encode()?,
         })
     }
 
-    async fn install(&self, code: RestoreCode, require_connected: bool) -> Result<(), SyncError> {
-        let current = self.code().await?;
-        let previous = RestoreStorage::decode(current.storage.as_bytes())?;
-        let next = RestoreStorage::decode(code.storage.as_bytes())?;
+    async fn install(
+        &self,
+        next: ConnectionCredentials,
+        require_connected: bool,
+    ) -> Result<(), SyncError> {
+        next.validate()?;
+        let previous = self.connection()?.ok_or(SyncError::NoStorage)?;
+        let codes = if matches!(next.credentials, StorageCredentials::S3(_)) {
+            let current = self.code().await?;
+            let code = RestoreCode {
+                store: current.store,
+                name: current.name.clone(),
+                member_keys: current.member_keys.clone(),
+                storage: RestoreStorage::from_connection(&next).encode()?,
+            };
+            Some((current, code))
+        } else {
+            None
+        };
+        let previous_credentials = previous.credentials.clone();
+        let credentials = next.credentials.clone();
         let keychain = self.keychain.clone();
         self.operations
             .install_credentials(
@@ -330,8 +359,18 @@ impl RestoreCodesInner {
                 next,
                 require_connected,
                 Box::new(move || {
-                    commit_restore_code(&keychain, &code)?;
-                    Ok(Box::new(move || commit_restore_code(&keychain, &current)))
+                    commit_credentials(
+                        &keychain,
+                        &credentials,
+                        codes.as_ref().map(|(_, next)| next),
+                    )?;
+                    Ok(Box::new(move || {
+                        commit_credentials(
+                            &keychain,
+                            &previous_credentials,
+                            codes.as_ref().map(|(previous, _)| previous),
+                        )
+                    }))
                 }),
             )
             .await
@@ -349,22 +388,31 @@ pub(crate) async fn install_session(
     }
 }
 
-/// Commit the device credentials and, on Apple, the matching restore code.
-/// Bootstrap and storage setup use the same operation as credential updates;
-/// errors restore both previous values and retain every rollback failure.
-pub fn commit_restore_code(keychain: &StoreKeychain, code: &RestoreCode) -> Result<(), SyncError> {
-    let data = RestoreStorage::decode(code.storage.as_bytes())?;
-    let credentials = data.credentials.encode()?;
-    let encoded = SecretBytes::new(code.to_bytes()?.to_vec());
+/// Commit device credentials and an optional changed restore code. OAuth refresh
+/// supplies no code: it neither unlocks member keys nor touches synced custody.
+/// Bootstrap, setup and S3 replacement supply the code. Errors restore every
+/// value this call changed and retain every rollback failure.
+pub fn commit_credentials(
+    keychain: &StoreKeychain,
+    credentials: &StorageCredentials,
+    code: Option<&RestoreCode>,
+) -> Result<(), SyncError> {
+    let credentials = credentials.encode()?;
+    let encoded = match code {
+        Some(code) if keychain.supports_synced_restore_codes() => {
+            Some(SecretBytes::new(code.to_bytes()?.to_vec()))
+        }
+        _ => None,
+    };
     let prior_credentials = keychain.storage_credentials()?;
-    let prior_code = if keychain.supports_synced_restore_codes() {
+    let prior_code = if encoded.is_some() {
         keychain.synced_restore_code()?
     } else {
         None
     };
     let write = || -> Result<(), SyncError> {
-        if keychain.supports_synced_restore_codes() {
-            keychain.set_synced_restore_code(&encoded)?;
+        if let Some(encoded) = &encoded {
+            keychain.set_synced_restore_code(encoded)?;
         }
         keychain.set_storage_credentials(&credentials)?;
         Ok(())
@@ -377,7 +425,7 @@ pub fn commit_restore_code(keychain: &StoreKeychain, code: &RestoreCode) -> Resu
         if let Err(cleanup) = rollback {
             operation = cleanup_error(operation, cleanup.into());
         }
-        if keychain.supports_synced_restore_codes() {
+        if encoded.is_some() {
             let rollback = match prior_code {
                 Some(bytes) => keychain.set_synced_restore_code(&bytes),
                 None => keychain.delete_synced_restore_code(),

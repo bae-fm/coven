@@ -56,4 +56,4 @@ pub use codes::{
     decode_code_info, read_invite_code, read_restore_code, CodeError, CodeInfo, CodeKind,
 };
 mod restore_codes;
-pub use restore_codes::{commit_restore_code, RestoreCodes};
+pub use restore_codes::{commit_credentials, RestoreCodes};

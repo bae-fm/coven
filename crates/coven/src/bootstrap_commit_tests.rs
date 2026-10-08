@@ -7,20 +7,28 @@ fn code(store: StoreId) -> RestoreCode {
         store,
         name: "Household".into(),
         member_keys: MemberKeys::generate().unwrap(),
-        storage: RestoreStorage {
+        storage: RestoreStorage::S3 {
             location: StorageConfig::S3 {
                 bucket: "bucket".into(),
                 region: "us-east-1".into(),
                 endpoint: None,
                 prefix: "store".into(),
             },
-            credentials: StorageCredentials::S3(S3Credentials {
-                access_key_id: "access".into(),
-                secret_access_key: SecretText::new("secret".into()),
-            }),
+            credentials: s3_key(),
         }
         .encode()
         .unwrap(),
+    }
+}
+
+fn credentials() -> StorageCredentials {
+    StorageCredentials::S3(s3_key())
+}
+
+fn s3_key() -> S3Credentials {
+    S3Credentials {
+        access_key_id: "access".into(),
+        secret_access_key: SecretText::new("secret".into()),
     }
 }
 
@@ -87,7 +95,15 @@ async fn custody_failure_restores_the_prior_keys_without_publishing() {
         IdentityCustody::Custom(Arc::new(RefusedIdentity(None))),
     )
     .await;
-    let error = publish_bootstrap(&pending, code(id), next, owners, database.clone()).unwrap_err();
+    let error = publish_bootstrap(
+        &pending,
+        code(id),
+        credentials(),
+        next,
+        owners,
+        database.clone(),
+    )
+    .unwrap_err();
     assert!(matches!(
         error,
         BootstrapError::SecureStorage(KeyError::ServiceNotRegistered)
@@ -133,7 +149,15 @@ async fn settings_rollback_failure_retains_both_causes_and_restores_other_custod
     )
     .await;
     let next = StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap());
-    let error = publish_bootstrap(&pending, code(id), next, owners, database.clone()).unwrap_err();
+    let error = publish_bootstrap(
+        &pending,
+        code(id),
+        credentials(),
+        next,
+        owners,
+        database.clone(),
+    )
+    .unwrap_err();
     let BootstrapError::Cleanup { operation, cleanup } = error else {
         panic!("rollback failure was discarded: {error}")
     };
@@ -178,7 +202,15 @@ async fn publication_failure_rolls_back_settings_and_custody() {
     std::fs::remove_file(&marker).unwrap();
     std::fs::create_dir(&marker).unwrap();
     let next = StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap());
-    let error = publish_bootstrap(&pending, code(id), next, owners, database.clone()).unwrap_err();
+    let error = publish_bootstrap(
+        &pending,
+        code(id),
+        credentials(),
+        next,
+        owners,
+        database.clone(),
+    )
+    .unwrap_err();
     assert!(matches!(
         error,
         BootstrapError::Directory(BootstrapDirectoryError::File(_))
@@ -227,8 +259,10 @@ async fn cleanup_failure_returns_the_open_handle_with_its_session_keys() {
     std::fs::create_dir(leftover).unwrap();
     let location = RestoreStorage::decode(code.storage.as_bytes())
         .unwrap()
-        .location;
-    let error = publish_bootstrap(&pending, code, ring, owners, database).unwrap_err();
+        .location()
+        .clone();
+    let error =
+        publish_bootstrap(&pending, code, credentials(), ring, owners, database).unwrap_err();
     let BootstrapError::Published { handle, .. } = error else {
         panic!("expected published handle")
     };

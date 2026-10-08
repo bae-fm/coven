@@ -51,7 +51,7 @@ impl StorageConnector for ProviderConnector {
         credentials: StorageCredentials,
         device: DeviceId,
     ) -> Result<Arc<dyn Storage>, StorageError> {
-        crate::RestoreStorage {
+        crate::ConnectionCredentials {
             location: config.clone(),
             credentials: credentials.clone(),
         }

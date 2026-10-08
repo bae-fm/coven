@@ -3,7 +3,11 @@ mod access;
 mod http;
 mod oauth;
 pub use http::{OAuthSession, ProviderResponse};
-pub use oauth::{AuthorizeRequest, OAuthClients, OAuthError};
+pub use oauth::{OAuthClients, OAuthError, OAuthFlow, OAuthPresenter};
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+mod desktop_oauth;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+pub use desktop_oauth::DesktopOAuthPresenter;
 mod s3;
 pub use s3::S3Storage;
 mod google_drive;

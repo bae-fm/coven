@@ -1,7 +1,7 @@
 use super::*;
 use coven_crypto::{InviteSecret, MemberKeys, SecretBytes, SecretText};
 use coven_foundation::id_source::InviteId;
-use coven_storage::{S3Credentials, StorageConfig, StorageCredentials, StorageInvitation};
+use coven_storage::{S3Credentials, StorageConfig, StorageInvitation};
 
 fn location() -> StorageConfig {
     StorageConfig::S3 {
@@ -25,9 +25,9 @@ fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
         store: StoreId(uuid::Uuid::from_u128(1)),
         name: "Household".into(),
         member_keys: MemberKeys::generate().unwrap(),
-        storage: RestoreStorage {
+        storage: RestoreStorage::S3 {
             location: location(),
-            credentials: StorageCredentials::S3(credentials()),
+            credentials: credentials(),
         }
         .encode()
         .unwrap(),

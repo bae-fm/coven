@@ -78,8 +78,12 @@ server-side guarantee.
 | [OneDrive](src/providers/onedrive.rs) | Path parents, conflict-refusing content PUT, positions PUT, preauthenticated download/Range without bearer, recursive paged children, delete. | Native upload URL, bounded/multiple missing ranges, immutable-byte completion verification; DELETE cancellation. | Account-drive ownership check, permission pages and account identity resolution; only exclusive target-account permissions deleted. Invite carries native share token for recipient redemption. |
 | [CloudKit](src/providers/cloudkit.rs) | The app-call contract requires stable records, atomic saves, bounded asset reads, native paging and publication timestamps. Rust checks returned paths/range lengths. | App calls own durable parts and session identity; Rust records/validates progress. | Native owner check, grant/revoke, share URL and recipient metadata validation/acceptance through app calls. |
 
-OAuth uses each device's account, state-bound PKCE, browser callback,
-code exchange and refresh. Microsoft uses the common authority for personal and
+OAuth uses each device's account and one presenter-based flow. The presenter
+opens an authorization URL and returns the complete redirect or cancellation;
+state-bound PKCE, redirect checks, code exchange and refresh stay inside coven.
+The desktop presenter opens the system browser and owns the loopback listener.
+iOS and Android apps supply their native sign-in sheet. Restore codes carry
+provider locations and S3 keys, never OAuth tokens. Microsoft uses the common authority for personal and
 work/school accounts. After custody commits refreshed tokens, the owner calls
 `set_oauth_tokens`; tests verify the next request on the same adapter uses them.
 

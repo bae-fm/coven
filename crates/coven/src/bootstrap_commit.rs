@@ -5,6 +5,7 @@ use super::*;
 pub(super) fn publish_bootstrap(
     pending: &BootstrapStore,
     code: RestoreCode,
+    credentials: StorageCredentials,
     ring: StoreKeyring,
     owners: OpeningOwners,
     database: Database,
@@ -26,11 +27,11 @@ pub(super) fn publish_bootstrap(
     let settings = StorageSettings::new(directory.clone());
     let old_settings = settings.read().map_err(SyncError::from)?;
     let commit = || -> Result<(), BootstrapError> {
-        settings.commit(&data.location).map_err(SyncError::from)?;
+        settings.commit(data.location()).map_err(SyncError::from)?;
         keys.persist(&ring)?;
         identity.persist(&code.member_keys)?;
         keychain.set_device_id(owners.device)?;
-        coven_sync::commit_restore_code(keychain, &code)?;
+        coven_sync::commit_credentials(keychain, &credentials, Some(&code))?;
         Ok(pending.publish()?)
     };
     let publication_error = match commit() {

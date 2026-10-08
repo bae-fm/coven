@@ -51,8 +51,8 @@ pub(crate) enum Command {
     Discard(OperationId),
     ConfirmKey(String),
     Credentials {
-        previous: coven_storage::RestoreStorage,
-        next: coven_storage::RestoreStorage,
+        previous: coven_storage::ConnectionCredentials,
+        next: coven_storage::ConnectionCredentials,
         require_connected: bool,
         commit: crate::StorageCommit,
     },
@@ -170,8 +170,8 @@ impl Operations {
 
     pub(crate) async fn install_credentials(
         &self,
-        previous: coven_storage::RestoreStorage,
-        next: coven_storage::RestoreStorage,
+        previous: coven_storage::ConnectionCredentials,
+        next: coven_storage::ConnectionCredentials,
         require_connected: bool,
         commit: crate::StorageCommit,
     ) -> Result<(), SyncError> {

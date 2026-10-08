@@ -56,11 +56,10 @@ pub use coven_foundation::id_source::{
 };
 pub use coven_merge::{Audience, MergeError};
 pub use coven_storage::providers::{
-    AuthorizeRequest, CloudKitOps, CloudKitUpload, CloudKitUploadStatus, OAuthClients, OAuthError,
+    CloudKitOps, CloudKitUpload, CloudKitUploadStatus, OAuthClients, OAuthError, OAuthPresenter,
 };
 pub use coven_storage::{
-    ByteRange, CloudProvider, OAuthTokens, ObjectPath, ObjectPrefix, StorageConfig, StorageError,
-    StorageFailure,
+    ByteRange, CloudProvider, ObjectPath, ObjectPrefix, StorageConfig, StorageError, StorageFailure,
 };
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -78,6 +77,10 @@ pub use coven_sync::{
     SyncFailure, SyncStatus,
 };
 
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+pub use coven_storage::providers::DesktopOAuthPresenter;
+
+mod authentication;
 mod storage;
 pub use coven_storage::providers::StorageConnector;
 pub use coven_storage::{StorageCheck, StorageSetupError, StorageSetupFailure};

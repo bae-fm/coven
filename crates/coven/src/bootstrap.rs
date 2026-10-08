@@ -7,11 +7,15 @@ use coven_database::Database;
 use coven_format::codes::{InviteCode, RestoreCode};
 use coven_foundation::files::{BootstrapDirectoryError, BootstrapStore, StoreFile};
 use coven_storage::{
-    InviteStorage, OAuthTokens, RestoreStorage, StorageCredentials, StorageSettings,
+    ConnectionCredentials, InviteStorage, RestoreStorage, StorageCredentials, StorageSettings,
 };
 use coven_sync::{JoiningIdentity, StoreLogSync};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::watch;
+
+#[path = "bootstrap_authentication.rs"]
+mod authentication;
+use authentication::{account_credentials, refresh_sign_in};
 
 #[path = "bootstrap_commit.rs"]
 mod commit;
@@ -66,13 +70,11 @@ pub enum BootstrapError {
 }
 
 /// Restore this person's store on a new device, returning its open handle.
-/// The builder supplies all opening choices. OAuth providers use supplied
-/// tokens or the builder's browser sign-in client.
+/// The builder supplies all opening choices and holds this device's sign-in.
 pub async fn restore_from_code(
     builder: CovenBuilder,
     code: &str,
     device_name: &str,
-    oauth_tokens: Option<OAuthTokens>,
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<CovenHandle, BootstrapError> {
@@ -83,7 +85,6 @@ pub async fn restore_from_code(
             code: coven_sync::read_restore_code(code)?,
             name: device_name.into(),
         },
-        oauth_tokens,
         on_status,
         cancel,
     )
@@ -96,7 +97,6 @@ pub async fn restore_from_code(
 pub async fn restore_from_keychain(
     builder: CovenBuilder,
     device_name: &str,
-    oauth_tokens: Option<OAuthTokens>,
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Option<CovenHandle>, BootstrapError> {
@@ -110,7 +110,6 @@ pub async fn restore_from_keychain(
             code,
             name: device_name.into(),
         },
-        oauth_tokens,
         on_status,
         cancel,
     )
@@ -125,7 +124,6 @@ pub async fn join_with_invite(
     builder: CovenBuilder,
     code: &str,
     device_name: &str,
-    oauth_tokens: Option<OAuthTokens>,
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Option<CovenHandle>, BootstrapError> {
@@ -136,7 +134,6 @@ pub async fn join_with_invite(
             code: coven_sync::read_invite_code(code)?,
             name: device_name.into(),
         },
-        oauth_tokens,
         on_status,
         cancel,
     )
@@ -169,7 +166,6 @@ enum BootstrapRequest {
 async fn bootstrap_device(
     mut builder: CovenBuilder,
     request: BootstrapRequest,
-    tokens: Option<OAuthTokens>,
     status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Option<CovenHandle>, BootstrapError> {
@@ -183,17 +179,25 @@ async fn bootstrap_device(
     let pending = builder
         .layout
         .begin_bootstrap(id, name, builder.ids.as_ref())?;
-    let result = prepare_and_load(&mut builder, &pending, &request, tokens, &status, cancel).await;
+    let result = prepare_and_load(&mut builder, &pending, &request, &status, cancel).await;
     match result {
-        Ok(Some((code, ring, database))) => {
+        Ok(Some((code, credentials, ring, database))) => {
             status("Keeping keys and credentials");
             let result = check_cancel(cancel).and_then(|()| {
+                builder.authentication.take();
                 let owners = builder.owners(
                     pending.directory(),
                     Arc::new(StoreKeychain::new(keychain, id)),
                 )?;
                 // No await separates final custody, publication and the handle.
-                commit::publish_bootstrap(&pending, code, ring, owners, database.clone())
+                commit::publish_bootstrap(
+                    &pending,
+                    code,
+                    credentials,
+                    ring,
+                    owners,
+                    database.clone(),
+                )
             });
             match result {
                 Ok(handle) => Ok(Some(handle)),
@@ -234,27 +238,31 @@ async fn prepare_and_load(
     builder: &mut CovenBuilder,
     pending: &BootstrapStore,
     request: &BootstrapRequest,
-    tokens: Option<OAuthTokens>,
     status: &impl Fn(&str),
     cancel: &watch::Receiver<bool>,
-) -> Result<Option<(RestoreCode, StoreKeyring, Database)>, BootstrapError> {
+) -> Result<Option<(RestoreCode, StorageCredentials, StoreKeyring, Database)>, BootstrapError> {
     let directory = pending.directory();
     let file = directory.owned_file(StoreFile::Bootstrap);
-    let (member, data, device_name, mut admission) = match request {
+    let (member, mut data, device_name, mut admission) = match request {
         BootstrapRequest::Restore { code, name } => {
-            let mut data =
-                RestoreStorage::decode(code.storage.as_bytes()).map_err(SyncError::from)?;
-            if matches!(data.credentials, StorageCredentials::OAuth(_)) {
-                data.credentials = StorageCredentials::OAuth(
-                    sign_in(
-                        data.location.provider(),
-                        tokens,
-                        builder.oauth.as_ref(),
-                        cancel,
-                    )
-                    .await?,
-                );
-            }
+            let data =
+                match RestoreStorage::decode(code.storage.as_bytes()).map_err(SyncError::from)? {
+                    RestoreStorage::S3 {
+                        location,
+                        credentials,
+                    } => ConnectionCredentials {
+                        location,
+                        credentials: StorageCredentials::S3(credentials),
+                    },
+                    RestoreStorage::Account(location) => {
+                        let credentials =
+                            account_credentials(builder, location.provider(), cancel).await?;
+                        ConnectionCredentials {
+                            location,
+                            credentials,
+                        }
+                    }
+                };
             (
                 code.member_keys.clone(),
                 data,
@@ -272,19 +280,13 @@ async fn prepare_and_load(
                     } => (invitation, StorageCredentials::S3(credentials)),
                     InviteStorage::Account(invitation) => {
                         let provider = invitation.location().provider();
-                        let credentials = if provider == CloudProvider::CloudKit {
-                            StorageCredentials::CloudKit
-                        } else {
-                            StorageCredentials::OAuth(
-                                sign_in(provider, tokens, builder.oauth.as_ref(), cancel).await?,
-                            )
-                        };
+                        let credentials = account_credentials(builder, provider, cancel).await?;
                         (invitation, credentials)
                     }
                 };
             (
                 identity.member_keys(),
-                RestoreStorage {
+                ConnectionCredentials {
                     location: invitation.location().clone(),
                     credentials,
                 },
@@ -303,6 +305,12 @@ async fn prepare_and_load(
         Some(storage) => {
             if storage.config() != data.location {
                 return Err(SyncError::Storage(StorageError::InvitationMismatch).into());
+            }
+            if let StorageCredentials::OAuth(tokens) = &data.credentials {
+                storage
+                    .set_oauth_tokens(tokens.clone())
+                    .await
+                    .map_err(SyncError::from)?;
             }
             storage.clone()
         }
@@ -329,7 +337,7 @@ async fn prepare_and_load(
     builder.storage = Some(storage.clone());
     let database = builder.database(directory.clone())?.open().await?;
     let mut sync = StoreLogSync::new(
-        storage,
+        storage.clone(),
         database.clone(),
         ring.clone(),
         identity,
@@ -353,6 +361,7 @@ async fn prepare_and_load(
             }
             status("Waiting for approval");
             loop {
+                refresh_sign_in(builder, &mut data, storage.as_ref(), cancel).await?;
                 match sync.join_outcome(joining).await? {
                     coven_sync::JoinOutcome::Admitted => break,
                     coven_sync::JoinOutcome::Declined => return Ok(false),
@@ -367,6 +376,7 @@ async fn prepare_and_load(
             }
         }
         status("Loading snapshots and later writes");
+        refresh_sign_in(builder, &mut data, storage.as_ref(), cancel).await?;
         sync.load_new_device(device_name).await?;
         Ok::<_, BootstrapError>(true)
     };
@@ -387,13 +397,16 @@ async fn prepare_and_load(
                 store: settings.id,
                 name: settings.name,
                 member_keys: member,
-                storage: data.encode().map_err(SyncError::from)?,
+                storage: RestoreStorage::from_connection(&data)
+                    .encode()
+                    .map_err(SyncError::from)?,
             },
+            data.credentials,
             ring,
         )))
     });
     match result {
-        Ok(Some((code, ring))) => Ok(Some((code, ring, database))),
+        Ok(Some((code, credentials, ring))) => Ok(Some((code, credentials, ring, database))),
         result => {
             let closed = database
                 .close()
@@ -402,25 +415,6 @@ async fn prepare_and_load(
                 .map_err(BootstrapError::from);
             combine(result.map(|_| None), closed)
         }
-    }
-}
-
-async fn sign_in(
-    provider: CloudProvider,
-    tokens: Option<OAuthTokens>,
-    oauth: Option<&OAuthClients>,
-    cancel: &watch::Receiver<bool>,
-) -> Result<OAuthTokens, BootstrapError> {
-    match tokens {
-        Some(tokens) => Ok(tokens),
-        None => match oauth
-            .ok_or(OAuthError::Unavailable(provider))?
-            .authorize(provider, cancel.clone())
-            .await
-        {
-            Err(OAuthError::Cancelled) => Err(BootstrapError::Cancelled),
-            result => Ok(result?),
-        },
     }
 }
 

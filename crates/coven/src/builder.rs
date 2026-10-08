@@ -1,5 +1,6 @@
 //! Compose database, custody, operation and file owners at the store boundary.
 
+use crate::authentication::Authentication;
 use crate::*;
 use coven_crypto::custody::{
     InMemoryCustody, Keychain, KeyringCustody, PassphraseCustody, StoreCustody, StoreKeychain,
@@ -7,7 +8,7 @@ use coven_crypto::custody::{
 };
 use coven_database::DatabaseBuilder;
 use coven_foundation::files::StoreFile;
-use coven_storage::Storage;
+use coven_storage::{providers::OAuthFlow, Storage};
 use std::sync::Arc;
 
 /// The choices collected before opening a store (E1).
@@ -21,6 +22,8 @@ pub struct CovenBuilder {
     connector: Option<Arc<dyn StorageConnector>>,
     limits: TransferLimits,
     oauth: Option<OAuthClients>,
+    presenter: Option<Arc<dyn OAuthPresenter>>,
+    authentication: Option<Authentication>,
     cloudkit: Option<Arc<dyn CloudKitOps>>,
     keys: KeyCustody,
     identity: IdentityCustody,
@@ -41,6 +44,11 @@ impl CovenBuilder {
             storage: None,
             connector: None,
             oauth: None,
+            #[cfg(not(any(target_os = "ios", target_os = "android")))]
+            presenter: Some(Arc::new(DesktopOAuthPresenter)),
+            #[cfg(any(target_os = "ios", target_os = "android"))]
+            presenter: None,
+            authentication: None,
             limits: TransferLimits::default(),
             cloudkit: None,
             keys: KeyCustody::Keyring,
@@ -88,6 +96,26 @@ impl CovenBuilder {
         self.oauth = Some(clients);
         self
     }
+    /// Present sign-in through the app's platform sheet. Desktop defaults to
+    /// `DesktopOAuthPresenter`; iOS and Android require the app's presenter.
+    pub fn oauth_presenter(mut self, presenter: Arc<dyn OAuthPresenter>) -> Self {
+        self.presenter = Some(presenter);
+        self
+    }
+
+    /// Sign in and keep tokens in session custody for restore, join or opening.
+    /// Replaces the prior sign-in only on success. Dropping the future cancels it.
+    pub async fn authenticate(&mut self, provider: CloudProvider) -> Result<(), OAuthError> {
+        let flow = self.oauth_flow().ok_or(OAuthError::Unavailable(provider))?;
+        let tokens = flow.authenticate(provider).await?;
+        self.authentication = Some(Authentication { provider, tokens });
+        Ok(())
+    }
+
+    fn oauth_flow(&self) -> Option<OAuthFlow> {
+        Some(OAuthFlow::new(self.oauth.clone()?, self.presenter.clone()?))
+    }
+
     /// Supply the app's native CloudKit bridge.
     pub fn apply_cloudkit_ops(mut self, ops: Option<Arc<dyn CloudKitOps>>) -> Self {
         self.cloudkit = ops;
@@ -223,6 +251,7 @@ impl CovenBuilder {
         directory: StoreDir,
         keychain: Arc<StoreKeychain>,
     ) -> CovenResult<OpeningOwners> {
+        let oauth = self.oauth_flow();
         let settings = directory.settings()?;
         let has_storage_credentials = keychain.storage_credentials()?.is_some();
         let keys = Self::make_keys(self.keys, &directory, settings.id, keychain.clone());
@@ -245,7 +274,8 @@ impl CovenBuilder {
                     self.cloudkit,
                 )),
             },
-            oauth: self.oauth,
+            oauth,
+            authentication: self.authentication,
             limits: self.limits,
             device: settings.device_id,
             initial_name: settings.name,
@@ -323,7 +353,8 @@ struct OpeningOwners {
     limits: TransferLimits,
     keychain: Arc<StoreKeychain>,
     connector: Arc<dyn StorageConnector>,
-    oauth: Option<OAuthClients>,
+    oauth: Option<OAuthFlow>,
+    authentication: Option<Authentication>,
     device: DeviceId,
     directory: StoreDir,
     custody: StoreCustody,
@@ -458,6 +489,7 @@ impl OpeningOwners {
             self.keys,
             self.connector,
             self.oauth,
+            self.authentication,
             sync.clone(),
             self.device,
             self.ids,

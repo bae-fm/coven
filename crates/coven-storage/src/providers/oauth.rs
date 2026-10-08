@@ -5,17 +5,13 @@ use coven_foundation::clock::ClockRef;
 use oauth2::{CsrfToken, PkceCodeChallenge};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::watch;
 
 /// Sign-in failures distinguish cancellation, invalid redirects and provider refusal.
 #[derive(Debug, thiserror::Error)]
 pub enum OAuthError {
-    /// The app did not configure this provider's client id.
+    /// This provider has no OAuth client id or presenter configured.
     #[error("OAuth provider unavailable: {0:?}")]
     Unavailable(CloudProvider),
-    /// The request's provider or redirect does not match the exchange.
-    #[error("authorization request does not match this exchange")]
-    RequestMismatch,
     /// Redirect state is missing or different.
     #[error("authorization state mismatch")]
     StateMismatch,
@@ -35,8 +31,8 @@ pub enum OAuthError {
     #[error("provider tokens expired")]
     Expired,
     /// A new provider sign-in is required.
-    #[error("provider requires a new sign-in")]
-    Reauthorize,
+    #[error("{0:?} requires a new sign-in")]
+    Reauthorize(CloudProvider),
     /// The redirect URI or callback request is malformed.
     #[error("invalid OAuth redirect")]
     InvalidRedirect,
@@ -46,20 +42,71 @@ pub enum OAuthError {
     /// The browser or local redirect listener failed.
     #[error("OAuth browser or listener: {0}")]
     Io(#[from] std::io::Error),
+    /// The app's native sign-in sheet failed.
+    #[error("authorization presentation: {0}")]
+    Presentation(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// Network or provider failure, preserving its classification.
     #[error(transparent)]
     Storage(#[from] StorageError),
 }
 
-/// A request for an app that handles the redirect itself (E10).
-pub struct AuthorizeRequest {
-    /// The URL the app opens for sign-in.
-    pub auth_url: String,
+/// Presents sign-in without handling tokens. The platform sheet must be dismissed
+/// when its future is dropped. Native cancellation returns `OAuthError::Cancelled`.
+#[async_trait::async_trait]
+pub trait OAuthPresenter: Send + Sync {
+    /// The registered redirect for this provider. No query or fragment is allowed.
+    fn redirect_uri(&self, provider: CloudProvider) -> &str;
+    /// Open the authorization URL and return the complete provider redirect.
+    async fn present(&self, authorization_url: &str) -> Result<SecretText, OAuthError>;
+}
+
+struct AuthorizeRequest {
+    auth_url: String,
     verifier: SecretText,
     state: SecretText,
-    provider: CloudProvider,
-    redirect_uri: String,
-    client_id: String,
+    redirect: String,
+}
+
+/// The sign-in and refresh service used by coven's composition roots. Apps
+/// configure `OAuthClients` and `OAuthPresenter`; only coven receives tokens.
+#[derive(Clone)]
+pub struct OAuthFlow {
+    clients: OAuthClients,
+    presenter: Arc<dyn OAuthPresenter>,
+}
+
+impl OAuthFlow {
+    /// Compose the provider protocol with the app's presentation capability.
+    pub fn new(clients: OAuthClients, presenter: Arc<dyn OAuthPresenter>) -> Self {
+        Self { clients, presenter }
+    }
+
+    /// Exchange a checked redirect. Dropping this future cancels presentation;
+    /// no detached task survives it. The caller commits tokens to custody.
+    pub async fn authenticate(&self, provider: CloudProvider) -> Result<OAuthTokens, OAuthError> {
+        let request = self
+            .clients
+            .build_authorize_request(provider, self.presenter.redirect_uri(provider))?;
+        let flow = async {
+            let redirect = self.presenter.present(&request.auth_url).await?;
+            self.clients
+                .exchange_redirect(provider, &request, redirect)
+                .await
+        };
+        tokio::select! {
+            result = flow => result,
+            _ = self.clients.clock.sleep(Duration::from_secs(300)) => Err(OAuthError::Timeout),
+        }
+    }
+
+    /// Refresh for custody; a live provider must use replacements only after commit.
+    pub async fn refresh(
+        &self,
+        provider: CloudProvider,
+        tokens: &OAuthTokens,
+    ) -> Result<OAuthTokens, OAuthError> {
+        self.clients.refresh(provider, tokens).await
+    }
 }
 
 /// The app's OAuth client ids and injected clock (E10).
@@ -70,7 +117,7 @@ pub struct OAuthClients {
     onedrive: Option<String>,
     clock: ClockRef,
     client: Result<reqwest::Client, Arc<reqwest::Error>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     token_override: Option<String>,
 }
 impl OAuthClients {
@@ -87,7 +134,7 @@ impl OAuthClients {
             onedrive: onedrive_client_id,
             clock,
             client: http::client().map_err(Arc::new),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-utils"))]
             token_override: None,
         }
     }
@@ -107,15 +154,18 @@ impl OAuthClients {
             .ok_or(OAuthError::Unavailable(provider))?;
         Ok((id, auth, token, scope))
     }
-    /// Build the URL and private proof for an app-managed redirect.
-    pub fn build_authorize_request(
+    fn build_authorize_request(
         &self,
         provider: CloudProvider,
         redirect_uri: &str,
     ) -> Result<AuthorizeRequest, OAuthError> {
         let (client_id, auth, _, scope) = self.config(provider)?;
         let redirect = url::Url::parse(redirect_uri).map_err(|_| OAuthError::InvalidRedirect)?;
-        if redirect.fragment().is_some() {
+        if redirect.fragment().is_some()
+            || redirect.query().is_some()
+            || !redirect.username().is_empty()
+            || redirect.password().is_some()
+        {
             return Err(OAuthError::InvalidRedirect);
         }
         let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
@@ -146,39 +196,49 @@ impl OAuthClients {
             auth_url: url.into(),
             verifier: SecretText::new(verifier.secret().clone()),
             state: SecretText::new(state.secret().clone()),
-            provider,
-            redirect_uri: redirect_uri.into(),
-            client_id: client_id.into(),
+            redirect: redirect_uri.to_owned(),
         })
     }
-    /// Check the redirect's state and exchange its code using this client's clock.
-    pub async fn exchange_code(
+    async fn exchange_redirect(
         &self,
         provider: CloudProvider,
-        code: &str,
-        callback_state: Option<&str>,
         request: &AuthorizeRequest,
-        redirect_uri: &str,
+        callback: SecretText,
     ) -> Result<OAuthTokens, OAuthError> {
-        let (client_id, _, _, _) = self.config(provider)?;
-        if request.provider != provider
-            || request.redirect_uri != redirect_uri
-            || request.client_id != client_id
-        {
-            return Err(OAuthError::RequestMismatch);
+        let mut redirect =
+            url::Url::parse(callback.as_str()).map_err(|_| OAuthError::InvalidRedirect)?;
+        let mut fields = std::collections::BTreeMap::new();
+        for (key, value) in redirect.query_pairs() {
+            if fields
+                .insert(key.into_owned(), SecretText::new(value.into_owned()))
+                .is_some()
+            {
+                return Err(OAuthError::InvalidRedirect);
+            }
         }
-        if callback_state != Some(request.state.as_str()) {
+        redirect.set_query(None);
+        if redirect
+            != url::Url::parse(&request.redirect).map_err(|_| OAuthError::InvalidRedirect)?
+        {
+            return Err(OAuthError::InvalidRedirect);
+        }
+        if fields.get("state").map(SecretText::as_str) != Some(request.state.as_str()) {
             return Err(OAuthError::StateMismatch);
         }
-        if code.is_empty() {
-            return Err(OAuthError::MissingCode);
+        if fields.contains_key("error") {
+            return Err(OAuthError::Denied);
         }
+        let code = fields
+            .get("code")
+            .filter(|code| !code.as_str().is_empty())
+            .ok_or(OAuthError::MissingCode)?;
+        let (client_id, _, _, _) = self.config(provider)?;
         self.tokens(
             provider,
             &[
                 ("grant_type", "authorization_code"),
-                ("code", code),
-                ("redirect_uri", redirect_uri),
+                ("code", code.as_str()),
+                ("redirect_uri", request.redirect.as_str()),
                 ("client_id", client_id),
                 ("code_verifier", request.verifier.as_str()),
             ],
@@ -188,7 +248,7 @@ impl OAuthClients {
     /// Obtain replacement tokens. The facade commits them to custody before
     /// installing them on its provider session. Omitted refresh tokens retain
     /// the previous token as specified by OAuth.
-    pub async fn refresh(
+    async fn refresh(
         &self,
         provider: CloudProvider,
         tokens: &OAuthTokens,
@@ -197,7 +257,7 @@ impl OAuthClients {
         let refresh = tokens
             .refresh_token
             .as_ref()
-            .ok_or(OAuthError::Reauthorize)?;
+            .ok_or(OAuthError::Reauthorize(provider))?;
         let mut replacement = self
             .tokens(
                 provider,
@@ -219,7 +279,7 @@ impl OAuthClients {
         params: &[(&str, &str)],
     ) -> Result<OAuthTokens, OAuthError> {
         let (_, _, token, _) = self.config(provider)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-utils"))]
         let token = match &self.token_override {
             Some(url) => url.as_str(),
             None => token,
@@ -278,95 +338,11 @@ impl OAuthClients {
             expires_at,
         })
     }
-    /// Run sign-in in the browser and await its local redirect. All listener work
-    /// is scoped to this future; cancellation or dropping it closes the socket.
-    pub async fn authorize(
-        &self,
-        provider: CloudProvider,
-        cancel: watch::Receiver<bool>,
-    ) -> Result<OAuthTokens, OAuthError> {
-        if *cancel.borrow() {
-            return Err(OAuthError::Cancelled);
-        }
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:19284").await?;
-        let redirect = "http://localhost:19284/callback";
-        let request = self.build_authorize_request(provider, redirect)?;
-        open::that(&request.auth_url)?;
-        self.receive_redirect(listener, provider, cancel, request, redirect)
-            .await
-    }
-    async fn receive_redirect(
-        &self,
-        listener: tokio::net::TcpListener,
-        provider: CloudProvider,
-        mut cancel: watch::Receiver<bool>,
-        request: AuthorizeRequest,
-        redirect: &str,
-    ) -> Result<OAuthTokens, OAuthError> {
-        let callback = async {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            loop {
-                let (mut socket, _) = listener.accept().await?;
-                let mut data = zeroize::Zeroizing::new(Vec::with_capacity(8192));
-                while !data.ends_with(b"\r\n\r\n") {
-                    if data.len() >= 8192 {
-                        return Err(OAuthError::InvalidRedirect);
-                    }
-                    let byte = socket.read_u8().await?;
-                    data.push(byte);
-                }
-                let line = std::str::from_utf8(&data)
-                    .map_err(|_| OAuthError::InvalidRedirect)?
-                    .lines()
-                    .next()
-                    .ok_or(OAuthError::InvalidRedirect)?;
-                let target = line
-                    .strip_prefix("GET ")
-                    .and_then(|s| s.strip_suffix(" HTTP/1.1"))
-                    .ok_or(OAuthError::InvalidRedirect)?;
-                if !target.starts_with('/') || target.starts_with("//") {
-                    return Err(OAuthError::InvalidRedirect);
-                }
-                let url = url::Url::parse(redirect)
-                    .and_then(|base| base.join(target))
-                    .map_err(|_| OAuthError::InvalidRedirect)?;
-                if url.path() != "/callback" {
-                    socket.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
-                    continue;
-                }
-                let mut fields = std::collections::BTreeMap::new();
-                for (key, value) in url.query_pairs() {
-                    if fields
-                        .insert(key.into_owned(), SecretText::new(value.into_owned()))
-                        .is_some()
-                    {
-                        return Err(OAuthError::InvalidRedirect);
-                    }
-                }
-                if fields.get("state").map(SecretText::as_str) != Some(request.state.as_str()) {
-                    return Err(OAuthError::StateMismatch);
-                }
-                if fields.contains_key("error") {
-                    return Err(OAuthError::Denied);
-                }
-                let code = fields.get("code").ok_or(OAuthError::MissingCode)?;
-                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n").await?;
-                return self
-                    .exchange_code(
-                        provider,
-                        code.as_str(),
-                        fields.get("state").map(SecretText::as_str),
-                        &request,
-                        redirect,
-                    )
-                    .await;
-            }
-        };
-        tokio::select! {
-            result = callback => result,
-            _ = cancel.wait_for(|value| *value) => Err(OAuthError::Cancelled),
-            _ = self.clock.sleep(Duration::from_secs(300)) => Err(OAuthError::Timeout),
-        }
+    /// Redirect token requests to an HTTP fake while retaining the real protocol.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn with_token_endpoint(mut self, endpoint: String) -> Self {
+        self.token_override = Some(endpoint);
+        self
     }
 }
 

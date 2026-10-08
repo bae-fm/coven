@@ -170,7 +170,7 @@ pub struct MemberKeys { /* private fields */ }
 /// Every opened store and circle key, including older keys (§11, §14.3).
 pub struct StoreKeyring { /* private fields */ }
 
-/// The app's provider clients and shared clock, kept private (E10).
+/// The app's provider client ids and sign-in clock, kept private (E10).
 pub struct OAuthClients { /* private fields */ }
 
 /// A validated encrypted-object path in the store (§4).
@@ -754,6 +754,15 @@ impl CovenBuilder {
     /// The app's own OAuth clients for Google Drive, Dropbox and OneDrive.
     /// Coven ships none.
     pub fn oauth_clients(self, clients: OAuthClients) -> Self;
+
+    /// The app's sign-in presenter. Desktop defaults to `DesktopOAuthPresenter`;
+    /// iOS and Android require a presenter using the platform's sign-in sheet.
+    pub fn oauth_presenter(self, presenter: Arc<dyn OAuthPresenter>) -> Self;
+
+    /// Sign in and commit tokens to coven's session custody for setup, restore
+    /// or join. Dropping the future cancels sign-in; failure retains the prior
+    /// sign-in. Success returns no tokens to the app.
+    pub async fn authenticate(&mut self, provider: CloudProvider) -> Result<(), OAuthError>;
 
     /// The app's CloudKit calls, on Apple platforms. Every iCloud operation
     /// goes through them.
@@ -1367,6 +1376,12 @@ while let Ok(values) = lost.next().await {
     `LocationOccupied`.
   - Creating uploads the store's first entry and its key sealed to this
     member; waiting writes then go up through sync like any others.
+- The app calls `authenticate(provider)` on the handle before OAuth setup.
+  Coven owns the request, checked redirect and code exchange. The builder's
+  presenter opens the page and returns the redirect or cancellation; it receives
+  no tokens. Sign-in is held in coven's session custody until setup succeeds.
+  Replacing a sign-in does not change an existing storage connection; setup
+  verifies the chosen account and location before attaching it.
 - Every setup, including reconnection, reaches the candidate provider with the
   newly supplied credentials and checks it before reserving or publishing a
   store entry or committing local state. A fresh sealed test object must be
@@ -1751,14 +1766,18 @@ impl CovenHandle {
         secret_access_key: SecretText,
     ) -> Result<ConnectedStorage, StorageSetupError>;
 
-    /// Sets up storage on Google Drive, Dropbox or OneDrive, running the
-    /// provider's sign-in with the builder's OAuth clients. `cancel` stops
-    /// the sign-in.
+    /// Runs sign-in through the builder's presenter and commits the tokens to
+    /// session custody. Setup attaches this sign-in and persists credentials.
+    /// Dropping the future cancels presentation without replacing held tokens.
+    pub async fn authenticate(&self, provider: CloudProvider) -> Result<(), StorageSetupError>;
+
+    /// Sets up Google Drive, Dropbox or OneDrive using coven's held sign-in.
+    /// Without a new sign-in, reconnects using this store's custody credentials.
+    /// Expired tokens are refreshed before use. Never opens sign-in UI.
     pub async fn setup_oauth_storage(
         &self,
         storage: StorageConfig,
         device_name: &str,
-        cancel: watch::Receiver<bool>,
     ) -> Result<ConnectedStorage, StorageSetupError>;
 
     /// Sets up storage on iCloud, through the builder's CloudKit calls.
@@ -2291,8 +2310,8 @@ impl CovenHandle {
         secret_access_key: SecretText,
     ) -> Result<String, SyncError>;
 
-    /// On a device that already has the store open: takes the storage
-    /// credentials from a new restore code of this member's, and keeps
+    /// On a device that already has the store open: takes the S3 key
+    /// from a new restore code of this member's, and keeps
     /// everything else. A disconnected handle keeps them for its next
     /// connection; a connected handle also replaces its provider's credentials.
     pub async fn update_credentials(&self, code: &str) -> Result<(), SyncError>;
@@ -2398,11 +2417,14 @@ pub enum ProviderSignOut {
 - An admin adds a person with an invite, and approves their join request
   ([§12.2](coven.md#122-adding-a-person)).
 - Each call takes the app's layout-scoped `CovenBuilder`, plus its code,
-  device name, OAuth tokens, status callback and cancellation receiver, and
+  device name, status callback and cancellation receiver, and
   returns the open `CovenHandle`. There is no second app-side open.
   - The builder supplies tables, migrations, custody, clock, id source,
-    provider clients and file-transfer limits once. Session-only `InMemory`
-    custody lives with the returned handle.
+    provider clients, sign-in presenter and file-transfer limits once. The app
+    calls `builder.authenticate(provider)` first where `needs_oauth` is true;
+    bootstrap uses that held sign-in and never opens UI. Session-only `InMemory`
+    custody lives with the returned handle. OAuth sign-in tokens move from
+    session custody into the device keychain on successful publication.
   - Every call migrates coven's own local tables in place before applying
     the app's migrations, as a writable open does ([§17.2](coven.md#172-covens-schema)).
   - An unfinished store is created at its permanent path with a durable
@@ -2448,7 +2470,7 @@ pub struct CodeInfo {
 
 /// The two codes used to open a store on a new device (§12).
 pub enum CodeKind {
-    /// Holds the person's member keys and storage credentials.
+    /// Holds the person's member keys, location and S3 key where needed.
     Restore,
     /// Holds an invite id and secret; approval is still required.
     Invite,
@@ -2487,29 +2509,25 @@ pub enum BootstrapError {
     Published { handle: CovenHandle, source: Box<BootstrapError> },
 }
 
-/// Provider sign-in tokens, held as secrets rather than printed (E10).
-pub struct OAuthTokens {
-    /// The token authorizing provider requests.
-    pub access_token: SecretText,
-    /// A renewal token, if the provider supplied one.
-    pub refresh_token: Option<SecretText>,
-    /// Expiry calculated with the injected clock, or None for a non-expiring token.
-    pub expires_at: Option<SystemTime>,
+/// Opens sign-in and returns the provider's complete redirect URL. Coven holds
+/// the expected state, PKCE verifier and resulting tokens (E5, E10).
+#[async_trait]
+pub trait OAuthPresenter: Send + Sync {
+    /// The registered redirect for this provider, without query or fragment.
+    fn redirect_uri(&self, provider: CloudProvider) -> &str;
+    /// Opens the page and returns its redirect. Native cancellation returns
+    /// `OAuthError::Cancelled`; dropping this future must dismiss the sheet.
+    async fn present(&self, authorization_url: &str) -> Result<SecretText, OAuthError>;
 }
 
-/// A browser request plus private state retained to check its redirect (E10).
-pub struct AuthorizeRequest {
-    /// The URL the app opens for sign-in.
-    pub auth_url: String,
-    /* private fields */
-}
+/// The desktop presenter: opens the system browser and listens locally at
+/// `http://localhost:19284/callback`. Not shipped on iOS or Android.
+pub struct DesktopOAuthPresenter;
 
 /// Provider sign-in could not finish (E5, E10).
 pub enum OAuthError {
-    /// This provider is not an OAuth provider or the app supplied no client id.
+    /// This provider has no OAuth client id or presenter configured.
     Unavailable(CloudProvider),
-    /// The request's provider, redirect or client id does not match the exchange.
-    RequestMismatch,
     /// The redirect state is missing or different.
     StateMismatch,
     /// The provider declined sign-in.
@@ -2523,20 +2541,22 @@ pub enum OAuthError {
     /// The current tokens have expired; refresh and commit them before reuse.
     Expired,
     /// A new provider sign-in is required.
-    Reauthorize,
+    Reauthorize(CloudProvider),
     /// The redirect URI or callback request is malformed.
     InvalidRedirect,
     /// The provider's expiry cannot be represented.
     InvalidExpiry,
     /// The browser or local redirect listener failed.
     Io(std::io::Error),
+    /// The app's native sign-in sheet failed.
+    Presentation(Box<dyn std::error::Error + Send + Sync>),
     /// The provider refused sign-in or token exchange, or could not be reached.
     Storage(StorageError),
 }
 
 impl CovenHandle {
     /// This member's restore code: their member key, the store's id and
-    /// name, and storage credentials. The app shows it as a QR code, blurred
+    /// name, location and S3 key where needed. The app shows it as a QR code, blurred
     /// until the person taps it, and asks them to write it down at setup.
     pub async fn restore_code(&self) -> Result<String, SyncError>;
 
@@ -2593,12 +2613,11 @@ pub struct JoinRequest {
 pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError>;
 
 /// Opens the store on a new device from the person's restore code, scanned
-/// or typed. `oauth_tokens` is the provider sign-in, when `needs_oauth`.
+/// or typed. The builder holds its own sign-in when `needs_oauth`.
 pub async fn restore_from_code(
     builder: CovenBuilder,
     code: &str,
     device_name: &str,
-    oauth_tokens: Option<OAuthTokens>,
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<CovenHandle, BootstrapError>;
@@ -2609,7 +2628,6 @@ pub async fn restore_from_code(
 pub async fn restore_from_keychain(
     builder: CovenBuilder,
     device_name: &str,
-    oauth_tokens: Option<OAuthTokens>,
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Option<CovenHandle>, BootstrapError>;
@@ -2628,7 +2646,6 @@ pub async fn join_with_invite(
     builder: CovenBuilder,
     code: &str,
     device_name: &str,
-    oauth_tokens: Option<OAuthTokens>,
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Option<CovenHandle>, BootstrapError>;
@@ -2641,44 +2658,15 @@ impl OAuthClients {
         onedrive_client_id: Option<String>,
         clock: ClockRef,
     ) -> Self;
-
-    /// Runs browser sign-in with a local redirect; cancellation or dropping it closes the listener.
-    pub async fn authorize(
-        &self,
-        provider: CloudProvider,
-        cancel: watch::Receiver<bool>,
-    ) -> Result<OAuthTokens, OAuthError>;
-
-    /// Builds the URL and private proof for an app that handles its own redirect.
-    pub fn build_authorize_request(&self, provider: CloudProvider, redirect_uri: &str) -> Result<AuthorizeRequest, OAuthError>;
-    /// Checks the redirect's state and exchanges its code using this client's clock.
-    pub async fn exchange_code(
-        &self,
-        provider: CloudProvider,
-        code: &str,
-        callback_state: Option<&str>,
-        request: &AuthorizeRequest,
-        redirect_uri: &str,
-    ) -> Result<OAuthTokens, OAuthError>;
-
-    /// Gets replacement tokens, retaining the old refresh token when the provider omits it.
-    pub async fn refresh(&self, provider: CloudProvider, tokens: &OAuthTokens) -> Result<OAuthTokens, OAuthError>;
 }
 ```
 
-- Refreshed tokens are committed to key custody before the provider session
-  uses them.
-
-Example, when the app handles the sign-in redirect:
-
-```rust
-let request = oauth_clients.build_authorize_request(provider, redirect_uri)?;
-open_sign_in(&request.auth_url);
-let (code, callback_state) = receive_sign_in_redirect().await?;
-let tokens = oauth_clients
-    .exchange_code(provider, &code, callback_state.as_deref(), &request, redirect_uri)
-    .await?;
-```
+- Coven validates the complete callback URL and its state before exchanging the
+  code. Missing, duplicate or mismatched callback fields fail sign-in. The
+  sign-in deadline is five minutes; dropping the future releases the presenter.
+- Refreshed tokens are committed to custody before the provider session uses
+  them. Refresh leaves synced restore codes untouched. Account-provider restore
+  codes carry the location, never OAuth tokens.
 
 Example, adding Ana's laptop. On her phone:
 
@@ -2691,23 +2679,20 @@ On the laptop:
 
 ```rust
 let info = decode_code_info(&scanned)?;
-let tokens = if info.needs_oauth {
-    Some(oauth_clients.authorize(info.cloud_provider, cancel_rx.clone()).await?)
-} else {
-    None
-};
-let builder = Coven::builder(layout.clone())
+let mut builder = Coven::builder(layout.clone())
     .synced_tables(tables())
     .migrations(migrations())
     .oauth_clients(oauth_clients.clone())
     .apply_cloudkit_ops(cloudkit_ops.clone())
     .clock(clock.clone())
     .id_source(ids.clone());
+if info.needs_oauth {
+    builder.authenticate(info.cloud_provider).await?;
+}
 let handle = restore_from_code(
     builder,
     &scanned,
     "Ana’s laptop",
-    tokens,
     |step| show_step(step),
     &cancel_rx,
 )
@@ -2743,16 +2728,16 @@ loop {
 On Carol's phone:
 
 ```rust
-let tokens = oauth_clients.authorize(CloudProvider::GoogleDrive, cancel_rx.clone()).await?;
-let builder = Coven::builder(layout.clone())
+let mut builder = Coven::builder(layout.clone())
     .synced_tables(tables())
     .migrations(migrations())
-    .oauth_clients(oauth_clients.clone());
+    .oauth_clients(oauth_clients.clone())
+    .oauth_presenter(platform_sign_in_sheet);
+builder.authenticate(CloudProvider::GoogleDrive).await?;
 match join_with_invite(
     builder,
     &scanned,
     "Carol's phone",
-    Some(tokens),
     |step| show_step(step),
     &cancel_rx,
 )

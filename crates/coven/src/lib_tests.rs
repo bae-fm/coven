@@ -143,7 +143,6 @@ impl Network {
             ),
             &invite.code,
             &name,
-            None,
             |_| {},
             &cancel,
         );

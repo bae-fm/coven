@@ -68,14 +68,19 @@ impl CovenHandle {
             .setup_s3(storage, device_name, access_key_id, secret_access_key)
             .await
     }
-    /// Sign in, check provider operations and set up Google Drive, Dropbox or OneDrive.
+    /// Present provider sign-in and keep tokens in coven's session custody.
+    /// Call setup to attach the chosen account to storage and persist credentials.
+    /// Dropping the future cancels sign-in without replacing the previous tokens.
+    pub async fn authenticate(&self, provider: CloudProvider) -> Result<(), StorageSetupError> {
+        self.storage.authenticate(provider).await
+    }
+    /// Check provider operations and set up OAuth storage using coven's held sign-in.
     pub async fn setup_oauth_storage(
         &self,
         storage: StorageConfig,
         device_name: &str,
-        cancel: tokio::sync::watch::Receiver<bool>,
     ) -> Result<ConnectedStorage, StorageSetupError> {
-        self.storage.setup_oauth(storage, device_name, cancel).await
+        self.storage.setup_oauth(storage, device_name).await
     }
     /// Check provider operations and set up iCloud through the configured native bridge.
     pub async fn setup_cloudkit_storage(
@@ -136,7 +141,7 @@ impl CovenHandle {
             .await
     }
 
-    /// Take only provider credentials from this member's new restore code (E9).
+    /// Take only the S3 key from this member's new restore code (E9).
     pub async fn update_credentials(&self, code: &str) -> Result<(), SyncError> {
         self.codes.update_credentials(code).await
     }

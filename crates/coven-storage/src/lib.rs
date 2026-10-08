@@ -5,6 +5,7 @@
 //! after setup succeeds. Providers never read the database.
 mod config;
 mod connection;
+mod connection_credentials;
 mod credentials;
 mod error;
 mod invitation;
@@ -21,6 +22,7 @@ mod transfer;
 
 pub use config::*;
 pub use connection::StorageConnection;
+pub use connection_credentials::ConnectionCredentials;
 pub use credentials::*;
 pub use error::*;
 pub use invitation::StorageInvitation;

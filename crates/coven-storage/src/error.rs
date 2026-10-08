@@ -240,17 +240,17 @@ impl StorageSetupError {
             Self::SecureStorage(_) => S::SecureStorage,
             Self::Internal(_) => S::Internal,
             Self::OAuth(error) => match error {
-                OAuthError::Unavailable(_)
-                | OAuthError::RequestMismatch
-                | OAuthError::InvalidRedirect => S::InvalidConfiguration,
+                OAuthError::Unavailable(_) | OAuthError::InvalidRedirect => S::InvalidConfiguration,
                 OAuthError::StateMismatch
                 | OAuthError::Denied
                 | OAuthError::MissingCode
                 | OAuthError::Cancelled
                 | OAuthError::Timeout
                 | OAuthError::Expired
-                | OAuthError::Reauthorize => S::Authentication,
-                OAuthError::InvalidExpiry | OAuthError::Io(_) => S::Internal,
+                | OAuthError::Reauthorize(_) => S::Authentication,
+                OAuthError::InvalidExpiry | OAuthError::Io(_) | OAuthError::Presentation(_) => {
+                    S::Internal
+                }
                 OAuthError::Storage(error) => Self::storage_failure(error),
             },
             Self::Storage(error) => Self::storage_failure(error),

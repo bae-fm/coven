@@ -132,11 +132,13 @@ async fn stopping_releases_the_provider_and_start_rebuilds_it_once() {
     status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     assert!(f.connector.clients.lock().unwrap()[0].upgrade().is_none());
     let mut code = coven_sync::read_restore_code(&f.handle.restore_code().await.unwrap()).unwrap();
-    let mut data = RestoreStorage::decode(code.storage.as_bytes()).unwrap();
-    data.credentials = StorageCredentials::S3(S3Credentials {
-        access_key_id: "replacement".into(),
-        secret_access_key: SecretText::new("replacement secret".into()),
-    });
+    let data = coven_storage::RestoreStorage::S3 {
+        location: f.storage.config(),
+        credentials: S3Credentials {
+            access_key_id: "replacement".into(),
+            secret_access_key: SecretText::new("replacement secret".into()),
+        },
+    };
     code.storage = data.encode().unwrap();
     f.handle
         .update_credentials(&code.to_text().unwrap())

@@ -46,7 +46,7 @@ enum SyncCommand {
         storage: Arc<StorageConnection>,
         access: coven_format::MemberAccess,
         device_name: String,
-        connection: coven_storage::RestoreStorage,
+        connection: coven_storage::ConnectionCredentials,
         store_name: String,
         reply: Reply,
     },
@@ -126,7 +126,7 @@ impl SyncLoop {
         storage: Arc<dyn Storage>,
         access: coven_format::MemberAccess,
         device_name: String,
-        connection: coven_storage::RestoreStorage,
+        connection: coven_storage::ConnectionCredentials,
         store_name: String,
     ) -> Result<(), SyncError> {
         let (reply, result) = oneshot::channel();
@@ -260,7 +260,7 @@ impl SyncRun {
         storage: Arc<StorageConnection>,
         access: coven_format::MemberAccess,
         device_name: String,
-        connection: coven_storage::RestoreStorage,
+        connection: coven_storage::ConnectionCredentials,
         store_name: String,
     ) -> Result<(), SyncError> {
         // Relocation needs the old provider even when stop has released it.

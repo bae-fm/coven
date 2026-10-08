@@ -536,8 +536,9 @@
 - A restore code (kind 10): `store:uuid | name:name | member_keys:bytes |
   storage:bytes`.
   - `member_keys` is `CVMK 01 | signing seed:32 bytes | sealing secret:32
-    bytes`; `storage` is the provider settings and credentials, at most
-    16 KiB.
+    bytes`; `storage` is the provider location and, only for S3, the
+    member's access key, at most 16 KiB. OAuth tokens are device-only and
+    never appear in a restore code.
 - An invite code (kind 11): `store:uuid | name:name | invite:uuid |
   secret:32 bytes | storage:bytes`.
 - As text, a code is `CVR1-` (restore) or `CVI1-` (invite), then unpadded

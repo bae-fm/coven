@@ -2,7 +2,8 @@
 
 use crate::*;
 use coven_storage::{
-    providers::StorageConnector, RestoreStorage, S3Credentials, StorageCredentials,
+    providers::{OAuthFlow, StorageConnector},
+    ConnectionCredentials, S3Credentials, StorageCredentials,
 };
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -55,7 +56,8 @@ pub(crate) struct StorageConnections {
     initial_name: String,
     keys: std::sync::Mutex<Option<Arc<dyn StoreKeyCustody>>>,
     connector: Arc<dyn StorageConnector>,
-    oauth: Option<OAuthClients>,
+    oauth: Option<OAuthFlow>,
+    authentication: tokio::sync::Mutex<Option<crate::authentication::Authentication>>,
     sync: coven_sync::SyncLoop,
     device: DeviceId,
     ids: IdSourceRef,
@@ -70,7 +72,8 @@ impl StorageConnections {
         initial_name: String,
         keys: Arc<dyn StoreKeyCustody>,
         connector: Arc<dyn StorageConnector>,
-        oauth: Option<OAuthClients>,
+        oauth: Option<OAuthFlow>,
+        authentication: Option<crate::authentication::Authentication>,
         sync: coven_sync::SyncLoop,
         device: DeviceId,
         ids: IdSourceRef,
@@ -82,6 +85,7 @@ impl StorageConnections {
             keys: std::sync::Mutex::new(Some(keys)),
             connector,
             oauth,
+            authentication: tokio::sync::Mutex::new(authentication),
             sync,
             device,
             ids,
@@ -139,22 +143,72 @@ impl StorageConnections {
         .await
     }
 
+    pub(crate) async fn authenticate(
+        &self,
+        provider: CloudProvider,
+    ) -> Result<(), StorageSetupError> {
+        let _call = self.calls.lock().await;
+        self.check_open()?;
+        let flow = self
+            .oauth
+            .as_ref()
+            .ok_or(OAuthError::Unavailable(provider))?;
+        let tokens = flow.authenticate(provider).await?;
+        *self.authentication.lock().await =
+            Some(crate::authentication::Authentication { provider, tokens });
+        Ok(())
+    }
+
     pub(crate) async fn setup_oauth(
         self: &Arc<Self>,
         storage: StorageConfig,
         device_name: &str,
-        cancel: tokio::sync::watch::Receiver<bool>,
     ) -> Result<ConnectedStorage, StorageSetupError> {
-        self.check_open()?;
-        let clients =
-            self.oauth
-                .as_ref()
-                .ok_or(coven_storage::providers::OAuthError::Unavailable(
-                    storage.provider(),
-                ))?;
-        let tokens = clients.authorize(storage.provider(), cancel).await?;
-        self.setup(storage, device_name, StorageCredentials::OAuth(tokens))
-            .await
+        let owner = self.clone();
+        let device_name = device_name.to_owned();
+        crate::coven::completion(tokio::spawn(async move {
+            let _call = owner.calls.lock().await;
+            owner.check_open()?;
+            let provider = storage.provider();
+            if !matches!(
+                provider,
+                CloudProvider::GoogleDrive | CloudProvider::Dropbox | CloudProvider::OneDrive
+            ) {
+                return Err(OAuthError::Unavailable(provider).into());
+            }
+            let mut held = owner.authentication.lock().await;
+            let credentials = match held.as_mut() {
+                Some(authentication) => {
+                    authentication
+                        .credentials(
+                            provider,
+                            owner
+                                .oauth
+                                .as_ref()
+                                .ok_or(OAuthError::Unavailable(provider))?,
+                            owner.clock.now(),
+                        )
+                        .await?
+                }
+                None => {
+                    let data = owner
+                        .connection()
+                        .await
+                        .map_err(setup_error)?
+                        .ok_or(OAuthError::Reauthorize(provider))?;
+                    if data.location.provider() != provider {
+                        return Err(OAuthError::Reauthorize(provider).into());
+                    }
+                    data.credentials
+                }
+            };
+            let result = owner
+                .setup_connection(storage, &device_name, credentials)
+                .await?;
+            held.take();
+            Ok(result)
+        }))
+        .await
     }
 
     pub(crate) async fn setup_cloudkit(
@@ -180,51 +234,61 @@ impl StorageConnections {
         crate::coven::completion(tokio::spawn(async move {
             let _call = owner.calls.lock().await;
             owner.check_open()?;
-            let storage = owner
-                .connector
-                .connect(config.clone(), credentials.clone(), owner.device)
-                .await?;
-            let path = ObjectPath::file(owner.device, FileId(owner.ids.new_id()));
-            let plaintext = b"coven storage check";
-            let header = coven_format::file::FileHeader::new(plaintext.len() as u64);
-            let key = coven_crypto::FileKey::generate()
-                .map_err(|error| StorageSetupError::Internal(Box::new(error)))?;
-            let mut bytes = header.encode().to_vec();
-            bytes.extend(
-                header
-                    .seal_chunk(&key, path.as_str(), 0, plaintext)
-                    .map_err(|error| StorageSetupError::Internal(Box::new(error)))?,
-            );
-            coven_storage::check_provider(storage.as_ref(), &path, &bytes).await?;
-            let access = match &credentials {
-                StorageCredentials::S3(keys) => coven_format::MemberAccess::S3AccessKey {
-                    access_key_id: keys.access_key_id.clone(),
-                },
-                _ => coven_format::MemberAccess::ProviderAccount(storage.account().await?),
-            };
             owner
-                .sync
-                .setup(
-                    storage,
-                    access,
-                    device_name,
-                    RestoreStorage {
-                        location: config.clone(),
-                        credentials,
-                    },
-                    owner.initial_name.clone(),
-                )
+                .setup_connection(config, &device_name, credentials)
                 .await
-                .map_err(setup_error)?;
-            Ok(ConnectedStorage {
-                storage: config,
-                key_state: StoreKeyState::Available,
-            })
         }))
         .await
     }
 
-    async fn connection(&self) -> Result<Option<RestoreStorage>, SyncError> {
+    async fn setup_connection(
+        &self,
+        config: StorageConfig,
+        device_name: &str,
+        credentials: StorageCredentials,
+    ) -> Result<ConnectedStorage, StorageSetupError> {
+        let storage = self
+            .connector
+            .connect(config.clone(), credentials.clone(), self.device)
+            .await?;
+        let path = ObjectPath::file(self.device, FileId(self.ids.new_id()));
+        let plaintext = b"coven storage check";
+        let header = coven_format::file::FileHeader::new(plaintext.len() as u64);
+        let key = coven_crypto::FileKey::generate()
+            .map_err(|error| StorageSetupError::Internal(Box::new(error)))?;
+        let mut bytes = header.encode().to_vec();
+        bytes.extend(
+            header
+                .seal_chunk(&key, path.as_str(), 0, plaintext)
+                .map_err(|error| StorageSetupError::Internal(Box::new(error)))?,
+        );
+        coven_storage::check_provider(storage.as_ref(), &path, &bytes).await?;
+        let access = match &credentials {
+            StorageCredentials::S3(keys) => coven_format::MemberAccess::S3AccessKey {
+                access_key_id: keys.access_key_id.clone(),
+            },
+            _ => coven_format::MemberAccess::ProviderAccount(storage.account().await?),
+        };
+        self.sync
+            .setup(
+                storage,
+                access,
+                device_name.into(),
+                ConnectionCredentials {
+                    location: config.clone(),
+                    credentials,
+                },
+                self.initial_name.clone(),
+            )
+            .await
+            .map_err(setup_error)?;
+        Ok(ConnectedStorage {
+            storage: config,
+            key_state: StoreKeyState::Available,
+        })
+    }
+
+    async fn connection(&self) -> Result<Option<ConnectionCredentials>, SyncError> {
         self.codes.refresh_if_expired(self.clock.now()).await?;
         self.codes.connection().await
     }
@@ -258,7 +322,9 @@ impl StorageConnections {
         crate::coven::completion(tokio::spawn(async move {
             let _call = owner.calls.lock().await;
             owner.check_open()?;
-            owner.sync.forget_storage().await
+            owner.sync.forget_storage().await?;
+            owner.authentication.lock().await.take();
+            Ok(())
         }))
         .await
     }
@@ -284,6 +350,7 @@ impl StorageConnections {
     pub(crate) async fn close(&self) {
         let _call = self.calls.lock().await;
         self.closed.store(true, Ordering::Release);
+        self.authentication.lock().await.take();
         self.keys.lock().expect("store keys lock poisoned").take();
     }
 }

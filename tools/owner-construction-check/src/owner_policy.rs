@@ -126,6 +126,12 @@ pub(crate) const POLICY: Policy = Policy {
             "open_read_graph",
         ),
         ("crates/coven/src/builder.rs", "CovenBuilder", "new"),
+        ("crates/coven/src/builder.rs", "CovenBuilder", "oauth_flow"),
+        (
+            "crates/coven/src/builder.rs",
+            "CovenBuilder",
+            "authenticate",
+        ),
         ("crates/coven/src/builder.rs", "CovenBuilder", "open"),
         ("crates/coven/src/builder.rs", "CovenBuilder", "open_graph"),
         ("crates/coven/src/builder.rs", "CovenBuilder", "database"),
@@ -280,6 +286,7 @@ pub(crate) const POLICY: Policy = Policy {
         "Storage",
         "CloudKitOps",
         "OAuthClients",
+        "OAuthPresenter",
         "OAuthSession",
         "DatabaseConnection",
     ],
@@ -291,6 +298,7 @@ pub(crate) const POLICY: Policy = Policy {
         "StorageConnector",
         "Storage",
         "CloudKitOps",
+        "OAuthPresenter",
     ],
     construction_only_capability_types: &[
         "BootstrapStore",

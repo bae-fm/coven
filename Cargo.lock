@@ -938,6 +938,7 @@ name = "coven"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "coven-crypto",
  "coven-database",
  "coven-format",
@@ -945,9 +946,11 @@ dependencies = [
  "coven-merge",
  "coven-storage",
  "coven-sync",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "url",
  "uuid",
 ]
 

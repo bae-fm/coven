@@ -2,12 +2,12 @@
 
 use coven_format::codes::{InviteCode, RestoreCode};
 use coven_foundation::id_source::StoreId;
-use coven_storage::{CloudProvider, InviteStorage, RestoreStorage};
+use coven_storage::{CloudProvider, ConnectionCredentials, InviteStorage, RestoreStorage};
 
 /// The two codes that can open a store on a new device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodeKind {
-    /// This person's existing identity and storage credentials.
+    /// This person's identity, storage location and S3 key where needed.
     Restore,
     /// A one-time request requiring another member's approval.
     Invite,
@@ -96,7 +96,7 @@ fn decode(text: &str) -> Result<(DecodedCode, CloudProvider), CodeError> {
         let code = RestoreCode::from_text(text).map_err(|_| CodeError::Invalid)?;
         let storage =
             RestoreStorage::decode(code.storage.as_bytes()).map_err(|_| CodeError::Invalid)?;
-        Ok((DecodedCode::Restore(code), storage.location.provider()))
+        Ok((DecodedCode::Restore(code), storage.location().provider()))
     } else if text.starts_with("CVI1-") {
         let code = InviteCode::from_text(text).map_err(|_| CodeError::Invalid)?;
         let storage =
@@ -111,7 +111,7 @@ fn decode(text: &str) -> Result<(DecodedCode, CloudProvider), CodeError> {
                 invitation,
                 credentials,
             } => {
-                let storage = RestoreStorage {
+                let storage = ConnectionCredentials {
                     location: invitation.location().clone(),
                     credentials: coven_storage::StorageCredentials::S3(credentials),
                 };
