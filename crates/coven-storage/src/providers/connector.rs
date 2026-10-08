@@ -11,8 +11,9 @@ use coven_foundation::{
 };
 use std::sync::Arc;
 
-/// Constructs a connection without committing settings or credentials. Apps and
-/// tests can supply another connector while using the same setup and sync owners.
+/// Constructs built-in provider connections without committing settings or credentials.
+/// Shared by coven's opening, setup and sync owners. Tests replace it with an
+/// in-memory provider through coven's `test-utils` builder hook.
 #[async_trait::async_trait]
 pub trait StorageConnector: Send + Sync {
     /// Construct the selected adapter; the caller verifies it before publication.

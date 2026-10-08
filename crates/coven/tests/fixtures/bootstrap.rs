@@ -235,7 +235,6 @@ impl Installation {
             .synced_tables(tables())
             .migrations(migrations())
             .clock(clock_with_runtime_waits(&owner.clock))
-            .storage(storage.clone())
             .storage_connector(storage)
     }
 
@@ -320,15 +319,13 @@ impl Installation {
     }
 
     async fn handle(&self, directory: StoreDir, owner: &Owner) -> CovenHandle {
-        Coven::builder(self.layout.clone())
-            .with_keychain(self.keychain.clone())
-            .synced_tables(tables())
-            .migrations(migrations())
-            .clock(clock_with_runtime_waits(&owner.clock))
-            .storage(owner.storage.clone())
+        let handle = self
+            .builder(owner, owner.storage.clone())
             .open(directory.id())
             .await
-            .unwrap()
+            .unwrap();
+        handle.unlock_store_key().await.unwrap();
+        handle
     }
 }
 

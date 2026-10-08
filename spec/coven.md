@@ -2693,7 +2693,13 @@ Carol's tablet:
   - Rebuilding a damaged database takes a fresh device id (§10), because
     unreadable counters cannot establish which write, entry and snapshot
     numbers were already used. Readable waiting writes keep their original
-    identities. Reloading in place keeps the device id.
+    identities. The app supplies the new device's name. Reloading in place
+    keeps the device id.
+  - Recovery connects using the store's saved storage settings and credentials
+    in custody, refreshing expired sign-in tokens as when starting sync. It
+    requires unlocked store and member keys and checks storage before moving
+    any damaged database files. Missing storage, unavailable keys or a failed
+    connection leaves those files in place and returns the failure to the app.
   - A device that opens but disagrees with the others reloads in place.
 - Its own writes still waiting in `_coven_uploads`, those it can still
   read, are uploaded after, and merge like any late write.
@@ -2811,8 +2817,9 @@ Carol's tablet:
   - the builder's `open`;
   - the calls that open a store on a new device: `restore_from_code`,
     `restore_from_keychain` and `join_with_invite`;
-  - provider connection construction for starting sync, storage setup and key
-    unlocking, through the connector supplied at opening;
+  - provider connection construction for starting sync, storage setup, key
+    unlocking, recovery and file reads, through the built-in connector assembled
+    at opening;
   - the test fixtures that build the same graph.
 - Each long-lived task has one *lifetime authority*, the only owner that
   may start it, and that stops it when it is dropped.

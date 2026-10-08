@@ -7,7 +7,10 @@ use coven_crypto::custody::{
 };
 use coven_database::DatabaseBuilder;
 use coven_foundation::files::StoreFile;
-use coven_storage::{providers::OAuthFlow, Storage};
+use coven_storage::{
+    providers::{OAuthFlow, StorageConnector},
+    Storage,
+};
 use std::sync::Arc;
 
 /// The choices collected before opening a store (E1).
@@ -17,7 +20,6 @@ pub struct CovenBuilder {
     layout: StoreLayout,
     ids: IdSourceRef,
     clock: ClockRef,
-    storage: Option<Arc<dyn coven_storage::Storage>>,
     connector: Option<Arc<dyn StorageConnector>>,
     limits: TransferLimits,
     oauth: Option<OAuthClients>,
@@ -40,7 +42,6 @@ impl CovenBuilder {
             layout,
             ids,
             clock,
-            storage: None,
             connector: None,
             oauth: None,
             #[cfg(not(any(target_os = "ios", target_os = "android")))]
@@ -78,18 +79,26 @@ impl CovenBuilder {
         self.ids = ids;
         self
     }
-    /// Supply the connected storage capability used by operations and files.
-    /// Provider setup and credential custody remain with their existing owners.
-    pub fn storage(mut self, storage: Arc<dyn coven_storage::Storage>) -> Self {
-        self.storage = Some(storage);
-        self
-    }
-
-    /// Supply provider construction for setup and reconnect; tests can use memory storage.
+    /// Replace provider construction in tests while exercising setup, credential
+    /// custody, reconnect, restore and recovery through the production graph.
+    /// `coven_storage::test_utils::MemoryStorage` implements this connector.
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn storage_connector(mut self, connector: Arc<dyn StorageConnector>) -> Self {
         self.connector = Some(connector);
         self
     }
+    fn connector(&mut self) -> Arc<dyn StorageConnector> {
+        self.connector
+            .get_or_insert_with(|| {
+                Arc::new(coven_storage::providers::ProviderConnector::new(
+                    self.clock.clone(),
+                    self.ids.clone(),
+                    self.cloudkit.clone(),
+                ))
+            })
+            .clone()
+    }
+
     /// Configure this app's own sign-in clients. Coven supplies no client ids.
     pub fn oauth_clients(mut self, clients: OAuthClients) -> Self {
         self.oauth = Some(clients);
@@ -159,13 +168,19 @@ impl CovenBuilder {
     }
 
     /// Recover a damaged database from storage, preserving readable waiting work.
-    /// Storage and unlocked keys are required before any database file moves.
+    /// Connects from saved settings and custody credentials, refreshing expired
+    /// sign-in tokens. Storage and unlocked keys are checked before any database
+    /// file moves. The fresh device id is registered with the app's device name.
     /// The damaged SQLite files remain in a named archive. An interrupted reload
     /// must be retried explicitly; ordinary opens refuse its unpublished state.
-    pub async fn open_reloading(self, store: StoreId) -> Result<CovenHandle, RecoveryError> {
+    pub async fn open_reloading(
+        self,
+        store: StoreId,
+        device_name: &str,
+    ) -> Result<CovenHandle, RecoveryError> {
         crate::coven::blocking(move || self.open_graph(store, true))
             .await?
-            .open_reloading()
+            .open_reloading(device_name)
             .await
     }
 
@@ -173,14 +188,37 @@ impl CovenBuilder {
     /// Its shared lock protects both read connections and local cache metadata.
     /// It runs no migration and refuses a database whose schema is newer or
     /// whose coven tables need migrating.
-    pub async fn open_read_only(self, store: StoreId) -> CovenResult<CovenReadHandle> {
+    /// File reads connect using saved settings and custody credentials when present.
+    pub async fn open_read_only(
+        mut self,
+        store: StoreId,
+    ) -> Result<CovenReadHandle, ReadOnlyOpenError> {
         let directory = self.layout.store_dir(&store);
         let ids = self.ids.clone();
         let clock = self.clock.clone();
-        let storage = self.storage.clone();
+        let connector = self.connector();
         let limits = self.limits;
         let database = self.database(directory.clone())?;
         let database = database.open_read_only().await?;
+        let settings = coven_storage::StorageSettings::new(directory.clone());
+        let data = crate::coven::blocking(move || {
+            let keychain = StoreKeychain::new(self.keychain()?, store);
+            coven_sync::read_connection(&settings, &keychain)
+        })
+        .await?;
+        let storage = match data {
+            Some(data) => Some(
+                connector
+                    .connect(
+                        data.location,
+                        data.credentials,
+                        directory.settings().map_err(CovenError::from)?.device_id,
+                    )
+                    .await
+                    .map_err(SyncError::from)?,
+            ),
+            None => None,
+        };
         let files = coven_sync::Files::new(
             coven_database::FileDatabase::read_only(database.clone()),
             directory,
@@ -246,11 +284,12 @@ impl CovenBuilder {
     }
 
     fn owners(
-        self,
+        mut self,
         directory: StoreDir,
         keychain: Arc<StoreKeychain>,
     ) -> CovenResult<OpeningOwners> {
         let oauth = self.oauth_flow();
+        let connector = self.connector();
         let settings = directory.settings()?;
         let has_storage_credentials = keychain.storage_credentials()?.is_some();
         let keys = Self::make_keys(self.keys, &directory, settings.id, keychain.clone());
@@ -261,14 +300,7 @@ impl CovenBuilder {
             has_storage_credentials,
             custody: StoreCustody::new(identity.clone(), keychain.clone()),
             keychain,
-            connector: match self.connector {
-                Some(connector) => connector,
-                None => Arc::new(coven_storage::providers::ProviderConnector::new(
-                    self.clock.clone(),
-                    self.ids.clone(),
-                    self.cloudkit,
-                )),
-            },
+            connector,
             oauth,
             authentication: self.authentication,
             limits: self.limits,
@@ -278,9 +310,7 @@ impl CovenBuilder {
             identity,
             clock: self.clock,
             ids: self.ids,
-            storage: self
-                .storage
-                .map(|storage| Arc::new(coven_storage::StorageConnection::new(storage))),
+            storage: None,
         })
     }
 
@@ -359,8 +389,12 @@ impl OpeningStore {
         Ok(self.owners.handle(database, sync))
     }
 
-    async fn open_reloading(self) -> Result<CovenHandle, RecoveryError> {
-        let storage = self.owners.storage.as_ref().ok_or(SyncError::NoStorage)?;
+    async fn open_reloading(mut self, device_name: &str) -> Result<CovenHandle, RecoveryError> {
+        let mut data = coven_sync::read_connection(
+            &coven_storage::StorageSettings::new(self.owners.directory.clone()),
+            &self.owners.keychain,
+        )?
+        .ok_or(SyncError::NoStorage)?;
         self.owners
             .keys
             .unlock()
@@ -373,10 +407,28 @@ impl OpeningStore {
             .ok_or(SyncError::from(
                 coven_storage::StorageFailure::MemberKeysMissing,
             ))?;
+        if let Some(credentials) = coven_sync::refreshed_credentials(
+            &data,
+            self.owners.oauth.as_ref(),
+            self.owners.clock.now(),
+        )
+        .await?
+        {
+            coven_sync::commit_credentials(&self.owners.keychain, &credentials, None)?;
+            data.credentials = credentials;
+        }
+        let storage = self
+            .owners
+            .connector
+            .connect(data.location, data.credentials, self.owners.device)
+            .await
+            .map_err(SyncError::from)?;
+        let storage = Arc::new(coven_storage::StorageConnection::new(storage));
         storage
             .list(&ObjectPrefix::all())
             .await
             .map_err(SyncError::from)?;
+        self.owners.storage = Some(storage);
         let archive = coven_foundation::files::FileName::new(self.owners.ids.new_id().to_string())
             .expect("UUID filename");
         let database = self
@@ -392,7 +444,7 @@ impl OpeningStore {
         if !local.log.replay.state.devices.contains_key(&local.device) {
             sync.make_and_upload_entry(coven_format::store_log::StoreChange::AddDevice {
                 device: local.device,
-                name: "Recovered device".into(),
+                name: device_name.into(),
             })
             .await?;
         }

@@ -126,6 +126,7 @@ pub(crate) const POLICY: Policy = Policy {
             "open_read_graph",
         ),
         ("crates/coven/src/builder.rs", "CovenBuilder", "new"),
+        ("crates/coven/src/builder.rs", "CovenBuilder", "connector"),
         ("crates/coven/src/builder.rs", "CovenBuilder", "oauth_flow"),
         (
             "crates/coven/src/builder.rs",

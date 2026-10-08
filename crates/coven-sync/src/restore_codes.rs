@@ -214,43 +214,14 @@ impl RestoreCodes {
     pub async fn refresh_if_expired(&self, now: std::time::SystemTime) -> Result<(), SyncError> {
         let guard = self.inner.lock().await;
         let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
-        let Some(location) = owner.settings.read()? else {
+        let Some(mut data) = owner.connection()? else {
             return Ok(());
         };
-        let Some(bytes) = owner.keychain.storage_credentials()? else {
-            return Ok(());
-        };
-        let StorageCredentials::OAuth(tokens) = StorageCredentials::decode(bytes.as_bytes())?
-        else {
-            return Ok(());
-        };
-        if tokens.expires_at.is_none_or(|expiry| now < expiry) {
-            return Ok(());
+        if let Some(credentials) = refreshed_credentials(&data, owner.oauth.as_ref(), now).await? {
+            data.credentials = credentials;
+            owner.install(data, false).await?;
         }
-        let clients = owner.oauth.as_ref().ok_or(
-            coven_storage::StorageFailure::InvalidConfiguration
-                .with_source("OAuth clients are absent"),
-        )?;
-        let tokens = clients
-            .refresh(location.provider(), &tokens)
-            .await
-            .map_err(|error| match error {
-                coven_storage::providers::OAuthError::Storage(error) => error,
-                error => coven_storage::StorageError::Provider {
-                    provider: location.provider(),
-                    failure: coven_storage::StorageFailure::Authentication,
-                    source: Box::new(error),
-                },
-            })?;
-        owner
-            .install(
-                ConnectionCredentials {
-                    location,
-                    credentials: StorageCredentials::OAuth(tokens),
-                },
-                false,
-            )
-            .await
+        Ok(())
     }
 
     /// Finish the current update, then release custody and connection owners.
@@ -297,18 +268,7 @@ impl RestoreCodesInner {
     }
 
     fn connection(&self) -> Result<Option<ConnectionCredentials>, SyncError> {
-        let Some(location) = self.settings.read()? else {
-            return Ok(None);
-        };
-        let Some(bytes) = self.keychain.storage_credentials()? else {
-            return Ok(None);
-        };
-        let data = ConnectionCredentials {
-            location,
-            credentials: StorageCredentials::decode(bytes.as_bytes())?,
-        };
-        data.validate()?;
-        Ok(Some(data))
+        read_connection(&self.settings, &self.keychain)
     }
 
     async fn code(&self) -> Result<RestoreCode, SyncError> {
@@ -446,4 +406,56 @@ struct SavedConnection {
     location: Option<StorageConfig>,
     credentials: Option<SecretBytes>,
     code: Option<SecretBytes>,
+}
+
+/// Read the saved provider location and custody credentials without opening a
+/// database. Shared by normal sync, read-only file access and damaged-database
+/// recovery. Absence means storage is not configured on this installation.
+pub fn read_connection(
+    settings: &StorageSettings,
+    keychain: &StoreKeychain,
+) -> Result<Option<ConnectionCredentials>, SyncError> {
+    let Some(location) = settings.read()? else {
+        return Ok(None);
+    };
+    let Some(bytes) = keychain.storage_credentials()? else {
+        return Ok(None);
+    };
+    let data = ConnectionCredentials {
+        location,
+        credentials: StorageCredentials::decode(bytes.as_bytes())?,
+    };
+    data.validate()?;
+    Ok(Some(data))
+}
+
+/// Refresh expired OAuth credentials without changing custody or a live client.
+/// The caller commits the replacement before installing it; recovery can do so
+/// before opening SQLite, while normal sync serializes it with live operations.
+pub async fn refreshed_credentials(
+    data: &ConnectionCredentials,
+    oauth: Option<&coven_storage::providers::OAuthFlow>,
+    now: std::time::SystemTime,
+) -> Result<Option<StorageCredentials>, SyncError> {
+    let StorageCredentials::OAuth(tokens) = &data.credentials else {
+        return Ok(None);
+    };
+    if tokens.expires_at.is_none_or(|expiry| now < expiry) {
+        return Ok(None);
+    }
+    let clients = oauth.ok_or(
+        coven_storage::StorageFailure::InvalidConfiguration.with_source("OAuth clients are absent"),
+    )?;
+    let tokens = clients
+        .refresh(data.location.provider(), tokens)
+        .await
+        .map_err(|error| match error {
+            coven_storage::providers::OAuthError::Storage(error) => error,
+            error => coven_storage::StorageError::Provider {
+                provider: data.location.provider(),
+                failure: coven_storage::StorageFailure::Authentication,
+                source: Box::new(error),
+            },
+        })?;
+    Ok(Some(StorageCredentials::OAuth(tokens)))
 }

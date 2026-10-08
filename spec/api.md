@@ -298,8 +298,6 @@ pub enum CovenError {
     Lock(StoreLockError),
     /// A required builder choice was not supplied (E1).
     MissingConfiguration { field: &'static str },
-    /// Reloading from storage failed (§19.2).
-    Sync(SyncError),
 }
 
 /// A failed database call or a write the database refuses (§5, §8, §14, §16).
@@ -530,6 +528,14 @@ pub enum StoreLockError {
     File(FileError),
 }
 
+/// Opening a read-only store or its saved file-storage connection failed (E1).
+pub enum ReadOnlyOpenError {
+    /// The database or store directory could not be opened.
+    Local(CovenError),
+    /// Saved settings, credential custody or provider construction failed.
+    Storage(SyncError),
+}
+
 /// Explicit damaged-database recovery failed (§19.2).
 pub enum RecoveryError {
     /// Opening SQLite, custody or the local directory failed.
@@ -745,10 +751,6 @@ impl CovenBuilder {
     /// The source of new ids (§20.2). Defaults to `UuidIds`, random UUIDs.
     pub fn id_source(self, ids: IdSourceRef) -> Self;
 
-    /// An already connected provider capability shared by operations and files
-    /// at the composition root. The adapter owns its settings and credentials.
-    pub fn storage(self, storage: Arc<dyn coven_storage::Storage>) -> Self;
-
     /// The app's own OAuth clients for Google Drive, Dropbox and OneDrive.
     /// Coven ships none.
     pub fn oauth_clients(self, clients: OAuthClients) -> Self;
@@ -793,16 +795,19 @@ impl CovenBuilder {
     /// Opens a store whose database is damaged (§19.2): moves the damaged
     /// file aside, loads the latest snapshot, and queues the waiting writes it
     /// can still read from the old file, then resumes unfinished operations.
-    /// It needs storage and the store key; without either it fails, leaving
-    /// the damaged file where it was.
-    pub async fn open_reloading(self, store: StoreId) -> Result<CovenHandle, RecoveryError>;
+    /// Connects from saved storage settings and custody credentials, refreshing
+    /// expired sign-in tokens. Requires unlocked store and member keys and checks
+    /// storage before moving the damaged files. Registers the fresh device id
+    /// with the app's `device_name`.
+    pub async fn open_reloading(self, store: StoreId, device_name: &str) -> Result<CovenHandle, RecoveryError>;
 
     /// Opens the store for reading only, alongside a handle that has it open,
     /// for example from another process. Its shared lock prevents deletion
     /// while its read connections and local cache connection remain open.
     /// It runs no migration and refuses a database whose schema is newer than
     /// its migrations or whose coven tables need migrating.
-    pub async fn open_read_only(self, store: StoreId) -> CovenResult<CovenReadHandle>;
+    /// File reads use saved storage settings and custody credentials when present.
+    pub async fn open_read_only(self, store: StoreId) -> Result<CovenReadHandle, ReadOnlyOpenError>;
 }
 
 pub enum KeyCustody {

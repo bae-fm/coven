@@ -182,14 +182,15 @@ async fn bootstrap_device(
         .begin_bootstrap(id, name, builder.ids.as_ref())?;
     let result = prepare_and_load(&mut builder, &pending, &request, &status, cancel).await;
     match result {
-        Ok(Some((code, credentials, ring, database))) => {
+        Ok(Some((code, credentials, ring, database, storage))) => {
             status("Keeping keys and credentials");
             let result = check_cancel(cancel).and_then(|()| {
                 builder.authentication.take();
-                let owners = builder.owners(
+                let mut owners = builder.owners(
                     pending.directory(),
                     Arc::new(StoreKeychain::new(keychain, id)),
                 )?;
+                owners.storage = Some(Arc::new(coven_storage::StorageConnection::new(storage)));
                 // No await separates final custody, publication and the handle.
                 commit::publish_bootstrap(
                     &pending,
@@ -241,7 +242,16 @@ async fn prepare_and_load(
     request: &BootstrapRequest,
     status: &impl Fn(&str),
     cancel: &watch::Receiver<bool>,
-) -> Result<Option<(RestoreCode, StorageCredentials, StoreKeyring, Database)>, BootstrapError> {
+) -> Result<
+    Option<(
+        RestoreCode,
+        StorageCredentials,
+        StoreKeyring,
+        Database,
+        Arc<dyn Storage>,
+    )>,
+    BootstrapError,
+> {
     let directory = pending.directory();
     let file = directory.owned_file(StoreFile::Bootstrap);
     let (member, mut data, device_name, mut admission) = match request {
@@ -302,40 +312,17 @@ async fn prepare_and_load(
     };
     check_cancel(cancel)?;
     let settings = directory.settings().map_err(CovenError::from)?;
-    let storage = match &builder.storage {
-        Some(storage) => {
-            if storage.config() != data.location {
-                return Err(SyncError::from(StorageFailure::InvitationMismatch).into());
-            }
-            if let StorageCredentials::OAuth(tokens) = &data.credentials {
-                storage
-                    .set_oauth_tokens(tokens.clone())
-                    .await
-                    .map_err(SyncError::from)?;
-            }
-            storage.clone()
-        }
-        None => {
-            let connector = builder.connector.get_or_insert_with(|| {
-                Arc::new(coven_storage::providers::ProviderConnector::new(
-                    builder.clock.clone(),
-                    builder.ids.clone(),
-                    builder.cloudkit.clone(),
-                ))
-            });
-            connector
-                .connect(
-                    data.location.clone(),
-                    data.credentials.clone(),
-                    settings.device_id,
-                )
-                .await
-                .map_err(SyncError::from)?
-        }
-    };
+    let storage = builder
+        .connector()
+        .connect(
+            data.location.clone(),
+            data.credentials.clone(),
+            settings.device_id,
+        )
+        .await
+        .map_err(SyncError::from)?;
     let ring: Arc<dyn StoreKeyCustody> = Arc::new(InMemoryCustody::<StoreKeyring>::empty());
     let identity: Arc<dyn MemberKeyCustody> = Arc::new(InMemoryCustody::new(member.clone()));
-    builder.storage = Some(storage.clone());
     let database = builder.database(directory.clone())?.open().await?;
     let mut sync = StoreLogSync::new(
         storage.clone(),
@@ -409,7 +396,9 @@ async fn prepare_and_load(
         )))
     });
     match result {
-        Ok(Some((code, credentials, ring))) => Ok(Some((code, credentials, ring, database))),
+        Ok(Some((code, credentials, ring))) => {
+            Ok(Some((code, credentials, ring, database, storage)))
+        }
         result => {
             let closed = database
                 .close()

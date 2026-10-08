@@ -131,6 +131,9 @@ struct HeldRequest {
 /// it leaves the owner and other recipients untouched. Clones share their account's
 /// tokens, and replacement tokens govern subsequent calls on the same adapter.
 /// S3 console keys are outside this account-sharing model.
+/// Implements [`crate::providers::StorageConnector`] so application tests can
+/// exercise saved settings and credential custody through the `test-utils`
+/// builder's connector hook.
 #[derive(Clone)]
 pub struct MemoryStorage {
     config: StorageConfig,

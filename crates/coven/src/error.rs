@@ -21,6 +21,17 @@ pub enum StoreDeletionError {
     File(#[from] FileError),
 }
 
+/// Opening a read-only store or its saved file-storage connection failed.
+#[derive(Debug, thiserror::Error)]
+pub enum ReadOnlyOpenError {
+    /// The database or store directory could not be opened.
+    #[error(transparent)]
+    Local(#[from] crate::CovenError),
+    /// Saved settings, credential custody or provider construction failed.
+    #[error(transparent)]
+    Storage(#[from] crate::SyncError),
+}
+
 /// Explicit damaged-database recovery failed. The source archive is retained
 /// after replacement begins, and ordinary opens refuse an unfinished reload.
 #[derive(Debug, thiserror::Error)]

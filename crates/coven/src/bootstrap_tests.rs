@@ -430,10 +430,6 @@ async fn restore_codes_track_s3_keys_in_synced_custody() {
             .unwrap(),
         after.as_str()
     );
-    assert_eq!(
-        owner.storage.s3_access_key_id().await.as_deref(),
-        Some("replacement")
-    );
     assert_ne!(before, after.as_str());
     assert_eq!(handle.restore_code().await.unwrap(), after.as_str());
     assert_eq!(
@@ -758,10 +754,6 @@ async fn failed_access_publication_retains_credentials_and_retry_finishes_once()
         Err(SyncError::Storage(_))
     ));
     let retained = handle.restore_code().await.unwrap();
-    assert_eq!(
-        owner.storage.s3_access_key_id().await.as_deref(),
-        Some("replacement")
-    );
     assert_eq!(
         keychain_code(&install.keychain)
             .unwrap()

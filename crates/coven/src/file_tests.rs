@@ -385,8 +385,11 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         .unwrap();
     let storage = Arc::new(
         coven_storage::test_utils::MemoryStorage::new(
-            StorageConfig::Dropbox {
-                namespace_id: "uploaded".into(),
+            StorageConfig::S3 {
+                bucket: "files".into(),
+                region: "test".into(),
+                endpoint: None,
+                prefix: "uploaded".into(),
             },
             Arc::new(SystemClock),
         )
@@ -395,10 +398,32 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         .unwrap(),
     );
     let handle = builder(&app, layout.clone(), ids.clone())
-        .storage(storage.clone())
+        .storage_connector(storage.clone())
         .open(directory.id())
         .await
         .unwrap();
+    handle.initialize_identity().unwrap();
+    use coven_storage::Storage;
+    handle
+        .setup_s3_storage(
+            storage.config(),
+            "Laptop",
+            "owner".into(),
+            SecretText::new("secret".into()),
+        )
+        .await
+        .unwrap();
+    let mut status = handle.subscribe_sync_status();
+    status
+        .wait_for(|s| matches!(s, SyncStatus::Synced { .. }))
+        .await
+        .unwrap();
+    handle.stop_sync();
+    status
+        .wait_for(|s| matches!(s, SyncStatus::Stopped))
+        .await
+        .unwrap();
+    handle.unlock_store_key().await.unwrap();
     handle.set_uploads_paused(true);
     let note = ids.new_id().to_string();
     let thumbnail = ids.new_id().to_string();
@@ -481,14 +506,39 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
             .unwrap(),
         file
     );
+    let wrong_location = Arc::new(
+        coven_storage::test_utils::MemoryStorage::new(
+            StorageConfig::S3 {
+                bucket: "other".into(),
+                region: "test".into(),
+                endpoint: None,
+                prefix: "uploaded".into(),
+            },
+            Arc::new(SystemClock),
+        )
+        .unwrap(),
+    );
+    assert!(matches!(
+        builder(&app, layout.clone(), ids.clone())
+            .storage_connector(wrong_location)
+            .open_read_only(directory.id())
+            .await,
+        Err(ReadOnlyOpenError::Storage(SyncError::Storage(error)))
+            if error.failure() == StorageFailure::InvalidConfiguration
+    ));
     let readonly = builder(&app, layout.clone(), ids)
-        .storage(storage)
+        .storage_connector(storage.clone())
         .open_read_only(directory.id())
         .await
         .unwrap();
+    handle.evict_file(&file).await.unwrap();
+    let reads = storage.reads().await.len();
     let stream = readonly.open_file_stream(&file).await.unwrap();
     assert_eq!(stream.read_at(1234, 37).await.unwrap(), vec![42; 37]);
-    handle.evict_file(&file).await.unwrap();
+    assert!(
+        storage.reads().await.len() > reads,
+        "uncached read-only ranges reach saved storage"
+    );
     assert_eq!(pins.next().await.unwrap(), vec![None, Some(false)]);
     assert_eq!(
         handle

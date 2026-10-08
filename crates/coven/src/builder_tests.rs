@@ -1,8 +1,8 @@
 use crate::*;
 use coven_crypto::custody::{InMemoryCustody, StoreKeyCustody};
 use coven_database::DatabaseBuilder;
-use coven_format::store_log::{MemberPublicKeys, StoreChange};
-use coven_storage::test_utils::MemoryStorage;
+use coven_format::store_log::StoreChange;
+use coven_storage::{test_utils::MemoryStorage, Storage};
 use coven_sync::StoreLogSync;
 use std::sync::Arc;
 use std::{future::Future, task::Poll, time::UNIX_EPOCH};
@@ -52,43 +52,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     );
     let member = MemberKeys::generate().unwrap();
     let identity = Arc::new(InMemoryCustody::new(member.clone()));
-    let store_key = KeyId(ids.new_id());
-    let keys = Arc::new(InMemoryCustody::new(StoreKeyring::new(
-        StoreKey::generate(store_key).unwrap(),
-    )));
-    let db = DatabaseBuilder::new(directory.clone())
-        .synced_tables(tables())
-        .migrations(migrations())
-        .clock(clock.clone())
-        .open()
-        .await
-        .unwrap();
-    let mut sync = StoreLogSync::new(
-        storage.clone(),
-        db.clone(),
-        keys.clone(),
-        identity.clone(),
-        clock.clone(),
-        ids.clone(),
-        directory.clone(),
-    );
-    sync.make_and_upload_entry(StoreChange::CreateStore {
-        store: directory.id(),
-        name: "Household".into(),
-        admin: MemberPublicKeys {
-            signing: member.member_id(),
-            sealing: member.sealing_public_key(),
-        },
-        access: coven_format::MemberAccess::S3AccessKey {
-            access_key_id: "owner-key".into(),
-        },
-        device_name: "Owner".into(),
-        key: store_key,
-    })
-    .await
-    .unwrap();
-    db.close().await.unwrap();
-    drop(sync);
+    let keys = Arc::new(InMemoryCustody::<StoreKeyring>::empty());
     let open = || {
         app.builder(layout.clone())
             .synced_tables(tables())
@@ -96,7 +60,19 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
             .key_custody(KeyCustody::Custom(keys.clone()))
             .identity_custody(IdentityCustody::Custom(identity.clone()))
             .clock(clock.clone())
+            .storage_connector(storage.clone())
     };
+    let handle = open().open(directory.id()).await.unwrap();
+    handle
+        .setup_s3_storage(
+            storage.config(),
+            "Owner",
+            "owner-key".into(),
+            SecretText::new("secret".into()),
+        )
+        .await
+        .unwrap();
+    handle.close().await.unwrap();
     let handle = open().open(directory.id()).await.unwrap();
     handle.set_uploads_paused(true);
     handle
@@ -129,11 +105,8 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     handle.get_members().await.unwrap(); // The preceding call's intent has committed.
     drop(waiting);
     handle.close().await.unwrap();
-    let handle = open()
-        .storage(storage.clone())
-        .open(directory.id())
-        .await
-        .unwrap();
+    let handle = open().open(directory.id()).await.unwrap();
+    handle.unlock_store_key().await.unwrap();
     let mut uploads = handle.subscribe_uploads();
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         loop {
@@ -252,10 +225,10 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     db.close().await.unwrap();
     let handle = open()
         .migrations(updated())
-        .storage(storage)
         .open(directory.id())
         .await
         .unwrap();
+    handle.unlock_store_key().await.unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(20), handle.get_members())
         .await
         .unwrap()
@@ -272,13 +245,181 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
 
 mod recovery {
     use super::*;
-    use coven_storage::Storage;
 
     fn recovery_tables() -> Vec<SyncedTable> {
         vec![SyncedTable::new("notes", RowIdentity::SharedKey)]
     }
     fn recovery_migrations() -> Vec<Migration> {
         vec![Migration::sql(1, "notes", "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL); CREATE TABLE scratch(value TEXT)")]
+    }
+
+    #[tokio::test]
+    async fn recovery_reconnects_from_setup_credentials() {
+        for config in [
+            StorageConfig::S3 {
+                bucket: "test".into(),
+                region: "us-east-1".into(),
+                endpoint: None,
+                prefix: "recovery".into(),
+            },
+            StorageConfig::Dropbox {
+                namespace_id: "recovery".into(),
+            },
+            StorageConfig::CloudKit {
+                container: "test".into(),
+                owner: "owner".into(),
+                zone: "recovery".into(),
+            },
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let layout = StoreLayout::new(root.path().into());
+            let app = TestCoven::new();
+            let directory = app
+                .create_store(&layout, "Recovery", Arc::new(UuidIds))
+                .await
+                .unwrap();
+            let clock = Arc::new(FixedClock::new(UNIX_EPOCH));
+            let sign_in = crate::authentication::SignIn::new(clock.clone()).await;
+            let storage = Arc::new(
+                MemoryStorage::new(config.clone(), clock.clone())
+                    .unwrap()
+                    .with_transfer_limits(65536, 65536)
+                    .unwrap(),
+            );
+            let builder = || {
+                sign_in.configure(
+                    app.builder(layout.clone())
+                        .synced_tables(recovery_tables())
+                        .migrations(recovery_migrations())
+                        .clock(clock.clone())
+                        .storage_connector(storage.clone()),
+                )
+            };
+            let handle = builder().open(directory.id()).await.unwrap();
+            handle.initialize_identity().unwrap();
+            match config.provider() {
+                CloudProvider::S3 => handle
+                    .setup_s3_storage(
+                        config.clone(),
+                        "Original",
+                        "owner".into(),
+                        SecretText::new("secret".into()),
+                    )
+                    .await
+                    .unwrap(),
+                CloudProvider::CloudKit => handle
+                    .setup_cloudkit_storage(config.clone(), "Original")
+                    .await
+                    .unwrap(),
+                provider => {
+                    handle.authenticate(provider).await.unwrap();
+                    handle
+                        .setup_oauth_storage(config.clone(), "Original")
+                        .await
+                        .unwrap()
+                }
+            };
+            let mut status = handle.subscribe_sync_status();
+            handle.stop_sync();
+            status
+                .wait_for(|s| matches!(s, SyncStatus::Stopped))
+                .await
+                .unwrap();
+            handle
+                .write(|sql| {
+                    sql.execute("INSERT INTO notes VALUES('saved','from storage')", [])?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            handle.start_sync().await.unwrap();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            handle.close().await.unwrap();
+            let damaged = b"damaged SQLite";
+            std::fs::write(directory.database_path(), damaged).unwrap();
+            clock.set(UNIX_EPOCH + std::time::Duration::from_secs(3600));
+            let scoped = coven_crypto::custody::StoreKeychain::new(
+                builder().keychain().unwrap(),
+                directory.id(),
+            );
+            let credentials = scoped.storage_credentials().unwrap().unwrap();
+            scoped
+                .set_storage_credentials(&SecretBytes::new(b"malformed credentials".to_vec()))
+                .unwrap();
+            assert!(matches!(
+                builder()
+                    .open_reloading(directory.id(), "Ana’s recovered laptop")
+                    .await,
+                Err(RecoveryError::Sync(SyncError::Storage(error)))
+                    if error.failure() == StorageFailure::Encoding
+            ));
+            assert_eq!(std::fs::read(directory.database_path()).unwrap(), damaged);
+            scoped.set_storage_credentials(&credentials).unwrap();
+            storage.set_online(false);
+            let error = builder()
+                .open_reloading(directory.id(), "Ana’s recovered laptop")
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(
+                    &error,
+                    RecoveryError::Sync(SyncError::Storage(error)) if error.failure() == StorageFailure::Network
+                ),
+                "{error:?}"
+            );
+            assert_eq!(std::fs::read(directory.database_path()).unwrap(), damaged);
+            storage.set_online(true);
+            let recovered = builder()
+                .open_reloading(directory.id(), "Ana’s recovered laptop")
+                .await
+                .unwrap();
+            let title: String = recovered
+                .read(|sql| {
+                    Ok(
+                        sql.query_row("SELECT title FROM notes WHERE id='saved'", [], |row| {
+                            row.get(0)
+                        })?,
+                    )
+                })
+                .await
+                .unwrap();
+            assert_eq!(title, "from storage");
+            if config.provider() == CloudProvider::Dropbox {
+                assert_eq!(
+                    sign_in.presentation_count(),
+                    1,
+                    "recovery never opens sign-in UI"
+                );
+                assert_eq!(
+                    sign_in.request_count(),
+                    2,
+                    "recovery refreshes the saved token once"
+                );
+            }
+            assert!(matches!(
+                *recovered.subscribe_sync_status().borrow(),
+                SyncStatus::Stopped
+            ));
+            recovered.close().await.unwrap();
+            let database = DatabaseBuilder::new(directory.clone())
+                .synced_tables(recovery_tables())
+                .migrations(recovery_migrations())
+                .open()
+                .await
+                .unwrap();
+            let local = database.local_store_log().await.unwrap();
+            assert_eq!(
+                local.log.replay.state.devices[&local.device].name,
+                "Ana’s recovered laptop"
+            );
+            database.close().await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -305,12 +446,28 @@ mod recovery {
                 )
                 .unwrap(),
             );
-            let member = MemberKeys::generate().unwrap();
-            let identity = Arc::new(InMemoryCustody::new(member.clone()));
-            let key = KeyId(ids.new_id());
-            let keys = Arc::new(InMemoryCustody::new(StoreKeyring::new(
-                StoreKey::generate(key).unwrap(),
-            )));
+            let identity = Arc::new(InMemoryCustody::new(MemberKeys::generate().unwrap()));
+            let keys = Arc::new(InMemoryCustody::<StoreKeyring>::empty());
+            let builder = || {
+                app.builder(layout.clone())
+                    .synced_tables(recovery_tables())
+                    .migrations(recovery_migrations())
+                    .clock(clock.clone())
+                    .key_custody(KeyCustody::Custom(keys.clone()))
+                    .identity_custody(IdentityCustody::Custom(identity.clone()))
+                    .storage_connector(storage.clone())
+            };
+            let handle = builder().open(directory.id()).await.unwrap();
+            handle
+                .setup_s3_storage(
+                    storage.config(),
+                    "Original",
+                    "owner".into(),
+                    SecretText::new("secret".into()),
+                )
+                .await
+                .unwrap();
+            handle.close().await.unwrap();
             let db = DatabaseBuilder::new(directory.clone())
                 .synced_tables(recovery_tables())
                 .migrations(recovery_migrations())
@@ -327,21 +484,6 @@ mod recovery {
                 ids.clone(),
                 directory.clone(),
             );
-            sync.make_and_upload_entry(StoreChange::CreateStore {
-                store: directory.id(),
-                name: "Recovery".into(),
-                admin: MemberPublicKeys {
-                    signing: member.member_id(),
-                    sealing: member.sealing_public_key(),
-                },
-                access: coven_format::MemberAccess::S3AccessKey {
-                    access_key_id: "owner".into(),
-                },
-                key,
-                device_name: "Original".into(),
-            })
-            .await
-            .unwrap();
             db.write(|sql| {
                 sql.execute("INSERT INTO notes VALUES('saved','snapshot')", [])?;
                 Ok(())
@@ -429,29 +571,25 @@ mod recovery {
                 damaged[..16].fill(0xff);
             }
             std::fs::write(&path, &damaged).unwrap();
-            let builder = || {
-                app.builder(layout.clone())
-                    .synced_tables(recovery_tables())
-                    .migrations(recovery_migrations())
-                    .clock(clock.clone())
-                    .key_custody(KeyCustody::Custom(keys.clone()))
-                    .identity_custody(IdentityCustody::Custom(identity.clone()))
-            };
             assert!(matches!(
                 builder().open(directory.id()).await,
                 Err(CovenError::Database(DbError::DamagedDatabase))
             ));
+            let settings = coven_storage::StorageSettings::new(directory.clone());
+            settings.remove().unwrap();
             assert!(matches!(
-                builder().open_reloading(directory.id()).await,
+                builder()
+                    .open_reloading(directory.id(), "Ana’s recovered laptop")
+                    .await,
                 Err(RecoveryError::Sync(SyncError::NoStorage))
             ));
             assert_eq!(std::fs::read(&path).unwrap(), damaged);
+            settings.commit(&storage.config()).unwrap();
             let ring = keys.unlock().unwrap().unwrap();
             keys.forget().unwrap();
             assert!(matches!(
                 builder()
-                    .storage(storage.clone())
-                    .open_reloading(directory.id())
+                    .open_reloading(directory.id(), "Ana’s recovered laptop")
                     .await,
                 Err(RecoveryError::NoStoreKeys)
             ));
@@ -478,8 +616,7 @@ mod recovery {
                     .unwrap();
                 storage.delete(&write).await.unwrap();
                 assert!(builder()
-                    .storage(storage.clone())
-                    .open_reloading(directory.id())
+                    .open_reloading(directory.id(), "Ana’s recovered laptop")
                     .await
                     .is_err());
                 assert!(matches!(
@@ -488,7 +625,9 @@ mod recovery {
                 ));
                 assert!(matches!(
                     builder().open_read_only(directory.id()).await,
-                    Err(CovenError::Lock(StoreLockError::RecoveryPending(_)))
+                    Err(ReadOnlyOpenError::Local(CovenError::Lock(
+                        StoreLockError::RecoveryPending(_)
+                    )))
                 ));
                 storage.delete(&snapshot).await.unwrap();
                 storage
@@ -498,8 +637,7 @@ mod recovery {
                 storage.create_once(&write, &write_bytes).await.unwrap();
             }
             let recovered = builder()
-                .storage(storage.clone())
-                .open_reloading(directory.id())
+                .open_reloading(directory.id(), "Ana’s recovered laptop")
                 .await
                 .unwrap();
             let rows = recovered
