@@ -138,6 +138,20 @@ impl Database {
             .await
     }
 
+    /// Read one committed journal row without loading unrelated operation data.
+    /// Absence means the operation has finished or never existed.
+    pub async fn operation(&self, id: OperationId) -> Result<Option<OperationRecord>, DbError> {
+        self.call(move |inner| inner.with_writer(|writer| crate::operation::find(writer, id)))
+            .await
+    }
+
+    /// Read the earliest unfinished row of a sync-owned kind, including failures.
+    pub async fn first_operation(&self, kind: &str) -> Result<Option<OperationRecord>, DbError> {
+        let kind = kind.to_owned();
+        self.call(move |inner| inner.with_writer(|writer| crate::operation::first(writer, &kind)))
+            .await
+    }
+
     /// Commit the operation before its first step.
     pub async fn start_operation(&self, operation: NewOperation) -> Result<OperationId, DbError> {
         self.call(move |inner| {

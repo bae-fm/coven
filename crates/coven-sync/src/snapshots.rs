@@ -226,18 +226,11 @@ impl StoreLogSync {
     }
 
     pub(crate) async fn pending_reload(&self) -> Result<Option<crate::OperationId>, SyncError> {
-        for record in self.database.operations().await? {
-            if matches!(
-                Data::read(&record)?,
-                Data::Snapshots(SnapshotTask {
-                    job: SnapshotJob::Reload { .. },
-                    ..
-                })
-            ) {
-                return Ok(Some(record.id));
-            }
-        }
-        Ok(None)
+        self.database
+            .first_operation(crate::OperationKind::ReloadSnapshots.name())
+            .await?
+            .map(|record| Data::read(&record).map(|_| record.id))
+            .transpose()
     }
 
     pub(super) async fn discard_snapshot(
@@ -261,10 +254,8 @@ impl StoreLogSync {
 
     async fn snapshot_record(&self, id: crate::OperationId) -> Result<OperationRecord, SyncError> {
         self.database
-            .operations()
+            .operation(id)
             .await?
-            .into_iter()
-            .find(|r| r.id == id)
             .ok_or_else(|| coven_database::DbError::OperationChanged(id).into())
     }
 
@@ -294,187 +285,251 @@ impl StoreLogSync {
         damages: &mut Vec<DamagedObject>,
     ) -> Result<Progress, SyncError> {
         let _reads = self.reads.enter();
-        match task.job.clone() {
-            SnapshotJob::Write {
-                audience,
-                device,
-                trigger,
-                session,
-            } => {
-                if !matches!(trigger, SnapshotTrigger::Raise { .. }) {
-                    if let Some(id) = self.pending_reload().await? {
-                        return Err(SyncError::ReloadPending(id));
-                    }
-                }
-                let local = self.database.local_store_log().await?;
-                let member = self.operation_member()?;
-                self.check_stopped(&local, &member)?;
-                if matches!(trigger, SnapshotTrigger::Reset) {
-                    self.require_reset(&local.log.replay.state, &audience, &member.member_id())?;
-                }
-                let id = SnapshotId {
-                    audience: audience.clone(),
-                    device,
-                    number: record
-                        .id
-                        .0
-                        .try_into()
-                        .map_err(|_| coven_database::DbError::DamagedDatabase)?,
-                };
-                let path = snapshot_path(&id)?;
-                if let SnapshotTrigger::Raise { version, ref entry } = trigger {
-                    if entry.is_none()
-                        && super::schema_sync::schema_in_place(
-                            &local.log.replay.state,
-                            &audience,
-                            version,
-                        )
-                    {
-                        self.discard_snapshot(record, task).await?;
-                        self.database.finish_operation(record.id).await?;
-                        return Ok(Progress::Finished(Output::Unit));
-                    }
-                    if record.last_step >= 2 {
-                        return self.raise_snapshot_step(record, task, version, id).await;
-                    }
-                }
-                match record.last_step {
-                    0 => {
-                        self.clear_snapshot_files(record, &mut task).await?;
-                        if matches!(trigger, SnapshotTrigger::Growth) {
-                            let candidates = self
-                                .current_snapshot_candidates(&audience, &local.log, damages)
-                                .await?;
-                            let (positions, threshold) = match candidates.candidates.first() {
-                                Some(latest) => (
-                                    latest.prefix.writes.clone(),
-                                    crate::write_object::checked(
-                                        &latest.object.path,
-                                        latest.prefix.plaintext_length(latest.object.size),
-                                    )?,
-                                ),
-                                None => (WritePositions(Vec::new()), 1024 * 1024),
-                            };
-                            let state = self.database.sync_state(Vec::new()).await?;
-                            let waiting = self.database.waiting_snapshot_headers().await?;
-                            let waiting_ids: std::collections::BTreeSet<_> =
-                                waiting.iter().map(|h| h.header.position).collect();
-                            let mut bytes: u128 = waiting
-                                .iter()
-                                .filter(|h| !positions.covers(h.header.position))
-                                .flat_map(|h| &h.parts)
-                                .filter(|p| p.audience == audience)
-                                .map(|p| u128::from(p.plaintext_length))
-                                .sum();
-                            for object in self
-                                .storage
-                                .as_deref()
-                                .ok_or(SyncError::NoStorage)?
-                                .list(&ObjectPrefix::device_logs())
-                                .await?
-                            {
-                                let write = object.path.write_id().ok_or_else(|| {
-                                    catalog::inconsistent("device listing has another path layout")
-                                })?;
-                                if positions.covers(write)
-                                    || !state.positions.covers(write)
-                                    || waiting_ids.contains(&write)
-                                {
-                                    continue;
-                                }
-                                let header = self.open_write_header(&object).await?;
-                                bytes += header
-                                    .parts
-                                    .iter()
-                                    .filter(|p| p.audience == audience)
-                                    .map(|p| u128::from(p.plaintext_length))
-                                    .sum::<u128>();
-                            }
-                            if bytes <= u128::from(threshold) {
-                                self.database.finish_operation(record.id).await?;
-                                return Ok(Progress::Finished(Output::Unit));
-                            }
-                        }
-                        let current = self.snapshot_audiences(&local.log)?;
-                        let key_id = *current.get(&audience).ok_or(SyncError::PermissionDenied)?;
-                        let ring = self
-                            .store_keys
-                            .unlock()?
-                            .ok_or(SyncError::KeyUnavailable(key_id))?;
-                        let key = io::key(&ring, &audience, key_id)?;
-                        let name = self
-                            .reserve_snapshot_files(record, &mut task, 1)
-                            .await?
-                            .remove(0);
-                        self.seal_snapshot(id, key_id, key, &member, &path, &name)
-                            .await?;
-                        self.save_snapshot_task(record, &task, 1).await?;
-                    }
-                    1 => {
-                        let name = task
-                            .temporary
-                            .first()
-                            .ok_or(coven_database::DbError::DamagedDatabase)?;
-                        let input = io::SnapshotInput::open(&self.directory, name)?;
-                        let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
-                        if storage
-                            .list(&ObjectPrefix::audience_snapshots(&audience))
-                            .await?
-                            .iter()
-                            .any(|o| o.path == path)
-                        {
-                            if let Some(session) = &session {
-                                storage.abort_upload(session).await?;
-                            }
-                        } else {
-                            crate::recorded_upload::upload(
-                                storage,
-                                &path,
-                                input.size(),
-                                session,
-                                &mut SnapshotTransfer {
-                                    sync: self,
-                                    record,
-                                    task: &mut task,
-                                    input: &input,
-                                },
-                            )
-                            .await?;
-                        }
-                        self.save_snapshot_task(record, &task, 2).await?;
-                    }
-                    2 => {
-                        if matches!(trigger, SnapshotTrigger::Reset) {
-                            self.clear_snapshot_files(record, &mut task).await?;
-                            let data = Data::Entry(crate::operation_data::EntryWork {
-                                intent: crate::operation_data::Intent::Reset { snapshot: id },
-                                entry: None,
-                                removal: None,
-                            });
-                            self.database
-                                .advance_operation(data.update(record, 3)?)
-                                .await?;
-                            return Ok(Progress::Advanced);
-                        }
-                        self.retain_snapshot_objects(damages).await?;
-                        self.clear_snapshot_files(record, &mut task).await?;
-                        self.database.finish_operation(record.id).await?;
-                        return Ok(Progress::Finished(Output::Unit));
-                    }
-                    _ => return Err(coven_database::DbError::DamagedDatabase.into()),
-                }
-            }
-            SnapshotJob::Reload { .. } => {
-                return self.reload_snapshot_step(record, task, damages).await
-            }
+        match &task.job {
+            SnapshotJob::Write { .. } => self.write_snapshot_step(record, task, damages).await,
+            SnapshotJob::Reload { .. } => self.reload_snapshot_step(record, task, damages).await,
             SnapshotJob::Retain => {
                 self.clear_snapshot_files(record, &mut task).await?;
                 self.retain_snapshot_objects(damages).await?;
                 self.database.finish_operation(record.id).await?;
-                return Ok(Progress::Finished(Output::Unit));
+                Ok(Progress::Finished(Output::Unit))
             }
         }
+    }
+
+    async fn write_snapshot_step(
+        &mut self,
+        record: &OperationRecord,
+        task: SnapshotTask,
+        damages: &mut Vec<DamagedObject>,
+    ) -> Result<Progress, SyncError> {
+        let SnapshotJob::Write {
+            audience,
+            device,
+            trigger,
+            ..
+        } = task.job.clone()
+        else {
+            unreachable!("snapshot writing step")
+        };
+        if !matches!(trigger, SnapshotTrigger::Raise { .. }) {
+            if let Some(id) = self.pending_reload().await? {
+                return Err(SyncError::ReloadPending(id));
+            }
+        }
+        let local = self.database.local_store_log().await?;
+        let member = self.operation_member()?;
+        self.check_stopped(&local, &member)?;
+        if matches!(trigger, SnapshotTrigger::Reset) {
+            self.require_reset(&local.log.replay.state, &audience, &member.member_id())?;
+        }
+        let id = SnapshotId {
+            audience: audience.clone(),
+            device,
+            number: record
+                .id
+                .0
+                .try_into()
+                .map_err(|_| coven_database::DbError::DamagedDatabase)?,
+        };
+        let path = snapshot_path(&id)?;
+        if let SnapshotTrigger::Raise { version, ref entry } = trigger {
+            if entry.is_none()
+                && super::schema_sync::schema_in_place(&local.log.replay.state, &audience, version)
+            {
+                self.discard_snapshot(record, task).await?;
+                self.database.finish_operation(record.id).await?;
+                return Ok(Progress::Finished(Output::Unit));
+            }
+            if record.last_step >= 2 {
+                return self.raise_snapshot_step(record, task, version, id).await;
+            }
+        }
+        match record.last_step {
+            0 => {
+                self.prepare_snapshot(record, task, &path, &local.log, &member, damages)
+                    .await
+            }
+            1 => self.upload_snapshot(record, task, &path).await,
+            2 => self.finish_snapshot(record, task, id, damages).await,
+            _ => Err(coven_database::DbError::DamagedDatabase.into()),
+        }
+    }
+
+    async fn prepare_snapshot(
+        &self,
+        record: &OperationRecord,
+        mut task: SnapshotTask,
+        path: &ObjectPath,
+        log: &StoreLog,
+        member: &coven_crypto::MemberKeys,
+        damages: &mut Vec<DamagedObject>,
+    ) -> Result<Progress, SyncError> {
+        let id = path.snapshot_id().expect("snapshot path");
+        self.clear_snapshot_files(record, &mut task).await?;
+        if matches!(
+            task.job,
+            SnapshotJob::Write {
+                trigger: SnapshotTrigger::Growth,
+                ..
+            }
+        ) && !self.snapshot_grew(&id.audience, log, damages).await?
+        {
+            self.database.finish_operation(record.id).await?;
+            return Ok(Progress::Finished(Output::Unit));
+        }
+        let current = self.snapshot_audiences(log)?;
+        let key_id = *current
+            .get(&id.audience)
+            .ok_or(SyncError::PermissionDenied)?;
+        let ring = self
+            .store_keys
+            .unlock()?
+            .ok_or(SyncError::KeyUnavailable(key_id))?;
+        let key = io::key(&ring, &id.audience, key_id)?;
+        let name = self
+            .reserve_snapshot_files(record, &mut task, 1)
+            .await?
+            .remove(0);
+        self.seal_snapshot(id, key_id, key, member, path, &name)
+            .await?;
+        self.save_snapshot_task(record, &task, 1).await?;
         Ok(Progress::Advanced)
+    }
+
+    async fn snapshot_grew(
+        &self,
+        audience: &Audience,
+        log: &StoreLog,
+        damages: &mut Vec<DamagedObject>,
+    ) -> Result<bool, SyncError> {
+        let candidates = self
+            .current_snapshot_candidates(audience, log, damages)
+            .await?;
+        let (positions, threshold) = match candidates.candidates.first() {
+            Some(latest) => (
+                latest.prefix.writes.clone(),
+                crate::write_object::checked(
+                    &latest.object.path,
+                    latest.prefix.plaintext_length(latest.object.size),
+                )?,
+            ),
+            None => (WritePositions(Vec::new()), 1024 * 1024),
+        };
+        let state = self.database.sync_state(Vec::new()).await?;
+        let waiting = self.database.waiting_snapshot_headers().await?;
+        let waiting_ids: std::collections::BTreeSet<_> =
+            waiting.iter().map(|h| h.header.position).collect();
+        let mut bytes: u128 = waiting
+            .iter()
+            .filter(|h| !positions.covers(h.header.position))
+            .flat_map(|h| &h.parts)
+            .filter(|p| &p.audience == audience)
+            .map(|p| u128::from(p.plaintext_length))
+            .sum();
+        for object in self
+            .storage
+            .as_deref()
+            .ok_or(SyncError::NoStorage)?
+            .list(&ObjectPrefix::device_logs())
+            .await?
+        {
+            let write = object
+                .path
+                .write_id()
+                .ok_or_else(|| catalog::inconsistent("device listing has another path layout"))?;
+            if positions.covers(write)
+                || !state.positions.covers(write)
+                || waiting_ids.contains(&write)
+            {
+                continue;
+            }
+            let header = self.open_write_header(&object).await?;
+            bytes += header
+                .parts
+                .iter()
+                .filter(|p| &p.audience == audience)
+                .map(|p| u128::from(p.plaintext_length))
+                .sum::<u128>();
+        }
+        Ok(bytes > u128::from(threshold))
+    }
+
+    async fn upload_snapshot(
+        &self,
+        record: &OperationRecord,
+        mut task: SnapshotTask,
+        path: &ObjectPath,
+    ) -> Result<Progress, SyncError> {
+        let SnapshotJob::Write {
+            audience, session, ..
+        } = task.job.clone()
+        else {
+            unreachable!("snapshot upload step")
+        };
+        let name = task
+            .temporary
+            .first()
+            .ok_or(coven_database::DbError::DamagedDatabase)?;
+        let input = io::SnapshotInput::open(&self.directory, name)?;
+        let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
+        if storage
+            .list(&ObjectPrefix::audience_snapshots(&audience))
+            .await?
+            .iter()
+            .any(|o| &o.path == path)
+        {
+            if let Some(session) = &session {
+                storage.abort_upload(session).await?;
+            }
+        } else {
+            crate::recorded_upload::upload(
+                storage,
+                path,
+                input.size(),
+                session,
+                &mut SnapshotTransfer {
+                    sync: self,
+                    record,
+                    task: &mut task,
+                    input: &input,
+                },
+            )
+            .await?;
+        }
+        self.save_snapshot_task(record, &task, 2).await?;
+        Ok(Progress::Advanced)
+    }
+
+    async fn finish_snapshot(
+        &self,
+        record: &OperationRecord,
+        mut task: SnapshotTask,
+        id: SnapshotId,
+        damages: &mut Vec<DamagedObject>,
+    ) -> Result<Progress, SyncError> {
+        if matches!(
+            task.job,
+            SnapshotJob::Write {
+                trigger: SnapshotTrigger::Reset,
+                ..
+            }
+        ) {
+            self.clear_snapshot_files(record, &mut task).await?;
+            let data = Data::Entry(crate::operation_data::EntryWork {
+                intent: crate::operation_data::Intent::Reset { snapshot: id },
+                entry: None,
+                removal: None,
+            });
+            self.database
+                .advance_operation(data.update(record, 3)?)
+                .await?;
+            return Ok(Progress::Advanced);
+        }
+        self.retain_snapshot_objects(damages).await?;
+        self.clear_snapshot_files(record, &mut task).await?;
+        self.database.finish_operation(record.id).await?;
+        Ok(Progress::Finished(Output::Unit))
     }
 
     pub(super) fn snapshot_audiences(

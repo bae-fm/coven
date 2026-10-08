@@ -548,7 +548,9 @@ impl OperationRun {
                 .into_iter()
                 .map(|record| Ok((crate::operation_data::Data::read(&record)?, record)))
                 .collect::<Result<Vec<_>, SyncError>>()?;
-            let reloading = self.sync.pending_reload().await?.is_some();
+            let reloading = records
+                .iter()
+                .any(|(data, _)| data.kind() == OperationKind::ReloadSnapshots);
             let mut advanced = false;
             let raising = records.iter().any(|(data, _)| data.raises_version());
             let mut writer = None;

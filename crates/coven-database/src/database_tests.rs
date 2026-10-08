@@ -378,3 +378,66 @@ async fn callback_panics_release_the_writer_and_reserve_nothing() {
         "callbacks poisoned the writer: {poisoned:?}"
     );
 }
+
+#[tokio::test]
+async fn journal_lookups_read_current_steps_and_keep_failed_rows_in_order() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let mut ids = Vec::new();
+    for kind in ["invite", "reload-snapshots", "reload-snapshots"] {
+        ids.push(
+            db.start_operation(crate::NewOperation {
+                kind: kind.into(),
+                data: vec![1],
+                started_by: "coven".into(),
+            })
+            .await
+            .unwrap(),
+        );
+    }
+    assert!(db.operation(crate::OperationId(0)).await.unwrap().is_none());
+    assert!(db.first_operation("retention").await.unwrap().is_none());
+    db.advance_operation(crate::OperationUpdate {
+        id: ids[1],
+        previous: 0,
+        last_step: 2,
+        data: vec![2, 3],
+    })
+    .await
+    .unwrap();
+    db.operation_failure(ids[1], Some("missing write".into()))
+        .await
+        .unwrap();
+    let first = db
+        .first_operation("reload-snapshots")
+        .await
+        .unwrap()
+        .unwrap();
+    let exact = db.operation(ids[1]).await.unwrap().unwrap();
+    for record in [first, exact] {
+        assert_eq!(record.id, ids[1]);
+        assert_eq!(record.kind, "reload-snapshots");
+        assert_eq!(record.last_step, 2);
+        assert_eq!(record.data, [2, 3]);
+        assert_eq!(record.started_by, "coven");
+        assert_eq!(record.failure.as_deref(), Some("missing write"));
+    }
+    assert_eq!(db.operation(ids[0]).await.unwrap().unwrap().data, [1]);
+    db.finish_operation(ids[1]).await.unwrap();
+    assert!(db.operation(ids[1]).await.unwrap().is_none());
+    assert_eq!(
+        db.first_operation("reload-snapshots")
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        ids[2]
+    );
+    db.finish_operation(ids[2]).await.unwrap();
+    assert!(db
+        .first_operation("reload-snapshots")
+        .await
+        .unwrap()
+        .is_none());
+    db.close().await.unwrap();
+}

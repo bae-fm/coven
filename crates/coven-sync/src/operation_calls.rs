@@ -160,12 +160,13 @@ impl StoreLogSync {
             }
             Command::Discard(id) => {
                 let record = self.blocked(id).await?;
-                if let Data::Snapshots(task) = Data::read(&record)? {
-                    self.discard_snapshot(&record, task).await?;
+                let data = Data::read(&record)?;
+                if let Data::Snapshots(task) = &data {
+                    self.discard_snapshot(&record, task.clone()).await?;
                 }
                 // Publication numbers cannot be abandoned. Publishing fixed bytes
                 // does not perform any later access or invite step.
-                if Data::read(&record)?.entry()?.is_some()
+                if data.entry()?.is_some()
                     && self.database.local_store_log().await?.upload.is_some()
                 {
                     let member = self.operation_member()?;
@@ -542,10 +543,9 @@ impl StoreLogSync {
 
     async fn blocked(&self, id: OperationId) -> Result<OperationRecord, SyncError> {
         self.database
-            .operations()
+            .operation(id)
             .await?
-            .into_iter()
-            .find(|r| r.id == id && r.failure.is_some())
+            .filter(|r| r.failure.is_some())
             .ok_or(SyncError::NotBlocked(id))
     }
 

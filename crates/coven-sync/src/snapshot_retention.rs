@@ -27,12 +27,13 @@ impl StoreLogSync {
         let mut superseded = Vec::new();
         let mut pinned = BTreeSet::new();
         for pending in self.database.operations().await? {
+            let data = crate::operation_data::Data::read(&pending)?;
             if let crate::operation_data::Data::Entry(crate::operation_data::EntryWork {
                 intent: crate::operation_data::Intent::Reset { snapshot },
                 ..
-            }) = crate::operation_data::Data::read(&pending)?
+            }) = &data
             {
-                pinned.insert(snapshot_path(&snapshot)?);
+                pinned.insert(snapshot_path(snapshot)?);
             }
             if let crate::operation_data::Data::Snapshots(crate::snapshot_data::SnapshotTask {
                 job:
@@ -40,11 +41,11 @@ impl StoreLogSync {
                         audience, device, ..
                     },
                 ..
-            }) = crate::operation_data::Data::read(&pending)?
+            }) = &data
             {
                 pinned.insert(snapshot_path(&coven_format::store_log::SnapshotId {
-                    audience,
-                    device,
+                    audience: audience.clone(),
+                    device: *device,
                     number: pending
                         .id
                         .0

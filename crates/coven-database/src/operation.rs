@@ -84,17 +84,43 @@ pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<OperationRecord>, DbEr
     db.query(
         "SELECT id,kind,last_step,data,started_by,failure FROM _coven_operations ORDER BY id",
         [],
-        |r| {
-            Ok(OperationRecord {
-                id: OperationId(r.get(0)?),
-                kind: r.get(1)?,
-                last_step: r.get(2)?,
-                data: r.get(3)?,
-                started_by: r.get(4)?,
-                failure: r.get(5)?,
-            })
-        },
+        record,
     )
+}
+
+pub(crate) fn find(
+    db: &DatabaseConnection,
+    id: OperationId,
+) -> Result<Option<OperationRecord>, DbError> {
+    Ok(db
+        .query(
+            "SELECT id,kind,last_step,data,started_by,failure FROM _coven_operations WHERE id=?1",
+            [id.0],
+            record,
+        )?
+        .pop())
+}
+
+pub(crate) fn first(
+    db: &DatabaseConnection,
+    kind: &str,
+) -> Result<Option<OperationRecord>, DbError> {
+    Ok(db.query(
+        "SELECT id,kind,last_step,data,started_by,failure FROM _coven_operations WHERE kind=?1 ORDER BY id LIMIT 1",
+        [kind],
+        record,
+    )?.pop())
+}
+
+fn record(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationRecord> {
+    Ok(OperationRecord {
+        id: OperationId(row.get(0)?),
+        kind: row.get(1)?,
+        last_step: row.get(2)?,
+        data: row.get(3)?,
+        started_by: row.get(4)?,
+        failure: row.get(5)?,
+    })
 }
 
 pub(crate) fn advance(db: &DatabaseConnection, update: &OperationUpdate) -> Result<(), DbError> {

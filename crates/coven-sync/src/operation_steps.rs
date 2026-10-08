@@ -62,10 +62,8 @@ impl StoreLogSync {
                 if let Some(id) = self.pending_reload().await? {
                     let reload = self
                         .database
-                        .operations()
+                        .operation(id)
                         .await?
-                        .into_iter()
-                        .find(|r| r.id == id)
                         .ok_or(coven_database::DbError::OperationChanged(id))?;
                     if let Some(failure) = reload.failure {
                         return Err(SyncError::RecoveryBlocked {
@@ -249,10 +247,8 @@ impl StoreLogSync {
         local = self.database.local_store_log().await?;
         let current = self
             .database
-            .operations()
+            .operation(record.id)
             .await?
-            .into_iter()
-            .find(|r| r.id == record.id)
             .ok_or(coven_database::DbError::OperationChanged(record.id))?;
         match local.log.replay.entries.get(&entry.position) {
             Some(EntryOutcome::Kept) => {
