@@ -7,7 +7,7 @@ use crate::DbError;
 use coven_format::{merge_fields, snapshot_rows::AppliedWrite, value::Value, write::WriteRecord};
 use coven_merge::{
     Audience, Cell, ColumnValue, LostKey, LostValue, MergeError, RowId, RowState, RowUpdate,
-    Timestamp, WriteId, WriteOracle,
+    Timestamp, WriteId, WriteOracle, WritePast,
 };
 use rusqlite::params;
 use std::cell::RefCell;
@@ -76,11 +76,8 @@ impl WriteOracle for WriteMetadata<'_> {
         let reader_metadata = writes
             .get(&reader)
             .ok_or(MergeError::MissingWrite(reader))?;
-        Ok(if reader.device == earlier.device {
-            earlier.number < reader.number
-        } else {
-            reader_metadata.record.had_read.covers(earlier)
-        })
+        let past = reader_metadata.record.had_read.causal_past(reader);
+        Ok(past.contains(&earlier))
     }
 }
 
@@ -313,21 +310,19 @@ impl<'a> MergeStore<'a> {
         &self,
         record: &WriteRecord,
     ) -> Result<BTreeMap<RowId, RowUpdate<Value>>, DbError> {
-        let mut past = record.header.had_read.clone();
-        if record.header.position.number > 1 {
-            past.0.push(WriteId {
-                device: record.header.position.device,
-                number: record.header.position.number - 1,
-            });
-            past.0.sort_by_key(|w| w.device);
-        }
-        for id in &past.0 {
+        let past = record.header.had_read.causal_past(record.header.position);
+        for id in past.frontier() {
             self.metadata.load(*id)?;
         }
         let write = coven_merge::Write {
             id: record.header.position,
             timestamp: record.header.timestamp,
-            had_read: past,
+            had_read: {
+                let mut positions =
+                    coven_format::value::WritePositions(past.frontier().copied().collect());
+                positions.0.sort_by_key(|id| id.device);
+                positions
+            },
             changes: record
                 .parts
                 .iter()

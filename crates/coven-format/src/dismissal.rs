@@ -3,7 +3,7 @@
 use crate::error::{require, Error, Rule};
 use crate::value::{name, positive, row};
 use crate::wire::{decode_frame, wire_struct, Wire};
-use coven_merge::{RowId, WriteId};
+use coven_merge::{RowId, WriteId, WritePast};
 
 /// One lost cell the author has dealt with. Removed rows use ordinary deletes.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -37,9 +37,10 @@ impl Dismissal {
     /// A dismissal can acknowledge only a value its author had read.
     pub fn validate_past(&self, header: &crate::write::WriteHeader) -> Result<(), Error> {
         require(
-            header.had_read.covers(self.write)
-                || (self.write.device == header.position.device
-                    && self.write.number < header.position.number),
+            header
+                .had_read
+                .causal_past(header.position)
+                .contains(&self.write),
             "dismissed write",
             Rule::Coverage,
         )

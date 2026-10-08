@@ -9,7 +9,7 @@ use crate::write_schema::WriteSchema;
 use crate::{DbError, DownloadedWriteStream, WriteWait};
 use coven_format::{merge_fields, snapshot_rows::AppliedWrite};
 use coven_foundation::id_source::{CircleId, DeviceId};
-use coven_merge::WriteId;
+use coven_merge::{WriteId, WritePast};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::time::SystemTime;
@@ -101,21 +101,12 @@ pub(crate) fn apply<R: Read>(
             Source::Deleted(write) => {
                 let positions = crate::download::positions(database)?;
                 if !positions.covers(write.id) {
-                    let mut missing: Vec<_> = write
-                        .had_read
-                        .0
-                        .into_iter()
+                    let past = write.had_read.causal_past(write.id);
+                    let missing: Vec<_> = past
+                        .frontier()
+                        .copied()
                         .filter(|id| !positions.covers(*id))
                         .collect();
-                    if write.id.number > 1 {
-                        let previous = WriteId {
-                            number: write.id.number - 1,
-                            ..write.id
-                        };
-                        if !positions.covers(previous) {
-                            missing.push(previous);
-                        }
-                    }
                     if !missing.is_empty() {
                         return Err(SnapshotError::MissingWrites { missing }.into());
                     }

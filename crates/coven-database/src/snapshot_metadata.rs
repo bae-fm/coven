@@ -5,7 +5,7 @@ use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{counter, decoded, encoded};
 use crate::DbError;
 use coven_format::{merge_fields, snapshot_rows::AppliedWrite, value::WritePositions};
-use coven_merge::{MergeError, Timestamp, WriteId, WriteOracle};
+use coven_merge::{MergeError, Timestamp, WriteId, WriteOracle, WritePast};
 use rusqlite::params;
 use std::cell::RefCell;
 
@@ -74,16 +74,10 @@ impl<'a> SnapshotMetadata<'a> {
                 let write = self
                     .read(id)?
                     .ok_or_else(|| invalid("missing applied write"))?;
-                let mut past = write.had_read.0.clone();
-                if previous > 0 {
-                    past.push(WriteId {
-                        number: previous,
-                        ..id
-                    });
-                }
-                for earlier in past {
+                let past = write.had_read.causal_past(id);
+                for earlier in past.frontier() {
                     let earlier = self
-                        .read(earlier)?
+                        .read(*earlier)?
                         .ok_or_else(|| invalid("missing causal write"))?;
                     if earlier.timestamp >= write.timestamp {
                         return Err(SnapshotError::Format(coven_format::Error::Merge(
@@ -123,10 +117,7 @@ impl WriteOracle for SnapshotMetadata<'_> {
         let write = self
             .observed(reader)
             .ok_or(MergeError::MissingWrite(reader))?;
-        Ok(if reader.device == earlier.device {
-            earlier.number < reader.number
-        } else {
-            write.had_read.covers(earlier)
-        })
+        let past = write.had_read.causal_past(reader);
+        Ok(past.contains(&earlier))
     }
 }

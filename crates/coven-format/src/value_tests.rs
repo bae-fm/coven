@@ -110,6 +110,35 @@ fn positions_are_unique_by_device_and_do_not_sort_by_number() {
     entries.validate().unwrap();
     assert_eq!(bytes(&entries), bytes(&valid));
 }
+
+#[test]
+fn causal_past_includes_own_history_without_changing_encoded_positions() {
+    use coven_merge::WritePast;
+    let id = |device, number| WriteId {
+        device: DeviceId(device),
+        number,
+    };
+    let positions = WritePositions(vec![id(1, 3), id(3, 7)]);
+    let encoded = bytes(&positions);
+    for (number, frontier) in [
+        (1, vec![id(1, 3), id(3, 7)]),
+        (2, vec![id(1, 3), id(3, 7), id(2, 1)]),
+        (u64::MAX, vec![id(1, 3), id(3, 7), id(2, u64::MAX - 1)]),
+    ] {
+        let past = positions.causal_past(id(2, number));
+        assert_eq!(past.frontier().copied().collect::<Vec<_>>(), frontier);
+        assert_eq!(past.contains(&id(2, 1)), number > 1);
+        assert!(!past.contains(&id(2, number)));
+        assert!(!past.contains(&id(2, u64::MAX)));
+        assert!(past.contains(&id(1, 2)));
+        assert!(past.contains(&id(1, 3)));
+        assert!(!past.contains(&id(1, 4)));
+        assert!(past.contains(&id(3, 7)));
+        assert!(!past.contains(&id(4, 1)));
+    }
+    assert_eq!(bytes(&positions), encoded);
+}
+
 #[test]
 fn sqlite_values_keep_their_storage_classes_outside_keys() {
     for value in [

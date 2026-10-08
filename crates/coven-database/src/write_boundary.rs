@@ -8,7 +8,7 @@ use coven_format::{
     value::WritePositions,
     write::{WriteHeader, WritePart},
 };
-use coven_merge::{Audience, WriteId};
+use coven_merge::{Audience, WritePast};
 use rusqlite::params;
 
 /// Coverage of applied store-log boundaries, in application order.
@@ -112,17 +112,9 @@ impl WriteBoundary {
                 audience,
                 included,
             } => {
-                let follows = included.0.iter().all(|id| {
-                    header.had_read.covers(*id)
-                        || (id.device == header.position.device
-                            && id.number < header.position.number)
-                });
-                let missing = header.had_read.0.iter().any(|id| !included.covers(*id))
-                    || (header.position.number > 1
-                        && !included.covers(WriteId {
-                            number: header.position.number - 1,
-                            ..header.position
-                        }));
+                let past = header.had_read.causal_past(header.position);
+                let follows = included.0.iter().all(|id| past.contains(id));
+                let missing = past.frontier().any(|id| !included.covers(*id));
                 (part.audience == *audience
                     && !included.covers(header.position)
                     && !follows

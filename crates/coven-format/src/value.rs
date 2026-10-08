@@ -150,6 +150,43 @@ positions!(
     WriteId,
     "How far each device's write log has been read (§7.1)."
 );
+impl WritePositions {
+    /// The author's causal past, including its implicit earlier own writes.
+    /// These positions must name only other devices, as in a write header or
+    /// applied-write record. The frontier retains their order, then the author's
+    /// preceding write, without copying or expanding the positions.
+    pub fn causal_past(&self, author: WriteId) -> impl coven_merge::WritePast + '_ {
+        CausalPast {
+            others: self,
+            author,
+            previous: (author.number > 1).then(|| WriteId {
+                number: author.number - 1,
+                ..author
+            }),
+        }
+    }
+}
+
+struct CausalPast<'a> {
+    others: &'a WritePositions,
+    author: WriteId,
+    previous: Option<WriteId>,
+}
+
+impl coven_merge::WritePast for CausalPast<'_> {
+    fn contains(&self, write: &WriteId) -> bool {
+        if write.device == self.author.device {
+            write.number < self.author.number
+        } else {
+            self.others.covers(*write)
+        }
+    }
+
+    fn frontier(&self) -> impl Iterator<Item = &WriteId> {
+        self.others.0.iter().chain(self.previous.as_ref())
+    }
+}
+
 impl coven_merge::WritePast for WritePositions {
     fn contains(&self, write: &WriteId) -> bool {
         self.covers(*write)

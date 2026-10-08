@@ -11,7 +11,7 @@ use coven_format::{
     write::{WriteDisposition, WriteHeader, WritePart, WriteRecord},
 };
 use coven_foundation::id_source::{CircleId, DeviceId};
-use coven_merge::{Audience, ColumnValue, Operation, Timestamp, WriteId};
+use coven_merge::{Audience, ColumnValue, Operation, Timestamp, WriteId, WritePast};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -133,22 +133,12 @@ pub(crate) fn prerequisite(
     if !missing_entries.is_empty() {
         return Ok(Some(WriteWait::StoreLog(missing_entries)));
     }
-    let mut missing: Vec<_> = header
-        .had_read
-        .0
-        .iter()
+    let past = header.had_read.causal_past(header.position);
+    let missing: Vec<_> = past
+        .frontier()
         .copied()
         .filter(|id| !positions.covers(*id))
         .collect();
-    if header.position.number > 1 {
-        let prior = WriteId {
-            number: header.position.number - 1,
-            ..header.position
-        };
-        if !positions.covers(prior) {
-            missing.push(prior);
-        }
-    }
     if !missing.is_empty() {
         return Ok(Some(WriteWait::Writes(missing)));
     }

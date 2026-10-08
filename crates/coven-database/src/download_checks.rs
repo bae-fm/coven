@@ -4,14 +4,11 @@ use coven_format::{
     merge_fields,
     write::{WriteHeader, WritePart},
 };
-use coven_merge::{Operation, WriteId};
+use coven_merge::{Operation, WritePast};
 
 pub(crate) fn past(database: &DatabaseConnection, header: &WriteHeader) -> Result<(), DbError> {
-    let own = (header.position.number > 1).then(|| WriteId {
-        number: header.position.number - 1,
-        ..header.position
-    });
-    for frontier in header.had_read.0.iter().copied().chain(own) {
+    let causal_past = header.had_read.causal_past(header.position);
+    for frontier in causal_past.frontier() {
         let bytes: Vec<u8> = database.query_row(
             "SELECT had_read FROM _coven_writes WHERE substr(timestamp,9,8)=?1 AND number=?2",
             (
@@ -21,10 +18,7 @@ pub(crate) fn past(database: &DatabaseConnection, header: &WriteHeader) -> Resul
             |row| row.get(0),
         )?;
         let past = merge_fields::decode_write_positions(&bytes)?;
-        if past.0.iter().any(|read| {
-            !(header.had_read.covers(*read)
-                || read.device == header.position.device && read.number < header.position.number)
-        }) {
+        if past.0.iter().any(|read| !causal_past.contains(read)) {
             return Err(coven_format::Error::Invalid {
                 field: "write causal closure",
                 rule: coven_format::error::Rule::Coverage,
