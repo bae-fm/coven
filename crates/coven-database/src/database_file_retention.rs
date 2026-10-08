@@ -65,17 +65,18 @@ impl Database {
                         )?;
                     }
                     crate::upload::each_plaintext(db, |_, parts| {
-                        for (header, chunks) in parts {
-                            let mut decoder = coven_format::write_stream::PartDecoder::new(header)?;
-                            for chunk in chunks {
-                                for frame in decoder.chunk(&chunk?)? {
+                        for (header, mut chunks) in parts {
+                            crate::download_stream::visit_part(
+                                header,
+                                |chunk| chunks.read_chunk(chunk),
+                                |frame| {
                                     if let coven_format::dismissal::WriteFrame::Change(row) = frame
                                     {
                                         retain_change(schema, &row, &mut references)?;
                                     }
-                                }
-                            }
-                            decoder.finish()?;
+                                    Ok::<_, DbError>(())
+                                },
+                            )?;
                         }
                         Ok(())
                     })?;

@@ -129,29 +129,50 @@ pub(crate) fn read_part<R: Read, E: From<SnapshotError> + From<coven_format::Err
     write: &coven_format::write::WriteHeader,
     mut consume: impl FnMut(WriteFrame) -> Result<(), E>,
 ) -> Result<(), E> {
-    let mut left = header.plaintext_length;
-    let mut decoder = PartDecoder::new(header)?;
-    let mut chunk = [0; CHUNK_SIZE];
-    while left > 0 {
-        let length = left.min(CHUNK_SIZE as u64) as usize;
-        input
-            .read_exact(&mut chunk[..length])
-            .map_err(SnapshotError::Read)?;
-        for frame in decoder.chunk(&chunk[..length])? {
+    visit_part(
+        header,
+        |chunk| {
+            input
+                .read_exact(chunk)
+                .map_err(|error| SnapshotError::Read(error).into())
+        },
+        |frame| {
             if let WriteFrame::Dismissal(dismissal) = &frame {
                 dismissal.validate_past(write)?;
             }
-            consume(frame)?;
-        }
-        left -= length as u64;
-    }
-    decoder.finish()?;
+            consume(frame)
+        },
+    )?;
+    let mut trailing = [0];
     loop {
-        match input.read(&mut chunk[..1]) {
+        match input.read(&mut trailing) {
             Ok(0) => return Ok(()),
             Ok(_) => return Err(coven_format::Error::TrailingBytes.into()),
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(SnapshotError::Read(error).into()),
         }
     }
+}
+
+/// Visit a part from either an I/O stream or the upload queue's SQLite BLOB.
+/// The source fills each requested chunk exactly; the decoder checks framing,
+/// ordering, audience and record count before completing the part.
+pub(crate) fn visit_part<E: From<coven_format::Error>>(
+    header: coven_format::write_stream::PartHeader,
+    mut read_chunk: impl FnMut(&mut [u8]) -> Result<(), E>,
+    mut consume: impl FnMut(WriteFrame) -> Result<(), E>,
+) -> Result<(), E> {
+    let mut left = header.plaintext_length;
+    let mut decoder = PartDecoder::new(header)?;
+    let mut chunk = [0; CHUNK_SIZE];
+    while left > 0 {
+        let length = left.min(CHUNK_SIZE as u64) as usize;
+        read_chunk(&mut chunk[..length])?;
+        for frame in decoder.chunk(&chunk[..length])? {
+            consume(frame)?;
+        }
+        left -= length as u64;
+    }
+    decoder.finish()?;
+    Ok(())
 }

@@ -53,12 +53,24 @@ impl<'a> UploadBytes<'a> {
     }
 
     fn read(&self, offset: usize, length: usize) -> Result<Vec<u8>, DbError> {
-        if offset > self.end || length > self.end - offset {
-            return Err(DbError::DamagedDatabase);
-        }
+        self.check_length(offset, length)?;
         let mut bytes = vec![0; length];
         self.blob.read_at_exact(&mut bytes, offset)?;
         Ok(bytes)
+    }
+
+    fn check_length(&self, offset: usize, length: usize) -> Result<(), DbError> {
+        if offset > self.end || length > self.end - offset {
+            return Err(DbError::DamagedDatabase);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn read_chunk(&mut self, bytes: &mut [u8]) -> Result<(), DbError> {
+        self.check_length(self.offset, bytes.len())?;
+        self.blob.read_at_exact(bytes, self.offset)?;
+        self.offset += bytes.len();
+        Ok(())
     }
 }
 
