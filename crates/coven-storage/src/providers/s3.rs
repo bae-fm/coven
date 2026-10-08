@@ -1,3 +1,4 @@
+use super::pagination::Pagination;
 use crate::session::{S3Part, SessionState};
 use crate::*;
 use async_trait::async_trait;
@@ -10,11 +11,10 @@ use aws_sdk_s3::{
 };
 use coven_crypto::SecretText;
 use coven_foundation::{clock::ClockRef, id_source::IdSourceRef};
-use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 /// S3 and compatible endpoints, using only object operations and manually supplied keys.
-pub struct S3Storage {
+pub(crate) struct S3Storage {
     client: Client,
     credentials: SigningCredentials,
     config: StorageConfig,
@@ -58,13 +58,12 @@ impl aws_smithy_async::time::TimeSource for SigningClock {
 impl S3Storage {
     /// Construct at a composition root. No credential discovery, IAM calls, key
     /// creation or revocation occurs. The SDK computes protocol checksums itself.
-    pub fn new(
+    pub(crate) fn new(
         config: StorageConfig,
         credentials: S3Credentials,
         clock: ClockRef,
         ids: IdSourceRef,
     ) -> Result<Self, StorageError> {
-        config.validate()?;
         let StorageConfig::S3 {
             bucket,
             region,
@@ -164,7 +163,6 @@ impl S3Storage {
         Ok(bytes)
     }
     fn upload_id<'a>(&self, session: &'a UploadSession) -> Result<&'a str, StorageError> {
-        session.check(&self.config)?;
         match &session.state {
             SessionState::S3 { id, .. } => Ok(id.as_str()),
             _ => Err(StorageFailure::SessionMismatch.into()),
@@ -208,7 +206,7 @@ impl S3Storage {
 }
 
 #[async_trait]
-impl Storage for S3Storage {
+impl ProviderOps for S3Storage {
     async fn set_s3_credentials(&self, credentials: S3Credentials) -> Result<(), StorageError> {
         if credentials.access_key_id.is_empty() || credentials.secret_access_key.as_str().is_empty()
         {
@@ -228,13 +226,9 @@ impl Storage for S3Storage {
         5 * 1024 * 1024 * 1024
     }
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        crate::transfer::upload_bytes(self, path, bytes, self.put(path, bytes, true)).await
+        self.put(path, bytes, true).await
     }
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        if !path.is_replaceable() {
-            return Err(StorageFailure::InvalidPath.into());
-        }
-        crate::transfer::check_single_request(bytes.len() as u64, self.single_request_limit())?;
         self.put(path, bytes, false).await
     }
     async fn read(&self, path: &ObjectPath) -> Result<Vec<u8>, StorageError> {
@@ -247,12 +241,12 @@ impl Storage for S3Storage {
     ) -> Result<Vec<u8>, StorageError> {
         self.get(path, Some(range)).await
     }
-    async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
+    async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
+        let prefix = listing.prefix().clone();
         let full = prefix.under(&self.prefix);
         let root = ObjectPrefix::all().under(&self.prefix);
         let mut marker = None;
-        let mut seen = BTreeSet::new();
-        let mut paths = BTreeMap::new();
+        let mut seen = Pagination::new();
         loop {
             let response = self
                 .client
@@ -284,17 +278,11 @@ impl Storage for S3Storage {
                 .try_into()
                 .map_err(|error| StorageFailure::Encoding.with_source(error))?;
                 let object = StoredObject {
-                    path: path.clone(),
+                    path,
                     size,
                     stored_at,
                 };
-                if let Some(previous) = paths.insert(path, object.clone()) {
-                    if previous != object {
-                        return Err(
-                            StorageFailure::Protocol.with_source("S3 listed conflicting objects")
-                        );
-                    }
-                }
+                listing.insert(object)?;
             }
             if !response
                 .is_truncated()
@@ -307,12 +295,10 @@ impl Storage for S3Storage {
                 .filter(|value| !value.is_empty())
                 .ok_or(StorageFailure::Protocol.with_source("S3 omitted continuation token"))?
                 .to_owned();
-            if !seen.insert(next.clone()) {
-                return Err(StorageFailure::Protocol.with_source("repeated S3 continuation token"));
-            }
+            seen.check(&next)?;
             marker = Some(next);
         }
-        Ok(paths.into_values().collect())
+        Ok(())
     }
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         match self
@@ -334,11 +320,16 @@ impl Storage for S3Storage {
     async fn grant_access(&self, _account: &str) -> Result<AccessGrant, StorageError> {
         Ok(AccessGrant::CreateAccessKey)
     }
-    async fn revoke_access(&self, member: &MemberAccess) -> Result<MemberRemoval, StorageError> {
+    async fn revoke_access(
+        &self,
+        member: &MemberAccess,
+    ) -> Result<ProviderRevocation, StorageError> {
         match member {
-            MemberAccess::S3AccessKey { access_key_id } => Ok(MemberRemoval::DeleteAccessKey {
-                access_key_id: access_key_id.clone(),
-            }),
+            MemberAccess::S3AccessKey { access_key_id } => Ok(ProviderRevocation::Reported(
+                MemberRemoval::DeleteAccessKey {
+                    access_key_id: access_key_id.clone(),
+                },
+            )),
             _ => Err(StorageFailure::InvalidConfiguration
                 .with_source("S3 revocation requires the member's access key")),
         }
@@ -348,9 +339,6 @@ impl Storage for S3Storage {
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
-        if path.is_replaceable() {
-            return Err(StorageFailure::InvalidPath.into());
-        }
         let part_size = crate::session::s3_part_size(total)?;
         let token = SecretText::new(self.ids.new_id().to_string());
         let response = self
@@ -380,13 +368,9 @@ impl Storage for S3Storage {
         })
     }
     async fn resume_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
-        session.check(&self.config)?;
-        if session.is_complete() {
-            return Ok(());
-        }
         let id = SecretText::new(self.upload_id(session)?.to_owned());
         let mut marker = None;
-        let mut seen = BTreeSet::new();
+        let mut seen = Pagination::new();
         let mut parts = Vec::new();
         let mut confirmed = 0u64;
         loop {
@@ -422,15 +406,11 @@ impl Storage for S3Storage {
                 confirmed = confirmed
                     .checked_add(size)
                     .ok_or(StorageFailure::InvalidPart)?;
-                if number as usize != parts.len() + 1
-                    || size == 0
-                    || size > session.part_size as u64
-                    || confirmed > session.total
-                    || (size != session.part_size as u64 && confirmed != session.total)
-                {
+                let part = S3Part { number, size, etag };
+                if !part.follows(parts.len(), confirmed, session.total, session.part_size) {
                     return Err(StorageFailure::Protocol.with_source("S3 upload has invalid parts"));
                 }
-                parts.push(S3Part { number, size, etag });
+                parts.push(part);
             }
             if !response
                 .is_truncated()
@@ -443,9 +423,7 @@ impl Storage for S3Storage {
                 .filter(|value| !value.is_empty())
                 .ok_or(StorageFailure::Protocol.with_source("S3 omitted part marker"))?
                 .to_owned();
-            if !seen.insert(next.clone()) {
-                return Err(StorageFailure::Protocol.with_source("repeated S3 part marker"));
-            }
+            seen.check(&next)?;
             marker = Some(next);
         }
         if confirmed < session.confirmed {
@@ -461,8 +439,8 @@ impl Storage for S3Storage {
         &self,
         session: &mut UploadSession,
         bytes: &[u8],
+        end: u64,
     ) -> Result<(), StorageError> {
-        let end = session.end_of_part(bytes.len())?;
         let id = self.upload_id(session)?;
         let SessionState::S3 { parts, .. } = &session.state else {
             return Err(StorageFailure::SessionMismatch.into());
@@ -499,10 +477,6 @@ impl Storage for S3Storage {
         Ok(())
     }
     async fn finish_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
-        session.check(&self.config)?;
-        if session.is_complete() {
-            return Ok(());
-        }
         if session.confirmed != session.total {
             return Err(StorageFailure::InvalidPart.into());
         }
@@ -545,10 +519,6 @@ impl Storage for S3Storage {
         }
     }
     async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError> {
-        session.check(&self.config)?;
-        if session.is_complete() {
-            return Ok(());
-        }
         match self
             .client
             .abort_multipart_upload()

@@ -475,11 +475,11 @@ pub(crate) fn validate_content_range(header: &str, range: ByteRange) -> Result<(
 }
 
 pub(crate) async fn verify_published_part(
-    storage: &dyn crate::Storage,
+    storage: &dyn crate::ProviderOps,
     session: &mut crate::UploadSession,
     bytes: &[u8],
+    end: u64,
 ) -> Result<(), StorageError> {
-    let end = session.end_of_part(bytes.len())?;
     let actual = storage
         .read_range(&session.path, ByteRange::new(session.confirmed, end)?)
         .await?;

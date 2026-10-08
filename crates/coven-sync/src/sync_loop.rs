@@ -3,9 +3,7 @@
 use crate::{Operations, SyncError, SyncFailure};
 use coven_database::{DatabaseChanges, DbError};
 use coven_foundation::{clock::ClockRef, id_source::DeviceId};
-use coven_storage::{
-    providers::StorageConnector, Storage, StorageConnection, StorageError, StorageFailure,
-};
+use coven_storage::{providers::StorageConnector, StorageConnection, StorageError, StorageFailure};
 use std::{
     sync::Arc,
     time::{Duration, SystemTime},
@@ -128,16 +126,17 @@ impl SyncLoop {
     /// Finish setup under this loop's connection lifetime, then start syncing.
     pub async fn setup(
         &self,
-        storage: Arc<dyn Storage>,
+        storage: Arc<StorageConnection>,
         access: coven_format::MemberAccess,
         device_name: String,
         connection: coven_storage::ConnectionCredentials,
         store_name: String,
     ) -> Result<(), SyncError> {
         let (reply, result) = oneshot::channel();
+        storage.reset_reachability();
         self.commands
             .send(SyncCommand::Setup {
-                storage: Arc::new(StorageConnection::new(storage)),
+                storage,
                 access,
                 device_name,
                 connection,
@@ -148,13 +147,11 @@ impl SyncLoop {
         result.await.map_err(|_| DbError::StoreClosed)?
     }
     /// Open the member's sealed keys and retain a stopped connection.
-    pub async fn unlock(&self, storage: Arc<dyn Storage>) -> Result<(), SyncError> {
+    pub async fn unlock(&self, storage: Arc<StorageConnection>) -> Result<(), SyncError> {
         let (reply, result) = oneshot::channel();
+        storage.reset_reachability();
         self.commands
-            .send(SyncCommand::Unlock {
-                storage: Arc::new(StorageConnection::new(storage)),
-                reply,
-            })
+            .send(SyncCommand::Unlock { storage, reply })
             .map_err(|_| DbError::StoreClosed)?;
         result.await.map_err(|_| DbError::StoreClosed)?
     }
@@ -222,11 +219,10 @@ impl SyncRun {
     async fn connect(&mut self) -> Result<(), SyncError> {
         self.codes.refresh_if_expired(self.clock.now()).await?;
         let data = self.codes.connection().await?.ok_or(SyncError::NoStorage)?;
-        let storage = self
+        let connection = self
             .connector
             .connect(data.location, data.credentials, self.device)
             .await?;
-        let connection = Arc::new(StorageConnection::new(storage));
         self.operations
             .set_storage(Some(connection.clone()))
             .await?;

@@ -39,19 +39,3 @@ async fn create_routes_the_boundary_without_starting_the_unused_request() {
     storage.create_once(&path, &[7; 17]).await.unwrap();
     assert_eq!(storage.read(&path).await.unwrap(), [7; 17]);
 }
-
-#[test]
-fn positions_limit_accepts_the_boundary_and_rejects_the_next_byte() {
-    for limit in [
-        5 * 1024 * 1024 * 1024,
-        5 * 1024 * 1024,
-        150 * 1024 * 1024,
-        250 * 1024 * 1024,
-        16,
-    ] {
-        check_single_request(limit, limit).unwrap();
-        assert!(
-            matches!(check_single_request(limit + 1, limit).unwrap_err().failure(), StorageFailure::SingleRequestTooLarge { size, limit: maximum } if size == limit + 1 && maximum == limit)
-        );
-    }
-}

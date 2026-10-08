@@ -206,7 +206,7 @@ impl CovenBuilder {
             coven_sync::read_connection(&settings, &keychain)
         })
         .await?;
-        let storage = match data {
+        let storage: Option<Arc<dyn Storage>> = match data {
             Some(data) => Some(
                 connector
                     .connect(
@@ -423,7 +423,6 @@ impl OpeningStore {
             .connect(data.location, data.credentials, self.owners.device)
             .await
             .map_err(SyncError::from)?;
-        let storage = Arc::new(coven_storage::StorageConnection::new(storage));
         storage
             .list(&ObjectPrefix::all())
             .await

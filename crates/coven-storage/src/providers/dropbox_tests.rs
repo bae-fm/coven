@@ -7,7 +7,7 @@ use axum::{
     Router,
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
 };
 struct RemovalJob {
@@ -372,7 +372,7 @@ async fn lost_completion_requires_byte_verification() {
     assert!(upload.is_complete());
     assert!(state.lock().unwrap().uploads.is_empty());
 }
-fn provider(url: &str) -> DropboxStorage {
+fn provider(url: &str) -> StorageConnection<DropboxStorage> {
     let mut storage = DropboxStorage::new(
         StorageConfig::Dropbox {
             namespace_id: "namespace".into(),
@@ -382,7 +382,7 @@ fn provider(url: &str) -> DropboxStorage {
     .unwrap();
     storage.api = format!("{url}/2");
     storage.content = storage.api.clone();
-    storage
+    StorageConnection::from_provider(Arc::new(storage))
 }
 #[tokio::test]
 async fn missing_session_and_destination_is_expired() {
@@ -500,7 +500,7 @@ async fn abort_retries_a_lost_close_and_accepts_an_expired_session() {
         storage.abort_upload(&upload).await.unwrap_err().failure(),
         StorageFailure::Network
     );
-    assert!(state.lock().unwrap().uploads[storage.id(&upload).unwrap()].closed);
+    assert!(state.lock().unwrap().uploads[storage.provider.id(&upload).unwrap()].closed);
     storage.abort_upload(&upload).await.unwrap();
     state.lock().unwrap().uploads.clear();
     storage.abort_upload(&upload).await.unwrap();
@@ -529,7 +529,7 @@ async fn abort_uses_the_remote_offset_after_a_lost_part_reply() {
     assert_eq!(upload.confirmed_bytes(), 0);
     storage.abort_upload(&upload).await.unwrap();
     assert_eq!(state.lock().unwrap().close_requests, [0, 4]);
-    assert!(state.lock().unwrap().uploads[storage.id(&upload).unwrap()].closed);
+    assert!(state.lock().unwrap().uploads[storage.provider.id(&upload).unwrap()].closed);
     storage.abort_upload(&upload).await.unwrap();
     assert!(state.lock().unwrap().objects.is_empty());
 }
@@ -700,7 +700,8 @@ async fn asynchronous_removal_waits_for_publication_and_retries_after_completion
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let clock = Arc::new(RemovalClock::default());
     let mut storage = provider(&server.url);
-    storage.session = crate::providers::tests::session_with_clock(PROVIDER, clock.clone());
+    Arc::get_mut(&mut storage.provider).unwrap().session =
+        crate::providers::tests::session_with_clock(PROVIDER, clock.clone());
     storage.grant_access("member").await.unwrap();
     state.lock().unwrap().removal_job = Some(RemovalJob {
         member: "member".into(),
@@ -732,7 +733,8 @@ async fn asynchronous_removal_times_out_without_hiding_remaining_access() {
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let clock = Arc::new(RemovalClock::default());
     let mut storage = provider(&server.url);
-    storage.session = crate::providers::tests::session_with_clock(PROVIDER, clock.clone());
+    Arc::get_mut(&mut storage.provider).unwrap().session =
+        crate::providers::tests::session_with_clock(PROVIDER, clock.clone());
     storage.grant_access("member").await.unwrap();
     state.lock().unwrap().removal_job = Some(RemovalJob {
         member: "member".into(),
@@ -933,7 +935,10 @@ async fn stale_abort_cannot_close_another_native_session() {
     );
     let mut old = storage.begin_upload(&first, 4).await.unwrap();
     let mut next = storage.begin_upload(&second, 4).await.unwrap();
-    assert_ne!(storage.id(&old).unwrap(), storage.id(&next).unwrap());
+    assert_ne!(
+        storage.provider.id(&old).unwrap(),
+        storage.provider.id(&next).unwrap()
+    );
     storage.upload_part(&mut old, b"old!").await.unwrap();
     storage.upload_part(&mut next, b"next").await.unwrap();
     storage.abort_upload(&old).await.unwrap();

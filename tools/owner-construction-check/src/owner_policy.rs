@@ -33,6 +33,21 @@ pub(crate) const POLICY: Policy = Policy {
             "ProviderConnector",
             "connect",
         ),
+        (
+            "crates/coven-storage/src/test_utils.rs",
+            "MemoryStorage",
+            "connect",
+        ),
+        (
+            "crates/coven-storage/src/test_utils.rs",
+            "MemoryStorage",
+            "new",
+        ),
+        (
+            "crates/coven-storage/src/test_utils.rs",
+            "MemoryStorage",
+            "for_recipient",
+        ),
         ("crates/coven/tests/fixtures/bootstrap.rs", "Owner", "new"),
         (
             "crates/coven/src/bootstrap.rs",
@@ -284,6 +299,7 @@ pub(crate) const POLICY: Policy = Policy {
         "MemberKeyCustody",
         "StorageConnector",
         "Storage",
+        "ProviderOps",
         "CloudKitOps",
         "OAuthClients",
         "OAuthPresenter",
@@ -297,6 +313,7 @@ pub(crate) const POLICY: Policy = Policy {
         "MemberKeyCustody",
         "StorageConnector",
         "Storage",
+        "ProviderOps",
         "CloudKitOps",
         "OAuthPresenter",
     ],

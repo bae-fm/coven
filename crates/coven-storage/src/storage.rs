@@ -277,15 +277,6 @@ pub trait Storage: Send + Sync {
     /// Already closed or absent sessions succeed; published objects are preserved.
     async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError>;
 
-    /// Provider-specific sign-out instructions; coven never makes or deletes S3 keys.
-    fn sign_out(&self) -> ProviderSignOut {
-        match self.config().provider() {
-            CloudProvider::S3 => ProviderSignOut::ReplaceAccessKey,
-            CloudProvider::CloudKit => ProviderSignOut::RemoveFromAppleAccount,
-            provider => ProviderSignOut::RemoveAppAccess { provider },
-        }
-    }
-
     /// Retry an operation's create with its fixed encrypted bytes (§18).
     /// An occupied path counts as stored, without a second read. Paths have one
     /// writer except dropped-removal key copies (§4, §11): competing sealed
@@ -312,7 +303,6 @@ pub trait Storage: Send + Sync {
         first_entry: &ObjectPath,
         encrypted_entry: &[u8],
     ) -> Result<StorageConfig, StorageSetupError> {
-        self.config().validate()?;
         if !first_entry.is_first_store_entry() {
             return Err(StorageError::Failure(StorageFailure::InvalidPath).into());
         }

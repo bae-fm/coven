@@ -360,7 +360,7 @@ async fn missing_session_and_destination_is_expired() {
     storage.finish_upload(&mut replacement).await.unwrap();
     assert_eq!(storage.read(&path).await.unwrap(), b"data");
 }
-fn provider(url: &str) -> GoogleDriveStorage {
+fn provider(url: &str) -> StorageConnection<GoogleDriveStorage> {
     let mut storage = GoogleDriveStorage::new(
         StorageConfig::GoogleDrive {
             folder_id: "folder".into(),
@@ -371,7 +371,7 @@ fn provider(url: &str) -> GoogleDriveStorage {
     .unwrap();
     storage.api = format!("{url}/drive");
     storage.upload_api = format!("{url}/upload");
-    storage
+    StorageConnection::from_provider(Arc::new(storage))
 }
 
 #[tokio::test]

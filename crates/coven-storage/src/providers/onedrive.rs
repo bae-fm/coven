@@ -1,17 +1,18 @@
 use super::access::PermissionAccess;
 use super::http::{self, Body, OAuthSession};
 use super::onedrive_access::AccountPermissions;
+use super::pagination::Pagination;
 use crate::session::SessionState;
 use crate::*;
 use async_trait::async_trait;
 use coven_crypto::SecretText;
 use reqwest::Method;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 const PROVIDER: CloudProvider = CloudProvider::OneDrive;
 
 /// OneDrive objects under the store's shared folder, reached with each member's account.
-pub struct OneDriveStorage {
+pub(crate) struct OneDriveStorage {
     config: StorageConfig,
     drive: String,
     folder: String,
@@ -20,8 +21,7 @@ pub struct OneDriveStorage {
 }
 impl OneDriveStorage {
     /// Construct at a composition root with the device's own provider sign-in.
-    pub fn new(config: StorageConfig, session: OAuthSession) -> Result<Self, StorageError> {
-        config.validate()?;
+    pub(crate) fn new(config: StorageConfig, session: OAuthSession) -> Result<Self, StorageError> {
         let StorageConfig::OneDrive {
             drive_id,
             folder_id,
@@ -150,7 +150,6 @@ impl OneDriveStorage {
         .await
     }
     fn upload_url<'a>(&self, session: &'a UploadSession) -> Result<&'a str, StorageError> {
-        session.check(&self.config)?;
         let SessionState::OneDrive { url } = &session.state else {
             return Err(StorageFailure::SessionMismatch.into());
         };
@@ -227,14 +226,10 @@ impl OneDriveStorage {
     }
     async fn permissions(&self) -> Result<Vec<Value>, StorageError> {
         let mut url = self.item(&self.folder, &["permissions"])?;
-        let mut seen = BTreeSet::new();
+        let mut seen = Pagination::new();
         let mut result = Vec::new();
         loop {
-            if !seen.insert(url.clone()) {
-                return Err(
-                    StorageFailure::Protocol.with_source("repeated OneDrive permission page")
-                );
-            }
+            seen.check(&url)?;
             http::same_origin(&self.api, &url)?;
             let value =
                 http::json(PROVIDER, self.send(Method::GET, &url, Body::Empty).await?).await?;
@@ -282,65 +277,54 @@ impl OneDriveStorage {
 fn validate_download_url(api: &str, target: &str) -> Result<(), StorageError> {
     let url =
         url::Url::parse(target).map_err(|error| StorageFailure::Protocol.with_source(error))?;
-    if url.scheme() == "https"
-        && url.host_str().is_some()
-        && url.username().is_empty()
-        && url.password().is_none()
-    {
+    if crate::web_url::is_web_url(&url) && url.scheme() == "https" {
         return Ok(());
     }
     // Loopback endpoints permit HTTP for provider conformance tests.
     http::same_origin(api, target)
 }
 #[async_trait]
-impl Storage for OneDriveStorage {
+impl ProviderOps for OneDriveStorage {
     async fn account(&self) -> Result<String, StorageError> {
         self.session.account().await
-    }
-
-    fn config(&self) -> StorageConfig {
-        self.config.clone()
     }
     async fn set_oauth_tokens(&self, tokens: OAuthTokens) -> Result<(), StorageError> {
         self.session.set_tokens(tokens).await;
         Ok(())
     }
+
+    fn config(&self) -> StorageConfig {
+        self.config.clone()
+    }
     fn single_request_limit(&self) -> u64 {
         250_000_000
     }
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        crate::transfer::upload_bytes(self, path, bytes, async {
-            self.parents(path).await?;
-            let url = format!(
-                "{}?@microsoft.graph.conflictBehavior=fail",
-                self.by_path(path, "/content")?
-            );
-            http::checked(
-                PROVIDER,
-                self.session
-                    .send(
-                        Method::PUT,
-                        &url,
-                        &[
-                            ("If-None-Match", "*".into()),
-                            ("Content-Type", "application/octet-stream".into()),
-                        ],
-                        Body::Bytes(bytes.to_vec()),
-                        true,
-                    )
-                    .await?,
-            )
-            .await?;
-            Ok(())
-        })
-        .await
+        self.parents(path).await?;
+        let url = format!(
+            "{}?@microsoft.graph.conflictBehavior=fail",
+            self.by_path(path, "/content")?
+        );
+        http::checked(
+            PROVIDER,
+            self.session
+                .send(
+                    Method::PUT,
+                    &url,
+                    &[
+                        ("If-None-Match", "*".into()),
+                        ("Content-Type", "application/octet-stream".into()),
+                    ],
+                    Body::Bytes(bytes.to_vec()),
+                    true,
+                )
+                .await?,
+        )
+        .await?;
+        Ok(())
     }
 
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        if !path.is_replaceable() {
-            return Err(StorageFailure::InvalidPath.into());
-        }
-        crate::transfer::check_single_request(bytes.len() as u64, self.single_request_limit())?;
         self.parents(path).await?;
         http::checked(
             PROVIDER,
@@ -364,23 +348,19 @@ impl Storage for OneDriveStorage {
     ) -> Result<Vec<u8>, StorageError> {
         self.get(path, Some(range)).await
     }
-    async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
+    async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
+        let prefix = listing.prefix().clone();
         self.check_folder().await?;
         let mut folders = vec![(self.folder.clone(), Vec::new())];
         let mut visited = BTreeSet::new();
-        let mut paths = BTreeMap::new();
         while let Some((folder, names)) = folders.pop() {
             if !visited.insert(folder.clone()) {
                 return Err(StorageFailure::Protocol.with_source("OneDrive folder cycle"));
             }
             let mut url = self.item(&folder, &["children"])?;
-            let mut pages = BTreeSet::new();
+            let mut pages = Pagination::new();
             loop {
-                if !pages.insert(url.clone()) {
-                    return Err(
-                        StorageFailure::Protocol.with_source("repeated OneDrive listing page")
-                    );
-                }
+                pages.check(&url)?;
                 http::same_origin(&self.api, &url)?;
                 let value =
                     http::json(PROVIDER, self.send(Method::GET, &url, Body::Empty).await?).await?;
@@ -404,19 +384,14 @@ impl Storage for OneDriveStorage {
                         let path = ObjectPath::from_components(&names, name)?;
                         if prefix.contains(&path) {
                             let object = StoredObject {
-                                path: path.clone(),
+                                path,
                                 size: item["size"].as_u64().ok_or(
                                     StorageFailure::Protocol
                                         .with_source("OneDrive omitted object size"),
                                 )?,
                                 stored_at: http::timestamp(item, "createdDateTime")?,
                             };
-                            if let Some(previous) = paths.insert(path, object.clone()) {
-                                if previous != object {
-                                    return Err(StorageFailure::Protocol
-                                        .with_source("OneDrive listed conflicting objects"));
-                                }
-                            }
+                            listing.insert(object)?;
                         }
                     } else {
                         return Err(StorageFailure::InvalidPath.into());
@@ -436,7 +411,7 @@ impl Storage for OneDriveStorage {
                 }
             }
         }
-        Ok(paths.into_values().collect())
+        Ok(())
     }
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         let response = self
@@ -463,7 +438,6 @@ impl Storage for OneDriveStorage {
     }
 
     async fn join(&self, invitation: &StorageInvitation) -> Result<(), StorageError> {
-        invitation.check(&self.config)?;
         if let crate::invitation::InvitationAcceptance::OneDriveShare { token } =
             &invitation.acceptance
         {
@@ -490,10 +464,12 @@ impl Storage for OneDriveStorage {
                 }
             }
         }
-        self.list(&ObjectPrefix::all()).await?;
         Ok(())
     }
-    async fn revoke_access(&self, member: &MemberAccess) -> Result<MemberRemoval, StorageError> {
+    async fn revoke_access(
+        &self,
+        member: &MemberAccess,
+    ) -> Result<ProviderRevocation, StorageError> {
         let MemberAccess::ProviderAccount(email) = member else {
             return Err(
                 StorageFailure::InvalidConfiguration.with_source("OneDrive requires an account")
@@ -540,11 +516,7 @@ impl Storage for OneDriveStorage {
                 }),
             }
         }
-        if shares.is_empty() {
-            Ok(MemberRemoval::Revoked)
-        } else {
-            Ok(MemberRemoval::AccessRemains { shares })
-        }
+        Ok(ProviderRevocation::Remaining(shares))
     }
 
     async fn begin_upload(
@@ -552,12 +524,6 @@ impl Storage for OneDriveStorage {
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
-        if path.is_replaceable() {
-            return Err(StorageFailure::InvalidPath.into());
-        }
-        if total == 0 {
-            return Err(StorageFailure::InvalidPart.into());
-        }
         self.parents(path).await?;
         let value=http::json(PROVIDER,self.send(Method::POST,&self.by_path(path,"/createUploadSession")?,Body::Json(json!({"item":{"@microsoft.graph.conflictBehavior":"fail","name":path.file_name()}}))).await?).await?;
         let url = http::string(&value, "uploadUrl")?;
@@ -574,8 +540,7 @@ impl Storage for OneDriveStorage {
         })
     }
     async fn resume_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
-        session.check(&self.config)?;
-        if session.is_complete() || matches!(session.state, SessionState::VerifyPublished) {
+        if matches!(session.state, SessionState::VerifyPublished) {
             return Ok(());
         }
         let response = self
@@ -611,12 +576,11 @@ impl Storage for OneDriveStorage {
         &self,
         session: &mut UploadSession,
         bytes: &[u8],
+        end: u64,
     ) -> Result<(), StorageError> {
-        session.check(&self.config)?;
         if matches!(session.state, SessionState::VerifyPublished) {
-            return http::verify_published_part(self, session, bytes).await;
+            return http::verify_published_part(self, session, bytes, end).await;
         }
-        let end = session.end_of_part(bytes.len())?;
         let response = self
             .session
             .send(
@@ -649,8 +613,7 @@ impl Storage for OneDriveStorage {
         Ok(())
     }
     async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError> {
-        session.check(&self.config)?;
-        if session.is_complete() || matches!(session.state, SessionState::VerifyPublished) {
+        if matches!(session.state, SessionState::VerifyPublished) {
             return Ok(());
         }
         let response = self

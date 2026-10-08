@@ -235,8 +235,8 @@ fn respond(
         _ => panic!("unexpected S3 request: {uri}"),
     }
 }
-fn provider(url: &str) -> S3Storage {
-    S3Storage::new(
+fn provider(url: &str) -> StorageConnection<S3Storage> {
+    let storage = S3Storage::new(
         StorageConfig::S3 {
             bucket: "bucket".into(),
             region: "us-east-1".into(),
@@ -250,7 +250,8 @@ fn provider(url: &str) -> S3Storage {
         Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
         Arc::new(SequentialIds::new()),
     )
-    .unwrap()
+    .unwrap();
+    StorageConnection::from_provider(Arc::new(storage))
 }
 #[tokio::test]
 async fn real_s3_client_conforms_with_pagination() {
@@ -338,7 +339,6 @@ async fn errors_and_manual_key_instructions() {
         panic!()
     };
     assert_eq!(access_key_id, "member-key");
-    assert_eq!(storage.sign_out(), ProviderSignOut::ReplaceAccessKey);
 }
 
 #[tokio::test]
@@ -543,6 +543,42 @@ async fn listing_retains_server_time_and_size_across_pages_and_retries() {
     );
     storage.create_once(&first, b"first").await.unwrap();
     assert_eq!(storage.list(&ObjectPrefix::all()).await.unwrap(), expected);
+}
+
+#[tokio::test]
+async fn duplicate_listing_entries_merge_or_fail_before_fetching_another_page() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let path = ObjectPath::device_log(
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    for (size, expected_requests) in [(4, 2), (5, 1)] {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let received = requests.clone();
+        let key = path.under("store");
+        let server = TestServer::new(Router::new().fallback(move || {
+            let page = received.fetch_add(1, Ordering::SeqCst);
+            let key = key.clone();
+            async move {
+                let contents = if page == 0 {
+                    format!("<IsTruncated>true</IsTruncated><NextContinuationToken>next</NextContinuationToken><Contents><Key>{key}</Key><Size>4</Size><LastModified>2026-10-06T00:00:00Z</LastModified></Contents><Contents><Key>{key}</Key><Size>{size}</Size><LastModified>2026-10-06T00:00:00Z</LastModified></Contents>")
+                } else {
+                    "<IsTruncated>false</IsTruncated>".into()
+                };
+                response(200, format!("<ListBucketResult>{contents}</ListBucketResult>"))
+            }
+        })).await;
+        let result = provider(&server.url).list(&ObjectPrefix::all()).await;
+        if size == 4 {
+            let listed = result.unwrap();
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0].path, path);
+            assert_eq!(listed[0].size, 4);
+        } else {
+            assert_eq!(result.unwrap_err().failure(), StorageFailure::Protocol);
+        }
+        assert_eq!(requests.load(Ordering::SeqCst), expected_requests);
+    }
 }
 
 #[tokio::test]

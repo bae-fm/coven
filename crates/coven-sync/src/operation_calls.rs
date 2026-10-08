@@ -307,6 +307,8 @@ impl StoreLogSync {
                     .storage
                     .as_deref()
                     .ok_or(SyncError::NoStorage)?
+                    .config()
+                    .provider()
                     .sign_out();
                 match self
                     .make_and_upload_entry(StoreChange::RemoveDevice { device })

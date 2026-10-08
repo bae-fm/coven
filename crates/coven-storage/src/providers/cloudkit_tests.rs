@@ -30,6 +30,14 @@ fn config() -> StorageConfig {
         zone: "zone".into(),
     }
 }
+fn provider(
+    config: StorageConfig,
+    ops: Arc<dyn CloudKitOps>,
+) -> Result<StorageConnection<CloudKitStorage>, StorageError> {
+    Ok(StorageConnection::from_provider(Arc::new(
+        CloudKitStorage::new(config, ops)?,
+    )))
+}
 impl Bridge {
     fn new(memory: MemoryStorage) -> Self {
         Self {
@@ -291,7 +299,7 @@ async fn bridge_conforms_and_retains_parts_across_adapter_restart() {
         )
         .unwrap(),
     ));
-    let storage = Arc::new(CloudKitStorage::new(config(), bridge.clone()).unwrap());
+    let storage = Arc::new(provider(config(), bridge.clone()).unwrap());
     Conformance::new(storage.clone()).run().await.unwrap();
     let path = ObjectPath::file(
         coven_foundation::id_source::DeviceId(31),
@@ -309,14 +317,13 @@ async fn bridge_conforms_and_retains_parts_across_adapter_restart() {
     assert!(storage.upload_part(&mut session, b"abcd").await.is_err());
     drop(storage);
     drop(session);
-    let storage = CloudKitStorage::new(config(), bridge.clone()).unwrap();
+    let storage = provider(config(), bridge.clone()).unwrap();
     let mut session = UploadSession::decode(recorded.as_bytes()).unwrap();
     storage.resume_upload(&mut session).await.unwrap();
     assert_eq!(session.confirmed, 4);
     storage.upload_part(&mut session, b"e").await.unwrap();
     storage.finish_upload(&mut session).await.unwrap();
     assert_eq!(storage.read(&path).await.unwrap(), b"abcde");
-    assert_eq!(storage.sign_out(), ProviderSignOut::RemoveFromAppleAccount);
     bridge
         .memory
         .set_faults(Faults {
@@ -342,7 +349,7 @@ async fn expired_bridge_session_restarts_from_retained_bytes() {
         )
         .unwrap(),
     ));
-    let storage = CloudKitStorage::new(config(), bridge).unwrap();
+    let storage = provider(config(), bridge).unwrap();
     let path = ObjectPath::device_log(
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
@@ -378,7 +385,7 @@ async fn abort_accepts_a_forgotten_session_and_keeps_published_objects() {
         )
         .unwrap(),
     ));
-    let storage = CloudKitStorage::new(config(), bridge.clone()).unwrap();
+    let storage = provider(config(), bridge.clone()).unwrap();
     let path = ObjectPath::device_log(
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
@@ -408,7 +415,7 @@ async fn create_respects_the_bridges_single_request_limit() {
         )
         .unwrap(),
     ));
-    let storage = CloudKitStorage::new(config(), bridge.clone()).unwrap();
+    let storage = provider(config(), bridge.clone()).unwrap();
     assert_eq!(storage.single_request_limit(), 16);
     let path = ObjectPath::device_log(
         coven_foundation::id_source::DeviceId(31),
@@ -420,19 +427,6 @@ async fn create_respects_the_bridges_single_request_limit() {
     storage.create(&path, &[2; 17]).await.unwrap();
     assert_eq!(bridge.uploads.lock().await.len(), 1);
     assert_eq!(storage.read(&path).await.unwrap(), [2; 17]);
-    let positions = ObjectPath::positions(coven_foundation::id_source::DeviceId(31));
-    assert!(matches!(
-        storage
-            .replace(&positions, &[3; 17])
-            .await
-            .unwrap_err()
-            .failure(),
-        StorageFailure::SingleRequestTooLarge {
-            size: 17,
-            limit: 16
-        }
-    ));
-    assert_eq!(bridge.uploads.lock().await.len(), 1);
 }
 
 #[tokio::test]
@@ -455,7 +449,7 @@ async fn automatic_upload_keeps_both_transfer_and_abort_failures() {
         })
         .await;
     let bridge = Arc::new(bridge);
-    let storage = CloudKitStorage::new(config(), bridge.clone()).unwrap();
+    let storage = provider(config(), bridge.clone()).unwrap();
     let path = ObjectPath::device_log(
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
@@ -481,7 +475,7 @@ async fn sharing_requires_the_store_owners_account() {
         .unwrap(),
     );
     bridge.non_owner = true;
-    let storage = CloudKitStorage::new(config(), Arc::new(bridge)).unwrap();
+    let storage = provider(config(), Arc::new(bridge)).unwrap();
     assert!(matches!(
         storage.grant_access("new@example.test").await,
         Err(error) if error.failure() == StorageFailure::NotStoreOwner
@@ -505,7 +499,7 @@ async fn listing_keeps_the_native_publication_metadata() {
         )
         .unwrap(),
     ));
-    let storage = CloudKitStorage::new(config(), bridge.clone()).unwrap();
+    let storage = provider(config(), bridge.clone()).unwrap();
     let path = ObjectPath::device_log(
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
@@ -544,7 +538,7 @@ async fn listing_refuses_duplicate_paths_and_objects_outside_the_requested_prefi
             .unwrap(),
         );
         bridge.listed = Some(listed.clone());
-        let storage = CloudKitStorage::new(config(), Arc::new(bridge)).unwrap();
+        let storage = provider(config(), Arc::new(bridge)).unwrap();
         let prefix = if listed.len() == 1 {
             ObjectPrefix::positions()
         } else {
@@ -579,7 +573,7 @@ async fn recipient_join_accepts_the_native_share_before_reading_the_zone() {
         )
         .unwrap(),
     ));
-    let owner = CloudKitStorage::new(config(), bridge.clone()).unwrap();
+    let owner = provider(config(), bridge.clone()).unwrap();
     let path = ObjectPath::store_log(
         coven_foundation::id_source::DeviceId(1),
         std::num::NonZeroU64::MIN,
@@ -589,7 +583,7 @@ async fn recipient_join_accepts_the_native_share_before_reading_the_zone() {
         panic!()
     };
     let invitation = StorageInvitation::decode(invitation.encode().unwrap().as_bytes()).unwrap();
-    let recipient = CloudKitStorage::new(config(), Arc::new(bridge.recipient("member"))).unwrap();
+    let recipient = provider(config(), Arc::new(bridge.recipient("member"))).unwrap();
     assert_eq!(
         recipient.read(&path).await.unwrap_err().failure(),
         StorageFailure::PermissionDenied
@@ -648,7 +642,7 @@ async fn bridge_retained_grants_reach_the_owner() {
         reason: RetainedAccessReason::StoreOwner,
     };
     bridge.shares.lock().await.retained.push(retained.clone());
-    let owner = CloudKitStorage::new(config(), bridge).unwrap();
+    let owner = provider(config(), bridge).unwrap();
     let MemberRemoval::AccessRemains { shares } = owner
         .revoke_access(&MemberAccess::ProviderAccount("owner".into()))
         .await
@@ -670,7 +664,7 @@ async fn forgotten_native_sessions_cannot_abort_their_replacements() {
         )
         .unwrap(),
     ));
-    let storage = CloudKitStorage::new(config(), bridge.clone()).unwrap();
+    let storage = provider(config(), bridge.clone()).unwrap();
     let path = ObjectPath::device_log(
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
@@ -680,8 +674,8 @@ async fn forgotten_native_sessions_cannot_abort_their_replacements() {
     bridge.uploads.lock().await.clear();
     let mut next = storage.restart_upload(&expired).await.unwrap();
     assert_ne!(
-        storage.id(&expired).unwrap().as_str(),
-        storage.id(&next).unwrap().as_str()
+        storage.provider.id(&expired).unwrap().as_str(),
+        storage.provider.id(&next).unwrap().as_str()
     );
     storage.abort_upload(&expired).await.unwrap();
     storage.upload_part(&mut next, b"data").await.unwrap();
@@ -701,6 +695,6 @@ async fn account_identifies_the_signed_in_member_even_when_they_do_not_own_the_z
         )
         .unwrap(),
     );
-    let recipient = CloudKitStorage::new(config(), Arc::new(bridge.recipient("member"))).unwrap();
+    let recipient = provider(config(), Arc::new(bridge.recipient("member"))).unwrap();
     assert_eq!(recipient.account().await.unwrap(), "member");
 }

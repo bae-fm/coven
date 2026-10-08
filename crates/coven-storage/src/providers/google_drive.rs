@@ -1,6 +1,7 @@
 use super::access::PermissionAccess;
 use super::google_drive_access as access;
 use super::http::{self, Body, OAuthSession};
+use super::pagination::Pagination;
 use crate::session::SessionState;
 use crate::*;
 use async_trait::async_trait;
@@ -8,11 +9,11 @@ use coven_crypto::SecretText;
 use coven_foundation::id_source::DeviceId;
 use reqwest::Method;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 const PROVIDER: CloudProvider = CloudProvider::GoogleDrive;
 
 /// Encrypted objects named by their full coven path in a shared Drive folder.
-pub struct GoogleDriveStorage {
+pub(crate) struct GoogleDriveStorage {
     config: StorageConfig,
     folder: String,
     device: DeviceId,
@@ -23,12 +24,11 @@ pub struct GoogleDriveStorage {
 }
 impl GoogleDriveStorage {
     /// Construct with this device's own Google sign-in and upload identity.
-    pub fn new(
+    pub(crate) fn new(
         config: StorageConfig,
         device: DeviceId,
         session: OAuthSession,
     ) -> Result<Self, StorageError> {
-        config.validate()?;
         let StorageConfig::GoogleDrive { folder_id } = &config else {
             return Err(
                 StorageFailure::InvalidConfiguration.with_source("expected Google Drive location")
@@ -131,7 +131,7 @@ impl GoogleDriveStorage {
     async fn pages(&self, query: &str) -> Result<Vec<Value>, StorageError> {
         self.folder_metadata().await?;
         let mut token = None::<String>;
-        let mut seen = BTreeSet::new();
+        let mut seen = Pagination::new();
         let mut files = Vec::new();
         loop {
             let mut parameters = vec![("q", query), ("fields", "nextPageToken,incompleteSearch,files(id,name,mimeType,size,createdTime,parents,properties,ownedByMe,driveId)"), ("includeItemsFromAllDrives", "true"), ("pageSize", "1000")];
@@ -162,11 +162,7 @@ impl GoogleDriveStorage {
                         .filter(|s| !s.is_empty())
                         .ok_or(StorageFailure::Protocol.with_source("invalid Drive page token"))?
                         .to_owned();
-                    if !seen.insert(next.clone()) {
-                        return Err(
-                            StorageFailure::Protocol.with_source("repeated Drive page token")
-                        );
-                    }
+                    seen.check(&next)?;
                     token = Some(next);
                 }
             }
@@ -246,7 +242,6 @@ impl GoogleDriveStorage {
         Ok(())
     }
     fn upload_url<'a>(&self, session: &'a UploadSession) -> Result<&'a str, StorageError> {
-        session.check(&self.config)?;
         let SessionState::GoogleDrive { url, .. } = &session.state else {
             return Err(StorageFailure::SessionMismatch.into());
         };
@@ -315,7 +310,7 @@ impl GoogleDriveStorage {
     }
     async fn permissions(&self) -> Result<Vec<Value>, StorageError> {
         let mut token = None::<String>;
-        let mut seen = BTreeSet::new();
+        let mut seen = Pagination::new();
         let mut found = Vec::new();
         loop {
             let mut query = vec![(
@@ -344,9 +339,7 @@ impl GoogleDriveStorage {
                 .filter(|value| !value.is_empty())
                 .ok_or(StorageFailure::Protocol.with_source("invalid permission page token"))?
                 .to_owned();
-            if !seen.insert(next.clone()) {
-                return Err(StorageFailure::Protocol.with_source("repeated permission page token"));
-            }
+            seen.check(&next)?;
             token = Some(next);
         }
         Ok(found)
@@ -394,37 +387,32 @@ fn escape(value: &str) -> String {
 }
 
 #[async_trait]
-impl Storage for GoogleDriveStorage {
+impl ProviderOps for GoogleDriveStorage {
     async fn account(&self) -> Result<String, StorageError> {
         self.session.account().await
-    }
-
-    fn config(&self) -> StorageConfig {
-        self.config.clone()
     }
     async fn set_oauth_tokens(&self, tokens: OAuthTokens) -> Result<(), StorageError> {
         self.session.set_tokens(tokens).await;
         Ok(())
     }
+
+    fn config(&self) -> StorageConfig {
+        self.config.clone()
+    }
+    async fn lock_create(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        Some(self.create_lock.lock().await)
+    }
     fn single_request_limit(&self) -> u64 {
         5_000_000
     }
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        let _guard = self.create_lock.lock().await;
-        crate::transfer::upload_bytes(self, path, bytes, async {
-            if self.remove_own_duplicates(path).await?.is_some() {
-                return Err(StorageFailure::AlreadyExists.into());
-            }
-            self.create_request(path, bytes).await
-        })
-        .await
+        if self.remove_own_duplicates(path).await?.is_some() {
+            return Err(StorageFailure::AlreadyExists.into());
+        }
+        self.create_request(path, bytes).await
     }
 
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        if !path.is_replaceable() {
-            return Err(StorageFailure::InvalidPath.into());
-        }
-        crate::transfer::check_single_request(bytes.len() as u64, self.single_request_limit())?;
         let Some(item) = self.remove_own_duplicates(path).await? else {
             return self.create_request(path, bytes).await;
         };
@@ -458,7 +446,8 @@ impl Storage for GoogleDriveStorage {
     ) -> Result<Vec<u8>, StorageError> {
         self.read_object(path, Some(range)).await
     }
-    async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
+    async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
+        let prefix = listing.prefix().clone();
         let query = format!("'{}' in parents and trashed = false", escape(&self.folder));
         let mut paths = BTreeMap::new();
         for item in self.pages(&query).await? {
@@ -486,7 +475,10 @@ impl Storage for GoogleDriveStorage {
                 }
             }
         }
-        Ok(paths.into_values().map(|(_, object)| object).collect())
+        for (_, object) in paths.into_values() {
+            listing.insert(object)?;
+        }
+        Ok(())
     }
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         for item in self.copies(path).await? {
@@ -563,7 +555,10 @@ impl Storage for GoogleDriveStorage {
             invitation: StorageInvitation::for_account(self.config())?,
         })
     }
-    async fn revoke_access(&self, member: &MemberAccess) -> Result<MemberRemoval, StorageError> {
+    async fn revoke_access(
+        &self,
+        member: &MemberAccess,
+    ) -> Result<ProviderRevocation, StorageError> {
         let MemberAccess::ProviderAccount(email) = member else {
             return Err(
                 StorageFailure::InvalidConfiguration.with_source("Drive requires an account")
@@ -606,23 +601,13 @@ impl Storage for GoogleDriveStorage {
                 }),
             }
         }
-        if shares.is_empty() {
-            Ok(MemberRemoval::Revoked)
-        } else {
-            Ok(MemberRemoval::AccessRemains { shares })
-        }
+        Ok(ProviderRevocation::Remaining(shares))
     }
     async fn begin_upload(
         &self,
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
-        if path.is_replaceable() {
-            return Err(StorageFailure::InvalidPath.into());
-        }
-        if total == 0 {
-            return Err(StorageFailure::InvalidPart.into());
-        }
         if self.remove_own_duplicates(path).await?.is_some() {
             return Err(StorageFailure::AlreadyExists.into());
         }
@@ -687,10 +672,6 @@ impl Storage for GoogleDriveStorage {
         })
     }
     async fn resume_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
-        session.check(&self.config)?;
-        if session.is_complete() {
-            return Ok(());
-        }
         let response = self
             .session
             .send(
@@ -710,8 +691,8 @@ impl Storage for GoogleDriveStorage {
         &self,
         session: &mut UploadSession,
         bytes: &[u8],
+        end: u64,
     ) -> Result<(), StorageError> {
-        let end = session.end_of_part(bytes.len())?;
         let response = self
             .session
             .send(
@@ -742,10 +723,6 @@ impl Storage for GoogleDriveStorage {
         Ok(())
     }
     async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError> {
-        session.check(&self.config)?;
-        if session.is_complete() {
-            return Ok(());
-        }
         let response = self
             .session
             .send(

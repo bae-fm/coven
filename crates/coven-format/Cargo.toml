@@ -13,6 +13,7 @@ coven-merge.workspace = true
 serde = { workspace = true, features = ["derive"] }
 uuid.workspace = true
 zeroize.workspace = true
+hex.workspace = true
 
 [lints]
 workspace = true

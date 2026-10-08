@@ -6,7 +6,7 @@ use crate::{
 };
 use coven_storage::{
     providers::{OAuthFlow, StorageConnector},
-    ConnectionCredentials, S3Credentials, StorageCredentials,
+    ConnectionCredentials, S3Credentials, Storage, StorageCredentials,
 };
 use std::{future::Future, sync::Arc};
 

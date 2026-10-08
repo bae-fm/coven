@@ -1,7 +1,7 @@
 use super::*;
 use coven_storage::{
     test_utils::{Faults, MemoryStorage},
-    Storage, StorageSettings,
+    Storage, StorageConnection, StorageSettings,
 };
 use std::{
     sync::atomic::{AtomicBool, Ordering},
@@ -91,7 +91,7 @@ impl Fixture {
 
 struct TrackingConnector {
     storage: Arc<MemoryStorage>,
-    clients: std::sync::Mutex<Vec<std::sync::Weak<dyn Storage>>>,
+    clients: std::sync::Mutex<Vec<std::sync::Weak<StorageConnection>>>,
     credentials: std::sync::Mutex<Vec<StorageCredentials>>,
     refuse: AtomicBool,
     held: tokio::sync::Mutex<
@@ -109,7 +109,7 @@ impl StorageConnector for TrackingConnector {
         config: StorageConfig,
         credentials: coven_storage::StorageCredentials,
         device: DeviceId,
-    ) -> Result<Arc<dyn Storage>, StorageError> {
+    ) -> Result<Arc<StorageConnection>, StorageError> {
         if let Some((entered, resume)) = self.held.lock().await.take() {
             entered.send(()).unwrap();
             resume.await.unwrap();
@@ -537,7 +537,7 @@ impl StorageConnector for Locations {
         config: StorageConfig,
         credentials: coven_storage::StorageCredentials,
         device: DeviceId,
-    ) -> Result<Arc<dyn Storage>, StorageError> {
+    ) -> Result<Arc<StorageConnection>, StorageError> {
         let storage = self
             .0
             .iter()

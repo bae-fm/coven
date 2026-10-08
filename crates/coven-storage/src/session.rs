@@ -97,6 +97,17 @@ pub(crate) struct S3Part {
     pub(crate) etag: String,
 }
 
+impl S3Part {
+    pub(crate) fn follows(&self, index: usize, end: u64, total: u64, part_size: usize) -> bool {
+        self.number as usize == index + 1
+            && !self.etag.is_empty()
+            && self.size != 0
+            && self.size <= part_size as u64
+            && end <= total
+            && (self.size == part_size as u64 || end == total)
+    }
+}
+
 impl UploadSession {
     /// Whether this recorded transfer belongs to the connected location.
     pub fn is_at(&self, location: &StorageConfig) -> bool {
@@ -167,12 +178,7 @@ impl UploadSession {
                     confirmed = confirmed
                         .checked_add(part.size)
                         .ok_or(StorageFailure::InvalidPart)?;
-                    if part.number != index as i32 + 1
-                        || part.etag.is_empty()
-                        || part.size == 0
-                        || part.size > self.part_size as u64
-                        || (part.size != self.part_size as u64 && confirmed != self.total)
-                    {
+                    if !part.follows(index, confirmed, self.total, self.part_size) {
                         return Err(StorageFailure::InvalidPart.into());
                     }
                 }
@@ -262,12 +268,7 @@ fn nonempty(id: &SecretText) -> Result<(), StorageError> {
 fn transfer_url(value: &SecretText) -> Result<(), StorageError> {
     let url = url::Url::parse(value.as_str())
         .map_err(|error| StorageFailure::SessionMismatch.with_source(error))?;
-    if !matches!(url.scheme(), "https" | "http")
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.fragment().is_some()
-    {
+    if !crate::web_url::is_web_url(&url) || url.fragment().is_some() {
         return Err(StorageFailure::SessionMismatch.into());
     }
     Ok(())

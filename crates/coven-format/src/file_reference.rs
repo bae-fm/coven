@@ -3,7 +3,7 @@
 use crate::{error::Rule, Error};
 use coven_crypto::{FileKey, SecretText};
 use coven_foundation::id_source::{DeviceId, FileId};
-use std::fmt::Write;
+use zeroize::Zeroizing;
 
 /// An uploaded object's owner, random name and decryption key.
 /// The owner remains available after the last row referring to the file goes.
@@ -56,9 +56,10 @@ impl UploadedFileReference {
     /// Encode into secret text so diagnostics cannot reveal the file key.
     pub fn encode(&self) -> SecretText {
         let mut text = format!("uploaded {} {} ", self.device.0, self.id);
-        for byte in self.key.to_secret_bytes().as_bytes() {
-            write!(text, "{byte:02x}").expect("writing to String");
-        }
+        let mut key = Zeroizing::new([0; 64]);
+        hex::encode_to_slice(self.key.to_secret_bytes().as_bytes(), key.as_mut())
+            .expect("64 hex digits for a 32-byte key");
+        text.push_str(std::str::from_utf8(key.as_ref()).expect("hex is ASCII"));
         SecretText::new(text)
     }
 }

@@ -68,11 +68,7 @@ impl StorageInvitation {
             (CloudProvider::CloudKit, InvitationAcceptance::CloudKitShare { url }) => {
                 let url = url::Url::parse(url.as_str())
                     .map_err(|error| StorageFailure::InvalidConfiguration.with_source(error))?;
-                if url.scheme() != "https"
-                    || url.host_str().is_none()
-                    || !url.username().is_empty()
-                    || url.password().is_some()
-                {
+                if !crate::web_url::is_web_url(&url) || url.scheme() != "https" {
                     return Err(StorageFailure::InvalidConfiguration
                         .with_source("invalid CloudKit share URL"));
                 }

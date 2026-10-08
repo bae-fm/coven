@@ -132,14 +132,16 @@ pub trait CloudKitOps: Send + Sync {
 }
 
 /// iCloud storage through the app's native CloudKit bridge.
-pub struct CloudKitStorage {
+pub(crate) struct CloudKitStorage {
     config: StorageConfig,
     ops: Arc<dyn CloudKitOps>,
 }
 impl CloudKitStorage {
     /// Bind the injected bridge to one store's zone at the composition root.
-    pub fn new(config: StorageConfig, ops: Arc<dyn CloudKitOps>) -> Result<Self, StorageError> {
-        config.validate()?;
+    pub(crate) fn new(
+        config: StorageConfig,
+        ops: Arc<dyn CloudKitOps>,
+    ) -> Result<Self, StorageError> {
         if !matches!(config, StorageConfig::CloudKit { .. }) {
             return Err(StorageFailure::InvalidConfiguration.with_source("expected CloudKit zone"));
         }
@@ -157,7 +159,6 @@ impl CloudKitStorage {
         Ok(())
     }
     fn id<'a>(&self, session: &'a UploadSession) -> Result<&'a SecretText, StorageError> {
-        session.check(&self.config)?;
         match &session.state {
             SessionState::CloudKit { id } => Ok(id),
             _ => Err(StorageFailure::SessionMismatch.into()),
@@ -165,7 +166,7 @@ impl CloudKitStorage {
     }
 }
 #[async_trait]
-impl Storage for CloudKitStorage {
+impl ProviderOps for CloudKitStorage {
     async fn account(&self) -> Result<String, StorageError> {
         let account = self.ops.account(&self.config).await?;
         if account.is_empty() {
@@ -180,19 +181,9 @@ impl Storage for CloudKitStorage {
         self.ops.single_request_limit()
     }
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        crate::transfer::upload_bytes(
-            self,
-            path,
-            bytes,
-            self.ops.create(&self.config, path, bytes),
-        )
-        .await
+        self.ops.create(&self.config, path, bytes).await
     }
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        if !path.is_replaceable() {
-            return Err(StorageFailure::InvalidPath.into());
-        }
-        crate::transfer::check_single_request(bytes.len() as u64, self.single_request_limit())?;
         self.ops.replace(&self.config, path, bytes).await
     }
     async fn read(&self, path: &ObjectPath) -> Result<Vec<u8>, StorageError> {
@@ -209,18 +200,13 @@ impl Storage for CloudKitStorage {
         }
         Ok(bytes)
     }
-    async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
-        let paths = self.ops.list(&self.config, prefix).await?;
-        let mut unique = std::collections::BTreeMap::new();
-        for object in paths {
-            if !prefix.contains(&object.path)
-                || unique.insert(object.path.clone(), object).is_some()
-            {
-                return Err(StorageFailure::Protocol.with_source("invalid CloudKit prefix listing"));
-            }
+    async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
+        for object in self.ops.list(&self.config, listing.prefix()).await? {
+            listing.insert(object)?;
         }
-        Ok(unique.into_values().collect())
+        Ok(())
     }
+
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         self.ops.delete(&self.config, path).await
     }
@@ -235,35 +221,33 @@ impl Storage for CloudKitStorage {
         })
     }
     async fn join(&self, invitation: &StorageInvitation) -> Result<(), StorageError> {
-        invitation.check(&self.config)?;
         let crate::invitation::InvitationAcceptance::CloudKitShare { url } = &invitation.acceptance
         else {
             return Err(StorageFailure::InvitationMismatch.into());
         };
         self.ops.accept_share(&self.config, url).await?;
-        self.list(&ObjectPrefix::all()).await?;
         Ok(())
     }
-    async fn revoke_access(&self, member: &MemberAccess) -> Result<MemberRemoval, StorageError> {
+    async fn revoke_access(
+        &self,
+        member: &MemberAccess,
+    ) -> Result<ProviderRevocation, StorageError> {
         let MemberAccess::ProviderAccount(email) = member else {
             return Err(
                 StorageFailure::InvalidConfiguration.with_source("CloudKit requires an account")
             );
         };
         self.require_owner().await?;
-        self.ops.revoke_access(&self.config, email).await
+        self.ops
+            .revoke_access(&self.config, email)
+            .await
+            .map(ProviderRevocation::Reported)
     }
     async fn begin_upload(
         &self,
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
-        if path.is_replaceable() {
-            return Err(StorageFailure::InvalidPath.into());
-        }
-        if total == 0 {
-            return Err(StorageFailure::InvalidPart.into());
-        }
         let upload = self.ops.begin_upload(&self.config, path, total).await?;
         if upload.part_size == 0 || upload.id.as_str().is_empty() {
             return Err(StorageFailure::Protocol.with_source("invalid CloudKit session"));
@@ -278,10 +262,6 @@ impl Storage for CloudKitStorage {
         })
     }
     async fn resume_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
-        session.check(&self.config)?;
-        if session.is_complete() {
-            return Ok(());
-        }
         match self
             .ops
             .upload_status(&self.config, self.id(session)?)
@@ -306,8 +286,8 @@ impl Storage for CloudKitStorage {
         &self,
         session: &mut UploadSession,
         bytes: &[u8],
+        end: u64,
     ) -> Result<(), StorageError> {
-        let end = session.end_of_part(bytes.len())?;
         self.ops
             .upload_part(&self.config, self.id(session)?, session.confirmed, bytes)
             .await?;
@@ -315,10 +295,6 @@ impl Storage for CloudKitStorage {
         Ok(())
     }
     async fn finish_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
-        session.check(&self.config)?;
-        if session.is_complete() {
-            return Ok(());
-        }
         if session.confirmed != session.total {
             return Err(StorageFailure::InvalidPart.into());
         }
@@ -329,10 +305,6 @@ impl Storage for CloudKitStorage {
         Ok(())
     }
     async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError> {
-        session.check(&self.config)?;
-        if session.is_complete() {
-            return Ok(());
-        }
         match self.ops.abort_upload(&self.config, self.id(session)?).await {
             Err(error)
                 if matches!(

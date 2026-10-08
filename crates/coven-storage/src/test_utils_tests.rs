@@ -233,9 +233,17 @@ async fn failed_automatic_upload_is_aborted_without_publishing() {
         storage.create(&path, &[1; 17]).await.unwrap_err().failure(),
         StorageFailure::Network
     );
+    assert!(
+        !storage.reached(),
+        "inner upload calls must not mask its network failure"
+    );
     assert!(storage.list(&ObjectPrefix::all()).await.unwrap().is_empty());
-    assert!(storage.state.lock().await.uploads.is_empty());
+    assert!(storage.provider.state.lock().await.uploads.is_empty());
+    assert!(storage.reached());
+    storage.reset_reachability();
+    assert!(!storage.reached());
     storage.create(&path, &[1; 17]).await.unwrap();
+    assert!(storage.reached());
     assert_eq!(storage.read(&path).await.unwrap(), [1; 17]);
 }
 
@@ -263,6 +271,7 @@ async fn sharing_authority_belongs_to_the_adapters_account() {
         ));
         assert_eq!(
             owner
+                .provider
                 .state
                 .lock()
                 .await
@@ -276,7 +285,7 @@ async fn sharing_authority_belongs_to_the_adapters_account() {
             .revoke_access(&MemberAccess::ProviderAccount("kept@example.test".into()))
             .await
             .unwrap();
-        assert!(owner.state.lock().await.accounts.is_empty());
+        assert!(owner.provider.state.lock().await.accounts.is_empty());
     }
     let s3 = MemoryStorage::new(
         config(),
@@ -403,6 +412,7 @@ async fn recorded_sessions_cannot_redirect_or_regress_provider_state() {
         panic!()
     };
     storage
+        .provider
         .state
         .lock()
         .await
@@ -442,7 +452,13 @@ async fn publication_removes_pending_parts_and_verifies_the_exact_session() {
     let SessionState::Memory { id, .. } = first.state else {
         panic!()
     };
-    assert!(!storage.state.lock().await.uploads.contains_key(&id));
+    assert!(!storage
+        .provider
+        .state
+        .lock()
+        .await
+        .uploads
+        .contains_key(&id));
     storage.resume_upload(&mut recorded).await.unwrap();
     assert!(recorded.is_complete());
     storage.finish_upload(&mut recorded).await.unwrap();
@@ -457,7 +473,7 @@ async fn publication_removes_pending_parts_and_verifies_the_exact_session() {
         Err(error) if error.failure() == StorageFailure::AlreadyExists
     ));
     assert_eq!(storage.read(&path).await.unwrap(), b"data");
-    assert!(storage.state.lock().await.uploads.is_empty());
+    assert!(storage.provider.state.lock().await.uploads.is_empty());
 }
 
 #[tokio::test]
@@ -544,7 +560,7 @@ async fn lost_publication_replies_and_expired_parts_are_distinct() {
         StorageFailure::Network
     );
     assert!(!upload.is_complete());
-    assert!(storage.state.lock().await.uploads.is_empty());
+    assert!(storage.provider.state.lock().await.uploads.is_empty());
     storage.resume_upload(&mut upload).await.unwrap();
     assert!(upload.is_complete());
     storage.delete(&path).await.unwrap();
@@ -728,7 +744,7 @@ async fn invalid_account_grants_leave_the_fake_unchanged() {
             owner.grant_access("").await,
             Err(error) if error.failure() == StorageFailure::InvalidConfiguration
         ));
-        assert!(owner.state.lock().await.accounts.is_empty());
+        assert!(owner.provider.state.lock().await.accounts.is_empty());
         assert!(MemoryStorage::for_recipient(&owner, "").is_err());
     }
 }

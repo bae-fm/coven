@@ -1,16 +1,16 @@
 use super::dropbox_access::{remaining_parent_access, FolderMembers, MemberId};
 use super::http::{self, Body, OAuthSession};
+use super::pagination::Pagination;
 use crate::session::SessionState;
 use crate::*;
 use async_trait::async_trait;
 use coven_crypto::SecretText;
 use reqwest::Method;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
 const PROVIDER: CloudProvider = CloudProvider::Dropbox;
 
 /// Dropbox objects reached through the shared namespace, independent of mount names.
-pub struct DropboxStorage {
+pub(crate) struct DropboxStorage {
     config: StorageConfig,
     namespace: String,
     session: OAuthSession,
@@ -19,8 +19,7 @@ pub struct DropboxStorage {
 }
 impl DropboxStorage {
     /// Construct with this device's own Dropbox sign-in.
-    pub fn new(config: StorageConfig, session: OAuthSession) -> Result<Self, StorageError> {
-        config.validate()?;
+    pub(crate) fn new(config: StorageConfig, session: OAuthSession) -> Result<Self, StorageError> {
         let StorageConfig::Dropbox { namespace_id } = &config else {
             return Err(
                 StorageFailure::InvalidConfiguration.with_source("expected Dropbox namespace")
@@ -85,7 +84,6 @@ impl DropboxStorage {
         check_file(&value, path, bytes.len() as u64)
     }
     fn id<'a>(&self, session: &'a UploadSession) -> Result<&'a str, StorageError> {
-        session.check(&self.config)?;
         match &session.state {
             SessionState::Dropbox { id } => Ok(id.as_str()),
             _ => Err(StorageFailure::SessionMismatch.into()),
@@ -109,7 +107,7 @@ impl DropboxStorage {
         if inherited {
             request["path"] = json!(format!("ns:{}", self.namespace));
         }
-        let mut seen = BTreeSet::new();
+        let mut seen = Pagination::new();
         let mut members = FolderMembers::default();
         loop {
             let value = self.rpc(method, request).await?;
@@ -118,9 +116,7 @@ impl DropboxStorage {
                 return Ok(members);
             };
             let cursor = http::string(&value, "cursor")?;
-            if !seen.insert(cursor.to_owned()) {
-                return Err(StorageFailure::Protocol.with_source("repeated Dropbox member cursor"));
-            }
+            seen.check(cursor)?;
             method = "sharing/list_folder_members/continue";
             request = json!({"cursor":cursor});
         }
@@ -224,29 +220,25 @@ fn check_file(value: &Value, path: &ObjectPath, size: u64) -> Result<(), Storage
     Ok(())
 }
 #[async_trait]
-impl Storage for DropboxStorage {
+impl ProviderOps for DropboxStorage {
     async fn account(&self) -> Result<String, StorageError> {
         self.session.account().await
-    }
-
-    fn config(&self) -> StorageConfig {
-        self.config.clone()
     }
     async fn set_oauth_tokens(&self, tokens: OAuthTokens) -> Result<(), StorageError> {
         self.session.set_tokens(tokens).await;
         Ok(())
     }
+
+    fn config(&self) -> StorageConfig {
+        self.config.clone()
+    }
     fn single_request_limit(&self) -> u64 {
         150 * 1024 * 1024
     }
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        crate::transfer::upload_bytes(self, path, bytes, self.write(path, bytes, "add")).await
+        self.write(path, bytes, "add").await
     }
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        if !path.is_replaceable() {
-            return Err(StorageFailure::InvalidPath.into());
-        }
-        crate::transfer::check_single_request(bytes.len() as u64, self.single_request_limit())?;
         self.write(path, bytes, "overwrite").await
     }
     async fn read(&self, path: &ObjectPath) -> Result<Vec<u8>, StorageError> {
@@ -281,11 +273,11 @@ impl Storage for DropboxStorage {
         )
         .await
     }
-    async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
+    async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
+        let prefix = listing.prefix().clone();
         let mut method = "files/list_folder";
         let mut request = json!({"path":"","recursive":true,"include_deleted":false,"limit":2000});
-        let mut seen = BTreeSet::new();
-        let mut paths = BTreeMap::new();
+        let mut seen = Pagination::new();
         loop {
             let value = self.rpc(method, request).await?;
             for entry in http::array(&value, "entries")? {
@@ -311,18 +303,13 @@ impl Storage for DropboxStorage {
                 )?;
                 if prefix.contains(&path) {
                     let object = StoredObject {
-                        path: path.clone(),
+                        path,
                         size: entry["size"].as_u64().ok_or(
                             StorageFailure::Protocol.with_source("Dropbox omitted object size"),
                         )?,
                         stored_at: http::timestamp(entry, "server_modified")?,
                     };
-                    if let Some(previous) = paths.insert(path, object.clone()) {
-                        if previous != object {
-                            return Err(StorageFailure::Protocol
-                                .with_source("Dropbox listed conflicting objects"));
-                        }
-                    }
+                    listing.insert(object)?;
                 }
             }
             match value["has_more"].as_bool() {
@@ -335,13 +322,11 @@ impl Storage for DropboxStorage {
                 }
             }
             let cursor = http::string(&value, "cursor")?;
-            if !seen.insert(cursor.to_owned()) {
-                return Err(StorageFailure::Protocol.with_source("repeated Dropbox cursor"));
-            }
+            seen.check(cursor)?;
             method = "files/list_folder/continue";
             request = json!({"cursor":cursor});
         }
-        Ok(paths.into_values().collect())
+        Ok(())
     }
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         match self
@@ -393,8 +378,7 @@ impl Storage for DropboxStorage {
             invitation: StorageInvitation::for_account(self.config())?,
         })
     }
-    async fn join(&self, invitation: &StorageInvitation) -> Result<(), StorageError> {
-        invitation.check(&self.config)?;
+    async fn join(&self, _invitation: &StorageInvitation) -> Result<(), StorageError> {
         let response = self
             .rpc_response(
                 "sharing/mount_folder",
@@ -424,10 +408,12 @@ impl Storage for DropboxStorage {
                 return Err(error);
             }
         }
-        self.list(&ObjectPrefix::all()).await?;
         Ok(())
     }
-    async fn revoke_access(&self, member: &MemberAccess) -> Result<MemberRemoval, StorageError> {
+    async fn revoke_access(
+        &self,
+        member: &MemberAccess,
+    ) -> Result<ProviderRevocation, StorageError> {
         let MemberAccess::ProviderAccount(email) = member else {
             return Err(
                 StorageFailure::InvalidConfiguration.with_source("Dropbox requires an account")
@@ -453,23 +439,13 @@ impl Storage for DropboxStorage {
                 shares.push(share);
             }
         }
-        if shares.is_empty() {
-            Ok(MemberRemoval::Revoked)
-        } else {
-            Ok(MemberRemoval::AccessRemains { shares })
-        }
+        Ok(ProviderRevocation::Remaining(shares))
     }
     async fn begin_upload(
         &self,
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
-        if path.is_replaceable() {
-            return Err(StorageFailure::InvalidPath.into());
-        }
-        if total == 0 {
-            return Err(StorageFailure::InvalidPart.into());
-        }
         let value = http::json(
             PROVIDER,
             self.content(
@@ -493,8 +469,7 @@ impl Storage for DropboxStorage {
         })
     }
     async fn resume_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
-        session.check(&self.config)?;
-        if session.is_complete() || matches!(session.state, SessionState::VerifyPublished) {
+        if matches!(session.state, SessionState::VerifyPublished) {
             return Ok(());
         }
         // Empty append is Dropbox's offset query. An incorrect-offset response
@@ -534,22 +509,17 @@ impl Storage for DropboxStorage {
         &self,
         session: &mut UploadSession,
         bytes: &[u8],
+        end: u64,
     ) -> Result<(), StorageError> {
-        session.check(&self.config)?;
         if matches!(session.state, SessionState::VerifyPublished) {
-            return http::verify_published_part(self, session, bytes).await;
+            return http::verify_published_part(self, session, bytes, end).await;
         }
-        let end = session.end_of_part(bytes.len())?;
         let response = self.content("files/upload_session/append_v2",json!({"cursor":{"session_id":self.id(session)?,"offset":session.confirmed},"close":false}),bytes.to_vec(),None).await?;
         http::checked(PROVIDER, response).await?;
         session.confirmed = end;
         Ok(())
     }
     async fn finish_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
-        session.check(&self.config)?;
-        if session.is_complete() {
-            return Ok(());
-        }
         if session.confirmed != session.total {
             return Err(StorageFailure::InvalidPart.into());
         }
@@ -560,8 +530,7 @@ impl Storage for DropboxStorage {
         Ok(())
     }
     async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError> {
-        session.check(&self.config)?;
-        if session.is_complete() || matches!(session.state, SessionState::VerifyPublished) {
+        if matches!(session.state, SessionState::VerifyPublished) {
             return Ok(());
         }
         let mut offset = session.confirmed;

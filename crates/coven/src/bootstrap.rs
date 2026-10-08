@@ -190,7 +190,8 @@ async fn bootstrap_device(
                     pending.directory(),
                     Arc::new(StoreKeychain::new(keychain, id)),
                 )?;
-                owners.storage = Some(Arc::new(coven_storage::StorageConnection::new(storage)));
+                storage.reset_reachability();
+                owners.storage = Some(storage);
                 // No await separates final custody, publication and the handle.
                 commit::publish_bootstrap(
                     &pending,
@@ -248,7 +249,7 @@ async fn prepare_and_load(
         StorageCredentials,
         StoreKeyring,
         Database,
-        Arc<dyn Storage>,
+        Arc<coven_storage::StorageConnection>,
     )>,
     BootstrapError,
 > {

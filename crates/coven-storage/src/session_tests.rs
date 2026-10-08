@@ -240,6 +240,15 @@ fn session_urls_and_unknown_state_fields_are_refused() {
         24 * 320 * 1024,
     );
     for url in [
+        "http://localhost/session?token=1",
+        "https://upload.example/session?token=1",
+    ] {
+        session.state = SessionState::OneDrive {
+            url: SecretText::new(url.into()),
+        };
+        UploadSession::decode(session.encode().unwrap().as_bytes()).unwrap();
+    }
+    for url in [
         "",
         "not a URL",
         "file:///session",

@@ -325,7 +325,7 @@ async fn lost_completion_requires_byte_verification() {
     storage.finish_upload(&mut upload).await.unwrap();
     assert!(upload.is_complete());
 }
-fn provider(url: &str) -> OneDriveStorage {
+fn provider(url: &str) -> StorageConnection<OneDriveStorage> {
     let mut storage = OneDriveStorage::new(
         StorageConfig::OneDrive {
             drive_id: "drive".into(),
@@ -335,7 +335,7 @@ fn provider(url: &str) -> OneDriveStorage {
     )
     .unwrap();
     storage.api = format!("{url}/graph");
-    storage
+    StorageConnection::from_provider(Arc::new(storage))
 }
 fn remote() -> Arc<Mutex<Remote>> {
     let mut remote = Remote::default();

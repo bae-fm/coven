@@ -15,6 +15,18 @@ pub enum CloudProvider {
     CloudKit,
 }
 
+impl CloudProvider {
+    /// Instructions for cutting off a removed device's provider access (§13).
+    /// This depends on the provider kind, not on a connected account or request.
+    pub fn sign_out(self) -> crate::ProviderSignOut {
+        match self {
+            Self::S3 => crate::ProviderSignOut::ReplaceAccessKey,
+            Self::CloudKit => crate::ProviderSignOut::RemoveFromAppleAccount,
+            provider => crate::ProviderSignOut::RemoveAppAccess { provider },
+        }
+    }
+}
+
 /// The store's location; credentials are kept separately in key custody.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -80,10 +92,7 @@ impl StorageConfig {
                 prefix,
             } => {
                 if let Some(endpoint) = endpoint {
-                    if !matches!(endpoint.scheme(), "https" | "http")
-                        || endpoint.host_str().is_none()
-                        || !endpoint.username().is_empty()
-                        || endpoint.password().is_some()
+                    if !crate::web_url::is_web_url(endpoint)
                         || endpoint.query().is_some()
                         || endpoint.fragment().is_some()
                     {
@@ -117,3 +126,7 @@ impl StorageConfig {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "config_tests.rs"]
+mod tests;
