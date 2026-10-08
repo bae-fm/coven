@@ -327,7 +327,6 @@ macro_rules! coven_tables {
                 path BLOB NOT NULL,
                 size BLOB NOT NULL CHECK(length(size)=8),
                 modified_at BLOB NOT NULL CHECK(length(modified_at)=13),
-                chunk_size INTEGER NOT NULL CHECK(chunk_size BETWEEN 4096 AND 8388608),
                 PRIMARY KEY(table_name,key,column_name)
             ) STRICT, WITHOUT ROWID;
         ");
@@ -345,7 +344,6 @@ macro_rules! coven_tables {
                 column_name TEXT NOT NULL,
                 identity BLOB NOT NULL,
                 path TEXT NOT NULL,
-                chunk_size INTEGER NOT NULL CHECK(chunk_size BETWEEN 4096 AND 8388608),
                 PRIMARY KEY(table_name,key,column_name)
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_device_files_path ON _coven_device_files(path);
@@ -366,7 +364,6 @@ macro_rules! coven_tables {
                 last_attempt_at BLOB,
                 failure BLOB,
                 identity BLOB,
-                chunk_size INTEGER NOT NULL CHECK(chunk_size BETWEEN 4096 AND 8388608),
                 session BLOB,
                 stored INTEGER NOT NULL DEFAULT 0 CHECK(stored IN (0,1)),
                 unused INTEGER NOT NULL DEFAULT 0 CHECK(unused IN (0,1)),

@@ -175,13 +175,15 @@ async fn ranges_authenticate_cache_batch_and_fail_offline() {
     let file = f.uploaded("one", bytes.clone()).await;
     let stream = f.files.open_file_stream(&file).await.unwrap();
     assert_eq!(f.storage.ranges().await.len(), 1);
+    assert_eq!(f.storage.ranges().await[0].start(), 0);
+    assert_eq!(f.storage.ranges().await[0].len(), 11);
     assert_eq!(
         stream.read_at(CHUNK as u64 * 4 + 5, 19).await.unwrap(),
         bytes[CHUNK * 4 + 5..CHUNK * 4 + 24]
     );
     let ranges = f.storage.ranges().await;
     assert_eq!(ranges.len(), 2);
-    assert_eq!(ranges[1].start(), 15 + 4 * (CHUNK as u64 + 16));
+    assert_eq!(ranges[1].start(), 11 + 4 * (CHUNK as u64 + 16));
     assert_eq!(ranges[1].len(), CHUNK as u64 + 16);
     let requests = f.storage.request_count();
     assert_eq!(
@@ -216,7 +218,7 @@ async fn ranges_authenticate_cache_batch_and_fail_offline() {
     let uploaded = file.uploaded().unwrap().unwrap();
     let path = coven_storage::ObjectPath::file(uploaded.device, uploaded.id);
     f.storage
-        .corrupt_byte(&path, 15 + CHUNK + 16 + 1)
+        .corrupt_byte(&path, 11 + CHUNK + 16 + 1)
         .await
         .unwrap();
     assert!(matches!(
@@ -336,7 +338,7 @@ async fn eviction_uses_chunk_recency_and_keeps_namespace_budgets_independent() {
     f.files.read_file(&other).await.unwrap();
     let stream = f.files.open_file_stream(&file).await.unwrap();
     f.files
-        .set_cache_budget("files", 15 + 2 * (CHUNK as u64 + 16))
+        .set_cache_budget("files", 11 + 2 * (CHUNK as u64 + 16))
         .await
         .unwrap();
     for index in [0, 1, 0, 2] {
@@ -394,7 +396,7 @@ async fn sequential_reading_starts_read_ahead_and_streams_a_whole_hash_check() {
             let ranges = f.storage.ranges().await;
             if ranges
                 .iter()
-                .any(|range| range.start() == 15 + 2 * (CHUNK as u64 + 16))
+                .any(|range| range.start() == 11 + 2 * (CHUNK as u64 + 16))
             {
                 break;
             }
@@ -529,7 +531,7 @@ async fn pinning_preserves_cached_tail_chunks_while_assembling_the_whole_file() 
     let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     let file = f.uploaded("cached-tail", vec![74; CHUNK * 4]).await;
     f.files
-        .set_cache_budget("files", 15 + 2 * (CHUNK as u64 + 16))
+        .set_cache_budget("files", 11 + 2 * (CHUNK as u64 + 16))
         .await
         .unwrap();
     let stream = f.files.open_file_stream(&file).await.unwrap();
@@ -557,7 +559,7 @@ async fn unused_headers_do_not_displace_recently_read_chunks() {
     f.files.open_file_stream(&old).await.unwrap();
     let recent = f.uploaded("recent", vec![76; CHUNK]).await;
     f.files
-        .set_cache_budget("files", 15 + CHUNK as u64 + 16)
+        .set_cache_budget("files", 11 + CHUNK as u64 + 16)
         .await
         .unwrap();
     f.files

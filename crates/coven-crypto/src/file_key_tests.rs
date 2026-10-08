@@ -1,7 +1,7 @@
 use super::*;
 
 const PATH: &str = "files/1/11111111-1111-1111-1111-111111111111";
-const HEADER: [u8; 15] = [38, 0, 1, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 10];
+const HEADER: [u8; 11] = [38, 0, 1, 0, 0, 0, 0, 0, 0, 0, 10];
 
 #[test]
 fn file_chunk_matches_an_independent_xchacha_vector() {
@@ -10,7 +10,7 @@ fn file_chunk_matches_an_independent_xchacha_vector() {
     let sealed = key.seal_chunk(PATH, &HEADER, 0, b"hello file");
     assert_eq!(
         hex::encode(&sealed),
-        "5621e82de767c089ad29e2bfefbb3bb31f83a3de5a6f63164470"
+        "5621e82de767c089ad298c5b76f00982eb0d2b879416e4ed0019"
     );
     assert_eq!(
         key.open_chunk(PATH, &HEADER, 0, &sealed).unwrap(),

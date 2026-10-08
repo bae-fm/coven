@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn hashes_follow_file_chunks_regardless_of_input_fragmentation() {
-    let size = DEFAULT_CHUNK_SIZE as usize;
+    let size = CHUNK_SIZE;
     for length in [0, 1, size - 1, size, size + 1, size * 3 + 19] {
         let bytes = (0..length).map(|i| (i % 251) as u8).collect::<Vec<_>>();
         let mut whole = ContentHasher::new();

@@ -314,7 +314,7 @@ async fn recorded_sessions_continue_or_restart_with_the_same_encrypted_bytes() {
         assert_eq!(session.confirmed_bytes(), 0);
         let identity = item.identity.as_ref().unwrap().as_bytes().to_vec();
         let (id, key) = decode_identity(&identity).unwrap();
-        let expected_size = item.header.encrypted_size().unwrap();
+        let expected_size = 11 + (CHUNK * 5 + 18) as u64 + 6 * 16;
         f.reopen().await;
         f.storage
             .set_faults(Faults {

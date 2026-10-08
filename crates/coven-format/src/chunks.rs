@@ -3,7 +3,7 @@
 use crate::error::{require, Error, Rule};
 use crate::{frame_length, FRAME_PREFIX_LEN};
 
-/// Plaintext bytes in a full write-part or snapshot chunk.
+/// Plaintext bytes in a full file, write-part or snapshot chunk.
 pub const CHUNK_SIZE: usize = 64 * 1024;
 
 /// Cut a sequence of frames into fixed-size chunks, retaining at most one frame

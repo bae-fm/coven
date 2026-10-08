@@ -2,7 +2,7 @@
 
 use crate::{sqlite::DatabaseConnection, write_rows::AppKey, DbError};
 use coven_crypto::{ContentHash, ContentHasher};
-use coven_format::file::{FileHeader, DEFAULT_CHUNK_SIZE};
+use coven_format::{chunks::CHUNK_SIZE, file::FileHeader};
 
 #[derive(Debug)]
 pub(crate) struct FileHashes {
@@ -30,11 +30,11 @@ impl FileHasher {
     pub(crate) fn update(&mut self, mut bytes: &[u8]) {
         self.content.update(bytes);
         while !bytes.is_empty() {
-            let length = bytes.len().min(DEFAULT_CHUNK_SIZE as usize - self.in_chunk);
+            let length = bytes.len().min(CHUNK_SIZE - self.in_chunk);
             self.chunk.update(&bytes[..length]);
             self.in_chunk += length;
             bytes = &bytes[length..];
-            if self.in_chunk == DEFAULT_CHUNK_SIZE as usize {
+            if self.in_chunk == CHUNK_SIZE {
                 self.finish_chunk();
             }
         }

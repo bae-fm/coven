@@ -100,7 +100,7 @@ async fn an_uploading_write_refuses_a_trigger_that_removes_its_file() {
 async fn chunk_hashes_belong_to_the_queued_version_and_retire_with_it() {
     use crate::file_write::tests::{local_count, SCHEMA};
     use coven_crypto::ContentHasher;
-    use coven_format::file::DEFAULT_CHUNK_SIZE;
+    use coven_format::chunks::CHUNK_SIZE;
     for provenance in [Provenance::UserProvided, Provenance::AppProvided] {
         for remove in [false, true] {
             let store = TestStore::new();
@@ -108,7 +108,7 @@ async fn chunk_hashes_belong_to_the_queued_version_and_retire_with_it() {
                 .schema(tables(provenance.clone()), SCHEMA)
                 .await
                 .unwrap();
-            let bytes = vec![17; DEFAULT_CHUNK_SIZE as usize + 1];
+            let bytes = vec![17; CHUNK_SIZE + 1];
             let original = tempfile::NamedTempFile::new().unwrap();
             match provenance {
                 Provenance::AppProvided => attach(&db, bytes.clone(), true).await.unwrap(),
@@ -156,7 +156,7 @@ async fn chunk_hashes_belong_to_the_queued_version_and_retire_with_it() {
                 .unwrap();
                 assert_eq!(local_count(&db, "_coven_file_chunks"), 0);
             }
-            for (index, chunk) in bytes.chunks(DEFAULT_CHUNK_SIZE as usize).enumerate() {
+            for (index, chunk) in bytes.chunks(CHUNK_SIZE).enumerate() {
                 let mut expected = ContentHasher::new();
                 expected.update(chunk);
                 assert_eq!(

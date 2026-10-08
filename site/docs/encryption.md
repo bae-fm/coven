@@ -91,10 +91,10 @@ Providers can assign a separate physical object identifier; the retained exact
 reference records that identifier along with the logical key, stored length,
 and stored-byte hash.
 
-Payloads encrypted under Store or Circle keys expose a 36-byte key tag and
-their chunk header. The tag contains `CKF`, a format-version byte, and the 32-byte key fingerprint. The
-header records the chunk size, plaintext length, and nonce policy. These let a
-reader choose the key and locate chunks; they do not expose the key itself.
+Uploaded files expose an 11-byte header containing the object kind, format
+version, and plaintext length. Chunks are always 64 KiB, so the length determines
+their offsets. The file's independent key travels in its row's encrypted writes;
+it is not in the file header.
 See [the threat model](/docs/threat-model) for the limits of these protections.
 
 ## Where the store key lives
@@ -145,35 +145,27 @@ unverified partial read.
 
 ## Chunked encryption
 
-Coven encrypts chunks independently with XChaCha20-Poly1305. The default
-plaintext chunk size is 64 KiB, and each stored header records the size used by
-its writer. Each chunk adds a 16-byte authentication tag, including the single
-tag-only chunk used for an empty payload.
+Coven encrypts each uploaded file in 64-KiB chunks with XChaCha20-Poly1305.
+The last chunk may be shorter. Each chunk adds a 16-byte authentication tag;
+an empty file has a header and no chunks.
 
-The stored form for a payload encrypted with an audience key is:
+The stored file at `files/<device>/<file>` is:
 
 ```text
-[key tag: 36 bytes]
-[format version: 1 byte][nonce policy: 1 byte]
-[chunk size: 4 bytes, little-endian][plaintext length: 8 bytes, little-endian]
-[base nonce: 24 bytes, only for the random-stored policy]
+[kind: 1 byte (38)][format version: 2 bytes, big-endian]
+[plaintext length: 8 bytes, big-endian]
 [encrypted chunk 0][encrypted chunk 1]...[encrypted chunk n]
 ```
 
-Whole-object encryption, including encrypted protocol objects and sealed
-application-row data, uses a fresh random base nonce stored in the header.
-Streaming blob encryption derives its base nonce from the sealing key and the
-blob context using HKDF-SHA256. That context includes the Store ID and locator
-key, which binds the plaintext hash. Re-sealing the same blob with the same key,
-context, and chunk size reproduces the same ciphertext; different plaintext
-must have a different context.
+Each file has an independent random key. A chunk's nonce is its zero-based index
+encoded as a 24-byte big-endian number. Its authentication tag binds the
+`coven/file-chunk/v1` context, storage path, complete header, index, and contents.
+Changing chunk positions, the declared length, or the path makes authentication
+fail. Upload retries verify each plaintext chunk against its recorded hash before
+encrypting it, so a retry cannot encrypt different bytes under the same key and
+chunk index.
 
-Each chunk's nonce is the base nonce with its index mixed in. Its authentication
-tag binds the complete header, the object context, its index, and its contents.
-Changing chunk positions, the declared length, or the context makes
-authentication fail.
-
-For an encrypted blob, the [range reader](/docs/storage#ranged-reads) reads the
-key tag and header once, then fetches and authenticates only the chunks covering
-the requested plaintext range. It does not need preceding chunks or a complete
-file download to verify that range.
+The range reader reads the header once, then fetches and authenticates only the
+chunks covering the requested plaintext range. Chunk `i` starts at
+`11 + i × (65,536 + 16)`. Reading a range does not need preceding chunks or a
+complete file download.

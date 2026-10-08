@@ -2092,7 +2092,7 @@ pub struct BlockedOperation {
   content hash before transfer, and the first-read hash of each plaintext
   chunk before encryption. A changed user original reports `UserFileChanged`;
   a changed app-provided copy reports `Integrity`. Retries retain the same
-  file id, key, chunk size and chunk hashes, without an encrypted local copy.
+  file id, key and chunk hashes, without an encrypted local copy.
 
 ```rust
 /// Live upload-queue results, ending when the store closes (E7).

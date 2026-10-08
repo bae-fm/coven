@@ -2089,9 +2089,9 @@ Carol's tablet:
 - An *app-provided* file is bytes the app hands to coven, which keeps and
   owns them.
 - The first read records both the whole-file content hash and a SHA-256
-  hash of each plaintext chunk at the file's chunk size: when preparing a
-  user-provided original, or staging an app-provided file. These hashes
-  stay local; they are not part of the storage format.
+  hash of each 64-KiB plaintext chunk (the last may be shorter), when
+  preparing a user-provided original or staging an app-provided file.
+  These hashes stay local; they are not part of the storage format.
 - The app can hand them over as a stream, so a large file never has to fit
   in memory.
 - Every row of a synced table syncs, but each file is in one of two
@@ -2143,8 +2143,8 @@ Carol's tablet:
     rows are stored twice, and deleting one never touches the other.
   - The key never reaches storage outside the row's encrypted writes, so
     a member who can't read the row can't read the file.
-- A file is encrypted in chunks, 64 KiB by default, recorded in its
-  header.
+- A file is encrypted in 64-KiB chunks; the last may be shorter. Its
+  header records the file size.
   - Each chunk is encrypted and authenticated on its own, with its index
     bound in, so a chunk can't be altered, swapped or reordered unnoticed.
   - So any chunk can be read and checked without the rest of the file.
@@ -2251,13 +2251,13 @@ Carol's tablet:
 - Coven keeps, in its local tables, what only this device knows about
   files; none of it syncs:
   - `_coven_user_files`: each user-provided file's path, size and
-    modification time and upload chunk size, by its row and column;
+    modification time, by its row and column;
   - `_coven_device_files`: each app-provided file waiting to upload, and
-    where in coven's own folder, with its upload chunk size;
+    where in coven's own folder;
   - `_coven_file_chunks`: plaintext chunk hashes recorded with the local
     source, retained until it is uploaded or its local file facts go;
   - `_coven_file_uploads`: the upload queue, each file's attempts, last
-    failure category, captured file reference, chunk size, independent id
+    failure category, captured file reference, independent id
     and key, and its provider upload session while one is in progress;
     - `_coven_file_upload_chunks` holds its chunk hashes, copied from the
       local source when queued and deleted with the queue row. Keeping

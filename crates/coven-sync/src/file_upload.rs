@@ -7,7 +7,10 @@ use crate::{
 };
 use coven_crypto::{FileKey, SecretBytes, FILE_CHUNK_TAG_LEN};
 use coven_database::{DbError, FileRef, FileUpload, LocalFileStream};
-use coven_format::file::FILE_HEADER_LEN;
+use coven_format::{
+    chunks::CHUNK_SIZE,
+    file::{FileHeader, FILE_HEADER_LEN},
+};
 use coven_foundation::id_source::FileId;
 use coven_storage::{ObjectPath, UploadSession};
 use futures_util::StreamExt;
@@ -256,8 +259,7 @@ impl FilesInner {
                 },
             );
             let source = self.database.open_local(&item.file).await?;
-            let total = item
-                .header
+            let total = FileHeader::new(item.file.plaintext_size())
                 .encrypted_size()
                 .map_err(|_| FileReadError::Integrity { id: item.file.id() })?;
             self.phase(
@@ -400,7 +402,7 @@ struct FileTransfer<'a> {
 }
 impl FileTransfer<'_> {
     async fn read_encrypted(&self, offset: u64, length: usize) -> Result<Vec<u8>, UploadFailure> {
-        let header = self.item.header;
+        let header = FileHeader::new(self.item.file.plaintext_size());
         let end = offset
             .checked_add(length as u64)
             .filter(|end| *end <= self.total)
@@ -413,8 +415,8 @@ impl FileTransfer<'_> {
             position = next;
         }
         while position < end {
-            let index = (position - FILE_HEADER_LEN as u64)
-                / (u64::from(header.chunk_size()) + FILE_CHUNK_TAG_LEN as u64);
+            let index =
+                (position - FILE_HEADER_LEN as u64) / (CHUNK_SIZE + FILE_CHUNK_TAG_LEN) as u64;
             let chunk = header.chunk(index).map_err(|_| DbError::DamagedDatabase)?;
             let expected = self
                 .owner
@@ -424,7 +426,7 @@ impl FileTransfer<'_> {
             let plain = self
                 .source
                 .read_verified_at(
-                    index * u64::from(header.chunk_size()),
+                    index * CHUNK_SIZE as u64,
                     chunk.plaintext_length as u64,
                     expected,
                 )

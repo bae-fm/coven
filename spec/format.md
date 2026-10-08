@@ -535,18 +535,16 @@
 - An uploaded file at `files/<device>/<file>` is:
 
   ```
-  kind:u8 (38) | version:u16 | chunk_size:u32 | size:u64 | chunks
+  kind:u8 (38) | version:u16 | size:u64 | chunks
   ```
 
-  - Chunks are `ciphertext | tag:16 bytes`, each `chunk_size` bytes of the
-    file except the last; a file of size 0 has none. `chunk_size` is 64 KiB
-    unless the app chose another, from 4 KiB to 8 MiB, inclusive; every
-    integer byte size in that range is valid.
+  - Chunks are `ciphertext | tag:16 bytes`, each 65,536 bytes (64 KiB) of
+    the file except the last, which may be shorter; a file of size 0 has none.
   - Each is XChaCha20-Poly1305 under the file's own key
     ([§16.2](coven.md#162-storage-and-naming)), with its index
     as the nonce, a 24-byte big-endian number, and associated data binding
     `coven/file-chunk/v1`, the path, the cleartext header and the index.
-  - Chunk `i` starts at `15 + i × (chunk_size + 16)`, so any range is read
+  - Chunk `i` starts at `11 + i × (65,536 + 16)`, so any range is read
     without the rest.
 - The file's key and id are in its row's where-column, which coven writes
   as the text `uploaded <device id> <file id> <key in lowercase hex>`, or the decimal
@@ -594,7 +592,7 @@
 - The sealed fixtures are `sealed-write.hex`, `sealed-store-log.hex`,
   `sealed-snapshot.hex`, `sealed-positions.hex` and `sealed-join-request.hex`;
   `sealed-store-key.hex` and `sealed-circle-key.hex` hold the two key boxes.
-  `file.hex` has a full 4-KiB chunk and a 29-byte last chunk; `uploaded-file.txt`
+  `file.hex` has a full 64-KiB chunk and a 29-byte last chunk; `uploaded-file.txt`
   pins its device-qualified path and uploaded row reference. The code frames
   are `restore-code.hex` and `invite-code.hex`, with their text in `codes.txt`.
   All key material and fixed nonces in these fixtures are public test data.

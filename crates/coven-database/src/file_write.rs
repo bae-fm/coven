@@ -147,15 +147,14 @@ impl<'a> FileWrite<'a> {
                     };
                     db.internal_execute(
                         "INSERT INTO _coven_device_files
-                             (table_name,key,column_name,identity,path,chunk_size)
-                         VALUES(?1,?2,?3,?4,?5,?6)",
+                             (table_name,key,column_name,identity,path)
+                         VALUES(?1,?2,?3,?4,?5)",
                         (
                             &key.0,
                             &key.1,
                             &file.id,
                             file_row::identity(file, &attached_values)?,
                             staged.name.as_str(),
-                            coven_format::file::DEFAULT_CHUNK_SIZE,
                         ),
                     )?;
                     staged.hashes.record(
@@ -217,11 +216,11 @@ impl<'a> FileWrite<'a> {
         );
         db.internal_execute(
             "INSERT INTO _coven_user_files
-                 (table_name,key,column_name,identity,path,size,modified_at,chunk_size)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+                 (table_name,key,column_name,identity,path,size,modified_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7)
              ON CONFLICT(table_name,key,column_name) DO UPDATE SET
                  identity=excluded.identity,path=excluded.path,
-                 size=excluded.size,modified_at=excluded.modified_at,chunk_size=excluded.chunk_size",
+                 size=excluded.size,modified_at=excluded.modified_at",
             rusqlite::params![
                 key.0,
                 key.1,
@@ -229,7 +228,7 @@ impl<'a> FileWrite<'a> {
                 file_row::identity(file, &attached_values)?,
                 crate::user_file::encode_path(prepared.observed.path()),
                 prepared.observed.size().to_be_bytes().as_slice(),
-                crate::user_file::encode_time(prepared.observed.modified_at()), coven_format::file::DEFAULT_CHUNK_SIZE
+                crate::user_file::encode_time(prepared.observed.modified_at())
             ],
         )?;
         prepared.hashes.record(

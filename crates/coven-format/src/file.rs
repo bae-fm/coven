@@ -2,45 +2,26 @@
 
 use std::ops::Range;
 
+use crate::chunks::CHUNK_SIZE;
 use crate::error::{require, Error, Rule};
 use coven_crypto::{CryptoError, FileKey, FILE_CHUNK_TAG_LEN};
 
-/// Bytes before the first file chunk: kind, version, chunk size and file size.
-pub const FILE_HEADER_LEN: usize = 15;
-/// The chunk size used unless an app chooses another.
-pub const DEFAULT_CHUNK_SIZE: u32 = 64 * 1024;
-/// The smallest permitted plaintext chunk size.
-pub const MIN_CHUNK_SIZE: u32 = 4 * 1024;
-/// The largest permitted plaintext chunk size.
-pub const MAX_CHUNK_SIZE: u32 = 8 * 1024 * 1024;
+/// Bytes before the first file chunk: kind, version and file size.
+pub const FILE_HEADER_LEN: usize = 11;
 
 /// Validated kind-38 cleartext header. It is authenticated by every file chunk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FileHeader {
-    chunk_size: u32,
     size: u64,
 }
 
 impl FileHeader {
-    /// Use the 64-KiB default for a file of this plaintext size.
+    /// Describe a file of this plaintext size, in fixed 64-KiB chunks.
     pub fn new(size: u64) -> Self {
-        Self {
-            chunk_size: DEFAULT_CHUNK_SIZE,
-            size,
-        }
+        Self { size }
     }
 
-    /// Choose any chunk size from 4 KiB through 8 MiB, inclusive.
-    pub fn with_chunk_size(size: u64, chunk_size: u32) -> Result<Self, Error> {
-        require(
-            (MIN_CHUNK_SIZE..=MAX_CHUNK_SIZE).contains(&chunk_size),
-            "file chunk size",
-            Rule::Chunk,
-        )?;
-        Ok(Self { chunk_size, size })
-    }
-
-    /// Decode exactly the 15-byte header, without reading any ciphertext.
+    /// Decode exactly the 11-byte header, without reading any ciphertext.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         crate::sealed::prefix(bytes, 38)?;
         if bytes.len() < FILE_HEADER_LEN {
@@ -49,25 +30,18 @@ impl FileHeader {
         if bytes.len() > FILE_HEADER_LEN {
             return Err(Error::TrailingBytes);
         }
-        Self::with_chunk_size(
-            u64::from_be_bytes(bytes[7..15].try_into().expect("eight bytes")),
-            u32::from_be_bytes(bytes[3..7].try_into().expect("four bytes")),
-        )
+        Ok(Self::new(u64::from_be_bytes(
+            bytes[3..11].try_into().expect("eight bytes"),
+        )))
     }
 
-    /// Encode kind, version, chunk size and size, all integers big-endian.
+    /// Encode kind, version and size, all integers big-endian.
     pub fn encode(&self) -> [u8; FILE_HEADER_LEN] {
         let mut bytes = [0; FILE_HEADER_LEN];
         bytes[0] = 38;
         bytes[1..3].copy_from_slice(&crate::FORMAT_VERSION.to_be_bytes());
-        bytes[3..7].copy_from_slice(&self.chunk_size.to_be_bytes());
-        bytes[7..].copy_from_slice(&self.size.to_be_bytes());
+        bytes[3..].copy_from_slice(&self.size.to_be_bytes());
         bytes
-    }
-
-    /// Plaintext bytes in every chunk except a possible shorter final chunk.
-    pub fn chunk_size(&self) -> u32 {
-        self.chunk_size
     }
 
     /// The file's complete plaintext size.
@@ -77,7 +51,7 @@ impl FileHeader {
 
     /// How many chunks follow this header; an empty file has none.
     pub fn chunk_count(&self) -> u64 {
-        self.size.div_ceil(u64::from(self.chunk_size))
+        self.size.div_ceil(CHUNK_SIZE as u64)
     }
 
     /// Full stored size, refusing an offset that cannot be represented in u64.
@@ -93,11 +67,11 @@ impl FileHeader {
     pub fn chunk(&self, index: u64) -> Result<FileChunk, Error> {
         require(index < self.chunk_count(), "file chunk index", Rule::Chunk)?;
         let offset = index
-            .checked_mul(u64::from(self.chunk_size) + FILE_CHUNK_TAG_LEN as u64)
+            .checked_mul((CHUNK_SIZE + FILE_CHUNK_TAG_LEN) as u64)
             .and_then(|n| n.checked_add(FILE_HEADER_LEN as u64))
             .ok_or_else(offset_error)?;
-        let plaintext_length = (self.size - index * u64::from(self.chunk_size))
-            .min(u64::from(self.chunk_size)) as usize;
+        let plaintext_length =
+            (self.size - index * CHUNK_SIZE as u64).min(CHUNK_SIZE as u64) as usize;
         offset
             .checked_add((plaintext_length + FILE_CHUNK_TAG_LEN) as u64)
             .ok_or_else(offset_error)?;
@@ -162,7 +136,7 @@ impl FileHeader {
 pub struct FileChunk {
     /// Zero-based index; also the chunk's nonce.
     pub index: u64,
-    /// Byte offset in the stored object, including its 15-byte header.
+    /// Byte offset in the stored object, including its 11-byte header.
     pub offset: u64,
     /// Exact plaintext length; the stored length adds a 16-byte tag.
     pub plaintext_length: usize,
@@ -180,12 +154,10 @@ impl FileRange {
         if self.range.is_empty() {
             return Ok(FILE_HEADER_LEN as u64..FILE_HEADER_LEN as u64);
         }
-        let first = self
-            .header
-            .chunk(self.range.start / u64::from(self.header.chunk_size))?;
+        let first = self.header.chunk(self.range.start / CHUNK_SIZE as u64)?;
         let last = self
             .header
-            .chunk((self.range.end - 1) / u64::from(self.header.chunk_size))?;
+            .chunk((self.range.end - 1) / CHUNK_SIZE as u64)?;
         Ok(first.offset..last.offset + (last.plaintext_length + FILE_CHUNK_TAG_LEN) as u64)
     }
 
@@ -198,7 +170,7 @@ impl FileRange {
         if self.range.is_empty() {
             return Ok(Vec::new());
         }
-        let size = u64::from(self.header.chunk_size);
+        let size = CHUNK_SIZE as u64;
         let first = self.range.start / size;
         let last = (self.range.end - 1) / size;
         let length =

@@ -22,8 +22,6 @@ pub struct FileUpload {
     pub failure: Option<SecretBytes>,
     /// Sync's encoded independent file id and key, fixed before contacting storage.
     pub identity: Option<SecretBytes>,
-    /// The header fixes the chunk size across retries and provider sessions.
-    pub header: FileHeader,
     /// Opaque provider session, interpreted only by storage.
     pub session: Option<SecretBytes>,
     /// The provider has confirmed complete publication.
@@ -42,15 +40,7 @@ fn enqueue(
     let (key, values) = crate::file_row::lookup(db, schema, file.table(), file.key())?;
     let identity =
         crate::file_row::identity(declaration, &values)?.ok_or(DbError::DamagedDatabase)?;
-    let table = match declaration.provenance {
-        crate::Provenance::UserProvided => "_coven_user_files",
-        crate::Provenance::AppProvided => "_coven_device_files",
-    };
-    let chunk_size: u32 = db.query_row(
-        &format!("SELECT chunk_size FROM {table} WHERE table_name=?1 AND key=?2 AND column_name=?3 AND identity=?4"),
-        (&key.0, &key.1, file.column(), &identity), |row| row.get(0),
-    )?;
-    let inserted = db.internal_execute("INSERT INTO _coven_file_uploads(reference,queued_at,chunk_size) VALUES(?1,?2,?3) ON CONFLICT(reference) DO NOTHING", (file.encode()?, crate::user_file::encode_time(now), chunk_size))?;
+    let inserted = db.internal_execute("INSERT INTO _coven_file_uploads(reference,queued_at) VALUES(?1,?2) ON CONFLICT(reference) DO NOTHING", (file.encode()?, crate::user_file::encode_time(now)))?;
     if inserted == 1 {
         let id: i64 = db.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
         let count = db.internal_execute(
@@ -59,8 +49,7 @@ fn enqueue(
              WHERE table_name=?2 AND key=?3 AND column_name=?4 AND identity=?5",
             (id, &key.0, &key.1, file.column(), identity),
         )?;
-        let header = FileHeader::with_chunk_size(file.plaintext_size(), chunk_size)
-            .map_err(|_| DbError::DamagedDatabase)?;
+        let header = FileHeader::new(file.plaintext_size());
         let end: Option<i64> = db.query_row(
             "SELECT max(chunk)+1 FROM _coven_file_upload_chunks WHERE upload=?1",
             [id],
@@ -95,8 +84,8 @@ pub(crate) fn attached(
 }
 
 pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> {
-    let rows = db.query("SELECT id,reference,queued_at,attempts,last_attempt_at,failure,identity,chunk_size,session,stored,unused FROM _coven_file_uploads ORDER BY id", [], |r| {
-        Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, Vec<u8>>(2)?, r.get::<_, i64>(3)?, r.get::<_, Option<Vec<u8>>>(4)?, r.get::<_, Option<Vec<u8>>>(5)?, r.get::<_, Option<Vec<u8>>>(6)?, r.get::<_, u32>(7)?, r.get::<_, Option<Vec<u8>>>(8)?, r.get::<_, bool>(9)?, r.get::<_, bool>(10)?))
+    let rows = db.query("SELECT id,reference,queued_at,attempts,last_attempt_at,failure,identity,session,stored,unused FROM _coven_file_uploads ORDER BY id", [], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, Vec<u8>>(2)?, r.get::<_, i64>(3)?, r.get::<_, Option<Vec<u8>>>(4)?, r.get::<_, Option<Vec<u8>>>(5)?, r.get::<_, Option<Vec<u8>>>(6)?, r.get::<_, Option<Vec<u8>>>(7)?, r.get::<_, bool>(8)?, r.get::<_, bool>(9)?))
     })?;
     rows.into_iter()
         .map(
@@ -108,7 +97,6 @@ pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> 
                 last,
                 failure,
                 identity,
-                chunk_size,
                 session,
                 stored,
                 unused,
@@ -116,8 +104,6 @@ pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> 
                 let file = FileRef::decode(&reference)?;
                 Ok(FileUpload {
                     id,
-                    header: FileHeader::with_chunk_size(file.plaintext_size(), chunk_size)
-                        .map_err(|_| DbError::DamagedDatabase)?,
                     file,
                     queued_at: crate::user_file::decode_time(&queued)?,
                     attempts: u64::try_from(attempts).map_err(|_| DbError::DamagedDatabase)?,

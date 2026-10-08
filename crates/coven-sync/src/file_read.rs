@@ -6,7 +6,10 @@ use crate::{
 };
 use coven_crypto::{ContentHasher, FileKey};
 use coven_database::{DbError, FileLocation, FileRef, LocalFileStream};
-use coven_format::file::{FileHeader, FILE_HEADER_LEN};
+use coven_format::{
+    chunks::CHUNK_SIZE,
+    file::{FileHeader, FILE_HEADER_LEN},
+};
 use coven_foundation::files::{FileArea, FileName, StoreReadLock};
 use coven_storage::{ByteRange, ObjectPath, StorageFailure};
 use std::sync::Arc;
@@ -186,7 +189,7 @@ impl FileRangeStream<'_> {
         if self.remaining == 0 {
             return Ok(None);
         }
-        let length = self.remaining.min(REQUEST_BYTES - 64 * 1024);
+        let length = self.remaining.min(REQUEST_BYTES - CHUNK_SIZE as u64);
         let bytes = self.file.read_at(self.offset, length).await?;
         self.offset += length;
         self.remaining -= length;
@@ -337,7 +340,7 @@ impl UploadedFile {
         if len == 0 {
             return Ok(result);
         }
-        let size = u64::from(self.header.chunk_size());
+        let size = CHUNK_SIZE as u64;
         let mut index = offset / size;
         let last = (offset + len - 1) / size;
         while index <= last {
@@ -411,15 +414,7 @@ impl UploadedFile {
             end_index += 1;
             end = next_end;
         }
-        // D12 permits chunks larger than the request cap. Accumulate that one
-        // ciphertext chunk from capped requests, then authenticate before use.
-        let mut bytes = Vec::new();
-        let mut cursor = start;
-        while cursor < end {
-            let next = (cursor + REQUEST_BYTES).min(end);
-            bytes.extend(fetch(&self.owner, &self.file, &self.path, cursor, next).await?);
-            cursor = next;
-        }
+        let bytes = fetch(&self.owner, &self.file, &self.path, start, end).await?;
         let mut plain = Vec::new();
         let mut cursor = 0;
         for index in first..=end_index {
