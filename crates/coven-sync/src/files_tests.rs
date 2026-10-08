@@ -103,7 +103,7 @@ impl Fixture {
         let table = table.to_owned();
         let name = table.clone();
         self.database
-            .write_with_files(
+            .write_with_files::<_, _, _, coven_database::DbError>(
                 move |batch| {
                     batch.put_file(namespace, fileid, bytes);
                     Ok(())

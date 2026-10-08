@@ -1,4 +1,5 @@
 //! Session changes, audience moves, and one causal write record.
+use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::merge_store::MergeStore;
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{audience_text, counter, decoded, timestamp};
@@ -343,7 +344,7 @@ pub(crate) fn record(
     )?.into_iter().collect();
     let own_position = positions.remove(&device).unwrap_or(0);
     let last: Option<Vec<u8>> = database.query_row(
-        "SELECT max(number) FROM _coven_writes WHERE substr(timestamp,9,8)=?1",
+        &format!("SELECT max(number) FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1"),
         [device.0.to_be_bytes().as_slice()],
         |r| r.get(0),
     )?;

@@ -1,5 +1,6 @@
 //! Indexed loading of the merge's own row state and causal metadata.
 
+use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{audience_text, counter, decoded};
 use crate::write_rows::AppView;
@@ -34,7 +35,7 @@ impl<'a> WriteMetadata<'a> {
         if self.writes.borrow().contains_key(&id) {
             return Ok(());
         }
-        let applied=self.database.query_row("SELECT id,timestamp,had_read FROM _coven_writes WHERE substr(timestamp,9,8)=?1 AND number=?2",params![id.device.0.to_be_bytes().as_slice(),id.number.to_be_bytes().as_slice()],|r| Ok(StoredWrite { ordinal:r.get(0)?, record:AppliedWrite { id,timestamp:decoded(merge_fields::decode_timestamp(&r.get::<_,Vec<u8>>(1)?))?,had_read:decoded(merge_fields::decode_write_positions(&r.get::<_,Vec<u8>>(2)?))? } }))?;
+        let applied=self.database.query_row(&format!("SELECT id,timestamp,had_read FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2"),params![id.device.0.to_be_bytes().as_slice(),id.number.to_be_bytes().as_slice()],|r| Ok(StoredWrite { ordinal:r.get(0)?, record:AppliedWrite { id,timestamp:decoded(merge_fields::decode_timestamp(&r.get::<_,Vec<u8>>(1)?))?,had_read:decoded(merge_fields::decode_write_positions(&r.get::<_,Vec<u8>>(2)?))? } }))?;
         self.writes.borrow_mut().insert(id, applied);
         Ok(())
     }

@@ -115,7 +115,7 @@ fn forget_merge_losses(
     let key = hash(&[b"row", row.table.as_bytes(), &row.key]);
     let audience = audience_text(&row.audience);
     // Finish reading the leaf cursor before deleting from its table.
-    database.visit(
+    database.for_each::<_, crate::DbError>(
         "SELECT hash FROM _coven_fingerprint_leaves WHERE audience=?1 AND merge_row=?2",
         params![audience, key.as_slice()],
         |r| {

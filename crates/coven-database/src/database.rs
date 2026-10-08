@@ -391,18 +391,8 @@ impl Database {
 
     /// Stream app-provided files to durable storage, then commit their rows and
     /// metadata atomically. A failed write discards all newly supplied bytes.
-    pub async fn write_with_files<F, S, R>(&self, build: F, sql: S) -> Result<R, DbError>
-    where
-        F: FnOnce(&mut crate::WriteBatch) -> Result<(), DbError> + Send + 'static,
-        S: FnOnce(crate::SqlContext<'_, '_>) -> Result<R, DbError> + Send + 'static,
-        R: Send + 'static,
-    {
-        self.write_with_files_result(build, sql).await
-    }
-
-    /// Run a write whose callbacks use the facade's error type, preserving that
-    /// type alongside any rollback or byte-cleanup failure.
-    pub async fn write_with_files_result<F, S, R, E>(&self, build: F, sql: S) -> Result<R, E>
+    /// Callback errors retain their type alongside rollback or byte-cleanup failures.
+    pub async fn write_with_files<F, S, R, E>(&self, build: F, sql: S) -> Result<R, E>
     where
         F: FnOnce(&mut crate::WriteBatch) -> Result<(), E> + Send + 'static,
         S: FnOnce(crate::SqlContext<'_, '_>) -> Result<R, E> + Send + 'static,

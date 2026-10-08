@@ -331,7 +331,7 @@ async fn circle_deletion_commits_file_removal_with_the_entry_and_rolls_both_back
             .await
             .unwrap();
     }
-    db.write_with_files(
+    db.write_with_files::<_, _, _, crate::DbError>(
         |batch| {
             batch.put_file("files", NOTE, b"original".to_vec());
             Ok(())

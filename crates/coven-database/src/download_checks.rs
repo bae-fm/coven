@@ -1,4 +1,5 @@
 //! Cross-record and application-schema checks before merge state is touched.
+use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError};
 use coven_format::{
     merge_fields,
@@ -10,7 +11,9 @@ pub(crate) fn past(database: &DatabaseConnection, header: &WriteHeader) -> Resul
     let causal_past = header.had_read.causal_past(header.position);
     for frontier in causal_past.frontier() {
         let bytes: Vec<u8> = database.query_row(
-            "SELECT had_read FROM _coven_writes WHERE substr(timestamp,9,8)=?1 AND number=?2",
+            &format!(
+                "SELECT had_read FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2"
+            ),
             (
                 frontier.device.0.to_be_bytes().as_slice(),
                 frontier.number.to_be_bytes().as_slice(),

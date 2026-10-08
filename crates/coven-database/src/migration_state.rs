@@ -18,7 +18,7 @@ pub(crate) fn carry(
 ) -> Result<BTreeSet<String>, DbError> {
     // The cursor owns identities only, and never changes the table being visited.
     db.batch("CREATE TEMP TABLE _coven_migration_retired AS SELECT DISTINCT table_name,key,audience FROM _coven_lost WHERE retired=0 AND replacement_kind='rules'")?;
-    db.visit("SELECT table_name,key,audience FROM temp._coven_migration_retired", [], |r| {
+    db.for_each::<_, crate::DbError>("SELECT table_name,key,audience FROM temp._coven_migration_retired", [], |r| {
         let id = crate::row_queries::read_identity(r)?;
         freeze_losses(db, &id)?;
         crate::fingerprint::forget_rows(db, std::iter::once(&id))?;
@@ -44,7 +44,7 @@ pub(crate) fn carry(
                 continue;
             }
         }
-        db.visit(
+        db.for_each::<_, crate::DbError>(
             "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE table_name=?1",
             [&table.name],
             |r| {
@@ -222,7 +222,7 @@ fn references(
     let mut losses = BTreeSet::new();
     for (id, table, old) in keys {
         let target = names.tables.get(&table).and_then(|new_table| {
-            let key = names.foreign_key(&table, &old)?;
+            let key = names.foreign_key(&table, &old, None)?;
             let target = after.table(new_table);
             target
                 .foreign_keys
@@ -261,12 +261,12 @@ fn references(
     }
     for table in losses {
         // Values of concurrent cell losses embed reference identities as well.
-        db.visit("SELECT id,value FROM _coven_lost WHERE table_name=?1 AND retired=0 AND replacement_kind='write'",[&table],|r| {
+        db.for_each::<_, crate::DbError>("SELECT id,value FROM _coven_lost WHERE table_name=?1 AND retired=0 AND replacement_kind='write'",[&table],|r| {
             let id: i64 = r.get(0)?;
             let mut value = decoded(merge_fields::decode_column_value(&r.get::<_,Vec<u8>>(1)?))?;
             let old = value.clone();
             value.parents = value.parents.into_iter().filter_map(|(fk,mut parent)| {
-                let fk = names.foreign_key(&table,&fk)?;
+                let fk = names.foreign_key(&table,&fk, None)?;
                 let target = after.table(&names.tables[&table]);
                 if !target.foreign_keys.iter().any(|f|after.foreign_key(target,f)==fk) { return None; }
                 parent.row.table = names.tables.get(&parent.row.table)?.clone();
@@ -358,7 +358,7 @@ pub(crate) fn refresh(
 ) -> Result<(), DbError> {
     let deleted = crate::store_log_tables::deleted_circles(db)?;
     for table in tables {
-        db.visit(
+        db.for_each::<_, crate::DbError>(
             "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE table_name=?1",
             [table],
             |r| {

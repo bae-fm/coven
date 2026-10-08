@@ -81,7 +81,7 @@ async fn a_socket_stream_leaves_the_writer_available_and_keeps_its_pending_bytes
     let writing = tokio::spawn({
         let db = db.clone();
         async move {
-            db.write_with_files(
+            db.write_with_files::<_, _, _, crate::DbError>(
                 move |batch| {
                     batch.put_file("files", "7", source);
                     Ok(())
@@ -133,7 +133,7 @@ async fn close_waits_for_staging_and_reopen_removes_cancelled_bytes() {
         let writing = tokio::spawn({
             let db = db.clone();
             async move {
-                db.write_with_files(
+                db.write_with_files::<_, _, _, crate::DbError>(
                     move |batch| {
                         batch.put_file("files", "7", source);
                         Ok(())
@@ -211,7 +211,7 @@ fn a_file_reader_and_writer_can_share_one_blocking_worker() {
         let reader = tokio::fs::File::open(original.path()).await.unwrap();
         tokio::time::timeout(
             Duration::from_secs(5),
-            db.write_with_files(
+            db.write_with_files::<_, _, _, crate::DbError>(
                 move |batch| {
                     batch.put_file("files", "7", FileSource::Stream(Box::pin(reader)));
                     Ok(())

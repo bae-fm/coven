@@ -238,7 +238,7 @@ impl CovenHandle {
         F: FnOnce(SqlContext<'_, '_>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static,
     {
-        self.database.write_with_files_result(|_| Ok(()), sql).await
+        self.database.write_with_files(|_| Ok(()), sql).await
     }
 
     /// Runs one write that also hands coven app-provided files. `build` adds
@@ -251,7 +251,7 @@ impl CovenHandle {
         S: FnOnce(SqlContext<'_, '_>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static,
     {
-        self.database.write_with_files_result(build, sql).await
+        self.database.write_with_files(build, sql).await
     }
 
     /// A read of one consistent snapshot, run when awaited. Attach `process`

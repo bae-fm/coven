@@ -224,7 +224,7 @@ impl MigrationSnapshot {
             return Ok(None);
         };
         let mut rows = Vec::new();
-        db.visit(
+        db.for_each::<_, crate::DbError>(
             &format!(
                 "SELECT {} FROM temp.{} WHERE coven_key=?1",
                 table.projection(),
@@ -385,7 +385,7 @@ impl MigrationSnapshot {
                 identifier(&table.name),
                 tests.join(" OR ")
             );
-            db.visit(&sql, [], |r| {
+            db.for_each::<_, crate::DbError>(&sql, [], |r| {
                 let columns = table
                     .columns
                     .iter()
@@ -401,7 +401,7 @@ impl MigrationSnapshot {
             })?;
             if let Some(snapshot) = snapshot {
                 db.batch(&format!("CREATE TEMP TABLE _coven_migration_keys(coven_key BLOB PRIMARY KEY) WITHOUT ROWID; INSERT INTO _coven_migration_keys SELECT {key} FROM main.{} a",identifier(&table.name)))?;
-                db.visit(&format!("SELECT b.coven_key FROM temp.{} b LEFT JOIN temp._coven_migration_keys a USING(coven_key) WHERE a.coven_key IS NULL",identifier(&snapshot.temporary)),[],|r| { changed.insert((table.name.clone(),r.get(0)?),BTreeSet::new()); Ok(()) })?;
+                db.for_each::<_, crate::DbError>(&format!("SELECT b.coven_key FROM temp.{} b LEFT JOIN temp._coven_migration_keys a USING(coven_key) WHERE a.coven_key IS NULL",identifier(&snapshot.temporary)),[],|r| { changed.insert((table.name.clone(),r.get(0)?),BTreeSet::new()); Ok(()) })?;
                 db.batch("DROP TABLE temp._coven_migration_keys")?;
             }
         }

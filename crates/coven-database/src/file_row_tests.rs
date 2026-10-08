@@ -12,7 +12,7 @@ async fn invalid_batches_report_the_namespace_and_file_without_leaving_bytes() {
         .await
         .unwrap();
     let duplicate = db
-        .write_with_files(
+        .write_with_files::<_, _, _, crate::DbError>(
             |batch| {
                 batch.put_file("files", "7", vec![1]);
                 batch.put_file("files", "7", vec![2]);
@@ -26,7 +26,7 @@ async fn invalid_batches_report_the_namespace_and_file_without_leaving_bytes() {
         matches!(duplicate, DbError::FileBatchDuplicate { namespace, id } if namespace == "files" && id == "7")
     );
     let namespace = db
-        .write_with_files(
+        .write_with_files::<_, _, _, crate::DbError>(
             |batch| {
                 batch.put_file("unknown", "7", vec![1]);
                 Ok(())

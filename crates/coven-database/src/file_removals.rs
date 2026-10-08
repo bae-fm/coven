@@ -56,15 +56,7 @@ impl<'a> FileRemovals<'a> {
                     )? {
                         return Err(DbError::DamagedDatabase);
                     }
-                    match area.as_str() {
-                        "files" => self.directory.file(FileArea::AppProvided, &name).remove()?,
-                        "cache" => self.directory.file(FileArea::Cache, &name).remove()?,
-                        _ => return Err(DbError::DamagedDatabase),
-                    }
-                    database.internal_execute(
-                        "DELETE FROM _coven_file_removals WHERE path=?1 AND area=?2",
-                        (name.as_str(), &area),
-                    )?;
+                    remove(database, self.directory, &name, &area)?;
                     Ok(())
                 })();
                 if let Err(error) = result {
@@ -78,6 +70,25 @@ impl<'a> FileRemovals<'a> {
         }
         failures
     }
+}
+
+/// Remove bytes and their pending record inside the caller's transaction.
+pub(crate) fn remove(
+    database: &DatabaseConnection,
+    directory: &StoreDir,
+    name: &FileName,
+    area: &str,
+) -> Result<(), DbError> {
+    match area {
+        "files" => directory.file(FileArea::AppProvided, name).remove()?,
+        "cache" => directory.file(FileArea::Cache, name).remove()?,
+        _ => return Err(DbError::DamagedDatabase),
+    }
+    database.internal_execute(
+        "DELETE FROM _coven_file_removals WHERE path=?1 AND area=?2",
+        (name.as_str(), area),
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

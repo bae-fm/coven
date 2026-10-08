@@ -437,7 +437,7 @@ mod memory {
         };
         let a = sa.schema(tables(), schema).await.unwrap();
         let b = sb.schema(tables(), schema).await.unwrap();
-        a.write_with_files(|batch| {
+        a.write_with_files::<_, _, _, crate::DbError>(|batch| {
             batch.put_file("linked-files", "shared", b"original".to_vec());
             Ok(())
         }, |sql| {

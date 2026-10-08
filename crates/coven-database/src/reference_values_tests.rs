@@ -263,7 +263,7 @@ async fn migrations_freeze_retired_losses_and_preserve_surviving_written_referen
         assert!(matches!(after.target, crate::lost::LossTarget::Cells(_)));
     }
     a.inspect_writer_schema(|db, schema| {
-        db.visit(
+        db.for_each::<_, crate::DbError>(
             "SELECT replacement_kind,value FROM _coven_lost WHERE retired=1",
             [],
             |r| {

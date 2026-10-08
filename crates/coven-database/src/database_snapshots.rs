@@ -1,6 +1,7 @@
 //! Snapshot streams and atomic reload through the database owner.
 
 use super::Database;
+use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::DbError;
 
 impl Database {
@@ -44,7 +45,7 @@ impl Database {
                     number: crate::write_encoding::counter(r.get(1)?),
                 }))?;
                 let mut required = std::collections::BTreeMap::<_, u64>::new();
-                reader.for_each("SELECT number,had_read FROM _coven_writes WHERE substr(timestamp,9,8)=?1 ORDER BY number DESC LIMIT 1", [inner.access.device.0.to_be_bytes().as_slice()], |r| {
+                reader.for_each(&format!("SELECT number,had_read FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 ORDER BY number DESC LIMIT 1"), [inner.access.device.0.to_be_bytes().as_slice()], |r| {
                     let number = crate::write_encoding::counter(r.get(0)?);
                     required.insert(inner.access.device, number);
                     let past = crate::write_encoding::decoded(coven_format::merge_fields::decode_write_positions(&r.get::<_, Vec<u8>>(1)?))?;

@@ -182,6 +182,7 @@ impl DatabaseBuilder {
                 .finish(Ok::<_, DbError>(()))?;
         }
         let write_schema = crate::write_schema::WriteSchema::read(&writer, tables.clone())?;
+        write_schema.prepare(&writer)?;
         writer.prepare_file_triggers()?;
         let observer = CommitObserver::new();
         #[cfg(test)]

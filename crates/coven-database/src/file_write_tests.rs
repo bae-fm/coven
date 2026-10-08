@@ -19,7 +19,7 @@ pub(crate) fn tables(kind: Provenance) -> Vec<SyncedTable> {
 
 pub(crate) async fn attach(db: &Database, bytes: Vec<u8>, insert: bool) -> Result<(), DbError> {
     let size = bytes.len() as i64;
-    db.write_with_files(
+    db.write_with_files::<_, _, _, crate::DbError>(
         move |batch| {
             batch.put_file("files", "7", bytes);
             Ok(())
@@ -198,7 +198,7 @@ async fn a_stream_exceeds_its_memory_budget_and_is_read_once() {
         read: read.clone(),
         directory: store.database_path().parent().unwrap().join("files"),
     }));
-    db.write_with_files(
+    db.write_with_files::<_, _, _, crate::DbError>(
         move |batch| {
             batch.put_file("files", "7", source);
             Ok(())
@@ -236,7 +236,7 @@ async fn failed_sql_stream_and_commit_discard_new_bytes_and_preserve_old_bytes()
     let original = owned_paths(&store);
     for failure in ["sql", "commit", "stream", "unused"] {
         let error = db
-            .write_with_files(
+            .write_with_files::<_, _, _, crate::DbError>(
                 move |batch| {
                     let source = if failure == "stream" {
                         FileSource::Stream(Box::pin(FailingReader { started: false }))
@@ -545,7 +545,7 @@ async fn shared_triggers_cannot_write_managed_columns_and_allowed_inserts_can_at
         sql.execute_batch(&format!("{SCHEMA}; CREATE TABLE commands(id TEXT NOT NULL PRIMARY KEY); CREATE TRIGGER attach_file AFTER INSERT ON commands WHEN NOT coven_applying() BEGIN INSERT INTO files(id,size) VALUES(new.id,8); END"))?;
         Ok(())
     })]).open().await.unwrap();
-    db.write_with_files(
+    db.write_with_files::<_, _, _, crate::DbError>(
         |batch| {
             batch.put_file("files", "7", b"original".to_vec());
             Ok(())
@@ -570,7 +570,7 @@ async fn shared_bytes_last_until_the_final_row_deletion_commits() {
     );
     let schema = "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEXT,size INTEGER,hash BLOB,location TEXT)";
     let db = store.schema(vec![declaration], schema).await.unwrap();
-    db.write_with_files(
+    db.write_with_files::<_, _, _, crate::DbError>(
         |batch| {
             batch.put_file("files", "shared", b"original".to_vec());
             Ok(())
@@ -630,7 +630,7 @@ async fn a_move_preserves_the_owned_copy_and_a_panicking_write_removes_new_bytes
     let schema = "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT,audience TEXT NOT NULL)";
     let db = store.schema(vec![declaration], schema).await.unwrap();
     const ID: &str = "00000000-0000-4000-8000-000000000001";
-    db.write_with_files(
+    db.write_with_files::<_, _, _, crate::DbError>(
         |batch| {
             batch.put_file("files", ID, b"original".to_vec());
             Ok(())
@@ -660,7 +660,7 @@ async fn a_move_preserves_the_owned_copy_and_a_panicking_write_removes_new_bytes
     let other = db.clone();
     let failure = tokio::spawn(async move {
         other
-            .write_with_files(
+            .write_with_files::<_, _, _, crate::DbError>(
                 |batch| {
                     batch.put_file("files", ID, b"different".to_vec());
                     Ok(())
@@ -798,7 +798,7 @@ async fn staged_bytes_supply_the_app_files_size() {
         (false, b"replacement".to_vec()),
     ] {
         let size = bytes.len() as u64;
-        db.write_with_files(
+        db.write_with_files::<_, _, _, crate::DbError>(
             move |batch| {
                 batch.put_file("files", "7", bytes);
                 Ok(())

@@ -8,7 +8,7 @@ use transaction_capture::ChangeCapture;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use coven_foundation::id_source::DeviceId;
@@ -308,7 +308,7 @@ impl DatabaseConnection {
     {
         #[cfg(test)]
         let _profile = self.profile_statements();
-        self.transaction_with_error(|database| {
+        self.transaction_captured(false, |database| {
             let deleted_circles = crate::store_log_tables::deleted_circles(database)?;
             let mut session = rusqlite::session::Session::new(&database.connection)?;
             for table in &schema.declarations {
@@ -436,21 +436,11 @@ impl DatabaseConnection {
         mut map: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
     ) -> Result<Vec<T>, DbError> {
         let mut values = Vec::new();
-        self.visit(sql, params, |row| {
+        self.for_each::<_, DbError>(sql, params, |row| {
             values.push(map(row)?);
             Ok(())
         })?;
         Ok(values)
-    }
-
-    /// Visit rows while SQLite owns the cursor; no result-sized allocation.
-    pub(crate) fn visit<P: Params>(
-        &self,
-        sql: &str,
-        params: P,
-        visit: impl FnMut(&Row<'_>) -> Result<(), DbError>,
-    ) -> Result<(), DbError> {
-        self.for_each(sql, params, visit)
     }
 
     /// Stream rows to a consumer with its own error type.
@@ -558,30 +548,10 @@ impl DatabaseConnection {
             self.observation.is_none(),
             "migrations precede commit observation"
         );
-        let changes = Arc::new(Mutex::new(BTreeSet::new()));
-        let captured = Arc::clone(&changes);
-        self.connection.preupdate_hook(Some(
-            move |_, schema: &str, table: &str, _: &rusqlite::hooks::PreUpdateCase| {
-                if schema == "main" {
-                    captured
-                        .lock()
-                        .expect("migration capture")
-                        .insert(table.to_ascii_lowercase());
-                }
-            },
-        ))?;
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
-        self.connection
-            .preupdate_hook(
-                None::<fn(rusqlite::hooks::Action, &str, &str, &rusqlite::hooks::PreUpdateCase)>,
-            )
-            .expect("remove migration capture");
-        let result = match result {
-            Ok(result) => result?,
-            Err(panic) => std::panic::resume_unwind(panic),
-        };
+        let capture = stream_capture::StreamCapture::begin(self)?;
+        let result = run()?;
         self.require_transaction()?;
-        let changed = std::mem::take(&mut *changes.lock().expect("migration capture"));
+        let changed = capture.tables();
         Ok((result, changed))
     }
 
@@ -751,7 +721,7 @@ impl DatabaseConnection {
         &self,
         run: impl FnOnce(&Self) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
-        self.transaction_with_error(run)
+        self.transaction_captured(false, run)
     }
 
     /// Streaming transfers publish table invalidations without a session's
@@ -761,13 +731,6 @@ impl DatabaseConnection {
         run: impl FnOnce(&Self) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
         self.transaction_captured(true, run)
-    }
-
-    fn transaction_with_error<T, E: crate::WriteFailure>(
-        &self,
-        run: impl FnOnce(&Self) -> Result<T, E>,
-    ) -> Result<T, E> {
-        self.transaction_captured(false, run)
     }
 
     fn transaction_captured<T, E: crate::WriteFailure>(

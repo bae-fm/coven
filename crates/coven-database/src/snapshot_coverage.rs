@@ -1,5 +1,6 @@
 //! Audience frontiers exist only inside the atomic loading transaction.
 
+use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::snapshot_error::invalid;
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{audience, audience_text, decoded};
@@ -36,8 +37,10 @@ impl SnapshotCoverage {
         // A device's next write implicitly reads every earlier own write, even
         // when the upload queue is empty. Reload cannot rewind that causal past.
         let own = database.query(
-            "SELECT number,had_read FROM _coven_writes WHERE substr(timestamp,9,8)=?1
-             ORDER BY number DESC LIMIT 1",
+            &format!(
+                "SELECT number,had_read FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1
+             ORDER BY number DESC LIMIT 1"
+            ),
             [device.0.to_be_bytes().as_slice()],
             |r| {
                 Ok((

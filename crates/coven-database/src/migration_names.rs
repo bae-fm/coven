@@ -199,7 +199,7 @@ impl MigrationMatch {
                 .foreign_keys
                 .iter()
                 .filter(|fk| fk.columns.iter().any(|c| c.eq_ignore_ascii_case(column)))
-                .map(|fk| self.foreign_key(table, &before.foreign_key(old_table, fk)))
+                .map(|fk| self.foreign_key(table, &before.foreign_key(old_table, fk), None))
                 .collect();
             let new: BTreeSet<_> = new_table
                 .foreign_keys
@@ -221,13 +221,23 @@ impl MigrationMatch {
         changes
     }
 
-    pub(crate) fn foreign_key(&self, table: &str, key: &ForeignKey) -> Option<ForeignKey> {
+    pub(crate) fn foreign_key(
+        &self,
+        table: &str,
+        key: &ForeignKey,
+        renames: Option<&BTreeMap<String, String>>,
+    ) -> Option<ForeignKey> {
         Some(ForeignKey::new(
             ConstraintColumns(
                 key.columns
                     .0
                     .iter()
-                    .map(|c| self.columns.get(&(table.to_owned(), c.clone())).cloned())
+                    .map(|c| {
+                        renames
+                            .and_then(|names| names.get(c))
+                            .or_else(|| self.columns.get(&(table.to_owned(), c.clone())))
+                            .cloned()
+                    })
                     .collect::<Option<Vec<_>>>()?,
             ),
             self.tables.get(&key.parent)?.clone(),

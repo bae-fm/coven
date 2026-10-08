@@ -1,5 +1,6 @@
 //! Audience snapshots are streamed from one pinned reader transaction.
 
+use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::merge_store::MergeStore;
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{audience_text, counter, decoded};
@@ -51,7 +52,7 @@ pub(crate) fn write<E>(
     })?;
     let writes = crate::download::positions(database)?;
     database.for_each(
-        "SELECT substr(timestamp,9,8),number FROM _coven_writes",
+        &format!("SELECT {WRITE_DEVICE_SQL},number FROM _coven_writes"),
         [],
         |r| {
             let id = WriteId {
@@ -123,7 +124,7 @@ pub(crate) fn write<E>(
         Ok::<_, SnapshotWriteError<E>>(())
     })?;
     database.for_each(
-        "SELECT timestamp,number,had_read FROM _coven_writes ORDER BY substr(timestamp,9,8),number",
+        &format!("SELECT timestamp,number,had_read FROM _coven_writes ORDER BY {WRITE_DEVICE_SQL},number"),
         [],
         |r| {
             let write = read_write(r).map_err(DbError::from)?;

@@ -1,4 +1,5 @@
 //! Persist exactly the row updates produced by coven-merge, with their record.
+use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::merge_store::MergeStore;
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{audience_text, encoded};
@@ -50,7 +51,7 @@ pub(crate) fn retain_metadata(
 ) -> Result<i64, DbError> {
     let stamp = encoded(merge_fields::encode_timestamp(&write.timestamp))?;
     let past = encoded(merge_fields::encode_write_positions(&write.had_read))?;
-    let known=database.query("SELECT id,timestamp,had_read FROM _coven_writes WHERE substr(timestamp,9,8)=?1 AND number=?2",params![write.id.device.0.to_be_bytes().as_slice(),write.id.number.to_be_bytes().as_slice()],|r| Ok((r.get::<_,i64>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,Vec<u8>>(2)?)))?;
+    let known=database.query(&format!("SELECT id,timestamp,had_read FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2"),params![write.id.device.0.to_be_bytes().as_slice(),write.id.number.to_be_bytes().as_slice()],|r| Ok((r.get::<_,i64>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,Vec<u8>>(2)?)))?;
     if let Some((ordinal, old_stamp, old_past)) = known.into_iter().next() {
         if old_stamp != stamp || old_past != past {
             return Err(DbError::InvalidWrite {
@@ -191,15 +192,7 @@ pub(crate) fn column(
     table: &str,
     column: &str,
 ) -> Result<i64, DbError> {
-    database.internal_execute(
-        "INSERT INTO _coven_columns(table_name,column_name) VALUES(?1,?2) ON CONFLICT DO NOTHING",
-        params![table, column],
-    )?;
-    database.query_row(
-        "SELECT id FROM _coven_columns WHERE table_name=?1 AND column_name=?2",
-        params![table, column],
-        |r| r.get(0),
-    )
+    crate::row_queries::definition_id(database, "_coven_columns", "column_name", table, &column)
 }
 
 #[cfg(test)]

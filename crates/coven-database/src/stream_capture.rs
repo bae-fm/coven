@@ -25,12 +25,15 @@ impl<'a> StreamCapture<'a> {
         ))?;
         Ok(Self { database, tables })
     }
-    pub(super) fn changes(&self) -> Result<Vec<RowChange>, DbError> {
-        let mut tables = self
-            .tables
+    pub(super) fn tables(&self) -> BTreeSet<String> {
+        self.tables
             .lock()
             .expect("stream observation lock poisoned")
-            .clone();
+            .clone()
+    }
+
+    pub(super) fn changes(&self) -> Result<Vec<RowChange>, DbError> {
+        let mut tables = self.tables();
         for table in tables.clone() {
             if let Some(parent) = crate::change_capture::shadow_parent(self.database, &table)? {
                 tables.insert(parent);

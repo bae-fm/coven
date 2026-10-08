@@ -195,49 +195,43 @@ fn finish(
     (device, now): (DeviceId, SystemTime),
 ) -> Result<(), DbError> {
     let schema = crate::write_schema::WriteSchema::read(database, tables.to_vec())?;
-    let refresh = crate::migration_state::carry(database, initial_schema, names, &schema)?;
-    snapshot.rename(database, baseline_names)?;
-    let before = AppView::migration_before(database, &schema, &snapshot);
-    let visible = AppView::after(database, &schema);
-    let reference_columns = baseline_names.reference_columns(baseline_schema, &schema.schema);
-    let mut changed = snapshot.differences(database, &schema, &reference_columns)?;
-    for key in changed.keys() {
-        if before.row(key)?.is_none() {
-            if let Some(row) = visible.row(key)? {
-                crate::write_capture::validate_key(&schema, schema.table(&key.0), &row.values)?;
+    schema.with_evaluators(database, || {
+        let refresh = crate::migration_state::carry(database, initial_schema, names, &schema)?;
+        snapshot.rename(database, baseline_names)?;
+        let before = AppView::migration_before(database, &schema, &snapshot);
+        let visible = AppView::after(database, &schema);
+        let reference_columns = baseline_names.reference_columns(baseline_schema, &schema.schema);
+        let mut changed = snapshot.differences(database, &schema, &reference_columns)?;
+        for key in changed.keys() {
+            if before.row(key)?.is_none() {
+                if let Some(row) = visible.row(key)? {
+                    crate::write_capture::validate_key(&schema, schema.table(&key.0), &row.values)?;
+                }
             }
         }
-    }
-    let store = crate::merge_store::MergeStore::new(database, &before);
-    crate::migration_references::changes(
-        database,
-        &schema,
-        &before,
-        &visible,
-        &store,
-        &mut changed,
-    )?;
-    let deleted = crate::store_log_tables::deleted_circles(database)?;
-    let changes = crate::write_record::changes(
-        database, &schema, &before, &visible, &store, &changed, &deleted,
-    )?;
-    let mut record = crate::write_record::record(database, device, now, changes)?;
-    crate::write_apply::WriteApply::new(database, &schema, &store, &before, &visible, &deleted)
-        .apply(Some(&record), BTreeSet::new())?;
-    record.header.disposition = WriteDisposition::Migration;
-    record.parts.clear();
-    crate::write_commit::queue(database, &record)?;
-    crate::migration_state::refresh(database, &schema, &refresh)?;
-    snapshot.drop(database)?;
-    for declaration in tables {
-        let table = schema.table(&declaration.name);
-        database.batch(&format!(
-            "DROP TABLE temp.{}; DROP TABLE temp.{}",
-            crate::sql::identifier(&crate::write_schema::evaluation_name(table)),
-            crate::sql::identifier(&crate::write_schema::affinity_name(table))
-        ))?;
-    }
-    Ok(())
+        let store = crate::merge_store::MergeStore::new(database, &before);
+        crate::migration_references::changes(
+            database,
+            &schema,
+            &before,
+            &visible,
+            &store,
+            &mut changed,
+        )?;
+        let deleted = crate::store_log_tables::deleted_circles(database)?;
+        let changes = crate::write_record::changes(
+            database, &schema, &before, &visible, &store, &changed, &deleted,
+        )?;
+        let mut record = crate::write_record::record(database, device, now, changes)?;
+        crate::write_apply::WriteApply::new(database, &schema, &store, &before, &visible, &deleted)
+            .apply(Some(&record), BTreeSet::new())?;
+        record.header.disposition = WriteDisposition::Migration;
+        record.parts.clear();
+        crate::write_commit::queue(database, &record)?;
+        crate::migration_state::refresh(database, &schema, &refresh)?;
+        snapshot.drop(database)?;
+        Ok(())
+    })
 }
 
 #[cfg(test)]

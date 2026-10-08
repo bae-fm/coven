@@ -492,16 +492,20 @@ impl FileDatabase {
             let id = cache::id(&file)?;
             if db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM _coven_cache
-                 WHERE namespace=?1 AND file_id=?2 AND chunk=-2)",
-                (file.namespace(), &id),
+                 WHERE namespace=?1 AND file_id=?2 AND chunk=?3)",
+                (file.namespace(), &id, cache::COMPLETE_FILE),
                 |r| r.get::<_, bool>(0),
             )? {
                 return Ok(0);
             }
             let cached = db.query_row(
-                "SELECT coalesce(sum(size-16),0) FROM _coven_cache
+                "SELECT coalesce(sum(size-?3),0) FROM _coven_cache
                  WHERE namespace=?1 AND file_id=?2 AND chunk>=0",
-                (file.namespace(), &id),
+                (
+                    file.namespace(),
+                    &id,
+                    coven_crypto::FILE_CHUNK_TAG_LEN as i64,
+                ),
                 |r| r.get::<_, i64>(0),
             )?;
             file.plaintext_size()

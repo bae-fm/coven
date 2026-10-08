@@ -110,7 +110,10 @@ impl<'a> DatabaseRemovalView<'a> {
 
     pub(crate) fn prime(&self, changed: impl IntoIterator<Item = RowId>) -> Result<(), DbError> {
         for row in changed {
-            for group in self.row_groups(&row)? {
+            for group in self
+                .groups(&row)
+                .map_err(|error| error.into_db_error(self.arriving.map(|(id, _)| id)))?
+            {
                 self.extra_groups
                     .borrow_mut()
                     .entry(group)
@@ -254,28 +257,39 @@ impl<'a> DatabaseRemovalView<'a> {
             values,
         )
     }
+}
 
-    fn row_groups(&self, id: &RowId) -> Result<BTreeSet<Group>, DbError> {
-        let row = self.evaluated(id)?;
-        let mut groups = BTreeSet::from([Group::Key {
-            table: id.table.clone(),
-            key: id.key.clone(),
-        }]);
-        groups.extend(
-            row.constraints
-                .unique
-                .into_iter()
-                .map(|(constraint, claim)| Group::Claim {
-                    table: id.table.clone(),
-                    audience: id.audience.clone(),
-                    constraint,
-                    value: claim.value,
-                }),
-        );
-        Ok(groups)
+impl RemovalView for DatabaseRemovalView<'_> {
+    type Error = RemovalFailure;
+    fn rows(&self) -> Result<Vec<RowId>, Self::Error> {
+        let mut rows: BTreeSet<_> = self
+            .database
+            .query(
+                "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE table_name>=''",
+                [],
+                crate::row_queries::read_identity,
+            )?
+            .into_iter()
+            .collect();
+        rows.extend(self.updates.keys().cloned());
+        Ok(rows.into_iter().collect())
     }
-
-    fn neighbors(&self, id: &RowId) -> Result<BTreeSet<RowId>, DbError> {
+    fn row(&self, row: &RowId) -> Result<RemovalRow, Self::Error> {
+        Ok(self.evaluated(row)?.facts)
+    }
+    fn constraints(
+        &self,
+        row: &RowId,
+        references: &BTreeMap<ForeignKey, ReferenceValue>,
+    ) -> Result<Constraints, Self::Error> {
+        let evaluated = self.evaluated(row)?;
+        assert_eq!(
+            &evaluated.readings, references,
+            "SQLite and merge resolved different references"
+        );
+        Ok(evaluated.constraints)
+    }
+    fn related(&self, id: &RowId) -> Result<BTreeSet<RowId>, Self::Error> {
         let mut related = BTreeSet::new();
         if let RemovalRow::Present { references, .. } = self.evaluated(id)?.facts {
             for reference in references.into_values() {
@@ -302,8 +316,26 @@ impl<'a> DatabaseRemovalView<'a> {
         }
         Ok(related)
     }
-
-    fn competitors(&self, group: &Group) -> Result<BTreeSet<RowId>, DbError> {
+    fn groups(&self, id: &RowId) -> Result<BTreeSet<Group>, Self::Error> {
+        let row = self.evaluated(id)?;
+        let mut groups = BTreeSet::from([Group::Key {
+            table: id.table.clone(),
+            key: id.key.clone(),
+        }]);
+        groups.extend(
+            row.constraints
+                .unique
+                .into_iter()
+                .map(|(constraint, claim)| Group::Claim {
+                    table: id.table.clone(),
+                    audience: id.audience.clone(),
+                    constraint,
+                    value: claim.value,
+                }),
+        );
+        Ok(groups)
+    }
+    fn members(&self, group: &Group) -> Result<BTreeSet<RowId>, Self::Error> {
         let mut members = match self.extra_groups.borrow().get(group) {
             Some(rows) => rows.clone(),
             None => BTreeSet::new(),
@@ -324,7 +356,8 @@ impl<'a> DatabaseRemovalView<'a> {
                     .iter()
                     .find(|c| c.identity == *constraint)
                     .expect("unique claim");
-                let parameters = decoded(coven_format::key::decode_key(value))?;
+                let parameters =
+                    decoded(coven_format::key::decode_key(value)).map_err(DbError::from)?;
                 let condition = unique
                     .expressions
                     .iter()
@@ -358,46 +391,5 @@ impl<'a> DatabaseRemovalView<'a> {
             }
         }
         Ok(members)
-    }
-}
-
-impl RemovalView for DatabaseRemovalView<'_> {
-    type Error = RemovalFailure;
-    fn rows(&self) -> Result<Vec<RowId>, Self::Error> {
-        let mut rows: BTreeSet<_> = self
-            .database
-            .query(
-                "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE table_name>=''",
-                [],
-                crate::row_queries::read_identity,
-            )?
-            .into_iter()
-            .collect();
-        rows.extend(self.updates.keys().cloned());
-        Ok(rows.into_iter().collect())
-    }
-    fn row(&self, row: &RowId) -> Result<RemovalRow, Self::Error> {
-        Ok(self.evaluated(row)?.facts)
-    }
-    fn constraints(
-        &self,
-        row: &RowId,
-        references: &BTreeMap<ForeignKey, ReferenceValue>,
-    ) -> Result<Constraints, Self::Error> {
-        let evaluated = self.evaluated(row)?;
-        assert_eq!(
-            &evaluated.readings, references,
-            "SQLite and merge resolved different references"
-        );
-        Ok(evaluated.constraints)
-    }
-    fn related(&self, row: &RowId) -> Result<BTreeSet<RowId>, Self::Error> {
-        Ok(self.neighbors(row)?)
-    }
-    fn groups(&self, row: &RowId) -> Result<BTreeSet<Group>, Self::Error> {
-        Ok(self.row_groups(row)?)
-    }
-    fn members(&self, group: &Group) -> Result<BTreeSet<RowId>, Self::Error> {
-        Ok(self.competitors(group)?)
     }
 }

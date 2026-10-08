@@ -185,7 +185,7 @@ fn crashing_file_writer() {
     if phase == "stream" || phase == "transaction" {
         let stream = phase == "stream";
         runtime
-            .block_on(db.write_with_files(
+            .block_on(db.write_with_files::<_, _, _, crate::DbError>(
                 move |batch| {
                     let source = if stream {
                         FileSource::Stream(Box::pin(CrashingReader(false)))
@@ -329,7 +329,7 @@ async fn a_failed_write_keeps_its_error_when_pending_deletion_also_fails() {
     let directory = store.database_path().parent().unwrap().join("files");
     db.inspect_writer(|sql| sql.batch("CREATE TRIGGER _coven_fail_cleanup BEFORE DELETE ON _coven_file_removals BEGIN SELECT RAISE(ABORT,'record stays'); END").unwrap());
     let error = db
-        .write_with_files(
+        .write_with_files::<_, _, _, crate::DbError>(
             |batch| {
                 batch.put_file("files", "7", b"partial".to_vec());
                 Ok(())

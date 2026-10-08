@@ -1,6 +1,11 @@
 //! Cache publication and eviction obey the same bytes-before-row rule as attachments.
 
 use crate::{sqlite::DatabaseConnection, DbError, FileRef};
+use coven_crypto::FILE_CHUNK_TAG_LEN;
+
+pub(super) use crate::internal_schema::{
+    CACHE_COMPLETE_FILE as COMPLETE_FILE, CACHE_HEADER as HEADER,
+};
 use coven_foundation::files::{FileArea, FileName, StoreDir};
 
 pub(super) fn id(file: &FileRef) -> Result<String, DbError> {
@@ -26,17 +31,17 @@ pub(super) fn read(
 ) -> Result<Option<Vec<u8>>, DbError> {
     let id = id(file)?;
     db.transaction(|db| {
-        let paths=db.query("SELECT path,chunk,size FROM _coven_cache WHERE namespace=?1 AND file_id=?2 AND chunk IN (?3,-2) ORDER BY chunk LIMIT 1",(file.namespace(),&id,index),|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?)))?;
+        let paths=db.query("SELECT path,chunk,size FROM _coven_cache WHERE namespace=?1 AND file_id=?2 AND chunk IN (?3,?4) ORDER BY chunk LIMIT 1",(file.namespace(),&id,index,COMPLETE_FILE),|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?)))?;
         let Some((path,kind,length))=paths.first() else {return Ok(None)};
         let name=FileName::new(path).map_err(|_|DbError::DamagedDatabase)?;
         let reader=directory.file(FileArea::Cache,&name).open_reader().map_err(observation)?;
         if reader.size()!=u64::try_from(*length).map_err(|_|DbError::DamagedDatabase)? {return Err(DbError::DamagedDatabase)}
-        let (offset,length)=if *kind==-2 {
+        let (offset,length)=if *kind==COMPLETE_FILE {
             let bytes=reader.read_at(0,coven_format::file::FILE_HEADER_LEN).map_err(observation)?;
             let header=coven_format::file::FileHeader::decode(&bytes)?;
-            if index==-1 {(0,coven_format::file::FILE_HEADER_LEN)} else {
+            if index==HEADER {(0,coven_format::file::FILE_HEADER_LEN)} else {
                 let chunk=header.chunk(u64::try_from(index).map_err(|_|DbError::DamagedDatabase)?)?;
-                (chunk.offset,chunk.plaintext_length+16)
+                (chunk.offset,chunk.plaintext_length+FILE_CHUNK_TAG_LEN)
             }
         }else {(0,usize::try_from(*length).map_err(|_|DbError::DamagedDatabase)?)};
         let bytes=reader.read_at(offset,length).map_err(observation)?;
@@ -71,7 +76,7 @@ pub(super) fn put(
     // cleanup. If cleanup won the interval, no bytes have been written yet.
     let result=db.transaction(|db| {
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_file_removals WHERE area='cache' AND path=?1)",[name.as_str()],|r|r.get::<_,bool>(0))? {return Err(DbError::DamagedDatabase)}
-        if !db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE namespace=?1 AND file_id=?2 AND chunk IN (?3,-2))",(file.namespace(),&id,index),|r|r.get::<_,bool>(0))? {
+        if !db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE namespace=?1 AND file_id=?2 AND chunk IN (?3,?4))",(file.namespace(),&id,index,COMPLETE_FILE),|r|r.get::<_,bool>(0))? {
             directory.file(FileArea::Cache,name).replace(bytes)?;
             db.internal_execute("INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned) VALUES(?1,?2,?3,?4,?5,?6,0)",rusqlite::params![file.namespace(),id,index,name.as_str(),bytes.len() as i64,tick(db)?])?;
         }
@@ -93,14 +98,7 @@ fn remove_pending(
     directory: &StoreDir,
     name: &FileName,
 ) -> Result<(), DbError> {
-    db.transaction(|db| {
-        directory.file(FileArea::Cache, name).remove()?;
-        db.internal_execute(
-            "DELETE FROM _coven_file_removals WHERE area='cache' AND path=?1",
-            [name.as_str()],
-        )?;
-        Ok(())
-    })
+    db.transaction(|db| crate::file_removals::remove(db, directory, name, "cache"))
 }
 pub(super) fn budget(db: &DatabaseConnection, namespace: &str) -> Result<Option<u64>, DbError> {
     db.query(
@@ -138,12 +136,12 @@ pub(super) fn trim(
             let next = db.query(
                 "SELECT path,size FROM _coven_cache AS candidate
                  WHERE namespace=?1 AND pinned=0
-                   AND (chunk!=-1 OR NOT EXISTS(
+                   AND (chunk!=?2 OR NOT EXISTS(
                        SELECT 1 FROM _coven_cache AS chunks
                        WHERE chunks.namespace=candidate.namespace
                          AND chunks.file_id=candidate.file_id AND chunks.chunk>=0))
                  ORDER BY last_read,path LIMIT 1",
-                [namespace],
+                (namespace, HEADER),
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
             )?;
             let Some((path, size)) = next.into_iter().next() else {
@@ -216,7 +214,7 @@ fn remove_paths(
 }
 pub(super) fn pin_complete(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
     let id = id(file)?;
-    Ok(db.internal_execute("UPDATE _coven_cache SET pinned=1 WHERE namespace=?1 AND file_id=?2 AND chunk=-2 AND checked_hash=?3",(file.namespace(),id,file.content_hash().as_bytes().as_slice()))?==1)
+    Ok(db.internal_execute("UPDATE _coven_cache SET pinned=1 WHERE namespace=?1 AND file_id=?2 AND chunk=?4 AND checked_hash=?3",(file.namespace(),id,file.content_hash().as_bytes().as_slice(),COMPLETE_FILE))?==1)
 }
 pub(super) fn unpin(db: &DatabaseConnection, file: &FileRef) -> Result<(), DbError> {
     if file.uploaded()?.is_none() {
@@ -233,7 +231,7 @@ pub(super) fn pinned(db: &DatabaseConnection, file: &FileRef) -> Result<bool, Db
         return Ok(false);
     }
     let id = id(file)?;
-    db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE namespace=?1 AND file_id=?2 AND chunk=-2 AND pinned=1 AND checked_hash=?3)",(file.namespace(),id,file.content_hash().as_bytes().as_slice()),|r|r.get(0))
+    db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE namespace=?1 AND file_id=?2 AND chunk=?4 AND pinned=1 AND checked_hash=?3)",(file.namespace(),id,file.content_hash().as_bytes().as_slice(),COMPLETE_FILE),|r|r.get(0))
 }
 pub(super) fn publish(
     db: &DatabaseConnection,
@@ -264,7 +262,7 @@ pub(super) fn publish(
         "DELETE FROM _coven_cache WHERE namespace=?1 AND file_id=?2",
         (file.namespace(), &id),
     )?;
-    db.internal_execute("INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned,checked_hash) VALUES(?1,?2,-2,?3,?4,?5,1,?6)",rusqlite::params![file.namespace(),id,name.as_str(),size,tick(db)?,file.content_hash().as_bytes().as_slice()])?;
+    db.internal_execute("INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned,checked_hash) VALUES(?1,?2,?7,?3,?4,?5,1,?6)",rusqlite::params![file.namespace(),id,name.as_str(),size,tick(db)?,file.content_hash().as_bytes().as_slice(),COMPLETE_FILE])?;
     db.internal_execute(
         "DELETE FROM _coven_file_removals WHERE area='cache' AND path=?1",
         [name.as_str()],

@@ -13,6 +13,10 @@
 //! ids in `sealing_keys`, encoded as the D9 write prefix; no ciphertext is kept.
 
 pub(crate) const VERSION: u32 = 1;
+pub(crate) const CACHE_HEADER: i64 = -1;
+pub(crate) const CACHE_COMPLETE_FILE: i64 = -2;
+// D2 timestamps contain six clock bytes, two counter bytes, then the device id.
+pub(crate) const WRITE_DEVICE_SQL: &str = "substr(timestamp,9,8)";
 
 /// App objects cannot use either reserved namespace (§17.2).
 pub(crate) fn reserved_name(name: &str) -> bool {
@@ -168,7 +172,7 @@ macro_rules! coven_tables {
                 number BLOB NOT NULL CHECK(length(number) = 8 AND number > x'0000000000000000'),
                 had_read BLOB NOT NULL
             ) STRICT;
-            CREATE UNIQUE INDEX _coven_write_position ON _coven_writes(substr(timestamp, 9, 8), number);
+            CREATE UNIQUE INDEX _coven_write_position ON _coven_writes({WRITE_DEVICE_SQL}, number);
         ");
         $visit!(_coven_positions, "
             CREATE TABLE _coven_positions (
@@ -371,12 +375,12 @@ macro_rules! coven_tables {
             CREATE TABLE _coven_cache (
                 namespace TEXT NOT NULL,
                 file_id TEXT NOT NULL,
-                chunk INTEGER NOT NULL CHECK(chunk>=-2),
+                chunk INTEGER NOT NULL CHECK(chunk>={CACHE_COMPLETE_FILE}),
                 path TEXT NOT NULL UNIQUE,
                 size INTEGER NOT NULL CHECK(size>=0),
                 last_read INTEGER NOT NULL,
-                pinned INTEGER NOT NULL CHECK(pinned IN (0,1)) CHECK(pinned=0 OR chunk=-2),
-                checked_hash BLOB CHECK((chunk=-2)=(checked_hash IS NOT NULL)) CHECK(checked_hash IS NULL OR length(checked_hash)=32),
+                pinned INTEGER NOT NULL CHECK(pinned IN (0,1)) CHECK(pinned=0 OR chunk={CACHE_COMPLETE_FILE}),
+                checked_hash BLOB CHECK((chunk={CACHE_COMPLETE_FILE})=(checked_hash IS NOT NULL)) CHECK(checked_hash IS NULL OR length(checked_hash)=32),
                 PRIMARY KEY(namespace,file_id,chunk)
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_cache_lru ON _coven_cache(namespace,pinned,last_read);
@@ -403,6 +407,12 @@ macro_rules! coven_tables {
 pub(crate) fn initial_schema() -> String {
     let mut sql = String::new();
     macro_rules! append {
+        (_coven_writes, $sql:literal) => {
+            sql.push_str(&format!($sql));
+        };
+        (_coven_cache, $sql:literal) => {
+            sql.push_str(&format!($sql));
+        };
         ($table:ident, $sql:literal) => {
             sql.push_str($sql);
         };

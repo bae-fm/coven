@@ -1,5 +1,6 @@
 //! Replace one audience's records inside the loading transaction.
 
+use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::merge_store::StoredRow;
 use crate::snapshot_error::invalid;
 use crate::sqlite::DatabaseConnection;
@@ -238,7 +239,7 @@ pub(crate) fn loss(
 
 pub(crate) fn ordinal(database: &DatabaseConnection, id: WriteId) -> Result<i64, DbError> {
     database.query_row(
-        "SELECT id FROM _coven_writes WHERE substr(timestamp,9,8)=?1 AND number=?2",
+        &format!("SELECT id FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2"),
         params![
             id.device.0.to_be_bytes().as_slice(),
             id.number.to_be_bytes().as_slice()

@@ -22,15 +22,12 @@ pub(crate) fn foreign_key(
     table: &str,
     key: &ForeignKey,
 ) -> Result<i64, DbError> {
-    let identity = encoded(merge_fields::encode_foreign_key(key))?;
-    database.internal_execute(
-        "INSERT INTO _coven_foreign_keys(table_name,identity) VALUES(?1,?2) ON CONFLICT DO NOTHING",
-        params![table, identity],
-    )?;
-    database.query_row(
-        "SELECT id FROM _coven_foreign_keys WHERE table_name=?1 AND identity=?2",
-        params![table, identity],
-        |r| r.get(0),
+    definition_id(
+        database,
+        "_coven_foreign_keys",
+        "identity",
+        table,
+        &encoded(merge_fields::encode_foreign_key(key))?,
     )
 }
 
@@ -39,15 +36,12 @@ pub(crate) fn constraint(
     table: &str,
     constraint: &UniqueConstraint,
 ) -> Result<i64, DbError> {
-    let identity = encoded(merge_fields::encode_unique_constraint(constraint))?;
-    database.internal_execute(
-        "INSERT INTO _coven_constraints(table_name,identity) VALUES(?1,?2) ON CONFLICT DO NOTHING",
-        params![table, identity],
-    )?;
-    database.query_row(
-        "SELECT id FROM _coven_constraints WHERE table_name=?1 AND identity=?2",
-        params![table, identity],
-        |r| r.get(0),
+    definition_id(
+        database,
+        "_coven_constraints",
+        "identity",
+        table,
+        &encoded(merge_fields::encode_unique_constraint(constraint))?,
     )
 }
 
@@ -67,4 +61,26 @@ pub(crate) fn read_identity(r: &rusqlite::Row<'_>) -> rusqlite::Result<RowId> {
         key: r.get(1)?,
         audience: audience(&r.get::<_, String>(2)?)?,
     })
+}
+
+/// Insert a table-scoped metadata definition once and return its stable row id.
+pub(crate) fn definition_id(
+    database: &DatabaseConnection,
+    metadata: &'static str,
+    column: &'static str,
+    table: &str,
+    identity: &dyn rusqlite::ToSql,
+) -> Result<i64, DbError> {
+    let parameters = rusqlite::params![table, identity];
+    database.internal_execute(
+        &format!(
+            "INSERT INTO {metadata}(table_name,{column}) VALUES(?1,?2) ON CONFLICT DO NOTHING"
+        ),
+        parameters,
+    )?;
+    database.query_row(
+        &format!("SELECT id FROM {metadata} WHERE table_name=?1 AND {column}=?2"),
+        parameters,
+        |r| r.get(0),
+    )
 }

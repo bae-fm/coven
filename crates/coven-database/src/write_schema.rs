@@ -52,7 +52,6 @@ impl WriteSchema {
             declarations,
             rules,
         };
-        result.prepare(db)?;
         Ok(result)
     }
 
@@ -228,6 +227,26 @@ impl WriteSchema {
 
     pub(crate) fn foreign_key(&self, table: &TableSchema, key: &SchemaForeignKey) -> ForeignKey {
         self.schema.foreign_key(table, key)
+    }
+
+    /// Run within the caller's transaction. Failure rolls back its temporary
+    /// tables with that transaction; success removes them before returning.
+    pub(crate) fn with_evaluators<R>(
+        &self,
+        db: &DatabaseConnection,
+        run: impl FnOnce() -> Result<R, DbError>,
+    ) -> Result<R, DbError> {
+        self.prepare(db)?;
+        let result = run()?;
+        for declaration in &self.declarations {
+            let table = self.table(&declaration.name);
+            db.batch(&format!(
+                "DROP TABLE temp.{}; DROP TABLE temp.{}",
+                identifier(&evaluation_name(table)),
+                identifier(&affinity_name(table))
+            ))?;
+        }
+        Ok(result)
     }
 
     pub(crate) fn prepare(&self, db: &DatabaseConnection) -> Result<(), DbError> {

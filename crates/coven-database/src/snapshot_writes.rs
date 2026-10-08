@@ -1,5 +1,6 @@
 //! Apply supplied gap streams and waiting writes in causal order inside a reload.
 
+use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::snapshot_coverage::SnapshotCoverage;
 use crate::snapshot_error::{invalid, SnapshotError};
 use crate::sqlite::DatabaseConnection;
@@ -85,7 +86,7 @@ pub(crate) fn apply<R: Read>(
         if !coverage.covered_by_snapshot(id) {
             return Err(invalid("absent write is not covered by a loaded snapshot"));
         }
-        let write = database.query_row("SELECT timestamp,had_read FROM _coven_writes WHERE substr(timestamp,9,8)=?1 AND number=?2",
+        let write = database.query_row(&format!("SELECT timestamp,had_read FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2"),
             (id.device.0.to_be_bytes().as_slice(), id.number.to_be_bytes().as_slice()), |r| Ok(AppliedWrite {
                 id, timestamp: decoded(merge_fields::decode_timestamp(&r.get::<_, Vec<u8>>(0)?))?,
                 had_read: decoded(merge_fields::decode_write_positions(&r.get::<_, Vec<u8>>(1)?))?,

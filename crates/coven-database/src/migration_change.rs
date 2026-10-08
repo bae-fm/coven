@@ -147,7 +147,7 @@ impl RowChange {
                 let mapped = reference
                     .constraints
                     .iter()
-                    .filter_map(|key| rename_key(key, &original.row.table, &renames, names))
+                    .filter_map(|key| names.foreign_key(&original.row.table, key, Some(&renames)))
                     .collect::<Vec<_>>();
                 if constraints.iter().any(|key| !mapped.contains(key))
                     || (!constraints.is_empty()
@@ -305,45 +305,6 @@ fn references(
         .collect()
 }
 
-fn rename_key(
-    key: &ForeignKey,
-    source_table: &str,
-    renames: &BTreeMap<String, String>,
-    names: &MigrationMatch,
-) -> Option<ForeignKey> {
-    Some(ForeignKey::new(
-        coven_merge::ConstraintColumns(
-            key.columns
-                .0
-                .iter()
-                .map(|column| {
-                    renames
-                        .get(column)
-                        .or_else(|| {
-                            names
-                                .columns
-                                .get(&(source_table.to_owned(), column.clone()))
-                        })
-                        .cloned()
-                })
-                .collect::<Option<Vec<_>>>()?,
-        ),
-        names.tables.get(&key.parent)?.clone(),
-        coven_merge::ConstraintColumns(
-            key.parent_columns
-                .0
-                .iter()
-                .map(|column| {
-                    names
-                        .columns
-                        .get(&(key.parent.clone(), column.clone()))
-                        .cloned()
-                })
-                .collect::<Option<Vec<_>>>()?,
-        ),
-    ))
-}
-
 fn rename_parents(
     parents: &BTreeMap<ForeignKey, Parent>,
     source_table: &str,
@@ -353,7 +314,7 @@ fn rename_parents(
 ) -> Result<BTreeMap<ForeignKey, Parent>, DbError> {
     let mut renamed = BTreeMap::new();
     for (key, parent) in parents {
-        let Some(identity) = rename_key(key, source_table, renames, names) else {
+        let Some(identity) = names.foreign_key(source_table, key, Some(renames)) else {
             continue;
         };
         if !constraints.contains(&identity) {

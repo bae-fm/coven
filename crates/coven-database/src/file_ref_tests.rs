@@ -12,7 +12,7 @@ fn tables(kind: Provenance) -> Vec<SyncedTable> {
 }
 async fn attach(db: &Database, bytes: Vec<u8>, insert: bool) {
     let size = bytes.len() as i64;
-    db.write_with_files(
+    db.write_with_files::<_, _, _, crate::DbError>(
         move |batch| {
             batch.put_file("files", "7", bytes);
             Ok(())
@@ -324,7 +324,7 @@ async fn custom_columns_and_inherited_audience_are_read_together_with_composite_
     let db = store.schema(declarations(), schema).await.unwrap();
     const NOTE: &str = "00000000-0000-4000-8000-000000000007";
     const CIRCLE: &str = "00000000-0000-4000-8000-000000000008";
-    db.write_with_files(
+    db.write_with_files::<_, _, _, crate::DbError>(
         |batch| {
             batch.put_file("files", "content", b"original".to_vec());
             Ok(())

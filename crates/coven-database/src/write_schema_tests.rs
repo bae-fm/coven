@@ -308,3 +308,36 @@ async fn explicit_collation_terms_do_not_merge_with_bare_column_constraints() {
         db.close().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn reading_schema_leaves_connection_evaluators_unchanged() {
+    let store = TestStore::new();
+    let tables = vec![SyncedTable::new("notes", RowIdentity::SharedKey)];
+    let db = store
+        .schema(
+            tables.clone(),
+            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY)",
+        )
+        .await
+        .unwrap();
+    db.inspect_writer(|writer| {
+        let before = writer
+            .query(
+                "SELECT name,sql FROM temp.sqlite_schema ORDER BY name",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+            )
+            .unwrap();
+        let schema = super::WriteSchema::read(writer, tables).unwrap();
+        assert_eq!(schema.table("notes").name, "notes");
+        let after = writer
+            .query(
+                "SELECT name,sql FROM temp.sqlite_schema ORDER BY name",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(after, before);
+    });
+    db.close().await.unwrap();
+}

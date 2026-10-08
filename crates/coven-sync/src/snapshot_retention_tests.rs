@@ -231,7 +231,7 @@ async fn a_file_named_only_by_a_retained_log_write_stays_until_that_log_goes() {
         Arc::new(coven_foundation::id_source::UuidIds),
         crate::TransferLimits::default(),
     );
-    a.db.write_with_files(
+    a.db.write_with_files::<_, _, _, coven_database::DbError>(
         |batch| {
             batch.put_file("files", "one", vec![37; 65536]);
             Ok(())

@@ -1,12 +1,10 @@
 //! Immutable store-log plaintext, its sealing key and their prerequisite sealed keys (§§6, 9, 18).
 
-use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use coven_crypto::MemberId;
 use coven_format::{
     store_log::{StoreChange, StoreLogEntry},
-    value::EntryPositions,
     Object,
 };
 use coven_foundation::id_source::{DeviceId, KeyId, StoreId};
@@ -106,14 +104,14 @@ where
         return Err(DbError::StoreLogUploadPending(upload.entry.position).into());
     }
     let log = crate::store_log_tables::read(database)?;
-    let mut positions = BTreeMap::<DeviceId, u64>::new();
-    for applied in &log.entries {
-        positions
-            .entry(applied.entry.position.device)
-            .and_modify(|n| *n = (*n).max(applied.entry.position.number))
-            .or_insert(applied.entry.position.number);
-    }
-    let previous = positions.remove(&device).unwrap_or(0); // An absent prior entry starts this device at one.
+    let mut positions = log.positions();
+    // An absent prior entry starts this device at one.
+    let previous = positions
+        .0
+        .iter()
+        .find(|entry| entry.device == device)
+        .map_or(0, |entry| entry.number);
+    positions.0.retain(|entry| entry.device != device);
     let number = previous
         .checked_add(1)
         .ok_or(DbError::StoreLogNumberExhausted)?;
@@ -125,12 +123,7 @@ where
             device,
         )?,
         author,
-        had_read: EntryPositions(
-            positions
-                .into_iter()
-                .map(|(device, number)| EntryId { device, number })
-                .collect(),
-        ),
+        had_read: positions,
         change,
     };
     let record = Object::StoreLog(entry.clone()).encode().map_err(|error| {
