@@ -93,9 +93,7 @@ impl DeviceLogSync {
         };
         match applied {
             Ok(result) => Ok(result),
-            Err(DbError::WriteFormat(coven_format::Error::UnsupportedVersion(version)))
-                if version > coven_format::FORMAT_VERSION =>
-            {
+            Err(DbError::WriteFormat(error)) if crate::error::newer_format(&error) => {
                 Err(crate::SyncFailure::UpdateRequired.into())
             }
             Err(

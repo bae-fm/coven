@@ -172,11 +172,7 @@ impl From<SyncError> for SyncFailure {
 impl From<coven_format::Error> for SyncError {
     fn from(error: coven_format::Error) -> Self {
         match error {
-            coven_format::Error::UnsupportedVersion(version)
-                if version > coven_format::FORMAT_VERSION =>
-            {
-                Self::Stopped(SyncFailure::UpdateRequired)
-            }
+            error if newer_format(&error) => Self::Stopped(SyncFailure::UpdateRequired),
             error => Self::Format(error),
         }
     }
@@ -205,4 +201,15 @@ pub enum ObjectCheckFailure {
     /// The bytes or their causal metadata violate the format.
     #[error("parse failed: {0}")]
     Parse(#[source] Arc<dyn std::error::Error + Send + Sync>),
+}
+
+/// Older unsupported formats are damaged inputs; only newer ones require an update.
+pub(crate) fn newer_format(error: &(dyn std::error::Error + 'static)) -> bool {
+    matches!(
+        error.downcast_ref::<coven_format::Error>(),
+        Some(coven_format::Error::UnsupportedVersion(version)) if *version > coven_format::FORMAT_VERSION
+    ) || matches!(
+        error.downcast_ref::<CryptoError>(),
+        Some(CryptoError::UnsupportedVersion(version)) if *version > coven_format::FORMAT_VERSION
+    )
 }

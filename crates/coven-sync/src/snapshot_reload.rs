@@ -87,12 +87,7 @@ impl StoreLogSync {
                     .await?
                     .into_iter();
                 for (audience, candidates) in catalogs {
-                    for id in &candidates.required_positions.0 {
-                        highest
-                            .entry(id.device)
-                            .and_modify(|n: &mut u64| *n = (*n).max(id.number))
-                            .or_insert(id.number);
-                    }
+                    super::include_positions(&mut highest, &candidates.required_positions.0);
                     let unreadable_prefix = candidates.unreadable_prefix;
                     match self
                         .load_snapshot(candidates.candidates, &mut names, damages)
@@ -125,12 +120,10 @@ impl StoreLogSync {
                 }
                 let (required, waiting) = self.database.reload_positions().await?;
                 let waiting: BTreeSet<_> = waiting.into_iter().collect();
-                for id in positions.iter().flat_map(|p| &p.0).chain(&required.0) {
-                    highest
-                        .entry(id.device)
-                        .and_modify(|n: &mut u64| *n = (*n).max(id.number))
-                        .or_insert(id.number);
-                }
+                super::include_positions(
+                    &mut highest,
+                    positions.iter().flat_map(|p| &p.0).chain(&required.0),
+                );
                 let mut objects = BTreeMap::new();
                 for object in self
                     .storage
@@ -143,10 +136,7 @@ impl StoreLogSync {
                         .path
                         .write_id()
                         .ok_or_else(|| inconsistent("device listing has another path layout"))?;
-                    highest
-                        .entry(id.device)
-                        .and_modify(|n| *n = (*n).max(id.number))
-                        .or_insert(id.number);
+                    super::include_positions(&mut highest, [&id]);
                     objects.insert(id, object);
                 }
                 if unknown_empty && objects.is_empty() {

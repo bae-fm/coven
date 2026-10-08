@@ -163,7 +163,7 @@ fn parts(
         let Some(introduction) = introduction else {
             return Err(SyncError::KeyUnavailable(*key));
         };
-        let holds = crate::write_seal::holds(ring, &part.audience, *key);
+        let holds = crate::store_log_keys::holds(Some(ring), &part.audience, *key);
         // Dropped removals share their keys with the latest audience (§11,
         // §14.4). Its members wait for that copy before applying the part.
         if !holds
@@ -365,9 +365,7 @@ pub(crate) fn checked<T>(
     value: Result<T, coven_format::Error>,
 ) -> Result<T, SyncError> {
     match value {
-        Err(coven_format::Error::UnsupportedVersion(version))
-            if version > coven_format::FORMAT_VERSION =>
-        {
+        Err(error) if crate::error::newer_format(&error) => {
             Err(crate::SyncFailure::UpdateRequired.into())
         }
         value => value.map_err(|e| damaged(path, parse(e))),

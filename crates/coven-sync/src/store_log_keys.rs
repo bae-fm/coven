@@ -93,10 +93,10 @@ pub(crate) fn path(audience: &Audience, key: KeyId, member: &MemberId) -> Object
     }
 }
 
-pub(crate) fn holds(ring: &Option<StoreKeyring>, audience: &Audience, key: KeyId) -> bool {
-    ring.as_ref().is_some_and(|ring| match audience {
-        Audience::Store => ring.store_key(key).is_ok(),
-        Audience::Circle(circle) => ring.circle_key(*circle, key).is_ok(),
+pub(crate) fn holds(ring: Option<&StoreKeyring>, audience: &Audience, key: KeyId) -> bool {
+    ring.is_some_and(|ring| match audience {
+        Audience::Store => ring.store_key_ids().any(|id| id == key),
+        Audience::Circle(circle) => ring.circle_key_ids(*circle).any(|id| id == key),
     })
 }
 
@@ -112,7 +112,7 @@ pub(crate) fn check_shared_keys(
             StoreChange::AddCircleMember { circle, .. } => audience == Audience::Circle(*circle),
             _ => false,
         };
-        if sharing && !holds(ring, &audience, key) {
+        if sharing && !holds(ring.as_ref(), &audience, key) {
             return Err(SyncError::KeyUnavailable(key));
         }
     }

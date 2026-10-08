@@ -557,6 +557,18 @@ pub(super) fn snapshot_path(id: &SnapshotId) -> Result<ObjectPath, SyncError> {
     ))
 }
 
+pub(super) fn include_positions<'a>(
+    positions: &mut BTreeMap<DeviceId, u64>,
+    writes: impl IntoIterator<Item = &'a coven_merge::WriteId>,
+) {
+    for write in writes {
+        positions
+            .entry(write.device)
+            .and_modify(|number| *number = (*number).max(write.number))
+            .or_insert(write.number);
+    }
+}
+
 pub(super) fn point(positions: &WritePositions, device: DeviceId) -> u64 {
     positions
         .0

@@ -330,8 +330,8 @@ async fn dropped_removal_parts(
             coven_database::EntryOutcome::Dropped(coven_database::DropReason::BeatenBy(id))
                 if id == winner
         ));
-        assert!(!crate::write_seal::holds(
-            &ben.keys.unlock().unwrap().unwrap(),
+        assert!(!crate::store_log_keys::holds(
+            Some(&ben.keys.unlock().unwrap().unwrap()),
             &audience,
             dropped_key,
         ));
@@ -361,8 +361,8 @@ async fn dropped_removal_parts(
         assert_eq!(count(&carol.db).await, 1);
     }
     ben.log.sync_store_log().await.unwrap();
-    assert!(crate::write_seal::holds(
-        &ben.keys.unlock().unwrap().unwrap(),
+    assert!(crate::store_log_keys::holds(
+        Some(&ben.keys.unlock().unwrap().unwrap()),
         &audience,
         dropped_key,
     ));

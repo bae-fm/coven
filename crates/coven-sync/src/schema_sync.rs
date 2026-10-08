@@ -62,18 +62,10 @@ impl StoreLogSync {
         }
         // Intent needs the device's committed membership, not unlocked signing
         // keys. Actual snapshot and entry steps check custody and authority.
-        let Some(device) = local.log.replay.state.devices.get(&local.device) else {
+        let Some(device) = crate::effects::device(&local.log.replay.state, local.device) else {
             return Ok(());
         };
-        if device.removed
-            || local
-                .log
-                .replay
-                .state
-                .members
-                .get(&device.member)
-                .is_none_or(|m| m.removed)
-        {
+        if crate::effects::member(&local.log.replay.state, &device.member).is_none() {
             return Ok(());
         }
         crate::write_seal::check_upload_version(&local.log, state.schema_version)?;

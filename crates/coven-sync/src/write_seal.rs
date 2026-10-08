@@ -32,13 +32,6 @@ pub(crate) fn derive(
     })
 }
 
-pub(crate) fn holds(ring: &StoreKeyring, audience: &Audience, key: KeyId) -> bool {
-    match audience {
-        Audience::Store => ring.store_key_ids().any(|id| id == key),
-        Audience::Circle(circle) => ring.circle_key_ids(*circle).any(|id| id == key),
-    }
-}
-
 pub(crate) fn current(
     log: &StoreLog,
     ring: &StoreKeyring,
@@ -55,7 +48,7 @@ pub(crate) fn current(
             .map(|circle| circle.key),
     }
     .ok_or(SyncError::Rejected(coven_database::DropReason::TargetGone))?;
-    if holds(ring, audience, selected) {
+    if crate::store_log_keys::holds(Some(ring), audience, selected) {
         return Ok(selected);
     }
     // A former circle member still writes its earlier readable history (§14.3).
@@ -67,7 +60,7 @@ pub(crate) fn current(
                 continue;
             }
             for (owner, key) in crate::store_log_keys::introduced(&applied.entry.change) {
-                if &owner == audience && holds(ring, audience, key) {
+                if &owner == audience && crate::store_log_keys::holds(Some(ring), audience, key) {
                     return Ok(key);
                 }
             }
@@ -83,11 +76,8 @@ pub(crate) fn check_member(
 ) -> Result<(), SyncError> {
     let state = &log.replay.state;
     let identity = member.member_id();
-    if state.members.get(&identity).is_none_or(|m| m.removed)
-        || state
-            .devices
-            .get(&device)
-            .is_none_or(|d| d.removed || d.member != identity)
+    if crate::effects::member(state, &identity).is_none()
+        || crate::effects::device(state, device).is_none_or(|d| d.member != identity)
     {
         return Err(SyncFailure::Removed.into());
     }

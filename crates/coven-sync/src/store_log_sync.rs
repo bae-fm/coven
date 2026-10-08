@@ -6,7 +6,7 @@ use crate::{
 };
 use coven_crypto::{
     custody::{MemberKeyCustody, StoreKeyCustody},
-    seal_circle_key, seal_store_key, CryptoError, MemberKeys, SealedKey, StoreKeyring,
+    seal_circle_key, seal_store_key, MemberKeys, SealedKey, StoreKeyring,
 };
 use coven_database::{Database, LocalStoreLog, StoreLog};
 use coven_format::{
@@ -499,7 +499,7 @@ impl StoreLogSync {
         ring: &Option<StoreKeyring>,
     ) -> Result<(), SyncError> {
         for (audience, key) in keys::dropped_removal_keys(log) {
-            if !keys::holds(ring, &audience, key) {
+            if !keys::holds(ring.as_ref(), &audience, key) {
                 tracing::debug!(?audience, ?key, "dropped removal's key has not arrived");
                 continue;
             }
@@ -574,7 +574,7 @@ impl StoreLogSync {
         ring: &mut Option<StoreKeyring>,
         damages: &mut Vec<DamagedObject>,
     ) -> Result<bool, SyncError> {
-        if keys::holds(ring, audience, key) {
+        if keys::holds(ring.as_ref(), audience, key) {
             return Ok(true);
         }
         let path = keys::path(audience, key, &member.member_id());
@@ -641,13 +641,7 @@ impl StoreLogSync {
         failure: ObjectCheckFailure,
     ) -> Result<(), SyncError> {
         if let ObjectCheckFailure::Parse(error) = &failure {
-            if matches!(
-                error.downcast_ref::<coven_format::Error>(),
-                Some(coven_format::Error::UnsupportedVersion(version)) if *version > coven_format::FORMAT_VERSION
-            ) || matches!(
-                error.downcast_ref::<CryptoError>(),
-                Some(CryptoError::UnsupportedVersion(version)) if *version > coven_format::FORMAT_VERSION
-            ) {
+            if crate::error::newer_format(error.as_ref()) {
                 return Err(SyncFailure::UpdateRequired.into());
             }
         }

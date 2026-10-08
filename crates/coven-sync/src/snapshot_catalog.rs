@@ -74,12 +74,7 @@ impl StoreLogSync {
                 &object.path.snapshot_id().expect("checked path"),
                 prefix,
             ) {
-                for id in &prefix.writes.0 {
-                    positions
-                        .entry(id.device)
-                        .and_modify(|n: &mut u64| *n = (*n).max(id.number))
-                        .or_insert(id.number);
-                }
+                super::include_positions(&mut positions, &prefix.writes.0);
             }
             if keys.contains(&(audience.clone(), prefix.key)) {
                 candidates.push(candidate);
