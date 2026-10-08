@@ -68,7 +68,7 @@ pub enum SyncError {
     /// The request or invitation is absent, expired, or no longer matches.
     #[error("invitation or join request is no longer current")]
     InvitationChanged,
-    /// The requested journal row is not a blocked operation.
+    /// The requested journal row is not failed app work available for retry or discard.
     #[error("operation {0:?} is not blocked")]
     NotBlocked(crate::OperationId),
     /// Store-log and snapshot publication wait for the retained reload (§18).
@@ -79,7 +79,7 @@ pub enum SyncError {
     RecoveryBlocked {
         /// The failed reload operation.
         operation: crate::OperationId,
-        /// Its retained cause, also available through `Operations::blocked_operations`.
+        /// Its retained cause.
         failure: String,
     },
     /// Decoding persisted operation data failed; its cause remains available.
@@ -131,6 +131,20 @@ pub enum SyncError {
         /// The proposed creation's store.
         actual: StoreId,
     },
+}
+
+impl SyncError {
+    /// Network interruptions and unavailable prerequisites remain runnable.
+    pub(crate) fn blocks_operation(&self) -> bool {
+        match self {
+            Self::NoStorage
+            | Self::KeyUnavailable(_)
+            | Self::ReloadPending(_)
+            | Self::Stopped(SyncFailure::UpdateRequired) => false,
+            Self::Storage(error) => !error.retryable(),
+            _ => true,
+        }
+    }
 }
 
 /// A sync step stopped as a whole (E5).

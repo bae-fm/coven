@@ -184,7 +184,8 @@ impl CovenHandle {
     pub async fn reset_store(&self) -> Result<(), SyncError> {
         self.operations.reset_store().await
     }
-    /// Permanently failed operations awaiting retry or discard, also available while stopped.
+    /// Failed app work awaiting retry or discard, also available while stopped.
+    /// Maintenance failures appear through sync status and retry on the next pass.
     pub async fn blocked_operations(&self) -> Result<Vec<BlockedOperation>, OperationError> {
         self.operations.blocked_operations().await
     }

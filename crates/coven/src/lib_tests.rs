@@ -595,3 +595,48 @@ async fn a_returning_device_loads_snapshots_covering_deleted_writes_and_keeps_it
     network.assert_converged().await;
     network.close().await;
 }
+
+#[tokio::test]
+async fn an_internal_reload_failure_reports_sync_status_and_retries_without_app_action() {
+    let network = Network::new(2).await;
+    let reader = &network.devices[1].handle;
+    reader.stop_sync();
+    reader
+        .subscribe_sync_status()
+        .wait_for(|s| matches!(s, SyncStatus::Stopped))
+        .await
+        .unwrap();
+    network.devices[0].handle.reset_store().await.unwrap();
+    network.sync(0).await;
+    let storage = &network.devices[0].storage;
+    let snapshots = storage.list(&ObjectPrefix::snapshots()).await.unwrap();
+    assert_eq!(snapshots.len(), 1);
+    let path = &snapshots[0].path;
+    let bytes = storage.read(path).await.unwrap();
+    storage.delete(path).await.unwrap();
+    let device = reader
+        .get_members()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|m| m.is_self)
+        .unwrap()
+        .devices[0];
+    let positions = ObjectPath::positions(device);
+    let before = storage.read(&positions).await.unwrap();
+    reader.start_sync().await.unwrap();
+    let mut status = reader.subscribe_sync_status();
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        status.wait_for(|s| matches!(s, SyncStatus::Failed { .. })),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(reader.blocked_operations().await.unwrap().is_empty());
+    assert_eq!(storage.read(&positions).await.unwrap(), before);
+    storage.create(path, &bytes).await.unwrap();
+    network.sync(1).await;
+    assert_ne!(storage.read(&positions).await.unwrap(), before);
+    network.close().await;
+}

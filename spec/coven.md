@@ -2542,10 +2542,17 @@ Carol's tablet:
   step after its last completed one.
 - A step that fails for good, rather than for lack of network, stops its
   operation, and sets its `failure`.
-  - The failure goes to the app call that started it while that call
-    waits; it remains available through `blocked_operations()`
-    ([E6](api.md#e6-operations-and-recovery)).
-  - The app can retry or abandon it.
+  - For app work, the failure goes to the call that started it while that
+    call waits, and remains available through `blocked_operations()`
+    ([E6](api.md#e6-operations-and-recovery)). The app sees its id, purpose
+    and failure, and can retry or abandon it; step numbers and initiators
+    remain internal. Keeping a reset or schema change, an app-requested
+    reload, and revoking access after a remote removal are app work too.
+  - Coven's snapshot writing, retention and internal reloads do not appear
+    in the app's list and cannot be discarded through it. Their failure
+    fails the sync pass through sync status; coven retries their retained
+    work on its next pass. A failed reload never lets a pass report success
+    or publish a new position before the reload completes.
 - An operation's row is deleted when its last step completes.
 
 ### 18.1 Operations
@@ -2863,8 +2870,9 @@ Carol's tablet:
   to be passed on, and nothing returns `Result<_, String>`.
 - Failed app calls and whole-pass sync failures retain typed causes, such as
   a damaged database, a file on another device, or unreachable storage.
-  Permanently failed operations remain available through `blocked_operations()`;
-  waiting writes and skipped damaged remote objects remain internal (§19.1).
+  Permanently failed app operations remain available through `blocked_operations()`;
+  maintenance failures go through sync status and retry on the next pass (§18).
+  Waiting writes and skipped damaged remote objects remain internal (§19.1).
 - A source file holds at most 1,000 lines, and its tests live beside it
   in `<name>_tests.rs`.
 - Each crate offers a `test-utils` feature with its fakes, such as an

@@ -178,6 +178,7 @@ impl StoreLogSync {
 
     pub(super) async fn resume_snapshots(&mut self) -> Result<Vec<DamagedObject>, SyncError> {
         let _reads = self.reads.enter();
+        self.retry_maintenance().await?;
         let mut damages = Vec::new();
         loop {
             let mut work = Vec::new();
@@ -227,7 +228,7 @@ impl StoreLogSync {
 
     pub(crate) async fn pending_reload(&self) -> Result<Option<crate::OperationId>, SyncError> {
         self.database
-            .first_operation(crate::OperationKind::ReloadSnapshots.name())
+            .first_operation(Data::RELOAD_KIND)
             .await?
             .map(|record| Data::read(&record).map(|_| record.id))
             .transpose()
@@ -266,10 +267,22 @@ impl StoreLogSync {
     ) -> Result<bool, SyncError> {
         loop {
             let record = self.snapshot_record(id).await?;
-            let Data::Snapshots(task) = Data::read(&record)? else {
+            let data = Data::read(&record)?;
+            let maintenance = data.app_kind(&record.started_by).is_none();
+            let Data::Snapshots(task) = data else {
                 return Err(coven_database::DbError::DamagedDatabase.into());
             };
-            match self.snapshot_step(&record, task, damages).await? {
+            let progress = match self.snapshot_step(&record, task, damages).await {
+                Ok(progress) => progress,
+                Err(error) => {
+                    // The operation worker records app failures and replies to their callers.
+                    if maintenance && error.blocks_operation() {
+                        self.block_operation(record.id, error.to_string()).await?;
+                    }
+                    return Err(error);
+                }
+            };
+            match progress {
                 Progress::Finished(_) => return Ok(true),
                 Progress::Waiting => return Ok(false),
                 Progress::Advanced => (),

@@ -121,7 +121,7 @@ struct OperationRun {
 
 impl Operations {
     /// Compose and start the lifetime owner after the database opens. Schedule
-    /// migration publication on opening; retained failures stay blocked.
+    /// migration publication on opening; app failures await retry or discard.
     /// The store's injected clock drives retries without postponing them on commands.
     pub fn new(sync: StoreLogSync, files: Files, writes: DeviceLogSync, clock: ClockRef) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
@@ -216,7 +216,8 @@ impl Operations {
     pub async fn sync(&self) -> Result<(), SyncError> {
         self.unit(Command::SyncAll).await
     }
-    /// Read permanently failed operations from the journal, including while stopped.
+    /// Read failed app work, including while stopped. Maintenance failures go
+    /// through the sync pass and retry on its next invocation.
     pub async fn blocked_operations(&self) -> Result<Vec<BlockedOperation>, SyncError> {
         match self.call(Command::BlockedOperations).await? {
             Output::BlockedOperations(operations) => Ok(operations),
@@ -512,20 +513,19 @@ impl OperationRun {
     async fn sync_pass(&mut self) -> Result<(), SyncError> {
         let _reads = self.sync.begin_pass(&mut self.writes);
         self.sync.sync_store_log().await?;
-        self.drive().await?;
-        // A blocked reload leaves its operation visible, without publishing a
-        // snapshot or applying further writes over the unreloaded audience.
-        if self.sync.pending_reload().await?.is_some() {
-            return Ok(());
+        self.drive_pass().await?;
+        // A pending reload cannot report a successful pass or advance positions.
+        if let Some(id) = self.sync.pending_reload().await? {
+            return Err(SyncError::ReloadPending(id));
         }
         self.sync.reload_deleted_history().await?;
         self.writes.upload_writes().await?;
         // Deleting a circle waits for its row deletion's write to be uploaded.
-        self.drive().await?;
+        self.drive_pass().await?;
         self.writes.download_writes().await?;
-        self.drive().await?;
-        if self.sync.pending_reload().await?.is_some() {
-            return Ok(());
+        self.drive_pass().await?;
+        if let Some(id) = self.sync.pending_reload().await? {
+            return Err(SyncError::ReloadPending(id));
         }
         self.files.sync_files().await?;
         self.writes.upload_writes().await?;
@@ -535,7 +535,16 @@ impl OperationRun {
         Ok(())
     }
 
-    async fn drive(&mut self) -> Result<(), SyncError> {
+    async fn drive_pass(&mut self) -> Result<(), SyncError> {
+        match self.drive().await? {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    // Journal failures stop the worker; maintenance failures stop only the pass.
+    async fn drive(&mut self) -> Result<Option<SyncError>, SyncError> {
+        let mut maintenance_failure = None;
         loop {
             match self.sync.schedule_version_changes().await {
                 Ok(()) | Err(SyncError::Stopped(SyncFailure::UpdateRequired)) => (),
@@ -548,9 +557,7 @@ impl OperationRun {
                 .into_iter()
                 .map(|record| Ok((crate::operation_data::Data::read(&record)?, record)))
                 .collect::<Result<Vec<_>, SyncError>>()?;
-            let reloading = records
-                .iter()
-                .any(|(data, _)| data.kind() == OperationKind::ReloadSnapshots);
+            let reloading = records.iter().any(|(data, _)| data.is_reload());
             let mut advanced = false;
             let raising = records.iter().any(|(data, _)| data.raises_version());
             let mut writer = None;
@@ -573,17 +580,7 @@ impl OperationRun {
                 if record.failure.is_some() && !self.sync.invite_expired(&data) {
                     continue;
                 }
-                if raising_first
-                    && matches!(
-                        data,
-                        crate::operation_data::Data::Snapshots(
-                            crate::snapshot_data::SnapshotTask {
-                                job: crate::snapshot_data::SnapshotJob::Reload { .. },
-                                ..
-                            }
-                        )
-                    )
-                {
+                if raising_first && data.is_reload() {
                     continue;
                 }
                 if data.writes_entry()
@@ -592,6 +589,7 @@ impl OperationRun {
                 {
                     continue;
                 }
+                let maintenance = data.app_kind(&record.started_by).is_none();
                 let step = self.sync.operation_step(&record, data).await;
                 match step {
                     Ok(Progress::Waiting) => (),
@@ -608,11 +606,6 @@ impl OperationRun {
                             let _ = reply.send(Ok(value));
                         }
                     }
-                    Err(
-                        SyncError::NoStorage
-                        | SyncError::KeyUnavailable(_)
-                        | SyncError::ReloadPending(_),
-                    ) => (),
                     Err(SyncError::Stopped(SyncFailure::UpdateRequired)) => {
                         // The committed operation waits for the next app open;
                         // an update requirement is not a permanently blocked step.
@@ -620,14 +613,19 @@ impl OperationRun {
                             let _ = reply.send(Err(SyncFailure::UpdateRequired.into()));
                         }
                     }
-                    Err(SyncError::Storage(error)) if error.retryable() => {
-                        tracing::debug!(operation = record.id.0, error = %error, "operation waiting for storage");
+                    Err(error) if !error.blocks_operation() => {
+                        tracing::debug!(operation = record.id.0, error = %error, "operation waiting for storage or prerequisites");
                     }
                     Err(error) => {
                         self.sync
                             .block_operation(record.id, error.to_string())
                             .await?;
-                        if let Some(reply) = self.waiters.remove(&record.id) {
+                        if maintenance {
+                            tracing::warn!(operation = record.id.0, error = %error, "maintenance failed; retained for the next pass");
+                            if maintenance_failure.is_none() {
+                                maintenance_failure = Some(error);
+                            }
+                        } else if let Some(reply) = self.waiters.remove(&record.id) {
                             let _ = reply.send(Err(error));
                         }
                     }
@@ -643,7 +641,7 @@ impl OperationRun {
                 }
             });
             if !advanced {
-                return Ok(());
+                return Ok(maintenance_failure);
             }
         }
     }

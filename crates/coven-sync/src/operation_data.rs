@@ -106,37 +106,74 @@ pub(crate) enum Data {
 }
 
 impl Data {
+    /// Stable journal name shared by app-requested and automatic reloads.
+    pub(crate) const RELOAD_KIND: &str = "reload-snapshots";
+
     pub(crate) fn read(record: &OperationRecord) -> Result<Self, SyncError> {
         let data: Self = serde_json::from_slice(&record.data)?;
-        if data.kind().name() != record.kind {
+        if data.journal_kind() != record.kind {
             return Err(coven_database::DbError::DamagedDatabase.into());
         }
         Ok(data)
     }
-    pub(crate) fn kind(&self) -> OperationKind {
+    /// The app purpose is independent of the journal's execution steps.
+    pub(crate) fn app_kind(&self, started_by: &str) -> Option<OperationKind> {
         match self {
-            Self::PublishSchema { .. } => OperationKind::MigrateSchema,
-            Self::Entry(work) => work.intent.kind(),
+            Self::PublishSchema { .. } => Some(OperationKind::SchemaChange),
+            Self::Entry(work) => Some(work.intent.kind()),
             Self::Snapshots(task) => match task.job {
                 SnapshotJob::Write {
                     trigger: SnapshotTrigger::Raise { .. },
                     ..
-                } => OperationKind::RaiseSchema,
-                crate::snapshot_data::SnapshotJob::Write {
-                    trigger: crate::snapshot_data::SnapshotTrigger::Reset,
+                } => Some(OperationKind::SchemaChange),
+                SnapshotJob::Write {
+                    trigger: SnapshotTrigger::Reset,
                     ..
-                } => OperationKind::Reset,
-                crate::snapshot_data::SnapshotJob::Write { .. } => OperationKind::WriteSnapshot,
-                crate::snapshot_data::SnapshotJob::Reload { .. } => OperationKind::ReloadSnapshots,
-                crate::snapshot_data::SnapshotJob::Retain => OperationKind::Retention,
+                } => Some(OperationKind::Reset),
+                SnapshotJob::Reload { .. } if started_by != "coven" => {
+                    Some(OperationKind::ReloadFromSnapshot)
+                }
+                SnapshotJob::Write { .. } | SnapshotJob::Reload { .. } | SnapshotJob::Retain => {
+                    None
+                }
             },
-            Self::Invite(_) => OperationKind::Invite,
-            Self::Revoke { .. } => OperationKind::RevokeAccess,
+            Self::Invite(_) => Some(OperationKind::Invite),
+            Self::Revoke { .. } => Some(OperationKind::RevokeAccess),
+        }
+    }
+
+    /// Stable names used only by the local journal, including maintenance.
+    pub(crate) fn journal_kind(&self) -> &'static str {
+        match self {
+            Self::PublishSchema { .. } => "migrate-schema",
+            Self::Entry(work) => match work.intent {
+                Intent::Reset { .. } => "reset",
+                Intent::RemoveMember { .. } => "remove-member",
+                Intent::CreateCircle { .. } => "create-circle",
+                Intent::AddCircleMember { .. } => "add-circle-member",
+                Intent::RemoveCircleMember { .. } => "remove-circle-member",
+                Intent::DeleteCircle { .. } => "delete-circle",
+            },
+            Self::Snapshots(task) => match task.job {
+                SnapshotJob::Write {
+                    trigger: SnapshotTrigger::Raise { .. },
+                    ..
+                } => "raise-schema",
+                SnapshotJob::Write {
+                    trigger: SnapshotTrigger::Reset,
+                    ..
+                } => "reset",
+                SnapshotJob::Write { .. } => "write-snapshot",
+                SnapshotJob::Reload { .. } => Self::RELOAD_KIND,
+                SnapshotJob::Retain => "retention",
+            },
+            Self::Invite(_) => "invite",
+            Self::Revoke { .. } => "revoke-access",
         }
     }
     pub(crate) fn new_operation(&self, started_by: &str) -> Result<NewOperation, SyncError> {
         Ok(NewOperation {
-            kind: self.kind().name().into(),
+            kind: self.journal_kind().into(),
             data: serde_json::to_vec(self)?,
             started_by: started_by.into(),
         })
@@ -261,25 +298,15 @@ impl Data {
             })
         )
     }
-}
 
-impl OperationKind {
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            Self::MigrateSchema => "migrate-schema",
-            Self::Reset => "reset",
-            Self::WriteSnapshot => "write-snapshot",
-            Self::RaiseSchema => "raise-schema",
-            Self::ReloadSnapshots => "reload-snapshots",
-            Self::Retention => "retention",
-            Self::RemoveMember => "remove-member",
-            Self::CreateCircle => "create-circle",
-            Self::AddCircleMember => "add-circle-member",
-            Self::RemoveCircleMember => "remove-circle-member",
-            Self::DeleteCircle => "delete-circle",
-            Self::Invite => "invite",
-            Self::RevokeAccess => "revoke-access",
-        }
+    pub(crate) fn is_reload(&self) -> bool {
+        matches!(
+            self,
+            Self::Snapshots(SnapshotTask {
+                job: SnapshotJob::Reload { .. },
+                ..
+            })
+        )
     }
 }
 

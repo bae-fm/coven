@@ -366,7 +366,7 @@ impl StoreLogSync {
                         });
                         Ok(coven_database::OperationCommit::Start(
                             coven_database::NewOperation {
-                                kind: data.kind().name().into(),
+                                kind: data.journal_kind().into(),
                                 data: serde_json::to_vec(&data)?,
                                 started_by: "circles.delete".into(),
                             },
@@ -542,31 +542,44 @@ impl StoreLogSync {
     }
 
     async fn blocked(&self, id: OperationId) -> Result<OperationRecord, SyncError> {
-        self.database
+        let record = self
+            .database
             .operation(id)
             .await?
             .filter(|r| r.failure.is_some())
-            .ok_or(SyncError::NotBlocked(id))
+            .ok_or(SyncError::NotBlocked(id))?;
+        if Data::read(&record)?.app_kind(&record.started_by).is_none() {
+            return Err(SyncError::NotBlocked(id));
+        }
+        Ok(record)
     }
 
     pub(crate) async fn blocked_operations(&self) -> Result<Vec<BlockedOperation>, SyncError> {
         let mut operations = Vec::new();
         for record in self.database.operations().await? {
             if let Some(failure) = &record.failure {
-                operations.push(BlockedOperation {
-                    id: record.id,
-                    kind: Data::read(&record)?.kind(),
-                    last_step: record.last_step,
-                    started_by: if record.started_by == "coven" {
-                        StartedBy::Coven
-                    } else {
-                        StartedBy::AppCall(record.started_by.clone())
-                    },
-                    failure: failure.clone(),
-                });
+                if let Some(kind) = Data::read(&record)?.app_kind(&record.started_by) {
+                    operations.push(BlockedOperation {
+                        id: record.id,
+                        kind,
+                        failure: failure.clone(),
+                    });
+                }
             }
         }
         Ok(operations)
+    }
+
+    /// A new sync pass retries failed maintenance from its retained step.
+    pub(crate) async fn retry_maintenance(&self) -> Result<(), SyncError> {
+        for record in self.database.operations().await? {
+            if record.failure.is_some()
+                && Data::read(&record)?.app_kind(&record.started_by).is_none()
+            {
+                self.database.operation_failure(record.id, None).await?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) async fn current_join_requests(&self) -> Result<Vec<JoinRequest>, SyncError> {

@@ -1382,7 +1382,8 @@ while let Ok(values) = lost.next().await {
     are then uploaded before snapshot writing, retention and posted positions.
   - Retention uses previously confirmed posted positions; the new position is
     published last, after every preceding step has completed. File transfer
-    failures remain visible through their file status and blocked operations.
+    failures remain visible through their file status. Maintenance failures
+    fail the pass through sync status and retry on the next pass (E6).
   - Coven tracks per-device progress, waiting writes, damaged objects,
     fingerprint disagreements and dropped entries internally; these are not yet
     exposed to the app (§9, §19.1). A disagreement never triggers a reload.
@@ -1665,7 +1666,7 @@ pub enum SyncError {
     CircleDeleted(CircleId),
     /// The target is not an active store member.
     NotStoreMember(MemberId),
-    /// The requested journal row is not a blocked operation.
+    /// The requested journal row is not failed app work available for retry or discard.
     NotBlocked(OperationId),
     /// Decoding persisted operation data failed, retaining its cause.
     OperationData(serde_json::Error),
@@ -1841,14 +1842,24 @@ loop {
 - Every unfinished operation is a row in `_coven_operations`
   ([§18](coven.md#18-operations)).
 - A failed step goes to the app call that started its operation while
-  that call waits. Permanent failures remain available through
-  `blocked_operations`, including when no app call is waiting.
+  that call waits. Permanent failures of app work remain available through
+  `blocked_operations`, including when no app call is waiting. Each result
+  carries its id, app purpose and failure; journal steps and initiators stay
+  internal.
+- Automatic snapshot writing, retention and internal reloads never appear in that list.
+  Their failures fail the sync pass through `SyncStatus::Failed`; coven keeps
+  their progress and retries them on the next pass. They cannot be retried or
+  discarded through the blocked-operation calls.
+- An app-requested reload remains app work, as do keeping a reset or schema
+  change and revoking access after a remote removal. Calls that publish a
+  single entry, such as removing a device, return failures directly and do
+  not create operation rows.
 
 ```rust
 /// The local integer primary key of one unfinished operation (§18).
 pub struct OperationId(pub i64);
 
-/// The work represented by an unfinished operation (§18.1, §19.3).
+/// The app purpose of an unfinished operation (§18.1, §19.3).
 pub enum OperationKind {
     /// Remove a member and replace the store key.
     RemoveMember,
@@ -1864,29 +1875,19 @@ pub enum OperationKind {
     RevokeAccess,
     /// Migrate the schema, snapshot it and raise the version.
     SchemaChange,
-    /// Replace this device's synced data from a snapshot.
+    /// Reload at the app's request, keeping its waiting writes.
     ReloadFromSnapshot,
-    /// Write a snapshot and delete covered logs and unused files.
-    Snapshot,
     /// Grant access, approve or decline a join, and settle the invite.
     Invite,
     /// Snapshot and reset an audience (§19.3).
     Reset,
 }
 
-/// Who initiated an operation (§18).
-pub enum StartedBy {
-    /// The app call, named as in _coven_operations.started_by.
-    AppCall(String),
-    /// Coven's own running work.
-    Coven,
-}
-
 /// Operation calls retain the same typed causes as sync calls (§18).
 pub type OperationError = SyncError;
 
 impl CovenHandle {
-    /// Operations whose steps failed permanently (§18), including revocations
+    /// App work that failed permanently (§18), including revocations
     /// that need the owner's action (§13).
     pub async fn blocked_operations(&self) -> Result<Vec<BlockedOperation>, OperationError>;
 
@@ -1909,14 +1910,11 @@ impl CovenHandle {
     pub async fn reset_store(&self) -> Result<(), SyncError>;
 }
 
-/// One `_coven_operations` row whose step failed for good.
+/// App work stopped by a permanent failure, awaiting retry or discard.
 pub struct BlockedOperation {
     pub id: OperationId,
-    /// Such as removing a member, or reloading from a snapshot.
+    /// What the operation was for in app terms.
     pub kind: OperationKind,
-    pub last_step: u32,
-    /// The app call that started it, or coven.
-    pub started_by: StartedBy,
     pub failure: String,
 }
 ```

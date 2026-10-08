@@ -9,21 +9,15 @@ pub use coven_database::{AccessKeyToDelete, OperationId};
 /// An operation failure retains the same typed causes as an ordinary sync call.
 pub type OperationError = crate::SyncError;
 
-/// The work retained in an unfinished journal row.
+/// The app purpose of an unfinished operation; maintenance stays internal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OperationKind {
-    /// Run the app migration batch and publish every readable audience.
-    MigrateSchema,
+    /// Publish the app's migrated schema and its audience snapshots.
+    SchemaChange,
     /// Snapshot this device and reset one audience to that state.
     Reset,
-    /// Write, upload and retain one audience snapshot.
-    WriteSnapshot,
-    /// Publish a migrated audience snapshot and its schema raise.
-    RaiseSchema,
-    /// Replace readable audiences and replay waiting writes atomically.
-    ReloadSnapshots,
-    /// Delete objects released by snapshot coverage.
-    Retention,
+    /// Reload snapshots at the app's request, keeping waiting writes.
+    ReloadFromSnapshot,
     /// Remove a member and rotate every affected key.
     RemoveMember,
     /// Create a circle and its first key.
@@ -40,26 +34,13 @@ pub enum OperationKind {
     RevokeAccess,
 }
 
-/// Who initiated the retained work.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum StartedBy {
-    /// The app method that started it.
-    AppCall(String),
-    /// Work caused by applying a store-log entry.
-    Coven,
-}
-
-/// An unfinished operation stopped by a permanent failure.
+/// App work stopped by a permanent failure, awaiting retry or discard.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockedOperation {
     /// Local journal identity.
     pub id: OperationId,
     /// The work being performed.
     pub kind: OperationKind,
-    /// Last committed step.
-    pub last_step: u32,
-    /// The initiator.
-    pub started_by: StartedBy,
     /// The failure presented when no app call is waiting.
     pub failure: String,
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::snapshot_data::{ReloadScope, SnapshotJob, SnapshotTask, SnapshotTrigger};
 use crate::{
     operation_data::Data,
     operations::{Begun, Command, Output, Progress},
@@ -447,7 +448,9 @@ async fn permanent_storage_failure_preserves_fixed_bytes_for_retry_and_discard()
         };
         let blocked = operations.blocked_operations().await.unwrap();
         assert_eq!(blocked.len(), 1);
-        assert_eq!(blocked[0].last_step, 1);
+        assert_eq!(blocked[0].id, id);
+        assert_eq!(blocked[0].kind, OperationKind::CreateCircle);
+        assert!(!blocked[0].failure.is_empty());
         assert!(matches!(
             storage.read(&object::path(fixed.entry.position)).await,
             Err(error) if error.failure() == StorageFailure::NotFound
@@ -509,6 +512,14 @@ async fn retained_provider_grants_block_both_requested_and_remote_revocations() 
         }
         let blocked = operations.blocked_operations().await.unwrap();
         assert_eq!(blocked.len(), 1);
+        assert_eq!(
+            blocked[0].kind,
+            if remote {
+                OperationKind::RevokeAccess
+            } else {
+                OperationKind::RemoveMember
+            }
+        );
         let id = blocked[0].id;
         assert!(
             matches!(operations.retry_blocked_operation(id).await, Err(SyncError::AccessRemains(found)) if found == shares)
@@ -748,4 +759,211 @@ async fn store_reset_requires_admin_and_circle_reset_requires_membership() {
     for operations in [a, b, c] {
         operations.close().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn maintenance_failures_are_hidden_and_retry_on_the_next_pass() {
+    for job in [
+        SnapshotJob::Write {
+            audience: Audience::Store,
+            device: DeviceId(1),
+            trigger: SnapshotTrigger::Requested,
+            session: None,
+        },
+        SnapshotJob::Reload {
+            scope: ReloadScope::All,
+            files: None,
+        },
+        SnapshotJob::Retain,
+    ] {
+        let storage = Arc::new(
+            google()
+                .as_ref()
+                .clone()
+                .with_transfer_limits(65536, 65536)
+                .unwrap(),
+        );
+        let [mut a, _b, _c] = accounts(storage.clone()).await;
+        let id =
+            a.db.start_operation(
+                Data::Snapshots(SnapshotTask {
+                    job,
+                    temporary: Vec::new(),
+                })
+                .new_operation("coven")
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        a.sync.storage = Some(Arc::new(
+            MemoryStorage::for_recipient(&storage, "uninvited@example.com").unwrap(),
+        ));
+        let files = file_owner(&a);
+        let writes = a.writes();
+        let operations = Operations::new(a.sync, files, writes, a.clock.clone());
+        assert!(operations.blocked_operations().await.unwrap().is_empty());
+        let failed = a.db.operations().await.unwrap().remove(0);
+        assert_eq!(failed.id, id);
+        assert!(failed.failure.is_some());
+        assert!(
+            matches!(operations.retry_blocked_operation(id).await, Err(SyncError::NotBlocked(found)) if found == id)
+        );
+        assert!(
+            matches!(operations.discard_blocked_operation(id).await, Err(SyncError::NotBlocked(found)) if found == id)
+        );
+        assert!(operations.sync().await.is_err());
+        operations.set_storage(Some(storage)).await.unwrap();
+        assert!(a.db.operations().await.unwrap()[0].failure.is_some());
+        operations.sync().await.unwrap();
+        assert!(!a.db.operations().await.unwrap().iter().any(|r| r.id == id));
+        operations.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn app_reload_and_reset_stay_blocked_until_explicit_retry() {
+    for (command, kind) in [
+        (Command::Reload, OperationKind::ReloadFromSnapshot),
+        (Command::Reset(Audience::Store), OperationKind::Reset),
+    ] {
+        let storage = Arc::new(
+            google()
+                .as_ref()
+                .clone()
+                .with_transfer_limits(65536, 65536)
+                .unwrap(),
+        );
+        let [mut a, _b, _c] = accounts(storage.clone()).await;
+        let id = begin(&mut a, command).await;
+        a.sync.storage = Some(Arc::new(
+            MemoryStorage::for_recipient(&storage, "uninvited@example.com").unwrap(),
+        ));
+        let files = file_owner(&a);
+        let writes = a.writes();
+        let operations = Operations::new(a.sync, files, writes, a.clock.clone());
+        let blocked = operations.blocked_operations().await.unwrap();
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0].id, id);
+        assert_eq!(blocked[0].kind, kind);
+        assert!(!blocked[0].failure.is_empty());
+        operations.set_storage(Some(storage.clone())).await.unwrap();
+        if kind == OperationKind::ReloadFromSnapshot {
+            assert!(
+                matches!(operations.sync().await, Err(SyncError::ReloadPending(found)) if found == id)
+            );
+        } else {
+            operations.sync().await.unwrap();
+        }
+        assert_eq!(operations.blocked_operations().await.unwrap(), blocked);
+        operations.close().await.unwrap();
+        a.sync = StoreLogSync::new(
+            storage.clone(),
+            a.db.clone(),
+            a.custody.clone(),
+            Arc::new(coven_crypto::custody::InMemoryCustody::new(
+                a.member.clone(),
+            )),
+            a.clock.clone(),
+            Arc::new(coven_foundation::id_source::UuidIds),
+            a.directory.clone(),
+        );
+        let files = file_owner(&a);
+        let writes = a.writes();
+        let operations = Operations::new(a.sync, files, writes, a.clock.clone());
+        assert_eq!(operations.blocked_operations().await.unwrap(), blocked);
+        operations.retry_blocked_operation(id).await.unwrap();
+        assert!(operations.blocked_operations().await.unwrap().is_empty());
+        operations.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn migration_and_audience_publication_share_the_schema_change_purpose() {
+    let storage = storage();
+    let mut a = device(storage, 1, member(1), store(1)).await;
+    a.create(key(1)).await;
+    for operation in [
+        StoreLogSync::migration_operation(2).unwrap(),
+        Data::Snapshots(SnapshotTask {
+            job: SnapshotJob::Write {
+                audience: Audience::Store,
+                device: a.device().await,
+                trigger: SnapshotTrigger::Raise {
+                    version: 2,
+                    entry: None,
+                },
+                session: None,
+            },
+            temporary: Vec::new(),
+        })
+        .new_operation("coven")
+        .unwrap(),
+    ] {
+        let id = a.db.start_operation(operation).await.unwrap();
+        a.db.operation_failure(id, Some("publication refused".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            a.sync.blocked_operations().await.unwrap(),
+            [BlockedOperation {
+                id,
+                kind: OperationKind::SchemaChange,
+                failure: "publication refused".into(),
+            }]
+        );
+        a.sync
+            .begin_operation_call(Command::Discard(id))
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_reload_failure_during_sync_reaches_its_waiting_app_call() {
+    let storage = storage();
+    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
+    a.create(key(1)).await;
+    let files = file_owner(&a);
+    let writes = a.writes();
+    let operations = Operations::new(a.sync, files, writes, a.clock.clone());
+    operations.reset_store().await.unwrap();
+    let snapshot = storage
+        .list(&ObjectPrefix::snapshots())
+        .await
+        .unwrap()
+        .remove(0)
+        .path;
+    storage.set_online(false);
+    let mut waiting = Box::pin(operations.reload_from_snapshot());
+    std::future::poll_fn(|cx| {
+        use std::future::Future;
+        assert!(waiting.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    operations.get_members().await.unwrap();
+    let retained = a.db.operations().await.unwrap();
+    assert_eq!(retained.len(), 1);
+    assert!(retained[0].failure.is_none());
+    storage.set_online(true);
+    storage.delete(&snapshot).await.unwrap();
+    assert!(operations.sync().await.is_err());
+    std::future::poll_fn(|cx| {
+        use std::future::Future;
+        assert!(
+            matches!(
+                waiting.as_mut().poll(cx),
+                std::task::Poll::Ready(Err(SyncError::Storage(error)))
+                    if error.failure() == StorageFailure::NotFound
+            ),
+            "the waiting reload call must receive its failure"
+        );
+        std::task::Poll::Ready(())
+    })
+    .await;
+    let blocked = operations.blocked_operations().await.unwrap();
+    assert_eq!(blocked.len(), 1);
+    assert_eq!(blocked[0].id, retained[0].id);
+    assert_eq!(blocked[0].kind, OperationKind::ReloadFromSnapshot);
+    operations.close().await.unwrap();
 }

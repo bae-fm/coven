@@ -75,8 +75,8 @@ pub use coven_format::store_log::MemberRole;
 pub use coven_storage::{MemberRemoval, ProviderSignOut, RetainedAccess, RetainedAccessReason};
 pub use coven_sync::{
     AccessKeyToDelete, BlockedOperation, Circle, CircleMemberInfo, Invite, InviteAccess,
-    JoinRequest, MemberInfo, OperationError, OperationId, OperationKind, StartedBy, SyncError,
-    SyncFailure, SyncStatus,
+    JoinRequest, MemberInfo, OperationError, OperationId, OperationKind, SyncError, SyncFailure,
+    SyncStatus,
 };
 
 #[cfg(not(any(target_os = "ios", target_os = "android")))]

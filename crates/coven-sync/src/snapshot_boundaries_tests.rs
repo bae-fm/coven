@@ -258,8 +258,13 @@ async fn queued_entries_wait_for_reload_and_finishing_a_queued_reset_blocks_new_
             .failure(),
         StorageFailure::NotFound
     );
-    a.db.operation_failure(pending, None).await.unwrap();
-    a.sync.sync_store_log().await.unwrap();
+    assert!(!a
+        .db
+        .operations()
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| r.id == pending));
     a.sync.sync_store_log().await.unwrap();
     assert_eq!(
         storage
@@ -271,7 +276,7 @@ async fn queued_entries_wait_for_reload_and_finishing_a_queued_reset_blocks_new_
 }
 
 #[tokio::test]
-async fn a_blocked_reload_cannot_be_bypassed_by_publishing_a_snapshot() {
+async fn a_failed_internal_reload_prevents_snapshot_publication_until_it_can_resume() {
     let storage = snapshot_storage();
     let mut a = notes_device(storage.clone(), 1).await;
     a.create(key(1)).await;
@@ -280,21 +285,37 @@ async fn a_blocked_reload_cannot_be_bypassed_by_publishing_a_snapshot() {
         .make_and_upload_entry(StoreChange::Reset { snapshot: reset })
         .await
         .unwrap();
-    let pending = a.db.operations().await.unwrap().remove(0);
-    a.db.operation_failure(pending.id, Some("reload failed".into()))
+    let pending = a.db.operations().await.unwrap().remove(0).id;
+    let snapshot = storage
+        .list(&ObjectPrefix::snapshots())
         .await
-        .unwrap();
-    assert!(
-        matches!(a.sync.write_snapshot(Audience::Store).await, Err(SyncError::ReloadPending(id)) if id == pending.id)
-    );
-    assert_eq!(
-        storage
+        .unwrap()
+        .remove(0)
+        .path;
+    let bytes = storage.read(&snapshot).await.unwrap();
+    storage.delete(&snapshot).await.unwrap();
+    for _ in 0..2 {
+        let error = a.sync.write_snapshot(Audience::Store).await.unwrap_err();
+        assert!(
+            matches!(&error, SyncError::Storage(error) if error.failure() == StorageFailure::NotFound),
+            "{error:?}"
+        );
+        assert!(storage
             .list(&ObjectPrefix::snapshots())
             .await
             .unwrap()
-            .len(),
-        1
-    );
+            .is_empty());
+        assert!(a
+            .db
+            .operations()
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.id == pending && r.failure.is_some()));
+    }
+    storage.create(&snapshot, &bytes).await.unwrap();
+    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    assert!(a.db.operations().await.unwrap().is_empty());
 }
 
 #[tokio::test]

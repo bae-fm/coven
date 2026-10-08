@@ -28,7 +28,7 @@ pub struct OperationRecord {
     pub data: Vec<u8>,
     /// The initiating app method or `coven`.
     pub started_by: String,
-    /// A permanent failure, cleared only by an explicit retry.
+    /// A permanent failure. Sync decides whether app action or its next pass retries it.
     pub failure: Option<String>,
 }
 
