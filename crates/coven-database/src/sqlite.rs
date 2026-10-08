@@ -34,6 +34,8 @@ pub(crate) struct DatabaseConnection {
     authorization: SqlAuthorization,
     observation: Option<WriterObservation>,
     streaming: std::cell::Cell<bool>,
+    #[cfg(any(test, feature = "test-utils"))]
+    write_checkpoint: std::cell::RefCell<Option<crate::test_utils::WriteCheckpointObserver>>,
     #[cfg(test)]
     scans: std::sync::Mutex<Vec<(String, i32)>>,
     #[cfg(test)]
@@ -117,6 +119,8 @@ impl DatabaseConnection {
             authorization,
             observation: None,
             streaming: std::cell::Cell::new(false),
+            #[cfg(any(test, feature = "test-utils"))]
+            write_checkpoint: std::cell::RefCell::new(None),
             #[cfg(test)]
             scans: std::sync::Mutex::new(Vec::new()),
             #[cfg(test)]
@@ -767,9 +771,13 @@ impl DatabaseConnection {
                 },
             };
             self.batch("COMMIT")?;
+            #[cfg(any(test, feature = "test-utils"))]
+            self.checkpoint(crate::test_utils::WriteCheckpoint::Committed);
             if let Some(observation) = &self.observation {
                 observation.observer.commit(changes);
             }
+            #[cfg(any(test, feature = "test-utils"))]
+            self.checkpoint(crate::test_utils::WriteCheckpoint::Observed);
             Ok(result)
         })();
         guard.active = false;
@@ -819,6 +827,21 @@ impl DatabaseConnection {
         self.connection
             .close()
             .map_err(|(_connection, error)| error.into())
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn on_write_checkpoint(
+        &self,
+        callback: impl Fn(crate::test_utils::WriteCheckpoint) + Send + 'static,
+    ) {
+        *self.write_checkpoint.borrow_mut() = Some(Box::new(callback));
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn checkpoint(&self, point: crate::test_utils::WriteCheckpoint) {
+        if let Some(callback) = self.write_checkpoint.borrow().as_ref() {
+            callback(point);
+        }
     }
 }
 

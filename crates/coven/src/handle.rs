@@ -417,6 +417,14 @@ impl CovenHandle {
         }))
         .await
     }
+    /// Read committed plaintext records still awaiting upload in application tests.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn test_queued_writes(
+        &self,
+    ) -> Result<Vec<coven_format::write::WriteRecord>, DbError> {
+        self.database.test_queued_writes().await
+    }
+
     /// Inspect the actual synchronization state in application integration tests.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn test_sync_state(

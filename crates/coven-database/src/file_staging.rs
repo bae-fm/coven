@@ -210,6 +210,8 @@ impl FileStaging {
                 }
             }
             let _lease = self.lease.take();
+            #[cfg(any(test, feature = "test-utils"))]
+            writer.checkpoint(crate::test_utils::WriteCheckpoint::StagingReleased);
             match result {
                 Ok(result) => result,
                 Err(panic) => std::panic::resume_unwind(panic),

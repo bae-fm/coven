@@ -4,6 +4,20 @@ use super::Database;
 use crate::DbError;
 
 impl Database {
+    /// Observe transaction completion and file cleanup on the writer thread.
+    /// Install after setup; the callback may terminate a subprocess to simulate
+    /// a crash without Rust destructors or SQLite connection shutdown.
+    pub async fn test_on_write_checkpoint(
+        &self,
+        callback: impl Fn(crate::test_utils::WriteCheckpoint) + Send + 'static,
+    ) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.with_writer(|writer| writer.on_write_checkpoint(callback));
+            Ok(())
+        })
+        .await
+    }
+
     /// Inject an agreement fault without changing positions or application rows.
     /// Recovery tests use the actual incremental sum and production reload path.
     pub async fn test_damage_fingerprint(

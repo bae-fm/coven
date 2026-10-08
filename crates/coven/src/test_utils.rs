@@ -10,6 +10,10 @@ pub struct TestCoven {
     keychain: Arc<Keychain>,
 }
 
+#[cfg(test)]
+#[path = "test_utils_tests.rs"]
+mod tests;
+
 impl TestCoven {
     /// Make an installation with an empty device-only and synced keychain.
     pub fn new() -> Self {

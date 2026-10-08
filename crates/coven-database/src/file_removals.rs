@@ -26,6 +26,9 @@ impl<'a> FileRemovals<'a> {
 
     pub(crate) fn finish<R, E: crate::WriteFailure>(&self, result: Result<R, E>) -> Result<R, E> {
         let failures = self.remove_unused();
+        #[cfg(any(test, feature = "test-utils"))]
+        self.database
+            .checkpoint(crate::test_utils::WriteCheckpoint::Finished);
         if failures.is_empty() {
             result
         } else {
@@ -84,10 +87,14 @@ pub(crate) fn remove(
         "cache" => directory.file(FileArea::Cache, name).remove()?,
         _ => return Err(DbError::DamagedDatabase),
     }
+    #[cfg(any(test, feature = "test-utils"))]
+    database.checkpoint(crate::test_utils::WriteCheckpoint::FileRemoved);
     database.internal_execute(
         "DELETE FROM _coven_file_removals WHERE path=?1 AND area=?2",
         (name.as_str(), area),
     )?;
+    #[cfg(any(test, feature = "test-utils"))]
+    database.checkpoint(crate::test_utils::WriteCheckpoint::FileRemovalRecorded);
     Ok(())
 }
 

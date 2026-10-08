@@ -39,44 +39,6 @@ async fn download_suppresses_shared_triggers_and_runs_local_triggers_with_applyi
 }
 
 #[tokio::test]
-async fn a_fingerprint_storage_failure_rolls_back_the_download_and_allows_retry() {
-    let ids = SequentialIds::new();
-    let a_store = TestStore::with_ids(&ids);
-    let b_store = TestStore::with_ids(&ids);
-    let a = a_store.schema(notes(), NOTES).await.unwrap();
-    let b = b_store.schema(notes(), NOTES).await.unwrap();
-    sql(&a, "INSERT INTO notes VALUES('n','title','body')")
-        .await
-        .unwrap();
-    let record = records(&a).remove(0);
-    b.inspect_writer(|sql| sql.batch("CREATE TRIGGER fail_hash AFTER INSERT ON _coven_fingerprint_leaves BEGIN SELECT RAISE(ABORT,'fingerprint failure'); END").unwrap());
-    assert!(
-        matches!(b.apply_downloaded(record.clone().into()).await,Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(_,Some(message)))) if message=="fingerprint failure")
-    );
-    for table in [
-        "notes",
-        "_coven_rows",
-        "_coven_cells",
-        "_coven_writes",
-        "_coven_positions",
-        "_coven_lost",
-        "_coven_fingerprint_leaves",
-        "_coven_fingerprint_sums",
-    ] {
-        assert_eq!(count(&b, table), 0, "{table}");
-    }
-    b.inspect_writer(|sql| sql.batch("DROP TRIGGER fail_hash").unwrap());
-    assert_eq!(
-        b.apply_downloaded(record.into()).await.unwrap(),
-        ApplyOutcome::Applied
-    );
-    assert_eq!(count(&b, "notes"), 1);
-    for db in [a, b] {
-        db.close().await.unwrap();
-    }
-}
-
-#[tokio::test]
 async fn a_trigger_ending_the_transaction_returns_its_original_sqlite_error() {
     let ids = SequentialIds::new();
     let a_store = TestStore::with_ids(&ids);
@@ -133,6 +95,190 @@ async fn a_trigger_ending_the_transaction_returns_its_original_sqlite_error() {
 }
 
 type StoredTables = std::collections::BTreeMap<String, Vec<Vec<crate::types::Value>>>;
+
+#[tokio::test]
+async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifications() {
+    use coven_foundation::clock::FixedClock;
+    use std::{
+        sync::Arc,
+        time::{Duration, UNIX_EPOCH},
+    };
+    let ids = SequentialIds::new();
+    let source_store = TestStore::with_ids(&ids);
+    let tables = || {
+        vec![
+            SyncedTable::new("notes", RowIdentity::SharedKey),
+            SyncedTable::new("tags", RowIdentity::SharedKey),
+        ]
+    };
+    let schema = "
+        CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL UNIQUE,body TEXT NOT NULL);
+        CREATE TABLE tags(id TEXT NOT NULL PRIMARY KEY,note TEXT REFERENCES notes(id) ON DELETE CASCADE);
+        CREATE TABLE audit(id INTEGER PRIMARY KEY,event TEXT NOT NULL);
+        CREATE TRIGGER note_insert AFTER INSERT ON notes BEGIN INSERT INTO audit(event) VALUES('insert'); END;
+        CREATE TRIGGER note_update AFTER UPDATE ON notes BEGIN INSERT INTO audit(event) VALUES('update'); END;
+        CREATE TRIGGER note_delete AFTER DELETE ON notes BEGIN INSERT INTO audit(event) VALUES('delete'); END;";
+    let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1000)));
+    let source = source_store
+        .builder(tables(), vec![crate::Migration::sql(1, "records", schema)])
+        .clock(clock.clone())
+        .open()
+        .await
+        .unwrap();
+    sql(&source, "INSERT INTO notes VALUES('a','A','initial'),('b','B','initial'),('d','D','delete'); INSERT INTO tags VALUES('old','b')").await.unwrap();
+    let initial = records(&source).remove(0);
+    clock.set(UNIX_EPOCH + Duration::from_secs(1002));
+    sql(&source, "UPDATE notes SET body='remote' WHERE id='a'; UPDATE notes SET title='collision' WHERE id='b'; DELETE FROM notes WHERE id='d'; INSERT INTO notes VALUES('new','new','inserted'); INSERT INTO tags VALUES('new','a')").await.unwrap();
+    let incoming = records(&source).remove(1);
+    for streamed in [false, true] {
+        let receiver_store = TestStore::with_ids(&ids);
+        let receiver_clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1001)));
+        let db = receiver_store
+            .builder(tables(), vec![crate::Migration::sql(1, "records", schema)])
+            .clock(receiver_clock)
+            .open()
+            .await
+            .unwrap();
+        db.apply_downloaded(initial.clone().into()).await.unwrap();
+        sql(&db, "UPDATE notes SET body='local' WHERE id='a'; INSERT INTO notes VALUES('c','collision','local')").await.unwrap();
+        let before = stored_tables(&db);
+        let mut query = db.subscribe(|sql| {
+            Ok(
+                sql.query("SELECT id,title,body FROM notes ORDER BY id", [], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                })?,
+            )
+        });
+        let old_rows = query.next().await.unwrap();
+        // Count actual row mutations, including repeated changes to one table,
+        // local trigger effects, losses, fingerprints and applied positions.
+        db.inspect_writer(|writer| {
+            writer.batch("CREATE TEMP TABLE failure_step(number INTEGER NOT NULL,fail_at INTEGER NOT NULL); INSERT INTO failure_step VALUES(0,1)").unwrap();
+            for (index, table) in before.keys().filter(|name| !name.starts_with("sqlite_")).enumerate() {
+                for action in ["INSERT", "UPDATE", "DELETE"] {
+                    writer.batch(&format!("CREATE TEMP TRIGGER fault_{index}_{action} AFTER {action} ON main.{} BEGIN UPDATE failure_step SET number=number+1; SELECT CASE WHEN number=fail_at THEN RAISE(ABORT,'injected apply failure') END FROM failure_step; END", crate::sql::identifier(table))).unwrap();
+                }
+            }
+        });
+        let mut applied = false;
+        for step in 1..1000 {
+            db.inspect_writer(|writer| {
+                writer
+                    .internal_execute("UPDATE failure_step SET number=0,fail_at=?1", [step])
+                    .unwrap()
+            });
+            let result = if streamed {
+                let encoder = coven_format::write_stream::WriteEncoder::new(&incoming).unwrap();
+                let input = crate::DownloadedWriteStream {
+                    header: encoder.header().clone(),
+                    parts: (0..incoming.parts.len())
+                        .map(|i| {
+                            crate::DownloadedPartStream::Opened(std::io::Cursor::new(
+                                encoder
+                                    .part_chunks(i)
+                                    .unwrap()
+                                    .collect::<Result<Vec<_>, _>>()
+                                    .unwrap()
+                                    .concat(),
+                            ))
+                        })
+                        .collect(),
+                };
+                db.apply_downloaded_stream(
+                    input,
+                    coven_format::value::EntryPositions(Vec::new()),
+                    || Ok(()),
+                )
+                .await
+            } else {
+                db.apply_downloaded(incoming.clone().into()).await
+            };
+            match result {
+                Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(_, Some(message))))
+                    if message == "injected apply failure" =>
+                {
+                    assert_eq!(
+                        stored_tables(&db),
+                        before,
+                        "streamed={streamed}, step={step}"
+                    );
+                    assert!(
+                        !query.is_marked_for_rerun(),
+                        "streamed={streamed}, step={step}"
+                    );
+                    let rows = db
+                        .read(|sql| {
+                            Ok(sql.query(
+                                "SELECT id,title,body FROM notes ORDER BY id",
+                                [],
+                                |r| {
+                                    Ok((
+                                        r.get::<_, String>(0)?,
+                                        r.get::<_, String>(1)?,
+                                        r.get::<_, String>(2)?,
+                                    ))
+                                },
+                            )?)
+                        })
+                        .await
+                        .unwrap();
+                    assert_eq!(rows, old_rows);
+                    db.inspect_writer(|writer| assert_eq!(writer.query_row("SELECT count(*) FROM temp.sqlite_schema WHERE name GLOB '_coven_download_*'", [], |r| r.get::<_, i64>(0)).unwrap(), 0));
+                }
+                Ok(ApplyOutcome::Applied) => {
+                    let mutations = db.inspect_writer(|writer| {
+                        writer
+                            .query_row("SELECT number FROM failure_step", [], |r| {
+                                r.get::<_, i64>(0)
+                            })
+                            .unwrap()
+                    });
+                    assert_eq!(mutations, step - 1);
+                    assert!(
+                        mutations > 20,
+                        "fixture must exercise merge persistence and materialization"
+                    );
+                    applied = true;
+                    break;
+                }
+                result => panic!("streamed={streamed}, step={step}: {result:?}"),
+            }
+        }
+        assert!(applied, "all mutations must eventually succeed");
+        let rows = query.next().await.unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("a".into(), "A".into(), "remote".into()),
+                ("c".into(), "collision".into(), "local".into()),
+                ("new".into(), "new".into(), "inserted".into())
+            ]
+        );
+        assert!(!db.lost_values().await.unwrap().is_empty());
+        assert_eq!(count(&db, "tags"), 1);
+        assert!(db
+            .sync_state(Vec::new())
+            .await
+            .unwrap()
+            .positions
+            .covers(incoming.header.position));
+        assert_eq!(
+            records(&db).len(),
+            1,
+            "downloads never enter the local upload queue"
+        );
+        assert_eq!(
+            db.apply_downloaded(incoming.clone().into()).await.unwrap(),
+            ApplyOutcome::AlreadyApplied
+        );
+        db.close().await.unwrap();
+    }
+    source.close().await.unwrap();
+}
 
 fn stored_tables(database: &crate::Database) -> StoredTables {
     database.inspect_writer(|db| {

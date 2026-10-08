@@ -2906,6 +2906,16 @@ Carol's tablet:
   - every crate built without test code, so an item only tests use shows
     up as dead;
   - the tests, with all features and with none;
+    - the guarantees in §3 are exercised through app calls where visible:
+      committed writes survive dropping the handle and process exits at each
+      post-commit boundary, remain queued and upload after reopening; app reads
+      and writes finish while a sync pass is held;
+    - removal's next write and snapshots open with the rotated keys and fail
+      with the removed member's keys; identical file uploads store different
+      ciphertext; snapshots delete covered logs and superseded own snapshots;
+    - injected failures at each remote-write mutation roll back app rows,
+      merge records, losses, fingerprints, positions and query notifications;
+      these tests use fixed inputs, an injected clock and explicit barriers;
   - the Lean proofs, built from scratch, with no `sorry` and no axiom
     beyond Lean's own, and their differential tests against Rust.
 - The checker is the first thing built, before any crate, so every rule
