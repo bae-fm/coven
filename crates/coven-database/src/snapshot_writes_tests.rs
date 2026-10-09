@@ -430,6 +430,7 @@ async fn supplied_dismissals_apply_before_waiting_changes_and_validate_their_pas
     let mut invalid = stream(&dismissal);
     invalid.header.header.had_read.0.clear();
     invalid.header.header.position.number = 1;
+    let invalid_position = invalid.header.header.position;
     assert!(matches!(
         b.load_snapshots(crate::SnapshotReload::new(
             vec![(
@@ -440,7 +441,8 @@ async fn supplied_dismissals_apply_before_waiting_changes_and_validate_their_pas
             vec![invalid],
         ))
         .await,
-        Err(crate::DbError::Snapshot(crate::SnapshotError::Format(_)))
+        Err(crate::DbError::Snapshot(crate::SnapshotError::Write { write, error }))
+            if write == invalid_position && matches!(*error, crate::DbError::Snapshot(crate::SnapshotError::Format(_)))
     ));
     assert_eq!(contents(&b), before);
     b.load_snapshots(crate::SnapshotReload::new(

@@ -306,7 +306,16 @@
   store_log       EntryPositions
   schema_version  u32
   fingerprints    [audience:Audience | key:uuid | fingerprint:32 bytes]   store first, increasing
+  stuck           [log:u8 | device:DeviceId | number:u64 | failure:u8]
   ```
+
+  `log` is 0 for a device write log, 1 for a store log. `number` is positive
+  and identifies the refused write or entry in that device's log. `failure`
+  is 0 for decryption/authentication, 1 for signature, 2 for parsing, 3 for
+  an invalid write. Records are strictly ordered by `(log, device)`, at most
+  one per log. Only judgments made by the posting device appear here; peer
+  reports, local judgment times and coven versions do not travel. The D9
+  signature authenticates the complete list as that device's report (§19.1).
 
 - A join request (kind 9):
   `invite:uuid | keys:MemberKeys | device_name:name`.
@@ -419,7 +428,7 @@
 | `devices/<device>/<n>` | A device's write `n` |
 | `store-log/<device>/<n>` | A device's store log entry `n` |
 | `snapshots/<audience>/<device>/<n>` | A device's snapshot `n` of an audience: `store`, or a circle's id |
-| `positions/<device>` | A device's posted positions, replaced as they advance |
+| `positions/<device>` | A device's posted positions and stuck records, replaced as either changes |
 | `keys/store/<key>/<member>` | A store key sealed to a member |
 | `keys/circles/<circle>/<key>/<member>` | A circle key sealed to a member |
 | `files/<device>/<file>` | An uploaded file |

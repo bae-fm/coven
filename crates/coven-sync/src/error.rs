@@ -9,6 +9,9 @@ use std::sync::Arc;
 /// A synchronization request failed; its durable queue, if any, remains retryable.
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
+    /// An explicit recovery or join requires an object from a stopped log.
+    #[error("operation requires a stuck log: {0:?}")]
+    StuckLog(coven_format::stuck::StuckRecord),
     /// Provider setup failed before replacing the active connection.
     #[error(transparent)]
     Setup(#[from] Box<coven_storage::StorageSetupError>),
@@ -206,6 +209,9 @@ pub struct DamagedObject {
 /// Authentication and parsing failures retain their original causes.
 #[derive(Debug, thiserror::Error)]
 pub enum ObjectCheckFailure {
+    /// The authenticated write failed the merge or application schema's checks.
+    #[error("invalid write: {0}")]
+    InvalidWrite(#[source] Arc<DbError>),
     /// Opening the object or its authenticated path failed.
     #[error("decryption failed: {0}")]
     Decryption(#[source] CryptoError),
@@ -215,6 +221,18 @@ pub enum ObjectCheckFailure {
     /// The bytes or their causal metadata violate the format.
     #[error("parse failed: {0}")]
     Parse(#[source] Arc<dyn std::error::Error + Send + Sync>),
+}
+
+impl ObjectCheckFailure {
+    pub(crate) fn category(&self) -> coven_format::stuck::StuckFailure {
+        use coven_format::stuck::StuckFailure;
+        match self {
+            Self::Decryption(_) => StuckFailure::Decryption,
+            Self::Signature(_) => StuckFailure::Signature,
+            Self::Parse(_) => StuckFailure::Parse,
+            Self::InvalidWrite(_) => StuckFailure::InvalidWrite,
+        }
+    }
 }
 
 /// Older unsupported formats are damaged inputs; only newer ones require an update.

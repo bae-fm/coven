@@ -25,6 +25,7 @@ pub mod snapshot;
 pub mod snapshot_rows;
 pub mod snapshot_stream;
 pub mod store_log;
+pub mod stuck;
 pub mod value;
 mod wire;
 pub mod write;

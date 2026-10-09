@@ -49,6 +49,8 @@ pub struct PostedPositions {
     pub schema_version: u32,
     /// One fingerprint per readable audience, in increasing audience order.
     pub fingerprints: Vec<Fingerprint>,
+    /// Locally judged failures, ordered by log kind and device, one per log.
+    pub stuck: Vec<crate::stuck::StuckRecord>,
 }
 wire_struct!(
     PostedPositions,
@@ -56,12 +58,29 @@ wire_struct!(
     writes,
     store_log,
     schema_version,
-    fingerprints
+    fingerprints,
+    stuck
 );
 impl PostedPositions {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         self.writes.validate()?;
         self.store_log.validate()?;
+        for record in &self.stuck {
+            record.validate()?;
+        }
+        require(
+            self.stuck.windows(2).all(|pair| {
+                let log = |record: &crate::stuck::StuckRecord| {
+                    (
+                        matches!(record.object, crate::stuck::LogObject::Entry(_)),
+                        record.object.device(),
+                    )
+                };
+                log(&pair[0]) < log(&pair[1])
+            }),
+            "stuck logs",
+            Rule::Order,
+        )?;
         require(
             self.fingerprints
                 .first()

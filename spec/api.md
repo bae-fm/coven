@@ -1386,9 +1386,16 @@ while let Ok(values) = lost.next().await {
     published last, after every preceding step has completed. File transfer
     failures remain visible through their file status. Maintenance failures
     fail the pass through sync status and retry on the next pass (E6).
-  - Coven tracks per-device progress, waiting writes, damaged objects,
-    fingerprint disagreements and dropped entries internally; these are not yet
-    exposed to the app (§9, §19.1). A disagreement never triggers a reload.
+  - `subscribe_stuck_logs` exposes permanent refusals of writes and store-log
+    entries, including signed peer reports about this device's own objects.
+    Each local judgment stops only its log at that object; it does not fail
+    sync status (§19.1). A successful reset reload clears local judgments;
+    opening another coven version permits one new attempt per recorded object.
+    Peer reports change when their signed posts change; silence or unequal
+    positions never imply a stuck log.
+  - Waiting prerequisites, other damaged objects, fingerprint disagreements
+    and dropped entries remain internal (§9, §19.1). A disagreement never
+    triggers a reload.
   - A finished pass publishes its completion time, without a sync report or row
     changes. Live queries notify the app when their rows change (E4).
   - Revocation actions remain available through `access_keys_to_delete` (E9)
@@ -1617,6 +1624,8 @@ pub enum StoreKeyUnlockError {
 
 /// Sync or a store-log change failed (§9, §13, §17, E5).
 pub enum SyncError {
+    /// Recovery or joining requires an object whose log has a recorded permanent refusal.
+    StuckLog(StuckRecord),
     /// The proposed entry violates its byte format.
     Format(coven_format::Error),
     /// A required key is absent from custody, or its material conflicts.
@@ -1690,6 +1699,35 @@ pub enum ObjectCheckFailure {
     Signature(CryptoError),
     /// Its bytes could not be parsed.
     Parse(Arc<dyn std::error::Error + Send + Sync>),
+    /// Its write failed the merge or application schema's checks.
+    InvalidWrite(Arc<DbError>),
+}
+
+/// An immutable object identifies its author and which log stopped (§19.1).
+pub enum LogObject {
+    Write(WriteId),
+    Entry(EntryId),
+}
+
+/// The permanent check that refused the object.
+pub enum StuckFailure {
+    Decryption,
+    Signature,
+    Parse,
+    InvalidWrite,
+}
+
+/// One receiver's judgment, also carried in its signed posted positions (D8).
+pub struct StuckRecord {
+    pub object: LogObject,
+    pub failure: StuckFailure,
+}
+
+/// A local judgment or an authenticated peer report about this device's own log.
+pub struct StuckLog {
+    pub record: StuckRecord,
+    /// None means judged here; Some names the peer reporting our object.
+    pub reported_by: Option<DeviceId>,
 }
 
 /// Why a store log entry was dropped (§9).
@@ -1769,6 +1807,10 @@ impl CovenHandle {
 
     /// The sync status, live. The first value is the current status.
     pub fn subscribe_sync_status(&self) -> watch::Receiver<SyncStatus>;
+
+    /// Local judgments and peer reports, including while disconnected.
+    /// The first value is the current list; later values follow committed changes.
+    pub fn subscribe_stuck_logs(&self) -> LiveQuery<Vec<StuckLog>>;
 
     /// How many uploads and downloads run at once.
     pub fn transfer_limits(&self) -> TransferLimits;

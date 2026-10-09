@@ -177,6 +177,7 @@ impl DatabaseBuilder {
             Some(origin),
             self.migration_operation.as_deref(),
         )?;
+        crate::stuck::version_changed(&writer)?;
         if recovery.is_none() {
             crate::file_removals::FileRemovals::new(&writer, &self.directory, &BTreeSet::new())
                 .finish(Ok::<_, DbError>(()))?;

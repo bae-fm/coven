@@ -54,6 +54,16 @@ impl StoreLogSync {
                 }
             }
         }
+        if let Some(record) = self
+            .database
+            .sync_state(Vec::new())
+            .await?
+            .stuck
+            .into_iter()
+            .find(|record| matches!(record.object, coven_format::stuck::LogObject::Entry(_)))
+        {
+            return Err(SyncError::StuckLog(record));
+        }
         Ok(false)
     }
 

@@ -44,6 +44,26 @@ pub(crate) fn load<R: Read, W: Read>(
             }
         }
         if let Some(boundaries) = boundaries {
+            let previous = crate::WriteBoundary::load(database)?;
+            let resets = |boundaries: &[crate::WriteBoundary]| {
+                boundaries
+                    .iter()
+                    .filter_map(|boundary| match boundary {
+                        crate::WriteBoundary::Reset {
+                            entry, audience, ..
+                        } => Some((entry.to_owned(), audience.clone())),
+                        _ => None,
+                    })
+                    .collect::<BTreeSet<_>>()
+            };
+            if !resets(&boundaries).is_subset(&resets(&previous)) {
+                // Failed ciphertext can conceal every audience. A committed reset
+                // invalidates local judgments for both logs; peer reports remain theirs.
+                database.internal_execute(
+                    "DELETE FROM _coven_stuck_logs WHERE length(reporter)=0",
+                    [],
+                )?;
+            }
             if let Some(version) = boundaries
                 .iter()
                 .filter_map(|boundary| match boundary {

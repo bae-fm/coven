@@ -36,6 +36,7 @@ pub use coven_crypto::{
     CircleKey, CryptoError, MaterialError, MemberId, MemberKeys, SecretBytes, SecretText, StoreKey,
     StoreKeyring,
 };
+pub use coven_database::StuckLog;
 pub use coven_database::{
     named_params, params, prepare_user_file, types, CacheFill, ChangeOp, ColumnChange, CovenError,
     CovenMigrationError, CovenResult, DbError, FileDecl, FileLocation, FileRef, FileSource,
@@ -45,6 +46,7 @@ pub use coven_database::{
     ReconfigurableLiveQueryEvent, RemovalRule, Replacement, Row, RowChange, RowIdentity, RowKey,
     SchemaError, SqlContext, SqlReadContext, SyncedTable, ToSql, UserFile, WriteBatch, WriteId,
 };
+pub use coven_format::stuck::{LogObject, StuckFailure, StuckRecord};
 pub use coven_format::value::EntryId;
 pub use coven_format::MemberAccess;
 pub use coven_foundation::clock::{Clock, ClockRef, SystemClock};

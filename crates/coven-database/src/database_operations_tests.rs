@@ -18,6 +18,22 @@ impl Database {
         .await
     }
 
+    /// Model a database last judged by another library release before reopening it.
+    pub async fn test_stuck_version(&self, version: &'static str) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.with_writer(|writer| {
+                writer.transaction(|db| {
+                    db.internal_execute(
+                        "UPDATE _coven_stuck_logs SET coven_version=?1 WHERE length(reporter)=0",
+                        [version],
+                    )?;
+                    Ok(())
+                })
+            })
+        })
+        .await
+    }
+
     /// Inject an agreement fault without changing positions or application rows.
     /// Recovery tests use the actual incremental sum and production reload path.
     pub async fn test_damage_fingerprint(

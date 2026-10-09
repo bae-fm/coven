@@ -183,8 +183,7 @@ impl StoreLogSync {
             .await?;
         let mut entries = BTreeMap::new();
         for stored in paths {
-            let path = stored.path;
-            let (device, number) = path.store_log_position().ok_or(
+            let (device, number) = stored.path.store_log_position().ok_or(
                 coven_storage::StorageFailure::Protocol
                     .with_source("store-log listing returned another layout"),
             )?;
@@ -193,14 +192,27 @@ impl StoreLogSync {
                     device,
                     number: number.get(),
                 },
-                path,
+                stored,
             );
         }
+        let stuck = self.database.sync_state(Vec::new()).await?.stuck;
+        entries.retain(|id, _| {
+            !stuck
+                .iter()
+                .any(|record| record.blocks(coven_format::stuck::LogObject::Entry(*id)))
+        });
         let mut blocked = BTreeSet::new();
         let mut cache = BTreeMap::new();
         let mut origins = Vec::new();
-        for (id, path) in entries.iter().filter(|(id, _)| id.number == 1) {
-            let Some(bytes) = self.read(path).await? else {
+        for (id, stored) in entries
+            .iter()
+            .filter(|(id, _)| id.number == 1 && !local.log.replay.entries.contains_key(id))
+        {
+            let path = &stored.path;
+            if blocked.contains(&id.device) {
+                continue;
+            }
+            let Some(bytes) = self.read_entry(stored).await? else {
                 continue;
             };
             match SingleChunkObject::decode(&bytes) {
@@ -215,16 +227,13 @@ impl StoreLogSync {
                         }
                     }
                     Err(failure) => {
-                        Self::damage(&mut damages, path, failure)?;
+                        self.stuck_entry(*id, path, failure).await?;
                         blocked.insert(id.device);
                     }
                 },
                 Err(error) => {
-                    Self::damage(
-                        &mut damages,
-                        path,
-                        ObjectCheckFailure::Parse(Arc::new(error)),
-                    )?;
+                    self.stuck_entry(*id, path, ObjectCheckFailure::Parse(Arc::new(error)))
+                        .await?;
                     blocked.insert(id.device);
                 }
             }
@@ -252,7 +261,8 @@ impl StoreLogSync {
         };
         loop {
             let mut advanced = false;
-            for (id, path) in &entries {
+            for (id, stored) in &entries {
+                let path = &stored.path;
                 if blocked.contains(&id.device) || local.log.replay.entries.contains_key(id) {
                     continue;
                 }
@@ -265,7 +275,7 @@ impl StoreLogSync {
                     continue;
                 }
                 if !cache.contains_key(id) {
-                    let Some(bytes) = self.read(path).await? else {
+                    let Some(bytes) = self.read_entry(stored).await? else {
                         blocked.insert(id.device);
                         continue;
                     };
@@ -274,17 +284,14 @@ impl StoreLogSync {
                 let envelope = match SingleChunkObject::decode(&cache[id]) {
                     Ok(envelope) => envelope,
                     Err(error) => {
-                        Self::damage(
-                            &mut damages,
-                            path,
-                            ObjectCheckFailure::Parse(Arc::new(error)),
-                        )?;
+                        self.stuck_entry(*id, path, ObjectCheckFailure::Parse(Arc::new(error)))
+                            .await?;
                         blocked.insert(id.device);
                         continue;
                     }
                 };
                 if let Err(failure) = object::check_origin(&envelope, path) {
-                    Self::damage(&mut damages, path, failure)?;
+                    self.stuck_entry(*id, path, failure).await?;
                     blocked.insert(id.device);
                     continue;
                 }
@@ -311,7 +318,7 @@ impl StoreLogSync {
                 ) {
                     Ok(entry) => entry,
                     Err(failure) => {
-                        Self::damage(&mut damages, path, failure)?;
+                        self.stuck_entry(*id, path, failure).await?;
                         blocked.insert(id.device);
                         continue;
                     }
@@ -326,7 +333,7 @@ impl StoreLogSync {
                     }
                     Ok(false) => continue,
                     Err(failure) => {
-                        Self::damage(&mut damages, path, failure)?;
+                        self.stuck_entry(*id, path, failure).await?;
                         blocked.insert(id.device);
                         continue;
                     }
@@ -338,6 +345,43 @@ impl StoreLogSync {
             }
         }
         Ok(damages)
+    }
+
+    async fn read_entry(
+        &self,
+        object: &coven_storage::StoredObject,
+    ) -> Result<Option<Vec<u8>>, SyncError> {
+        let bytes = self.read(&object.path).await?;
+        if bytes
+            .as_ref()
+            .is_some_and(|bytes| bytes.len() as u64 != object.size)
+        {
+            return Err(StorageFailure::Protocol
+                .with_source("store-log read length differs from listing")
+                .into());
+        }
+        Ok(bytes)
+    }
+
+    async fn stuck_entry(
+        &self,
+        entry: EntryId,
+        path: &ObjectPath,
+        failure: ObjectCheckFailure,
+    ) -> Result<(), SyncError> {
+        if let ObjectCheckFailure::Parse(error) = &failure {
+            if crate::error::newer_format(error.as_ref()) {
+                return Err(SyncFailure::UpdateRequired.into());
+            }
+        }
+        self.database
+            .record_stuck_log(coven_format::stuck::StuckRecord {
+                object: coven_format::stuck::LogObject::Entry(entry),
+                failure: failure.category(),
+            })
+            .await?;
+        tracing::warn!(path = path.as_str(), error = %failure, "store log is stuck");
+        Ok(())
     }
 
     fn check_stopped(&self, local: &LocalStoreLog, member: &MemberKeys) -> Result<(), SyncError> {

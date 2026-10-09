@@ -123,6 +123,11 @@ impl CovenHandle {
         self.sync.subscribe()
     }
 
+    /// Observe stuck logs, including this device's objects named by a peer's signed report.
+    pub fn subscribe_stuck_logs(&self) -> LiveQuery<Vec<StuckLog>> {
+        self.database.subscribe_stuck_logs()
+    }
+
     /// This member's current restore code, for their other devices (§12.1).
     pub async fn restore_code(&self) -> Result<String, SyncError> {
         self.codes.restore_code().await

@@ -122,8 +122,20 @@ impl StoreLogSync {
             return Ok(());
         }
         let mut replays = ReplayCache::new(&local.log);
+        let stuck = self.database.sync_state(Vec::new()).await?.stuck;
         for object in storage.list(&ObjectPrefix::device_logs()).await? {
             if eligible.iter().all(|path| references.contains(path)) {
+                return Ok(());
+            }
+            let id = object
+                .path
+                .write_id()
+                .ok_or(coven_database::DbError::DamagedDatabase)?;
+            if stuck
+                .iter()
+                .any(|record| record.blocks(coven_format::stuck::LogObject::Write(id)))
+            {
+                tracing::debug!(?id, "stuck write prevents proving file absence");
                 return Ok(());
             }
             let files = match self
@@ -140,6 +152,15 @@ impl StoreLogSync {
                 }
                 Err(error) if super::retention::waiting(&object.path, &error) => return Ok(()),
                 Err(error) => {
+                    if let SyncError::Damaged(damage) = &error {
+                        crate::write_object::record_damage(
+                            &self.database,
+                            storage,
+                            &object,
+                            &damage.failure,
+                        )
+                        .await?;
+                    }
                     snapshot_damage(damages, &object.path, error)?;
                     return Ok(());
                 }
@@ -210,7 +231,8 @@ impl StoreLogSync {
         let (transferred, checked) =
             tokio::join!(transfer, self.database.write_file_references(input));
         transferred?;
-        let files = checked?;
+        let files =
+            checked.map_err(|error| crate::write_object::database_failure(&object.path, error))?;
         self.reads.keep_files(object, files.clone());
         Ok(files)
     }

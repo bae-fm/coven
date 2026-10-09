@@ -429,7 +429,7 @@ impl StoreLogSync {
             ),
             None => (WritePositions(Vec::new()), 1024 * 1024),
         };
-        let state = self.database.sync_state(Vec::new()).await?;
+        let mut state = self.database.sync_state(Vec::new()).await?;
         let waiting = self.database.waiting_snapshot_headers().await?;
         let waiting_ids: std::collections::BTreeSet<_> =
             waiting.iter().map(|h| h.header.position).collect();
@@ -454,10 +454,24 @@ impl StoreLogSync {
             if positions.covers(write)
                 || !state.positions.covers(write)
                 || waiting_ids.contains(&write)
+                || state
+                    .stuck
+                    .iter()
+                    .any(|record| record.blocks(coven_format::stuck::LogObject::Write(write)))
             {
                 continue;
             }
-            let header = self.open_write_header(&object).await?;
+            let header = match self.open_write_header(&object).await {
+                Ok(header) => header,
+                Err(SyncError::Damaged(damage)) => {
+                    state.stuck.push(coven_format::stuck::StuckRecord {
+                        object: coven_format::stuck::LogObject::Write(write),
+                        failure: damage.failure.category(),
+                    });
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             bytes += header
                 .parts
                 .iter()

@@ -124,6 +124,7 @@ impl StoreLogSync {
                     &mut highest,
                     positions.iter().flat_map(|p| &p.0).chain(&required.0),
                 );
+                let stuck = self.database.sync_state(Vec::new()).await?.stuck;
                 let mut objects = BTreeMap::new();
                 for object in self
                     .storage
@@ -136,6 +137,12 @@ impl StoreLogSync {
                         .path
                         .write_id()
                         .ok_or_else(|| inconsistent("device listing has another path layout"))?;
+                    if stuck
+                        .iter()
+                        .any(|record| record.blocks(coven_format::stuck::LogObject::Write(id)))
+                    {
+                        continue;
+                    }
                     super::include_positions(&mut highest, [&id]);
                     objects.insert(id, object);
                 }
@@ -161,6 +168,12 @@ impl StoreLogSync {
                         if waiting.contains(&id) {
                             continue;
                         }
+                        if let Some(record) = stuck
+                            .iter()
+                            .find(|record| record.blocks(coven_format::stuck::LogObject::Write(id)))
+                        {
+                            return Err(SyncError::StuckLog(*record));
+                        }
                         match objects.get(&id) {
                             Some(object) => needed.push(object),
                             None if positions.iter().any(|p| p.covers(id)) => {
@@ -179,23 +192,33 @@ impl StoreLogSync {
                 }
                 let mut count = 0;
                 for object in &needed {
-                    count += self.open_write_header(object).await?.parts.len();
+                    match self.open_write_header(object).await {
+                        Ok(header) => count += header.parts.len(),
+                        // The recorded stop changes which optional tail writes can
+                        // be downloaded. Select again before installing any rows.
+                        Err(SyncError::Damaged(_)) => return Ok(Progress::Advanced),
+                        Err(error) => return Err(error),
+                    }
                 }
                 let mut names = self
                     .reserve_snapshot_files(record, &mut task, count)
                     .await?
                     .into_iter();
                 for object in needed {
-                    files.writes.push(
-                        self.open_snapshot_write(
+                    match self
+                        .open_snapshot_write(
                             object,
                             &local.log,
                             &mut replays,
                             &readable,
                             &mut names,
                         )
-                        .await?,
-                    );
+                        .await
+                    {
+                        Ok(write) => files.writes.push(write),
+                        Err(SyncError::Damaged(_)) => return Ok(Progress::Advanced),
+                        Err(error) => return Err(error),
+                    }
                 }
                 let SnapshotJob::Reload { files: saved, .. } = &mut task.job else {
                     unreachable!()
@@ -225,7 +248,7 @@ impl StoreLogSync {
                     .writes
                     .iter()
                     .map(|write| self.open_saved_write(write))
-                    .collect::<Result<_, _>>()?;
+                    .collect::<Result<Vec<_>, _>>()?;
                 let reload = SnapshotReload {
                     snapshots,
                     writes,
@@ -256,7 +279,38 @@ impl StoreLogSync {
                     ),
                     operation: Some(Data::Snapshots(task.clone()).update(record, 2)?),
                 };
-                match self.database.load_snapshots(reload).await {
+                let result = match self.database.load_snapshots(reload).await {
+                    Err(coven_database::DbError::Snapshot(
+                        coven_database::SnapshotError::Write { write, error },
+                    )) => {
+                        match crate::write_object::database_failure(
+                            &crate::write_seal::path(write),
+                            *error,
+                        ) {
+                            SyncError::Damaged(damage) => {
+                                // Its complete authenticated bytes were staged before
+                                // the atomic reload refused this particular write.
+                                self.database
+                                    .record_stuck_log(coven_format::stuck::StuckRecord {
+                                        object: coven_format::stuck::LogObject::Write(write),
+                                        failure: damage.failure.category(),
+                                    })
+                                    .await?;
+                                tracing::warn!(?write, error = %damage, "reload write log is stuck");
+                                let SnapshotJob::Reload { files, .. } = &mut task.job else {
+                                    unreachable!()
+                                };
+                                *files = None;
+                                self.save_snapshot_task(record, &task, 0).await?;
+                                return Ok(Progress::Advanced);
+                            }
+                            SyncError::Database(error) => Err(error),
+                            error => return Err(error),
+                        }
+                    }
+                    result => result,
+                };
+                match result {
                     Err(coven_database::DbError::StoreLogEntriesChanged) => {
                         // No database state changed: discard this selection and
                         // download against the new replay before trying to commit.

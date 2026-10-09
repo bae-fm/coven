@@ -298,6 +298,8 @@ pub(crate) fn exclude_row(
 
 /// Agreement state read atomically for sync to post.
 pub struct SyncState {
+    /// This device's permanent judgments, to stop downloads and publish with positions.
+    pub stuck: Vec<coven_format::stuck::StuckRecord>,
     /// This install's device identity.
     pub device: DeviceId,
     /// Applied store-log positions from the same committed state.

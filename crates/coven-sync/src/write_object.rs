@@ -46,10 +46,50 @@ async fn piece(
         .await
         .map_err(|error| match error {
             crate::object_range::ReadError::Storage(error) => error.into(),
-            crate::object_range::ReadError::Length => {
-                damaged(&object.path, invalid("range response has the wrong length"))
-            }
+            crate::object_range::ReadError::Length => coven_storage::StorageFailure::Protocol
+                .with_source("range response has the wrong length")
+                .into(),
         })
+}
+
+/// Persist a judgment only after the entire listed immutable object is readable.
+pub(crate) async fn record_damage(
+    database: &coven_database::Database,
+    storage: &dyn coven_storage::Storage,
+    object: &StoredObject,
+    failure: &ObjectCheckFailure,
+) -> Result<coven_format::stuck::StuckRecord, SyncError> {
+    read_complete(storage, object).await?;
+    let record = coven_format::stuck::StuckRecord {
+        object: coven_format::stuck::LogObject::Write(object.path.write_id().expect("write path")),
+        failure: failure.category(),
+    };
+    database.record_stuck_log(record).await?;
+    tracing::warn!(path = object.path.as_str(), error = %failure, "write log is stuck");
+    Ok(record)
+}
+
+/// Complete the transport check after an early permanent refusal, with bounded memory.
+async fn read_complete(
+    storage: &dyn coven_storage::Storage,
+    object: &StoredObject,
+) -> Result<(), SyncError> {
+    let mut offset = 0;
+    while offset < object.size {
+        let length = (object.size - offset).min(64 * 1024) as usize;
+        piece(storage, object, offset, length).await?;
+        offset += length as u64;
+    }
+    // An empty listed object must still be readable; absence is transient.
+    if object.size == 0 {
+        let bytes = storage.read(&object.path).await?;
+        if !bytes.is_empty() {
+            return Err(coven_storage::StorageFailure::Protocol
+                .with_source("listed object length differs from its bytes")
+                .into());
+        }
+    }
+    Ok(())
 }
 
 pub(crate) async fn open(
@@ -358,6 +398,27 @@ fn authority(
         return Err(invalid("write read its author's or device's removal"));
     }
     Ok(device.member.clone())
+}
+
+/// Only object checks become permanent; local database and input I/O failures propagate.
+pub(crate) fn database_failure(path: &ObjectPath, error: coven_database::DbError) -> SyncError {
+    use coven_database::{DbError, SnapshotError};
+    match error {
+        DbError::WriteFormat(error) | DbError::Snapshot(SnapshotError::Format(error))
+            if crate::error::newer_format(&error) =>
+        {
+            crate::SyncFailure::UpdateRequired.into()
+        }
+        error @ (DbError::InvalidWrite { .. }
+        | DbError::Schema(_)
+        | DbError::Snapshot(
+            SnapshotError::Inconsistent(_) | SnapshotError::Schema { .. },
+        )) => damaged(path, ObjectCheckFailure::InvalidWrite(Arc::new(error))),
+        error @ (DbError::WriteFormat(_)
+        | DbError::Snapshot(SnapshotError::Format(_))
+        | DbError::TooLarge { .. }) => damaged(path, ObjectCheckFailure::Parse(Arc::new(error))),
+        error => error.into(),
+    }
 }
 
 pub(crate) fn checked<T>(

@@ -27,6 +27,20 @@ pub(crate) fn reserved_name(name: &str) -> bool {
 // This is also the ownership checker's source of reserved table names.
 macro_rules! coven_tables {
     ($visit:ident) => {
+        $visit!(_coven_stuck_logs, "
+            CREATE TABLE _coven_stuck_logs (
+                kind INTEGER NOT NULL CHECK(kind IN (0,1)),
+                device BLOB NOT NULL CHECK(length(device)=8),
+                reporter BLOB NOT NULL CHECK(length(reporter) IN (0,8)),
+                number BLOB NOT NULL CHECK(length(number)=8 AND number>x'0000000000000000'),
+                failure INTEGER NOT NULL CHECK(failure IN (0,1,2,3)),
+                judged_at BLOB CHECK(length(judged_at)=13),
+                coven_version TEXT,
+                PRIMARY KEY(kind,device,reporter),
+                CHECK((length(reporter)=0 AND judged_at IS NOT NULL AND coven_version IS NOT NULL)
+                   OR (length(reporter)=8 AND judged_at IS NULL AND coven_version IS NULL))
+            ) STRICT, WITHOUT ROWID;
+        ");
         $visit!(_coven_store_log, "
             CREATE TABLE _coven_store_log (
                 device BLOB NOT NULL CHECK(length(device)=8),

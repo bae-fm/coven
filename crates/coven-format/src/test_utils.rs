@@ -494,6 +494,22 @@ pub fn objects() -> Vec<Object> {
             device_name: "D".into(),
         }),
         Object::PostedPositions(PostedPositions {
+            stuck: vec![
+                crate::stuck::StuckRecord {
+                    object: crate::stuck::LogObject::Write(WriteId {
+                        device: DeviceId(2),
+                        number: 4,
+                    }),
+                    failure: crate::stuck::StuckFailure::InvalidWrite,
+                },
+                crate::stuck::StuckRecord {
+                    object: crate::stuck::LogObject::Entry(EntryId {
+                        device: DeviceId(3),
+                        number: 2,
+                    }),
+                    failure: crate::stuck::StuckFailure::Signature,
+                },
+            ],
             schema_version: 1,
             device: DeviceId(1),
             writes: WritePositions(vec![position()]),

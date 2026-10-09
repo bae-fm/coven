@@ -3,6 +3,15 @@
 /// Snapshots or their gap writes could not be loaded into this database.
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotError {
+    /// A downloaded gap write failed while the reload transaction was applying it.
+    #[error("reload write {write:?}: {error}")]
+    Write {
+        /// The supplied object's position, distinct from local queued writes.
+        write: coven_merge::WriteId,
+        /// The failed read, format or merge check.
+        #[source]
+        error: Box<crate::DbError>,
+    },
     /// Reading the plaintext supplied by sync failed.
     #[error("reading reload input: {0}")]
     Read(#[source] std::io::Error),

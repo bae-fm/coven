@@ -2,15 +2,11 @@
 
 use super::DeviceLogSync;
 use crate::stream_input::{ChannelParts, WithReferences};
-use crate::{
-    replay_cache::ReplayCache,
-    write_object::{damaged, ReadyWrite},
-    ObjectCheckFailure, SyncError,
-};
+use crate::{replay_cache::ReplayCache, write_object::ReadyWrite, SyncError};
 use coven_crypto::{MemberId, StoreKeyring};
 use coven_database::{ApplyOutcome, DbError, StoreLog};
 use coven_storage::StoredObject;
-use std::{io, sync::Arc};
+use std::io;
 use tokio::sync::oneshot;
 
 impl DeviceLogSync {
@@ -91,22 +87,6 @@ impl DeviceLogSync {
             Err(SyncError::Database(error)) => Err(error),
             Err(error) => return Err(error),
         };
-        match applied {
-            Ok(result) => Ok(result),
-            Err(DbError::WriteFormat(error)) if crate::error::newer_format(&error) => {
-                Err(crate::SyncFailure::UpdateRequired.into())
-            }
-            Err(
-                error @ (DbError::InvalidWrite { .. }
-                | DbError::WriteFormat(_)
-                | DbError::TooLarge { .. }
-                | DbError::Snapshot(_)
-                | DbError::Schema(_)),
-            ) => Err(damaged(
-                &object.path,
-                ObjectCheckFailure::Parse(Arc::new(error)),
-            )),
-            Err(error) => Err(error.into()),
-        }
+        applied.map_err(|error| crate::write_object::database_failure(&object.path, error))
     }
 }

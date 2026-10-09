@@ -698,7 +698,16 @@ async fn only_newer_envelopes_require_an_update() {
             if version == 2 {
                 assert!(matches!(result, Err(SyncFailure::UpdateRequired)));
             } else {
-                assert_eq!(result.unwrap()[0].path, path.as_str());
+                let damage = result.unwrap();
+                if sealed_key {
+                    assert_eq!(damage[0].path, path.as_str());
+                } else {
+                    assert!(damage.is_empty());
+                    assert_eq!(
+                        b.db.stuck_logs().await.unwrap()[0].record.object,
+                        coven_format::stuck::LogObject::Entry(first)
+                    );
+                }
             }
             assert!(b.log().await.entries.is_empty());
             assert!(b.db.operations().await.unwrap().is_empty());
@@ -711,7 +720,11 @@ async fn only_newer_envelopes_require_an_update() {
             storage.delete(&path).await.unwrap();
             storage.create(&path, &original).await.unwrap();
             b.sync().await;
-            assert_eq!(b.log().await, a.log().await);
+            if !sealed_key && version == 0 {
+                assert!(b.log().await.entries.is_empty());
+            } else {
+                assert_eq!(b.log().await, a.log().await);
+            }
             assert!(b.db.operations().await.unwrap().is_empty());
         }
     }

@@ -54,10 +54,25 @@ async fn damaged_objects_roll_back_and_block_only_their_device() {
             rows(&devices[2].db).await,
             vec![("independent".into(), "good".into(), "body".into())]
         );
-        storage.delete(&path).await.unwrap();
-        publish(&storage, &record).await;
+        let before = storage.reads().await;
         devices[2].writes.download_writes().await.unwrap();
-        assert_eq!(rows(&devices[2].db).await.len(), 2);
+        assert_eq!(storage.reads().await, before);
+        let stuck = devices[2].db.stuck_logs().await.unwrap();
+        assert_eq!(stuck.len(), 1);
+        assert_eq!(
+            stuck[0].record.object,
+            LogObject::Write(record.header.position)
+        );
+        use coven_format::stuck::StuckFailure;
+        assert_eq!(
+            stuck[0].record.failure,
+            match failure {
+                "decryption" | "moved" => StuckFailure::Decryption,
+                "signature" => StuckFailure::Signature,
+                "parse" => StuckFailure::Parse,
+                _ => unreachable!(),
+            }
+        );
     }
 }
 
@@ -101,13 +116,22 @@ async fn removal_checks_the_authors_past_not_the_receivers_present() {
     publish(&storage, &after).await;
     devices[2].writes.download_writes().await.unwrap();
     assert_eq!(rows(&devices[2].db).await[0].1, "before");
-    assert!(matches!(
-        devices[2].sync.reload_from_snapshots().await,
-        Err(SyncError::Damaged(crate::DamagedObject {
-            failure: crate::ObjectCheckFailure::Parse(_),
-            ..
-        }))
-    ));
+    let before = storage
+        .reads()
+        .await
+        .into_iter()
+        .filter(|(path, _, _)| path.write_id() == Some(after.header.position))
+        .count();
+    devices[2].sync.reload_from_snapshots().await.unwrap();
+    assert_eq!(
+        storage
+            .reads()
+            .await
+            .into_iter()
+            .filter(|(path, _, _)| path.write_id() == Some(after.header.position))
+            .count(),
+        before
+    );
     assert_eq!(rows(&devices[2].db).await[0].1, "before");
 }
 
@@ -243,7 +267,10 @@ async fn only_a_newer_format_requires_an_update() {
         storage.delete(&path).await.unwrap();
         storage.create(&path, &original).await.unwrap();
         devices[1].writes.download_writes().await.unwrap();
-        assert_eq!(rows(&devices[1].db).await.len(), 2);
+        assert_eq!(
+            rows(&devices[1].db).await.len(),
+            if version == 2 { 2 } else { 1 }
+        );
         assert_eq!(queued(&devices[1].db).await, waiting);
     }
 }
@@ -310,15 +337,11 @@ async fn a_cached_read_view_still_checks_each_writes_timestamp() {
     publish(&storage, &second).await;
     devices[1].writes.download_writes().await.unwrap();
     assert_eq!(rows(&devices[1].db).await[0].1, "before");
-    let error = devices[1].sync.reload_from_snapshots().await.unwrap_err();
-    let SyncError::Damaged(damaged) = error else {
-        panic!("unexpected reload failure: {error:?}");
-    };
+    devices[1].sync.reload_from_snapshots().await.unwrap();
     assert_eq!(
-        damaged.path,
-        crate::write_seal::path(second.header.position).as_str()
+        devices[1].db.stuck_logs().await.unwrap()[0].record.object,
+        LogObject::Write(second.header.position)
     );
-    assert!(damaged.failure.to_string().contains("timestamp"));
     assert_eq!(rows(&devices[1].db).await[0].1, "before");
 }
 

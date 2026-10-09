@@ -1,7 +1,10 @@
 use super::*;
 use coven_crypto::{MemberKeys, StoreKey, StoreKeyring};
 use coven_database::{Migration, RowIdentity, SyncedTable};
-use coven_format::store_log::{MemberPublicKeys, StoreChange};
+use coven_format::{
+    store_log::{MemberPublicKeys, StoreChange},
+    stuck::StuckRecord,
+};
 use coven_foundation::id_source::{DeviceId, IdSource, KeyId, SequentialIds, StoreId};
 use coven_storage::test_utils::{Faults, MemoryStorage};
 use std::time::{Duration, UNIX_EPOCH};
@@ -510,6 +513,307 @@ async fn groceries_example_converges_in_every_arrival_order() {
                 .unwrap()
                 .fingerprints;
             assert_eq!(actual, expected, "{order:?}");
+        }
+    }
+}
+
+mod stuck {
+    use super::writes::{publish, queued};
+    use super::*;
+    use coven_database::StuckLog;
+    use coven_format::stuck::StuckFailure;
+
+    async fn refuse(storage: &MemoryStorage, devices: &mut [Device], reload: bool) -> StuckRecord {
+        sql(
+            &devices[0].db,
+            "INSERT INTO notes VALUES('one','title','body')",
+        )
+        .await;
+        let mut record = queued(&devices[0].db).await;
+        let coven_merge::Operation::Insert(values) =
+            record.parts[0].rows[0].change.operation.clone()
+        else {
+            panic!("insert")
+        };
+        record.parts[0].rows[0].old = values
+            .iter()
+            .map(|(name, value)| (name.clone(), value.value.clone()))
+            .collect();
+        record.parts[0].rows[0].change.operation = coven_merge::Operation::Update(values);
+        record.parts[0].rows[0].change.generation = 1;
+        devices[0].writes.upload_writes().await.unwrap();
+        storage
+            .delete(&crate::write_seal::path(record.header.position))
+            .await
+            .unwrap();
+        publish(storage, &record).await;
+        if reload {
+            devices[1].sync.reload_from_snapshots().await.unwrap();
+        } else {
+            devices[1].writes.download_writes().await.unwrap();
+        }
+        assert!(rows(&devices[1].db).await.is_empty());
+        StuckRecord {
+            object: LogObject::Write(record.header.position),
+            failure: StuckFailure::InvalidWrite,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_merge_is_observed_without_retries_and_reported_to_its_author() {
+        let storage = storage();
+        let mut devices = group(storage.clone(), 3).await;
+        let mut live = devices[1].db.subscribe_stuck_logs();
+        assert!(live.next().await.unwrap().is_empty());
+        let record = refuse(&storage, &mut devices, false).await;
+        assert_eq!(
+            live.next().await.unwrap(),
+            vec![StuckLog {
+                record,
+                reported_by: None
+            }]
+        );
+        let before = storage.reads().await;
+        devices[1].writes.download_writes().await.unwrap();
+        assert_eq!(storage.reads().await, before);
+        devices[0].writes.download_writes().await.unwrap();
+        assert!(devices[0].db.stuck_logs().await.unwrap().is_empty());
+        for receiver in &mut devices[1..] {
+            receiver.writes.download_writes().await.unwrap();
+            receiver.writes.post_positions().await.unwrap();
+        }
+        // Reports are read even while the author has unposted local edits.
+        sql(
+            &devices[0].db,
+            "INSERT INTO notes VALUES('pending','local','body')",
+        )
+        .await;
+        let mut author = devices[0].db.subscribe_stuck_logs();
+        assert!(author.next().await.unwrap().is_empty());
+        devices[0].writes.download_writes().await.unwrap();
+        assert_eq!(
+            author.next().await.unwrap(),
+            vec![
+                StuckLog {
+                    record,
+                    reported_by: Some(DeviceId(2))
+                },
+                StuckLog {
+                    record,
+                    reported_by: Some(DeviceId(3))
+                },
+            ]
+        );
+        devices[0].writes.upload_writes().await.unwrap();
+        devices[0].writes.post_positions().await.unwrap();
+        assert!(posted(&storage, &devices[0], 1).await.stuck.is_empty());
+        // A damaged report has no authority; a device that stops posting is not inferred stuck.
+        let path = ObjectPath::positions(DeviceId(2));
+        let mut bytes = storage.read(&path).await.unwrap();
+        *bytes.last_mut().unwrap() ^= 1;
+        storage.replace(&path, &bytes).await.unwrap();
+        storage
+            .delete(&ObjectPath::positions(DeviceId(3)))
+            .await
+            .unwrap();
+        devices[0].writes.download_writes().await.unwrap();
+        assert!(author.next().await.unwrap().is_empty());
+    }
+
+    async fn reopen(storage: Arc<MemoryStorage>, device: &mut Device) {
+        device
+            .reopen(
+                storage,
+                vec![SyncedTable::new("notes", RowIdentity::SharedKey)],
+                vec![schema::initial()],
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_library_version_change_retries_each_stuck_write_once() {
+        let storage = storage();
+        let mut devices = group(storage.clone(), 2).await;
+        let record = refuse(&storage, &mut devices, false).await;
+        let device = &mut devices[1];
+        let before = storage.reads().await;
+        reopen(storage.clone(), device).await;
+        device.writes.download_writes().await.unwrap();
+        assert_eq!(storage.reads().await, before);
+        device
+            .db
+            .test_stuck_version("previous-version")
+            .await
+            .unwrap();
+        reopen(storage.clone(), device).await;
+        assert!(device.db.stuck_logs().await.unwrap().is_empty());
+        device.writes.download_writes().await.unwrap();
+        assert!(storage.reads().await.len() > before.len());
+        assert_eq!(
+            device.db.stuck_logs().await.unwrap(),
+            vec![StuckLog {
+                record,
+                reported_by: None
+            }]
+        );
+        let before = storage.reads().await;
+        device.writes.download_writes().await.unwrap();
+        reopen(storage.clone(), device).await;
+        device.writes.download_writes().await.unwrap();
+        assert_eq!(storage.reads().await, before);
+    }
+
+    #[tokio::test]
+    async fn a_reset_reload_clears_judgments_and_the_next_post_withdraws_reports() {
+        let storage = storage();
+        let mut devices = group(storage.clone(), 2).await;
+        refuse(&storage, &mut devices, false).await;
+        devices[1].writes.post_positions().await.unwrap();
+        devices[0].writes.download_writes().await.unwrap();
+        assert_eq!(devices[0].db.stuck_logs().await.unwrap().len(), 1);
+        let snapshot = devices[0]
+            .sync
+            .write_snapshot(Audience::Store)
+            .await
+            .unwrap();
+        devices[0]
+            .sync
+            .make_and_upload_entry(StoreChange::Reset { snapshot })
+            .await
+            .unwrap();
+        devices[1].sync.sync_store_log().await.unwrap();
+        assert!(devices[1].db.stuck_logs().await.unwrap().is_empty());
+        assert_eq!(rows(&devices[1].db).await, rows(&devices[0].db).await);
+        devices[1].writes.post_positions().await.unwrap();
+        devices[0].writes.download_writes().await.unwrap();
+        assert!(devices[0].db.stuck_logs().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn retention_does_not_read_stuck_logs_or_delete_files_without_their_references() {
+        let storage = storage();
+        let mut devices = group(storage.clone(), 2).await;
+        refuse(&storage, &mut devices, false).await;
+        let unused = ObjectPath::file(
+            DeviceId(2),
+            coven_foundation::id_source::FileId(Uuid::from_u128(99)),
+        );
+        storage.create(&unused, b"file").await.unwrap();
+        let before = storage.reads().await;
+        devices[1].sync.run_retention().await.unwrap();
+        assert_eq!(storage.reads().await, before);
+        assert_eq!(storage.read(&unused).await.unwrap(), b"file");
+    }
+
+    #[tokio::test]
+    async fn listed_objects_with_failed_or_incomplete_reads_are_retried() {
+        for failure in ["missing", "network", "incomplete corrupt header"] {
+            let storage = storage();
+            let mut devices = group(storage.clone(), 2).await;
+            sql(
+                &devices[0].db,
+                "INSERT INTO notes VALUES('one','title','body')",
+            )
+            .await;
+            devices[0].writes.upload_writes().await.unwrap();
+            let path = ObjectPath::device_log(DeviceId(1), 1.try_into().unwrap());
+            let original = storage.read(&path).await.unwrap();
+            let (listed, waiting) = tokio::sync::oneshot::channel();
+            let (resume, held) = tokio::sync::oneshot::channel();
+            storage
+                .hold_next_listing(ObjectPrefix::device_logs(), listed, held)
+                .await;
+            let download = devices[1].writes.download_writes();
+            let interrupt = async {
+                waiting.await.unwrap();
+                match failure {
+                    "network" => {
+                        storage
+                            .set_faults(Faults {
+                                fail_next: 1,
+                                ..Faults::none()
+                            })
+                            .await
+                    }
+                    "missing" => storage.delete(&path).await.unwrap(),
+                    _ => {
+                        storage.delete(&path).await.unwrap();
+                        let mut partial = original[..23].to_vec();
+                        partial[0] = 255;
+                        storage.create(&path, &partial).await.unwrap();
+                    }
+                }
+                resume.send(()).unwrap();
+            };
+            let (result, ()) = tokio::join!(download, interrupt);
+            assert!(
+                matches!(result, Err(SyncError::Storage(_))),
+                "{failure}: {result:?}"
+            );
+            assert!(devices[1].db.stuck_logs().await.unwrap().is_empty());
+            if failure != "network" {
+                storage.delete(&path).await.unwrap();
+                storage.create(&path, &original).await.unwrap();
+            }
+            devices[1].writes.download_writes().await.unwrap();
+            assert_eq!(rows(&devices[1].db).await, rows(&devices[0].db).await);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refusal_first_seen_during_reload_is_recorded_without_advancing_its_log() {
+        let storage = storage();
+        let mut devices = group(storage.clone(), 2).await;
+        let record = refuse(&storage, &mut devices, true).await;
+        assert_eq!(
+            devices[1].db.stuck_logs().await.unwrap(),
+            vec![StuckLog {
+                record,
+                reported_by: None
+            }]
+        );
+        let before = storage.reads().await;
+        devices[1].writes.download_writes().await.unwrap();
+        assert_eq!(storage.reads().await, before);
+    }
+
+    #[tokio::test]
+    async fn a_required_stuck_gap_preserves_local_edits_and_is_not_downloaded_again() {
+        let storage = storage();
+        let mut devices = group(storage.clone(), 2).await;
+        sql(
+            &devices[0].db,
+            "INSERT INTO notes VALUES('one','title','body')",
+        )
+        .await;
+        devices[0].writes.upload_writes().await.unwrap();
+        devices[1].writes.download_writes().await.unwrap();
+        sql(&devices[1].db, "UPDATE notes SET title='local'").await;
+        let expected = rows(&devices[1].db).await;
+        let queued = queued(&devices[1].db).await;
+        let object = storage
+            .list(&ObjectPrefix::device_logs())
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        storage
+            .corrupt_byte(&object.path, object.size as usize - 1)
+            .await
+            .unwrap();
+        for attempt in 0..2 {
+            let before = storage.reads().await;
+            assert!(matches!(
+                devices[1].sync.reload_from_snapshots().await,
+                Err(SyncError::StuckLog(record))
+                    if record.object == LogObject::Write(object.path.write_id().unwrap())
+                        && record.failure == StuckFailure::Signature
+            ));
+            if attempt == 1 {
+                assert_eq!(storage.reads().await, before);
+            }
+            assert_eq!(rows(&devices[1].db).await, expected);
+            assert_eq!(super::writes::queued(&devices[1].db).await, queued);
         }
     }
 }

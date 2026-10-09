@@ -310,11 +310,17 @@
   coven's `_coven_positions` table: one row per device, naming its last
   applied write's number.
 - It also posts those positions to storage at `positions/<device>`,
-  replacing its own object when the positions advance.
+  replacing its own object when its positions or stuck records change.
+  - It includes its own judgments of stuck logs: the log, object and failure
+    category (§19.1, D8). Reports received from peers are never republished.
   - In its own log it posts the last write it has uploaded.
   - The object is signed with its author's member key. Every reader checks
     that signature against the member the applied store log names for the
     device in its path; a missing or wrong signature is damaged (§19.1).
+- Missing prerequisites and failed reads wait for another sync. A completely
+  downloaded write or store-log entry that fails a permanent check stops that
+  device's corresponding log at that object, recorded and exposed as stuck
+  (§19.1). Independent logs continue.
 - A device finds devices it doesn't know yet, and their logs, by listing
   `devices/` and `store-log/` ([E5](api.md#e5-storage-and-sync)).
 
@@ -1960,8 +1966,9 @@ Carol's tablet:
 - A snapshot is the synced tables and coven's merge tables
   ([§8](#8-merge)) as one device has them, encrypted, with how far into
   every log they reach.
-  - A device's own `_coven_uploads` and `_coven_operations` aren't in it, so
-    a device that loads one keeps its own.
+  - A device's own `_coven_uploads`, `_coven_operations` and `_coven_stuck_logs`
+    aren't in it. Loading keeps that local state, except that committing a
+    changed reset clears local stuck judgments (§19.1).
   - Snapshots live at `snapshots/<audience>/<device>/<n>`, where the
     audience is `store` or a circle's id.
   - Its prefix, outside its encryption, names its audience, its key and
@@ -2055,6 +2062,11 @@ Carol's tablet:
 - A write waiting for store-log entries or a key copy holds retention back.
   This is not damaged data and does not fail the sync pass. Deletion is
   reconsidered after those inputs arrive, under the same coverage rules.
+- Recorded stuck logs are not read at or past their refused object, including
+  for retention and reload. Retention keeps those objects; if their file
+  references are needed to prove absence, it keeps the uploaded files too.
+  A reload requiring such a gap write fails atomically with
+  `SyncError::StuckLog`; a snapshot covering it can load without reading it.
 - A device deletes a snapshot of its own once a newer one of the same
   audience covers everything it covers.
   - A snapshot named by a kept reset or version-raise entry that changes
@@ -2656,9 +2668,35 @@ Carol's tablet:
 - An object that fails its check when read: it won't decrypt, its
   signature doesn't match, it doesn't parse, or its write breaks the
   merge's rules, such as a timestamp no later than a write it had read.
-  - A damaged write or entry holds back what had read it, like a missing
-    one; the device reads it again on every sync, in case the failure was
-    passing.
+  - Network and read failures, including a listed object not yet readable,
+    are transient and retried. An object must be completely readable before
+    its failed check becomes a permanent judgment. Newer object formats still
+    require an update (§17.2); missing keys and causal prerequisites still wait.
+  - A completely downloaded write or store-log entry that fails decryption
+    or authentication, its signature, parsing, or the merge's checks is
+    permanent: stored objects never change. The device records its log
+    (device and write log or store log), object id, typed failure category,
+    judgment time and coven package version in `_coven_stuck_logs`.
+  - The record stops that log at and after the object, across sync passes
+    and reopen. Other logs continue and this judgment does not fail sync
+    status. Anything depending on the refused object still cannot apply.
+  - Opening for writing with a different coven version clears the previous
+    version's local judgments, allowing each object one new attempt. A new
+    refusal records the current version. Reopening the same version does
+    not retry identical bytes.
+  - Committing a changed audience reset clears local judgments in the same
+    transaction as its reload; a failed reload clears nothing. The object
+    may be unreadable, so its audience need not be known: this clears the
+    device's local judgments for both kinds of log. Loading snapshots alone
+    does not clear them or bypass required store-log history (§15).
+  - Posted positions carry only the posting device's local judgments (D8).
+    Reading an authenticated peer post records every report naming one of
+    this device's own writes or entries, with the peer's device id, in the
+    same local table. These reports inform the author; they never stop its
+    downloads. A completed positions scan replaces the peer reports atomically.
+  - The live stuck-log list exposes local judgments and peer reports (E5).
+    A device that publishes no positions reports nothing. Neither position
+    differences nor storage times establish that a log is stuck.
   - A damaged snapshot is passed over for the next latest, or the logs.
     Positions whose prefix signature verifies still require that history,
     even if the snapshot's encrypted data or final signature is damaged;
@@ -2692,8 +2730,8 @@ Carol's tablet:
     one of them wrong;
   - on different versions they can't compare: an added column exists on
     one device only.
-- Waiting writes, damaged remote objects and fingerprint disagreements are
-  tracked internally and are not yet exposed as app-facing diagnostics. A
+- Stuck logs are visible through E5. Waiting prerequisites, damaged snapshots,
+  key copies and positions, and fingerprint disagreements remain internal. A
   damaged local database still fails to open. Nothing reloads on its own after
   a mismatch, since neither device can tell which is wrong. Explicit reset
   ([§19.3](#193-resetting-a-store)) and reload
@@ -2881,7 +2919,8 @@ Carol's tablet:
   a damaged database, a file on another device, or unreachable storage.
   Permanently failed app operations remain available through `blocked_operations()`;
   maintenance failures go through sync status and retry on the next pass (§18).
-  Waiting writes and skipped damaged remote objects remain internal (§19.1).
+  Stuck logs and authenticated peer reports are a live typed list (E5).
+  Waiting prerequisites and other skipped damaged objects remain internal (§19.1).
 - A source file holds at most 1,000 lines, and its tests live beside it
   in `<name>_tests.rs`.
 - Crates offer shared fakes through `test-utils` where needed, such as an

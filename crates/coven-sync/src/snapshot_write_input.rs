@@ -19,14 +19,45 @@ impl StoreLogSync {
     ) -> Result<WriteHeaderFrame, SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let ring = self.store_keys.unlock()?;
-        Ok(
-            crate::write_object::open(storage, object, ring.as_ref(), &self.reads)
-                .await?
-                .header,
-        )
+        let result = crate::write_object::open(storage, object, ring.as_ref(), &self.reads).await;
+        if let Err(SyncError::Damaged(damage)) = &result {
+            crate::write_object::record_damage(&self.database, storage, object, &damage.failure)
+                .await?;
+        }
+        Ok(result?.header)
     }
 
     pub(super) async fn open_snapshot_write(
+        &self,
+        object: &StoredObject,
+        log: &StoreLog,
+        replays: &mut ReplayCache<'_>,
+        readable: &BTreeSet<Audience>,
+        names: &mut impl Iterator<Item = String>,
+    ) -> Result<SavedWrite, SyncError> {
+        let result = self
+            .download_snapshot_write(object, log, replays, readable, names)
+            .await;
+        let result = match result {
+            Err(SyncError::Format(error)) => crate::write_object::checked(&object.path, Err(error)),
+            Err(SyncError::Database(error)) => {
+                Err(crate::write_object::database_failure(&object.path, error))
+            }
+            result => result,
+        };
+        if let Err(SyncError::Damaged(damage)) = &result {
+            crate::write_object::record_damage(
+                &self.database,
+                self.storage.as_deref().ok_or(SyncError::NoStorage)?,
+                object,
+                &damage.failure,
+            )
+            .await?;
+        }
+        result
+    }
+
+    async fn download_snapshot_write(
         &self,
         object: &StoredObject,
         log: &StoreLog,

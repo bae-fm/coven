@@ -732,3 +732,90 @@ async fn an_internal_reload_failure_reports_sync_status_and_retries_without_app_
     assert_ne!(storage.read(&positions).await.unwrap(), before);
     network.close().await;
 }
+
+mod stuck_logs {
+    use super::*;
+
+    #[tokio::test]
+    async fn stuck_logs_are_live_while_sync_succeeds_and_reset_withdraws_the_report() {
+        let network = Network::new(2).await;
+        let reader = &network.devices[1].handle;
+        reader.stop_sync();
+        reader
+            .subscribe_sync_status()
+            .wait_for(|s| matches!(s, SyncStatus::Stopped))
+            .await
+            .unwrap();
+        let mut received = reader.subscribe_stuck_logs();
+        assert!(received.next().await.unwrap().is_empty());
+        let owner = &network.devices[0].handle;
+        owner
+            .write(|sql| {
+                sql.execute("INSERT INTO parents VALUES('one','label',1)", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        network.sync(0).await;
+        let storage = &network.devices[0].storage;
+        let object = storage
+            .list(&ObjectPrefix::device_logs())
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        storage
+            .corrupt_byte(&object.path, object.size as usize - 1)
+            .await
+            .unwrap();
+        reader.start_sync().await.unwrap();
+        network.sync(1).await;
+        let record = StuckRecord {
+            object: LogObject::Write(object.path.write_id().unwrap()),
+            failure: StuckFailure::Signature,
+        };
+        assert_eq!(
+            received.next().await.unwrap(),
+            vec![StuckLog {
+                record,
+                reported_by: None
+            }]
+        );
+        let before = network.devices[1]
+            .storage
+            .reads()
+            .await
+            .into_iter()
+            .filter(|(path, _, _)| path == &object.path)
+            .count();
+        network.sync(1).await;
+        assert_eq!(
+            network.devices[1]
+                .storage
+                .reads()
+                .await
+                .into_iter()
+                .filter(|(path, _, _)| path == &object.path)
+                .count(),
+            before
+        );
+        network.sync(0).await;
+        let report = owner.subscribe_stuck_logs().next().await.unwrap();
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].record, record);
+        assert!(report[0].reported_by.is_some());
+        assert!(network.rows(1).await.0.is_empty());
+        owner.reset_store().await.unwrap();
+        network.sync(1).await;
+        network.sync(0).await;
+        assert!(received.next().await.unwrap().is_empty());
+        assert!(owner
+            .subscribe_stuck_logs()
+            .next()
+            .await
+            .unwrap()
+            .is_empty());
+        network.assert_converged().await;
+        network.close().await;
+    }
+}

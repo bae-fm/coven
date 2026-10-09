@@ -91,6 +91,7 @@ impl StoreLogSync {
             }
         }
         let positions = self.retention_positions(&local.log, damages).await?;
+        let mut stuck = self.database.sync_state(Vec::new()).await?.stuck;
         for object in storage.list(&ObjectPrefix::device_logs()).await? {
             let id = object
                 .path
@@ -99,10 +100,22 @@ impl StoreLogSync {
             if !self.can_delete_device(&local.log, local.device, id.device)? {
                 continue;
             }
+            if stuck
+                .iter()
+                .any(|record| record.blocks(coven_format::stuck::LogObject::Write(id)))
+            {
+                continue;
+            }
             let header = match self.open_write_header(&object).await {
                 Ok(header) => header,
                 Err(error) if waiting(&object.path, &error) => return Ok(()),
                 Err(error) => {
+                    if let SyncError::Damaged(damage) = &error {
+                        stuck.push(coven_format::stuck::StuckRecord {
+                            object: coven_format::stuck::LogObject::Write(id),
+                            failure: damage.failure.category(),
+                        });
+                    }
                     snapshot_damage(damages, &object.path, error)?;
                     continue;
                 }

@@ -96,63 +96,87 @@ pub(crate) fn apply<R: Read>(
     coverage.start(database)?;
     let mut affected = BTreeSet::new();
     for source in sources.into_values() {
-        let supplied = matches!(source, Source::Download(_));
-        let write = match source {
-            Source::Download(stream) => stream.read()?,
-            Source::Deleted(write) => {
-                let positions = crate::download::positions(database)?;
-                if !positions.covers(write.id) {
-                    let past = write.had_read.causal_past(write.id);
-                    let missing: Vec<_> = past
-                        .frontier()
-                        .copied()
-                        .filter(|id| !positions.covers(*id))
-                        .collect();
-                    if !missing.is_empty() {
-                        return Err(SnapshotError::MissingWrites { missing }.into());
-                    }
-                    database.internal_execute("INSERT INTO _coven_positions(device,number) VALUES(?1,?2) ON CONFLICT(device) DO UPDATE SET number=excluded.number", (write.id.device.0.to_be_bytes().as_slice(), write.id.number.to_be_bytes().as_slice()))?;
-                }
-                continue;
-            }
-            Source::Queue(rowid) => database
-                .query_row(
-                    "SELECT record FROM _coven_uploads WHERE rowid=?1",
-                    [rowid],
-                    |r| {
-                        decoded(coven_format::write_stream::decode_plaintext(
-                            &r.get::<_, Vec<u8>>(0)?,
-                        ))
-                    },
-                )?
-                .into(),
+        let downloaded = match &source {
+            Source::Download(stream) => Some(stream.header.header.position),
+            _ => None,
         };
-        if (supplied && queued.contains(&write.header.position))
-            || crate::download::positions(database)?.covers(write.header.position)
-        {
-            // Validate supplied copies, but replay the queue's current plaintext
-            // (which an app migration may have converted) from the queue itself.
-            crate::write_commit::retain_metadata(
-                database,
-                &AppliedWrite {
-                    id: write.header.position,
-                    timestamp: write.header.timestamp,
-                    had_read: write.header.had_read,
-                },
-            )?;
-            continue;
-        }
-        if let Some(wait) = crate::download::prerequisite(database, now, &write.header)? {
-            return Err(match wait {
-                WriteWait::Writes(missing) => SnapshotError::MissingWrites { missing },
-                wait => SnapshotError::WriteWaiting(wait),
+        let result = (|| -> Result<(), DbError> {
+            let supplied = matches!(source, Source::Download(_));
+            let write = match source {
+                Source::Download(stream) => stream.read()?,
+                Source::Deleted(write) => {
+                    let positions = crate::download::positions(database)?;
+                    if !positions.covers(write.id) {
+                        let past = write.had_read.causal_past(write.id);
+                        let missing: Vec<_> = past
+                            .frontier()
+                            .copied()
+                            .filter(|id| !positions.covers(*id))
+                            .collect();
+                        if !missing.is_empty() {
+                            return Err(SnapshotError::MissingWrites { missing }.into());
+                        }
+                        database.internal_execute("INSERT INTO _coven_positions(device,number) VALUES(?1,?2) ON CONFLICT(device) DO UPDATE SET number=excluded.number", (write.id.device.0.to_be_bytes().as_slice(), write.id.number.to_be_bytes().as_slice()))?;
+                    }
+                    return Ok(());
+                }
+                Source::Queue(rowid) => database
+                    .query_row(
+                        "SELECT record FROM _coven_uploads WHERE rowid=?1",
+                        [rowid],
+                        |r| {
+                            decoded(coven_format::write_stream::decode_plaintext(
+                                &r.get::<_, Vec<u8>>(0)?,
+                            ))
+                        },
+                    )?
+                    .into(),
+            };
+            if (supplied && queued.contains(&write.header.position))
+                || crate::download::positions(database)?.covers(write.header.position)
+            {
+                // Validate supplied copies, but replay the queue's current plaintext
+                // (which an app migration may have converted) from the queue itself.
+                crate::write_commit::retain_metadata(
+                    database,
+                    &AppliedWrite {
+                        id: write.header.position,
+                        timestamp: write.header.timestamp,
+                        had_read: write.header.had_read,
+                    },
+                )?;
+                return Ok(());
             }
-            .into());
+            if let Some(wait) = crate::download::prerequisite(database, now, &write.header)? {
+                return Err(match wait {
+                    WriteWait::Writes(missing) => SnapshotError::MissingWrites { missing },
+                    wait => SnapshotError::WriteWaiting(wait),
+                }
+                .into());
+            }
+            let write = coverage.uncovered(write)?;
+            affected.extend(crate::download::apply_opened(
+                database, schema, write, deleted,
+            )?);
+            Ok(())
+        })();
+        match downloaded {
+            Some(_)
+                if matches!(
+                    &result,
+                    Err(DbError::Snapshot(
+                        SnapshotError::MissingWrites { .. } | SnapshotError::WriteWaiting(_)
+                    ))
+                ) =>
+            {
+                result?
+            }
+            Some(write) => result.map_err(|error| SnapshotError::Write {
+                write,
+                error: Box::new(error),
+            })?,
+            None => result?,
         }
-        let write = coverage.uncovered(write)?;
-        affected.extend(crate::download::apply_opened(
-            database, schema, write, deleted,
-        )?);
     }
     coverage.finish(database)?;
     Ok(affected)

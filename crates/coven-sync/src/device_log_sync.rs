@@ -6,11 +6,12 @@ use coven_database::{ApplyOutcome, Database, DbError};
 use coven_format::{
     objects::{Fingerprint, PostedPositions},
     sealed_single::SingleChunkPrefix,
+    stuck::LogObject,
     Object,
 };
 use coven_merge::{Audience, WriteId};
 use coven_storage::{ObjectPath, ObjectPrefix, Storage};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[path = "write_download.rs"]
@@ -136,8 +137,8 @@ impl DeviceLogSync {
     }
 
     /// List device logs and apply ready writes until no further listed write can
-    /// advance. Damage blocks that device's successors, while independent devices
-    /// continue. A later call rereads damaged objects and retries waiting writes.
+    /// advance. Permanent failures are recorded once and stop that log; independent
+    /// logs continue. Waiting prerequisites and failed reads remain retryable.
     pub async fn download_writes(&mut self) -> Result<(), SyncError> {
         let _reads = self.reads.enter();
         let local = self.database.local_store_log().await?;
@@ -176,7 +177,7 @@ impl DeviceLogSync {
                 objects.insert(write, object);
             }
         }
-        let mut damaged = BTreeSet::new();
+        let mut stuck = state.stuck;
         let mut positions = state.positions;
         let mut replays = crate::replay_cache::ReplayCache::new(&local.log);
         loop {
@@ -192,7 +193,10 @@ impl DeviceLogSync {
                 if write.number > 1 && !positions.covers(previous) {
                     continue;
                 }
-                if damaged.contains(&write.device) {
+                if stuck
+                    .iter()
+                    .any(|record| record.blocks(LogObject::Write(*write)))
+                {
                     continue;
                 }
                 match self
@@ -212,9 +216,16 @@ impl DeviceLogSync {
                     Ok(ApplyOutcome::Waiting(reason)) => {
                         tracing::debug!(?write, ?reason, "write is waiting for its prerequisites");
                     }
-                    Err(SyncError::Damaged(object)) => {
-                        damaged.insert(write.device);
-                        tracing::warn!(error = %object, "damaged write; will reread on sync");
+                    Err(SyncError::Damaged(damage)) => {
+                        stuck.push(
+                            crate::write_object::record_damage(
+                                &self.database,
+                                self.storage.as_deref().ok_or(SyncError::NoStorage)?,
+                                object,
+                                &damage.failure,
+                            )
+                            .await?,
+                        );
                     }
                     Err(SyncError::KeyUnavailable(key)) => {
                         tracing::debug!(?write, ?key, "write key is unavailable");
@@ -274,13 +285,14 @@ impl DeviceLogSync {
     /// Compare this committed state with every other device's posted state.
     /// Only equal write positions, store-log positions, schema versions and
     /// fingerprint keys are comparable. Damage counts as no post (§19.1).
-    /// No database state is changed and no recovery operation is started.
+    /// Signed peer reports about our objects are retained independently of agreement.
     async fn compare_fingerprints(&mut self) -> Result<(), SyncError> {
-        let Some(own) = self.current_positions().await? else {
-            return Ok(());
-        };
+        let own = self.current_positions().await?;
         let ring = self.store_keys.unlock()?;
-        let log = self.database.local_store_log().await?.log;
+        let local = self.database.local_store_log().await?;
+        let log = local.log;
+        let state = self.database.sync_state(Vec::new()).await?;
+        let mut reports = Vec::new();
         for object in self
             .storage
             .as_deref()
@@ -288,7 +300,7 @@ impl DeviceLogSync {
             .list(&ObjectPrefix::positions())
             .await?
         {
-            if object.path.device() == Some(own.device) {
+            if object.path.device() == Some(local.device) {
                 continue;
             }
             let bytes = match self
@@ -325,6 +337,19 @@ impl DeviceLogSync {
                     }
                     Err(error) => return Err(error),
                 };
+            reports.extend(
+                peer.stuck
+                    .iter()
+                    .filter(|record| {
+                        record.object.device() == local.device
+                            && match record.object {
+                                LogObject::Write(id) => state.positions.covers(id),
+                                LogObject::Entry(id) => state.store_log.covers(id),
+                            }
+                    })
+                    .map(|record| (peer.device, *record)),
+            );
+            let Some(own) = &own else { continue };
             if own.writes != peer.writes
                 || own.store_log != peer.store_log
                 || own.schema_version != peer.schema_version
@@ -346,6 +371,7 @@ impl DeviceLogSync {
                 }
             }
         }
+        self.database.replace_stuck_reports(reports).await?;
         Ok(())
     }
 
@@ -415,6 +441,7 @@ impl DeviceLogSync {
             })
             .collect();
         Ok(Some(PostedPositions {
+            stuck: state.stuck,
             device: state.device,
             writes: state.positions,
             store_log: state.store_log,

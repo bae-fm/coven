@@ -66,6 +66,7 @@ mod store_log;
 mod store_log_check;
 mod store_log_tables;
 mod store_log_upload;
+mod stuck;
 mod upload;
 mod user_file;
 mod write;
@@ -112,6 +113,7 @@ pub use store_log::{
 };
 pub use store_log_check::{ReplayEntry, StoreLogCheck};
 pub use store_log_upload::{LocalStoreLog, StoreLogKeyUpload, StoreLogSealing, StoreLogUpload};
+pub use stuck::StuckLog;
 pub use upload::{UploadBytes, UploadParts, UploadReadError, WaitingUpload};
 pub use user_file::{prepare_user_file, PreparedUserFile, UserFile};
 pub use write::SqlContext;
