@@ -182,3 +182,70 @@ redone against the new text, and found:
 - It proves the spec, not the implementation. The implementation still
   needs tests, and could be checked against the Lean model's executable
   step function.
+
+## Modelling the whole system: devices, storage and time
+
+The merge proof covers one question: given a set of writes, do devices agree?
+Most of what went wrong later lived outside it: upload queues, breaking schema
+changes, resets, snapshots and retention. Those are about *events in time* on
+several devices at once, so they're modelled differently.
+
+- **A state machine.** The state is everything that matters: each device's
+  queue of committed writes, what it has applied and its schema version; each
+  storage slot (empty, or holding which write); the store log.
+- **Steps.** Every event that can happen is a rule for how the state changes:
+  commit a write; start an upload, which may succeed, fail, or fail and still
+  land later; download and apply; raise the schema; update the app and reload;
+  reset.
+- **Safety properties** are statements about every state reachable by any
+  sequence of those steps, in any order: every device reaches the same verdict
+  on each write; nothing applied built on a dropped write; nothing is applied
+  twice. They're proved by induction: true at the start, and kept by every step.
+- **Eventual properties**, like "every queued write settles", say something
+  must happen. They need an assumption about the world: each pending event
+  happens at some point (fairness). The assumption has to be stated exactly; see
+  the last counterexample below.
+- **Lean checks a proof; it doesn't search for bugs.** The counterexamples come
+  from trying to write the proof: a step that won't keep the property is exactly
+  the sequence of events that breaks it. Once the proof is finished, the property
+  holds for every order of events, not only the ones anyone thought of.
+- **Model versus code.** The proof is about the model, not the Rust. The
+  differential test connects them: it generates random histories, runs each
+  through the Rust implementation and through the Lean model's executable step
+  function, and compares the results. The merge and the store log already have
+  one; each new model gets one too.
+
+### What the queue and schema-change model found before any code changed
+
+A data-integrity audit had found by hand that a write whose upload failed just
+before a breaking schema change could be lost on every device but kept on its
+author's, and that the author's later writes then stalled everywhere. Fixes were
+designed in conversation and handed to the model to check. It rejected four
+designs in a row, each with a concrete history:
+
+- **A converted write that built on a peer's dropped write.** Ana inserts row r
+  just after Carol's breaking-change snapshot S is taken, so S lacks it. Ben,
+  still on the old app, edits r; his edit waits for his update. After the change,
+  Ana's insert is dropped everywhere, but Ben's converted edit still points at r,
+  and every device refuses it. This happens in today's design with no failed
+  upload at all. Fix: one rule every device applies the same way, from what each
+  write read: a write that read a dropped write is dropped too.
+- **A snapshot rule that deadlocked.** "Write snapshots only with nothing
+  waiting to upload" was added so no unsent write could leak through a snapshot.
+  But the device making a breaking change queues its own migration write, which
+  waits for the raise entry, which needs a snapshot. Fix: drop the rule; it was
+  only needed for a renumbering design that had already been abandoned.
+- **Coverage counted as storage.** "If the raise snapshot covers the unsettled
+  write, treat it as stored" fails when the snapshot is the device's own, which
+  can include its own unsent writes. The slot stays empty and everyone waits on
+  it forever. Fix: an unsettled write is always settled by resending its exact
+  original bytes; coverage only decides whether it's then kept or dropped.
+- **Fairness stated too weakly.** "Every upload attempt eventually resolves"
+  allows every retry to fail forever, so nothing ever settles. Settlement needs
+  the assumption that storage eventually accepts a retried write. That is an
+  assumption about the provider, and the model now states it.
+
+Two more had been caught by hand while designing, and are the kind the model
+checks: a copy of a write must not be made when the snapshot already includes
+the original, or it applies twice; and an upload that seemed to fail can land
+after a check found its slot empty, so "check, then convert in place" is a race.
