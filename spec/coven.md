@@ -523,6 +523,10 @@ Two mechanisms order writes:
     every column.
   - The row comes back if the new values clear its reasons, and otherwise
     stays out with them, like any write to a removed row.
+  - This is how an app puts a removed row somewhere else, in its audience or
+    the store: its reason can still go away, and a copy under a new key
+    would then show twice, while the same key shows once (in two audiences,
+    the store's row wins).
   - E.g. tag "urgent" is taken out because it fails a CHECK; Ana adds
     "urgent" again with values that pass, and every device puts the row
     back with her values.
@@ -975,7 +979,7 @@ Carol's tablet:
   - Both devices end with attachment 9 on note 44, and nothing lost.
   - Had Ben not moved it, both would end with attachment 9 taken out, and
     the same `_coven_lost` row, so the app can offer to put it on another
-    note.
+    note, by inserting it again with its key ([§8](#8-merge)).
 - Re-adding a deleted parent doesn't bring back the rows taken out with it
   under cascade, restrict or no action, since they point at its old
   generation.
@@ -1956,7 +1960,8 @@ Carol's tablet:
 
   - Notes 7 and 8 are deleted on both devices.
   - Note 9 arrives in a deleted circle, so it is taken out and recorded in
-    `_coven_lost`, and Ana's app can offer to put it somewhere else.
+    `_coven_lost`, and Ana's app can offer to put it somewhere else, by
+    inserting it again with its key ([§8](#8-merge)).
 - Devices outside the circle see only the store log entry.
 - The circle's files and log objects go like those of any deleted row
   ([§15](#15-snapshots), [§16.5](#165-uploads-and-deletion)).
