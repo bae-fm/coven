@@ -206,7 +206,9 @@ a zero-body pass cannot hide a listing of the whole history.
 - **Waiting:** every automatic wait has a bounded request rate, including
   operations, invites, joining, missing keys and provider throttling.
   Delays are 1, 2, 4, …, 256, then 300 seconds between unsuccessful attempts,
-  measured monotonically. A provider's `Retry-After` can only lengthen them.
+  measured monotonically. Unsuccessful includes a successful request that
+  finds its prerequisite still absent. A provider's `Retry-After` can only
+  lengthen them.
   For `W` unchanged waits in one uninterrupted run, at most
   `W * (1 + floor(t / 1 second))` attempts start in any interval of length
   `t`; after reaching the cap it is `W * (1 + floor(t / 300 seconds))`.
@@ -232,6 +234,8 @@ Local work has bounds too:
   decoding, or store-log replay. Read-only decisions use read connections;
   a writer is held only to validate and commit actual state changes. An
   atomic apply can include its database work; it cannot include a download.
+  Each transaction acquires the writer once; count failed transaction
+  attempts separately rather than hiding repeated holds in a success count.
 - An unchanged idle pass commits zero durable transactions. If a chosen
   feed requires saving an advanced cursor even with no object changes,
   allow at most one transaction for it, declared as part of that design.
@@ -462,6 +466,8 @@ clock and ordering guarantees as publication times, or a dedicated encrypted
 time-probe object whose create, metadata observation and deletion are counted.
 The latter needs an agreed path and lifecycle; D10 has no probe path.
 Neither choice may use the device clock as evidence of storage age.
+The source must report complete publication time as §4 requires; an
+upload-session initiation time cannot stand in for completion.
 
 Until one is specified, known stored times remain valid lower bounds, but
 an otherwise quiet store cannot be promised prompt finality or age-based
@@ -538,10 +544,10 @@ errors. A bounded single-object join probe remains conditional.
 
 #### Open decision: request bounds for transfers and resulting work
 
-One newly arrived write can reference an arbitrarily long file, trigger a
-snapshot of existing rows, or change membership requiring copies of many
-historical keys. Files use bounded range reads, and uploads above a
-provider's limit require parts (§16). These requests cannot be bounded by
+One newly arrived write can reference an arbitrarily long file or trigger
+a snapshot of existing rows. One store-log entry can change membership,
+requiring copies of many historical keys. Files use bounded range reads,
+and uploads above a provider's limit require parts (§16). These requests cannot be bounded by
 a constant times the number of arriving objects alone.
 
 One option states separate bounds for discovery and object reads, then adds
@@ -1703,8 +1709,11 @@ Carol's tablet:
   - Removed members and removed or replaced devices stay. Their stored
     writes still count when authorized, checked with their keys
     ([§10](#10-device-identity)).
-  - An entry and the replay it causes commit in one transaction, so the
-    tables always hold the replay of exactly the entries kept.
+  - A causally ready batch of entries and its resulting replay commit in
+    one transaction, so the tables always hold the replay of exactly the
+    entries kept. Author-view checks still use each entry's own recorded
+    past. The decoded store log stays with the sync owner between passes
+    ([One sync pass](sync-pass.md#what-survives-a-pass)).
 - Every store-log effect is computed from the entries received. An
   arriving entry can drop one kept before, or bring a dropped one back.
   - Keep the original inputs until every entry the effect depends on is
@@ -1765,10 +1774,19 @@ Carol's tablet:
   before advancing finality. A gap, unreadable entry or failed listing
   blocks that check and the cleanup that needs it (§19.1).
   - A provider-assigned stored time already observed is a lower bound on
-    storage's current time. A quiet store needing cleanup replaces this
-    device's signed posted positions, then reads their new stored time
-    before listing the store log. This uses the existing positions object,
-    with the same rules for publishable positions and fingerprints (§6).
+    storage's current time. Reuse times from the pass's listings and
+    successful publications, but only a time known before this store-log
+    scan can be its T; a later observation serves a later scan.
+  - Schedule a fresh time observation only when recorded storage times
+    indicate that finality or retention could cross its next threshold.
+    The device's timer schedules the check; it never proves storage age.
+    An observation still short of the threshold backs off before retrying.
+  - Unchanged positions are not replaced to observe time. The authoritative
+    time source for a quiet store is an
+    [open decision](#open-decision-storage-time-in-a-quiet-store), including
+    its requests and ordering before the complete store-log scan. Until
+    that source is specified, a quiet store's prompt cleanup is conditional;
+    the finality test itself is unchanged.
   - No device's acknowledgement is required. A sleeping device or a
     concurrently registered one has the same landing deadline as any other.
 - Why this holds:
@@ -1800,8 +1818,10 @@ Carol's tablet:
   Key rotation and provider revocation act on the current replay immediately.
 - The member list is what you get by replaying the applied entries in
   timestamp order, from the first.
-  - Each time an entry arrives, the device replays them all again, from
-    the first, so the result depends only on which entries it has.
+  - For each causally ready arrival batch, the device replays the resulting
+    received set once, from the first, so the result depends only on which
+    entries it has. It does not replay the same growing set separately for
+    every entry downloaded in that batch.
   - The member list an entry's author had read is the replay of just the
     entries that entry had read.
   - That past never changes once the entry is applied. The device keeps
@@ -1809,7 +1829,7 @@ Carol's tablet:
     removal's circle keys match, a removed device's observed owner, and
     the circles a member removal deletes in that view. These commit in
     the same transaction as the entry and are reused on later replays.
-    Replay marks start afresh for each arriving entry; the permanent
+    Replay marks start afresh for each ready batch; the permanent
     “landed too late” exclusions remain.
 - At its place in the replay, an entry applies only if its author's role
   allowed it, in the member list the author had read.
@@ -1827,7 +1847,7 @@ Carol's tablet:
 - When an entry beats some already applied, they are all dropped, and the
   replay starts again without them.
   - A replay-dropped entry stays dropped until that replay ends; the next
-    arrival starts afresh, still excluding entries that landed too late.
+    ready batch starts afresh, still excluding entries that landed too late.
 - A dropped entry has a blocked record with its reason. Replay reasons
   can change until finality; “landed too late” cannot. Neither is a
   permanent refusal of the entry's bytes (§19.1).
@@ -1901,7 +1921,7 @@ Carol's tablet:
     It does not keep reading to discover a later reversal. In this case,
     another device of the remaining member may need to add it again.
 - A replay-dropped entry stays dropped for that replay even if its defeater
-  later drops. The next arrival starts a fresh replay, with time-based drops
+  later drops. The next ready batch starts a fresh replay, with time-based drops
   still excluded.
 
 ## 10. Device identity
@@ -2596,8 +2616,11 @@ Carol's tablet:
   1 MiB while the audience has none.
   - Both sizes count encoded plaintext, before sealing adds chunk overhead.
     The latest snapshot's size follows from its listed object size and D9's
-    fixed chunk layout. Choosing it and checking growth read only its signed
-    prefix; they do not decrypt or validate its rows.
+    fixed chunk layout. Choosing it uses its cached verified prefix, reading
+    that prefix only when its checked local record is missing. Growth sums
+    the part lengths recorded when writes were authored or applied; neither
+    decision rereads unchanged headers or decrypts snapshot rows
+    ([One sync pass](sync-pass.md#what-survives-a-pass)).
 - Before uploading a snapshot, its writer opens the sealed temporary file
   through the snapshot reader: decrypt, verify both signatures, and parse
   and check every record.
@@ -2688,9 +2711,10 @@ Carol's tablet:
   - every device's posted write position has passed it, or storage has
     held it for 30 days.
   - Age compares storage times only: use the observed storage time T from
-    §9 and the object's first stored time. Refreshing signed posted positions
-    lets a quiet store establish age without waiting for another app write.
-    Device-made write and entry timestamps never establish storage age.
+    §9 and the object's first stored time. A quiet store's due observation
+    follows §9 and its open time-source decision; unchanged positions are
+    not refreshed. Device-made write and entry timestamps never establish
+    storage age.
   - E.g. Ana's phone clock jumps ahead a year. A log stored yesterday is
     still only one storage day old, so that jump cannot release it.
   - Every device means every active device in the store log; removed and
@@ -2698,10 +2722,12 @@ Carol's tablet:
     one that has never posted counts as having read nothing.
   - Coverage needs only the write header's part audiences, authenticated by
     its store-key encryption and bound to its path and prefix. Retention
-    reads that section by range, without reading parts or checking the
-    whole-object author signature. These fields describe the object being
-    deleted; they grant no author authority and apply no rows. Loading a
-    write still checks its complete signature (§6).
+    uses the facts retained when that device authored, applied or checked
+    the write. Only missing header facts require a read; keep its result
+    across passes. A header-only read needs no parts or whole-object author
+    signature, subject to §4.1's partial-read decision. These fields describe
+    the object being deleted; they grant no author authority and apply no
+    rows. Loading a write still checks its complete signature (§6).
 - A write waiting for entries or a key copy holds retention back, with a
   `Retention` blocked record naming that first prerequisite. It does not
   fail the pass. Arrival of the prerequisite permits another attempt.
@@ -2863,7 +2889,9 @@ Carol's tablet:
   the file on disk.
 - An uploaded file not in the cache is read by fetching only the chunks that
   cover the range, with ranged requests to the provider.
-  - The header is fetched once per open file.
+  - Reuse its checked header across opens while it remains cached. If it
+    is missing and the requested range starts at zero, fetch it with the
+    first chunks; seeking elsewhere may need a separate header request.
   - Neighbouring chunks are fetched together, up to 1 MiB per request.
   - Each chunk is checked as it arrives; a failed check fails the read.
 - Fetched chunks go into the cache, so reading a range again costs nothing.
@@ -2918,6 +2946,12 @@ Carol's tablet:
 - Retry delays use the sync loop's in-memory monotonic timer: start at
   1 second and double to at most 5 minutes. Restarting retries at once.
   - No persisted wall-clock time decides when an upload can retry.
+  - Operations, invites, joining and other automatic waits share this
+    scheduling rule, with `Retry-After` allowed to exceed the cap and block
+    all affected workers ([One sync pass](sync-pass.md#waiting-without-repeated-work)).
+    A bound that survives restart, including a provider cooldown, is an
+    [open decision](#open-decision-retry-bounds-across-restarts); the
+    immediate-restart rule does not establish that stronger guarantee.
   - E.g. Ana's failed upload is waiting 8 seconds when she sets the clock
     back a year. It still retries after those 8 seconds.
 - A large file goes up through the provider's resumable or multipart
@@ -2946,14 +2980,24 @@ Carol's tablet:
     file, no snapshot rows or log parts need reading for file retention.
   - Otherwise stream the necessary retained data into the database's
     reference checks, with complete object authentication before deletion.
-    Keep checked references and metadata for the current pass so an object
-    already read for loading or retention is not downloaded again. Do not
-    stage retained objects in temporary files for this check.
+    Keep checked references and metadata by immutable object identity across
+    passes and reopening, with an explicit completeness record. Loading and
+    retention share this index; an object already checked is not downloaded
+    again. Whether to retain sealed bodies or inspected ranges is open in
+    §4.1; neither choice discards checked references at pass end.
+  - Reconsider deletion when references, protected inputs, finality,
+    ownership or file presence change. Use the pass's history catalogs and
+    list only file prefixes this device may delete from. Discovering a
+    delayed upload without another event is an
+    [open decision](#open-decision-discovering-delayed-file-publication).
 - Its storage path and fixed row reference carry the uploader's device
   id, so ownership remains known after the last reference disappears.
 - If retained data belongs to an unreadable audience, lacks a key copy,
   or fails validation,
   a device cannot prove file absence and leaves uploaded files in storage.
+  Keep that uncertainty by object identity; retry the local proof only when
+  its prerequisite or applicable reader version changes, or the object is
+  deleted. Another pass alone does not download the same retained data.
 - Uploaded files are deleted by the same devices as logs
   ([§15](#15-snapshots)).
 - Deleting a row deletes only coven's copies of its file, never a
@@ -2984,7 +3028,8 @@ Carol's tablet:
       under the same retained-reference checks; no marking write is queued;
   - `_coven_cache`: each cached file or chunk, its namespace, size, when it
     was last read, and whether it is pinned;
-  - `_coven_cache_budgets`: each namespace's budget;
+  - `_coven_cache_budgets`: each namespace's budget and cached byte total,
+    updated with its cache records so a budget check needs no full sum;
   - `_coven_file_removals`: unused local copies waiting to be deleted.
 - The bytes themselves are files in the store's directory: coven's own
   copies, and the cache.
@@ -3287,6 +3332,12 @@ Carol's tablet:
   last, after everything it refers to.
 - When the app starts, coven resumes every unfinished operation from the
   step after its last completed one.
+  - Thereafter it wakes for commands, changed prerequisites or due retry
+    timers, following [the pass's waiting rules](sync-pass.md#waiting-without-repeated-work).
+    It does not scan and replay the store log every second while waiting.
+  - Determine snapshot growth and retention eligibility from local indexed
+    facts before creating maintenance operations. An idle check creates no
+    operation row; an unchanged blocker causes no durable rewrite.
 - A step that cannot advance records its first blocker in `_coven_blocked`
   in the same transaction that records what the step completed.
   - A waiting app call receives the typed error. The record retains its
@@ -3440,7 +3491,8 @@ Carol's tablet:
     in that log and dependent work cannot pass it; independent logs continue.
   - Keep the coven package version of the local refusal internally.
     A different installed version permits one new attempt. Reopening the
-    same version does not retry the same immutable bytes.
+    same version does not retry the same immutable bytes. A permitted
+    check uses retained bytes first; only eviction requires another download.
   - A successful changed reset clears the current blocked list atomically
     with its reload. A failed reload changes nothing. Retain suppressed
     records until the reset is final; if the reset drops, recompute the list
@@ -3459,6 +3511,9 @@ Carol's tablet:
   - Peer reports inform the author or file reader; they do not dictate its own download
     checks. One completed positions scan replaces the received reports
     atomically. A failed scan leaves the previous reports and records why.
+    The pass reuses peer objects whose listed identity is unchanged (§3.1,
+    §4.1); agreement and retention use that same decoded state. An equal
+    received report set needs no replacement transaction.
   - A device can publish these records while its write positions wait (§6).
     Silence or different positions alone never proves an immutable refusal.
 - A damaged snapshot is recorded and passed over for the next latest, or
@@ -3467,7 +3522,9 @@ Carol's tablet:
   - Unverified prefixes establish no coverage.
   - Missing required logs block the reload without changing the database.
 - A damaged positions object has reason `InvalidPositions` and counts as
-  not posted. It retries automatically because its author can replace it.
+  not posted. Its discovery retries automatically because its author can
+  replace it; only a changed object identity or a permitted local recheck
+  triggers another validation, using retained bytes when available.
 - A damaged local database is detected by SQLite's integrity check or
   decoding its stored facts (§19.2).
 - Devices that disagree:

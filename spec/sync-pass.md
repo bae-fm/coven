@@ -13,13 +13,13 @@ A listing supplies paths, encrypted sizes and storage publication times.
 The device keeps a local catalog of these observations. Within a pass,
 every consumer shares each complete listing; no consumer lists it again
 under its own name. A failed or incomplete listing establishes neither
-absence nor a complete frontier. Keep the preceding committed catalog and
-report the failure. Explicitly observed objects can still be downloaded.
+absence nor a complete view of storage. Keep the preceding committed catalog
+and report the failure. Explicitly observed objects can still be downloaded.
 
 For an immutable object, reuse checked facts by `(path, size, stored_at)`.
-A previously observed immutable path whose size or stored time changes is
-a provider/identity failure, not permission to overwrite the old evidence
-and apply another version. For posted positions, changed size or stored
+A previously observed immutable path whose size or stored time changes
+reports `StorageFailure::Protocol`; keep the old evidence rather than apply
+another version. For posted positions, changed size or stored
 time triggers a read; equal metadata permits reuse only with the sound
 replacement identity required by §4.1. A provider revision, if adopted,
 participates in that comparison.
@@ -102,9 +102,11 @@ must not reread custody for each object. The derivation/session choice is
 open in §4.1. Drop the pass's unlocked values when its work ends, including
 failure; separately running file tasks retain only their own required keys.
 
-Choose an already observed storage time `T` before the store-log scan. From
-saved entry times and covered-log times, compute the next instant at which
-§9 finality or §15's 30-day age test could change. Include the last late
+Choose an already observed storage time `T` before the store-log scan, if
+one is available. With no time sample yet, discovery and ordinary sync
+still proceed; finality and age-based deletion wait for a qualifying scan.
+From saved entry times and covered-log times, compute the next instant at
+which §9 finality or §15's 30-day age test could change. Include the last late
 entry's window and the strict boundary for finality; equality at 30 days
 does not establish it. No pending time-dependent work means no time probe.
 
@@ -121,9 +123,10 @@ No unchanged positions post supplies this observation.
 
 List **`<store>/store-log/` completely**, across all devices and pages,
 including unknown devices, dropped entries and the history retained for
-finality. The listing begins after observing `T`. Compare with the catalog;
-read an entry only for a newly listed path or missing retained local bytes
-or checked record. Do not reread an already decoded entry.
+finality. A listing used to establish finality begins after observing `T`.
+Compare with the catalog; read an entry only for a newly listed path or
+missing retained local bytes or checked record. Do not reread an already
+decoded entry.
 
 Read each needed entry as one stream. Its clear prefix names the exact
 store key. If custody lacks that key, read **that key's copy sealed to this
@@ -135,7 +138,7 @@ No search through every device's entry 1 is repeated on later passes.
 
 Judge landing times against the entire completed listing, then check
 author views and apply causally ready entries in batches. One batch needs
-one resulting-set replay and one atomic commit, not one full replay and
+one replay of the received set and one atomic commit, not one full replay and
 transaction per received entry. Author-view checks still use exactly each
 entry's recorded past. Entries blocked on a key or cause stay cached.
 Independent ready entries can proceed, but a gap or unreadable entry
@@ -180,8 +183,9 @@ that invalidates it. Its required refreshes count as that call's requests.
 
 If incremental discovery is selected, a complete durable catalog plus a
 fully consumed feed update replaces these four logical listings. Fetch the
-feed after `T` and before processing entries, and use its same result for
-all four views. It must meet §4.1's completeness and scope conditions;
+feed before processing entries, and use its same result for all four views.
+For finality, the update must begin after observing `T`. It must meet
+§4.1's completeness and scope conditions;
 there are no additional prefix scans merely to give another consumer a view.
 
 ### 4. Observe keys and peers
@@ -205,13 +209,20 @@ Decide recipients and usable keys from the current received log before
 first attempts. Own key publication in this pass updates the catalog and
 presence facts without relisting all keys after each entry.
 
+Create each due historical copy queued independently of an entry only for
+a currently eligible recipient, using its retained sealed bytes (§11).
+An occupied copy follows the first-valid-copy rule; absence checks come
+from the catalog, not one GET per possible recipient. New rotations and
+entry prerequisites are published by the ordered work in step 5.
+
 Read each peer's positions only for new or changed listed identity, or a
 missing local checked record. Verify once; use the decoded value for
 agreement, retention and reports. One completed positions observation
 atomically replaces received reports; a failed scan keeps the previous
-reports and records the failure. If the resulting report set is equal,
-there is no write transaction. Recompare cached fingerprints when this
-device's own data, schema, positions or usable fingerprint key changes.
+reports and records the failure. Do not rewrite unchanged report rows;
+persist any changed peer identity or positions with the observation.
+Recompare cached fingerprints when this device's own data, schema, positions
+or usable fingerprint key changes.
 
 ### 5. Resume due operations and required reloads
 
@@ -223,6 +234,9 @@ changes or deletions. Never reserve a replacement entry without §9's
 online catch-up. An obsolete provider grant/revoke completes before its
 opposite is issued, as §4 requires. Count provider permission lookups and
 asynchronous-job polling as operation requests, subject to backoff.
+First settle any reserved store-log entry and its remaining prerequisite
+copies before reserving another entry. This includes queued entries whose
+initiating operation was discarded; discarding it cannot leave a log gap.
 
 While this device has open invites and a request check is due, list
 **`<store>/join-requests/` once**, serving all its invites. Read only newly
@@ -369,9 +383,28 @@ and never assume a fixed initial buffer contains every valid prefix. Its
 extra streams are measured under that conditional lifetime-read bound.
 
 **Carol's import.** A write of 50,000 notes arrives through one body
-stream. Its chunks are checked as they arrive. The last signature gates
-one atomic apply; neither retention nor a later agreement check downloads
-that write again.
+stream. Its chunks are checked as they arrive. Its complete signature must
+verify before the atomic apply; neither retention nor a later agreement
+check downloads that write again.
+
+## Counting a pass
+
+**Ben receives one note.** All four base prefixes fit one S3 page. There
+is one new readable write, its key is held, all caches are present, no
+maintenance or retry is due, and no snapshot grows enough to publish.
+Assume the chosen adapter needs no extra lookup or confirmation requests.
+Under the conditional four-scan design, Ben makes four LIST requests, one
+streaming GET for the write and one changed-positions PUT: **six requests**.
+The next unchanged pass makes four LISTs and no GET or PUT. A fifth keys
+scan, if selected under §4.1, adds its pages to both counts.
+
+If the store-log listing instead requires two pages, those counts become
+seven and five without any extra body download. With a suitable one-page
+feed replacing the four scans, they become three and one. Additional
+provider lookups, redirects or confirmation requests must be added; these
+examples do not disguise them as part of the streaming GET. A clock probe,
+file range, generated snapshot or operation request also has its own entry
+in the count, as §4.1 requires.
 
 ## Waiting without repeated work
 

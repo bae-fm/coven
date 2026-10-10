@@ -351,8 +351,9 @@
   - Blocked reports can change while positions stay at the last publishable
     past. Omit fingerprints unless they describe exactly that past.
   - Positions are not finality acknowledgements. Their provider-assigned
-    replacement time can supply T for §9's subsequent store-log check.
-    Replacing a post to observe time advances no positions by itself.
+    replacement time, observed after a changed post, can supply T for §9's
+    subsequent store-log check. Unchanged posts are not replaced to observe
+    time; a quiet store's time source remains an open decision (§4.1).
   - Entry drop reasons remain local: each device computes “landed too late”
     from D6 and storage metadata, including for its own entries.
 - A report's subject has one of these tags:

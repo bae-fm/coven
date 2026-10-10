@@ -1946,7 +1946,8 @@ impl CovenHandle {
     pub async fn stop_sync(&self) -> Result<(), SyncError>;
 
     /// Syncs now instead of at the next idle tick. While idle, coven syncs
-    /// every 30 seconds, and at once after a local write.
+    /// every 30 seconds, and at once after a local write. Requests coalesce
+    /// while a pass or connection backoff is active; provider cooldowns hold.
     pub fn sync_now(&self);
 
     /// The sync status, live. The first value is the current status.
@@ -2151,7 +2152,8 @@ impl CovenHandle {
     pub fn subscribe_uploads(&self) -> UploadsLiveQuery;
 
     /// Retries waiting uploads now; individual failures stay in blocked().
-    /// Overrides an automatic retry delay or retries a repaired source.
+    /// Overrides ordinary backoff or retries a repaired source, but never
+    /// bypasses a provider Retry-After cooldown.
     /// Automatic delays start at 1 second and double to at most 5 minutes
     /// on an in-memory monotonic timer; a restart retries at once (§16.5).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError>;
