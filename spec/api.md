@@ -1775,8 +1775,6 @@ pub enum PendingSubject {
 pub enum Prerequisite {
     Object(ObjectPath),
     DeviceRegistration(DeviceId),
-    /// A closed log contains an additional stored object (§10).
-    DeviceReplacement(DeviceId),
     SchemaPublication { audience: Audience, version: u32 },
     Reload(Audience),
     OwnUploads,
@@ -1996,7 +1994,7 @@ pub enum DeviceResetReason {
     StorageAhead,
     /// An occupied immutable path holds different bytes.
     SlotMismatch,
-    /// The store log already closes this device's id.
+    /// The store log has a kept replacement of this device's id.
     Replaced,
     /// The database could not be trusted; no local work was salvaged (§19.2).
     DatabaseDamage,
@@ -2523,8 +2521,9 @@ pub struct DeviceInfo {
 pub enum DeviceState {
     Active,
     Removed,
-    /// Stored log ends reported by kept replacement entries (§10).
-    Replaced { last_write: u64, last_entry: u64 },
+    /// A kept add-device entry replaces this id. Its older objects are
+    /// judged by their recorded reads, with no upper log number (§10).
+    Replaced,
 }
 
 pub enum MemberRole {

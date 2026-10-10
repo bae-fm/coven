@@ -57,9 +57,13 @@ preservation of deliberately discarded local edits.
 
 ## Replacement judged by recorded reads
 
-`ReplacementRead` models the proposed alternative to §10 and D6: the
-add-device entry names the old id but carries no log ends. The written
-closed-end rule remains in `Identity`; the two policies are separate.
+`ReplacementRead` supplies the results behind §10 and D6's replacement
+rule: the add-device entry names the old id but carries no log ends.
+`registration_authority` requires the same member and a distinct new id.
+`accepts_iff` and `before_read_counts` judge admission solely by whether
+the object's recorded past includes a kept replacement of its device.
+`replacement_order_irrelevant` covers concurrent replacements without
+combining counters.
 
 **Stored pre-read objects are preserved.** `stored_object_survives` combines
 create-once storage with receipt: later publications preserve the original
@@ -67,6 +71,9 @@ bytes and time, and delivery includes the identity whenever the object had
 not read a kept replacement of its device. There is no upper write or entry
 number. `racing_upload_kept` checks an old copy whose write 2 lands after a
 replacement that saw only write 1. It counts without another replacement.
+Ana's restored phone can therefore register a replacement while her old
+phone's write 2 is in flight: both stored writes remain receivable, provided
+the old phone made them before reading its replacement.
 
 **No duplicate application and agreement are proved.**
 `no_duplicate_application` covers arbitrary deliveries, including repeats.
@@ -98,7 +105,10 @@ custody id leaves no larger stored counter and no replacement to discover.
 The check passes and the write is sent under the old id. The literal Lean
 `example` needs one write and one send, with no earlier attempted write.
 Missing custody, a larger observed counter, or an observed replacement blocks
-the send; the checks cannot establish that every restore changes ids.
+the send. This supports the qualified wording: a restored copy that is behind
+storage never sends. A same-installation backup with intact custody and
+nothing newer in storage continues as that device; content-bound nonces
+do not depend on detecting that restore.
 
 The readings chosen are: “before it read” means the immutable recorded past
 of the copy that made the object, not whether another copy has read it;
@@ -116,7 +126,7 @@ snapshots do not have these write/entry read fields, so their own acceptance,
 physical cleanup, fresh-id generation and replacement registration liveness
 are outside this variant. Their outgoing sends still use the shared gate.
 
-## Checks and closed logs
+## Identity checks and reset
 
 `checkIdentity` models the checks §10 actually lists: non-backed-up custody,
 complete object listings, authenticated snapshot and posted coverage, replacement,
@@ -131,13 +141,11 @@ and positions. The caller supplies a completed scan or its failure, never a
 successful partial listing. Proving that a provider adapter performs that
 complete scan is outside this package.
 
-`replacement_has_owner` requires the same member and a distinct new id.
-`ends_comm`, `ends_assoc`, `ends_idempotent` and `ends_keep_both` prove that
-concurrent replacement ends combine independently by maximum, regardless of
-receipt order or repetition. `combined_end_keeps_completed` shows that an
-object included by either replacement remains consumable. `beyond_end_waits`
-blocks later objects pending a replacement that includes them. Such objects
-are not deleted by this model.
+`Identity` also contains a separate model with recorded replacement ends.
+Its `ends_*`, `combined_end_keeps_completed` and `beyond_end_waits` results
+concern that model, not §10's admission rule. The `ReplacementRead` results
+above justify admission without those ends; neither policy is inferred
+from the other one's theorems.
 
 `reset_unavailable`, `reset_uses_fresh_id` and `reset_discards_queue` describe
 the bootstrap boundary: retry keeps the chosen replacement; failure cannot
@@ -146,9 +154,10 @@ reopen the discarded database; successful loading starts with the fresh id.
 different path from every old write. `registration_retry_number` gives a new
 entry number after a too-late registration without changing the fresh device id.
 Authority checks, §9's late-entry rejection and finality are inputs from
-store-log replay. An observed end contributes only when its replacement is
-kept. This package does not prove that a late registration eventually succeeds,
-or that someone eventually extends a closed end after a racing upload.
+store-log replay. These reset results do not establish eventual successful
+registration. `ReplacementRead.reset_uses_new_path` and
+`receipt_after_restore` establish the fresh path and duplicate-free receipt
+for the replacement rule without recorded ends.
 
 ## Nonces
 

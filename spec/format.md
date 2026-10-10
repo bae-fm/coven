@@ -205,7 +205,7 @@
 | 1 | Add member | `keys:MemberKeys \| role:u8 \| access:MemberAccess` |
 | 2 | Remove member | `member:MemberId` |
 | 3 | Change role | `member:MemberId \| role:u8` |
-| 4 | Add device | `device:DeviceId \| name:name \| replaces:Option<device:DeviceId \| last_write:u64 \| last_entry:u64>` |
+| 4 | Add device | `device:DeviceId \| name:name \| replaces:Option<DeviceId>` |
 | 5 | Remove device | `device:DeviceId` |
 | 6 | Create circle | `circle:uuid \| name:name \| key:uuid \| key_hash:32 bytes` |
 | 7 | Rename circle | `circle:uuid \| name:name` |
@@ -226,9 +226,12 @@
   `admin` is its author; the device it adds is the one writing it.
 - Add-device carries no member id; create-circle carries no member list.
 - An add-device replacement names an older device of the same member,
-  distinct from the added device. Its log ends are observed stored positions;
-  zero means that log is empty. Concurrent replacements combine each end
-  by maximum (§10). Replacement is not removal and introduces no key.
+  distinct from the added device. It carries no log ends. Concurrent
+  replacements each keep their new id and mark the old id replaced (§10).
+  An old-id write counts only before it read a kept replacement, by D5's
+  `store_log_read`; an entry uses `had_read` with implicit own entries.
+  Ordinary authority and admission checks still apply. Replacement
+  introduces no key.
 - Set-access is about its author, the member whose access it records.
 - `key` and `key_hash` occur only on creation and rotation: the id and
   SHA-256 of the exact 32 key bytes ([§11](coven.md#11-keys)). The hash is
@@ -384,9 +387,7 @@
   3 invalid write, 4 not authorized, 5 invalid causality, 6 wrong identity,
   7 file content hash. Content-hash refusal applies only to File.
 - Wire prerequisites are 0 followed by an object path as `text`, or
-  1 followed by a device id whose registration is missing, or 2 followed
-  by a device id awaiting a replacement that includes a stored object
-  beyond its closed log end (§10). Other waits
+  1 followed by a device id whose registration is missing. Other waits
   remain local because they name no object or member key copy a peer can supply.
 - Update kind 0 means app schema; kind 1 means coven format and its version
   must fit u16. File-failure tags are 0 missing, 1 changed, 2 integrity.

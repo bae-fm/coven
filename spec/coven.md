@@ -619,7 +619,9 @@ Two mechanisms order writes:
   device's 64-bit id.
 - Timestamps sort by milliseconds, then counter, then device id.
 - So no two devices' timestamps are ever equal.
-- Every install, and every restored copy of a store, gets a new device id.
+- Every new installation and every device reset gets a new device id (§10).
+  Restoring a backup on the same installation can keep its id when custody
+  is intact and storage has nothing newer than its reservations.
 - The stamping rule:
   - each device keeps the latest timestamp it has seen, from its own writes
     and every write it applies, saved on disk;
@@ -1567,7 +1569,7 @@ Carol's tablet:
   - the replay's result: `_coven_members` (every member a kept entry
     added, their public keys and role, and whether they were removed),
     `_coven_devices` (every device a kept entry added, its member and name,
-    and whether it is active, removed or replaced with closed log ends),
+    and whether it is active, removed or replaced),
     `_coven_circles` (every circle a kept entry made, its name and whether
     it was deleted), and `_coven_circle_members`.
     The store's id and name come from its create-store entry; directory
@@ -1721,6 +1723,8 @@ Carol's tablet:
     “landed too late” exclusions remain.
 - At its place in the replay, an entry applies only if its author's role
   allowed it, in the member list the author had read.
+  An old device's entry must also precede its reading a kept replacement,
+  judged from its recorded store-log past (§10).
 - Then, an entry whose change is already in place applies and changes
   nothing.
   - E.g. Ana and Ben both add Dan: both apply, Dan is added once, and
@@ -1846,28 +1850,45 @@ Carol's tablet:
   - Until replacement finishes, keep the installation unavailable. Retry
     through the existing bootstrap state, using the same new id and entry.
     Never reopen the discarded copy as a working store.
-- The new device's add entry names the old id and its observed log ends:
-  the last stored write and store-log entry; zero means an empty log (D6).
+- The new device's add entry names the old id it replaces (D6).
   - The old id is shown as replaced. This changes no membership or keys.
   - Only that member can replace the id. The new id differs from the old.
-  - Concurrent replacements both apply. Their recorded ends combine by
-    taking the greatest write and entry numbers, independently.
-  - Readers consume the old logs through those ends. An object beyond a
-    closed end is waiting for a replacement entry that includes it;
-    it is never silently accepted or discarded. Retain the relevant inputs
-    until the replacement entries are final (§9).
+  - Concurrent replacements both apply. Each new device keeps its own id;
+    the old id remains replaced, with no recorded last write or entry.
+  - Judge an old-id write by its `store_log_read`, and an old-id entry by
+    its `had_read` including its implicit earlier own entries. It counts
+    only if that past contains no kept replacement of the old id, just as
+    an object made before reading removal can count. The ordinary authority,
+    causality, landing, schema and reset rules still apply.
+  - Publication after replacement does not change what the object had read.
+    There is no upper number to extend and no wait for another replacement
+    to include it. Retain relevant inputs until the deciding entries are
+    final; a changed replay recomputes admission atomically (§9).
   - A still-running old copy stops sending when it reads its replacement,
-    and resets the same way. Its replacement records any additional stored
-    objects, so another copy's completed upload is not lost.
+    and resets the same way, choosing its own fresh id. It does not take
+    over the id of the device whose replacement it read.
   - Replacement does not exempt an entry from §9's landing rule. A stale
     registration or replacement retry that lands too late is consumed and
     reported; registering again uses a new entry after catching up online.
 - E.g. Ana backs up her phone after write 5, then uploads writes 6 and 7.
   Her restored phone still has counter 5.
-  - Its storage check finds 7 before it sends anything. It registers as
-    `ana-phone-2`, replacing `ana-phone` through write 7, and loads 6 and 7.
+  - Its storage check finds newer writes before it sends anything. It registers
+    as `ana-phone-2`, replacing `ana-phone`, and loads 6 and 7.
   - Its first new write is `<store>/devices/ana-phone-2/1`.
     Edits made only in the restored copy are discarded, with an app notice.
+- Ana's still-running old phone can have write 8 in flight when that
+  replacement lands. If write 8 was made before the old phone read the
+  replacement, readers count it under the ordinary write rules. It needs
+  no second replacement to admit it. Reading the replacement stops the
+  old phone before it can make or send further work.
+- A restored copy that is behind storage never sends. A backup restored
+  on the same installation with custody intact, nothing newer in storage,
+  and no removal or replacement continues as that device. The checks cannot
+  detect every restore; content-bound nonces still separate different
+  plaintexts even if a backup forgot an encryption attempt (§11.1).
+  - Ben backs up one queued write before attempting it. Restoring that
+    backup on his laptop leaves its custody and stored counters unchanged.
+    The check passes and that same device uploads the queued write.
 - An occupied immutable path succeeds only if its complete stored bytes
   equal the bytes this attempt would send. Compare before retiring its queue
   row; a mismatch on this device's path triggers the same device reset.
@@ -1883,8 +1904,9 @@ Carol's tablet:
 - A write counts only if its author was a member, and its device one of
   theirs, in the store log the write had read ([§7.1](#71-causality)), so
   a write by Ana's phone counts as Ana's.
-- A removed device's writes still count if they reached storage and were
-  made before it read its removal.
+- A removed or replaced device's writes still count if they reached storage
+  and were made before it read its removal or a kept replacement, subject
+  to the same authority, schema and reset rules as other writes.
 - A device that reads its own removal, or its member's, stops syncing for
   good and tells the app ([E5](api.md#e5-storage-and-sync)).
 - Removing a device takes away its storage access, so nothing it writes
