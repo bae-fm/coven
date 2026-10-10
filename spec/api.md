@@ -522,9 +522,7 @@ pub enum SettingsError {
 pub enum StoreLockError {
     /// Another handle or process holds the lock.
     AlreadyOpen(StoreId),
-    /// An explicit recovery has not published its replacement database.
-    RecoveryPending(StoreId),
-    /// An unfinished installation must be resumed with restore or join.
+    /// An unfinished installation must be resumed with restore, join or reset_device.
     BootstrapPending(StoreId),
     /// A supplied lock protects a different directory.
     WrongDirectory(StoreId),
@@ -538,16 +536,6 @@ pub enum ReadOnlyOpenError {
     Local(CovenError),
     /// Saved settings, credential custody or provider construction failed.
     Storage(SyncError),
-}
-
-/// Explicit damaged-database recovery failed (§19.2).
-pub enum RecoveryError {
-    /// Opening SQLite, custody or the local directory failed.
-    Local(CovenError),
-    /// Authenticating and loading storage failed.
-    Sync(SyncError),
-    /// Recovery requires unlocked store keys before moving database files.
-    NoStoreKeys,
 }
 
 /// Listing the app's stores failed (E1).
@@ -779,14 +767,13 @@ impl CovenBuilder {
     /// opens as `Stopped`; otherwise its status is `Disconnected`.
     pub async fn open(self, store: StoreId) -> CovenResult<CovenHandle>;
 
-    /// Opens a store whose database is damaged (§19.2): moves the damaged
-    /// file aside, loads the latest snapshot, and queues the waiting writes it
-    /// can still read from the old file, then resumes unfinished operations.
-    /// Connects from saved storage settings and custody credentials, refreshing
-    /// once on provider rejection. Requires unlocked store and member keys and checks
-    /// storage before moving the damaged files. Registers the fresh device id
-    /// with the app's `device_name`.
-    pub async fn open_reloading(self, store: StoreId, device_name: &str) -> Result<CovenHandle, RecoveryError>;
+    /// Replaces a damaged local database with a new device loaded from storage
+    /// (§19.2). Uses saved settings and custody, with no data salvage.
+    /// Checks storage and keys before moving the old directory aside.
+    /// Uses the existing bootstrap state and errors; an interrupted call
+    /// resumes with the same fresh id. The returned handle holds a device-reset
+    /// notice that unsent edits may have been lost (E5).
+    pub async fn reset_device(self, store: StoreId, device_name: &str) -> Result<CovenHandle, BootstrapError>;
 
     /// Opens the store for reading only, alongside a handle that has it open,
     /// for example from another process. Its shared lock prevents deletion
@@ -1925,7 +1912,8 @@ impl CovenHandle {
 
     /// The latest device reset completed by this handle, initially None.
     /// A subscriber receives the current value, including a reset during open.
-    /// Show that unsent edits in the discarded copy were lost (§10).
+    /// Show that unsent edits were discarded, or may be lost for a damaged
+    /// database (§10, §19.2).
     pub fn subscribe_device_reset(&self) -> watch::Receiver<Option<DeviceReset>>;
 
     /// Current local blocks and relevant authenticated peer reports, including
@@ -1959,6 +1947,8 @@ pub enum DeviceResetReason {
     SlotMismatch,
     /// The store log already closes this device's id.
     Replaced,
+    /// The database could not be trusted; no local work was salvaged (§19.2).
+    DatabaseDamage,
 }
 
 pub enum SyncStatus {

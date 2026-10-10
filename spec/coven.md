@@ -126,8 +126,9 @@
 - **Durability:** a crash loses nothing:
   - every committed write is still uploaded while this device's database
     and identity remain usable;
-  - a restored stale copy starts again from storage. Unsent edits in that
-    copy are discarded, and the app is told (§10);
+  - a damaged local database or restored stale copy starts again from
+    storage. Edits it had not uploaded are lost, and the app is told
+    (§10, §19.2);
   - every operation with several steps resumes and finishes, for example:
     - rotating the key, then removing the member;
     - writing a snapshot ([§15](#15-snapshots)), then deleting the logs it
@@ -3077,29 +3078,34 @@ Carol's tablet:
 
 ### 19.2 Recovering one device
 
-- When only one device is broken, it reloads from the latest snapshot
-  ([§15](#15-snapshots)).
-  - A damaged database fails to open with an error of its own; reloading
-    then moves the damaged SQLite file and its journals aside and starts
-    from the snapshot. An unfinished replacement refuses ordinary opens;
-    another explicit recovery resumes it; the damaged files remain available.
-  - Rebuilding a damaged database takes a fresh device id (§10), because
-    unreadable counters cannot establish which write, entry and snapshot
-    numbers were already used. Readable waiting writes keep their original
-    identities. The app supplies the new device's name. Reloading in place
-    keeps the device id.
-  - Recovery connects using the store's saved storage settings and credentials
-    in custody, refreshing on provider rejection as in §4. It
-    requires unlocked store and member keys and checks storage before moving
-    any damaged database files. Missing storage, unavailable keys or a failed
-    connection leaves those files in place and returns the failure to the app.
-  - A device that opens but disagrees with the others reloads in place.
-- Its own writes still waiting in `_coven_uploads`, those it can still
-  read, are uploaded after, and merge like any late write.
-  - If recovering also updates the app schema, their unattempted writes
-    are converted or marked lost by the migration's second part, just as
-    on any updating device ([§17.1](#171-host-application)).
-    Already-attempted writes keep their plaintext and sealing key ids unchanged.
+- A usable database that disagrees with another device reloads in place
+  from snapshots and logs (§15). It keeps its device id and waiting writes.
+  - Settle attempted writes by sending their original bytes. Convert
+    eligible untried writes or record their losses under §17.1.
+  - Reset boundaries still decide which parts apply (§19.3).
+- A damaged database fails to open with `DbError::DamagedDatabase`.
+  The app calls `CovenBuilder::reset_device` (E1).
+  - Use the same new-device path as a stale copy (§10), from saved settings
+    and custody. Read no rows, counters, queues or operations from the
+    damaged database for salvage.
+  - Check storage and unlock the member and store keys before moving the
+    damaged files. A missing setting, unavailable key or failed connection
+    leaves them in place and returns its typed error.
+  - Stop all local database use and hold the store's writer and reader locks.
+    Move the old directory aside as a whole, including SQLite journals and
+    local file sources. Keep it available for inspection, not as live state.
+  - Use the existing bootstrap state (§12) to keep the new id, replacement
+    entry and old directory identity before moving it. Resume that bootstrap
+    after a failure; ordinary opens refuse the unfinished installation.
+    There is no separate recovery journal or recovery marker.
+  - Load storage under the fresh id, then publish the replacement handle.
+    Never import unsent rows or files from the damaged directory.
+  - Tell the app that unsent edits may have been lost. The returned handle's
+    device-reset notice names the old and new ids and `DatabaseDamage` (E5).
+- E.g. Ana's laptop has uploaded through write 12, but its damaged database
+  may contain write 13. Resetting loads the stored history through 12 under
+  a new device id. Coven does not guess which fragments of 13 are usable;
+  the app receives the loss notice.
 
 ### 19.3 Resetting a store
 
