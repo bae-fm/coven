@@ -7,18 +7,18 @@ fn identity(seed: u8) -> MemberKeys {
     bytes.extend([seed; 64]);
     MemberKeys::from_secret_bytes(&bytes).unwrap()
 }
+async fn circle_device(storage: Arc<MemoryStorage>, number: u64, seed: u8) -> Device {
+    let mut device = device(storage.clone(), number).await;
+    device.identity.persist(&identity(seed)).unwrap();
+    device.reopen(storage,
+            vec![SyncedTable::new("notes", RowIdentity::SharedKey), SyncedTable::new("pins", RowIdentity::IndependentUuid).audience_column("audience")],
+            vec![schema::initial(), Migration::sql(2, "circles", "CREATE TABLE pins(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,title TEXT NOT NULL);")]).await;
+    device
+}
 pub(super) async fn household(storage: Arc<MemoryStorage>) -> Vec<Device> {
     let mut devices = Vec::new();
     for number in 1..=3 {
-        let mut device = device(storage.clone(), number).await;
-        device
-            .identity
-            .persist(&identity(number as u8 + 2))
-            .unwrap();
-        device.reopen(storage.clone(),
-            vec![SyncedTable::new("notes", RowIdentity::SharedKey), SyncedTable::new("pins", RowIdentity::IndependentUuid).audience_column("audience")],
-            vec![schema::initial(), Migration::sql(2, "circles", "CREATE TABLE pins(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,title TEXT NOT NULL);")]).await;
-        devices.push(device);
+        devices.push(circle_device(storage.clone(), number, number as u8 + 2).await);
     }
     devices[0]
         .sync
@@ -123,6 +123,134 @@ async fn unreadable_circle_parts_are_skipped_but_missing_members_keys_wait() {
     devices[1].sync.sync_store_log().await.unwrap();
     devices[1].writes.download_writes().await.unwrap();
     assert_eq!(count(&devices[1].db).await, 1);
+}
+
+#[tokio::test]
+async fn a_circle_restored_after_deletion_keeps_a_previously_skipped_part_missing() {
+    let storage = storage();
+    let mut devices = household(storage.clone()).await;
+    let mut tablet = circle_device(storage.clone(), 4, 3).await;
+    let [ana, ben, carol] = devices.as_mut_slice() else {
+        panic!("three members")
+    };
+    let circle = CircleId(Uuid::from_u128(10));
+    ana.sync
+        .make_and_upload_entry(StoreChange::AddDevice {
+            device: DeviceId(4),
+            name: "Ana tablet".into(),
+        })
+        .await
+        .unwrap();
+    ana.sync
+        .make_and_upload_entry(StoreChange::AddCircleMember {
+            circle,
+            member: identity(5).member_id(),
+        })
+        .await
+        .unwrap();
+    for device in [&mut *ben, &mut *carol, &mut tablet] {
+        device.sync.sync_store_log().await.unwrap();
+    }
+    ben.clock.set(UNIX_EPOCH + Duration::from_secs(3));
+    let removal = ben
+        .sync
+        .make_and_upload_entry(StoreChange::RemoveCircleMember {
+            circle,
+            member: identity(3).member_id(),
+            key: KeyId(Uuid::from_u128(11)),
+        })
+        .await
+        .unwrap();
+    for device in [&mut *ana, &mut *carol] {
+        device.sync.sync_store_log().await.unwrap();
+    }
+    carol.clock.set(UNIX_EPOCH + Duration::from_secs(4));
+    sql(&carol.db, "INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','Carol wrote this')").await;
+    let writes = carol.writes.upload_writes().await.unwrap();
+    assert_eq!(writes.len(), 1);
+    ana.writes.download_writes().await.unwrap();
+    assert_eq!(count(&ana.db).await, 0);
+    assert!(ana
+        .db
+        .sync_state(Vec::new())
+        .await
+        .unwrap()
+        .positions
+        .covers(writes[0]));
+
+    // Ben has not downloaded Carol's row. Deleting the empty local circle
+    // therefore publishes an entry without an ordinary row-delete write.
+    ben.clock.set(UNIX_EPOCH + Duration::from_secs(5));
+    let crate::operations::Begun::Operation(id) = ben
+        .sync
+        .begin_operation_call(crate::operations::Command::DeleteCircle(circle))
+        .await
+        .unwrap()
+    else {
+        panic!("circle deletion")
+    };
+    loop {
+        let record = ben.operation(id).await;
+        match ben
+            .sync
+            .operation_step(&record, crate::operation_data::Data::read(&record).unwrap())
+            .await
+            .unwrap()
+        {
+            crate::operations::Progress::Finished(_) => break,
+            crate::operations::Progress::Advanced => (),
+            _ => panic!("empty circle deletion must finish"),
+        }
+    }
+    assert!(ben.db.test_queued_writes().await.unwrap().is_empty());
+    ana.sync.sync_store_log().await.unwrap();
+    assert!(ana.db.store_log().await.unwrap().replay.state.circles[&circle].deleted);
+
+    // Ana's tablet still has the common prefix. Its earlier removal beats
+    // both of Ben's entries; Carol can share the dropped circle key.
+    tablet.clock.set(UNIX_EPOCH + Duration::from_secs(2));
+    tablet
+        .sync
+        .make_and_upload_entry(StoreChange::RemoveCircleMember {
+            circle,
+            member: identity(4).member_id(),
+            key: KeyId(Uuid::from_u128(20)),
+        })
+        .await
+        .unwrap();
+    carol.sync.sync_store_log().await.unwrap();
+    for device in [&mut *ana, &mut tablet] {
+        device.sync.sync_store_log().await.unwrap();
+        device.writes.download_writes().await.unwrap();
+        let log = device.db.store_log().await.unwrap();
+        assert!(!log.replay.state.circles[&circle].deleted);
+        assert!(log.replay.state.circles[&circle]
+            .members
+            .contains(&identity(3).member_id()));
+        assert!(matches!(
+            log.replay.entries[&removal],
+            coven_database::EntryOutcome::Dropped(_)
+        ));
+        assert!(crate::store_log_keys::holds(
+            Some(&device.custody.unlock().unwrap().unwrap()),
+            &Audience::Circle(circle),
+            KeyId(Uuid::from_u128(11)),
+        ));
+        assert!(device
+            .db
+            .sync_state(Vec::new())
+            .await
+            .unwrap()
+            .positions
+            .covers(writes[0]));
+    }
+    assert_eq!(
+        ana.db.store_log().await.unwrap().replay,
+        tablet.db.store_log().await.unwrap().replay
+    );
+    assert_eq!(count(&ana.db).await, 0);
+    assert_eq!(count(&tablet.db).await, 1);
+    assert!(ana.db.lost_values().await.unwrap().is_empty());
 }
 
 #[tokio::test]

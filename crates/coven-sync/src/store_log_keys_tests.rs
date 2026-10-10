@@ -127,6 +127,111 @@ async fn remove(device: &mut Device, member: &MemberKeys, key: KeyId) -> EntryId
         .unwrap()
 }
 
+/// A key disclosed while its removal is dropped becomes current again when
+/// that removal returns. The alternative arrival never discloses the key.
+#[tokio::test]
+async fn a_rekept_removal_uses_a_key_disclosed_while_it_was_dropped() {
+    for temporary_drop in [false, true] {
+        let storage = storage();
+        let mut ana = device(storage.clone(), 1, member(1), store(1)).await;
+        let mut ben = device(storage.clone(), 2, member(2), store(1)).await;
+        let mut carol = device(storage.clone(), 3, member(3), store(1)).await;
+        let mut tablet = device(storage.clone(), 4, member(1), store(1)).await;
+        ana.create(key(1)).await;
+        ana.add(&ben.member, MemberRole::Admin).await;
+        ana.add(&carol.member, MemberRole::Member).await;
+        for device in [&mut ben, &mut carol, &mut tablet] {
+            device.sync().await;
+            device
+                .sync
+                .make_and_upload_entry(StoreChange::AddDevice {
+                    device: device.device().await,
+                    name: "registered".into(),
+                })
+                .await
+                .unwrap();
+        }
+        for device in [&mut ana, &mut ben, &mut carol, &mut tablet] {
+            device.sync().await;
+        }
+        tablet.clock.set(UNIX_EPOCH + Duration::from_secs(2));
+        ben.clock.set(UNIX_EPOCH + Duration::from_secs(3));
+        ana.clock.set(UNIX_EPOCH + Duration::from_secs(4));
+        let demotion = tablet
+            .sync
+            .make_and_upload_entry(StoreChange::ChangeRole {
+                member: ben.member.member_id(),
+                role: MemberRole::Member,
+            })
+            .await
+            .unwrap();
+        // Hold back delivery without changing any device's author view.
+        let delayed = object::path(demotion);
+        let bytes = storage.read(&delayed).await.unwrap();
+        storage.delete(&delayed).await.unwrap();
+        let removal = remove(&mut ana, &carol.member, key(3)).await;
+        assert_eq!(ana.log().await.replay.entries[&removal], EntryOutcome::Kept);
+        remove(&mut ben, &ana.member, key(2)).await;
+        let copy = ObjectPath::store_key(key(3), &carol.member.member_id());
+        if temporary_drop {
+            ben.sync().await;
+            assert!(matches!(
+                ben.log().await.replay.entries[&removal],
+                EntryOutcome::Dropped(_)
+            ));
+            // Carol must read Ben's removal first: seeing her own removal
+            // before its opponent stops her sync before the next listing.
+            let path = object::path(removal);
+            let bytes = storage.read(&path).await.unwrap();
+            storage.delete(&path).await.unwrap();
+            carol.sync().await;
+            storage.create(&path, &bytes).await.unwrap();
+            carol.sync().await;
+            assert!(carol
+                .custody
+                .unlock()
+                .unwrap()
+                .unwrap()
+                .store_key(key(3))
+                .is_ok());
+        }
+        storage.create(&delayed, &bytes).await.unwrap();
+        if !temporary_drop {
+            // Downloads apply each entry before reading the next device's
+            // listing. Deliver the demotion before Carol's removal on Ben.
+            let path = object::path(removal);
+            let bytes = storage.read(&path).await.unwrap();
+            storage.delete(&path).await.unwrap();
+            ben.sync().await;
+            storage.create(&path, &bytes).await.unwrap();
+        }
+        ben.sync().await;
+        let log = ben.log().await;
+        assert_eq!(log.replay.entries[&removal], EntryOutcome::Kept);
+        assert_eq!(log.replay.state.store.unwrap().key, key(3));
+        assert!(log.replay.state.members[&carol.member.member_id()].removed);
+        assert_eq!(storage.read(&copy).await.is_ok(), temporary_drop);
+        if temporary_drop {
+            let ring = ben.custody.unlock().unwrap().unwrap();
+            let encrypted = ring
+                .store_key(key(3))
+                .unwrap()
+                .derive()
+                .seal_object_chunk("after-removal", b"header", 0, 0, b"new private data")
+                .unwrap();
+            let ring = carol.custody.unlock().unwrap().unwrap();
+            assert_eq!(
+                ring.store_key(key(3))
+                    .unwrap()
+                    .derive()
+                    .open_object_chunk("after-removal", b"header", 0, 0, &encrypted)
+                    .unwrap(),
+                b"new private data"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn dropped_store_removal_key_lets_the_excluded_member_read_later_entries() {
     let storage = storage();
@@ -189,6 +294,100 @@ async fn dropped_store_removal_key_lets_the_excluded_member_read_later_entries()
         storage.read(&excluded).await,
         Err(error) if error.failure() == StorageFailure::NotFound
     ));
+}
+
+/// The two-member counterexample in spec/proofs/storelog-data.md: the only
+/// holder stops before it can distribute the losing removal's key.
+#[tokio::test]
+async fn a_removed_sole_holder_cannot_share_a_dropped_removals_key() {
+    let storage = storage();
+    let mut ana = device(storage.clone(), 1, member(1), store(1)).await;
+    let mut ben = device(storage.clone(), 2, member(2), store(1)).await;
+    for device in [&mut ana, &mut ben] {
+        device
+            .reopen(
+                storage.clone(),
+                vec![SyncedTable::new(
+                    "notes",
+                    coven_database::RowIdentity::SharedKey,
+                )],
+                vec![Migration::sql(
+                    1,
+                    "notes",
+                    "CREATE TABLE notes(id TEXT PRIMARY KEY NOT NULL, title TEXT NOT NULL)",
+                )],
+            )
+            .await;
+    }
+    ana.create(key(1)).await;
+    ana.add(&ben.member, MemberRole::Admin).await;
+    ben.sync().await;
+    ben.sync
+        .make_and_upload_entry(StoreChange::AddDevice {
+            device: ben.device().await,
+            name: "Ben".into(),
+        })
+        .await
+        .unwrap();
+    ana.sync().await;
+    ana.clock.set(UNIX_EPOCH + Duration::from_secs(2));
+    ben.clock.set(UNIX_EPOCH + Duration::from_secs(3));
+    let winner = remove(&mut ana, &ben.member, key(2)).await;
+    let loser = remove(&mut ben, &ana.member, key(3)).await;
+    ben.db
+        .write(|sql| {
+            sql.execute("INSERT INTO notes VALUES('one','Ben wrote this')", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let writes = ben.writes.upload_writes().await.unwrap();
+    assert_eq!(writes.len(), 1);
+    let missing = ObjectPath::store_key(key(3), &ana.member.member_id());
+    ana.sync().await;
+    assert_eq!(
+        ana.log().await.replay.entries[&loser],
+        EntryOutcome::Dropped(coven_database::DropReason::NoAdminLeft)
+    );
+    assert_eq!(ana.log().await.replay.entries[&winner], EntryOutcome::Kept);
+    assert!(matches!(
+        ben.sync.sync_store_log().await,
+        Err(SyncFailure::Removed)
+    ));
+    assert!(ben
+        .custody
+        .unlock()
+        .unwrap()
+        .unwrap()
+        .store_key(key(3))
+        .is_ok());
+    // A later call still stops before share_dropped_keys. The surviving
+    // member waits on the encrypted header and never advances over the write.
+    assert!(matches!(
+        ben.sync.sync_store_log().await,
+        Err(SyncFailure::Removed)
+    ));
+    ana.sync().await;
+    ana.writes.download_writes().await.unwrap();
+    assert!(matches!(storage.read(&missing).await,
+        Err(error) if error.failure() == StorageFailure::NotFound));
+    assert!(!ana
+        .db
+        .sync_state(Vec::new())
+        .await
+        .unwrap()
+        .positions
+        .covers(writes[0]));
+    assert_eq!(
+        ana.db
+            .read(
+                |sql| Ok(sql.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))?)
+            )
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(ana.db.lost_values().await.unwrap().is_empty());
 }
 
 #[tokio::test]

@@ -70,6 +70,7 @@
   - [A.7 Schema changes](#a7-schema-changes)
 - [Appendix B. Proof of convergence](proofs/merge.md), in its own file
 - [Appendix C. Proof of the store log](proofs/storelog.md), in its own file
+- [Store-log effects on data](proofs/storelog-data.md), coupling Appendices B and C
 - [Appendix D. Storage format](format.md), in its own file
 - [Appendix E. API](api.md), in its own file
 

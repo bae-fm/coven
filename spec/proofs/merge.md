@@ -431,5 +431,7 @@ at.
     current rows, since every change coven makes is ordinary SQL ([§8.7](../coven.md#87-triggers));
   - files: where a file is ([§16.1](../coven.md#161-kinds-and-where-files-are)) is an ordinary cell, which the merged state
     covers; uploading and caching aren't modelled;
-  - schema changes ([§17](../coven.md#17-schema-changes)) and resets ([§19.3](../coven.md#193-resetting-a-store)), which the model doesn't
-    include.
+  - schema changes ([§17](../coven.md#17-schema-changes)) and resets ([§19.3](../coven.md#193-resetting-a-store)), which this model doesn't
+    include. The separate [store-log/data coupling](storelog-data.md) supplies
+    replay-dependent removal inputs and models snapshot replacement, including
+    a counterexample for losing migration values.

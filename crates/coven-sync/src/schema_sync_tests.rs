@@ -310,6 +310,70 @@ async fn a_raise_resumes_after_reopening_at_every_publication_step() {
 }
 
 #[tokio::test]
+async fn a_losing_migrations_derived_value_disappears_without_a_loss() {
+    let storage = storage();
+    let mut devices = group(storage.clone(), 2).await;
+    seed(&mut devices).await;
+    devices[0].clock.set(UNIX_EPOCH + Duration::from_secs(2));
+    devices[1].clock.set(UNIX_EPOCH + Duration::from_secs(3));
+    sql(&devices[1].db, "UPDATE notes SET title='Shopping'").await;
+    for device in &mut devices {
+        reopen(
+            device,
+            storage.clone(),
+            vec![SyncedTable::new("notes", RowIdentity::SharedKey)],
+            vec![
+                initial(),
+                Migration::sql(2, "copy title", "UPDATE notes SET body=title").writes(|_| Ok(())),
+            ],
+        )
+        .await;
+    }
+    let body = |db: Database| async move {
+        db.read(|sql| Ok(sql.query_row("SELECT body FROM notes", [], |r| r.get::<_, String>(0))?))
+            .await
+            .unwrap()
+    };
+    assert_eq!(body(devices[1].db.clone()).await, "Shopping");
+    let marker = devices[1]
+        .db
+        .test_queued_writes()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|w| w.header.disposition == WriteDisposition::Migration)
+        .unwrap();
+    assert!(marker.parts.is_empty());
+    // Publish Ben's snapshot first while Ana still sees only their common log.
+    devices[1].sync.sync_store_log().await.unwrap();
+    let loser =
+        devices[1].db.store_log().await.unwrap().replay.state.schema[&Audience::Store].clone();
+    let path = crate::store_log_object::path(loser.entry);
+    let entry = storage.read(&path).await.unwrap();
+    storage.delete(&path).await.unwrap();
+    let snapshot_path = ObjectPath::snapshot(
+        loser.snapshot.audience.clone(),
+        loser.snapshot.device,
+        loser.snapshot.number.try_into().unwrap(),
+    );
+    let snapshot = storage.read(&snapshot_path).await.unwrap();
+    storage.delete(&snapshot_path).await.unwrap();
+    devices[0].sync.sync_store_log().await.unwrap();
+    storage.create(&snapshot_path, &snapshot).await.unwrap();
+    storage.create(&path, &entry).await.unwrap();
+    sync_all(&mut devices).await;
+    for device in &devices {
+        assert!(matches!(
+            device.db.store_log().await.unwrap().replay.entries[&loser.entry],
+            coven_database::EntryOutcome::Dropped(_)
+        ));
+        assert_eq!(rows(&device.db).await[0].1, "Shopping");
+        assert_eq!(body(device.db.clone()).await, "Groceries");
+        assert!(device.db.lost_values().await.unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn a_circle_is_raised_by_its_first_updating_member_after_the_store() {
     use coven_foundation::id_source::CircleId;
     let storage = storage();

@@ -353,9 +353,11 @@
   reset are outside this store-log state. Thus §17's column and migration
   examples and §19.3's row-recovery rules are prose here; no theorem above
   claims to execute them.
-- Likewise, circle rows and encrypted writes belong to the merge model.
-  This appendix proves the store-log part of §14's examples. It does not
-  prove encryption or the coupling between the two models.
+- This appendix proves the store-log part of §14's examples. The separate
+  [store-log/data coupling](storelog-data.md) reuses this replay and the merge
+  model for rows, removal rules, operation ordering, snapshot replacement and
+  key availability. It includes checked counterexamples; neither development
+  proves encryption.
 - Correspondence between these Lean functions and Rust is not proved.
   `scripts/check.sh` builds `storelogRunner` and runs Rust's generated
   differential test against its `resolve`, comparing state, kept entries,

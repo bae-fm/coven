@@ -54,9 +54,10 @@ code_checks() {
 # A Lean proof, built from scratch: every module is imported by its root, so
 # none can drop out of the build; no `sorry`, and no axiom beyond Lean's own.
 lean_proof() {
-    local what=$1 proof=$2 lib=$3
+    local what=$1 proof=$2 lib=$3 package=$4
     step "Lean proof of $what"
-    (cd "$proof" && lake clean && lake build)
+    # Path dependencies are checked separately; preserve their runner binaries.
+    (cd "$proof" && lake clean "$package" && lake build)
     local module
     for module in "$proof/$lib"/*.lean; do
         module=$(basename "$module" .lean)
@@ -96,11 +97,12 @@ lean_proof() {
     fi
 }
 
-# The merge (spec/proofs/merge.md) and the store log
-# (spec/proofs/storelog.md), each checked against Rust by a differential test.
+# Merge and replay have Rust differential tests. Their data coupling also has
+# checked counterexamples (spec/proofs/storelog-data.md).
 proofs() {
-    lean_proof "the merge" spec/proofs/merge CovenMerge
-    lean_proof "the store log" spec/proofs/storelog CovenStorelog
+    lean_proof "the merge" spec/proofs/merge CovenMerge covenMerge
+    lean_proof "the store log" spec/proofs/storelog CovenStorelog covenStorelog
+    lean_proof "store-log data effects" spec/proofs/storelog-data CovenStorelogData covenStorelogData
 
     step "Rust / Lean differential merge test"
     runner="$(cd spec/proofs/merge && pwd)/.lake/build/bin/mergeRunner"

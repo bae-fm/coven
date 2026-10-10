@@ -1,0 +1,13 @@
+name = "covenStorelogData"
+defaultTargets = ["CovenStorelogData"]
+
+[[require]]
+name = "covenMerge"
+path = "../merge"
+
+[[require]]
+name = "covenStorelog"
+path = "../storelog"
+
+[[lean_lib]]
+name = "CovenStorelogData"
