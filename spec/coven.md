@@ -7,7 +7,6 @@
 - [3. Guarantees](#3-guarantees)
   - [3.1 IO bounds](#31-io-bounds)
 - [4. Storage providers and access](#4-storage-providers-and-access)
-  - [4.1 Open decisions for IO bounds](#41-open-decisions-for-io-bounds)
 - [5. Local database](#5-local-database)
 - [6. Syncing writes](#6-syncing-writes)
   - [One sync pass](sync-pass.md)
@@ -137,11 +136,11 @@
     - writing and verifying a snapshot ([§15](#15-snapshots)).
     Retention separately deletes the history that snapshots safely cover.
 - **Revocation:** before sending a write for the first time, a device
-  catches up on membership changes and lists sealed key copies at sync-pass
+  catches up on membership changes and new sealed key copies at sync-pass
   start, then seals with the newest usable key. An ex-member cannot read
   other members' writes first sent by devices that already knew they had
   left, provided no copy of the sealing key is made for them after that
-  pass's listing (§11).
+  pass's copy observation (§11).
   - A tried write retains its first attempt's key and bytes on every retry.
     Nothing is dropped or rewritten for revocation; storage access is cut
     off separately (§13).
@@ -162,9 +161,9 @@
 
 The request order and cache lifetimes are in [One sync pass](sync-pass.md).
 These are requirements on a device's sync, not estimates for a particular
-store. Discovery charges every scoped listing page (§4.1); there is no
-history-independent idle-request claim. All read, transfer, retry and local
-work limits below apply without assuming a change feed or an unknown method.
+store. Discovery reads each writer's next number (§6). Idle request counts
+depend on devices, not accumulated history. All read, transfer, retry and
+local work limits below apply without a change feed or history listing.
 The confidentiality, integrity, finality and atomicity rules still apply.
 
 A *steady store* has a complete local catalog, unchanged storage and local
@@ -185,7 +184,10 @@ a zero-body pass cannot hide a listing of the whole history.
   work `A`. Also count `M`, the metadata lookups, redirects, session-control
   calls and confirmations not included in another term, and `E`, failed or
   repeated requests. No request belongs to two terms.
-  - `D` is the actual complete listing-page and folder-traversal count.
+  - `D` counts discovery listing pages and terminal next-number misses.
+    A successful next-number read belongs to `O`, not also to `D`.
+    Folder traversal and exact-name lookup overhead belong to `M`, except
+    when the lookup itself establishes the miss already counted in `D`.
     `O` counts distinct object versions whose headers or bodies are needed.
     At most two header ranges and one remaining-body stream are allowed
     per object without failures or eviction: at most `3 * O` requests.
@@ -203,9 +205,13 @@ a zero-body pass cannot hide a listing of the whole history.
     causes a snapshot or historical-key sharing contributes to `P`, not an
     unspecified constant per arrival. A file's length contributes to `F`.
 - **Idle requests:** `O = F = P = X = A = M = E = 0`, so `R = D`.
-  Complete scans of store-log, devices, snapshots, positions and keys, plus
-  each file prefix this device may delete from, determine `D`. History can
-  increase their page count. More devices can increase folder traversal.
+  List store-log device folders and `positions/`, and make one next-number
+  miss per known device for each of three logs: store-log entries, writes
+  and key copies. With `N` devices and each listing fitting one page,
+  `D = 2 + 3 * N` on every provider. Folder ids are already known in this
+  warm count. All extra pages, initialization lookups and retries are charged.
+  Drive's unknown-name miss is one exact parent/name query; a hit needs
+  that query plus the download (§4). Neither lists historical log objects.
 - **New objects:** checked immutable facts and retained bytes are reused.
   Charge only newly needed versions to `O`; changed positions count as new
   versions. Work induced by them stays in its own term above.
@@ -277,8 +283,9 @@ cache eviction, interrupted streams, withheld prerequisites and rate limits
 separately. Measure each term above; a logical call never hides native work.
 
 **Ana's quiet library.** Adding 20,000 old files changes neither her idle
-body downloads (zero) nor local durable work (zero). It can increase her
-file-discovery pages. Ben's single new note can trigger a snapshot and an
+requests, body downloads (zero), nor local durable work (zero). With Ana's
+phone, Ben's laptop and Carol's tablet on S3, a pass is two LISTs plus nine
+GET misses: **11 requests**. Ben's single new note can trigger a snapshot and an
 eager file download: count the note under `O`, the snapshot under `P`, and
 the file's ranges under `F`.
 
@@ -319,6 +326,8 @@ the file's ranges under `F`.
     ([One sync pass](sync-pass.md#one-stream-checked-as-it-arrives));
   - list a prefix, with when storage stored each object; each query is scoped
     to that prefix, across all its pages, without a change feed;
+  - list immediate device folders under `store-log/`, without enumerating
+    their contents. This discovers unknown writers, not pages of history;
   - get one object's status by its exact path: absent, or its complete
     encrypted size, first publication or replacement time, object id and
     revision. A revision changes on every replacement, even when size and
@@ -333,6 +342,17 @@ the file's ranges under `F`.
   Folder ids and known path-to-object ids stay with the connection. An
   unknown Drive object uses an exact parent/name query; its id is then cached.
   Failed discovery never installs a partial catalog as complete.
+  - On S3, device discovery lists `store-log/` with delimiter `/`. Drive,
+    Dropbox and OneDrive list its immediate children, without recursion.
+    CloudKit queries the indexed store, object kind and number for entry 1
+    of each writer; those permanent records represent its device folders.
+    No adapter downloads the history to derive the set of writers locally.
+  - An exact-name GET needs no preliminary status request. On Drive, an
+    unknown file id requires one [parent/name query](https://developers.google.com/workspace/drive/api/guides/search-files).
+    An empty complete result is the miss; a hit adds one
+    [file download](https://developers.google.com/workspace/drive/api/reference/rest/v3/files/get).
+    Count query pages and redirects when they occur; an incomplete search
+    or provider error is not absence. Cache the id for subsequent reads.
   - Ana's `files/` folder can hold 20,000 photos. Reading `store-log/`
     never enumerates those photos or another store's objects.
 - Status uses S3 HEAD, Drive file metadata (an exact name lookup when its id
@@ -405,34 +425,8 @@ the file's ranges under `F`.
   has its own, so on S3 an admin makes and deletes members' keys in the
   provider's console, and coven says when.
 - Posted positions live at `<store>/positions/<device>` ([§6](#6-syncing-writes)).
-- Sealed circle keys live at `<store>/keys/<writer>/circles/<circle>/<key>/<member>`
-  ([§14.3](#143-circles)).
-
-### 4.1 Open decisions for IO bounds
-
-The remaining discovery decision conflicts with retention. The complete
-scoped listings in §4 remain the required mechanism; this section identifies
-the missing guarantee that prevents replacing them with next-number reads.
-
-#### Open decision: gap-free discovery after deletion
-
-GETting the next number is sufficient only while the entire unpublished
-suffix is gap-free. Retention can delete a number a reader has not seen.
-Ana publishes snapshots 2 and 3, then deletes 2 because 3 covers it. Ben's
-catalog ends at 1: GET 2 misses although 3 exists. Loading a snapshot cannot
-resolve this without a way to discover that snapshot first.
-
-Files also retain their attaching write's random id, support independent
-uploads, and can be deleted. A missing numbered file cannot establish that
-no later upload landed. A publication record written after a file would
-leave a crash window; it is not an atomic solution.
-
-Until a deletion-aware discovery rule is specified, complete scoped listings
-remain required. Key copies are observed every pass. The idle request bound
-must charge listing pages, including retained history; it cannot be stated
-as one miss per writer. Exact-name reads also have provider-specific request
-costs: [Drive downloads require a file id](https://developers.google.com/workspace/drive/api/reference/rest/v3/files/get),
-so an unknown name first needs an exact parent/name query.
+- Sealed store and circle keys share `<store>/keys/<writer>/<n>`; their
+  clear prefixes name audience, key and recipient ([§11](#11-keys), D9).
 
 ## 5. Local database
 
@@ -551,8 +545,38 @@ and pending-work gates are in [One sync pass](sync-pass.md).
 - A missing prerequisite or failed read gets a pending record. A complete
   immutable write or entry that fails a permanent check stops its log at
   that object. Independent logs continue (§19.1).
-- A device finds devices it doesn't know yet, and their logs, by listing
-  `<store>/devices/` and `<store>/store-log/` ([E5](api.md#e5-storage-and-sync)).
+- Every log has one writer per folder and gap-free publication numbers:
+  writes, store-log entries and sealed key copies. Each starts at 1 and
+  publishes in order. Discovery GETs the next number after the contiguous
+  input already retained or covered by an applied snapshot.
+  - A hit supplies the object itself. Fetch ahead in parallel up to the
+    transfer limit, and stop scheduling beyond the first miss. Retain
+    completed reads and their check results; never advance over a miss,
+    failed read or input not durably retained. Requests already in flight
+    still count. Causal application keeps
+    its own positions and waits, independently of this download position.
+  - A miss means nothing new at that observation, not permanent absence.
+    A missing number required by known causal or snapshot evidence is a
+    pending prerequisite instead. Failures are never misses (§19.1).
+  - Store-log entries and key copies are never deleted, so their terminal
+    miss is exact. Write misses use the return-from-absence rule in §15.
+    Snapshots and files are not discovered by next number.
+- Discover unknown writers by listing only the immediate device folders in
+  `<store>/store-log/`. Keep that set together with every device named by
+  received registrations, including removed and replaced devices. A newly
+  discovered writer starts at entry 1 and key copy 1; its writes start at
+  the device's applied snapshot coverage, or 1 without coverage.
+  Drain writers learned from arriving registrations in this observation
+  too, before treating its membership and copy evidence as complete.
+  Registration precedes ordinary writes and independent historical sharing;
+  creation's prerequisite copies are also reachable through its writer.
+- List `<store>/positions/` once per pass for agreement, retention and peer
+  reports. Positions are never an index for discovering logs: upload and
+  posting are not atomic. Ana can upload write 9 and crash before posting;
+  Ben still finds 9 by GETting its exact name.
+- Ben has Ana's writes through 8. GET 9 misses on an idle pass. After Ana
+  uploads 9 and 10, GET 9 succeeds, his parallel reads obtain 10 and miss
+  at 11, and application still checks both writes' recorded causes.
 
 ## 7. Order
 
@@ -851,11 +875,13 @@ Two mechanisms order writes:
     leaf shape; excluded writes need no duplicate header or row changes.
 - Store-log publication uses `_coven_store_log_uploads`: the next local entry's
   number, canonical plaintext record and sealing key id.
-- `_coven_key_uploads` is the one sealed-copy queue. It holds each writer-owned
-  path, fixed sealed bytes, and an optional `before_entry: EntryId`. A set
+- `_coven_key_uploads` is the one sealed-copy queue. It holds each writer's
+  reserved copy number, fixed sealed bytes, and an optional `before_entry: EntryId`. A set
   entry means the copy must be confirmed before publishing that entry; no
   entry means historical sharing (§11). The entry and its prerequisite copies
-  commit together before any storage attempt. There are no unsealed keys here.
+  commit together before any storage attempt. Reserving a copy commits its
+  number and fixed bytes as an irrevocable attempt; publication follows number
+  order even if its initiating operation is discarded. There are no unsealed keys here.
   Confirmed copies leave this queue; applying a published entry and its replay
   removes its entry row atomically (§9, §18). Occupancy of this writer's path
   requires §10's byte comparison, not an assumption that another writer won.
@@ -1559,12 +1585,12 @@ Carol's tablet:
     the next store-log step re-seals that plaintext with the recorded key,
     deriving its nonce as in §6, and sends identical bytes;
   - The same `_coven_key_uploads` holds historical copies with no
-    `before_entry`. Before a first attempt, choose recipients from the latest
-    replay; a queued copy for a member outside that audience waits without
-    being sent or resealed. An attempted object always retries its fixed bytes.
-    Confirmation of those bytes retires the queue row. Before a first attempt,
-    a verified copy at another writer's path can satisfy the need and remove
-    the unattempted row. Failure reaches the caller and remains visible;
+    `before_entry`. Before reserving a copy, choose recipients from the latest
+    replay and skip a need already satisfied by an observed copy. Unmet sharing
+    needs have no copy number yet. Once reserved, the object always retries
+    its fixed bytes, even if another writer supplies the key or membership
+    changes. Confirmation retires its queue row; cancellation cannot make
+    a gap that hides later copies. Failure reaches the caller and remains visible;
     prerequisite copies must be confirmed before their entry is published;
   - the replay's result: `_coven_members` (every member a kept entry
     added, their public keys and role, and whether they were removed),
@@ -1581,7 +1607,7 @@ Carol's tablet:
     published. Once that entry is checked, reads derive “Recipes” from it;
     a conflicting setting fails opening rather than choosing another name.
   - Keys themselves are only ever in key custody (§11). Key selection uses
-    introductions in the received entries and the pass's sealed-copy listing
+    introductions in the received entries and the pass's new-copy observation
     (§11). There is no shared current-key field or local retired-key table;
     permanent sealed copies are the shared record of who can hold each key.
   - Removed members and removed or replaced devices stay. Their stored
@@ -1655,9 +1681,12 @@ Carol's tablet:
   - Ana has established H = day 10. Ben's entry stored on day 9 is final;
     Carol's entry stored exactly on day 10 is not. A later qualifying
     window establishing H = day 11 makes Carol's entry final too.
-- Establish T from storage before starting a complete store-log listing.
-  Read and judge every entry through T, including unknown devices' logs,
-  before advancing finality. A gap, unreadable entry or failed listing
+- Establish T from storage before listing the store-log device folders.
+  Then read each known writer from its next entry through a terminal miss,
+  including newly discovered writers from entry 1. Permanent gap-free logs
+  make these observations, together with retained entries, every entry
+  through T. Read and judge them before advancing finality.
+  A gap, unreadable entry or failed folder listing
   blocks that check and the cleanup that needs it (§19.1).
   - A provider-assigned stored time already observed is a lower bound on
     storage's current time. Reuse times from the pass's listings and
@@ -1671,8 +1700,8 @@ Carol's tablet:
     signed clock object, then read its complete publication time with status.
     This device is its only writer. Keep one object, replacing it only when
     time-dependent work is due; positions are never reposted for time.
-    The identity check precedes the replacement. The store-log listing that
-    uses this T starts after the status response. A failed replacement or
+    The identity check precedes the replacement. The folder listing and
+    next-number reads that use this T start after the status response. A failed replacement or
     status call supplies no new T and remains visible as pending work.
   - Ana's covered log waits for its thirtieth storage day. Her timer wakes
     sync, which replaces her clock object and reads its status: two logical
@@ -1821,9 +1850,13 @@ Carol's tablet:
 - A device is one install of the app, with its own device id, belonging to
   one member, who adds it to the store log ([§9](#9-members-and-roles)).
 - Before any upload, check that this installation still owns its counters.
-  - At sync start, list its write, store-log and snapshot paths completely.
-    Check signed snapshot and posted positions too: covered writes may
-    already have been deleted from the log.
+  - Use the pass's next-number reads of its own writes, store-log entries
+    and key copies, plus checked own posted positions and signed snapshot
+    coverage. On reopening or reconnecting, inspect the snapshot folders
+    needed for own-counter evidence before sending; writes or snapshots
+    from a rolled-back database may already have been deleted. Retain that
+    evidence for the running session. This is initialization work, not an
+    every-pass history listing; all occupied paths still require comparison.
   - A stored number beyond this database's last reserved number for that
     kind of object proves this is a stale copy. An outstanding local reservation is not stale
     merely because its upload succeeded before a crash.
@@ -1956,10 +1989,19 @@ Carol's tablet:
     make Ana accept a different key under K2's id.
   - Recipients still ignore copies whose opened key fails the introduction's
     hash. That check governs key acceptance, not third-party exposure.
-- Each store key is sealed to every member's public key, and the sealed
-  copies are kept in storage, at `<store>/keys/<writer>/store/<key>/<member>`.
-- Sealed circle keys live at `<store>/keys/<writer>/circles/<circle>/<key>/<member>`
-  ([§14.3](#143-circles)).
+    Retain the invalid-copy verdict and continue to the writer's next copy;
+    a later valid copy can supply the key.
+- Each store key is sealed to every member's public key. Store and circle
+  copies share the writer's log at `<store>/keys/<writer>/<n>`, numbered
+  from 1 with no publication gaps. Copies are never deleted.
+  - The clear prefix holds the public routing facts: audience, key id and
+    recipient (D9/D10). Key bytes and their hash remain encrypted. Each copy
+    is a small object, read whole by its discovery GET. Keep its routing
+    facts and bytes.
+  - Numbering belongs to the writer, across all audiences and recipients.
+    Reserve fixed bytes with the number before sending, and settle that
+    number before publishing the next. An obsolete reserved copy cannot
+    be dropped to make a gap; §11's exposure rule accounts for its recipient.
 - Concurrent removals change membership independently. Once both arrive,
   keys known to have reached either excluded member are retired for first
   attempts. A remaining member uses an existing usable replacement or makes
@@ -1972,24 +2014,24 @@ Carol's tablet:
 - Several keys for one audience may coexist. Each object names the one
   that sealed it; arrival of another key does not invalidate old objects.
 - Ana's phone and Ben's laptop can both seal K to Carol. They publish
-  `keys/ana-phone/store/K/carol` and `keys/ben-laptop/store/K/carol`;
+  `keys/ana-phone/17` and `keys/ben-laptop/6`, each naming K and Carol;
   neither replaces the other's randomized sealed bytes.
-- Each sync pass lists sealed store and circle key copies alongside the
-  store log, at the paths above. Complete both reads before selecting keys
-  for first attempts. A failed or incomplete listing blocks those attempts
-  and records the failure (§19.1); an older listing cannot stand in for it.
-  - A listed copy means its recipient may hold the key, whether or not the
+- Each sync pass GETs every known writer's new copies through a next-number
+  miss, alongside the store log. Complete both observations before selecting
+  keys for first attempts. A failed or incomplete read blocks those attempts
+  and records the failure (§19.1); an older miss cannot stand in for it.
+  - An observed copy means its recipient may hold the key, whether or not the
     recipient has downloaded it. Copies remain in storage for good.
   - A key with a copy for someone the current replay excludes from its
     audience is retired for first attempts. Keep it for reading and for
     identical attempted retries. An addition or removal that drops does not
     erase its copies; an introducing entry returning does not erase them either.
-  - Retirement is derived from this listing and replay, not remembered in
+  - Retirement is derived from all observed copies and replay, not remembered in
     a separate local table. A recipient returning to the audience is no
     longer excluded; other excluded recipients' copies still retire the key.
   - If no usable replacement is held, a current audience member's device
     acquires one or makes a fresh key, seals it to current members, then
-    publishes a rotation entry. Old exposed copies remain listed forever;
+    publishes a rotation entry. Old exposed copies remain known forever;
     their presence does not cause another rotation once a usable replacement
     is held. Only a current circle member makes its replacement key (§13).
   - Several devices may rotate at once. Their keys have distinct ids;
@@ -1999,22 +2041,24 @@ Carol's tablet:
   the newest usable key this device holds, ordered by its introducing
   entry's timestamp, then key id.
   - Usable means introduced by a received authorized entry, available in
-    custody, and with no copy in this pass's listing for an excluded member.
+    custody, and with no observed copy for an excluded member after this
+    pass has read each writer's new copies through its terminal miss.
   - If no usable key exists, rotate or wait for its sealed copy, recording
     the first unmet condition. Never use a known exposed key as a fallback.
 - Share every historical key with current members who lack it. A membership
   reversal does not revoke an authorized key introduction. Sharing adds a permanent sealed copy;
-  every device's next listing can observe it.
-- The guarantee uses the sending device's replay and listing from the start
+  every device's next-number reads can observe it.
+- The guarantee uses the sending device's replay and copy observation at the start
   of this pass. There are no per-write or per-upload membership or key-copy
   checks. First attempts use that pass's selection; tried writes keep their bytes.
   - E.g. Ben's tablet sees Ana's removal drop and shares key K with her.
-    Ben's phone sees the removal kept throughout. Its next sealed-copy
-    listing still finds K's copy for Ana: it retires K and rotates before
+    Ben's phone sees the removal kept throughout. Its next reads of the
+    tablet's copy log find K's copy for Ana: it retires K and rotates before
     first sending another store write.
-  - A copy made after the phone's listing is the residual window. The phone
-    may first-send with K during that pass while Ana can obtain the new copy.
-    Its next listing retires K if Ana is still excluded. This is accepted;
+  - A copy published after the phone's miss for that writer is the residual
+    window. The phone may first-send with K during that pass while Ana can
+    obtain the new copy.
+    Its next pass retires K if Ana is still excluded. This is accepted;
     no per-write check closes it.
   - Writes first sent before the sender learned of a removal also remain
     readable under their old keys while the recipient has storage access.
@@ -2029,7 +2073,7 @@ Carol's tablet:
 - Removal retires keys exposed to that member for first attempts. A remaining
   member's device publishes a rotation before using a replacement key.
   - First attempts made after learning the removal use a key eligible under
-    the pass's listing, subject to the residual window above.
+    the pass's copy observation, subject to the residual window above.
   - Devices keep the old keys, to read writes made before.
 - Each device keeps its member's key in the OS keychain.
 - Storage access, not keys, is what keeps a removed device out.
@@ -2131,7 +2175,8 @@ Carol's tablet:
   holding:
   - the store's id, name and location;
   - the invite's id, a one-time *invite secret*, the initial store key id
-    from the creation entry, and the inviting writer's device id;
+    from the creation entry, the inviting writer's device id, and that
+    writer's last published key-copy number when making the invite;
   - on S3, an access key the admin made for the new person in the
     provider's console and entered.
 - E.g. Ana adds Carol, on Google Drive:
@@ -2154,21 +2199,28 @@ Carol's tablet:
 - The invite only lets a device ask; Ana's approval is what lets Carol in.
 - Only the device that made the invite holds its secret, so only it shows
   and approves the invite's requests.
-- Carol polls exactly
-  `<store>/keys/<inviting writer>/store/<initial key>/<Carol's member id>`
-  with the single-object status call, under the shared backoff. The approving
-  device publishes that historical copy before the membership entry, even
-  if the store has since rotated. Once present, Carol reads and retains it.
+- Carol starts at the inviting writer's key-copy number plus one, GETting
+  new copies whole under the shared backoff. Their clear prefixes let her
+  skip other recipients and audiences without opening their boxes. She
+  retains her progress and stops each attempt at the next-number miss.
+  The approving device publishes her initial-key copy after the invite's
+  number and before the membership entry, even if the store has rotated.
   No polling iteration scans every device's entry 1 while she waits.
-  - Ana's invite names K1 and her phone. Ana rotates to K2 before approving
-    Carol; approval still publishes K1 at the promised path, then supplies
-    K2 and every other historical store key.
+  - Ana's invite names K1, her phone and copy 12. Copy 13 goes to Ben;
+    Carol reads its prefix and keeps looking from 14. Ana approves with
+    Carol's K1 copy at 14, then supplies K2 and every other historical key.
+  - That starting number is only for the approval wait. Once admitted,
+    Carol's ordinary bootstrap reads every writer's permanent copy log
+    from 1, reusing copies already retained. Copies before the invite still
+    determine exposure; the polling position cannot certify that history.
 - Carol's phone learns the outcome from storage:
   - her store key sealed to her, then the store log entry adding her:
     she's in;
   - her request deleted with no key sealed to her: declined or expired.
   - It reads the store log again after observing a deleted request: approval
-    may have happened after its preceding listing. Sealed keys without an
+    may have happened after its preceding observation. First refresh the
+    inviting writer's copy log through a miss after the deletion; the
+    approval copy may also have raced the earlier probe. Sealed keys without an
     effective membership entry keep it waiting; a dropped membership entry
     reaches the app with its replay reason.
 - Before sending, Carol's phone keeps its new member keys and exact request
@@ -2274,7 +2326,7 @@ Carol's tablet:
   bring that deletion notice back.
 - A removed member's old keys cannot read other members' writes first sent by a device
   that already knew of the removal, subject to §11's window for copies made
-  after its listing (§3). Earlier attempted writes keep their keys on retry;
+  after its copy observation (§3). Earlier attempted writes keep their keys on retry;
   provider revocation cuts off access to those objects.
 - A circle the removed member was alone in is deleted by the same entry:
   no one is left who could read it ([§14.7](#147-deleting-a-circle)).
@@ -2395,8 +2447,8 @@ Carol's tablet:
   ([§9](#9-members-and-roles)).
 - Each circle has its own key, sealed to each of its members' public keys,
   like the store key ([§11](#11-keys)).
-  - Its sealed copies live at `<store>/keys/<writer>/circles/<circle>/<key>/<member>`
-    ([§11](#11-keys)).
+  - Its sealed copies live at `<store>/keys/<writer>/<n>`, with the circle,
+    key id and recipient in the clear prefix ([§11](#11-keys)).
   - It is replaced whenever someone leaves the circle.
   - Someone joining a circle gets its earlier keys too, so they can read its
     history.
@@ -2567,6 +2619,47 @@ Carol's tablet:
     complete object's signature before applying anything from it (D9).
   - A snapshot *covers* a write when the write is within its positions:
     `<store>/snapshots/store/ana-phone/3` covers ana-phone's writes 1 to 40.
+- Snapshots are discovered by listing `<store>/snapshots/<audience>/`,
+  never by GETting the next snapshot number. Retention can delete snapshot
+  2 while leaving 3. List the audience's retained snapshots and check their
+  signed prefixes by range to choose the newest under the ordering below;
+  cached checked prefixes need no second read. Fetch a body only to load it.
+- A new device, or one away for 30 storage days or more, performs this
+  discovery for each readable audience before treating write misses as
+  no new work. Apply the newest usable snapshot only if its signed write
+  positions go past where that audience left off on some writer. Otherwise
+  keep the local state and continue from its next write numbers. The atomic
+  common-point loading and schema/reset rules below still apply.
+  - Ben left at Ana's write 8. On returning after 40 storage days, he lists
+    the store's snapshots and checks the newest prefix: it covers Ana 20.
+    He loads it, then asks for 21. If it covered no writer past his local
+    positions, he would keep his state and resume normal log reads.
+- Keep the storage time `S` certified by the last completed catch-up pass
+  with its applied positions. For this purpose, completion means discovery
+  reached each log's terminal miss, required reloads and received writes
+  committed, and the corresponding positions were confirmed posted. A
+  finished pass with unresolved history does not move this checkpoint.
+  A pending file or retention operation alone does not prevent it.
+  - On return, replace this device's clock object and read its storage time
+    `T`; away is `T - S`, never the difference between device wall clocks.
+    No saved checkpoint means new. At exactly 30 days use snapshot discovery.
+    A failed time observation cannot justify the recent-return rule.
+  - The identity check comes before that replacement (§10). On reopening,
+    use the read-only snapshot/positions evidence first; when away is not
+    yet known, conservatively inspect the readable snapshot folders too.
+    Reuse those observations after the clock result, without relisting.
+  - During a running session, a monotonic timer schedules the next clock
+    check before the known interval reaches 30 days. A suspended session
+    refreshes storage time on return. Local time schedules; storage time
+    decides. Each qualifying pass can reuse a storage sample known before
+    its discovery as `S`; keeping an older sample is conservative. An idle
+    pass neither rewrites its clock object nor commits an unchanged checkpoint.
+- Before 30 storage days since that checkpoint, an unrequired write's
+  next-number miss means nothing new: earlier work was already consumed,
+  and a write published since that pass cannot yet meet the 30-day deletion
+  alternative. Reader positions cannot release an unconsumed write either.
+  Missing history required by a known object remains a pending condition;
+  it never counts as a successful catch-up.
 - A device writes one for an audience once that audience's parts after
   its latest snapshot add up to more bytes than that snapshot, or than
   1 MiB while the audience has none.
@@ -2577,6 +2670,14 @@ Carol's tablet:
     the part lengths recorded when writes were authored or applied; neither
     decision rereads unchanged headers or decrypts snapshot rows
     ([One sync pass](sync-pass.md#what-survives-a-pass)).
+- Snapshot growth uses the latest checked local snapshot facts. Only when
+  growth would request a new snapshot, a reload needs one, or a retention
+  candidate becomes due, refresh the relevant audience's snapshot listing
+  and read previously unchecked signed prefixes. Re-evaluate growth or
+  deletion against that coverage; an idle pass does none of this discovery.
+  A wait with unchanged prerequisites uses the shared backoff rather than
+  listing again on every pass. Retention reads an uncatalogued candidate's
+  header at its exact write path; it never lists historical write objects.
 - Before uploading a snapshot, its writer opens the sealed temporary file
   through the snapshot reader: decrypt, verify both signatures, and parse
   and check every record.
@@ -2998,7 +3099,7 @@ Carol's tablet:
 - A stored file is deleted only when no retained row, loss, snapshot or
   log write refers to its fixed path. Local rows, waiting writes, upload
   queues and inputs retained for non-final entries protect it too.
-  - Check local protection first. If it protects every eligible listed
+  - Check local protection first. If it protects every eligible known
     file, no snapshot rows or log parts need reading for file retention.
   - Otherwise stream the necessary retained data into the database's
     reference checks, with complete object authentication before deletion.
@@ -3008,13 +3109,25 @@ Carol's tablet:
     again. Keep inspected ranges and any subsequently loaded body under the
     retained-input budget; checked references have no pass-end expiry.
   - Reconsider deletion when references, protected inputs, finality,
-    ownership or file presence change. Use the pass's history catalogs and
-    observe every file prefix this device may delete from on every pass.
-    A newly listed file triggers these checks even without a new row write.
-    §4.1 explains why a missing next number cannot replace this observation.
-  - Ana removes Ben while his last photo upload is still in flight. It lands
-    after her previous scan. The next complete scan of Ben's assigned file
-    prefix discovers it; retained references still decide whether it can go.
+    ownership or file presence change. Discover files from their fixed row
+    references, retained inputs and this device's upload queue; read or check
+    status at the exact path. There is no idle file listing.
+  - Under §13's storage cut-off assumption, the device responsible for a
+    removed device's cleanup lists `<store>/files/<device>/` once after
+    access is taken away. Cut-off must prevent in-flight sessions from
+    publishing later too. This complete listing finds orphan files whose
+    attaching rows did not survive; incomplete scans fail visibly and retry.
+    Keep the discovered paths and scan completion so later passes and reopen
+    continue the reference checks without listing again. If access is restored,
+    a later cut-off needs its own scan. Removal alone does not authorize a scan
+    to be treated as the last one while storage access remains unresolved.
+  - Ana removes Ben while his last photo upload is in flight. After his
+    access is cut off, she lists his file folder: the photo either landed
+    before cut-off and is included, or cannot land. Retained references and
+    finality still decide whether she can delete it.
+  - When deletion needs remote reference completeness, list the relevant
+    snapshot folders then and retain their checked coverage and references.
+    This is due retention work, not an idle scan of snapshots or files.
 - Its storage path and fixed row reference carry the uploader's device
   id, so ownership remains known after the last reference disappears.
 - If retained data belongs to an unreadable audience, lacks a key copy,
@@ -3462,8 +3575,8 @@ retry rule.
     rotate key   2           store, K2, key hash            coven
 
   storage
-    <store>/keys/carol-phone/store/K2/ana       uploaded
-    <store>/keys/carol-phone/store/K2/carol     uploaded
+    <store>/keys/carol-phone/17                uploaded: store, K2, Ana
+    <store>/keys/carol-phone/18                uploaded: store, K2, Carol
     <store>/store-log/carol-phone/9             not yet: the rotation
   ```
 
@@ -3510,8 +3623,8 @@ holds failures and rejected entries, without making either wait look completed.
     work waiting for the owner, a request, or an app action;
   - a dropped entry, including “landed too late” on its author's device,
     or a fingerprint disagreement.
-- E.g. Carol's tablet has Ben's write 9, which read Ana's write 4. Storage
-  currently lists only Ana's writes 1 to 3.
+- E.g. Carol's tablet has Ben's write 9, which read Ana's write 4. GETting
+  Ana's next write, 4, returns a miss.
   - Ana's next log position reports the missing object.
   - Ben's write reports that same object as its first prerequisite.
   - Carol keeps applying independent writes. Both records disappear when

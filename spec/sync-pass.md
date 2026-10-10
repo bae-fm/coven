@@ -2,15 +2,15 @@
 
 This is the request order for [§6](coven.md#6-syncing-writes) and
 [E5](api.md#e5-storage-and-sync). Its bounds are requirements in
-[§3.1](coven.md#31-io-bounds). The next-number discovery conflict remains in
-[§4.1](coven.md#41-open-decisions-for-io-bounds); all other bounds use the
-settled contract. A request below is made only when its stated condition holds.
+[§3.1](coven.md#31-io-bounds). Discovery reads each writer's next number;
+no pass lists pages of log history. A request below is made only when its
+stated condition holds.
 
 ## What survives a pass
 
-A listing supplies paths, encrypted sizes and storage publication times.
-The device keeps a local catalog of these observations. Within a pass,
-every consumer shares each complete listing; no consumer lists it again
+A read or listing supplies paths, encrypted sizes and storage publication
+times. The device keeps a local catalog of these observations. Within a pass,
+every consumer shares each completed observation; no consumer repeats it
 under its own name. A failed or incomplete listing establishes neither
 absence nor a complete view of storage. Keep the preceding committed catalog
 and report the failure. Explicitly observed objects can still be downloaded.
@@ -63,11 +63,25 @@ These local records survive reopening and have no pass-end expiry:
   Losing bytes is explicit eviction work, never ordinary
   pass cleanup. Durable refusals and file-protection uncertainty are not
   evicted merely to permit another attempt.
-- **Sealed-key presence:** observed copy paths remain known, since sealed
-  copies are not deleted. A presence observation and a successfully opened
-  member copy are different facts. Secrets stay in custody. A failed read
-  or absent copy is remembered within the pass and then probed only when
-  discovery or its backoff permits it; absence is not permanent.
+- **Log download positions:** one contiguous received position per writer
+  for entries, writes and key copies. Keep received bytes and checked facts
+  before advancing; an applied snapshot can supply covered write positions.
+  These are separate from applied positions: a retained object waiting on a
+  key is not downloaded again. A miss is remembered for this pass, then
+  retried on a later due observation; it is not a permanent end marker.
+- **Sealed-key presence:** retain each whole copy and its clear audience,
+  key id and recipient by writer and number. Copies are never deleted.
+  Observed presence and a successfully opened member copy are different
+  facts; secrets stay in custody. Key selection combines this permanent
+  evidence with each writer's newly read copies and current replay.
+- **Completed catch-up:** keep its qualifying storage time with its applied
+  positions (§15). A pass with unresolved history cannot refresh it. It
+  determines when return requires snapshot discovery; an unchanged idle
+  checkpoint causes no durable write.
+- **Removed-device file scans:** after confirmed storage cut-off, keep the
+  complete file-folder observation and its completion with the retention
+  candidates. A failed or partial scan records no completion. Reopening
+  retries unfinished work; a completed scan is not repeated on idle passes.
 
 The sync owner also holds the **decoded store log between passes**, matching
 the committed database revision. It decodes the saved log once on startup
@@ -113,7 +127,12 @@ still proceed; finality and age-based deletion wait for a qualifying scan.
 From saved entry times and covered-log times, compute the next instant at
 which §9 finality or §15's 30-day age test could change. Include the last late
 entry's window and the strict boundary for finality; equality at 30 days
-does not establish it. No pending time-dependent work means no time probe.
+does not establish it. Include §15's return interval: a new device has no
+checkpoint; a returning device compares a fresh clock-object storage time
+with the last completed catch-up's saved storage time. A resumed session
+refreshes time, and a running session's monotonic timer schedules its next
+check before the known interval reaches 30 days. No due time-dependent
+work means no time probe.
 
 If a monotonic timer says a threshold may be reached and the known `T`
 cannot decide it, replace `<store>/clock/<this device>` and read its status.
@@ -121,34 +140,49 @@ These are two logical requests; provider overhead is counted separately.
 A device clock only schedules a check; storage time decides it.
 A sample still before the threshold schedules another check with backoff.
 A probe that writes anything must first satisfy §10 with the catalog and
-identity steps below, then start a new complete store-log scan after its
-time observation. Count that extra scan; a probe cannot bypass identity.
+identity steps below, using read-only snapshot discovery conservatively
+when absence duration is not yet known. Then list device folders and read
+the next entry numbers after the time observation. Count these extra
+requests; a probe cannot bypass identity. A snapshot observation already
+made for this return serves recovery too, without another listing.
 No unchanged positions post supplies this observation.
 
 ### 2. Discover and read the store log
 
-List **`<store>/store-log/` completely**, across all devices and pages,
-including unknown devices, dropped entries and the history retained for
-finality. A listing used to establish finality begins after observing `T`.
-Compare with the catalog; read an entry only for a newly listed path or
-missing retained local bytes or checked record. Do not reread an already
-decoded entry.
+List the immediate **`<store>/store-log/` device folders**, following every
+folder page without entering their history. Union them with known writers
+and devices named by received registrations, including removed or replaced
+devices. §4 gives each provider's scoped operation, including CloudKit's
+query for permanent entry 1 records. Unknown writers start at entry 1.
+Include writers learned from arriving registrations before completing this
+observation; each needs its entry and copy reads too.
 
-List **`<store>/keys/` completely in this phase**, before opening entries
-that may need a key copy. Include every writer's store and circle copies;
-a key id and recipient select the candidate paths from this observation.
-A failed or incomplete listing records its failure and prevents first
-attempts needing a current key selection. Reuse this one listing in step 4.
+For every known writer, GET its next **store-log entry** and **key copy**.
+On a hit, fetch ahead in parallel up to the shared transfer limit; stop
+scheduling at the first miss. Retain completed reads, including requests
+already in flight, but never advance the contiguous download position past
+a miss or failed read. Charge every actual request. Do not reread decoded
+entries or copies. Store-log entries and key copies are never deleted, so
+a miss is an exact end observation at that instant.
 
-Read each needed entry as one stream. Its clear prefix names the exact
-store key. If custody lacks that key, read **that key's copy sealed to this
-member**, unless it is already cached or this pass already observed it
-absent, and only when that wait's retry is due. A copy can be needed before
-its introducing entry can be decrypted;
-opening it does not by itself authorize that entry or key for sealing.
-No search through every device's entry 1 is repeated on later passes.
+Each key-copy GET reads the whole small object. Its clear prefix supplies
+audience, key id and recipient; index these facts for key selection, sharing
+and exposure. Open only this member's boxes, reusing their retained bytes.
+An invalid opened key is ignored without hiding subsequent copies: retain
+its verdict and continue discovery (§11).
+Read an entry as one stream; its clear prefix names the store key. A copy
+may be needed before its introduction can be decrypted. Opening a candidate
+is tentative until §11's introduction checks, never authority to seal data.
+If it has not arrived, retain the entry and wait on writer-copy discovery
+under shared backoff. No keys-folder listing or separate per-recipient
+status probe is required.
 
-Judge landing times against the entire completed listing, then check
+For finality, the folder listing starts after observing `T`, and each known
+writer's entry discovery reaches its next-number miss after that listing.
+Together with retained entries, this supplies every entry through `T`.
+Discovery after `T` can include later entries too. A writer first publishing
+after the folder observation cannot have an entry stored before `T`.
+Judge landing times against this complete received history, then check
 author views and apply causally ready entries in batches. One batch needs
 one replay of the received set and one atomic commit, not one full replay and
 transaction per received entry. Author-view checks still use exactly each
@@ -163,32 +197,36 @@ against an older replay. Fixed attempted uploads retain their retry rules.
 Advance the single finality horizon only from all entries through `T`
 and the exact §9 window. Queries derive finality by comparing stored time
 strictly with that horizon; an unchanged horizon causes no update.
-A storage time learned from this listing or any later request can be used by a later scan, never retroactively as the time before this one.
+A storage time learned during discovery or any later request can be used by
+a later observation, never retroactively as the time before this one.
 Reading this device's removal or replacement stops sends as §10 requires.
 
-### 3. Collect the other shared listings and check identity
+### 3. Observe positions, return coverage and identity
 
-In this order, list once each:
+List **`<store>/positions/` once**, including this device's post. Agreement,
+retention and reports share it. Positions never supply log discovery bounds:
+uploading and posting are separate requests, so a crash between them must
+not hide an uploaded object.
 
-1. **`<store>/devices/`**: complete write paths for every device, including
-   unknown and removed devices. Discovery, gaps, uploads, snapshot growth
-   and retention all consume this same result.
-2. **`<store>/snapshots/`**: all audiences and authors, not one scan per
-   readable audience. Local filtering chooses readable snapshots and the
-   prefix evidence required for this device's identity and boundaries.
-   Bodies in unreadable audiences are not decrypted.
-3. **`<store>/positions/`**: all posted device objects, including this
-   device. Agreement, retention and received reports share this observation.
+For a new device or one away at least 30 storage days, list each readable
+**`<store>/snapshots/<audience>/`** folder. Check previously unchecked signed
+prefixes by range to select the newest usable snapshot. Load it only if it
+covers past that audience's local position on some writer; otherwise keep
+the existing state and use ordinary next-number write reads. Apply §15's
+common-point loading rules, not each audience independently. Snapshots are
+never found by next number: retention can remove 2 while 3 remains.
 
-Read previously unchecked snapshot prefixes needed for selection, coverage
-or identity, and this device's positions only if their observed identity
-is new or the local checked record is missing. Reuse authored or previously
-verified evidence. A matching confirmed own post needs no GET. Header and
-prefix inspection uses retained ranges; load a body only when
-a consumer needs it, as specified below.
+On reopening or reconnecting, these read-only observations also supply own
+counter evidence for §10, including snapshots in any audience needed to
+check this id. Read this device's positions only if their observed identity
+is new or their checked local record is missing. A matching confirmed own
+post needs no GET. Reuse all authored or previously verified evidence.
+An uninterrupted warm pass has no snapshot listing for identity.
 
-Check §10 from these complete listings, the already received store log,
-checked own positions/snapshot evidence and the device-only custody id.
+Read this device's next write number as part of its identity check; retain
+any hit for step 6. Combine it with the received store log, key-copy numbers,
+checked own positions/snapshot evidence and device-only custody under §10.
+
 This is the check for every send in this pass. A failed check sends nothing,
 including keys, files and positions. An out-of-loop sender serializes with
 this work and uses a current completed check plus the occupied-path rule;
@@ -197,20 +235,18 @@ that invalidates it. Its required refreshes count as that call's requests.
 
 ### 4. Observe keys and peers
 
-Use the complete keys listing from step 2 on every pass, even when all
-entries are final and every current member already has a copy. A delayed
-publication can expose a key without another entry arriving. No stale
-catalog substitutes for this pass's observation; a provider cooldown delays
-the pass itself.
+Use step 2's new-copy observations on every pass, even when all entries
+are final and every current member already has a copy. A delayed publication
+can expose a key without another entry arriving. No stale catalog substitutes
+for this pass's observation; a provider cooldown delays the pass itself.
 
-Use the listing for sharing and exposure knowledge; do not GET every
-recipient's copy. Read only named copies this member needs and lacks,
-sharing the bytes already acquired in step 2. This device's successful
-creates also establish presence. Reads returning NotFound stay waits; a
-later listing showing presence permits a due attempt, not a tight loop.
-Decide recipients and usable keys from the current received log before
-first attempts. Own key publication in this pass updates the catalog and
-presence facts without relisting all keys after each entry.
+Use the retained clear prefixes and newly acquired copies for sharing and
+exposure; opening this member's copies uses bytes already read in step 2.
+This device's successful creates also establish presence. An expected copy
+not yet observed stays a wait; a later due read can supply it, without a
+separate probe for every possible recipient. Decide recipients and usable
+keys from the current received log before first attempts. Own publication
+updates the catalog without restarting discovery after each entry.
 
 Read each peer's positions only for new or changed listed identity, or a
 missing local checked record. Verify once; use the decoded value for
@@ -240,8 +276,11 @@ Her phase 2 publishes a rotation; Ana's device takes back provider access.
 Carol's phase 3 seals new data with that rotation. Ben's unresolved S3 key,
 if any, remains in the pending list for the admin.
 
-Create each due historical copy queued independently of an entry only for
-a currently eligible recipient, using its retained sealed bytes (§11).
+Reserve each due historical copy independently of an entry only for a
+currently eligible recipient whose need is not already satisfied (§11).
+The number and fixed sealed bytes commit as an irrevocable attempt. Publish
+reserved copies in number order even if their initiating need changes;
+discarding a numbered row would hide later copies behind a gap.
 An occupied own copy requires complete byte equality (§10); absence checks come
 from the catalog, not one GET per possible recipient. New rotations and
 entry prerequisites are published by the ordered work in step 5.
@@ -297,17 +336,20 @@ its queue row atomically; it also updates this pass's catalog. Resume any
 operation whose own-upload prerequisite this satisfies, using step 5's
 request order, without beginning a second full pass.
 
-For downloads, select paths not yet consumed for the audiences this device
-must load. A listed path with no local checked input is a read trigger;
-an already cached wait is not. Use the header to order causes and identify
-parts. Fetch known needed objects ahead in parallel within the configured
-transfer limit, retaining their results; reception order never bypasses
-causal or per-log application gates. Stream each uncached object once and
-check chunks as below. Apply each
+For downloads, GET each known device's next write number, reusing this
+device's identity read. Before 30 storage days since the last completed
+catch-up, a miss means no new writes at that observation (§15). A new or
+long-absent device first uses step 3's snapshot discovery and reload.
+A known required missing write is a prerequisite, not a terminal idle miss.
+On a hit, fetch ahead within the configured transfer limit and stop at the
+first miss. Retain completed reads; reception order never bypasses causal
+or per-log application gates. Use retained headers to order causes and
+identify parts. An already cached wait is not a download trigger.
+Stream each uncached object once and check chunks as below. Apply each
 write atomically only after all checks, with its header facts and file
 references. Skipped audiences, resets and schema exclusions keep their
-existing rules. A missing uncovered path is a blocker; do not repeatedly
-probe it when a complete listing already established its absence.
+existing rules. A missing required uncovered path is a blocker; retry only
+when its shared backoff permits, reusing this pass's absence observation.
 
 ### 7. Transfer files
 
@@ -333,8 +375,13 @@ This pass does not replace those requirements with an unchecked shortcut.
 
 ### 8. Write snapshots and retain history
 
-Use cached signed prefixes and recorded write-part lengths to decide
-growth. Create an operation only if an audience actually needs a snapshot.
+Use cached signed prefixes and recorded write-part lengths to check
+growth. When growth would request a snapshot or a retention candidate is
+due, list only its relevant snapshot audience folders, sharing any discovery
+already performed for a reload. Read unchecked signed prefixes by range,
+then re-evaluate growth or coverage. A wait with unchanged prerequisites
+backs off; an idle pass performs no snapshot discovery. Create an operation
+only if an audience actually needs a snapshot.
 Capture it, verify its sealed bytes locally as §15 requires, upload, and
 check the stored checksum, or fetch the stored bytes once if the provider
 has no complete-object checksum. That confirmation is shared with any
@@ -350,13 +397,19 @@ has no operation row; eligibility is derived again from the committed facts.
 Failure retains protection and its `Retention { path }` record.
 
 Consider files when a row/loss/protected-input change, history deletion,
-finality change, upload completion, ownership change or newly discovered
-file can affect their retention. On every pass, list
-**`<store>/files/<device>/`** for this device and each removed device it is
-authorized to delete for. Reuse that complete observation for retention.
-Even with no changed references, it must discover a delayed upload. Count
-every page; §4.1 leaves next-number discovery out because deletion can hide
-later objects.
+finality change, upload completion or ownership change can affect retention.
+Find files from fixed row references, retained inputs and the upload queue,
+using reads or status at exact paths. Never list files on an idle pass.
+
+Once §13's storage cut-off prevents further publication by a removed device,
+the device responsible for its cleanup lists **`<store>/files/<device>/`
+once**, across all pages, to discover orphans. This includes settling the
+ability of in-flight sessions to publish. Persist the paths and completed
+scan; a failed scan stays pending and retries. Retained references and
+finality still protect every candidate. If replay restores access, a later
+cut-off requires a new scan. An unresolved access request is not cut-off.
+When reference completeness needs remote snapshot discovery, list those
+audience folders for this due retention work and retain the checked facts.
 
 Use the durable reference index, checking local protection first. Read a
 retained object's body only if reference completeness is missing and the
@@ -382,6 +435,13 @@ No heartbeat, idle timestamp, unchanged refusal or time observation causes
 a replacement. Positions advance only over committed, fully realized work;
 pending changes can travel with the preceding positions (§6).
 
+If every discovered write and required reload is fully realized and its
+positions confirmed, retain the qualifying storage time from before this
+catch-up as the return checkpoint (§15). Keep the preceding checkpoint if
+history is still pending. `Synced` can still describe a finished pass with
+pending work; it does not by itself certify this checkpoint. An unchanged
+idle pass does not update a database timestamp.
+
 Publish the completion status in memory. Upload marking, queue removal,
 cache publication, received reports and this pass's own operation commits
 do not schedule an immediate full pass. If an app write or explicit command
@@ -400,7 +460,7 @@ parts. Check the final signature and complete framing before applying a
 write or snapshot. A snapshot's separately signed prefix can be used only
 after its own check. Readers share retained bytes and checked records.
 For any object naming a missing key, reuse the pass's acquired copies or
-request that exact member copy on its due retry, as in step 2. A later
+wait for its due new-copy discovery, as in step 2. A later
 consumer never unlocks custody or downloads the same copy again.
 
 If an earlier chunk fails, retain the failure and drain the same stream if
@@ -439,34 +499,49 @@ check downloads that write again.
 
 ## Counting a pass
 
-Let `L_p(x)` be all native requests needed for one complete scoped listing
-of `x` on provider `p`, including pages and required folder traversal.
-Let `U` contain this device and every removed device whose files it may
-delete. For a warm idle pass with usable credentials:
+Let `N` count every known device, this one and removed/replaced devices
+included. Let `L_p(x)` count the native pages for one scoped listing on
+provider `p`. Folder ids and retained observations are already available
+in a warm idle pass with usable credentials:
 
 ```
-D_p = L_p(store-log/) + L_p(devices/) + L_p(snapshots/)
-    + L_p(positions/) + L_p(keys/) + sum(d in U, L_p(files/d/))
+D_p = L_p(store-log device folders) + L_p(positions/) + 3 * N
 R_idle,p = D_p
 ```
 
-This formula applies to S3, Google Drive, Dropbox, OneDrive and CloudKit.
-S3 counts prefix pages. Drive and OneDrive also count every folder query
-needed for their scoped traversal. Dropbox counts recursive folder pages;
-CloudKit counts native query pages. No provider has a history-independent
-constant under complete discovery. There are zero idle body reads or writes.
+The three misses per device are its next store-log entry, write and key
+copy. A missing folder also establishes the miss; it needs no body request.
+Each folder listing enumerates devices, never log contents. Positions hold
+one object per device. If each listing fits one page, `R_idle = 2 + 3 * N`
+on S3, Google Drive, Dropbox, OneDrive and CloudKit. There are no idle body
+bytes, publications, snapshot queries or file queries. Additional pages
+scale with devices, not with historical objects or attached files.
 
-**Ben receives one note.** Each base prefix and his own file prefix fits
-one S3 page; he owns no removed-device cleanup. The idle pass is **six LIST
-requests**. One new readable note, with no extra maintenance, adds one body
-GET and one changed-positions PUT: **eight requests**. A second files page
-makes those seven and nine. Other providers use their measured `D_p`, plus
-their native read and publication overhead.
+An S3 GET, Dropbox download, OneDrive path read or CloudKit record fetch
+establishes an absent next object in one request. Drive needs a
+[parent/name query](https://developers.google.com/workspace/drive/api/guides/search-files)
+when the file id is unknown. An empty complete query is that one miss;
+a hit adds a [download by file id](https://developers.google.com/workspace/drive/api/reference/rest/v3/files/get).
+Cache the id and charge this hit's lookup to `M`, its body to `O`.
+All query continuation pages, folder lookups, redirects and native asset
+reads count when required. Initialization and eviction have their own
+counts; an incomplete Drive search is a failure, never an idle miss.
 
-A due clock observation adds a replacement and a status call, including
-any native overhead. Open invites add their due request checks. A new file
-or snapshot, retention deletion, permission call, lookup, redirect or retry
-is charged to its separate §3.1 term; none is hidden behind 'one arrival'.
+**Ben receives one note.** Household has Ana's phone, Ben's laptop and
+Carol's tablet. Each discovery listing fits one S3 page. An idle pass uses
+**two LISTs and nine GET misses: 11 requests**, regardless of their history.
+With a transfer limit of one, one new readable note and no other due work
+adds its GET and one changed-positions PUT: **13 requests**. Fetch-ahead
+with a higher limit may leave extra probes in flight after the first miss;
+charge those requests too. A second positions page makes these 12 and 14.
+
+A due clock observation adds a replacement and status call, plus any
+identity refresh and subsequent discovery needed to use that time.
+Open invites add their due request checks. Snapshot recovery or due retention
+adds only its required audience listings and prefix/body reads. A new file,
+snapshot, deletion, permission call, lookup, redirect or retry is charged to
+its separate §3.1 term; none is hidden behind 'one arrival'.
+
 ## Waiting without repeated work
 
 The operation worker wakes for a command, a committed prerequisite change,
@@ -488,16 +563,27 @@ to a monotonic deadline, so a skewed device clock cannot shorten it. A
 missing usable time basis is reported, not treated as permission to retry
 immediately. An app retry can override ordinary backoff, never this cooldown.
 
-A joiner keeps its encrypted request, discovered metadata, downloaded
-entries and negative observations across polling iterations. It does not
-run a complete store sync on every wait. The invite supplies the initial
-key and inviting writer, so each due approval probe uses status on one exact
-key-copy path. Read a present copy once and use cached bytes thereafter.
-Also use status for the request's continued presence: key absence alone
-cannot report a decline. An absent-key polling attempt costs two logical
-status calls, one for the copy and one for the request, plus provider lookups. Observing
-request deletion requires §12.2's fresh membership/key check before deciding
-the outcome. A keys-only result cannot admit a member without replay.
+A joiner keeps its encrypted request, writer-copy download position,
+downloaded copies and entries across polling iterations. It does not run a
+complete store sync on every wait. The invite names the initial key, inviting
+writer and last published key-copy number at invite time. Each due attempt
+GETs the next number, reading whole copies and inspecting their clear prefixes
+until its own initial-key copy appears or a miss ends the attempt. Hits can
+fetch ahead within the transfer limit, without advancing across a gap.
+Retain other recipients' routing facts and every completed copy so reopening
+does not start again at the invite's number.
+After admission, bootstrap obtains every writer's copy history from 1,
+reusing this retained tail. The invite's cursor cannot stand in for the
+earlier exposure evidence needed for ordinary key selection.
+
+Also use status for the request's continued presence: absence of the key
+alone cannot report a decline. A due poll with no new copy costs one logical
+next-copy miss and one request-status call; copies that arrived add their
+reads, with provider lookup overhead counted separately. After observing
+request deletion, refresh the inviting writer's copies through a miss and
+check membership as §12.2 requires before deciding the outcome. A copy may
+have arrived between the earlier miss and deletion. Key bytes alone cannot
+admit a member without replay.
 
 **Ana's open invite.** While Carol has not sent her request, Ana's device
 backs off the shared request check. Once it arrives, the checked request

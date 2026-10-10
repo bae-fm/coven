@@ -211,7 +211,7 @@ impl ByteRange {
     pub fn is_empty(self) -> bool;
 }
 
-/// A complete object returned by CloudKit listing or status (§4).
+/// Metadata of a complete object returned by CloudKit read, listing or status (§4).
 pub struct StoredObject {
     /// Validated path relative to the store's location.
     pub path: ObjectPath,
@@ -229,6 +229,9 @@ pub struct StoredObject {
 pub struct StorageStream { /* private fields */ }
 
 impl StorageStream {
+    /// Metadata of the complete published object accompanying this logical read,
+    /// including its storage time (§9). Any native lookup is charged under §3.1.
+    pub fn metadata(&self) -> &StoredObject;
     /// The next bounded buffer, EOF, or the original typed storage failure.
     /// A native asset request is charged separately from this logical stream.
     pub async fn next(&mut self) -> Result<Option<Vec<u8>>, StorageError>;
@@ -272,6 +275,10 @@ pub trait CloudKitOps: Send + Sync {
     /// Lists complete objects with encrypted size, revision and server publication time,
     /// following every native query cursor; pending assets are not listed.
     async fn list(&self, location: &StorageConfig, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError>;
+    /// Lists store-log writers without enumerating history (§4). Query indexed
+    /// path components for this store's entry 1 records, one per writer;
+    /// these records are never deleted. Follow all native query pages.
+    async fn list_store_log_devices(&self, location: &StorageConfig, store: StoreId) -> Result<Vec<DeviceId>, StorageError>;
     /// Deletes an object and its parts; an already absent object succeeds (§18).
     async fn delete(&self, location: &StorageConfig, path: &ObjectPath) -> Result<(), StorageError>;
     /// Saves read/write CKShare participation and returns its native share URL.
@@ -756,7 +763,8 @@ impl CovenBuilder {
     /// How many file uploads run at once. Defaults to one.
     pub fn max_concurrent_uploads(self, n: NonZeroUsize) -> Self;
 
-    /// How many file downloads a pin runs at once (E8). Defaults to one.
+    /// How many downloads run at once, including log fetch-ahead and file
+    /// ranges (E5, E8). Defaults to one.
     pub fn max_concurrent_downloads(self, n: NonZeroUsize) -> Self;
 
     /// Where this device keeps the store keys: the OS keychain by default, a
@@ -1406,14 +1414,20 @@ while let Ok(values) = lost.next().await {
   active pass first.
   - [One sync pass](sync-pass.md) specifies every listing, read trigger,
     send and cache lifetime in order; [§3.1](coven.md#31-io-bounds) states
-    the request and local-work bounds. Provider-dependent choices remain
-    explicit under [§4.1](coven.md#41-open-decisions-for-io-bounds).
-  - Before any upload, the pass uses its complete catalogs, checked own
+    the request and local-work bounds. List only store-log device folders
+    and positions on an idle pass. GET each known device's next store-log,
+    write and key-copy number; fetch ahead on a hit within the transfer limit,
+    stopping at the first miss. No pass lists pages of log history.
+  - New or long-absent devices list snapshots by audience (§15); snapshots
+    never use next-number discovery. The clock object's storage time and
+    the last completed catch-up's storage time measure absence. Due retention
+    can refresh snapshot coverage; idle passes do not list snapshots or files.
+  - Before any upload, the pass uses its completed observations, checked own
     positions and snapshots, received store log and device custody to check
     identity, counters, removal and replacement (§10). Other senders use
     the same serialized check. They do not make independent duplicate scans.
   - The pass borrows the keys unlocked at open for the handle's session.
-    Its listings and retained checked bytes serve operations, reloads,
+    Its observations and retained checked bytes serve operations, reloads,
     writes, file transfers, snapshots, retention and agreement together.
   - Own positions are posted only when their complete publishable contents
     change, or the post is absent. Upload completion creates no app write.
@@ -1521,11 +1535,11 @@ impl StorageConfig {
     pub fn validate(&self) -> Result<(), StorageError>;
 }
 
-/// Limits for concurrent file transfers (E1, E5).
+/// Limits for concurrent transfers (E1, E5).
 pub struct TransferLimits {
     /// Maximum file uploads running at once.
     pub uploads: NonZeroUsize,
-    /// Maximum file downloads a pin runs at once.
+    /// Maximum concurrent downloads, shared by log fetch-ahead and file reads.
     pub downloads: NonZeroUsize,
 }
 
@@ -2605,7 +2619,8 @@ pub struct CodeInfo {
 pub enum CodeKind {
     /// Holds the person's member keys, location and S3 key where needed.
     Restore,
-    /// Holds an invite id, secret, initial key id and inviting writer; approval is required.
+    /// Holds an invite id, secret, initial key id, inviting writer and its
+    /// key-copy number at invite time; approval is required (§12.2).
     Invite,
 }
 

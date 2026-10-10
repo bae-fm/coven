@@ -128,18 +128,23 @@ are outside this variant. Their outgoing sends still use the shared gate.
 
 ## Identity checks and reset
 
-`checkIdentity` models the checks §10 actually lists: non-backed-up custody,
-complete object listings, authenticated snapshot and posted coverage, replacement,
-and removal. `send_covers_all_evidence` proves that a successful check has no
+`checkIdentity` models the identity evidence supplied to §10: non-backed-up
+custody, observed counters, authenticated snapshot and posted coverage,
+replacement and removal. Its `Evidence.listed` input represents complete
+counter evidence; the model does not execute provider discovery.
+`send_covers_all_evidence` proves that a successful check has no
 observed counter beyond the local reservations, from any of those sources.
 The examples include a deleted log whose snapshot or posted positions still
 expose the rollback. A reserved upload already present in storage is allowed.
 
 `sends_require_check`, `failed_scan_sends_nothing` and the identity gate's
 no-send theorem cover writes, entries, snapshots, files, key copies
-and positions. The caller supplies a completed scan or its failure, never a
-successful partial listing. Proving that a provider adapter performs that
-complete scan is outside this package.
+and positions. The caller supplies a completed observation or its failure,
+never a successful partial scan. §6 and §15 obtain evidence through numbered
+log reads, positions and conditional snapshot discovery. Establishing that
+these requests supply the model's complete evidence, including after log
+deletion, is an [IO verification obligation](io.md#discovery-obligations).
+The model has no key-copy counter and does not prove that added check.
 
 `Identity` also contains a separate model with recorded replacement ends.
 Its `ends_*`, `combined_end_keeps_completed` and `beyond_end_waits` results

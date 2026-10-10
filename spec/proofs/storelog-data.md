@@ -26,14 +26,17 @@ attaches K to the removal instead.
 
 ## Results and their assumptions
 
-**Revocation is proved with the stated listing window.**
-[§11](../coven.md#11-keys) requires each pass to list sealed copies alongside
-the store log. `KeySelection.revocation_between_listings` proves that a key
+**Revocation is proved with the stated observation window.**
+[§11](../coven.md#11-keys) requires each pass to read every known writer's new
+copies through a next-number miss alongside the store log. Retained permanent
+copies and these reads supply the model's complete copy observation.
+`KeySelection.revocation_between_listings` proves that a key
 selected for a first attempt has no copy for an excluded member in storage,
-provided no such copy appears after that listing. The theorem names this
+provided no such copy appears after that observation. The theorem names this
 residual window as `noLaterCopy`; it assumes neither local memory of a dropped
-entry nor a separate retirement table. Failed or incomplete listings produce
-no pass (`listing_failure_blocks`).
+entry nor a separate retirement table. Failed or incomplete observations
+produce no pass (`listing_failure_blocks`). The theorem names use “listing”
+for this supplied set; they do not prove the numbered discovery algorithm.
 
 Ana and Ben are admins; Carol is a member. Three concurrent entries, in
 stamp order, demote Ben, promote Carol, and let Ben remove Ana. Ben's removal
@@ -43,13 +46,14 @@ shares K with the restored Ana, as §11 requires. Carol's promotion then arrives
 and the removal returns: Carol can remain admin without Ana.
 
 Ben's phone receives the removal, promotion, then demotion, keeping the removal
-throughout. A complete listing finds Ana's copy anyway, and the phone retires K
-for first attempts (`listing_prevents_reuse`).
+throughout. Reading the tablet's new copies finds Ana's copy anyway, and
+the phone retires K for first attempts (`listing_prevents_reuse`).
 
 **Revocation without the window hypothesis fails.** Move that one share to
-after the phone's listing: it selects K during the pass, while Ana can obtain
-the new copy. `residual_window_counterexample` and the following Lean `example`
-check this history, including the next listing refusing K.
+after the phone's miss for that writer: it selects K during the pass, while
+Ana can obtain the new copy. `residual_window_counterexample` and the
+following Lean `example` check this history, including the next observation
+refusing K.
 `sharing_history` checks both causal orders, the intermediate drop, the allowed
 share, and the removal's return. `storage_history_valid` checks online first
 attempts and storage landings. After setup the witness has three concurrent
@@ -84,7 +88,7 @@ same effect function, including the finishing projection.
 
 **Key selection is proved against storage evidence.**
 `first_attempt_safe` requires current membership, an authorized received
-introduction, custody and no listed copy for an excluded member.
+introduction, custody and no observed copy for an excluded member.
 `listed_exposure_retires` and `exposure_persists_while_excluded` make permanent
 copies disqualify the key for as long as their recipients remain excluded.
 A recipient returning no longer disqualifies that key; there is no remembered
@@ -160,7 +164,7 @@ replay inputs both protect file references; unreadable data prevents deletion.
 Storage age can satisfy the posted-position alternative without an absent
 reader's acknowledgement.
 
-The model supplies complete storage metadata as an input; provider listing and
+The model supplies complete storage metadata as an input; numbered discovery and
 authentication are outside the proof. Dependency expressions must name every
 entry that can affect an input. Their extraction from arbitrary SQL is outside
 the model. The theorem applies to the shared current replay, including
@@ -205,10 +209,10 @@ The current spec resolves or narrows the historical witnesses as follows:
 - **Snapshots under historical keys:** §9 and §11 retain authorized introduced
   keys for reading, independently of later membership replay. The executable
   dropped-removal-key witness uses its own removal representation.
-- **Re-kept keys and historical disclosures:** the sealed-copy listing exposes
+- **Re-kept keys and historical disclosures:** the sealed-copy observation exposes
   earlier disclosures even to devices that never saw the introducing entry
-  drop. Copies after that listing remain the explicit residual window.
-  Different custody or listing times can still produce different key choices.
+  drop. Copies published after that writer's miss remain the residual window.
+  Different custody or observation times can still produce different key choices.
 - **Provider revocation and stale requests:** intended access follows replay
   both ways; serialized requests cover the single-device ordering failure.
   Actual grants during a pending request and irreversible S3 console deletion
@@ -232,8 +236,8 @@ The current spec resolves or narrows the historical witnesses as follows:
 
 ## Readings and limits
 
-“Usable” combines device custody with a complete storage listing and current
-replay. A listing is a captured observation, not a claim that storage cannot
+“Usable” combines device custody with complete copy observations and current
+replay. Each writer's miss bounds that observation; storage can still
 change afterward. Historical-key sharing follows the sharing device's current
 audience. §3 excludes a departing author's own pre-removal writes; this model's
 revocation witness concerns Ben's new writes, not that exception.

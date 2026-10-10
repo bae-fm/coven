@@ -358,6 +358,9 @@
     replacement time, observed after a changed post, can supply T for §9's
     subsequent store-log check. Unchanged posts are not replaced to observe
     time; a quiet store instead replaces its clock object (§9).
+  - Positions are not a log discovery index. A writer can crash after
+    uploading an object and before posting; readers GET the next log number
+    regardless of what any positions object says (§6).
   - Entry drop reasons remain local: each device computes “landed too late”
     from D6 and storage metadata, including for its own entries.
 - A report's subject has one of these tags:
@@ -411,6 +414,8 @@
 - A clock observation (kind 12) contains `device:DeviceId`, matching its
   path. It asserts no device time. Its sealed object's provider-assigned
   publication time supplies T only to a subsequent complete store-log scan.
+  On return it also measures storage time since the last completed pass's
+  saved storage time, for §15's snapshot-discovery rule.
 
 - A join request (kind 9):
   `invite:uuid | keys:MemberKeys | device_name:name`.
@@ -431,6 +436,20 @@
   | 35 | Posted positions | `key:uuid` |
   | 36 | Join request | nothing |
   | 39 | Clock observation | `key:uuid` |
+
+- A sealed key copy uses the anonymous box framing of D11 instead of
+  chunks and an author signature:
+
+  ```
+  kind:u8 (37) | version:u16 | audience:Audience | key:uuid | member:MemberId |
+  ephemeral:32 bytes | nonce:24 bytes | ciphertext | tag:16 bytes
+  ```
+
+  The clear prefix is `kind | version | audience | key | member`. Discovery
+  reads the whole copy at `keys/<writer>/<n>`; routing, sharing and exposure
+  use that prefix, including when the reader is not the recipient. Audience,
+  key id and recipient are public routing facts; the key and its hash are
+  not exposed. D11 binds this prefix into the box's authentication.
 
 - Every store-log entry has the same 19-byte prefix including kind and
   version. The create-store frame supplies the first admin's signing key;
@@ -532,13 +551,17 @@
 | `<store>/snapshots/<audience>/<device>/<n>` | A device's snapshot `n` of an audience: `store`, or a circle's id |
 | `<store>/clock/<device>` | A signed, sealed clock observation, replaced only for a due storage-time check |
 | `<store>/positions/<device>` | A device's posted positions and pending records, replaced as either changes |
-| `<store>/keys/<writer>/store/<key>/<member>` | A store key sealed to a member |
-| `<store>/keys/<writer>/circles/<circle>/<key>/<member>` | A circle key sealed to a member |
+| `<store>/keys/<writer>/<n>` | A sealed store or circle key copy; audience, key and recipient are in its clear prefix |
 | `<store>/files/<device>/<file>` | An uploaded file |
 | `<store>/join-requests/<invite>` | A join request |
 
 - Device and key-copy writer ids and `n` are decimal, with no leading zeros;
   `n` is at least 1. Each sealed-copy path belongs to its named writer.
+- Writes, store-log entries and key copies each have their own gap-free
+  publication sequence per writer, starting at 1. Key copies use one
+  sequence across audiences and recipients. Store-log entries and key
+  copies are never deleted. Snapshot numbers identify snapshots but are
+  never discovery cursors; list their audience folder (§15).
 - Store, circle, key, invite and file ids are lowercase hyphenated UUIDs.
   A member is its public key in lowercase hex.
 - A path is used exactly as written here, with no other spelling, and is
@@ -584,21 +607,19 @@
   their originally sealed bytes.
 - An invite's secret derives its join request's key with
   `coven/join-request/v1`.
-- A sealed key at `<store>/keys/…` is:
-
-  ```
-  kind:u8 (37) | version:u16 | ephemeral:32 bytes | nonce:24 bytes | ciphertext | tag:16 bytes
-  ```
-
+- A sealed key at `<store>/keys/<writer>/<n>` has D9's clear prefix and box:
   - The shared secret is X25519 of a fresh ephemeral key and the member's
     sealing key; a contribution of all zeros is refused.
   - Its key is HKDF-SHA256 of the shared secret with the context of
-    `coven/sealed-box/v1`, `store` or `circle`, the path, the ephemeral key
-    and the member's sealing key; that context is also the associated data.
+    `coven/sealed-box/v1`, `store` or `circle`, the path, the exact D9
+    clear prefix, the ephemeral key and the member's sealing key, in that
+    order; that context is also the associated data.
   - The plaintext is `key:uuid | key bytes:32` for a store key, and
     `circle:uuid | key:uuid | key bytes:32` for a circle key. The recipient
-    checks SHA-256 of those 32 bytes against the authorized D6 introduction;
-    a mismatch is invalid, not another value under that key id.
+    must match the prefix's member and check the opened audience and key id
+    against its prefix. It checks SHA-256 of the 32 key bytes against the
+    authorized D6 introduction; a mismatch is invalid, not another value
+    under that key id.
 - A fingerprint ([§19.1](coven.md#191-noticing)) is
   HMAC-SHA256, under the audience's fingerprint key, of the raw concatenation
   `coven/agreement/root/v1 | audience | sum`. This outer concatenation has no
@@ -669,9 +690,12 @@
     member's access key, at most 16 KiB. OAuth tokens are device-only and
     never appear in a restore code.
 - An invite code (kind 11): `store:uuid | name:name | invite:uuid |
-  secret:32 bytes | initial_key:uuid | inviting_writer:DeviceId | storage:bytes`.
-  The key is the one introduced by creation. Together with the joining
-  member's id, these fields determine the approval-copy path in D10.
+  secret:32 bytes | initial_key:uuid | inviting_writer:DeviceId |
+  key_copy_number:u64 | storage:bytes`.
+  The key is the one introduced by creation. `key_copy_number` is the
+  inviting writer's last published copy number at invite time, zero if none.
+  The joiner starts at the next number in that writer's D10 key-copy log
+  and reads forward until her initial-key copy arrives (§12.2).
 - As text, a code is `CVR1-` (restore) or `CVI1-` (invite), then unpadded
   uppercase base32 (`A`–`Z`, `2`–`7`) of its frame followed by a CRC-32C
   of the frame, big-endian.
