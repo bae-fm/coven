@@ -384,6 +384,13 @@
 
 ### C10 Finality by storage time
 
+The specification stores one optional monotonic horizon H. The required
+representation theorem is that the established final set is exactly the
+entries stored strictly before H, with ties at H excluded, and that every
+advance preserves or increases H. No qualifying window means an empty final
+set. This representation theorem is not provided by the proofs described
+below; their window certificates establish replay stability.
+
 `FinalityReplay`, `ReplayPrefix`, `Finality` and `FinalityExamples` reuse the
 terminating replay and effects with a separate policy: no key-only conflicts,
 no conflicts between removals or between circle deletion and circle changes;

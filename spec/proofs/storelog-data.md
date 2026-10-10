@@ -139,7 +139,9 @@ remains stored. `progress` proves that more than a window without a late
 landing advances finality, without device acknowledgements.
 The certificate checks that the complete prefix through the observation time
 has arrived; a missing entry blocks it. Saved qualifying windows preserve
-previous finality when a later race starts. `finality_persists` and
+previous finality when a later race starts. The specification represents their
+union by one monotonic horizon; this package still models saved certificates
+and does not prove equivalence to that representation. `finality_persists` and
 `established_stable` prove both the saved status and its replay meaning persist.
 A condition can mention alternatives and joint causes; finality must cover all
 of them. `StorageFinality.bounded_storage` proves that, once dependencies have

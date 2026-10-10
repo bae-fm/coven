@@ -160,9 +160,10 @@ catch-up also prevents new administrative work, key sharing and first
 attempts requiring a current membership view; it is not permission to seal
 against an older replay. Fixed attempted uploads retain their retry rules.
 
-Establish finality only from all entries through `T` and the exact §9
-window. A storage time learned from this listing or any later request can
-be used by a later scan, never retroactively as the time before this one.
+Advance the single finality horizon only from all entries through `T`
+and the exact §9 window. Queries derive finality by comparing stored time
+strictly with that horizon; an unchanged horizon causes no update.
+A storage time learned from this listing or any later request can be used by a later scan, never retroactively as the time before this one.
 Reading this device's removal or replacement stops sends as §10 requires.
 
 ### 3. Collect the other shared listings and check identity

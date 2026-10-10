@@ -1541,8 +1541,11 @@ Carol's tablet:
 - Each device keeps, in coven's local tables:
   - `_coven_store_log`: every entry it has applied, as downloaded and
     checked, its storage time, its immutable author-view checks, whether
-    it landed too late, whether replay kept or dropped it, and established
-    finality;
+    it landed too late, and whether replay kept or dropped it;
+  - one optional finality horizon `H`: the greatest cutoff established by a
+    qualifying storage-time window. No qualifying window means no horizon,
+    not a zero timestamp. An entry is final exactly when its immutable
+    storage time is strictly before `H`; there is no per-entry final flag;
   - `_coven_store_log_uploads`: locally authored entries with their numbers,
     timestamps, recorded past, plaintext and sealing key id fixed before upload;
     `_coven_key_uploads`: sealed objects whose `before_entry` names this entry,
@@ -1642,6 +1645,14 @@ Carol's tablet:
     late entry. An entry once final stays final; later races cannot reopen it.
     The retained store log also lets a device establish finality from an
     earlier qualifying window.
+  - For each qualifying window ending at T, atomically save
+    `H = max(previous H, T - 30 days)` with the replay and changes to
+    queries that depend on finality. With no previous H, use that cutoff.
+    A failed or non-qualifying scan cannot advance H. Retain H through
+    restart; a later late entry never lowers it.
+  - Ana has established H = day 10. Ben's entry stored on day 9 is final;
+    Carol's entry stored exactly on day 10 is not. A later qualifying
+    window establishing H = day 11 makes Carol's entry final too.
 - Establish T from storage before starting a complete store-log listing.
   Read and judge every entry through T, including unknown devices' logs,
   before advancing finality. A gap, unreadable entry or failed listing
