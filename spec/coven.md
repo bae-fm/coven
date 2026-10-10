@@ -357,8 +357,30 @@ the file's ranges under `F`.
     or provider error is not absence. Cache the id for subsequent reads.
   - Ana's `files/` folder can hold 20,000 photos. Reading `store-log/`
     never enumerates those photos or another store's objects.
-- Status uses S3 HEAD, Drive file metadata (an exact name lookup when its id
-  is unknown), Dropbox or OneDrive metadata, or a CloudKit record fetch.
+- Status uses these calls and provider timestamp granularities. The time
+  unit `δ` for §9 comes from the returned timestamp's representation:
+  - S3 HEAD: `Last-Modified`, in whole seconds, so `δ = 1 second`
+    ([HeadObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html)).
+  - Drive file metadata, with an exact name lookup when its id is unknown:
+    `createdTime` for creation and `modifiedTime` for replacement, retaining
+    their RFC 3339 fractional-second precision
+    ([files](https://developers.google.com/workspace/drive/api/reference/rest/v3/files)).
+  - Dropbox metadata: `server_modified`, in whole seconds, so
+    `δ = 1 second`; never use `client_modified`
+    ([timestamp format](https://github.com/dropbox/dropbox-api-spec/blob/main/common.stone)).
+  - OneDrive metadata: `createdDateTime` for creation and the top-level
+    `lastModifiedDateTime` for replacement, retaining the returned
+    `DateTimeOffset` precision; never use the client's `fileSystemInfo` times
+    ([driveItem](https://learn.microsoft.com/en-us/graph/api/resources/driveitem?view=graph-rest-1.0)).
+  - CloudKit record fetch: the server's creation or modification date,
+    with `δ = 1 millisecond`, the unit of CloudKit's date/time representation
+    ([types and dictionaries](https://developer.apple.com/library/archive/documentation/DataManagement/Conceptual/CloudKitWebServicesReference/Types.html)).
+
+  For Drive and OneDrive, `p` returned fractional-second digits give
+  `δ = 10^(-p) seconds`: no fraction means one second, three digits one
+  millisecond. Preserve the returned precision in comparisons; do not round
+  a fractional timestamp to seconds or invent an order within an equal time.
+
   File status and upload confirmation use this call, not a folder listing.
   Count any name lookup separately. A revision proves freshness, not byte
   equality: occupied immutable paths still require §10's complete comparison.
@@ -1726,9 +1748,9 @@ Carol's tablet:
     writes have the replay-dependent landing deadline in §10; active
     devices' ordinary late writes follow §15.
 - An entry is *final* once later arrivals cannot change whether replay
-  keeps or drops it. At an observed storage time T:
-  - entries stored strictly before T minus 30 days are final if no entry
-    stored from T minus 30 days through T is late;
+  keeps or drops it. At a finality observation time `T′`, defined below:
+  - entries stored strictly before `T′ - 30 days` are final if no entry
+    stored from `T′ - 30 days` through `T′` is late;
   - include both ends of that recent window, and include dropped entries
     when checking it. Entries with the same storage time stay on the
     same side of the window;
@@ -1736,26 +1758,34 @@ Carol's tablet:
     late entry. An entry once final stays final; later races cannot reopen it.
     The retained store log also lets a device establish finality from an
     earlier qualifying window.
-  - For each qualifying window ending at T, atomically save
-    `H = max(previous H, T - 30 days)` with the replay and changes to
+  - For each qualifying window ending at `T′`, atomically save
+    `H = max(previous H, T′ - 30 days)` with the replay and changes to
     queries that depend on finality. With no previous H, use that cutoff.
     A failed or non-qualifying scan cannot advance H. Retain H through
     restart; a later late entry never lowers it.
   - Ana has established H = day 10. Ben's entry stored on day 9 is final;
     Carol's entry stored exactly on day 10 is not. A later qualifying
     window establishing H = day 11 makes Carol's entry final too.
-- Establish T from storage before listing the store-log device folders.
+- Establish the provider's stored time `T` before listing the store-log
+  device folders. The finality observation is `T′ = T - δ`, one provider
+  time unit earlier (§4). If that earlier value cannot be represented,
+  this sample cannot advance finality; never clamp it back to T.
+
   Then read each undrained writer from its next entry through a terminal miss,
   including newly discovered writers from entry 1. Permanent gap-free logs
   make these observations, together with retained entries, every entry
-  through T; completed drains supply the retained retired-writer history (§6).
-  Read and judge them before advancing finality.
+  through `T′`; completed drains supply the retained retired-writer history
+  (§6). Every such entry has a stored time strictly before T, so it was
+  published before the object supplying T. The tick at T can still acquire
+  entries after the folder listing and is not certified complete.
+  Read and judge the complete prefix through T′ before advancing finality.
   A gap, unreadable entry or failed folder listing
   blocks that check and the cleanup that needs it (§19.1).
   - A provider-assigned stored time already observed is a lower bound on
     storage's current time. Reuse times from the pass's listings and
     successful publications, but only a time known before this store-log
-    scan can be its T; a later observation serves a later scan.
+    scan can supply its T. Subtract its provider time unit before using it
+    for finality too; a later observation serves a later scan.
   - Schedule a fresh time observation only when recorded storage times
     indicate that finality, a retirement drain (§6), or retention could
     cross its next threshold.
@@ -1766,12 +1796,22 @@ Carol's tablet:
     This device is its only writer. Keep one object, replacing it only when
     time-dependent work is due; positions are never reposted for time.
     The identity check precedes the replacement. The folder listing and
-    next-number reads that use this T start after the status response. A failed replacement or
-    status call supplies no new T and remains visible as pending work.
+    next-number reads that use this sample start after the status response.
+    A failed replacement or status call supplies no new T or T′ and remains
+    visible as pending work.
+  - T remains the storage-age sample for retention (§15), the return check,
+    and the qualifying time saved as F when a retirement becomes final (§6).
+    Only the finality window and its horizon use T′.
   - Ana's covered log waits for its thirtieth storage day. Her timer wakes
     sync, which replaces her clock object and reads its status: two logical
     requests, plus any provider lookup or confirmation calls. If storage
     still says day 29, she keeps the log and schedules another check.
+  - **Ben's first entry shares Ana's clock tick.** Ana's S3 clock object
+    has stored time 12:00:10. Her folder listing finishes before Ben's new
+    phone publishes entry 1, also stamped 12:00:10 by storage. That listing
+    cannot certify all entries through 12:00:10. With one-second granularity,
+    her finality window ends at 12:00:09 instead. A later clock sample and
+    subsequent scan can include Ben's entry and certify its tick.
   - No device's acknowledgement is required. A sleeping device or a
     concurrently registered one has the same landing deadline as any other.
 - Why this holds:
@@ -1792,7 +1832,8 @@ Carol's tablet:
   - Day 31: C lands. It read A and missed B by only two days, so it
     survives. C defeats B before B can defeat A; replay keeps A and C.
     C is late too, so the wait starts again.
-  - After day 61, with no further late entry, all three results are final.
+  - Once T′ passes day 61, with no further late entry, all three results
+    are final.
     Cleanup can release the inputs no longer needed by the winning reset.
     If C had instead landed after day 59, it would have missed B by more
     than 30 days and been dropped as “landed too late”.

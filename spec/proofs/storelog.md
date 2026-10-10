@@ -458,6 +458,14 @@ window [T−W, T]. W is 30 days in the examples. Late entries count in this
 check even when their changes have been permanently dropped. Provider times
 keep their duration meaning; equal times are allowed and never ordered by path.
 
+The model's observation parameter T is §9's `T′ = T - δ`: one provider
+time unit before the clock object's stored time. The later folder listing
+and numbered reads must supply every entry through that earlier endpoint.
+An unknown writer can publish in the clock object's own tick after the
+listing; that tick is outside the certified window. The horizon and stability
+theorems take the earlier endpoint unchanged; they do not prove this provider
+discovery condition.
+
 **The final set is exactly one prefix.** `final_iff_before_horizon` equates
 two separately defined things: an entry was certified by at least one
 completed quiet check, and its storage time is strictly less than the saved

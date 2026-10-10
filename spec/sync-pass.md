@@ -140,14 +140,18 @@ read nor a save re-derives the passphrase key.
 once. Syncing a thousand objects uses those held keys. Stopping and starting
 sync does not unlock again; closing the handle erases the session.
 Choose an already observed storage time `T` before the store-log scan, if
-one is available. With no time sample yet, discovery and ordinary sync
-still proceed; finality and age-based deletion wait for a qualifying scan.
+one is available. For finality use `T′ = T - δ`, one provider time unit
+earlier (§4, §9), as the inclusive observation endpoint. The provider's
+stored time T remains the age sample for retention, retirement drains and
+the return check. With no time sample yet, discovery and ordinary sync
+still proceed; finality and age-based deletion wait for qualifying evidence.
 From saved entry times and covered-log times, compute the next instant at
 which §9 finality or §15's 30-day age test could change. Include the last late
 entry's window and the strict boundary for finality; equality at 30 days
-does not establish it. Include §6's drain deadline, strictly more than one
-day and five minutes after the saved finality observation. Include §15's
-return interval: a new device has no checkpoint; a returning device compares
+does not establish it, and the finality endpoint is T′, not T. Include
+§6's drain deadline, strictly more than one day and five minutes after the
+saved qualifying storage time F. Include §15's return interval: a new device
+has no checkpoint; a returning device compares
 a fresh clock-object storage time with the last completed catch-up's saved
 storage time. A resumed session
 refreshes time, and a running session's monotonic timer schedules its next
@@ -206,32 +210,36 @@ If it has not arrived, retain the entry and wait on writer-copy discovery
 under shared backoff. No keys-folder listing or separate per-recipient
 status probe is required.
 
-For finality, the folder listing starts after observing `T`, and each known
-undrained writer's entry discovery reaches its next-number miss after that
-listing. Together with retained entries, including completed retirement
-drains, this supplies every entry through `T`.
-Discovery after `T` can include later entries too. A writer first publishing
-after the folder observation cannot have an entry stored before `T`.
+For finality, the folder listing starts after observing the stored time `T`.
+Each known undrained writer's entry discovery reaches its next-number miss
+after that listing. Together with retained entries, including completed
+retirement drains, this supplies every entry through `T′ = T - δ`.
+Discovery can include later entries too. A writer first publishing after
+the folder observation can have an entry stamped T, but cannot have one
+stored at or before T′. Never use the clock object's own tick as the
+inclusive finality endpoint.
 Judge landing times against this complete received history, then check
 author views and apply causally ready entries in batches. One batch needs
 one replay of the received set and one atomic commit, not one full replay and
 transaction per received entry. Author-view checks still use exactly each
 entry's recorded past. Entries waiting for a key or cause stay cached.
 Independent ready entries can proceed, but a gap or unreadable entry
-through `T` prevents finality and any cleanup depending on it.
+through `T′` prevents finality and any cleanup depending on it.
 Do not read at or past a log's permanent refusal (§19.1). An incomplete
 catch-up also prevents new administrative work, key sharing and first
 attempts requiring a current membership view; it is not permission to seal
 against an older replay. Fixed attempted uploads retain their bytes, but
 every retry still needs §10's fresh completed catch-up.
 
-Advance the single finality horizon only from all entries through `T`
-and the exact §9 window. Queries derive finality by comparing stored time
+Advance the single finality horizon only from all entries through `T′`
+and the inclusive §9 window `[T′ - 30 days, T′]`. Its cutoff is
+`T′ - 30 days`. Queries derive finality by comparing stored time
 strictly with that horizon; an unchanged horizon causes no update.
 A storage time learned during discovery or any later request can be used by
 a later observation, never retroactively as the time before this one.
 Reading this device's removal or replacement stops sends as §10 requires.
-Once a kept retirement is final, retain its qualifying storage time `F`.
+Once a kept retirement is final, retain the qualifying sample T as `F`,
+keeping it distinct from the earlier finality endpoint T′.
 This observation's entry and copy misses can supply two parts of its drain
 only if they follow a storage time `T > F + one day + five minutes` (§6).
 The device remains undrained until step 6 supplies the write-log miss too.

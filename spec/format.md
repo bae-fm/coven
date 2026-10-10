@@ -363,9 +363,11 @@
   - Pending reports can change while positions stay at the last publishable
     past. Omit fingerprints unless they describe exactly that past.
   - Positions are not finality acknowledgements. Their provider-assigned
-    replacement time, observed after a changed post, can supply T for §9's
-    subsequent store-log check. Unchanged posts are not replaced to observe
-    time; a quiet store instead replaces its clock object (§9).
+    replacement time, observed after a changed post, can supply the storage
+    sample T for §9's subsequent store-log check. That check uses
+    `T′ = T - δ`, one provider time unit earlier, as its inclusive endpoint.
+    Unchanged posts are not replaced to observe time; a quiet store instead
+    replaces its clock object (§9).
   - Positions are not a log discovery index. A writer can crash after
     uploading an object and before posting; readers GET the next log number
     regardless of what any positions object says (§6).
@@ -422,9 +424,12 @@
 
 - A clock observation (kind 12) contains `device:DeviceId`, matching its
   path. It asserts no device time. Its sealed object's provider-assigned
-  publication time supplies T only to a subsequent complete store-log scan.
-  On return it also measures storage time since the last completed pass's
-  saved storage time, for §15's snapshot-discovery rule.
+  publication time is T. A subsequent complete store-log scan uses
+  `T′ = T - δ` for finality, with δ from §4; the tick at T is not certified
+  complete (§9). T and T′ are provider metadata and derived local evidence,
+  not fields in this object.
+  On return, T also supplies §15's elapsed-time check against the last
+  completed pass's saved storage time. That check does not substitute T′.
 
 - A join request (kind 9):
   `invite:uuid | keys:MemberKeys | device_name:name`.

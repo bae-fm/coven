@@ -276,6 +276,12 @@ to storage age and the monotonic retry deadline. `retry_delay_bounded` proves
 the five-minute ceiling within one run. These results assume §4's common,
 nondecreasing provider clock; they do not establish it for a real provider.
 
+§9 uses `T′ = T - δ` for the finality window, one provider time unit before
+the clock object's stored time T. This is still a lower bound for the age
+theorem. Completeness of the later store-log discovery through T′ is a
+separate requirement; a lower bound alone cannot certify every entry in
+T's own tick.
+
 The persisted restart rule in §16.5 is outside these theorems: save deadline
 T and the full wait W, then arm a monotonic delay of `max(0, min(T - now, W))`
 on reopen. Ana restarting halfway through an eight-second wait keeps the

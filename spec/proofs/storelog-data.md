@@ -220,9 +220,13 @@ that result to stored inputs: an original needed by any such later replay
 remains stored. `progress` proves that more than a window without a late
 landing advances finality, without device acknowledgements.
 The certificate checks that the complete prefix through the observation time
-has arrived; a missing entry blocks it. Saved qualifying windows preserve
-previous finality when a later race starts. The specification represents their
-union by one monotonic horizon; this package still models saved certificates.
+has arrived; a missing entry blocks it. For §9, that endpoint is
+`T′ = T - δ`, one provider time unit before the clock object's stored time,
+so an unknown writer arriving later in the same tick cannot invalidate the
+claimed completeness. Provider discovery remains an input to this proof.
+Saved qualifying windows preserve previous finality when a later race starts.
+The specification represents their union by one monotonic horizon; this package
+still models saved certificates.
 The storelog package's C10 horizon section proves the two representations agree. `finality_persists` and
 `established_stable` prove both the saved status and its replay meaning persist.
 A condition can mention alternatives and joint causes; finality must cover all
