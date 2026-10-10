@@ -188,7 +188,17 @@
   - that member's devices make invites ([§12.2](#122-adding-a-person));
   - any admin removes a member, and that member's access is taken back by
     the owner's device when it applies the removal
-    ([§13](#13-removing-members-and-devices)).
+    ([§13](#13-removing-members-and-devices));
+  - coven promises the access intended by the current replay. Provider
+    requests take time, can fail, and need not match that intention at
+    every instant;
+  - each owner's device runs its grant and revoke requests one at a time.
+    Before the next request it reads the current intended access. If a
+    completed request has become obsolete, it records and performs the
+    opposite request before reporting that account's work complete;
+  - pending and failed requests remain in the existing operation journal
+    and the blocked list (§18, §19.1). Security work starts immediately;
+    it does not wait for entry finality.
   - Sharing is per account, not per invite: taking access back takes the
     account's access, whatever shared it.
   - So the owner's device leaves an account shared while a member in its
@@ -1798,8 +1808,17 @@ Carol's tablet:
 - What the entry names is fixed when the removal starts, from the member
   list the device has then; if the replay drops the entry, the removal
   starts over against the new list ([§18](#18-operations)).
-- Access taken back stays taken back, even if a later entry drops the
-  removal: the member is told, and an admin shares the storage again.
+- Provider access follows replay both ways. If a removal drops and the
+  member is back, the owner's device grants the intended access again.
+  - E.g. Ana owns the folder; Ben and Carol are its admins. Ana's phone
+    applies Carol's removal of Ben and revokes Ben's share. Ben's earlier
+    concurrent removal of Carol then wins. Ana's phone finishes its request,
+    then grants Ben's share again; the app sees the pending work.
+  - A grant that was already delivered cannot be undisclosed. Keys and
+    storage cut-off bound what that access can reveal (§11, §13).
+  - On S3, deleting a key in the provider's console is irreversible. If
+    a returning member's recorded key was deleted, an admin supplies a
+    replacement through the existing access-key calls (E9).
 - The member whose provider account holds the store can't be removed:
   the store would go with their account. Removing them fails with
   `SyncError::StoreOwner`.

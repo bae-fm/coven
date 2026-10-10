@@ -2018,8 +2018,10 @@ pub enum OperationKind {
     CreateCircle,
     /// Seal the circle's history and add a member.
     AddCircleMember,
-    /// An owner's device takes back access after applying a kept removal.
+    /// An owner's device takes back access under the current replay.
     RevokeAccess,
+    /// An owner's device restores access when replay returns a member.
+    GrantAccess,
     /// Migrate the schema, snapshot it and raise the version.
     SchemaChange,
     /// Reload an audience, requested by the app or required by sync.
@@ -2336,6 +2338,13 @@ match stream.read_at(resume_at, 256 * 1024).await {
   their own devices, and admins any device ([§9](coven.md#9-members-and-roles)).
 - Administrative calls require an online store-log catch-up (§9, E6).
 - Removing a member is an operation ([§18.1](coven.md#181-operations)).
+- Access results describe current intended access. Each owner's device
+  serializes grant and revoke requests, and performs the opposite request
+  when replay reverses the intention (§4, §13).
+  Pending and failed work appears in `blocked()`, with the operation id for
+  the existing retry/discard calls. A discarded failure acknowledges that
+  provider work was left incomplete; it does not change membership or grant
+  permission to report the requested access as delivered.
 - Removing an account can leave access through a parent, a grant reaching other
   accounts, an unidentified recipient, or the owner. `MemberRemoval::AccessRemains`
   returns these grants and their reasons for the app to present to the owner.
@@ -2400,7 +2409,7 @@ pub struct AccessKeyToDelete {
 // is retained separately by key id, so later entries and retries cannot restore
 // an already-confirmed notice.
 
-/// Revoked sharing or remaining owner actions (§13).
+/// Current provider result or remaining work toward intended sharing (§13).
 pub enum MemberRemoval {
     /// This non-owner admin's removal is kept; an owner's device revokes
     /// sharing when it applies the removal.
