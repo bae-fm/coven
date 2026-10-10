@@ -88,13 +88,31 @@ theorem settled_iff_equal (b : Bytes) (r : Except ReadFailure (Option Object)) :
     | none => simp [compareOccupied]
     | some o => simp [compareOccupied]
 
-/-- §6, D11: a chunk's nonce inputs. This is not an HMAC implementation. -/
-structure NonceContext where
+/-- Key and chunk position within D11's content-bound nonce inputs. -/
+structure NoncePosition where
   key : Nat
   path : Path
   sectionIndex : Nat
   index : Nat
   deriving DecidableEq, Repr
+
+/-- D11's nonce inputs for one chunk. Plaintext stands for its
+SHA-256 digest in the collision-free abstraction; prefix includes the format
+and every cleartext routing byte. Actual hashing and HMAC are not implemented. -/
+structure NonceContext where
+  position : NoncePosition
+  cleartext : Bytes
+  plaintext : Bytes
+  deriving DecidableEq, Repr
+
+/-- No premise about paths, durable counters, rollback or live copies. -/
+theorem nonce_exclusivity (a b : NonceContext) (same : a = b) :
+    a.plaintext = b.plaintext ∧ a.cleartext = b.cleartext :=
+  ⟨congrArg NonceContext.plaintext same, congrArg NonceContext.cleartext same⟩
+
+theorem different_plaintext_separates_nonces (a b : NonceContext)
+    (different : a.plaintext ≠ b.plaintext) : a ≠ b :=
+  fun same => different (nonce_exclusivity a b same).1
 
 structure Draft where
   path : Path
@@ -108,8 +126,10 @@ structure Attempt where
   format : Nat
   deriving DecidableEq, Repr
 
+/-- Restore histories represent one affected chunk. Its abstract cleartext
+prefix is the format; arbitrary complete prefixes are covered above. -/
 def Attempt.nonce (a : Attempt) (sectionIndex index : Nat) : NonceContext :=
-  ⟨a.key, a.draft.path, sectionIndex, index⟩
+  ⟨⟨a.key, a.draft.path, sectionIndex, index⟩, [a.format], a.draft.plaintext⟩
 
 inductive Upload where
   | untried (draft : Draft)
@@ -133,55 +153,17 @@ theorem retry_fixed (a : Attempt) (key format : Nat) (f : Bytes → Bytes) :
 theorem fresh_path_separates_nonces (a b : Attempt) (s i t j : Nat)
     (h : a.draft.path ≠ b.draft.path) : a.nonce s i ≠ b.nonce t j := by
   intro he
-  exact h (congrArg NonceContext.path he)
+  exact h (congrArg (fun n => n.position.path) he)
 
-/-- §6: one writer's first attempts assign each path only once. Rollback of
-the durable attempt record is deliberately not assumed to preserve this. -/
-def OneAssignment (attempts : List Attempt) : Prop :=
-  ∀ a ∈ attempts, ∀ b ∈ attempts, a.draft.path = b.draft.path → a = b
+/-- Any two chunk attempts, including attempts absent from every surviving
+database, have equal plaintext when their content-bound nonce contexts agree. -/
+theorem attempts_nonce_exclusive (a b : Attempt) (s i t j : Nat)
+    (same : a.nonce s i = b.nonce t j) : a.draft.plaintext = b.draft.plaintext :=
+  (nonce_exclusivity _ _ same).1
 
-theorem one_writer_nonce_safe (attempts : List Attempt) (h : OneAssignment attempts)
-    (a b : Attempt) (ha : a ∈ attempts) (hb : b ∈ attempts) (s i t j : Nat)
-    (he : a.nonce s i = b.nonce t j) : a = b :=
-  h a ha b hb (congrArg NonceContext.path he)
-
-theorem fresh_assignment_preserved (attempts : List Attempt) (a : Attempt)
-    (h : OneAssignment attempts)
-    (fresh : ∀ b ∈ attempts, a.draft.path ≠ b.draft.path) :
-    OneAssignment (a :: attempts) := by
-  intro x hx y hy he
-  simp only [List.mem_cons] at hx hy
-  rcases hx with hx | hx
-  · subst x
-    rcases hy with hy | hy
-    · exact hy.symm
-    · exact False.elim (fresh y hy he)
-  · rcases hy with hy | hy
-    · subst y; exact False.elim (fresh x hx he.symm)
-    · exact h x hx y hy he
-
-theorem retry_assignment_preserved (attempts : List Attempt) (a : Attempt)
-    (h : OneAssignment attempts) (ha : a ∈ attempts) :
-    OneAssignment (a :: attempts) := by
-  intro x hx y hy he
-  have hx' : x ∈ attempts := by rcases List.mem_cons.mp hx with rfl | hx; exact ha; exact hx
-  have hy' : y ∈ attempts := by rcases List.mem_cons.mp hy with rfl | hy; exact ha; exact hy
-  exact h x hx' y hy' he
-
-/-- Every first assignment has a fresh path, and retries use a retained
-attempt. This history excludes database rollback, but allows any interleaving. -/
-inductive DurableAttempts : List Attempt → Prop where
-  | empty : DurableAttempts []
-  | first {history : List Attempt} (a : Attempt) : DurableAttempts history →
-      (∀ b ∈ history, a.draft.path ≠ b.draft.path) → DurableAttempts (a :: history)
-  | retry {history : List Attempt} (a : Attempt) : DurableAttempts history →
-      a ∈ history → DurableAttempts (a :: history)
-
-theorem durable_attempts_nonce_safe (history : List Attempt) (h : DurableAttempts history) :
-    OneAssignment history := by
-  induction h with
-  | empty => intro a ha; simp at ha
-  | first a _ fresh ih => exact fresh_assignment_preserved _ a ih fresh
-  | retry a _ member ih => exact retry_assignment_preserved _ a ih member
+theorem retries_identical (encrypt : NonceContext → Bytes) (a : Attempt)
+    (key format sectionIndex index : Nat) (convertBody : Bytes → Bytes) :
+    encrypt ((prepare key format (convert convertBody (.tried a))).nonce sectionIndex index) =
+      encrypt (a.nonce sectionIndex index) := rfl
 
 end CovenStorage

@@ -8,10 +8,11 @@ The format boundaries are [D6, D8–D12](../format.md#d6-store-log-entries);
 the app results follow [E5](../api.md#e5-storage-and-sync) and
 [E8](../api.md#e8-files-and-the-cache).
 
-Two requested claims fail without qualifications. Reset deliberately loses
+Two claims fail without qualifications. Reset deliberately loses
 unsent edits. Also, §10's detection checks do not establish that every restored
 database gets a new device id. A backup can erase the record of an encryption
-attempt without leaving any evidence in storage.
+attempt without leaving any evidence in storage. Content-bound nonces separate
+the resulting plaintexts without relying on that detection.
 
 All named results are audited by `CovenStorage/Axioms.lean`. The package uses
 Lean 4.34.1 and its standard library, without additional axioms or unfinished
@@ -92,51 +93,51 @@ or that someone eventually extends a closed end after a racing upload.
 
 Here “reuse” means encrypting different protected inputs under one key and
 nonce. Retrying identical inputs is required by §6 and is harmless in this
-model. A nonce is represented by its D11 inputs: key, path, section and index.
-The HMAC computation and chance of cryptographic collisions are not modelled.
+model. A nonce is represented by its D11 inputs: key, path, cleartext
+prefix, section, index and chunk plaintext. Plaintext stands for its SHA-256
+digest in the same collision-free abstraction used for file hashes below.
+Actual SHA-256, HMAC and truncation to 192 bits are outside the model. A finite
+nonce cannot be literally injective over arbitrary plaintext; these theorems
+prove separation of the inputs, not the absence of real cryptographic collisions.
 
-**Fixed durable attempts are safe.** `retry_fixed` proves that a tried write
-keeps its plaintext, key and format even after migration or an update changes
-the choices for new writes. `durable_attempts_nonce_safe` proves that fresh
-path assignments and retries preserve one assignment per path over every
-history built from those steps. `one_writer_nonce_safe` then makes equal nonce
-contexts imply equal attempts. `fresh_path_separates_nonces` covers a reset
-whose new device id gives different paths.
+**Nonce exclusivity is proved without a history restriction.**
+`nonce_exclusivity` makes equal nonce contexts imply equal chunk plaintext and
+cleartext prefix. `different_plaintext_separates_nonces` states the converse
+separation. `attempts_nonce_exclusive` applies it to any pair of attempts,
+including attempts erased from all surviving databases. There is no premise
+about fresh paths, durable reservations, rollback, or the number of live copies.
 
-**The claim that only two live copies can break this fails for the specified
-detection mechanism.** `single_live_restore_nonce_reuse` checks this history:
+Ana backs up her registered device before reserving write 1. She commits A
+and encrypts it, but it never lands. She restores the database while its
+non-backed-up custody survives, then commits B at write 1 with different bytes.
+Every §10 check passes. `single_live_restore_nonce_separation` executes this
+history through `BackupRun`: both attempts remain in its encryption history,
+and their content-bound contexts differ. `two_live_copies_race` checks the same
+separation when two copies are alive together; create-once storage and the
+loser's deliberate reset still have their specified effects.
 
-1. An already registered device backs up its database before reserving its
-   first data write.
-2. It commits write A, reserves number 1, and encrypts its first attempt.
-   That attempt does not land. The backup contains neither its reservation
-   nor its attempted flag.
-3. The app stops. The database backup is restored on the same installation.
-   Its existing custody id survives; custody was not copied from the backup.
-4. The app commits different write B, reserving number 1 again. Its storage
-   counters have not advanced and its custody id matches, so every listed
-   §10 check passes. It encrypts B with the same key, path, section and chunk
-   index. Both attempts use format 2; no schema or format change is needed.
+`rollback_conversion_changes_plaintext` checks that converting an apparently
+untried backup also changes its nonce. `entry_chunks_and_prefixes_separated`
+covers a store-log entry and changed authentication data. The general theorem
+covers arbitrary chunk sections, indices and prefixes. Restore examples model
+one affected chunk; they do not implement streaming or an entire migration.
 
-There is only one live installation in `BackupRun`. Its encryption history
-contains both attempts. A literal Lean `example` checks the complete history;
-the named theorem also checks the equal nonce contexts and different plaintexts.
-`fewer_than_two_attempts_no_reuse` proves that fewer than two attempts cannot
-contain unequal attempts. This history uses two app commits and two encryptions;
-the device's existing registration is background history.
+**Identical retries are proved.** `retry_fixed` retains plaintext, key and
+format across migration or changed choices. `retries_identical` applies any
+deterministic encryption function to those same inputs and obtains the same
+bytes. `fresh_path_separates_nonces` also retains the independent path separation.
 
-The erased reservation and attempt record are the missing evidence.
-`rollback_conversion_changes_plaintext` also checks that §17.1's conversion of
-an apparently untried backup can change plaintext under the same context;
-retaining the attempted flag would prevent that conversion. This supplementary
-example checks the queue operation, not an entire migration and snapshot history.
+**A content-free recipe fails.** `content_free_rollback_nonce_reuse` checks
+Ana's same two-attempt history using only key, path, section and index as
+nonce inputs, and proves that they agree for different plaintexts. Its literal
+Lean `example` checks the witness; `fewer_than_two_attempts_no_reuse` proves
+that one attempt cannot show it. This counterexample explains why D11 binds
+content.
 
-§7.2 says every restored copy gets a fresh id. If restoration is always known
-and routed through that reset, the counterexample is excluded. §10 does not
-state a restore notification or a custody value that advances with encryption
-attempts. Non-backed-up custody need not disappear when the database alone is
-restored. Thus the promised fresh-id outcome does not follow from the listed
-detection checks. No theorem claims unconditional nonce safety across rollback.
+The detection limitation remains separate: non-backed-up custody can survive
+database rollback, so the listed §10 checks cannot always detect a restore.
+Known restoration routed through reset produces a new id. Nonce separation
+under the content-bound recipe needs neither outcome.
 
 ## Files
 

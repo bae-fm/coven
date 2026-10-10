@@ -47,14 +47,14 @@ def rolledBackWrite : BackupRun := restoreDatabase failedWrite
 def newWrite : BackupRun := { rolledBackWrite with live := commitWrite rolledBackWrite.live [43] }
 def retriedSlot : BackupRun := backupAttempt newWrite 9 2 (.ok registeredEvidence)
 
-theorem single_live_restore_nonce_reuse :
+theorem single_live_restore_nonce_separation :
     rolledBackWrite.live.reserved.logs.writes = 0 ∧
     rolledBackWrite.custody = some 7 ∧
     newWrite.live.reserved.logs.writes = 1 ∧
     checkIdentity newWrite.live.device newWrite.live.reserved newWrite.custody
       (.ok registeredEvidence) = .send ∧
     retriedSlot.encrypted = [⟨⟨.write 7 1, [42]⟩, 9, 2⟩, ⟨⟨.write 7 1, [43]⟩, 9, 2⟩] ∧
-    (prepare 9 2 (.untried ⟨.write 7 1, [42]⟩)).nonce 0 0 =
+    (prepare 9 2 (.untried ⟨.write 7 1, [42]⟩)).nonce 0 0 ≠
       (prepare 9 2 (.untried ⟨.write 7 1, [43]⟩)).nonce 0 0 ∧
     (prepare 9 2 (.untried ⟨.write 7 1, [42]⟩)).draft.plaintext ≠
       (prepare 9 2 (.untried ⟨.write 7 1, [43]⟩)).draft.plaintext := by decide
@@ -62,16 +62,31 @@ theorem single_live_restore_nonce_reuse :
 example : retriedSlot.encrypted =
     [⟨⟨.write 7 1, [42]⟩, 9, 2⟩, ⟨⟨.write 7 1, [43]⟩, 9, 2⟩] := by decide
 
-/-- Even without a format update, §17.1 can convert what the backup says
-is untried. The preserved first-attempt flag would have prevented this. -/
+/-- Conversion of an apparently untried backup changes the nonce with its
+plaintext. A retained first-attempt flag still fixes the original attempt. -/
 theorem rollback_conversion_changes_plaintext :
     let original := prepare 9 2 (.untried ⟨.write 7 1, [42]⟩)
     let converted := prepare 9 2 (convert (fun _ => [43]) (.untried ⟨.write 7 1, [42]⟩))
-    original.nonce 0 0 = converted.nonce 0 0 ∧
+    original.nonce 0 0 ≠ converted.nonce 0 0 ∧
     original.draft.plaintext ≠ converted.draft.plaintext ∧
     prepare 9 2 (convert (fun _ => [43]) (.tried original)) = original := by decide
 
-/-- Two unequal sealing attempts are necessary for this failure. -/
+/-- Dropping content from the nonce inputs makes the same rollback history
+reuse a nonce for different plaintexts. This is why D11 binds content. -/
+theorem content_free_rollback_nonce_reuse :
+    let first := prepare 9 2 (.untried ⟨.write 7 1, [42]⟩)
+    let second := prepare 9 2 (.untried ⟨.write 7 1, [43]⟩)
+    retriedSlot.encrypted = [first, second] ∧
+    (first.nonce 0 0).position = (second.nonce 0 0).position ∧
+    first.draft.plaintext ≠ second.draft.plaintext := by decide
+
+example :
+    let first := prepare 9 2 (.untried ⟨.write 7 1, [42]⟩)
+    let second := prepare 9 2 (.untried ⟨.write 7 1, [43]⟩)
+    (first.nonce 0 0).position = (second.nonce 0 0).position ∧
+    first.draft.plaintext ≠ second.draft.plaintext := by decide
+
+/-- Two unequal sealing attempts are necessary for the content-free failure. -/
 theorem fewer_than_two_attempts_no_reuse (history : List Attempt) (h : history.length < 2) :
     ∀ a ∈ history, ∀ b ∈ history, a = b := by
   cases history with
@@ -88,7 +103,7 @@ preserves the winner, and byte comparison resets the loser. Its edit is lost. -/
 theorem two_live_copies_race :
     checkIdentity 7 pending.reserved (some 7) (.ok registeredEvidence) = .send ∧
     checkIdentity 7 secondCopy.reserved (some 7) (.ok registeredEvidence) = .send ∧
-    (prepare 9 2 (.untried ⟨.write 7 1, [42]⟩)).nonce 0 0 =
+    (prepare 9 2 (.untried ⟨.write 7 1, [42]⟩)).nonce 0 0 ≠
       (prepare 9 2 (.untried ⟨.write 7 1, [43]⟩)).nonce 0 0 ∧
     create (create emptyStorage (.write 7 1) [42] 10) (.write 7 1) [43] 11 (.write 7 1) =
       some ⟨[42], 10⟩ ∧
@@ -98,6 +113,14 @@ theorem two_live_copies_race :
 example : compareOccupied [43] (.ok (some ⟨[42], 10⟩)) = .reset ∧
     create (create emptyStorage (.write 7 1) [42] 10) (.write 7 1) [43] 11 (.write 7 1) =
       some ⟨[42], 10⟩ := by decide
+
+/-- D11 uses the same content-bound recipe for store-log chunks and write
+chunks. A changed cleartext prefix also changes the nonce context. -/
+theorem entry_chunks_and_prefixes_separated :
+    (prepare 9 2 (.untried ⟨.entry 7 1, [42]⟩)).nonce 0 0 ≠
+      (prepare 9 2 (.untried ⟨.entry 7 1, [43]⟩)).nonce 0 0 ∧
+    (NonceContext.mk ⟨9, .write 7 1, 1, 2⟩ [32, 2, 1] [42]) ≠
+      (NonceContext.mk ⟨9, .write 7 1, 1, 2⟩ [32, 2, 2] [42]) := by decide
 
 /-- The two ends must combine independently; neither replacement alone
 contains all the observed uploads. Objects above an end stay blocked. -/

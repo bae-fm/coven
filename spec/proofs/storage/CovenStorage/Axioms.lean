@@ -21,7 +21,7 @@ import CovenStorage
 #print axioms CovenStorage.Examples.unsent_restore_loss
 #print axioms CovenStorage.Examples.restore_from_deleted_log_detected
 #print axioms CovenStorage.Examples.outstanding_reservation_is_not_stale
-#print axioms CovenStorage.Examples.single_live_restore_nonce_reuse
+#print axioms CovenStorage.Examples.single_live_restore_nonce_separation
 #print axioms CovenStorage.Examples.rollback_conversion_changes_plaintext
 #print axioms CovenStorage.Examples.fewer_than_two_attempts_no_reuse
 #print axioms CovenStorage.Examples.two_live_copies_race
@@ -79,7 +79,9 @@ import CovenStorage
 #print axioms CovenStorage.settled_iff_equal
 #print axioms CovenStorage.retry_fixed
 #print axioms CovenStorage.fresh_path_separates_nonces
-#print axioms CovenStorage.one_writer_nonce_safe
-#print axioms CovenStorage.fresh_assignment_preserved
-#print axioms CovenStorage.retry_assignment_preserved
-#print axioms CovenStorage.durable_attempts_nonce_safe
+#print axioms CovenStorage.nonce_exclusivity
+#print axioms CovenStorage.different_plaintext_separates_nonces
+#print axioms CovenStorage.attempts_nonce_exclusive
+#print axioms CovenStorage.retries_identical
+#print axioms CovenStorage.Examples.content_free_rollback_nonce_reuse
+#print axioms CovenStorage.Examples.entry_chunks_and_prefixes_separated
