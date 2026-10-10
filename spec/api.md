@@ -1882,9 +1882,9 @@ impl CovenHandle {
         device_name: &str,
     ) -> Result<ConnectedStorage, StorageSetupError>;
 
-    /// Opens the current store key from its copy sealed to this member in
-    /// storage (§11), keeps it in key custody, and connects, without
-    /// starting to sync.
+    /// Opens store keys from their copies sealed to this member in storage
+    /// (§11), keeps them in custody, and connects without starting sync.
+    /// Key selection follows §11; other object-key waits remain in blocked().
     pub async fn unlock_store_key(&self) -> Result<ConnectedStorage, StoreKeyUnlockError>;
 
     /// Whether key custody holds the store key: `Available` or `Locked`.
@@ -2026,6 +2026,8 @@ pub enum OperationKind {
     SchemaChange,
     /// Reload an audience, requested by the app or required by sync.
     ReloadFromSnapshot,
+    /// Replace a key known to have reached an excluded member (§11).
+    RotateKey,
     /// Write and verify a snapshot for retention.
     WriteSnapshot,
     /// Delete only history whose coverage and finality allow it.

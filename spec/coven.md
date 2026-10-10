@@ -129,7 +129,13 @@
     - writing a snapshot ([§15](#15-snapshots)), then deleting the logs it
       covers;
     - uploading a file, then marking it stored.
-- **Revocation:** an ex-member can't read anything written after they left.
+- **Revocation:** before sending a write for the first time, a device
+  catches up on membership changes and seals it with the newest usable key.
+  An ex-member cannot read a write first sent by a device that already
+  knew they had left.
+  - A tried write retains its first attempt's key and bytes on every retry.
+    Nothing is dropped or rewritten for revocation; storage access is cut
+    off separately (§13).
 - **History cleanup:** snapshots let devices delete covered logs and older
   snapshots once the store-log decisions they depend on are final (§9).
   An absent device can delay finality and require retaining that history.
@@ -306,7 +312,7 @@
   before an earlier one.
 - The first attempt records the header's and each part's sealing key ids
   in `_coven_uploads`, in the transaction marking the attempt, choosing the
-  newest key of each audience this device holds ([§14.4](#144-writes)).
+  newest usable key under §11. Pre-removal circle writes follow §14.6.
   Every attempt re-seals the plaintext with those keys and signs with the
   device's member key. Each chunk's nonce is derived from its encryption
   key, path, section and index ([D11](format.md#d11-keys-contexts-and-fingerprints));
@@ -1256,8 +1262,8 @@ Carol's tablet:
   app's writes.
   - Each change is one *entry*: add or remove a member, change a role, add
     or remove a device, make, rename or delete a circle
-    ([§14](#14-audiences)) or change its members, raise the store's or a
-    circle's schema version, or reset the store or a circle to a
+    ([§14](#14-audiences)) or change its members, rotate an audience's key,
+    raise the store's or a circle's schema version, or reset the store or a circle to a
     snapshot ([§15](#15-snapshots)).
   - An entry names the store log entries its author had read, and is
     signed with its author's member key.
@@ -1333,14 +1339,17 @@ Carol's tablet:
   - the replay's result: `_coven_members` (every member a kept entry
     added, their public keys and role, and whether they were removed),
     `_coven_devices` (every device a kept entry added, its member and name,
-    and whether it was removed), `_coven_circles` (every circle a kept
-    entry made, its name and current key's id, and whether it was deleted),
-    `_coven_circle_members`, `_coven_store` (one row: the store's id, name,
-    and current key's id), `_coven_versions` (one row per audience:
+    and whether it was removed),
+    `_coven_circles` (every circle a kept entry made, its name and whether
+    it was deleted), `_coven_circle_members`, `_coven_store` (the store's id
+    and name), `_coven_versions` (one row per audience:
     its schema version, snapshot, and raise entry), and
     `_coven_resets` (each audience's reset snapshot).
-  - Keys themselves are only ever in key custody
-    ([§11](#11-keys)); these tables hold their ids.
+  - Keys themselves are only ever in key custody (§11). Key selection uses
+    introductions in the received entries and this device's exposure knowledge;
+    there is no single shared current-key field.
+  - `_coven_retired_keys` remembers ids this device knows reached an excluded
+    member. Replay cannot erase that knowledge or permit using them again.
   - Removed members and devices stay, since their writes that reached
     storage still count, checked with their keys
     ([§10](#10-device-identity)).
@@ -1568,7 +1577,7 @@ Carol's tablet:
   that brings it in names it ([§9](#9-members-and-roles)):
   - the store's first key, the entry creating the store; a circle's first
     key, the entry making the circle;
-  - each later key, the removal that replaced the one before.
+  - each later key, a removal or a rotation entry naming its audience.
 - Each store key is sealed to every member's public key, and the sealed
   copies are kept in storage, at `<store>/keys/store/<key>/<member>`.
 - Sealed circle keys live at `<store>/keys/circles/<circle>/<key>/<member>`
@@ -1588,22 +1597,47 @@ Carol's tablet:
   - E.g. Ana's removal of Dan beats Ben's removal of Erin. Erin, still a
     member, gets Ben's key from whichever device holding it sees the drop
     first, so she reads the entries sealed with it.
-- The *current* store key is the one named by the latest entry the replay
-  keeps, in its order, that brings one in, and likewise for each circle; new
-  writes, entries and snapshots use it.
-  - An entry already in place changes nothing, so it brings no key in,
-    though what was sealed with the key it names still opens: that key
-    is sealed to the same members.
-  - E.g. Ana and Ben both remove Dan: Ana's earlier removal brings its
-    key in, and Ben's applies without one.
+- Several keys for one audience may coexist. Each object names the one
+  that sealed it; arrival of another key does not invalidate old objects.
+- A key known to have reached someone now outside its audience is retired
+  for new sealing. Keep it for reading and for identical attempted retries.
+  - This includes delivery by an addition or removal that replay drops.
+  - Once a device observes that exposure, it never selects that key for
+    a first attempt again, even if the introducing entry returns.
+  - A current audience member's device makes a fresh key, seals it to the
+    current members, then publishes a rotation entry. An admin can also
+    rotate a circle's key when store removal requires it (§13).
+  - Several devices may rotate at once. Their keys have distinct ids;
+    both remain readable, and neither rotation defeats the other.
+- For a first attempt in an audience this member still belongs to, use
+  the newest usable key this device holds, ordered by its introducing
+  entry's timestamp, then key id.
+  - Usable means introduced by a received authorized entry, available in
+    custody, and not known to have reached an excluded member.
+  - An entry that is a membership no-op can still supply a readable key.
+  - If no usable key exists, rotate or wait for its sealed copy, recording
+    the first blocker. Never use a known exposed key as a fallback.
+- Share every historical key with current members who lack it, even if its
+  introducing removal was dropped. This does not make a retired key usable
+  for first attempts again.
+- The guarantee is what the sending device knew, not instantaneous global
+  secrecy. Sync reads the store log at the start of the pass, then seals
+  first attempts with the keys it holds. It does not reread membership for
+  each write or upload.
+  - E.g. Ana and Ben concurrently change Gifts' membership. Carol gets a
+    key from an addition that later drops. Once Ana learns Carol is out,
+    Ana rotates before first sending another Gifts write.
+  - Ben may not have learned yet. Writes he first sent before learning
+    remain readable with that old key while Carol still has storage access.
+    Revocation ends that access; on S3 an admin deletes her key in the console.
 - Every object encrypted with a store or circle key names that key outside
   its encryption, so a reader knows which key opens it.
 - A file's independent key is carried in its row's encrypted writes
   ([§16.1](#161-kinds-and-where-files-are)).
-- So a member's key alone gets the current store key: a device holding it
-  reads its member's sealed copy from storage and opens it.
+- A member's key opens every store key sealed to that member. A device
+  reads the named copies from storage; key selection follows the rule above.
 - The store key is replaced whenever a member is removed.
-  - Writes made after that use the new key.
+  - First attempts made after learning the removal use an unexposed key.
   - Devices keep the old keys, to read writes made before.
 - Each device keeps its member's key in the OS keychain.
 - Storage access, not keys, is what keeps a removed device out.
@@ -1827,8 +1861,9 @@ Carol's tablet:
   the removal or expiry that needs it came about. The device retains the
   confirmation by key id: another entry, invite, retry or restart cannot
   bring that deletion notice back.
-- So a removed member's copies of the old store and circle keys read
-  nothing written after the removal, even if they regain read access.
+- A removed member's old keys cannot read writes first sent by a device
+  that already knew of the removal (§3, §11). Earlier attempted writes keep
+  their keys on retry; provider revocation cuts off access to those objects.
 - The removing device makes a new key for a circle its member isn't in,
   seals it, and doesn't keep it.
   - E.g. Ana removes Carol, who shares "Gifts" with Ben; Ana isn't in
@@ -2037,14 +2072,16 @@ Carol's tablet:
 
 - E.g. Ana and Ben share a circle, and Ana removes Ben from it.
   - The circle key is replaced, sealed to Ana alone.
-  - Ben keeps the circle's rows he already had, but can't read anything
-    written to it afterwards.
+  - Ben keeps the rows he already had. Remaining members' devices use a
+    fresh key for first attempts once they know he has left. Earlier
+    attempted writes keep their original keys (§11).
 - Removing a circle's last member deletes the circle
   ([§14.7](#147-deleting-a-circle)).
 - A write Ben made to the circle before he had read his removal still
   counts, as with any concurrent entry ([§9](#9-members-and-roles)).
-  - Ben is still in the store, so storage access doesn't stop him writing
-    with the old circle key.
+  - Ben is still in the store, so storage access doesn't stop him sending
+    his own pre-removal edits with the old circle key (§6). He has no new
+    circle data to reveal and cannot make new writes into it.
   - Only trust keeps him from claiming he hadn't read his removal, and
     members are trusted not to be hostile ([§2](#2-threat-model)).
 - Once Ben's device reads his removal, it keeps the circle's rows it has,
@@ -2448,7 +2485,7 @@ Carol's tablet:
     stage retained objects in temporary files for this check.
 - Its storage path and uploaded row reference carry the uploader's device
   id, so ownership remains known after the last reference disappears.
-- If retained data belongs to an unreadable audience, uses an excluded key,
+- If retained data belongs to an unreadable audience, lacks a key copy,
   or fails validation,
   a device cannot prove file absence and leaves uploaded files in storage.
 - Uploaded files are deleted by the same devices as logs

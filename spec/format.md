@@ -203,6 +203,7 @@
 | 11 | Raise schema | `version:u32 \| snapshot:SnapshotId` |
 | 13 | Reset | `snapshot:SnapshotId` |
 | 14 | Set access | `access:MemberAccess` |
+| 15 | Rotate key | `audience:Audience \| key:uuid` |
 
 - Tag 12 is unused. The other tags retain their numbers.
 - A role is `0` admin or `1` member. `SnapshotId` is
@@ -217,6 +218,9 @@
   a removal's `circle_keys` are strictly increasing by circle. Their count
   is present even when zero. Key ids have no numerical ordering or succession.
   A removal carries no list of deleted circles.
+- A rotation changes no membership. Its author must be a member of the
+  audience in the entry's recorded past; a store admin may rotate a circle
+  key as part of store removal. Concurrent rotations coexist (§11).
 - Raised versions are at least 1, and a raise names a snapshot of the
   audience it raises; a reset names the audience it resets. A creation's
   store id must agree with its path (D9).
@@ -615,7 +619,7 @@
   sealed key, file and code, including:
   - a write with a store part and a circle part, the first spanning three
     chunks;
-  - all fourteen store-log change tags, including both member-access variants
+  - all fifteen store-log change tags, including both member-access variants
     across creation and addition, and a removal replacing two circles' keys;
   - a dismissal frame;
   - a snapshot with every section and active, frozen and excluded losses;
