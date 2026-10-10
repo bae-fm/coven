@@ -2012,7 +2012,8 @@ impl CovenHandle {
     pub fn subscribe_uploads(&self) -> UploadsLiveQuery;
 
     /// Retries every waiting upload now, instead of after its retry delay,
-    /// which starts at 1 second and doubles to at most 5 minutes.
+    /// which starts at 1 second and doubles to at most 5 minutes on an
+    /// in-memory monotonic timer. Restarting retries at once (§16.5).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError>;
 
     /// Pauses uploads, or resumes them. A paused upload keeps its place,
@@ -2038,7 +2039,6 @@ pub struct QueuedUpload {
     pub attempts: u64,
     pub last_failure: Option<Arc<UploadFailure>>,
     pub queued_at: SystemTime,
-    pub last_attempt_at: Option<SystemTime>,
 }
 
 pub enum UploadPhase {

@@ -2276,6 +2276,11 @@ Carol's tablet:
   - A provider part may begin or end inside an encrypted chunk. Coven
     reads and verifies the whole plaintext chunk before encrypting it
     and selecting the requested bytes.
+- Retry delays use the sync loop's in-memory monotonic timer: start at
+  1 second and double to at most 5 minutes. Restarting retries at once.
+  - No persisted wall-clock time decides when an upload can retry.
+  - E.g. Ana's failed upload is waiting 8 seconds when she sets the clock
+    back a year. It still retries after those 8 seconds.
 - A large file goes up through the provider's resumable or multipart
   upload, in parts.
   - Providers require it above a size, such as Google Drive above 5 MB per
