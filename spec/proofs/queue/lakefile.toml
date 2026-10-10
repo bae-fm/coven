@@ -1,0 +1,9 @@
+name = "covenQueue"
+defaultTargets = ["CovenQueue"]
+
+[[require]]
+name = "covenMerge"
+path = "../merge"
+
+[[lean_lib]]
+name = "CovenQueue"

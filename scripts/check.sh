@@ -104,6 +104,7 @@ proofs() {
     lean_proof "the store log" spec/proofs/storelog CovenStorelog covenStorelog
     lean_proof "store-log data effects" spec/proofs/storelog-data CovenStorelogData covenStorelogData
     lean_proof "storage identity, files and clocks" spec/proofs/storage CovenStorage covenStorage
+    lean_proof "device upload queues" spec/proofs/queue CovenQueue covenQueue
 
     step "Rust / Lean differential merge test"
     runner="$(cd spec/proofs/merge && pwd)/.lake/build/bin/mergeRunner"
