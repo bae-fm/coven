@@ -191,15 +191,12 @@ there are no additional prefix scans merely to give another consumer a view.
 
 ### 4. Observe keys and peers
 
-List **`<store>/keys/`**, all store and circle key copies and recipients,
-when the store log changed since the last complete keys observation, an
-entry remains non-final, finality has newly advanced, a current audience
-member lacks a historical copy, or publication is unsettled. A failed scan
-remains due. The after-finality rule and steady scan count are conditional
-on §4.1's key-copy decision. A feed containing these paths supplies the same
-evidence without another listing. Unchanged waiting conditions use their
-backoff; a new entry or newly established finality is new evidence, not an
-excuse to bypass a provider cooldown.
+List **`<store>/keys/` completely on every pass**, including every
+writer's store and circle copies. Do this even when all entries are final
+and every current member already has a copy. A delayed publication can
+expose a key without another entry arriving. A failed or incomplete scan
+prevents new key selection and remains recorded; no stale catalog substitutes
+for this pass's observation. A provider cooldown delays the pass itself.
 
 Use the listing for sharing and exposure knowledge; do not GET every
 recipient's copy. Read only named copies this member needs and lacks,
@@ -212,7 +209,7 @@ presence facts without relisting all keys after each entry.
 
 Create each due historical copy queued independently of an entry only for
 a currently eligible recipient, using its retained sealed bytes (§11).
-An occupied copy follows the first-valid-copy rule; absence checks come
+An occupied own copy requires complete byte equality (§10); absence checks come
 from the catalog, not one GET per possible recipient. New rotations and
 entry prerequisites are published by the ordered work in step 5.
 
@@ -256,7 +253,7 @@ operation runs while a reload is active. Missing history covered by a
 usable snapshot uses this same reload path, not another discovery pass.
 
 Every create uses fixed attempted bytes and the collision rule of §10;
-sealed keys retain §11's first-valid-copy rule. For a lost reply or occupied
+sealed keys use distinct writer paths under §11. For a lost reply or occupied
 path, reuse cached stored bytes when they establish the comparison, or
 make the one needed comparison read. Metadata cannot replace that byte comparison. Record returned metadata;
 where a provider omits it, use the single-object status call, counted here.

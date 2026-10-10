@@ -527,12 +527,13 @@
 | `<store>/snapshots/<audience>/<device>/<n>` | A device's snapshot `n` of an audience: `store`, or a circle's id |
 | `<store>/clock/<device>` | A signed, sealed clock observation, replaced only for a due storage-time check |
 | `<store>/positions/<device>` | A device's posted positions and blocked records, replaced as either changes |
-| `<store>/keys/store/<key>/<member>` | A store key sealed to a member |
-| `<store>/keys/circles/<circle>/<key>/<member>` | A circle key sealed to a member |
+| `<store>/keys/<writer>/store/<key>/<member>` | A store key sealed to a member |
+| `<store>/keys/<writer>/circles/<circle>/<key>/<member>` | A circle key sealed to a member |
 | `<store>/files/<device>/<file>` | An uploaded file |
 | `<store>/join-requests/<invite>` | A join request |
 
-- A device id and `n` are decimal, with no leading zeros; `n` is at least 1.
+- Device and key-copy writer ids and `n` are decimal, with no leading zeros;
+  `n` is at least 1. Each sealed-copy path belongs to its named writer.
 - Store, circle, key, invite and file ids are lowercase hyphenated UUIDs.
   A member is its public key in lowercase hex.
 - A path is used exactly as written here, with no other spelling, and is

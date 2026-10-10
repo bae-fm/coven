@@ -333,10 +333,10 @@ can meet the first two observations while failing the third.
 - Device paths have one intended writer: the device they name. Retrying
   that writer uses fixed bytes. A copied identity can violate this;
   the checks in §10 detect it before sending or when a path is occupied.
-  - A sealed key copy can have several writers: any device holding the key
-    may supply it to a current audience member who lacks it (§11).
-    Copies use different sealed bytes for the same key; the first valid
-    stored copy counts.
+  - Sealed key copies have one writer per path too. Several devices can
+    supply the same key to the same member, but each uses its own
+    `<store>/keys/<writer>/` folder in D10. Other writers never occupy that path.
+    Duplicate valid copies have the same key meaning, not the same bytes.
   - On Google Drive, which allows two files with one name, a retry first
     looks for its own earlier copy.
 - On the providers that share with an account, only the member whose
@@ -388,7 +388,7 @@ can meet the first two observations while failing the third.
   has its own, so on S3 an admin makes and deletes members' keys in the
   provider's console, and coven says when.
 - Posted positions live at `<store>/positions/<device>` ([§6](#6-syncing-writes)).
-- Sealed circle keys live at `<store>/keys/circles/<circle>/<key>/<member>`
+- Sealed circle keys live at `<store>/keys/<writer>/circles/<circle>/<key>/<member>`
   ([§14.3](#143-circles)).
 
 ### 4.1 Open decisions for IO bounds
@@ -416,22 +416,6 @@ must charge listing pages, including retained history; it cannot be stated
 as one miss per writer. Exact-name reads also have provider-specific request
 costs: [Drive downloads require a file id](https://developers.google.com/workspace/drive/api/reference/rest/v3/files/get),
 so an unknown name first needs an exact parent/name query.
-
-#### Open decision: key-copy observation after finality
-
-A keys scan is due when received store-log entries change, while an entry
-is non-final, while a current member lacks a copy, or while key publication
-is unsettled. Before stopping scans, also complete one after establishing
-finality. A feed can incorporate key-path changes in the same catalog update.
-
-Skipping all later keys scans requires proving that no delayed or retried
-publication can expose an old key without a new observable store-log change.
-An operation can publish copies before its entry (§18), so log finality
-alone does not prove this. Options are an always-observed key change feed,
-continued keys listings (a fifth logical idle scan, with its pages), or a
-publication rule that supplies this proof while preserving fixed attempted
-bytes and revocation. The four-scan idle count is conditional on this
-decision; sealed copies already observed remain known permanently (§11).
 
 #### Open decision: discovering delayed file publication
 
@@ -1903,8 +1887,8 @@ Carol's tablet:
 - An occupied immutable path succeeds only if its complete stored bytes
   equal the bytes this attempt would send. Compare before retiring its queue
   row; a mismatch on this device's path triggers the same device reset.
-  - This applies to writes, entries, snapshots and files. Sealed key copies
-    can have several authors and follow §11's first-valid-copy rule instead.
+  - This applies to writes, entries, snapshots, files and each writer's
+    sealed key copies. Different writers use different key-copy paths.
   - A read failure keeps the attempt pending; occupation alone proves nothing.
   - Two live copies can pass the check together and send different bytes
     to one path. Content-bound nonces separate their encryption (§11.1);
@@ -1939,8 +1923,8 @@ Carol's tablet:
     key, the entry making the circle;
   - each later key, a removal or a rotation entry naming its audience.
 - Each store key is sealed to every member's public key, and the sealed
-  copies are kept in storage, at `<store>/keys/store/<key>/<member>`.
-- Sealed circle keys live at `<store>/keys/circles/<circle>/<key>/<member>`
+  copies are kept in storage, at `<store>/keys/<writer>/store/<key>/<member>`.
+- Sealed circle keys live at `<store>/keys/<writer>/circles/<circle>/<key>/<member>`
   ([§14.3](#143-circles)).
 - Concurrent removals use distinct key paths and can both apply.
   - E.g. Ana removes Dan while Ben removes Erin. Each made a key without
@@ -1949,13 +1933,16 @@ Carol's tablet:
 - A dropped removal's keys may already seal writes or entries made before
   its drop was known. Current members must still be able to read them.
   - Every device holding such a key seals it to current audience members
-    who lack a copy. The first valid copy at each member's path counts.
+    who lack a copy. Any valid copy for that member supplies the key; each writer has its own path.
   - E.g. Ana and Ben are the last two admins and remove each other.
     Ana's earlier entry wins. A remaining device holding Ben's key seals
     it to Ana, who can then read objects Ben sealed with it. If no reachable
     device holds that key, the objects stay in the blocked list as key waits.
 - Several keys for one audience may coexist. Each object names the one
   that sealed it; arrival of another key does not invalidate old objects.
+- Ana's phone and Ben's laptop can both seal K to Carol. They publish
+  `keys/ana-phone/store/K/carol` and `keys/ben-laptop/store/K/carol`;
+  neither replaces the other's randomized sealed bytes.
 - Each sync pass lists sealed store and circle key copies alongside the
   store log, at the paths above. Complete both reads before selecting keys
   for first attempts. A failed or incomplete listing blocks those attempts
@@ -2367,7 +2354,7 @@ Carol's tablet:
   ([§9](#9-members-and-roles)).
 - Each circle has its own key, sealed to each of its members' public keys,
   like the store key ([§11](#11-keys)).
-  - Its sealed copies live at `<store>/keys/circles/<circle>/<key>/<member>`
+  - Its sealed copies live at `<store>/keys/<writer>/circles/<circle>/<key>/<member>`
     ([§11](#11-keys)).
   - It is replaced whenever someone leaves the circle.
   - Someone joining a circle gets its earlier keys too, so they can read its
