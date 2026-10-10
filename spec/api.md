@@ -172,7 +172,7 @@ pub struct MemberKeys { /* private fields */ }
 /// Every opened store and circle key, including older keys (§11, §14.3).
 pub struct StoreKeyring { /* private fields */ }
 
-/// The app's provider client ids and sign-in clock, kept private (E10).
+/// The app's provider client ids, kept private (E10).
 pub struct OAuthClients { /* private fields */ }
 
 /// A validated encrypted-object path, beginning with its store id (§4).
@@ -781,7 +781,7 @@ impl CovenBuilder {
     /// file aside, loads the latest snapshot, and queues the waiting writes it
     /// can still read from the old file, then resumes unfinished operations.
     /// Connects from saved storage settings and custody credentials, refreshing
-    /// expired sign-in tokens. Requires unlocked store and member keys and checks
+    /// once on provider rejection. Requires unlocked store and member keys and checks
     /// storage before moving the damaged files. Registers the fresh device id
     /// with the app's `device_name`.
     pub async fn open_reloading(self, store: StoreId, device_name: &str) -> Result<CovenHandle, RecoveryError>;
@@ -1403,8 +1403,8 @@ while let Ok(values) = lost.next().await {
 - A device that isn't connected still reads and writes
   ([§3](coven.md#3-guarantees)); its writes wait in `_coven_uploads`.
 - `start_sync` builds the provider client if absent, reading credentials from
-  custody and refreshing expired tokens, then starts the loop. Starting an
-  already running loop, or a store with no storage set up, does nothing.
+  custody, then starts the loop. Tokens refresh on provider rejection (§4).
+  Starting an already running loop, or a store with no storage set up, does nothing.
 - `stop_sync` finishes the active pass and file transfers, then drops the keys
   sync unlocked and all workers' references to the provider client. Credentials
   and the storage location remain available for the next `start_sync`.
@@ -1763,7 +1763,7 @@ impl CovenHandle {
 
     /// Sets up Google Drive, Dropbox or OneDrive using coven's held sign-in.
     /// Without a new sign-in, reconnects using this store's custody credentials.
-    /// Expired tokens are refreshed before use. Never opens sign-in UI.
+    /// A provider 401 refreshes once and retries once. Never opens sign-in UI.
     pub async fn setup_oauth_storage(
         &self,
         storage: StorageConfig,
@@ -1791,7 +1791,7 @@ impl CovenHandle {
     pub async fn disconnect_storage(&self) -> Result<(), SyncError>;
 
     /// Starts syncing, building the provider client if absent from the configured
-    /// location and custody credentials, refreshing tokens as needed. Reads keys
+    /// location and custody credentials, refreshing once on rejection. Reads keys
     /// from custody. Does nothing if already running or no storage is set up.
     pub async fn start_sync(&self) -> Result<(), SyncError>;
 
@@ -2519,14 +2519,10 @@ pub enum OAuthError {
     Cancelled,
     /// No callback arrived before the deadline.
     Timeout,
-    /// The current tokens have expired; refresh and commit them before reuse.
-    Expired,
     /// A new provider sign-in is required.
     Reauthorize(CloudProvider),
     /// The redirect URI or callback request is malformed.
     InvalidRedirect,
-    /// The provider's expiry cannot be represented.
-    InvalidExpiry,
     /// The browser or local redirect listener failed.
     Io(std::io::Error),
     /// The app's native sign-in sheet failed.
@@ -2632,21 +2628,24 @@ pub async fn join_with_invite(
 ) -> Result<Option<CovenHandle>, BootstrapError>;
 
 impl OAuthClients {
-    /// Sets client ids (None for providers the app does not offer) and the sign-in clock.
+    /// Sets client ids; None for providers the app does not offer.
     pub fn new(
         google_drive_client_id: Option<String>,
         dropbox_client_id: Option<String>,
         onedrive_client_id: Option<String>,
-        clock: ClockRef,
     ) -> Self;
 }
 ```
 
 - Coven validates the complete callback URL and its state before exchanging the
   code. Missing, duplicate or mismatched callback fields fail sign-in. The
-  sign-in deadline is five minutes; dropping the future releases the presenter.
-- Refreshed tokens are committed to custody before the provider session uses
-  them. Refresh leaves synced restore codes untouched. Account-provider restore
+  sign-in deadline is five minutes on a monotonic timer. Dropping the future
+  releases the presenter.
+- Tokens have no local expiry deadline. Setup, bootstrap, operations, file
+  transfers and sync use a token until the provider rejects it with HTTP 401.
+- A rejected request refreshes once, commits the replacement to custody,
+  then retries once. A failed refresh or second rejection reaches the caller.
+- Refresh leaves synced restore codes untouched. Account-provider restore
   codes carry the location, never OAuth tokens.
 
 Example, adding Ana's laptop. On her phone:

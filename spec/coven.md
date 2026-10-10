@@ -147,7 +147,12 @@
     local listener; iOS and Android apps supply their platform sign-in sheet.
   - Before storage setup or bootstrap publishes a store, the sign-in lives in
     coven's session custody. Publication commits it to device custody. Coven
-    refreshes expired tokens and commits replacements before using them.
+    uses a token until the provider rejects it with HTTP 401. It then
+    refreshes once, commits the replacement and retries that request once.
+  - Token expiry uses no device clock. Refresh failure or a second rejection
+    reaches the caller; every storage consumer uses the same rule.
+  - E.g. Ben sets his laptop clock back a year. Its token still works until
+    the provider rejects it; one refresh lets the waiting request continue.
 - On S3, each member has their own access key.
 - What coven needs from a provider:
   - create an object, refusing an existing path without replacing its bytes,
@@ -2764,7 +2769,7 @@ Carol's tablet:
     identities. The app supplies the new device's name. Reloading in place
     keeps the device id.
   - Recovery connects using the store's saved storage settings and credentials
-    in custody, refreshing expired sign-in tokens as when starting sync. It
+    in custody, refreshing on provider rejection as in §4. It
     requires unlocked store and member keys and checks storage before moving
     any damaged database files. Missing storage, unavailable keys or a failed
     connection leaves those files in place and returns the failure to the app.
@@ -2900,8 +2905,8 @@ Carol's tablet:
   it, and nothing else can leave one running.
 - Opening leaves configured storage `Stopped`, or `Disconnected` when none is
   set up. `start_sync` asks the injected provider connector to build a client
-  when absent, using custody credentials refreshed as needed, then starts the
-  loop. Repeated starts keep the running loop and client.
+  when absent, using custody credentials, then starts the loop. Tokens refresh
+  on rejection (§4). Repeated starts keep the running loop and client.
 - `stop_sync` finishes the active pass and file transfers before releasing
   unlocked keys and every worker's provider reference. It retains the location
   and custody credentials for the next start. `disconnect_storage` also forgets
