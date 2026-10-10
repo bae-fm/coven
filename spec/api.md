@@ -1094,6 +1094,16 @@ handle
 - Reads run on several read-only connections at once ([§5](coven.md#5-local-database)).
 - A *live query* runs once, then again whenever a write commits that changes
   rows it read.
+- Each table-backed built-in read uses one pre-built internal query for
+  its one-shot call and `subscribe_x() -> LiveQuery<T>` counterpart:
+  - `blocked` and `lost_values` on the handle;
+  - `members` on the handle, and `list` and `members` on `Circles`;
+  - `rows_pinned` on the handle, with the same table and keys in both calls.
+- These reads work without storage and use the app's normal read and live-query
+  machinery. Subscriptions observe committed changes to the same query inputs.
+  Upload byte progress and join requests keep their own streams (E7, E10).
+- E.g. Ana's app reads `members()` to draw its first list, or subscribes with
+  `subscribe_members()` to receive that same list and later committed changes.
 - Subscriptions show current results, including replay changes. Their callback
   histories need not match between devices (§9).
 - A loss with `pending_entries` can disappear on replay. Offer a removed row
@@ -2194,16 +2204,6 @@ pub struct PinProgress {
     pub bytes_total: u64,
 }
 
-/// A live query of whether each requested row's file is pinned (E8).
-pub struct RowsPinnedLiveQuery { /* private fields */ }
-
-impl RowsPinnedLiveQuery {
-    /// Replaces the table and keys whose pin state is watched.
-    pub fn set_rows(&self, table: &str, keys: Vec<RowKey>) -> Result<(), LiveQueryClosed>;
-    /// The current answers, in key order, then each change (E8).
-    pub async fn next(&mut self) -> Result<Vec<Option<bool>>, FileReadError>;
-}
-
 /// Downloads of files declared CacheEager (§16.4, E8).
 pub enum EagerCacheFillStatus {
     /// No files are waiting to download.
@@ -2256,10 +2256,11 @@ impl CovenHandle {
     /// Whether each row's file is pinned, one answer per key in order, or
     /// `None` for a key with no row carrying a file. A file not yet uploaded
     /// reads as not pinned.
-    pub async fn rows_pinned(&self, table: &str, keys: Vec<RowKey>) -> Result<Vec<Option<bool>>, FileReadError>;
+    pub async fn rows_pinned(&self, table: &str, keys: Vec<RowKey>) -> CovenResult<Vec<Option<bool>>>;
 
-    /// The same answers, live. `set_rows` changes which rows it watches.
-    pub fn subscribe_rows_pinned(&self, table: &str, keys: Vec<RowKey>) -> RowsPinnedLiveQuery;
+    /// The same internal query, live. To watch different keys, drop this query
+    /// and subscribe with the new keys; there is no separate pin-query type.
+    pub fn subscribe_rows_pinned(&self, table: &str, keys: Vec<RowKey>) -> LiveQuery<Vec<Option<bool>>>;
 
     /// Removes an uploaded file's copies from the cache, pinned or not. Never
     /// touches a file waiting to upload, or storage; a later read
@@ -2395,7 +2396,10 @@ match stream.read_at(resume_at, 256 * 1024).await {
 ```rust
 impl CovenHandle {
     /// The members and their devices, as this device's store log has them.
-    pub async fn get_members(&self) -> Result<Vec<MemberInfo>, SyncError>;
+    pub async fn members(&self) -> CovenResult<Vec<MemberInfo>>;
+
+    /// The same internal query, live (E4).
+    pub fn subscribe_members(&self) -> LiveQuery<Vec<MemberInfo>>;
 
     /// On S3: switches this member to the access key they made in the
     /// provider's console, records the new key's id in the store log (§9),
@@ -2942,7 +2946,7 @@ pub trait MemberKeyCustody: Send + Sync {
 
 - A circle's members add and remove its members ([§14.3](coven.md#143-circles)).
   Circle changes first catch up on reachable storage (§9, E6).
-- Circle calls return `SyncError` ([E5](#e5-storage-and-sync)), as member calls
+- Circle-changing calls return `SyncError` ([E5](#e5-storage-and-sync)), as member calls
   do ([E9](#e9-members-and-devices)). `CircleNotMember`, `CircleDeleted` and
   `NotStoreMember` retain the circle or member id the app can act on.
 - Removing someone from a circle is an operation that replaces the circle's
@@ -2977,10 +2981,16 @@ impl Circles<'_> {
     pub async fn remove_member(&self, circle: CircleId, member: &MemberId) -> Result<(), SyncError>;
 
     /// The circles this member is in.
-    pub async fn list(&self) -> Result<Vec<Circle>, SyncError>;
+    pub async fn list(&self) -> CovenResult<Vec<Circle>>;
+
+    /// The same circle-list query, live (E4).
+    pub fn subscribe_list(&self) -> LiveQuery<Vec<Circle>>;
 
     /// A circle's members who are still in the store.
-    pub async fn members(&self, circle: CircleId) -> Result<Vec<CircleMemberInfo>, SyncError>;
+    pub async fn members(&self, circle: CircleId) -> CovenResult<Vec<CircleMemberInfo>>;
+
+    /// The same query for this circle's members, live (E4).
+    pub fn subscribe_members(&self, circle: CircleId) -> LiveQuery<Vec<CircleMemberInfo>>;
 
     /// Resets a circle from this copy; only the snapshot and writes that
     /// read the reset count in that circle, on this device too (§19.3).
