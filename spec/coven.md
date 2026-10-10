@@ -299,10 +299,20 @@ can meet the first two observations while failing the third.
   - read it, whole and by range; complete-object reads stream with bounded
     buffers so the reader checks chunks without a request per chunk
     ([One sync pass](sync-pass.md#one-stream-checked-as-it-arrives));
-  - list a prefix, with when storage stored each object;
+  - list a prefix, with when storage stored each object; each query is scoped
+    to that prefix, across all its pages, without a change feed;
   - delete;
   - grant and revoke a member's access, where the provider can: Google
     Drive, Dropbox, OneDrive and iCloud share with an account.
+- On Drive, Dropbox and OneDrive, every directory component in D10 is a
+  real provider folder. List that folder directly, never the configured
+  root followed by client-side filtering. S3 uses the exact key prefix;
+  CloudKit queries records under that exact path prefix in the selected zone.
+  Folder ids and known path-to-object ids stay with the connection. An
+  unknown Drive object uses an exact parent/name query; its id is then cached.
+  Failed discovery never installs a partial catalog as complete.
+  - Ana's `files/` folder can hold 20,000 photos. Reading `store-log/`
+    never enumerates those photos or another store's objects.
 - Storage times come from the provider, on one clock for this store.
   An immutable object's time is its first complete publication; retrying
   an occupied path does not change it. Replacing posted positions gets
@@ -374,62 +384,25 @@ The choices below are unresolved. They state what each option would require;
 they do not add a provider method, change a path, or weaken a guarantee by
 implication.
 
-#### Open decision: discovery and provider scope
+#### Open decision: gap-free discovery after deletion
 
-Drive, OneDrive and Dropbox adapters that enumerate their whole configured
-folder or namespace and then filter paths pay for unrelated files on every
-prefix query. Two alternatives are:
+GETting the next number is sufficient only while the entire unpublished
+suffix is gap-free. Retention can delete a number a reader has not seen.
+Ana publishes snapshots 2 and 3, then deletes 2 because 3 covers it. Ben's
+catalog ends at 1: GET 2 misses although 3 exists. Loading a snapshot cannot
+resolve this without a way to discover that snapshot first.
 
-- Map each store and logical prefix to a provider folder, querying that
-  folder directly. Keep folder ids and path-to-object ids from listings and
-  creates for the connection's lifetime; do not resolve them again for
-  every read or create. This avoids unrelated prefixes but still returns
-  every retained object in the requested prefix, across all its pages.
-  Changing the physical layout must preserve discovery of existing D10
-  paths; a name-to-id cache alone cannot discover unknown new objects.
-- Add incremental discovery to §4's contract and maintain a durable local
-  catalog: [Drive `changes.list`](https://developers.google.com/workspace/drive/api/guides/manage-changes),
-  [Dropbox `list_folder` cursors](https://docs.dropboxapi.com/dropbox-api/docs/detecting-changes),
-  [OneDrive `delta`](https://learn.microsoft.com/en-us/graph/api/driveitem-delta?view=graph-rest-1.0),
-  and [CloudKit zone change tokens](https://developer.apple.com/documentation/cloudkit/ckfetchrecordzonechangesoperation).
-  Bootstrap establishes the catalog without a gap; a cursor commits only
-  with the catalog changes it covers. Retained download work need not have
-  applied yet, but must not be lost by advancing discovery. Exhaust every
-  page, record deletions, and treat cursor expiry as an explicit catalog
-  rebuild. A feed must establish completeness for §9 and §10, not merely
-  deliver hints. It must distinguish deletion from loss of access.
+Files also retain their attaching write's random id, support independent
+uploads, and can be deleted. A missing numbered file cannot establish that
+no later upload landed. A publication record written after a file would
+leave a crash window; it is not an atomic solution.
 
-A user- or drive-wide feed can include unrelated changes; a CloudKit zone
-can hold other stores (§4). Filtering them locally does not make those
-requests free. A store-scoped feed, a dedicated provider container, or a
-bound that explicitly charges unrelated changes are different choices.
-The latter two change §4's shared-location promise or the requested bound.
-
-S3's portable prefix-listing contract has no change cursor.
-[`ListObjectsV2`](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html)
-paginates retained keys. Keeping complete scans preserves the current
-discovery rules but leaves the constant idle-request and metadata-byte
-bounds unmet. A publication index or a required external notification
-service would need a protocol for discovery, deletion, crash safety and
-unknown devices. A notification hint alone cannot establish completeness.
-Fixed-width log numbers could permit ordered suffix listings, but change
-D10 and do not by themselves discover unknown devices or new snapshots.
-No such S3 design is selected here.
-
-With full scans, let `L_p(x)` include all requests and folder lookups to
-list prefix `x`. The steady pass's count is exactly
-`L_p(store-log/) + L_p(devices/) + L_p(snapshots/) + L_p(positions/)`,
-subject to the key-copy decision below. S3 is **4 LIST requests only when
-each prefix fits one page**. On Drive, OneDrive, Dropbox and CloudKit the
-count is the same sum of actual listing costs, not necessarily four.
-
-With a complete saved catalog and a suitable single feed, an empty,
-one-page update costs **1 request** on Drive, OneDrive, Dropbox or CloudKit;
-zero body reads and zero writes follow. Long-poll and subscription setup or
-renewal calls count separately when used. The one-request figure is
-conditional on feed scope and completeness, not a promise for every account
-or an arbitrary shared container. No fixed numeric `C_p` is established
-for any provider until these choices are resolved.
+Until a deletion-aware discovery rule is specified, complete scoped listings
+remain required. Key copies are observed every pass. The idle request bound
+must charge listing pages, including retained history; it cannot be stated
+as one miss per writer. Exact-name reads also have provider-specific request
+costs: [Drive downloads require a file id](https://developers.google.com/workspace/drive/api/reference/rest/v3/files/get),
+so an unknown name first needs an exact parent/name query.
 
 #### Open decision: single-object status and replacement identity
 
