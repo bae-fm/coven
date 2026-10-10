@@ -1566,9 +1566,15 @@ Carol's tablet:
     `_coven_devices` (every device a kept entry added, its member and name,
     and whether it is active, removed or replaced with closed log ends),
     `_coven_circles` (every circle a kept entry made, its name and whether
-    it was deleted), `_coven_circle_members`, `_coven_store` (the store's id
-    and name). `_coven_boundaries` holds each checked raise/reset boundary;
+    it was deleted), and `_coven_circle_members`.
+    The store's id and name come from its create-store entry; directory
+    settings supply them while creation or bootstrap is incomplete and must
+    match that entry when it is read. There is no duplicate store table.
+    `_coven_boundaries` holds each checked raise/reset boundary;
     the current boundary per audience is derived from the kept entries.
+  - Ana's directory settings name “Recipes” while its first entry is being
+    published. Once that entry is checked, reads derive “Recipes” from it;
+    a conflicting setting fails opening rather than choosing another name.
   - Keys themselves are only ever in key custody (§11). Key selection uses
     introductions in the received entries and the pass's sealed-copy listing
     (§11). There is no shared current-key field or local retired-key table;
