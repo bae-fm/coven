@@ -1314,8 +1314,9 @@ Carol's tablet:
   - the store always has at least one admin.
 - Every device that has the same entries ends with the same member list,
   whatever order they arrived in.
-  - The proof is [Appendix C](proofs/storelog.md), in its own file,
-    checked by machine.
+  - The machine-checked store-log model ([Appendix C](proofs/storelog.md))
+    must establish this for these conflict and replay rules, including
+    concurrent changes to different members and circle deletion.
 - A device applies an entry once it has every entry that entry had read.
 - Each device keeps, in coven's local tables:
   - `_coven_store_log`: every entry it has applied, as downloaded and
@@ -1437,43 +1438,32 @@ Carol's tablet:
 - Whose entry it is comes from its signature, not from the device it was
   written from, so a new device adds itself, signed with its member's key
   ([§12.1](#121-a-persons-new-device)).
-- Two concurrent entries conflict when:
-  - they give the same member or device contradictory states, or one
-    removes something the other needs; sharing a member id is not enough;
-    - two additions of different devices belonging to Ben both apply;
-    - adding Ben's phone, changing his access and adding him to Gifts
-      also all apply: none contradicts another;
-    - removing Ben conflicts with adding his phone, since the phone needs
-      Ben to remain a member;
-  - one adds a member and the other removes one, which replaces the store
-    key ([§13](#13-removing-members-and-devices));
-  - one deletes a circle and the other changes it, its members, or resets
-    it;
-  - one adds someone to a circle and the other replaces that circle's key:
-    by removing someone from it ([§14.6](#146-leaving-a-circle)), or by
-    removing from the store a member the removal names as in it
-    ([§13](#13-removing-members-and-devices));
-    - e.g. Ana's tablet adds Ben, then Carol, to Gifts, while her phone,
-      which hadn't seen either, removes Ben from the store: the removal
-      doesn't name Gifts, so Carol's add applies; Ben's own add is about
-      Ben, so the removal beats it;
-  - they each replace the same key: two removals from the store, or two
-    removals of someone from the same circle, since otherwise a key one of
-    them made would be sealed to the member the other removed
-    ([§13](#13-removing-members-and-devices));
-  - they raise one audience's schema to the same version with
-    different snapshots, reset the same audience to different snapshots, or
-    one resets an audience the other raises to a new version
-    ([§17](#17-schema-changes), [§19.3](#193-resetting-a-store)).
-- Whether an entry deletes a circle is judged in the member list its
-  author had read: removing the circle's only member there deletes it.
-  - E.g. Ana and Ben are admins and share Gifts. Concurrently, Ana's phone
-    removes Ben from Gifts, and her tablet removes Ana from the store.
-  - Each had read Gifts with two members, so neither deletes it. They
-    still conflict, since both replace Gifts' key.
-  - The tablet's store removal wins over the phone's circle removal,
-    whatever their timestamps. Ana leaves the store; Ben remains an admin
-    and the remaining member of Gifts.
+- Concurrent entries conflict only when they contradict:
+  - different states for the same member or device, such as granting and
+    removing the same membership, or assigning different roles;
+  - one removes a member or device the other's change requires to exist;
+  - one deletes a circle the other changes, adds to, removes from, rotates
+    a key for, resets or raises;
+  - two raises to the same audience and version with different snapshots,
+    two resets of one audience with different snapshots, or a reset and
+    raise of that same audience.
+- Sharing a member id or changing keys is not itself a conflict.
+  - Ben's two device additions, his new storage access and his circle
+    addition can all apply.
+  - Adding Carol and removing Dan both apply. Carol receives every key
+    she needs; keys that reached Dan are retired for new sealing (§11).
+  - Adding Carol to Gifts and removing Ben from Gifts both apply too.
+  - Two removals of different members both apply if an admin remains.
+    Two removals of the same member are the same membership result.
+  - Renames use their existing latest-timestamp rule (§14.3), and raises
+    to different versions keep the higher version (§17.1).
+- For conflict comparison, an entry deletes a circle when it explicitly
+  deletes it or removes its only member in the author's recorded view.
+  A store removal also deletes the circles its author saw with only that
+  member. This classification does not change on later replay.
+- Deletion conflicts with changes requiring the circle because they cannot
+  both take effect on an existing circle. The deletion wins by the tiers
+  below; there is no extra conflict merely because both entries supply keys.
 - Of two conflicting entries, the one that beats the other is:
   1. removing a member or device from the store;
   2. deleting a circle, including removing its last member in the author's view;
@@ -1485,18 +1475,17 @@ Carol's tablet:
 - Concurrent entries, and what applies:
 
   ```
-  Ana adds Dan               Ben makes Carol an admin   both: no conflict
-  Ben adds his phone         Ben adds his laptop        both: different devices
-  Ben adds his phone         Ben changes his S3 key     both: different facts
-  Ben adds his new phone     Ana removes Ben            the removal
-  Ana makes Ben an admin     Carol makes him a member   member: an admin
-                                                        grant loses
-  Ana removes Ben            Ben removes Ana            the earlier
-  Ana adds Carol             Ben removes Dan            the removal
+  Ana adds Dan               Ben makes Carol an admin   both
+  Ben adds his phone         Ben adds his laptop        both
+  Ben adds his phone         Ben changes his S3 key     both
+  Ben adds his phone         Ana removes Ben            removal
+  Ana makes Ben an admin     Carol makes him a member   member
+  Ana adds Carol             Ben removes Dan            both
+  Ana removes Ben            Ben removes Ana            earlier, if only two admins
   ```
 
-- E.g. Ana, Ben and Carol are admins. Each reads the store log, then
-  removes another before receiving the others' entries:
+- E.g. Ana, Ben and Carol are the only admins. Each reads the store log,
+  then removes another before receiving the others' entries:
 
   ```
   first stamp    Ana removes Ben
@@ -1504,25 +1493,19 @@ Carol's tablet:
   third stamp    Carol removes Ana
   ```
 
-  - Each pair conflicts, since each removal replaces the store key: Ana's,
-    the earliest, applies, and Ben's and Carol's are dropped.
-  - Carol's device then redoes her removal against the new member list,
-    as an operation does until its entry is kept
-    ([§18](#18-operations)): Ana is removed, and Carol stays the admin.
-    Ben's device, removed, can't redo his.
-- E.g. Ana and Ben are admins. Concurrently, Ben removes Ana, Ana removes
-  Ben a moment later, and Ben adds his new phone:
-  - after Ben's removal, Ana's would leave no admin, so it is dropped;
-  - Ana's removal would have beaten Ben's new phone, but it was dropped,
-    so the phone is added.
-- A dropped entry stays dropped for that replay even if what beat it is
-  dropped later; this only ever drops a change, never grants one.
-  - E.g. Ana and Ben are admins. Concurrently, Ana adds Carol as an admin,
-    Ben is made a member, and Ben removes Ana.
-  - Ben's removal beats Carol's add, which is dropped, and the replay
-    starts again; now removing Ana would leave no admin, so Ben's removal
-    is dropped too.
-  - Carol isn't added. Ana can invite Carol again.
+  - The first two apply. Ben's authority is checked in the view he read,
+    not the member list left by Ana's earlier concurrent removal.
+  - Carol's removal would leave no admin, so it drops. Ana remains admin.
+  - Ben and Carol stop when their devices read their own removal; neither
+    can start another removal after that.
+- With only Ana and Ben as admins, their concurrent removals of each other
+  leave the earlier remover as the remaining admin. The other removal drops
+  because it would leave none.
+  - A device that already observed its own removal stops for good (§10).
+    It does not keep reading to discover a later reversal. In this case,
+    another device of the remaining member may need to add it again.
+- A dropped entry stays dropped for that replay even if its defeater later
+  drops. The next arriving entry starts a fresh replay with all entries.
 
 ## 10. Device identity
 
@@ -1582,21 +1565,18 @@ Carol's tablet:
   copies are kept in storage, at `<store>/keys/store/<key>/<member>`.
 - Sealed circle keys live at `<store>/keys/circles/<circle>/<key>/<member>`
   ([§14.3](#143-circles)).
-- So two concurrent removals never write their keys to the same paths.
-  - E.g. Ana removes Dan while Ben, on another device, removes Erin: each removal
-    names its own new store key; the two conflict, since each key is
-    sealed to the member the other removes, so the earlier applies and
-    the other is redone against it ([§9](#9-members-and-roles)).
-- A dropped removal's keys may already seal entries other devices made
-  before they saw the drop, and the member it excluded, still a member,
-  has no copy of them.
-  - So every device holding such a key seals it to each member of its
-    audience in the latest replay who lacks a copy, at that member's
-    path; the first copy stored counts, and a device that finds the path
-    taken is done.
-  - E.g. Ana's removal of Dan beats Ben's removal of Erin. Erin, still a
-    member, gets Ben's key from whichever device holding it sees the drop
-    first, so she reads the entries sealed with it.
+- Concurrent removals use distinct key paths and can both apply.
+  - E.g. Ana removes Dan while Ben removes Erin. Each made a key without
+    seeing the other removal. Once both entries arrive, any key delivered
+    to Dan or Erin is retired and a remaining device rotates again.
+- A dropped removal's keys may already seal writes or entries made before
+  its drop was known. Current members must still be able to read them.
+  - Every device holding such a key seals it to current audience members
+    who lack a copy. The first valid copy at each member's path counts.
+  - E.g. Ana and Ben are the last two admins and remove each other.
+    Ana's earlier entry wins. A remaining device holding Ben's key seals
+    it to Ana, who can then read objects Ben sealed with it. If no reachable
+    device holds that key, the objects stay in the blocked list as key waits.
 - Several keys for one audience may coexist. Each object names the one
   that sealed it; arrival of another key does not invalidate old objects.
 - A key known to have reached someone now outside its audience is retired
@@ -1873,18 +1853,10 @@ Carol's tablet:
     hostile ([§2](#2-threat-model)).
 - A circle the removed member was alone in is deleted by the same entry:
   no one is left who could read it ([§14.7](#147-deleting-a-circle)).
-- Adding a member concurrently with a removal that rotates the key is a
-  conflict, and the removal beats the add, which is dropped
-  ([§9](#9-members-and-roles)).
-  - Otherwise the new member would hold only the old key, and couldn't
-    read anything written after the rotation.
-  - E.g. Ana adds Carol while Ben, on another device, removes Dan: on every device
-    Carol's add is dropped and tracked in the replay. Ana can invite Carol again.
-  - Carol's phone shows the join as dropped; Ana invites her again, or
-    cancels the invite, which takes back the storage access it granted
-    ([§12.2](#122-adding-a-person)).
-  - Nothing is taken back on its own: if a later entry brings the add
-    back, Carol is in, and her phone shows it.
+- Adding a different member concurrently with a removal does not conflict.
+  - E.g. Ana adds Carol while Ben removes Dan. Both entries apply.
+  - Devices share the historical keys with Carol. Any key that reached
+    Dan is retired for first attempts, and devices rotate as needed (§11).
 
 ## 14. Audiences
 
@@ -2075,8 +2047,19 @@ Carol's tablet:
   - Ben keeps the rows he already had. Remaining members' devices use a
     fresh key for first attempts once they know he has left. Earlier
     attempted writes keep their original keys (§11).
-- Removing a circle's last member deletes the circle
+- Removing a circle's last member in the author's view deletes the circle
   ([§14.7](#147-deleting-a-circle)).
+- Concurrent removals can also leave no members after the full replay,
+  even though each author saw someone remaining.
+  - Treat that circle as deleted while its resulting member list is empty.
+    This is computed after replay, not an extra conflicting entry.
+  - Its deleted-circle cause names the latest kept removal affecting that
+    circle, by timestamp. Keep every contributing entry's inputs until final.
+  - E.g. Ana's phone removes Ben from Gifts while her tablet removes Ana
+    from the store; both had seen Ana and Ben in Gifts. Both removals apply
+    if another store admin remains, and Gifts is empty and hidden.
+  - Carol's concurrent addition to Gifts, if it arrives, can leave it with
+    Carol instead. The rows return and Carol reloads their history (§14.4).
 - A write Ben made to the circle before he had read his removal still
   counts, as with any concurrent entry ([§9](#9-members-and-roles)).
   - Ben is still in the store, so storage access doesn't stop him sending
