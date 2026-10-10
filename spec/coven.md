@@ -162,16 +162,16 @@
 
 The request order and cache lifetimes are in [One sync pass](sync-pass.md).
 These are requirements on a device's sync, not estimates for a particular
-store. Discovery reads each writer's next number (§6). Idle request counts
+store. Discovery reads each undrained writer's next number (§6). Idle request counts
 depend on devices, not accumulated history. All read, transfer, retry and
 local work limits below apply without a change feed or history listing.
 The confidentiality, integrity, finality and atomicity rules still apply.
 
 A *steady store* has a complete local catalog, unchanged storage and local
-work, no evicted input needed by this pass, and no due retry, finality or
-retention deadline. Its connection and credentials are usable. Starting with
-an empty catalog and rebuilding an evicted cache are measured separately as
-initialization or eviction work.
+work, no evicted input needed by this pass, and no due retry, finality,
+retirement drain or retention deadline. Its connection and credentials are
+usable. Starting with an empty catalog and rebuilding an evicted cache are
+measured separately as initialization or eviction work.
 Repeatedly discarding a catalog at pass end is not eviction.
 
 Count actual provider requests, including pagination, metadata lookups,
@@ -207,8 +207,9 @@ a zero-body pass cannot hide a listing of the whole history.
     unspecified constant per arrival. A file's length contributes to `F`.
 - **Idle requests:** `O = F = P = X = A = M = E = 0`, so `R = D`.
   List store-log device folders and `positions/`, and make one next-number
-  miss per known device for each of three logs: store-log entries, writes
-  and key copies. With `N` devices and each listing fitting one page,
+  miss per polled device for each of three logs: store-log entries, writes
+  and key copies. `N` is active devices plus retired devices not yet drained
+  (§6). With each listing fitting one page,
   `D = 2 + 3 * N` on every provider. Folder ids are already known in this
   warm count. All extra pages, initialization lookups and retries are charged.
   Drive's unknown-name miss is one exact parent/name query; a hit needs
@@ -557,7 +558,8 @@ File uploads run in their own worker (§16.5); a pass does not wait for them.
     failed read or input not durably retained. Requests already in flight
     still count. Causal application keeps
     its own positions and waits, independently of this download position.
-  - A miss means nothing new at that observation, not permanent absence.
+  - A miss means nothing new at that observation; only a completed retirement
+    drain below makes it the last discovery probe.
     A missing number required by known causal or snapshot evidence is a
     pending prerequisite instead. Failures are never misses (§19.1).
   - Store-log entries and key copies are never deleted, so their terminal
@@ -568,10 +570,61 @@ File uploads run in their own worker (§16.5); a pass does not wait for them.
   received registrations, including removed and replaced devices. A newly
   discovered writer starts at entry 1 and key copy 1; its writes start at
   the device's applied snapshot coverage, or 1 without coverage.
-  Drain writers learned from arriving registrations in this observation
+  Read writers learned from arriving registrations in this observation
   too, before treating its membership and copy evidence as complete.
   Registration precedes ordinary writes and independent historical sharing;
   creation's prerequisite copies are also reachable through its writer.
+- Poll removed and replaced devices like active ones until a kept entry
+  retiring them has been final for more than one day and five minutes (§9,
+  §10). Finality itself requires more than 30 storage days after that entry,
+  and can take longer while late entries arrive.
+
+  Retain the qualifying storage time `F` that established this retirement's
+  finality in the local catalog, with its retiring entry and device id.
+  Save it atomically with the finality observation and keep it on reopening;
+  do not refresh it on later passes. Using a later qualifying time initially
+  is safe but delays the drain. Never infer `F` from the retirement's
+  publication time. Wait for an observed storage time `T`
+  strictly greater than `F + one day + five minutes` before the drain reads.
+
+  Then read each of that device's three logs forward to a miss once, using
+  §15's snapshot coverage before accepting write misses. Reuse this pass's
+  reads only if they followed that qualifying `T`.
+  Retain the complete inputs and settle in-flight reads before recording
+  the device as drained. A failure, required gap or incomplete read leaves
+  the drain pending; retry with retained progress under the shared backoff
+  and §19.1's refusal rules. It is never a completed drain.
+
+  `_coven_drained_devices` is local, keyed by device id, and records the
+  kept retiring entry that justified each completed drain. Set it only in
+  the successful transaction retaining all three completed observations,
+  checking that the entry is still kept and the wait above has elapsed.
+  It survives reopening, but is neither posted nor included in snapshots.
+  Later passes skip that device's entries, writes and key-copy probes;
+  keep its received history.
+  Cached writes waiting for keys or application remain pending and are
+  processed from retained inputs; draining does not claim they are applied.
+
+  Replay derives retirement from kept entries. In the same replay transaction,
+  remove any drain record and timing evidence whose retiring entry is no
+  longer kept; if the device is active again, poll it again. A non-final
+  removal can drop before any drain is allowed; a correctly established
+  final entry cannot drop (§9).
+  Remembered retirement alone never suppresses discovery.
+
+  The last drain is exact for writes because §10 rejects publication after
+  the kept retirement's 30-day deadline. Entries already have §9's permanent
+  deadline against any unread entry. Key copies need §10's fresh-catch-up
+  gate and one-day request-duration assumption: all in-flight copies land
+  within one day and five minutes after retirement becomes final, before
+  the drain reads. A copy cannot be disregarded after exposure.
+
+  **Ben's laptop removed.** Once its removal has been final for more than
+  one day and five minutes, Ana reads its entries, writes and key copies
+  to their misses and records that id as drained.
+  Her later passes stop probing those logs. **Ana's restored phone:** the
+  old id is drained after the same wait following its replacement's finality;
+  the new id remains active.
 - List `<store>/positions/` once per pass for agreement, retention and peer
   reports. Positions are never an index for discovering logs: upload and
   posting are not atomic. Ana can upload write 9 and crash before posting;
@@ -1606,6 +1659,11 @@ Carol's tablet:
     match that entry when it is read. There is no duplicate store table.
     `_coven_boundaries` holds each checked raise/reset boundary;
     the current boundary per audience is derived from the kept entries.
+    `_coven_drained_devices` separately records this device's completed
+    retirement drains, with their kept-entry basis (§6). The local catalog
+    retains the qualifying storage time establishing each retirement's
+    finality until its drain completes; this times the additional wait,
+    without replacing `H` as the finality test.
   - Ana's directory settings name “Recipes” while its first entry is being
     published. Once that entry is checked, reads derive “Recipes” from it;
     a conflicting setting fails opening rather than choosing another name.
@@ -1687,10 +1745,11 @@ Carol's tablet:
     Carol's entry stored exactly on day 10 is not. A later qualifying
     window establishing H = day 11 makes Carol's entry final too.
 - Establish T from storage before listing the store-log device folders.
-  Then read each known writer from its next entry through a terminal miss,
+  Then read each undrained writer from its next entry through a terminal miss,
   including newly discovered writers from entry 1. Permanent gap-free logs
   make these observations, together with retained entries, every entry
-  through T. Read and judge them before advancing finality.
+  through T; completed drains supply the retained retired-writer history (§6).
+  Read and judge them before advancing finality.
   A gap, unreadable entry or failed folder listing
   blocks that check and the cleanup that needs it (§19.1).
   - A provider-assigned stored time already observed is a lower bound on
@@ -1698,7 +1757,8 @@ Carol's tablet:
     successful publications, but only a time known before this store-log
     scan can be its T; a later observation serves a later scan.
   - Schedule a fresh time observation only when recorded storage times
-    indicate that finality or retention could cross its next threshold.
+    indicate that finality, a retirement drain (§6), or retention could
+    cross its next threshold.
     The device's timer schedules the check; it never proves storage age.
     An observation still short of the threshold backs off before retrying.
   - For a fresh time, replace `<store>/clock/<device>` with a sealed,
@@ -1938,6 +1998,9 @@ Carol's tablet:
   - Replacement does not exempt an entry from §9's landing rule. A stale
     registration or replacement retry that lands too late is consumed and
     reported; registering again uses a new entry after catching up online.
+  - Other devices keep polling the old id until a kept replacement has been
+    final for more than one day and five minutes, then drain its three logs
+    once and record completion locally (§6).
 - E.g. Ana backs up her phone after write 5, then uploads writes 6 and 7.
   Her restored phone still has counter 5.
   - Its storage check finds newer writes before it sends anything. It registers
@@ -2070,10 +2133,12 @@ Carol's tablet:
 - Ana's phone and Ben's laptop can both seal K to Carol. They publish
   `keys/ana-phone/17` and `keys/ben-laptop/6`, each naming K and Carol;
   neither replaces the other's randomized sealed bytes.
-- Each sync pass GETs every known writer's new copies through a next-number
+- Each sync pass GETs every undrained writer's new copies through a next-number
   miss, alongside the store log. Complete both observations before selecting
   keys for first attempts. A failed or incomplete read blocks those attempts
   and records the failure (§19.1); an older miss cannot stand in for it.
+  A completed retirement drain (§6) supplies that writer's complete retained
+  copy history without another probe.
   - An observed copy means its recipient may hold the key, whether or not the
     recipient has downloaded it. Copies remain in storage for good.
   - A key with a copy for someone the current replay excludes from its
@@ -2096,7 +2161,8 @@ Carol's tablet:
   entry's timestamp, then key id.
   - Usable means introduced by a received authorized entry, available in
     custody, and with no observed copy for an excluded member after this
-    pass has read each writer's new copies through its terminal miss.
+    pass has read each undrained writer's new copies through its terminal
+    miss, together with the complete histories of drained writers.
   - If no usable key exists, rotate or wait for its sealed copy, recording
     the first unmet condition. Never use a known exposed key as a fallback.
 - Share every historical key with current members who lack it. A membership
@@ -2315,6 +2381,13 @@ Carol's tablet:
 
 ## 13. Removing members and devices
 
+- Once a kept removal has been final for more than one day and five minutes,
+  drain each retired device's three logs once and stop polling them (§6).
+  Until then, poll them like active devices.
+  This log drain does not wait for provider cut-off; the one-time file-folder
+  scan still requires confirmed cut-off (§16.5). If replay restores the
+  device after removal drops, poll it again; clear any drain record based
+  on the dropped entry.
 - A removed device's writes count only before it read the kept retirement
   and if they landed within 30 storage days of it (§10). This applies to a
   member removal's devices too, independently of provider cut-off. Replaced
@@ -2701,8 +2774,9 @@ Carol's tablet:
     positions, he would keep his state and resume normal log reads.
 - Keep the storage time `S` certified by the last completed catch-up pass
   with its applied positions. For this purpose, completion means discovery
-  reached each log's terminal miss, required reloads and received writes
-  committed, and the corresponding positions were confirmed posted. A
+  reached each undrained log's terminal miss, with completed drains supplying
+  the others (§6), required reloads and received writes committed, and the
+  corresponding positions were confirmed posted. A
   finished pass with unresolved history does not move this checkpoint.
   A pending file or retention operation alone does not prevent it.
   - On return, replace this device's clock object and read its storage time

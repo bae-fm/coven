@@ -1415,7 +1415,7 @@ while let Ok(values) = lost.next().await {
   - [One sync pass](sync-pass.md) specifies every listing, read trigger,
     send and cache lifetime in order; [§3.1](coven.md#31-io-bounds) states
     the request and local-work bounds. List only store-log device folders
-    and positions on an idle pass. GET each known device's next store-log,
+    and positions on an idle pass. GET each undrained device's next store-log,
     write and key-copy number; fetch ahead on a hit within the transfer limit,
     stopping at the first miss. No pass lists pages of log history.
   - New or long-absent devices list snapshots by audience (§15); snapshots

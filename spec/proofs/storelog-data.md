@@ -24,8 +24,9 @@ the recipient's hash check; both are format/IO verification obligations.
 ## Results and their assumptions
 
 **Revocation is proved with the stated observation window.**
-§11 requires each pass to read every known writer's new copies through a
-next-number miss alongside the store log. Retained permanent copies and these
+§11 requires each pass to read every undrained writer's new copies through a
+next-number miss alongside the store log. A completed local retirement drain
+supplies that writer's complete retained history (§6). Permanent copies and these
 reads supply the model's complete copy observation; theorem names use
 “listing” for this supplied set and do not prove the numbered discovery
 algorithm. [§3](../coven.md#3-guarantees), [§11](../coven.md#11-keys) and the

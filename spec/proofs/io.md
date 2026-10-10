@@ -146,10 +146,14 @@ discovery.
 
 **7. Retired devices — proved conditionally.** `Retired.drain_complete`
 combines a completed scan, required write availability and `ClosedAfter`:
-no new object from that writer can land after cutoff. Removal needs confirmed
-provider cutoff, including already issued upload sessions. Closure applies
-while that access epoch remains closed. Restoring access must restore polling;
-the replay-to-drain-state transition is outside this model.
+no new object from that writer can land after that frontier. Confirmed
+provider cutoff, including already issued sessions, can supply closure for
+an access epoch. §6 instead drains removed and replaced ids after a kept
+retirement has been final for **more than one day and five minutes**; it
+does not wait for provider cutoff. The finality observation and §10's fresh
+catch-up gate plus one-day request-duration assumption must establish that
+frontier. The model takes closure as an input; it does not derive it from
+these timers or from retirement finality.
 
 For replacement, `ReplacementWindow` explicitly requires every old-copy send
 to precede its reading replacement, including attempted retries, and every
@@ -159,6 +163,8 @@ derives closure using the provider's publication witnesses.
 30 days” alone is insufficient: replacement at day 0, finality/drain at 31,
 last send at 31, replacement read and landing at 32. Stopping upon the read
 and bounded request duration both hold, but do not justify the earlier drain.
+This remains a counterexample to those weaker conditions, not to the later
+drain under §6 and §10. Their timing-to-closure argument is not machine-checked.
 
 §10's write admission has a separate landing deadline: a write must not
 have read a kept retirement and must land no more than 30 storage days
@@ -170,11 +176,29 @@ The write-time verdict and replay reversal remain verification obligations
 ([store-log data](storelog-data.md), [storage](storage.md)).
 
 `drained_not_polled` and `drained_not_named` exclude a drained writer from
-subsequent idle log requests, including after reopening saved state. This
-models the IO audit's **Decisions item 15**; its earlier finding numbered 15
-concerns cache writes. Literal “no request names the device” would also
-prohibit reading surviving files or deleting retained history. A checked
-file-range example shows that broader reading conflicts with fixed paths.
+subsequent idle log requests, including after reopening saved state.
+Literal “no request names the device” would also prohibit reading surviving
+files or deleting retained history. A checked file-range example shows that
+broader reading conflicts with fixed paths.
+
+Exactness has three grounds in the spec. Writes cannot count after the
+kept retirement's 30-day landing deadline (§10). Entry admission already
+has §9's permanent unread-entry deadline. Key-copy exposure cannot be undone
+by rejecting a late object; its complete history needs the freshness and
+request-duration bound, followed by the post-finality wait. These arguments
+also need the finality-input fence in obligation 5 and write availability
+through the scan in obligations 3–4. The checked counterexamples there block
+an unconditional end-to-end drain claim.
+
+The local catalog saves the qualifying finality time `F` with the retiring
+entry and device id, retaining it across reopening. Drain reads follow a
+storage observation `T > F + one day + five minutes`. Only successful terminal
+observations of all three logs, retained inputs and settled in-flight reads
+permit the atomic `_coven_drained_devices` mark. Failed work stays pending
+under shared backoff. Replay atomically discards timing and marks whose basis
+is no longer kept, and resumes polling an active id. Correctly established
+final entries cannot drop. Persisting these facts, deriving status from kept
+entries and applying that transition are outside the model's polling theorem.
 
 `failed_scan_not_complete` and `completed_scan_retained` model the durable
 one-time removed-device file-folder scan. Correct orphan enumeration,
@@ -184,10 +208,12 @@ access restoration epochs and reference-safe deletion still need Rust tests.
 
 **8. Cost and reuse — proved for modeled traces.** `idle_two_listings`,
 `idle_gets` and `idle_requests` give exactly two listings and 3N next-number
-GETs. N is the filtered active/undrained set, including this device. The
-trace depends on no history or file count. Three devices give 11 requests
-(`idle_three_devices`). Each listing is one complete logical page here;
-extra provider pages and native calls must be charged separately.
+GETs. N is active devices, including this one, plus retired devices not
+yet drained. Drained ids add no log probes; their permanent folders and
+positions still occupy listing pages. The trace depends on no history or
+file count. Three devices give 11 requests (`idle_three_devices`).
+Each listing is one complete logical page here; extra provider pages and
+native calls must be charged separately.
 
 `scan_cost` counts one read per received number plus the terminal miss.
 `fetch_ahead_cost` adds at most limit−1 already issued probes **per log**.
@@ -345,6 +371,25 @@ no Rust behavior.
   eager/pin progress, pending work and reset notices. Reopen reports committed
   progress before storage reconnects. Failed database reads cannot return empty
   lists or completed work. One-request uploads retire only after confirmation.
+- Ben's laptop is removed. Ana polls all three logs until its kept removal
+  has been final for more than one day and five minutes, then reads to their
+  misses and records the drain locally. Ana's restored phone uses the same
+  wait for its old id's replacement. Test equality, expiry, reopening with
+  retained `F`, delayed finality and reads made before the qualifying `T`.
+  Later idle passes and reopen issue no probes for a drained id. With three
+  devices and one-page listings, Ben's completed drain changes 11 requests
+  to 8; a pending drain keeps all three probes.
+- Fail each drain read and its final commit. Retain progress, leave the mark
+  absent and retry under shared backoff. Known gaps, permanent refusal and
+  outstanding fetch-ahead prevent completion; cached writes waiting for keys
+  remain pending independently of discovery. Replay dropping a removal must
+  clear its timing/mark and resume polling in the same transaction. A kept
+  final alternative basis still supports a mark; a new device inherits none.
+- Retain drained entries for finality input and drained copies for exposure
+  and key selection. Test the last permitted send and one-day publication
+  against the post-finality wait. These checks must satisfy the finality and
+  write-availability conditions above, not assume timestamp or snapshot
+  completeness that the model counterexamples disprove.
 - Confirm cutoff includes in-flight sessions, orphan scans survive reopen, a new
   access epoch requires a new scan, and rows, losses, history and non-final effects
   continue protecting file deletion.

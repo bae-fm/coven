@@ -2,7 +2,7 @@
 
 This is the request order for [§6](coven.md#6-syncing-writes) and
 [E5](api.md#e5-storage-and-sync). Its bounds are requirements in
-[§3.1](coven.md#31-io-bounds). Discovery reads each writer's next number;
+[§3.1](coven.md#31-io-bounds). Discovery reads each undrained writer's next number;
 no pass lists pages of log history. A request below is made only when its
 stated condition holds.
 
@@ -68,7 +68,18 @@ These local records survive reopening and have no pass-end expiry:
   before advancing; an applied snapshot can supply covered write positions.
   These are separate from applied positions: a retained object waiting on a
   key is not downloaded again. A miss is remembered for this pass, then
-  retried on a later due observation; it is not a permanent end marker.
+  retried on a later due observation unless a retirement drain completes.
+- **Drained devices:** `_coven_drained_devices` records each local completed
+  drain by device id and the kept, final retiring entry that justified it
+  (§6). While waiting, the catalog retains that entry's qualifying finality
+  storage time `F`, atomically with the finality observation. The drain needs
+  a storage time `T > F + one day + five minutes`; reopening keeps this evidence.
+  Persist the mark only after all three logs reach terminal misses after `T`
+  without failure and their received inputs are retained. Failed work stays
+  pending and retries under shared backoff; reopening retains progress.
+  Replay removes a mark and its timing evidence if its retiring entry drops,
+  in the same transaction; an active device is polled again. These marks
+  never enter snapshots or posts.
 - **Sealed-key presence:** retain each whole copy and its clear audience,
   key id and recipient by writer and number. Copies are never deleted.
   Observed presence and a successfully opened member copy are different
@@ -134,9 +145,11 @@ still proceed; finality and age-based deletion wait for a qualifying scan.
 From saved entry times and covered-log times, compute the next instant at
 which §9 finality or §15's 30-day age test could change. Include the last late
 entry's window and the strict boundary for finality; equality at 30 days
-does not establish it. Include §15's return interval: a new device has no
-checkpoint; a returning device compares a fresh clock-object storage time
-with the last completed catch-up's saved storage time. A resumed session
+does not establish it. Include §6's drain deadline, strictly more than one
+day and five minutes after the saved finality observation. Include §15's
+return interval: a new device has no checkpoint; a returning device compares
+a fresh clock-object storage time with the last completed catch-up's saved
+storage time. A resumed session
 refreshes time, and a running session's monotonic timer schedules its next
 check before the known interval reaches 30 days. No due time-dependent
 work means no time probe.
@@ -166,7 +179,10 @@ query for permanent entry 1 records. Unknown writers start at entry 1.
 Include writers learned from arriving registrations before completing this
 observation; each needs its entry and copy reads too.
 
-For every known writer, GET its next **store-log entry** and **key copy**.
+For every undrained writer, GET its next **store-log entry** and **key copy**.
+Writers with a completed local retirement drain (§6) supply their retained
+entries and copies to replay, finality and key selection.
+Removed or replaced writers without that mark are polled like active ones.
 On a hit, fetch ahead in parallel up to the shared transfer limit; stop
 scheduling at the first miss. Retain completed reads, including requests
 already in flight, but never advance the contiguous download position past
@@ -187,8 +203,9 @@ under shared backoff. No keys-folder listing or separate per-recipient
 status probe is required.
 
 For finality, the folder listing starts after observing `T`, and each known
-writer's entry discovery reaches its next-number miss after that listing.
-Together with retained entries, this supplies every entry through `T`.
+undrained writer's entry discovery reaches its next-number miss after that
+listing. Together with retained entries, including completed retirement
+drains, this supplies every entry through `T`.
 Discovery after `T` can include later entries too. A writer first publishing
 after the folder observation cannot have an entry stored before `T`.
 Judge landing times against this complete received history, then check
@@ -210,6 +227,10 @@ strictly with that horizon; an unchanged horizon causes no update.
 A storage time learned during discovery or any later request can be used by
 a later observation, never retroactively as the time before this one.
 Reading this device's removal or replacement stops sends as §10 requires.
+Once a kept retirement is final, retain its qualifying storage time `F`.
+This observation's entry and copy misses can supply two parts of its drain
+only if they follow a storage time `T > F + one day + five minutes` (§6).
+The device remains undrained until step 6 supplies the write-log miss too.
 
 ### 3. Observe positions, return coverage and identity
 
@@ -251,7 +272,9 @@ five minutes have elapsed from that catch-up's start.
 Use step 2's new-copy observations on every pass, even when all entries
 are final and every current member already has a copy. A delayed publication
 can expose a key without another entry arriving. No stale catalog substitutes
-for this pass's observation; a provider cooldown delays the pass itself.
+for this pass's observation; completed retirement drains supply exact copy
+histories for the writers no longer polled. A provider cooldown delays the
+pass itself.
 
 Use the retained clear prefixes and newly acquired copies for sharing and
 exposure; opening this member's copies uses bytes already read in step 2.
@@ -354,7 +377,7 @@ its queue row atomically; it also updates this pass's catalog. Resume any
 operation whose own-upload prerequisite this satisfies, using step 5's
 request order, without beginning a second full pass.
 
-For downloads, GET each known device's next write number, reusing this
+For downloads, GET each undrained device's next write number, reusing this
 device's identity read. Before 30 storage days since the last completed
 catch-up, a miss means no new writes at that observation (§15). A new or
 long-absent device first uses step 3's snapshot discovery and reload.
@@ -371,6 +394,14 @@ and entry storage times and current replay; consume an excluded write's
 position while keeping inputs needed for reversal. Entries retain §9's
 permanent landing rule. A missing required uncovered path is a blocker;
 retry only when its shared backoff permits, reusing this pass's absence observation.
+
+For a retirement past §6's finality wait, combine the write-log miss with
+step 2's entry and copy misses to finish its drain. Use observations after
+the qualifying `T > F + one day + five minutes`, retain all completed input,
+and wait for in-flight reads.
+Commit the local mark only when all three drains succeeded and the retiring
+entry is still kept and the wait has elapsed. Failure leaves it pending with
+retained progress and shared backoff. A miss before `T` is insufficient.
 
 ### 7. Fill the eager file cache
 
@@ -534,8 +565,8 @@ check downloads that write again.
 
 ## Counting a pass
 
-Let `N` count every known device, this one and removed/replaced devices
-included. Let `L_p(x)` count the native pages for one scoped listing on
+Let `N` be active devices, including this one, plus retired devices not yet
+drained. Let `L_p(x)` count the native pages for one scoped listing on
 provider `p`. Folder ids and retained observations are already available
 in a warm idle pass with usable credentials:
 
@@ -546,6 +577,8 @@ R_idle,p = D_p
 
 The three misses per device are its next store-log entry, write and key
 copy. A missing folder also establishes the miss; it needs no body request.
+Drained devices contribute no such probes. Their permanent folders and
+positions can still occupy listing pages, counted in `L_p`.
 Each folder listing enumerates devices, never log contents. Positions hold
 one object per device. If each listing fits one page, `R_idle = 2 + 3 * N`
 on S3, Google Drive, Dropbox, OneDrive and CloudKit. There are no idle body
