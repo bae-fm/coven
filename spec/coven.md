@@ -154,6 +154,14 @@
   - E.g. Ben sets his laptop clock back a year. Its token still works until
     the provider rejects it; one refresh lets the waiting request continue.
 - On S3, each member has their own access key.
+  - `RequestTimeTooSkewed` means the device clock is off, not that access
+    was denied. Retry the request once with the server offset the SDK
+    learned from the response.
+  - If that retry still fails for clock skew, report `ClockSkew` with the
+    provider's cause ([E5](api.md#e5-storage-and-sync)).
+  - E.g. Ben's laptop signs with yesterday's date. The first reply supplies
+    the offset; its one retry uses it without asking Ben to change his keys.
+
 - What coven needs from a provider:
   - create an object, refusing an existing path without replacing its bytes,
     in one request or, past the provider's single request limit, through its

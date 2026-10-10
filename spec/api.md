@@ -1494,6 +1494,8 @@ pub enum StorageFailure {
     ContainerNotFound,
     /// The S3 endpoint or signing region is wrong.
     RegionMismatch,
+    /// S3 rejected the device clock after one retry with the learned offset (§4).
+    ClockSkew,
     /// The provider has no space left.
     QuotaExceeded,
     /// The provider requests a later retry.
