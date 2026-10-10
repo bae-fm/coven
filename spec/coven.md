@@ -477,6 +477,10 @@ so an unknown name first needs an exact parent/name query.
 
 ## 6. Syncing writes
 
+A sync pass has three phases: catch up on membership and key copies; make
+keys and provider access match that view; then sync data. The request order
+and pending-work gates are in [One sync pass](sync-pass.md).
+
 - Each device uploads its writes to its own log in storage, and the other
   devices download them.
 - No two devices write the same object, so devices never have to coordinate
@@ -2161,8 +2165,17 @@ Carol's tablet:
     she makes no Gifts key. Ben's device sees Carol's old copy and rotates
     Gifts before a first send. If Ben is offline, no remaining device sends
     new Gifts data until a member can supply a usable key.
-- Their recorded storage access is taken back by the store owner's device,
-  or on S3 the admin deletes every recorded key in the provider's console.
+- Applying a removal or access entry records the resulting provider work in
+  the same transaction as replay. This is the only path that schedules a
+  member's grant or revocation; the removal call does not do it again.
+  The owner's device performs it in the pass's second phase. Elsewhere the
+  pending list names the owner wait; on S3 it names the keys to delete.
+- `remove_member` returns `()` once its entry is kept. Provider state is read
+  only from the pending list, including retained grants and shared-account
+  waits. Absence of an access record means no unresolved access work.
+  - Ben removes Dan while Ana, the folder owner, is offline. Ben's call
+    returns after replay keeps the entry. His list shows the owner wait;
+    Ana's next pass records and performs the revocation.
 - Taking back a removed member's access covers every access recorded for
   them in any entry the store log holds, kept or dropped: create-store and
   add-member entries naming them, and set-access entries signed by them.
@@ -3237,17 +3250,17 @@ Carol's tablet:
   - The reason determines retry: automatic, after an update, app action,
     or never (§19.1, E5). Unrelated operations can still advance.
   - The app can retry or discard its own blocked operations with E6.
-    Automatic maintenance cannot be discarded through those calls.
+    It can also retry failed provider access work. It cannot discard that
+    current intention or automatic maintenance through those calls.
   - A failed reload leaves the old database in place. No positions pass
     it until the replacement and its dependent work commit.
 - An operation's row is deleted when its last step completes.
 
 ### 18.1 Operations
 
-- Removing a member ([§13](#13-removing-members-and-devices)):
-  1. upload the store-log entry naming the member;
-  2. revoke the recorded storage access, or on S3 tell the admin which
-     access keys to delete in the provider's console.
+- Removing a member ([§13](#13-removing-members-and-devices)) publishes one
+  entry and returns once it is kept. Applying replay records access work;
+  the removal itself has no provider step or operation row.
 - Removing someone from a circle ([§14.6](#146-leaving-a-circle)) publishes
   one entry naming the circle and member. It is not a multi-step operation.
 - Rotating an audience key ([§11](#11-keys)):

@@ -85,6 +85,12 @@ download write 12 again.
 
 ## Requests, in order
 
+Every pass has three phases. A failed prerequisite remains visible while
+independent work proceeds; data first attempts require a usable key selected
+from this pass's completed membership and copy observations.
+
+## Phase 1: catch up on membership
+
 ### 1. Prepare local work and storage time
 
 Serialize this pass with the store's other sync work. Capture the newest
@@ -127,6 +133,12 @@ finality. A listing used to establish finality begins after observing `T`.
 Compare with the catalog; read an entry only for a newly listed path or
 missing retained local bytes or checked record. Do not reread an already
 decoded entry.
+
+List **`<store>/keys/` completely in this phase**, before opening entries
+that may need a key copy. Include every writer's store and circle copies;
+a key id and recipient select the candidate paths from this observation.
+A failed or incomplete listing records its failure and prevents first
+attempts needing a current key selection. Reuse this one listing in step 4.
 
 Read each needed entry as one stream. Its clear prefix names the exact
 store key. If custody lacks that key, read **that key's copy sealed to this
@@ -184,12 +196,11 @@ that invalidates it. Its required refreshes count as that call's requests.
 
 ### 4. Observe keys and peers
 
-List **`<store>/keys/` completely on every pass**, including every
-writer's store and circle copies. Do this even when all entries are final
-and every current member already has a copy. A delayed publication can
-expose a key without another entry arriving. A failed or incomplete scan
-prevents new key selection and remains recorded; no stale catalog substitutes
-for this pass's observation. A provider cooldown delays the pass itself.
+Use the complete keys listing from step 2 on every pass, even when all
+entries are final and every current member already has a copy. A delayed
+publication can expose a key without another entry arriving. No stale
+catalog substitutes for this pass's observation; a provider cooldown delays
+the pass itself.
 
 Use the listing for sharing and exposure knowledge; do not GET every
 recipient's copy. Read only named copies this member needs and lacks,
@@ -200,12 +211,6 @@ Decide recipients and usable keys from the current received log before
 first attempts. Own key publication in this pass updates the catalog and
 presence facts without relisting all keys after each entry.
 
-Create each due historical copy queued independently of an entry only for
-a currently eligible recipient, using its retained sealed bytes (§11).
-An occupied own copy requires complete byte equality (§10); absence checks come
-from the catalog, not one GET per possible recipient. New rotations and
-entry prerequisites are published by the ordered work in step 5.
-
 Read each peer's positions only for new or changed listed identity, or a
 missing local checked record. Verify once; use the decoded value for
 agreement, retention and reports. One completed positions observation
@@ -215,13 +220,41 @@ persist any changed peer identity or positions with the observation.
 Recompare cached fingerprints when this device's own data, schema, positions
 or usable fingerprint key changes.
 
+## Phase 2: make keys and access match
+
+For each audience, retire keys whose observed copies include someone now
+excluded. Use an existing usable replacement; if none is held, acquire one
+or have a current member's device rotate. Share historical keys with current
+members who lack them. Complete a needed rotation's copies and entry before
+first sending data with its key. If no usable key can be acquired or made,
+that audience's sends wait with their first reason; app writes still commit.
+
+The owner's device runs the access work recorded when entries were applied.
+A non-owner exposes the owner wait. Requests serialize and check their current
+intention as §4 requires. Pending provider access does not block independent
+data protected by usable keys; no removal call runs a second revocation path.
+
+Ana removes Ben. Carol's phase 1 receives the removal and Ben's old key copy.
+Her phase 2 publishes a rotation; Ana's device takes back provider access.
+Carol's phase 3 seals new data with that rotation. Ben's unresolved S3 key,
+if any, remains in the pending list for the admin.
+
+Create each due historical copy queued independently of an entry only for
+a currently eligible recipient, using its retained sealed bytes (§11).
+An occupied own copy requires complete byte equality (§10); absence checks come
+from the catalog, not one GET per possible recipient. New rotations and
+entry prerequisites are published by the ordered work in step 5.
+
 ### 5. Resume due operations and required reloads
 
 Only due operations whose prerequisites changed or whose retry delay
 elapsed run. All their catalog reads use steps 2–4. They issue their
 remaining requests in §18.1 order: prerequisite sealed-key creates or
-snapshot uploads, then the referencing entry create, then provider access
-changes or deletions. Never reserve a replacement entry without §9's
+snapshot uploads, then the referencing entry create. Applying an entry
+records any access change; the owner's serialized access work performs it.
+If a local entry changes membership, re-evaluate key eligibility before
+continuing to data first attempts, using this pass's copy observations and
+its own newly published copies. Never reserve a replacement entry without §9's
 online catch-up. An obsolete provider grant/revoke completes before its
 opposite is issued, as §4 requires. Count provider permission lookups and
 asynchronous-job polling as operation requests, subject to backoff.
@@ -251,6 +284,8 @@ path, reuse cached stored bytes when they establish the comparison, or
 make the one needed comparison read. Metadata cannot replace that byte comparison. Record returned metadata;
 where a provider omits it, use the single-object status call, counted here.
 Never invent a publication time from the device clock.
+
+## Phase 3: sync data
 
 ### 6. Send waiting writes, then receive writes
 

@@ -277,7 +277,7 @@ pub trait CloudKitOps: Send + Sync {
     /// Saves read/write CKShare participation and returns its native share URL.
     async fn grant_access(&self, location: &StorageConfig, email: &str) -> Result<SecretText, StorageError>;
     /// Removes only this account, preserving the owner and grants reaching others.
-    async fn revoke_access(&self, location: &StorageConfig, email: &str) -> Result<MemberRemoval, StorageError>;
+    async fn revoke_access(&self, location: &StorageConfig, email: &str) -> Result<Vec<RetainedAccess>, StorageError>;
     /// Fetches share metadata, verifies container/owner/zone against location, then
     /// accepts as the signed-in recipient. Repeating acceptance succeeds.
     async fn accept_share(&self, location: &StorageConfig, url: &SecretText) -> Result<(), StorageError>;
@@ -1709,8 +1709,6 @@ pub enum SyncError {
     Crypto(CryptoError),
     /// The request or invitation is absent, expired, or no longer matches.
     InvitationChanged,
-    /// The provider retained grants requiring the owner's action (E9).
-    AccessRemains(Vec<RetainedAccess>),
     /// The member's role does not permit this entry (§9).
     PermissionDenied,
     /// Removing or demoting the member would leave no admin (§9).
@@ -1732,7 +1730,8 @@ pub enum SyncError {
     CircleDeleted(CircleId),
     /// The target is not an active store member.
     NotStoreMember(MemberId),
-    /// The requested journal row is not failed app work available for retry or discard.
+    /// The requested journal row is not failed work eligible for this call:
+    /// retry accepts provider work; discard accepts only app-owned work.
     NotBlocked(OperationId),
     /// Decoding persisted operation data failed, retaining its cause.
     OperationData(serde_json::Error),
@@ -2075,9 +2074,11 @@ loop {
   first blocker in `blocked()` (E5). Pending work appears there too.
 - Automatic snapshot writing, retention and reloads use the same list.
   Their operation records cannot be discarded through the app-work calls.
-- App work includes keeping a reset or schema change, an app-requested
-  reload, and provider access work. Single-entry calls return their errors
-  directly; a reserved entry still has its own blocked subject.
+- App work includes keeping a reset or schema change and an app-requested
+  reload. Provider access work is recorded by replay; the app may retry a
+  failed request but cannot discard the current access intention.
+  Single-entry calls return their errors directly; a reserved entry still
+  has its own blocked subject.
 - A record stores a typed reason, not an error string. The immediate call
   retains the native cause; reopening retains the reason and subject.
 
@@ -2087,8 +2088,6 @@ pub struct OperationId(pub i64);
 
 /// The app purpose of an unfinished operation (§18.1, §19.3).
 pub enum OperationKind {
-    /// Publish a member removal and take back its recorded provider access.
-    RemoveMember,
     /// Make a circle and publish its first sealed key.
     CreateCircle,
     /// Seal the circle's history and add a member.
@@ -2117,8 +2116,8 @@ pub enum OperationKind {
 pub type OperationError = SyncError;
 
 impl CovenHandle {
-    /// Runs a failed operation again from the step after its last completed
-    /// one. An operation whose cause still stands fails again.
+    /// Runs failed app-owned or provider access work again from the step
+    /// after its last completed one. A cause that still stands fails again.
     pub async fn retry_blocked_operation(&self, operation: OperationId) -> Result<(), OperationError>;
 
     /// Abandons a failed operation and deletes its row. Steps already done
@@ -2422,19 +2421,20 @@ match stream.read_at(resume_at, 256 * 1024).await {
 - Only admins add and remove members, and change roles; each member removes
   their own devices, and admins any device ([§9](coven.md#9-members-and-roles)).
 - Administrative calls require an online store-log catch-up (§9, E6).
-- Removing a member is an operation ([§18.1](coven.md#181-operations)).
-- Access results describe current intended access. Each owner's device
+- Removing a member publishes one entry. It returns `()` once replay keeps
+  it; applying entries is the single path that records provider access work.
+- The pending list describes unresolved access work. Each owner's device
   serializes grant and revoke requests, and performs the opposite request
   when replay reverses the intention (§4, §13).
   Pending and failed work appears in `blocked()`, with the operation id for
-  the existing retry/discard calls. A discarded failure acknowledges that
-  provider work was left incomplete; it does not change membership or grant
-  permission to report the requested access as delivered.
+  retry. Derived provider work cannot be discarded while its current
+  intention remains unmet: disappearance from this list must not hide a
+  retained grant. A replay change can replace or remove that intention.
 - Removing an account can leave access through a parent, a grant reaching other
-  accounts, an unidentified recipient, or the owner. `MemberRemoval::AccessRemains`
-  returns these grants and their reasons for the app to present to the owner.
-  The revocation remains in blocked() until the app retries after the
-  owner changes those grants, or discards the operation to acknowledge them.
+  accounts, an unidentified recipient, or the owner. `BlockedReason::AccessRemains`
+  retains these grants and their reasons for the app to present to the owner.
+  The revocation remains in `blocked()` until a retry confirms the owner
+  removed those grants, or replay no longer requires that revocation.
   This also preserves the result when no app call is waiting, including a
   revocation initiated by applying another device's removal.
 
@@ -2474,12 +2474,10 @@ impl CovenHandle {
     /// so blocked() removes its DeleteAccessKey record (§13).
     pub async fn confirm_access_key_deleted(&self, access_key_id: &str) -> Result<(), SyncError>;
 
-    /// Removes a member and all their devices, then
-    /// revokes all their recorded storage access (§13). The result describes
-    /// their current replayed access, with retained grants from any recorded
-    /// account. On S3, blocked() lists every recorded key until
-    /// confirmed deleted, including keys in dropped entries.
-    pub async fn remove_member(&self, member: &MemberId) -> Result<MemberRemoval, SyncError>;
+    /// Publishes the removal of this member and all their devices (§13).
+    /// Returns once the entry is kept. Provider work appears only in blocked(),
+    /// including owner waits, retained grants and S3 keys until confirmed deleted.
+    pub async fn remove_member(&self, member: &MemberId) -> Result<(), SyncError>;
 
     /// Removes a device. The provider can't cut off one device alone, so the
     /// result says how its member signs out of the provider and signs in
@@ -2496,22 +2494,6 @@ pub struct AccessKeyToDelete {
 // Pending notices are DeleteAccessKey records in _coven_blocked. Confirmation
 // is retained separately by key id, so later entries and retries cannot restore
 // an already-confirmed notice.
-
-/// Current provider result or remaining work toward intended sharing (§13).
-pub enum MemberRemoval {
-    /// This non-owner admin's removal is kept; an owner's device revokes
-    /// sharing when it applies the removal.
-    PendingOwner,
-    /// Another active member or an open invite uses the same provider account.
-    /// Its sharing must remain until that use ends.
-    AccountInUse { account: String },
-    /// The provider no longer shares with the account.
-    Revoked,
-    /// Exclusive grants were removed; these grants remain for owner action.
-    AccessRemains { shares: Vec<RetainedAccess> },
-    /// The admin deletes the key with this public id in the provider's console.
-    DeleteAccessKey { access_key_id: String },
-}
 
 /// A grant that revocation left for the owner to inspect.
 pub struct RetainedAccess {
