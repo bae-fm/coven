@@ -124,7 +124,10 @@
     recorded, not silently dropped. Values computed by a breaking migration
     that lost to a concurrent one are replaced by the winner's (§17.1).
 - **Durability:** a crash loses nothing:
-  - every committed write is still uploaded;
+  - every committed write is still uploaded while this device's database
+    and identity remain usable;
+  - a restored stale copy starts again from storage. Unsent edits in that
+    copy are discarded, and the app is told (§10);
   - every operation with several steps resumes and finishes, for example:
     - rotating the key, then removing the member;
     - writing a snapshot ([§15](#15-snapshots)), then deleting the logs it
@@ -181,13 +184,13 @@
   - delete;
   - grant and revoke a member's access, where the provider can: Google
     Drive, Dropbox, OneDrive and iCloud share with an account.
-- Every path has one writer: the device it names, or the device that made
-  the key, file or request it holds.
-  - So creating an object only has to survive its own device retrying,
-    never two devices racing for one path.
-  - The one exception is a dropped removal's key sealed to a member it
-    left out ([§11](#11-keys)): any device holding it may write that
-    path, and every copy holds the same key, so the first stored counts.
+- Device paths have one intended writer: the device they name. Retrying
+  that writer uses fixed bytes. A copied identity can violate this;
+  the checks in §10 detect it before sending or when a path is occupied.
+  - A sealed key copy can have several writers: any device holding the key
+    may supply it to a current audience member who lacks it (§11).
+    Copies use different sealed bytes for the same key; the first valid
+    stored copy counts.
   - On Google Drive, which allows two files with one name, a retry first
     looks for its own earlier copy.
 - On the providers that share with an account, only the member whose
@@ -306,9 +309,9 @@
   - Its name is part of its encryption, so the provider can't swap one
     object for another.
   - A retried upload writes the same name with the same bytes.
-  - A retry that finds its path already holds an object counts it as
-    stored: only this device writes that path, and every attempt sends the
-    same bytes.
+  - A retry finding an occupied path reads and compares the complete bytes.
+    Equal bytes count as stored; different bytes reset this stale device
+    (§10). A failed comparison read leaves the upload pending.
 - A device uploads its writes in number order; a write never goes up
   before an earlier one.
 - The first attempt records the header's and each part's sealing key ids
@@ -1349,7 +1352,7 @@ Carol's tablet:
   - the replay's result: `_coven_members` (every member a kept entry
     added, their public keys and role, and whether they were removed),
     `_coven_devices` (every device a kept entry added, its member and name,
-    and whether it was removed),
+    and whether it is active, removed or replaced with closed log ends),
     `_coven_circles` (every circle a kept entry made, its name and whether
     it was deleted), `_coven_circle_members`, `_coven_store` (the store's id
     and name), `_coven_versions` (one row per audience:
@@ -1360,8 +1363,8 @@ Carol's tablet:
     there is no single shared current-key field.
   - `_coven_retired_keys` remembers ids this device knows reached an excluded
     member. Replay cannot erase that knowledge or permit using them again.
-  - Removed members and devices stay, since their writes that reached
-    storage still count, checked with their keys
+  - Removed members and removed or replaced devices stay. Their stored
+    writes still count when authorized, checked with their keys
     ([§10](#10-device-identity)).
   - An entry and the replay it causes commit in one transaction, so the
     tables always hold the replay of exactly the entries kept.
@@ -1520,27 +1523,57 @@ Carol's tablet:
 
 - A device is one install of the app, with its own device id, belonging to
   one member, who adds it to the store log ([§9](#9-members-and-roles)).
-- A device restored from a backup is a new device, with a new id.
-  - It knows it was restored because its id is also kept where backups
-    don't reach, such as a keychain item kept to this device only; a
-    store whose kept id is missing or different takes a new id at open.
-  - So it never reuses write numbers its backup's device already used.
-  - E.g. Ana's phone is backed up after its write 5, writes 6 and 7, and is
-    lost. Her new phone is restored from the backup:
-
-    ```
-    <store>/devices/ana-phone/
-      5   in the backup
-      6   written after the backup
-      7   written after the backup
-
-    <store>/devices/ana-phone-2/
-      1   the restored phone's first write
-    ```
-
-  - The restored phone downloads Ana's old phone's writes 6 and 7 like any
-    other device's.
-  - With the old id, its next write would be another write 6.
+- Before any upload, check that this installation still owns its counters.
+  - At sync start, list its write, store-log and snapshot paths completely.
+    Check signed snapshot and posted positions too: covered writes may
+    already have been deleted from the log.
+  - A stored number beyond this database's last reserved number for that
+    kind of object proves this is a stale copy. An outstanding local reservation is not stale
+    merely because its upload succeeded before a crash.
+  - The device id also lives in custody that backups do not copy. A missing
+    or different custody id requires the same device reset.
+  - Finish this check before sending writes, entries, snapshots, files,
+    key copies or positions, including sends outside the periodic sync loop.
+    A failed check sends nothing and reports its blocker.
+  - Check the store log for this id's replacement before sending too.
+- A stale copy resets as a new device using storage and saved custody.
+  - Stop its local writes and transfers. Discard its database and pending
+    local work; do not salvage or renumber waiting writes.
+  - Use the existing new-device installation path (§12.1), with a fresh id.
+    Load the stored history, then allow app writes again.
+  - Tell the app which old id was replaced and why, and that unsent edits
+    were discarded. The reset notice is separate from ordinary sync status (E5).
+  - Until replacement finishes, keep the installation unavailable. Retry
+    through the existing bootstrap state, using the same new id and entry.
+    Never reopen the discarded copy as a working store.
+- The new device's add entry names the old id and its observed log ends:
+  the last stored write and store-log entry; zero means an empty log (D6).
+  - The old id is shown as replaced. This changes no membership or keys.
+  - Only that member can replace the id. The new id differs from the old.
+  - Concurrent replacements both apply. Their recorded ends combine by
+    taking the greatest write and entry numbers, independently.
+  - Readers consume the old logs through those ends. An object beyond a
+    closed end is blocked pending a replacement entry that includes it;
+    it is never silently accepted or discarded. Retain the relevant inputs
+    until the replacement entries are final (§9).
+  - A still-running old copy stops sending when it reads its replacement,
+    and resets the same way. Its replacement records any additional stored
+    objects, so another copy's completed upload is not lost.
+- E.g. Ana backs up her phone after write 5, then uploads writes 6 and 7.
+  Her restored phone still has counter 5.
+  - Its storage check finds 7 before it sends anything. It registers as
+    `ana-phone-2`, replacing `ana-phone` through write 7, and loads 6 and 7.
+  - Its first new write is `<store>/devices/ana-phone-2/1`.
+    Edits made only in the restored copy are discarded, with an app notice.
+- An occupied immutable path succeeds only if its complete stored bytes
+  equal the bytes this attempt would send. Compare before retiring its queue
+  row; a mismatch on this device's path triggers the same device reset.
+  - This applies to writes, entries, snapshots and files. Sealed key copies
+    can have several authors and follow §11's first-valid-copy rule instead.
+  - A read failure keeps the attempt pending; occupation alone proves nothing.
+  - Two live copies can pass the check together and send different bytes
+    under one nonce before a create is refused. This race can reuse a nonce
+    once; the byte check detects the collision and resets the losing copy.
 - Every write record is signed with the key of the member whose device
   wrote it, so who wrote what is authentic.
 - This is about authenticity, not trust.
@@ -1549,8 +1582,8 @@ Carol's tablet:
   a write by Ana's phone counts as Ana's.
 - A removed device's writes still count if they reached storage and were
   made before it read its removal.
-- A device that reads its own removal, or its member's, stops syncing and
-  tells the app ([E5](api.md#e5-storage-and-sync)).
+- A device that reads its own removal, or its member's, stops syncing for
+  good and tells the app ([E5](api.md#e5-storage-and-sync)).
 - Removing a device takes away its storage access, so nothing it writes
   afterwards can reach other devices.
 
@@ -2254,7 +2287,8 @@ Carol's tablet:
     storage times.
   - E.g. Ana's phone clock jumps ahead a year. A log stored yesterday is
     still only one storage day old, so that jump cannot release it.
-  - Every device means every device the store log has and hasn't removed;
+  - Every device means every active device in the store log; removed and
+    replaced devices are not waiting readers here. Finality still follows §9;
     one that has never posted counts as having read nothing.
   - Coverage needs only the write header's part audiences, authenticated by
     its store-key encryption and bound to its path and prefix. Retention

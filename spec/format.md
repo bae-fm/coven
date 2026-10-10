@@ -196,7 +196,7 @@
 | 1 | Add member | `keys:MemberKeys \| role:u8 \| access:MemberAccess` |
 | 2 | Remove member | `member:MemberId \| key:uuid \| circle_keys:[circle:uuid \| key:uuid]` |
 | 3 | Change role | `member:MemberId \| role:u8` |
-| 4 | Add device | `device:DeviceId \| name:name` |
+| 4 | Add device | `device:DeviceId \| name:name \| replaces:Option<device:DeviceId \| last_write:u64 \| last_entry:u64>` |
 | 5 | Remove device | `device:DeviceId` |
 | 6 | Create circle | `circle:uuid \| name:name \| key:uuid` |
 | 7 | Rename circle | `circle:uuid \| name:name` |
@@ -216,6 +216,10 @@
 - The create-store entry is number 1 of its device, reads nothing, and its
   `admin` is its author; the device it adds is the one writing it.
 - Add-device carries no member id; create-circle carries no member list.
+- An add-device replacement names an older device of the same member,
+  distinct from the added device. Its log ends are observed stored positions;
+  zero means that log is empty. Concurrent replacements combine each end
+  by maximum (§10). Replacement is not removal and introduces no key.
 - Set-access is about its author, the member whose access it records.
 - `key` names the key the entry brings in ([§11](coven.md#11-keys));
   a removal's `circle_keys` are strictly increasing by circle. Their count
@@ -364,7 +368,9 @@
 - Refusal tags: 0 decryption/authentication, 1 signature, 2 parse,
   3 invalid write, 4 not authorized, 5 invalid causality, 6 wrong identity.
 - Wire prerequisites are 0 followed by an object path as `text`, or
-  1 followed by a device id whose registration is missing. Other waits
+  1 followed by a device id whose registration is missing, or 2 followed
+  by a device id awaiting a replacement that includes a stored object
+  beyond its closed log end (§10). Other waits
   remain local because they name no object or member key copy a peer can supply.
 - Update kind 0 means app schema; kind 1 means coven format and its version
   must fit u16. File-failure tags are 0 missing, 1 changed, 2 integrity.

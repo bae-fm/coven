@@ -61,7 +61,7 @@ pub enum Audience {
   the database, coven's copies of files, the cache, and the store's
   settings: its id and name, this device's id, and its storage settings.
 - Creating, restoring or joining a store makes the directory and writes
-  the settings, so the app never handles a device id ([§10](coven.md#10-device-identity)).
+  the settings, so the app never chooses a device id ([§10](coven.md#10-device-identity)).
 - A `StoreLayout` says where an app's stores live on disk.
 - Store lock files live beside each store directory. Deletion holds the writer
   and reader locks while removing the directory, then releases and removes the
@@ -1388,6 +1388,9 @@ while let Ok(values) = lost.next().await {
   local write or `sync_now`, and every 30 seconds while idle. Calls arriving
   during a sync request another pass; stopping and closing finish the active
   pass first.
+  - Before any upload, a pass checks this device's identity and storage
+    counters (§10), then reads the store log for a replacement. Other calls
+    that send objects use the same check before sending.
   - A pass applies the store log and keys, resumes operations and required
     reloads, then reloads snapshots if they cover missing logs (§15).
   - It uploads waiting writes, resumes operations waiting for those uploads,
@@ -1752,6 +1755,8 @@ pub enum BlockedSubject {
 pub enum Prerequisite {
     Object(ObjectPath),
     DeviceRegistration(DeviceId),
+    /// A closed log contains an additional stored object (§10).
+    DeviceReplacement(DeviceId),
     SchemaPublication { audience: Audience, version: u32 },
     Reload(Audience),
     OwnUploads,
@@ -1918,6 +1923,11 @@ impl CovenHandle {
     /// The sync status, live. The first value is the current status.
     pub fn subscribe_sync_status(&self) -> watch::Receiver<SyncStatus>;
 
+    /// The latest device reset completed by this handle, initially None.
+    /// A subscriber receives the current value, including a reset during open.
+    /// Show that unsent edits in the discarded copy were lost (§10).
+    pub fn subscribe_device_reset(&self) -> watch::Receiver<Option<DeviceReset>>;
+
     /// Current local blocks and relevant authenticated peer reports, including
     /// while disconnected. Sorted by subject, then reporting device (§19.1).
     pub async fn blocked(&self) -> CovenResult<Vec<BlockedRecord>>;
@@ -1931,6 +1941,24 @@ impl CovenHandle {
     /// Changes them while the store is open. Transfers already running keep
     /// the limit they started under.
     pub fn set_transfer_limits(&self, limits: TransferLimits);
+}
+
+/// A completed replacement of this installation, not a membership removal.
+pub struct DeviceReset {
+    pub old_device: DeviceId,
+    pub new_device: DeviceId,
+    pub reason: DeviceResetReason,
+}
+
+pub enum DeviceResetReason {
+    /// The database's id does not match device-only custody.
+    IdentityMismatch,
+    /// Storage proves counters beyond those reserved in the local database.
+    StorageAhead,
+    /// An occupied immutable path holds different bytes.
+    SlotMismatch,
+    /// The store log already closes this device's id.
+    Replaced,
 }
 
 pub enum SyncStatus {
@@ -2455,9 +2483,22 @@ pub enum RetainedAccessReason {
 pub struct MemberInfo {
     pub id: MemberId,
     pub role: MemberRole,
-    pub devices: Vec<DeviceId>,
+    pub devices: Vec<DeviceInfo>,
     /// Whether this is the member using this device.
     pub is_self: bool,
+}
+
+pub struct DeviceInfo {
+    pub id: DeviceId,
+    pub name: String,
+    pub state: DeviceState,
+}
+
+pub enum DeviceState {
+    Active,
+    Removed,
+    /// Stored log ends reported by kept replacement entries (§10).
+    Replaced { last_write: u64, last_entry: u64 },
 }
 
 pub enum MemberRole {
