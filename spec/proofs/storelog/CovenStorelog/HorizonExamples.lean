@@ -7,11 +7,13 @@ set_option maxRecDepth 32768
 
 /-- Two concurrent resets land at the same provider time. A third reset,
 attempted with the same past, lands after the deadline and is dropped. -/
-def tied : Finality.History :=
-  { log := fun e => if e = 0 then ⟨0, 0, [], .create "initial"⟩
+def currentTied : CurrentReplay.History :=
+  { log := fun e => if e = 0 then ⟨0, 0, [], .create "initial" ⟨0, Vector.replicate 32 0⟩⟩
       else ⟨0, e, [0], .reset ⟨.store, e⟩⟩
     stored := fun e => if e = 0 then 0 else if e < 3 then 1 else 40
     attempted := fun e => if e = 0 then 0 else 1 }
+
+def tied : Finality.History := currentTied.membership
 
 theorem tied_causal : CovenStorelog.Valid tied.log 4 := validCheck_sound _ _ (by decide)
 
@@ -40,7 +42,7 @@ theorem late_drop_does_not_reopen :
     finalSet tied 30 4 [31, 32, 40] 1 = true ∧
     finalSet tied 30 4 [31, 32, 40] 2 = true ∧
     finalSet tied 30 4 [31, 32, 40] 3 = false ∧
-    3 ∈ (CurrentReplay.resolve tied 30 4 (fun _ => true)).dropped := by decide
+    3 ∈ (CurrentReplay.resolve currentTied 30 4 (fun _ => true)).dropped := by decide
 
 theorem inclusive_recent_window :
     quiet tied 30 4 70 = false ∧
@@ -71,9 +73,9 @@ example : finalSet (Finality.Examples.history 40) 30 3 [32] 1 = true ∧
     finalSet (Finality.Examples.history 40) 30 3 [40] 1 = false := by decide
 
 theorem current_replay_stays_fixed :
-    (CurrentReplay.resolve tied 30 4 (Finality.atTime tied 32)).kept = [1, 0] ∧
-    (CurrentReplay.resolve tied 30 4 (Finality.atTime tied 40)).kept = [1, 0] ∧
-    (CurrentReplay.resolve tied 30 4 (Finality.atTime tied 32)).dropped = [2] ∧
-    (CurrentReplay.resolve tied 30 4 (Finality.atTime tied 40)).dropped = [2, 3] := by decide
+    (CurrentReplay.resolve currentTied 30 4 (Finality.atTime tied 32)).kept = [1, 0] ∧
+    (CurrentReplay.resolve currentTied 30 4 (Finality.atTime tied 40)).kept = [1, 0] ∧
+    (CurrentReplay.resolve currentTied 30 4 (Finality.atTime tied 32)).dropped = [2] ∧
+    (CurrentReplay.resolve currentTied 30 4 (Finality.atTime tied 40)).dropped = [2, 3] := by decide
 
 end CovenStorelog.Horizon.Examples

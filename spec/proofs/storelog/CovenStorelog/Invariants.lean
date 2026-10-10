@@ -4,9 +4,10 @@ import CovenStorelog.Ownership
 namespace CovenStorelog
 
 theorem checkedEffect_sound {s t : State} {w : Nat} {e : Entry}
-    (h : checkedEffect s w e = some t) : effect s w e = some t ∧ safe t = true := by
+    {remove : Nat → Circle → Nat → Option Circle}
+    (h : checkedEffect s w e remove = some t) : effect s w e remove = some t ∧ safe t = true := by
   unfold checkedEffect at h
-  cases he : effect s w e with
+  cases he : effect s w e remove with
   | none => simp [he] at h
   | some next =>
       simp only [he, bind, Option.bind] at h
@@ -17,9 +18,11 @@ theorem checkedEffect_sound {s t : State} {w : Nat} {e : Entry}
 /-- A state property preserved by effects is preserved by a complete pass.
 Already-in-place entries keep the same state. A restart publishes no state. -/
 theorem scan_state (M : Log) (views : Nat → State) (P : State → Prop)
-    (hp : ∀ s w t, P s → checkedEffect s w (M w) = some t → P t)
+    {conflict prefer : Nat → Nat → Bool}
+    {realize : State → Nat → Entry → Option State}
+    (hp : ∀ s w t, P s → realize s w (M w) = some t → P t)
     {todo : List Nat} {r out : Result} (hr : P r.state)
-    (h : scan M views todo r = .complete out) : P out.state := by
+    (h : scan M views todo r conflict prefer realize = .complete out) : P out.state := by
   induction todo generalizing r with
   | nil => cases h; exact hr
   | cons w ws ih =>
@@ -30,7 +33,7 @@ theorem scan_state (M : Log) (views : Nat → State) (P : State → Prop)
         · exact ih (r := { r with dropped := w :: r.dropped }) hr h
         · split at h
           · exact ih (r := { r with kept := w :: r.kept }) hr h
-          · cases he : checkedEffect r.state w (M w) with
+          · cases he : realize r.state w (M w) with
             | none => simp only [he] at h; exact ih (r := { r with dropped := w :: r.dropped }) hr h
             | some next =>
                 simp only [he] at h
@@ -42,14 +45,16 @@ theorem scan_state (M : Log) (views : Nat → State) (P : State → Prop)
 
 theorem settleN_state (M : Log) (views : Nat → State) (entries : List Nat)
     (P : State → Prop) (hi : P State.empty)
-    (hp : ∀ s w t, P s → checkedEffect s w (M w) = some t → P t)
+    {conflict prefer : Nat → Nat → Bool}
+    {realize : State → Nat → Entry → Option State}
+    (hp : ∀ s w t, P s → realize s w (M w) = some t → P t)
     {fuel : Nat} {drops : List Nat} {out : Result}
-    (h : settleN M views entries fuel drops = some out) : P out.state := by
+    (h : settleN M views entries fuel drops conflict prefer realize = some out) : P out.state := by
   induction fuel generalizing drops with
   | zero => cases h
   | succ fuel ih =>
       simp only [settleN] at h
-      cases he : scan M views entries ⟨State.empty, [], drops⟩ with
+      cases he : scan M views entries ⟨State.empty, [], drops⟩ conflict prefer realize with
       | complete r =>
           simp only [he, Option.some.injEq] at h
           subst out

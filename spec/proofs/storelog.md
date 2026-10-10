@@ -3,10 +3,9 @@
 - Lean checks the store log's terminating replay and entry accounting.
   C1–C9 describe the historical policy still compared with Rust; their key
   conflicts and examples are not the current §9 policy. C10 proves finality
-  for its stated policy. C11 models rotation entries and §14.6's empty
-  circles, sharing the same replay engine. The executable action type still
-  carries removal-key data; it does not check the key-free removal encoding
-  or the key-hash field required by D6.
+  for its stated policy. C11 models D6's key-free removals, key introductions
+  and §14.6's empty circles. C12 checks key hashes, copy exposure and
+  first-attempt selection against the current replay.
 - The development is in `spec/proofs/storelog/`, without Mathlib, using
   the toolchain pinned by [Appendix B](merge.md).
 
@@ -488,8 +487,9 @@ retained history through day 40 recovers day 39's quiet cutoff, even though
 the device did not check then and a late entry blocks day 40's own window.
 
 **The saved prefix has stable replay results.** `horizon_stability` applies
-the actual `CurrentReplay` rules. Once two received sets contain that prefix,
-they agree on every prefix entry's kept and dropped result, regardless of
+the membership engine's `ReplayPolicy` rules; `key_free_horizon_stability`
+transfers that result to `CurrentReplay`'s D6 actions. Once two received sets
+contain that prefix, they agree on every prefix entry's kept and dropped result, regardless of
 which later entries either has received. The finite history can include any
 continuation, including earlier author timestamps and tied landing times.
 `survivor_reads_old` proves the needed read relationship; `current_prefix`
@@ -517,48 +517,153 @@ saved number, physical cleanup, or Rust correspondence. All named horizon
 results are included in `Axioms.lean`; the Rust comparison retains its existing
 replay functions.
 
-### C11 Rotations and circles left empty after replay
+### C11 Key-free removals and circles left empty after replay
 
-`CurrentReplay` applies the contradiction rules, storage-time rejection and
-recorded-past authority. Its exact circle-key-list check belongs to its
-executable removal representation, not the key-free removals in D6. `Action.rotateKey` carries
-D6's tag-15 audience and key id. `rotation_authority` proves that a kept
-rotation's author belonged to its audience in its recorded past.
-`rotations_conflict_with_nothing` covers every action in both directions.
-Under §11 an outside admin never creates a circle key. Ana removes Carol
-from the store; Ben, still in Gifts, rotates Gifts' exposed key. The model's
-removal payload is not evidence for this publication order or its hash checks.
+`CurrentReplay.Action` models D6 tags 0, 2, 6, 10 and 15: store and circle
+creation and rotation carry a key id and hash; store removal carries only a
+member, and circle removal only a circle and member. There is no circle-key
+list to check and no `WrongCircleKeys` rejection. For this input, `ReplayPolicy` admits
+received entries unless they landed too late, then checks recorded-past
+authority and the replay conditions from §9.
+
+The current actions project to the membership engine's existing input. That
+projection carries no replacement keys for removals and forgets creation and
+rotation hashes, which do not affect membership. `ReplayPolicy` uses the
+shared `scan` and `settle`; it never uses the historical key-conflict rules.
+The C1–C9 functions and Rust runner retain their original actions and results.
+`ReplayCompatibility` also retains the data package's historical input:
+`Finality.History` selects its original key-list check; the key-free
+`CurrentReplay.History` selects no key check. The input type determines this
+choice. Every C11 and C12 example and key theorem uses the key-free type.
+The state-invariant induction also accepts the chosen effects and conflict
+policy, so `CurrentReplay.resolve_safe` and `admin_remains` prove the admin
+check for this replay through restarts.
+
+`rotation_authority` proves that every kept rotation's author belonged to
+its audience in its recorded past. `rotations_conflict_with_nothing` covers
+every action in both directions. `tier_results` checks all five tiers,
+including a circle removal classified as deletion in its author's view.
+`store_removals_compatible` proves that store removals do not contradict each
+other, including repeated removals of the same person.
 
 Ana and Ben can rotate Gifts concurrently; both entries stay. Dan, an admin
-outside Gifts, cannot rotate it. Ben's concurrent removal does not erase the
-authority his rotation had when written. `CurrentExamples.rotation_entries`
-and `removed_rotator_keeps_recorded_authority` check these histories.
+outside Gifts, cannot rotate it. Ben's concurrent removal does not erase his
+rotation's recorded authority. `CurrentExamples.rotation_entries` and
+`removed_rotator_keeps_recorded_authority` check these histories.
 `deleted_circle_keeps_rotation` checks that a concurrent circle deletion also
 leaves the rotation kept: it changes no membership and recreates no circle.
 
-The engine takes an effect function. `CurrentReplay.realize` uses the shared
-membership effects but deletes a circle during replay only for an explicit
-deletion or a removal that saw its sole member. Other removals retain an empty
-member list until `finish` projects the completed result. Author views use
-that same projection. `finished_circles_nonempty` proves that no empty circle
-is exposed as active; the finishing step changes no kept or dropped identity.
+The effect deletes a circle during replay only for an explicit deletion or a
+removal that saw its sole member. Other removals retain an empty member list
+until `finish` filters the completed result. Author views use that same
+filter. `finished_circles_nonempty` proves no empty circle is exposed as
+active; finishing changes no kept or dropped identity.
 
-Ana's phone removes Ben from Gifts while her tablet removes Ana from the store.
-Both saw two circle members. The completed replay hides Gifts and
+Ana's phone removes Ben from Gifts while her tablet removes Ana from the
+store. Both saw two circle members. The completed replay hides Gifts and
 `circleCause` names the later kept removal. Carol's concurrent addition can
-still populate it: the removals stay kept and Gifts returns with Carol.
-`concurrent_addition_populates_empty_circle` failed with the historical effect
-and passes with the new effect. `empty_circle_cause` checks both results;
-`explicit_deletion_still_wins` checks that a real deletion still defeats an add.
+still populate it: both removals stay kept and Gifts returns with Carol.
+`concurrent_addition_populates_empty_circle` and `empty_circle_cause` check
+these outcomes on key-free entries. `explicit_deletion_still_wins` checks
+that a deletion still defeats an addition.
 
-`empty_cause_latest` proves that a derived cause is a kept removal affecting
-that circle and that no later such removal was kept. “Affecting” uses circle
-membership in the removal's recorded past, including a repeated removal that
-is already satisfied in replay. `equal_received` covers state agreement.
-The generic termination, authority, accounting and prefix proofs apply to the
-selected effect. C10's existing theorems keep their original policy, and the
-Rust runner keeps `resolve`'s historical effects and conflict rules.
+`empty_cause_latest` proves that the cause is a kept removal affecting the
+circle, with no later such removal kept. “Affecting” uses membership in the
+removal's recorded past, including a repeated removal already satisfied in
+replay. `equal_received` proves state agreement for equal received sets.
 
-Key bytes, sealing, provider listings and physical deletion remain outside
-this package. The data package supplies key selection and retained row inputs.
-All named C11 results are included in `Axioms.lean`.
+### C12 Key introductions, hashes and exposure
+
+`CurrentKeys` takes introductions from the actual current replay's log and
+author views. `kept_key_origin` proves that every key introduced by a kept
+entry comes from store creation, circle creation or rotation.
+`removals_introduce_nothing` rules out both kinds of removal.
+`kept_introduction_received` connects kept introductions to the received,
+authorized set used for reading and key selection. Replay dropping an entry
+does not itself revoke its authorized key introduction (§11).
+
+**Circle creation needs an exception to prior membership.** The unrestricted
+claim “every circle key was introduced by someone already in the circle in
+its recorded past” fails with two entries: Ana creates the store, then Gifts.
+The Gifts entry is kept and introduces its key; its recorded past has no
+Gifts. The entry itself makes Ana its first member.
+`CurrentKeyExamples.creation_has_no_prior_circle_membership` and a literal
+Lean `example` check this history. `circle_key_authority` proves the spec's
+reading: creation requires store membership; every later circle-key rotation
+requires membership of that circle in the author's recorded past. An outside
+admin's removal introduces no circle key.
+
+**Copy acceptance checks the exact bytes.** `KeyBytes` and `KeyHash` are
+32-byte vectors. The hash is a parameter, not an implemented or axiomatized
+SHA-256. `accepted_copy_checked` checks the recipient, opened audience/id and
+authorized hash; `accepted_copy_authorized` traces that hash to a received
+entry with recorded-past authority. Tentative bytes with no such introduction
+cannot pass this check.
+
+Under an explicit injectivity hypothesis on the hash, `other_bytes_rejected`
+rejects different bytes, and `accepted_copies_unique` permits at most one
+accepted byte value for an audience/key id, across recipients and copies.
+`accepted_bytes_stable` extends this result to growing introduction sets.
+`mismatching_copy_no_key_or_exposure` proves that a recipient's mismatching
+copy contributes neither a key nor exposure evidence to that recipient's
+check. The byte-uniqueness theorems use the hypothesis as an argument; the
+development adds no axioms.
+
+The spec assumes fresh random key ids without specifying conflicting
+commitments for the same audience/id. The model refuses acceptance when
+received authorized introductions disagree on that hash
+(`conflicting_hashes_rejected`). Equal commitments may repeat. This reading
+avoids assuming id uniqueness or silently picking one of two commitments.
+An id in one audience is distinct from the same id in another audience.
+
+**Selection requires this pass's complete listing.** `firstAttempt` combines
+the current replay, received authorized introductions, custody and the pass's
+copy listing. An incomplete listing gives a listing wait; an excluded sender
+gives a membership wait. Otherwise `select` picks the newest usable held key,
+ordered by introduction timestamp and then key id (`selected_newest_usable`).
+A held candidate must match its authorized hash. An exposed key cannot be a
+fallback: `usable_or_pending` and `selected_usable` cover every result.
+`replacement_avoids_key_wait` proves that a usable held replacement suffices,
+even while old exposed copies remain listed.
+
+A device cannot open boxes addressed to other members. `foreign_copy_counts`
+therefore counts such a listed path as exposure without inspecting its
+payload, even if that payload is forged. `selected_no_excluded_copy` proves
+that every listed copy of the selected key addresses a current audience
+member. `first_attempt_safe` states the same guarantee against the actual
+current replay, and `first_attempt_authorized` proves its introduction's
+authority. This covers any excluded member who can hold a key through this
+listing, without assuming that foreign boxes can be decrypted.
+
+`recipient_rejects_forgery` checks both perspectives: Dan rejects a box whose
+bytes mismatch its named key, while Ben counts its path to excluded Dan.
+`forged_foreign_box_costs_a_rotation` checks the consequence: Ben had a usable
+store key; the forged foreign box causes a key wait; one fresh rotation,
+sealed only to remaining members, permits sending again. The old and forged
+copies stay listed, membership is unchanged, and Ben can still accept the
+old genuine key for reading. This is one forged box against one key; it does
+not claim progress against an unending sequence of new forgeries.
+
+**Concurrent removals apply independently.** In `concurrent_removals_apply`,
+Ana removes Dan while Ben removes Erin; both read the same past. Both entries
+are kept, both excluded members are absent, and both admins remain. Ana is
+outside Gifts, which contains Ben, Dan and Erin before the removals. Neither
+removal creates a store or circle key (`both_removals_mint_nothing`). A copy
+to either Dan or Erin makes each old audience key unusable
+(`excluded_dan_or_erin_retires_each_audience`); both audiences wait without
+falling back (`removals_wait_without_fallback`). Ben then rotates Gifts and
+Ana rotates the store: both new keys are usable and selected, despite the
+permanent old copies (`remaining_members_rotate`). `last_admin_removal_drops`
+checks the exception: with only Ana and Ben as admins, their concurrent
+mutual removals keep the earlier one and drop the removal that would leave
+no admin.
+
+The model assumes verified entry identities and signatures, the declared
+results of opening boxes, immutable recorded pasts, and a truthful complete
+listing for the current pass. It does not implement SHA-256, encryption,
+random generation, provider access revocation, custody storage, publication
+queues or physical deletion. The fresh-introduction sealing exception and
+identical attempted retries are outside this first-attempt selection model.
+Copies made after the listing remain §11's accepted residual window. All
+named current-policy, key and example results are audited in `Axioms.lean`;
+Rust correspondence remains the historical differential test.

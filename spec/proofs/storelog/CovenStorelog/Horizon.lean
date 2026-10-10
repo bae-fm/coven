@@ -158,30 +158,30 @@ theorem survivor_reads_old (H : History) (W n T : Nat) (hq : quiet H W n T = tru
 received set. This includes its actual conflict rules and circle effects. -/
 theorem current_prefix (H : History) (W n T : Nat) (S : EntrySet)
     (hv : CovenStorelog.Valid H.log n) (hq : quiet H W n T = true) :
-    let views := CurrentReplay.authorViews H W n n
-    let live := CurrentReplay.admitted H W n views S
+    let views := ReplayPolicy.authorViews H W n n
+    let live := ReplayPolicy.admitted H W n S
     let P := (List.range n).filter (fun e => live e && old H W T e)
-    let r := settle H.log views P (CurrentReplay.conflict H.log views)
-      (CurrentReplay.prefer H.log views) (CurrentReplay.realize views)
-    ReplayPrefix.Agree P (CurrentReplay.resolve H W n S).kept r.kept ∧
-    ReplayPrefix.Agree P (CurrentReplay.resolve H W n S).dropped r.dropped := by
+    let r := settle H.log views P (ReplayPolicy.conflict H.log views)
+      (ReplayPolicy.prefer H.log views) (ReplayPolicy.realize views)
+    ReplayPrefix.Agree P (ReplayPolicy.resolve H W n S).kept r.kept ∧
+    ReplayPrefix.Agree P (ReplayPolicy.resolve H W n S).dropped r.dropped := by
   dsimp only
-  let views := CurrentReplay.authorViews H W n n
-  let live := CurrentReplay.admitted H W n views S
+  let views := ReplayPolicy.authorViews H W n n
+  let live := ReplayPolicy.admitted H W n S
   let P := (List.range n).filter (fun e => live e && old H W T e)
   let suffix := (List.range n).filter (fun e => live e && !old H W T e)
   have read (b a : Nat) (hb : b < n) (ha : a < n)
       (hl : live b = true) (hn : old H W T b = false) (ho : old H W T a = true) :
       hadRead H.log b a = true := by
     have survives : Finality.tooLate H W n (fun _ => true) b = false := by
-      simp only [live, CurrentReplay.admitted, Bool.and_eq_true, Bool.not_eq_true'] at hl
-      exact hl.1.2
+      simp only [live, ReplayPolicy.admitted, Bool.and_eq_true, Bool.not_eq_true'] at hl
+      exact hl.2
     exact survivor_reads_old H W n T hq hb ha hn ho survives
   have splitList : (List.range n).filter live = P ++ suffix := by
     apply Finality.range_split
     intro a b ha hb _ hl ho hn
     exact hv.past_lt b hb a (read b a hb ha hl hn ho)
-  have sep : ∀ b ∈ suffix, b ∉ P ∧ ∀ a ∈ P, CurrentReplay.conflict H.log views b a = false := by
+  have sep : ∀ b ∈ suffix, b ∉ P ∧ ∀ a ∈ P, ReplayPolicy.conflict H.log views b a = false := by
     intro b hb
     obtain ⟨hb, hl, hn⟩ := by
       simpa only [suffix, List.mem_filter, List.mem_range, Bool.and_eq_true,
@@ -191,37 +191,37 @@ theorem current_prefix (H : History) (W n T : Nat) (S : EntrySet)
     · intro a ha
       obtain ⟨ha, _, ho⟩ := by
         simpa only [P, List.mem_filter, List.mem_range, Bool.and_eq_true] using ha
-      exact CurrentReplay.read_no_conflict H.log views b a (read b a hb ha hl hn ho)
-  have hp := ReplayPrefix.settle_prefix H.log views (CurrentReplay.conflict H.log views)
-    (CurrentReplay.prefer H.log views) P suffix ((List.nodup_range (n := n)).filter _) sep
-    (CurrentReplay.realize views)
+      exact ReplayPolicy.read_no_conflict H.log views b a (read b a hb ha hl hn ho)
+  have hp := ReplayPrefix.settle_prefix H.log views (ReplayPolicy.conflict H.log views)
+    (ReplayPolicy.prefer H.log views) P suffix ((List.nodup_range (n := n)).filter _) sep
+    (ReplayPolicy.realize views)
   rw [← splitList] at hp
   refine ⟨hp.1, ?_⟩
   intro a ha
   have halive : live a = true := (Bool.and_eq_true_iff.mp (List.mem_filter.mp ha).2).1
-  have halive' : CurrentReplay.admitted H W n (CurrentReplay.authorViews H W n n) S a = true := halive
-  simpa only [CurrentReplay.resolve, CurrentReplay.materialize, CurrentReplay.finish,
-    CurrentReplay.replay, List.mem_append, List.mem_filter, List.mem_range,
+  have halive' : ReplayPolicy.admitted H W n S none a = true := halive
+  simpa only [ReplayPolicy.resolve, ReplayPolicy.materialize, ReplayPolicy.finish,
+    ReplayPolicy.replay, Option.map_none, List.mem_append, List.mem_filter, List.mem_range,
     Bool.and_eq_true, halive',
     Bool.not_true, Bool.false_eq_true, and_false, or_false] using hp.2 a ha
 
 theorem excluded_disposition (H : History) (W n e : Nat) (S : EntrySet)
     (he : e < n) (hs : S e = true)
-    (excluded : CurrentReplay.admitted H W n (CurrentReplay.authorViews H W n n) S e = false) :
-    e ∉ (CurrentReplay.resolve H W n S).kept ∧
-    e ∈ (CurrentReplay.resolve H W n S).dropped := by
-  let views := CurrentReplay.authorViews H W n n
-  let candidates := (List.range n).filter (CurrentReplay.admitted H W n views S)
+    (excluded : ReplayPolicy.admitted H W n S none e = false) :
+    e ∉ (ReplayPolicy.resolve H W n S).kept ∧
+    e ∈ (ReplayPolicy.resolve H W n S).dropped := by
+  let views := ReplayPolicy.authorViews H W n n
+  let candidates := (List.range n).filter (ReplayPolicy.admitted H W n S)
   have acc := settleN_accounting H.log views candidates ((List.nodup_range (n := n)).filter _)
-    (by simp) (settle_eq_some H.log views candidates (CurrentReplay.conflict H.log views)
-      (CurrentReplay.prefer H.log views) (CurrentReplay.realize views))
+    (by simp) (settle_eq_some H.log views candidates (ReplayPolicy.conflict H.log views)
+      (ReplayPolicy.prefer H.log views) (ReplayPolicy.realize views))
   constructor
   · intro kept
     have hm := (acc.covered e).mpr (Or.inr (Or.inl kept))
-    simp only [candidates, views, List.mem_filter, excluded, Bool.false_eq_true,
+    simp only [candidates, List.mem_filter, excluded, Bool.false_eq_true,
       and_false] at hm
-  · simp [CurrentReplay.resolve, CurrentReplay.materialize, CurrentReplay.finish,
-      CurrentReplay.replay, he, hs, excluded]
+  · simp [ReplayPolicy.resolve, ReplayPolicy.materialize, ReplayPolicy.finish,
+      ReplayPolicy.replay, he, hs, excluded]
 
 def CompleteOld (H : History) (W n T : Nat) (S : EntrySet) : Prop :=
   ∀ e, e < n → old H W T e = true → S e = true
@@ -246,30 +246,29 @@ theorem current_stability (H : History) (W n T : Nat) (S U : EntrySet)
     (hv : CovenStorelog.Valid H.log n) (hq : quiet H W n T = true)
     (hs : CompleteOld H W n T S) (hu : CompleteOld H W n T U)
     {e : Nat} (he : e < n) (ho : old H W T e = true) :
-    (e ∈ (CurrentReplay.resolve H W n S).kept ↔ e ∈ (CurrentReplay.resolve H W n U).kept) ∧
-    (e ∈ (CurrentReplay.resolve H W n S).dropped ↔ e ∈ (CurrentReplay.resolve H W n U).dropped) := by
-  let views := CurrentReplay.authorViews H W n n
-  have live_eq : CurrentReplay.admitted H W n views S e = CurrentReplay.admitted H W n views U e := by
-    simp [CurrentReplay.admitted, hs e he ho, hu e he ho]
-  cases hl : CurrentReplay.admitted H W n views S e with
+    (e ∈ (ReplayPolicy.resolve H W n S).kept ↔ e ∈ (ReplayPolicy.resolve H W n U).kept) ∧
+    (e ∈ (ReplayPolicy.resolve H W n S).dropped ↔ e ∈ (ReplayPolicy.resolve H W n U).dropped) := by
+  have live_eq : ReplayPolicy.admitted H W n S none e = ReplayPolicy.admitted H W n U none e := by
+    simp [ReplayPolicy.admitted, hs e he ho, hu e he ho]
+  cases hl : ReplayPolicy.admitted H W n S none e with
   | false =>
     have ds := excluded_disposition H W n e S he (hs e he ho) hl
     have du := excluded_disposition H W n e U he (hu e he ho) (live_eq ▸ hl)
     exact ⟨by simp [ds.1, du.1], by simp [ds.2, du.2]⟩
   | true =>
-    have eqP : (List.range n).filter (fun a => CurrentReplay.admitted H W n views S a && old H W T a) =
-        (List.range n).filter (fun a => CurrentReplay.admitted H W n views U a && old H W T a) := by
+    have eqP : (List.range n).filter (fun a => ReplayPolicy.admitted H W n S none a && old H W T a) =
+        (List.range n).filter (fun a => ReplayPolicy.admitted H W n U none a && old H W T a) := by
       apply List.filter_congr
       intro a ha
       have ha' := List.mem_range.mp ha
       cases h : old H W T a
       · simp
-      · simp [CurrentReplay.admitted, hs a ha' h, hu a ha' h]
+      · simp [ReplayPolicy.admitted, hs a ha' h, hu a ha' h]
     have ps := current_prefix H W n T S hv hq
     have pu := current_prefix H W n T U hv hq
     dsimp only at ps pu
     have hes : e ∈ (List.range n).filter
-        (fun a => CurrentReplay.admitted H W n views S a && old H W T a) := by simp [he, hl, ho]
+        (fun a => ReplayPolicy.admitted H W n S none a && old H W T a) := by simp [he, hl, ho]
     have heu := eqP ▸ hes
     rw [eqP] at ps
     exact ⟨(ps.1 e heu).trans (pu.1 e heu).symm, (ps.2 e heu).trans (pu.2 e heu).symm⟩
@@ -282,8 +281,8 @@ theorem horizon_stability (H : History) (W n : Nat) (checks : List Nat) (S U : E
     (hs : ∀ e, e < n → H.stored e < horizon H W n checks → S e = true)
     (hu : ∀ e, e < n → H.stored e < horizon H W n checks → U e = true)
     {e : Nat} (he : e < n) (hf : H.stored e < horizon H W n checks) :
-    (e ∈ (CurrentReplay.resolve H W n S).kept ↔ e ∈ (CurrentReplay.resolve H W n U).kept) ∧
-    (e ∈ (CurrentReplay.resolve H W n S).dropped ↔ e ∈ (CurrentReplay.resolve H W n U).dropped) := by
+    (e ∈ (ReplayPolicy.resolve H W n S).kept ↔ e ∈ (ReplayPolicy.resolve H W n U).kept) ∧
+    (e ∈ (ReplayPolicy.resolve H W n S).dropped ↔ e ∈ (ReplayPolicy.resolve H W n U).dropped) := by
   have member := (final_iff_before_horizon H W n checks e).mpr ⟨he, hf⟩
   obtain ⟨T, ht, cert⟩ := List.any_eq_true.mp (Bool.and_eq_true_iff.mp member).2
   obtain ⟨ho, hq⟩ := Bool.and_eq_true_iff.mp cert
@@ -294,5 +293,16 @@ theorem horizon_stability (H : History) (W n : Nat) (checks : List Nat) (S U : E
   exact current_stability H W n T S U hv hq
     (fun a ha old => hs a ha (cut a ha old))
     (fun a ha old => hu a ha (cut a ha old)) he ho
+
+/-- The current key-bearing wire model inherits the same horizon theorem
+through its membership projection, including key-free removals. -/
+theorem key_free_horizon_stability (H : CurrentReplay.History) (W n : Nat)
+    (checks : List Nat) (S U : EntrySet) (hv : CurrentReplay.Valid H.log n)
+    (hs : ∀ e, e < n → H.stored e < horizon H.membership W n checks → S e = true)
+    (hu : ∀ e, e < n → H.stored e < horizon H.membership W n checks → U e = true)
+    {e : Nat} (he : e < n) (hf : H.stored e < horizon H.membership W n checks) :
+    (e ∈ (CurrentReplay.resolve H W n S).kept ↔ e ∈ (CurrentReplay.resolve H W n U).kept) ∧
+    (e ∈ (CurrentReplay.resolve H W n S).dropped ↔ e ∈ (CurrentReplay.resolve H W n U).dropped) :=
+  horizon_stability H.membership W n checks S U hv hs hu he hf
 
 end CovenStorelog.Horizon
