@@ -358,6 +358,10 @@
   - The final signature uses `coven/object-signature/v1` as below, hashing
     every preceding byte, including `prefix_signature`. Verify it when loading,
     before applying any snapshot data.
+  - Before upload, the writer verifies both signatures, decrypts and checks
+    every record, and compares with the fingerprint of the captured database
+    state (§15). After upload it checks the complete stored bytes' checksum.
+    These checks add no receipt or field to the object.
   - Both signatures must verify with the member the store log names for the
     device in the path, as of the entries the reader has applied. An unknown
     device, missing signature or wrong signer makes the object damaged (§19.1).

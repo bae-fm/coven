@@ -2016,6 +2016,25 @@ Carol's tablet:
     The latest snapshot's size follows from its listed object size and D9's
     fixed chunk layout. Choosing it and checking growth read only its signed
     prefix; they do not decrypt or validate its rows.
+- Before uploading a snapshot, its writer opens the sealed temporary file
+  through the snapshot reader: decrypt, verify both signatures, and parse
+  and check every record.
+  - Its fingerprint must equal the database state the writer captured,
+    at those same positions and schema version. Writes committed since
+    that capture do not change the comparison.
+  - A failed check stops publication and reaches the caller.
+- After upload, compare the provider's checksum of the complete stored
+  bytes with the local checksum, using the provider's checksum algorithm.
+  - For multipart uploads, compare the checksum of the complete object,
+    not a part checksum or an identifier that is not a checksum.
+  - A provider without a complete-object checksum must return the stored
+    bytes for this check. A mismatch is an integrity failure, not success.
+- Readers still choose by the authenticated prefix; they do not certify a
+  snapshot for other devices by opening its body.
+  - E.g. Ana's phone discovers its published snapshot was damaged. Ben's
+    healthy laptop writes a newer snapshot; new devices load that one.
+  - If Carol already loaded incorrect data, a person resets from Ben's
+    trusted copy (§19.3). Keeping one older snapshot is not a recovery rule.
 - The *latest* snapshot of an audience is the one covering the most writes,
   counted over every log; a tie goes to the smaller path.
 - Until an audience has a snapshot, a new device reads every log from the
@@ -2077,6 +2096,14 @@ Carol's tablet:
 - A log object is deleted once snapshots cover every part of it, and either
   every device's posted position has passed it or storage has held it for
   30 days.
+  - Age compares storage times only: “now” is the newest stored time in
+    the complete listing for this store, and the object's age is the
+    difference from its listed stored time. An empty listing proves no age.
+  - A quiet store can delay cleanup; it cannot make an object old early.
+    Device-made write and entry timestamps are never compared with these
+    storage times.
+  - E.g. Ana's phone clock jumps ahead a year. A log stored yesterday is
+    still only one storage day old, so that jump cannot release it.
   - Every device means every device the store log has and hasn't removed;
     one that has never posted counts as having read nothing.
   - Coverage needs only the write header's part audiences, authenticated by
@@ -2627,8 +2654,9 @@ Carol's tablet:
   3. migrate the writes waiting in `_coven_uploads`, if the snapshot's
      version is newer ([§17](#17-schema-changes)).
 - Writing a snapshot ([§15](#15-snapshots)):
-  1. write it, sealed, to a temporary file, and record the file;
-  2. upload it;
+  1. write it, sealed, to a temporary file, record it and check it locally
+     against the captured database state;
+  2. upload it and compare the stored bytes' checksum;
   3. delete the log objects, older snapshots and files it lets go
      ([§16.5](#165-uploads-and-deletion)).
 - Making a circle ([§14.3](#143-circles)):

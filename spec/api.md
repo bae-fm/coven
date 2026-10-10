@@ -1506,6 +1506,8 @@ pub enum StorageFailure {
     Refused,
     /// The response or recorded session is malformed.
     Protocol,
+    /// Complete uploaded bytes disagree with the local checksum (§15).
+    Integrity,
     /// An object path is outside the store's layout.
     InvalidPath,
     /// A range is empty, reversed or beyond the object's end.
