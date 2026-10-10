@@ -1912,8 +1912,7 @@ Carol's tablet:
   carries `key_hash`, SHA-256 of the exact 32 key bytes, inside the encrypted
   entry. After opening a copy, check its audience, id and hash against that
   authorized introduction before accepting the key for ordinary reads or
-  sending. A mismatch is an invalid copy and supplies neither the key nor
-  evidence of its exposure.
+  sending. A mismatch is an invalid copy; the recipient ignores its key.
   - A candidate needed to open its introducing entry is tentative until that
     entry's signature, authority, identity and hash checks succeed. It may
     open that entry for validation, but cannot enter the accepted key set
@@ -1925,11 +1924,16 @@ Carol's tablet:
     data with an unpublished key.
   - Dan plants chosen bytes under K2's copy path for Ana. Ana opens the box
     but rejects its hash; those bytes cannot become K2 in her custody.
-- A listed box addressed to someone else cannot be opened by this device.
-  Its plaintext hash therefore cannot be checked from the listing. Such a
-  copy remains potential exposure under the conservative listing rule;
-  ignoring forged third-party boxes requires evidence beyond D11's anonymous
-  sealed box. Ana holding K2 cannot decrypt Dan's box merely by knowing K2.
+- A copy addressed to an excluded member counts as exposure of the named
+  key. A device cannot open a box sealed to someone else, so it cannot
+  check that box's key hash. Exposure detection uses its named audience,
+  key id and recipient; it does not require proof that the recipient opened it.
+  - Dan is excluded. Someone publishes a forged K2 copy addressed to Dan.
+    Ana cannot open it, even though she holds K2, and retires K2 for first
+    attempts. That forged copy costs at worst an extra rotation; it cannot
+    make Ana accept a different key under K2's id.
+  - Recipients still ignore copies whose opened key fails the introduction's
+    hash. That check governs key acceptance, not third-party exposure.
 - Each store key is sealed to every member's public key, and the sealed
   copies are kept in storage, at `<store>/keys/<writer>/store/<key>/<member>`.
 - Sealed circle keys live at `<store>/keys/<writer>/circles/<circle>/<key>/<member>`

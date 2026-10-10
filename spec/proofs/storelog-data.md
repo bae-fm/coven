@@ -12,6 +12,13 @@ model's receipts abstract successful sealing and opening; they do not check
 D6's SHA-256 key commitment or the writer-specific D10 paths. The claims
 below describe those executable inputs, not a proof of these format checks.
 
+Exposure in §11 is conservative: any copy addressed to an excluded member
+retires its named key. Ana cannot decrypt a box for excluded Dan to check
+its key hash. A forged K2 box can therefore cause an extra rotation, while
+a recipient still rejects a key whose hash differs from K2's introduction.
+The model's successful receipts do not prove this third-party detection or
+the recipient's hash check; both are format/IO verification obligations.
+
 Ana removes Ben, then Carol rotates K for the remaining members. If a
 concurrent replay returns Ben, historical sharing supplies him K. This is
 the spec's corresponding disclosure history; the checked witness below
