@@ -1,0 +1,13 @@
+name = "covenIO"
+defaultTargets = ["CovenIO"]
+
+[[require]]
+name = "covenStorage"
+path = "../storage"
+
+[[require]]
+name = "covenStorelogData"
+path = "../storelog-data"
+
+[[lean_lib]]
+name = "CovenIO"
