@@ -1760,6 +1760,7 @@ pub enum PendingSubject {
     Entry(EntryId),
     KeyCopy { audience: Audience, key: KeyId, member: MemberId },
     Snapshot(SnapshotId),
+    /// Retention waits for this active reader's position, or storage age (§15).
     Positions(DeviceId),
     File { device: DeviceId, file: FileId },
     Operation { id: OperationId, kind: OperationKind },

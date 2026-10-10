@@ -2650,6 +2650,15 @@ Carol's tablet:
   - Every device means every active device in the store log; removed and
     replaced devices are not waiting readers here. Finality still follows §9;
     one that has never posted counts as having read nothing.
+  - When coverage and finality pass but an active reader has not posted past
+    the object, its retention reason is `Waits(Positions(device))`.
+    A missing or invalid post counts as no position. If several readers lag,
+    name the first by device id. The wait ends when that reader posts past it
+    or the object's storage age reaches 30 days; then evaluate any remaining
+    reader and retention conditions.
+  - Ana's snapshot covers write 9, but Ben last posted 8. Its retention record
+    names Ben. Ben posting 9 satisfies his wait, as does the object reaching
+    30 storage days; neither alone bypasses the snapshot or finality checks.
   - Coverage needs only the write header's part audiences, authenticated by
     its store-key encryption and bound to its path and prefix. Retention
     uses the facts retained when that device authored, applied or checked
