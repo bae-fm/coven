@@ -205,6 +205,23 @@ This restates storage's `sends_require_check` shape using its actual `Gate`
 type. Complete own-counter evidence, out-of-loop serialization and reset
 implementation remain outside the trace proof.
 
+§10 also requires every sender's last completed membership and key-copy
+catch-up to have **started** less than five minutes ago, on a monotonic
+clock including sleep. This covers the file worker and out-of-loop calls,
+retries, SDK retries, parts and session completion. An expired sender waits
+for the next pass; completion cannot restart freshness. Reopen, reconnect
+and reset invalidate that evidence. A fresh clock replacement needs this
+catch-up too, and its storage time qualifies only subsequent discovery.
+The trace's Boolean gate proves identity ordering, not this elapsed-time rule.
+
+With §10's assumption that every request settles within one day, including
+remote publication after a lost reply, all retired-writer publications settle
+within one day and five minutes after the kept retirement becomes final.
+Before finality, replay can drop and restore retirement, so publication time
+cannot start that bound. Deriving this bound from actual catch-up coverage,
+monotonic timing and request duration remains outside the model; it also
+requires the finality input condition in obligation 5.
+
 ## Downloads and their visible outcomes
 
 **10. Downloads and pending records — proved at the transaction boundary.**
@@ -285,6 +302,12 @@ no Rust behavior.
   copies followed by valid ones, and other-recipient exposure. Invite cursors do
   not replace earlier copy history. After request deletion, refresh copies and
   membership before reporting decline. Known required gaps remain pending.
+- Check the freshness gate immediately before every send, including the file
+  worker, out-of-loop calls and SDK retries. Exercise just before and exactly
+  at five minutes, sleep, reopen, reconnect, failed catch-up and a catch-up
+  taking five minutes. Test a retirement that drops and returns before
+  finality, and a last permitted send whose publication takes one day even
+  after a lost reply. No client timeout alone proves remote cancellation.
 - Test clock sampling, exactly 30 days, suspension, failed probes and checkpoint
   posting. Read-only identity discovery precedes clock replacement and is reused.
   Address the checked snapshot-selection and timestamp-frontier failures above.

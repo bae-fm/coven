@@ -92,6 +92,12 @@ install the entries, author checks, replay, affected data and operation
 progress. A failed transaction retains the previous decoded and durable
 state. No independently writable decoded copy is maintained by a worker.
 
+Separately, the owner keeps the monotonic start of the last completed
+membership and key-copy catch-up for §10's send gate. This session-only
+evidence expires five minutes after that start, counting sleep, and is
+invalidated on reopen, reconnect or reset. It is not §15's durable storage-time
+checkpoint, which also requires data application and confirmed positions.
+
 **Ben's missing key.** His laptop downloads Ana's write 12, but lacks its
 Gifts key. The next pass uses the cached bytes and reports the same wait.
 When the copy arrives, Ben opens those bytes and applies them; he does not
@@ -111,6 +117,7 @@ Serialize this pass with the store's other sync work. Capture the newest
 committed local write and commands it will service. Use the owner's decoded
 log and indexed pending work; create no snapshot or retention operation
 merely to find out that nothing needs doing.
+Record this first phase's monotonic start before its discovery requests.
 
 Borrow the member keys and keyring unlocked when the handle opened. Every
 pass, file task and operation uses that same session. Persist acquired or
@@ -141,8 +148,10 @@ A device clock only schedules a check; storage time decides it.
 A sample still before the threshold schedules another check with backoff.
 A probe that writes anything must first satisfy §10 with the catalog and
 identity steps below, using read-only snapshot discovery conservatively
-when absence duration is not yet known. Then list device folders and read
-the next entry numbers after the time observation. Count these extra
+when absence duration is not yet known. If no fresh completed first phase
+exists, complete that read-only phase before the clock replacement. Then
+list device folders and read the next entry numbers after the time
+observation. Count these extra
 requests; a probe cannot bypass identity. A snapshot observation already
 made for this return serves recovery too, without another listing.
 No unchanged positions post supplies this observation.
@@ -192,7 +201,8 @@ through `T` prevents finality and any cleanup depending on it.
 Do not read at or past a log's permanent refusal (§19.1). An incomplete
 catch-up also prevents new administrative work, key sharing and first
 attempts requiring a current membership view; it is not permission to seal
-against an older replay. Fixed attempted uploads retain their retry rules.
+against an older replay. Fixed attempted uploads retain their bytes, but
+every retry still needs §10's fresh completed catch-up.
 
 Advance the single finality horizon only from all entries through `T`
 and the exact §9 window. Queries derive finality by comparing stored time
@@ -232,6 +242,9 @@ including keys, files and positions. An out-of-loop sender serializes with
 this work and uses a current completed check plus the occupied-path rule;
 it cannot reuse evidence from before reconnect, reset or intervening work
 that invalidates it. Its required refreshes count as that call's requests.
+Every sender also checks the first phase's age immediately before each
+request (§10). A long-running pass or upload waits for the next pass once
+five minutes have elapsed from that catch-up's start.
 
 ### 4. Observe keys and peers
 
@@ -256,6 +269,11 @@ reports and records the failure. Do not rewrite unchanged report rows;
 persist any changed peer identity or positions with the observation.
 Recompare cached fingerprints when this device's own data, schema, positions
 or usable fingerprint key changes.
+
+Only a complete membership and key-copy observation with committed replay
+and a successful identity check supplies the completed first phase's start
+to senders. Completion never substitutes its own time for that start. A
+phase taking five minutes or more supplies no permission to send.
 
 ## Phase 2: make keys and access match
 
@@ -449,6 +467,9 @@ uploads. It shares the identity check (§10), transfer limits, retained
 observations and provider cooldown with the pass. Each upload uses its
 captured reference, fixed file key and source checks (§16.5), without
 selecting an audience key.
+Before every request, including a retry, part or session completion, check
+§10's catch-up freshness. Expiry waits for the next pass without changing
+the fixed reference, key or confirmed session progress.
 
 Use one create within the provider's single-request limit; crossing a
 64-KiB encryption chunk boundary alone does not start a resumable session.

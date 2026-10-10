@@ -1426,6 +1426,9 @@ while let Ok(values) = lost.next().await {
     positions and snapshots, received store log and device custody to check
     identity, counters, removal and replacement (§10). Other senders use
     the same serialized check. They do not make independent duplicate scans.
+    Every send, including retries and file parts, also checks that the last
+    completed first phase started less than five minutes ago, monotonically
+    with sleep counted. Otherwise it waits for the next pass (§10).
   - The pass borrows the keys unlocked at open for the handle's session.
     Its observations and retained checked bytes serve operations, reloads,
     writes, file transfers, snapshots, retention and agreement together.

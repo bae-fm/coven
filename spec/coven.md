@@ -137,8 +137,9 @@
     Retention separately deletes the history that snapshots safely cover.
 - **Revocation:** before sending a write for the first time, a device
   catches up on membership changes and new sealed key copies at sync-pass
-  start, then seals with the newest usable key. An ex-member cannot read
-  other members' writes first sent by devices that already knew they had
+  start, then seals with the newest usable key. Every send also requires
+  that completed catch-up to have started less than five minutes ago (§10).
+  An ex-member cannot read other members' writes first sent by devices that already knew they had
   left, provided no copy of the sealing key is made for them after that
   pass's copy observation (§11).
   - A tried write retains its first attempt's key and bytes on every retry.
@@ -1868,6 +1869,34 @@ Carol's tablet:
     the periodic sync loop.
     A failed check sends nothing and reports its blocker.
   - Check the store log for this id's replacement before sending too.
+- Every sender uses the last completed membership and key-copy catch-up
+  (the pass's first phase). Before each send, its start must be less than
+  five minutes ago on a monotonic clock that includes sleep. Measure from
+  the start, never the completion. An incomplete catch-up cannot refresh it.
+  - The pass, file-upload worker and calls outside the loop share this gate.
+    It covers first attempts, identical retries, upload-session requests,
+    parts and completion, as well as entries, key copies, snapshots,
+    positions and clock objects. Recheck immediately before starting each
+    provider request, including an SDK retry; a queued request has no exemption.
+  - At five minutes, or with no completed catch-up, wait for the next pass.
+    Per send this is a clock comparison; membership and copy IO stays with
+    the pass. Reopen, reconnect or device reset invalidates the session's
+    freshness evidence. The identity and removal checks above still apply.
+  - A clock-object replacement with no fresh catch-up first needs a read-only
+    first phase, including the identity evidence. Its time can qualify only
+    a subsequent store-log observation (§9), not the one that enabled it.
+  - Assume each provider request completes or fails within one day
+    (24 hours), including any publication after a lost reply: it cannot
+    publish later. A multipart session can last longer, but every subsequent
+    request needs the gate again. This is a provider-duration assumption,
+    not a claim that a client timeout cancels remote work.
+  - Once a kept retiring entry is final (§9), its kept status cannot change.
+    A catch-up started after that finality observes the retirement and stops
+    the old id. Earlier catch-ups permit sends for less than five further
+    minutes, and each request settles within one day. No publication can
+    occur more than one day and five minutes after finality. Measure from
+    finality, not the entry's publication: replay can drop and restore the
+    retirement before it is final.
 - A stale copy resets as a new device using storage and saved custody.
   - Stop its local writes and transfers. Discard its database and pending
     local work; do not salvage or renumber waiting writes.
@@ -2050,8 +2079,10 @@ Carol's tablet:
   reversal does not revoke an authorized key introduction. Sharing adds a permanent sealed copy;
   every device's next-number reads can observe it.
 - The guarantee uses the sending device's replay and copy observation at the start
-  of this pass. There are no per-write or per-upload membership or key-copy
-  checks. First attempts use that pass's selection; tried writes keep their bytes.
+  of this pass. Every send requires that completed catch-up to have started
+  less than five minutes ago (§10); there is no per-write or per-upload
+  membership or key-copy IO. First attempts use that pass's selection;
+  tried writes keep their bytes and obey the same freshness gate.
   - E.g. Ben's tablet sees Ana's removal drop and shares key K with her.
     Ben's phone sees the removal kept throughout. Its next reads of the
     tablet's copy log find K's copy for Ana: it retires K and rotates before
@@ -2060,7 +2091,11 @@ Carol's tablet:
     window. The phone may first-send with K during that pass while Ana can
     obtain the new copy.
     Its next pass retires K if Ana is still excluded. This is accepted;
-    no per-write check closes it.
+    the freshness gate bounds stale sending but does not close this window.
+    Under §10's one-day request-duration assumption, even a retired writer's
+    in-flight copy lands within one day and five minutes after its kept
+    retirement becomes final (§9), even if replay dropped it earlier.
+    Copy exposure cannot be undone by rejecting a late object.
   - Writes first sent before the sender learned of a removal also remain
     readable under their old keys while the recipient has storage access.
     Revocation ends that access; on S3 an admin deletes the access key in

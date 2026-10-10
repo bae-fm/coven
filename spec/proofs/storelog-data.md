@@ -39,6 +39,14 @@ runs; `rotation_requires_publication` proves that both receipts are required;
 Ana's key-free removal of Ben, then first-sending with K2. Provider access
 can remain pending while this protected data proceeds.
 
+Every send also requires §10's completed catch-up to have started less than
+five minutes ago, measured monotonically with sleep counted. This includes
+fixed retries and independent file uploads. The model does not represent
+that timer or the one-day provider-request duration assumption; they are
+[IO obligations](io.md#discovery-obligations), not consequences of the
+revocation theorems. Freshness bounds stale sending without eliminating
+copies published after the sender's observation.
+
 `KeySelection.revocation_between_listings` and `KeyPhases.revocation` prove
 that a selected sealing key has no copy for an excluded member in the listed
 storage plus later copies, provided `noLaterCopy` holds. The latter connects
