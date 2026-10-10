@@ -1335,8 +1335,13 @@ Carol's tablet:
   written from, so a new device adds itself, signed with its member's key
   ([§12.1](#121-a-persons-new-device)).
 - Two concurrent entries conflict when:
-  - they're about the same member or device and say different things,
-    where an entry about a device is also about the member it belongs to;
+  - they give the same member or device contradictory states, or one
+    removes something the other needs; sharing a member id is not enough;
+    - two additions of different devices belonging to Ben both apply;
+    - adding Ben's phone, changing his access and adding him to Gifts
+      also all apply: none contradicts another;
+    - removing Ben conflicts with adding his phone, since the phone needs
+      Ben to remain a member;
   - one adds a member and the other removes one, which replaces the store
     key ([§13](#13-removing-members-and-devices));
   - one deletes a circle and the other changes it, its members, or resets
@@ -1374,6 +1379,8 @@ Carol's tablet:
 
   ```
   Ana adds Dan               Ben makes Carol an admin   both: no conflict
+  Ben adds his phone         Ben adds his laptop        both: different devices
+  Ben adds his phone         Ben changes his S3 key     both: different facts
   Ben adds his new phone     Ana removes Ben            the removal
   Ana makes Ben an admin     Carol makes him a member   member: an admin
                                                         grant loses
