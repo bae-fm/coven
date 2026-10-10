@@ -134,6 +134,8 @@
   snapshots once the store-log decisions they depend on are final (§9).
   An absent device can delay finality and require retaining that history.
   The store log and sealed keys remain.
+- **Nothing waits silently:** whatever coven cannot apply or deliver is in
+  the blocked list, with its subject and typed reason (§19.1).
 
 ## 4. Storage providers and access
 
@@ -316,18 +318,22 @@
 - Each device remembers how far it has applied every device's log, in
   coven's `_coven_positions` table: one row per device, naming its last
   applied write's number.
-- It also posts those positions to storage at `<store>/positions/<device>`,
-  replacing its own object when its positions or stuck records change.
-  - It includes its own judgments of stuck logs: the log, object and failure
-    category (§19.1, D8). Reports received from peers are never republished.
-  - In its own log it posts the last write it has uploaded.
-  - The object is signed with its author's member key. Every reader checks
-    that signature against the member the applied store log names for the
-    device in its path; a missing or wrong signature is damaged (§19.1).
-- Missing prerequisites and failed reads wait for another sync. A completely
-  downloaded write or store-log entry that fails a permanent check stops that
-  device's corresponding log at that object, recorded and exposed as stuck
-  (§19.1). Independent logs continue.
+- It posts positions to storage at `<store>/positions/<device>`, replacing
+  its object when positions or blocked records change (D8).
+  - In its own write log it posts only writes already uploaded.
+  - The posted positions form a causally closed applied past: every cause
+    of every included write is included, and no unfinished reload is passed.
+  - Pending uploads can prevent advancing that past. Blocked records still
+    travel: reuse the last publishable positions and omit fingerprints
+    unless they describe exactly those positions.
+  - Store-log acknowledgements obey §9, including settling reserved entries
+    before acknowledging beyond them.
+  - The object's member signature is checked against the member the received
+    store log names for its device. An unknown device waits for registration;
+    a wrong or missing signature is refused (§19.1).
+- A missing prerequisite or failed read gets a blocked record. A complete
+  immutable write or entry that fails a permanent check stops its log at
+  that object. Independent logs continue (§19.1).
 - A device finds devices it doesn't know yet, and their logs, by listing
   `<store>/devices/` and `<store>/store-log/` ([E5](api.md#e5-storage-and-sync)).
 
@@ -1407,8 +1413,8 @@ Carol's tablet:
   replay starts again without them.
   - A dropped entry stays dropped until that replay ends; the next arrival
     starts a new replay with every entry.
-- Dropped entries and their reasons remain tracked in the replay; they are
-  not yet exposed to the app.
+- A dropped entry has a blocked record with its replay reason. The record
+  changes or disappears with replay; it is not a permanent byte judgment.
 - Whose entry it is comes from its signature, not from the device it was
   written from, so a new device adds itself, signed with its member's key
   ([§12.1](#121-a-persons-new-device)).
@@ -1778,7 +1784,7 @@ Carol's tablet:
   them in any entry the store log holds, kept or dropped: create-store and
   add-member entries naming them, and set-access entries signed by them.
   Dropping an entry does not undo the provider access it records.
-  - Every distinct S3 key id goes into `access_keys_to_delete` until the
+  - Every distinct S3 key id gets a `DeleteAccessKey` blocked record until the
     admin confirms its deletion. A replacement concurrent with removal
     therefore lists both the old and the new key, even though removal
     defeats the set-access entry in replay.
@@ -1797,7 +1803,7 @@ Carol's tablet:
 - The member whose provider account holds the store can't be removed:
   the store would go with their account. Removing them fails with
   `SyncError::StoreOwner`.
-- On S3, `access_keys_to_delete()` lists keys the admin must delete until
+- On S3, `blocked()` lists keys the admin must delete until
   the admin confirms they are gone ([E9](api.md#e9-members-and-devices)), however
   the removal or expiry that needs it came about. The device retains the
   confirmation by key id: another entry, invite, retry or restart cannot
@@ -2065,9 +2071,9 @@ Carol's tablet:
 - A snapshot is the synced tables and coven's merge tables
   ([§8](#8-merge)) as one device has them, encrypted, with how far into
   every log they reach.
-  - A device's own `_coven_uploads`, `_coven_operations` and `_coven_stuck_logs`
+  - A device's own `_coven_uploads`, `_coven_operations` and `_coven_blocked`
     aren't in it. Loading keeps that local state, except that committing a
-    changed reset suppresses local stuck judgments (§19.1). Their inputs
+    changed reset suppresses blocked records (§19.1). Their inputs
     remain until that reset is final (§9).
   - Snapshots live at `<store>/snapshots/<audience>/<device>/<n>`, where the
     audience is `store` or a circle's id.
@@ -2165,8 +2171,8 @@ Carol's tablet:
   Losses frozen by a breaking migration survive without their row's merge
   records or schema columns. Loading preserves them in `_coven_lost`, and
   every loss counts in its audience's fingerprint (§19.1).
-- Each device posts its positions only after uploading its own earlier
-  writes.
+- Each device advances its posted positions only over fully realized work.
+  It can post new blocked records without advancing them (§6).
 - Deleting a log object requires all of the following:
   - snapshots cover every part of it;
   - every store-log entry that makes this coverage usable, or makes the
@@ -2189,14 +2195,15 @@ Carol's tablet:
     whole-object author signature. These fields describe the object being
     deleted; they grant no author authority and apply no rows. Loading a
     write still checks its complete signature (§6).
-- A write waiting for store-log entries or a key copy holds retention back.
-  This is not damaged data and does not fail the sync pass. Deletion is
-  reconsidered after those inputs arrive, under the same coverage rules.
-- Recorded stuck logs are not read at or past their refused object, including
-  for retention and reload. Retention keeps those objects; if their file
-  references are needed to prove absence, it keeps the uploaded files too.
-  A reload requiring such a gap write fails atomically with
-  `SyncError::StuckLog`; a snapshot covering it can load without reading it.
+- A write waiting for entries or a key copy holds retention back, with a
+  `Retention` blocked record naming that first prerequisite. It does not
+  fail the pass. Arrival of the prerequisite permits another attempt.
+- A log with a permanent refusal is not read at or past that object,
+  including for retention and reload. Keep those objects and any files
+  whose absence cannot be proved without them.
+  - A reload requiring that gap fails atomically with `SyncError::Blocked`.
+  - A snapshot covering it can load without reading it. The refusal remains
+    recorded until the reset or update rules of §19.1 permit a new attempt.
 - A device deletes a snapshot of its own once a newer one of the same
   audience covers everything it covers, and the entries that make that
   replacement usable are final (§9).
@@ -2440,9 +2447,9 @@ Carol's tablet:
     where in coven's own folder;
   - `_coven_file_chunks`: plaintext chunk hashes recorded with the local
     source, retained until it is uploaded or its local file facts go;
-  - `_coven_file_uploads`: the upload queue, each file's attempts, last
-    failure category, captured file reference, independent id
-    and key, and its provider upload session while one is in progress;
+  - `_coven_file_uploads`: the upload queue, each file's captured reference,
+    independent id and key, and its provider session while one is in progress;
+    failures and waits use `_coven_blocked`, not a second failure column;
     - `_coven_file_upload_chunks` holds its chunk hashes, copied from the
       local source when queued and deleted with the queue row. Keeping
       hashes in separate rows avoids a single SQLite value limiting file size.
@@ -2640,8 +2647,7 @@ Carol's tablet:
     kind        TEXT NOT NULL,     -- 'remove member', 'reload from snapshot', …
     last_step   INTEGER NOT NULL,  -- 0 before the first step completes
     data        BLOB NOT NULL,     -- what this kind's steps need, in its own shape
-    started_by  TEXT NOT NULL,     -- the app call that started it, or 'coven'
-    failure     TEXT               -- set when a step fails for good
+    started_by  TEXT NOT NULL      -- the app call that started it, or 'coven'
   );
   ```
 
@@ -2695,19 +2701,18 @@ Carol's tablet:
   last, after everything it refers to.
 - When the app starts, coven resumes every unfinished operation from the
   step after its last completed one.
-- A step that fails for good, rather than for lack of network, stops its
-  operation, and sets its `failure`.
-  - For app work, the failure goes to the call that started it while that
-    call waits, and remains available through `blocked_operations()`
-    ([E6](api.md#e6-operations-and-recovery)). The app sees its id, purpose
-    and failure, and can retry or abandon it; step numbers and initiators
-    remain internal. Keeping a reset or schema change, an app-requested
-    reload, and revoking access after a remote removal are app work too.
-  - Coven's snapshot writing, retention and internal reloads do not appear
-    in the app's list and cannot be discarded through it. Their failure
-    fails the sync pass through sync status; coven retries their retained
-    work on its next pass. A failed reload never lets a pass report success
-    or publish a new position before the reload completes.
+- A step that cannot advance records its first blocker in `_coven_blocked`
+  in the same transaction that records what the step completed.
+  - A waiting app call receives the typed error. The record retains its
+    category across restart without converting an error into text.
+  - Every operation is visible there, including snapshots, retention,
+    internal reloads and pending provider access work.
+  - The reason determines retry: automatic, after an update, app action,
+    or never (§19.1, E5). Unrelated operations can still advance.
+  - The app can retry or discard its own blocked operations with E6.
+    Automatic maintenance cannot be discarded through those calls.
+  - A failed reload leaves the old database in place. No positions pass
+    it until the replacement and its dependent work commit.
 - An operation's row is deleted when its last step completes.
 
 ### 18.1 Operations
@@ -2795,62 +2800,82 @@ Carol's tablet:
 
 ### 19.1 Noticing
 
-- A write that never arrives:
-  - a device waits for every write that a write it holds had read
-    ([§7.1](#71-causality));
-  - usually the missing write just isn't listed by storage yet, and
-    arrives;
-  - rarely it never does: someone with storage access deleted it ([§2](#2-threat-model)), or
-    the provider lost it;
-  - a device can't tell the two apart, so it tracks the missing prerequisites
-    and waits. Waiting writes are not yet exposed to the app.
-  - E.g. Ben's write 9 had read Ana's log up to 4, but storage shows Carol's
-    tablet only Ana's writes 1 to 3; Carol's tablet holds back Ben's write
-    9 until Ana's write 4 arrives.
-- An object that fails its check when read: it won't decrypt, its
-  signature doesn't match, it doesn't parse, or its write breaks the
-  merge's rules, such as a timestamp no later than a write it had read.
-  - Network and read failures, including a listed object not yet readable,
-    are transient and retried. An object must be completely readable before
-    its failed check becomes a permanent judgment. Newer object formats still
-    require an update (§17.2); missing keys and causal prerequisites still wait.
-  - A completely downloaded write or store-log entry that fails decryption
-    or authentication, its signature, parsing, or the merge's checks is
-    permanent: stored objects never change. The device records its log
-    (device and write log or store log), object id, typed failure category,
-    judgment time and coven package version in `_coven_stuck_logs`.
-  - The record stops that log at and after the object, across sync passes
-    and reopen. Other logs continue and this judgment does not fail sync
-    status. Anything depending on the refused object still cannot apply.
-  - Opening for writing with a different coven version clears the previous
-    version's local judgments, allowing each object one new attempt. A new
-    refusal records the current version. Reopening the same version does
-    not retry identical bytes.
-  - Committing a changed audience reset removes local judgments from the
-    current list in the same transaction as its reload; a failed reload
-    changes nothing. Retain the suppressed judgments until the reset is
-    final, and restore them if replay drops the reset without a replacing
-    reset. The object
-    may be unreadable, so its audience need not be known: this clears the
-    device's local judgments for both kinds of log. Loading snapshots alone
-    does not clear them or bypass required store-log history (§15).
-  - Posted positions carry only the posting device's local judgments (D8).
-    Reading an authenticated peer post records every report naming one of
-    this device's own writes or entries, with the peer's device id, in the
-    same local table. These reports inform the author; they never stop its
-    downloads. A completed positions scan replaces the peer reports atomically.
-  - The live stuck-log list exposes local judgments and peer reports (E5).
-    A device that publishes no positions reports nothing. Neither position
-    differences nor storage times establish that a log is stuck.
-  - A damaged snapshot is passed over for the next latest, or the logs.
-    Positions whose prefix signature verifies still require that history,
-    even if the snapshot's encrypted data or final signature is damaged;
-    they never authorize applying it. Unverified prefixes are never trusted.
-    Missing required logs fail the reload without changing the database,
-    rather than silently loading less history.
-  - A damaged positions object counts as not posted.
-- A damaged local database, found by SQLite's integrity check when the
-  database opens.
+- `_coven_blocked` holds one record per subject and reporting device.
+  The app reads it with `blocked()` or `subscribe_blocked()` (E5).
+  - The subject identifies the write, entry, key copy, snapshot, positions,
+    file, operation, retention target, audience, join request or connection.
+  - An agreement check names both its audience and the peer.
+  - The reason is the first unmet condition in that subject's processing
+    order. Do not duplicate one subject for all of its downstream symptoms.
+  - Observe a block and save its record in one transaction. Replace it if
+    the first condition changes; delete it when the subject advances or
+    replay removes the need for that work.
+  - No wall-clock time or attempt counter controls these records. They
+    describe current work, not a history of attempts.
+- Record every wait and failure, including:
+  - a gap in either kind of log, a listed object that cannot yet be read,
+    an unknown author's device registration, or missing causal history;
+  - a missing or damaged sealed key copy;
+  - an app schema or object format that needs an update;
+  - an unpublished schema raise, pending own uploads or a required reload;
+  - a snapshot that cannot be used, a positions object that cannot be
+    trusted, or history that prevents proving a file safe to delete;
+  - physical cleanup waiting for an entry to become final, with
+    `Waits(EntryFinality(entry))` naming that entry (§9);
+  - file sources that cannot be uploaded, paused transfers, and provider
+    work waiting for the owner, a request, or an app action;
+  - a replay-dropped entry or a fingerprint disagreement.
+- E.g. Carol's tablet has Ben's write 9, which read Ana's write 4. Storage
+  currently lists only Ana's writes 1 to 3.
+  - Ana's next log position reports the missing object.
+  - Ben's write reports that same object as its first prerequisite.
+  - Carol keeps applying independent writes. Both records disappear when
+    Ana's write arrives and those subjects advance.
+- The typed reason determines retry (E5):
+  - missing objects, prerequisites, key copies and transient storage work
+    retry automatically;
+  - an immutable object's permanent refusal, or an unsupported schema or
+    format, waits for the applicable update;
+  - a missing file source, retained provider grant or disagreement needs
+    an app action;
+  - a dropped entry is recomputed on replay, not downloaded repeatedly.
+- A permanent refusal requires a complete download and a failed check:
+  decryption, authentication, signature, parsing, authorization, identity,
+  causality or merge validation. For example, a write cannot have a timestamp
+  no later than one of its causes. Network failures are not permanent checks.
+  - A refused write or entry stops its own log at that number. Later writes
+    in that log and dependent work cannot pass it; independent logs continue.
+  - Keep the coven package version of the local refusal internally.
+    A different installed version permits one new attempt. Reopening the
+    same version does not retry the same immutable bytes.
+  - A successful changed reset clears the current blocked list atomically
+    with its reload. A failed reload changes nothing. Retain suppressed
+    records until the reset is final; if the reset drops, recompute the list
+    from those inputs (§9). Still-unmet conditions are recorded when
+    observed again; clearing applies even when a refused object's audience
+    is unknown, to both kinds of log.
+  - Snapshot loading alone does not clear refusals or bypass required
+    store-log history.
+- Posted positions carry the subset peers can act on (D8): permanent
+  refusals, missing objects and prerequisites, unavailable member key copies,
+  update requirements, and this device's undeliverable files.
+  - Publish only observations made here, never reports received from peers.
+  - Authenticate each report. Retain it when it names this device's object,
+    an object needed from this device, or a key copy sealed to this member.
+  - Peer reports inform the author; they do not dictate its own download
+    checks. One completed positions scan replaces the received reports
+    atomically. A failed scan leaves the previous reports and records why.
+  - A device can publish these records while its write positions wait (§6).
+    Silence or different positions alone never proves an immutable refusal.
+- A damaged snapshot is recorded and passed over for the next latest, or
+  the logs. Its verified prefix still establishes required history; it
+  never authorizes applying a damaged body.
+  - Unverified prefixes establish no coverage.
+  - Missing required logs block the reload without changing the database.
+- A damaged positions object has reason `InvalidPositions` and counts as
+  not posted. It retries automatically because its author can replace it.
+- A damaged local database is detected by SQLite's integrity check or
+  decoding its stored facts (§19.2).
 - Devices that disagree:
   - each device keeps a *fingerprint* of the data in each audience it can
     read, updated as writes apply;
@@ -2875,12 +2900,14 @@ Carol's tablet:
     one of them wrong;
   - on different versions they can't compare: an added column exists on
     one device only.
-- Stuck logs are visible through E5. Waiting prerequisites, damaged snapshots,
-  key copies and positions, and fingerprint disagreements remain internal. A
-  damaged local database still fails to open. Nothing reloads on its own after
-  a mismatch, since neither device can tell which is wrong. Explicit reset
-  ([§19.3](#193-resetting-a-store)) and reload
-  ([§19.2](#192-recovering-one-device)) remain available.
+- A fingerprint mismatch is an `Agreement` blocked subject naming the
+  audience and peer, with reason `Disagrees`.
+  - Compare only fingerprints using the same key as well as the same
+    write positions, store-log positions and schema version.
+  - E.g. Ana and Ben reach the same positions in Gifts but their hashes
+    differ. Each app sees the peer and Gifts in its blocked list.
+  - Neither device can tell which copy is right. Recovery requires the
+    person's choice of reload (§19.2) or reset (§19.3).
 
 ### 19.2 Recovering one device
 
@@ -3060,12 +3087,10 @@ Carol's tablet:
     private.
 - Errors are typed enums per crate; an error is never turned into text
   to be passed on, and nothing returns `Result<_, String>`.
-- Failed app calls and whole-pass sync failures retain typed causes, such as
-  a damaged database, a file on another device, or unreachable storage.
-  Permanently failed app operations remain available through `blocked_operations()`;
-  maintenance failures go through sync status and retry on the next pass (§18).
-  Stuck logs and authenticated peer reports are a live typed list (E5).
-  Waiting prerequisites and other skipped damaged objects remain internal (§19.1).
+- Failed app calls and whole-pass sync failures retain typed causes.
+  Every object or operation that cannot advance has a typed blocked record,
+  including maintenance, prerequisites and relevant signed peer reports
+  (§19.1, E5). A persisted reason never substitutes text for its category.
 - A source file holds at most 1,000 lines, and its tests live beside it
   in `<name>_tests.rs`.
 - Crates offer shared fakes through `test-utils` where needed, such as an

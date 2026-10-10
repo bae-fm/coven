@@ -1390,25 +1390,20 @@ while let Ok(values) = lost.next().await {
   - It uploads waiting writes, resumes operations waiting for those uploads,
     downloads writes and completes any reload they require.
   - File uploads and eager downloads follow. Writes authored by file uploads
-    are then uploaded before snapshot writing, retention and posted positions.
-  - Retention uses previously confirmed posted positions; the new position is
-    published last, after every preceding step has completed. File transfer
-    failures remain visible through their file status. Maintenance failures
-    fail the pass through sync status and retry on the next pass (E6).
-  - `subscribe_stuck_logs` exposes permanent refusals of writes and store-log
-    entries, including signed peer reports about this device's own objects.
-    Each local judgment stops only its log at that object; it does not fail
-    sync status (§19.1). A successful reset reload clears local judgments;
-    opening another coven version permits one new attempt per recorded object.
-    Peer reports change when their signed posts change; silence or unequal
-    positions never imply a stuck log.
-  - Waiting prerequisites, other damaged objects, fingerprint disagreements
-    and dropped entries remain internal (§9, §19.1). A disagreement never
-    triggers a reload.
-  - A finished pass publishes its completion time, without a sync report or row
-    changes. Live queries notify the app when their rows change (E4).
-  - Revocation actions remain available through `access_keys_to_delete` (E9)
-    and `blocked_operations` (E6).
+    are uploaded before snapshot writing, retention and posted positions.
+  - Every subject that cannot advance has its first blocker in `blocked()`.
+    This includes missing prerequisites, key copies, damaged objects, dropped
+    entries, fingerprint disagreements, pending operations and file failures.
+  - Independent work continues. Per-object and maintenance blockers do not
+    fail sync status; a failed required reload prevents positions advancing
+    past that reload, and is recorded under its audience and operation.
+  - Posted positions never advance over unfinished work. A device can replace
+    its previous post with updated blocked records while its positions wait.
+    It omits fingerprints unless they describe exactly the posted positions.
+  - A finished pass publishes its completion time; `Synced` can coexist with
+    blocked records. Live queries report committed changes (E4).
+  - Reset and coven-update retry rules are in §19.1. Neither a disagreement
+    nor a peer's silence triggers recovery on its own.
 - A device that isn't connected still reads and writes
   ([§3](coven.md#3-guarantees)); its writes wait in `_coven_uploads`.
 - `start_sync` builds the provider client if absent, reading credentials from
@@ -1424,7 +1419,7 @@ Storage failures retain the same `StorageFailure` through setup, sync status,
 uploads, reads and operations. Their `StorageError` carries the native cause
 where one exists; setup adds the failed check or its distinct local failure
 without reclassifying storage failures. Missing member keys are always
-`StorageFailure::MemberKeysMissing`. Recorded upload failures retain this same
+`StorageFailure::MemberKeysMissing`. Blocked records retain this same
 classification when the native cause cannot survive closing the app.
 
 ```rust
@@ -1637,8 +1632,8 @@ pub enum StoreKeyUnlockError {
 
 /// Sync or a store-log change failed (§9, §13, §17, E5).
 pub enum SyncError {
-    /// Recovery or joining requires an object whose log has a recorded permanent refusal.
-    StuckLog(StuckRecord),
+    /// This call requires work that cannot yet advance (§19.1).
+    Blocked(Box<BlockedRecord>),
     /// The proposed entry violates its byte format.
     Format(coven_format::Error),
     /// A required key is absent from custody, or its material conflicts.
@@ -1716,31 +1711,128 @@ pub enum ObjectCheckFailure {
     InvalidWrite(Arc<DbError>),
 }
 
-/// An immutable object identifies its author and which log stopped (§19.1).
-pub enum LogObject {
-    Write(WriteId),
-    Entry(EntryId),
+/// One audience snapshot, identified by its storage path (§15).
+pub struct SnapshotId {
+    pub audience: Audience,
+    pub device: DeviceId,
+    pub number: u64,
 }
 
-/// The permanent check that refused the object.
-pub enum StuckFailure {
+/// One thing coven cannot currently apply or deliver (§19.1).
+pub struct BlockedRecord {
+    pub subject: BlockedSubject,
+    /// The first unmet condition for this subject, kept as a typed value.
+    pub reason: BlockedReason,
+    /// This device for a local observation; otherwise the signed report's author.
+    pub reported_by: DeviceId,
+}
+
+/// Stable identities; a record is keyed by subject and reporting device.
+pub enum BlockedSubject {
+    Write(WriteId),
+    Entry(EntryId),
+    KeyCopy { audience: Audience, key: KeyId, member: MemberId },
+    Snapshot(SnapshotId),
+    Positions(DeviceId),
+    File { device: DeviceId, file: FileId },
+    Operation { id: OperationId, kind: OperationKind },
+    Retention { path: ObjectPath },
+    Audience(Audience),
+    Agreement { audience: Audience, peer: DeviceId },
+    JoinRequest(InviteId),
+    Connection,
+}
+
+/// A condition coven has not yet observed (§19.1).
+pub enum Prerequisite {
+    Object(ObjectPath),
+    DeviceRegistration(DeviceId),
+    SchemaPublication { audience: Audience, version: u32 },
+    Reload(Audience),
+    OwnUploads,
+    Positions(DeviceId),
+    /// Physical cleanup cannot release this entry's retained inputs (§9).
+    EntryFinality(EntryId),
+    CircleVisible(CircleId),
+}
+
+/// A permanent check on complete immutable bytes, retried once after an update.
+pub enum Refusal {
     Decryption,
     Signature,
     Parse,
     InvalidWrite,
+    NotAuthorized,
+    InvalidCausality,
+    WrongIdentity,
 }
 
-/// One receiver's judgment, also carried in its signed posted positions (D8).
-pub struct StuckRecord {
-    pub object: LogObject,
-    pub failure: StuckFailure,
+pub enum RequiredUpdate {
+    AppSchema { version: u32 },
+    CovenFormat { version: u16 },
 }
 
-/// A local judgment or an authenticated peer report about this device's own log.
-pub struct StuckLog {
-    pub record: StuckRecord,
-    /// None means judged here; Some names the peer reporting our object.
-    pub reported_by: Option<DeviceId>,
+/// A source the attaching device cannot deliver. Local paths never travel to peers.
+pub enum FileSourceFailure {
+    Missing,
+    Changed,
+    Integrity,
+}
+
+/// Durable local categories; the failing call also retains its native typed cause.
+pub enum LocalFailure {
+    Database,
+    Disk,
+    KeyCustody,
+    Crypto,
+    Operation,
+}
+
+pub enum ProviderAccessAction {
+    Grant,
+    Revoke,
+}
+
+/// Reasons describe the current block, including work waiting without an error.
+pub enum BlockedReason {
+    Missing { path: ObjectPath },
+    Waits(Prerequisite),
+    KeyUnavailable { audience: Audience, key: KeyId },
+    UpdateRequired(RequiredUpdate),
+    NoStorage,
+    Storage { provider: CloudProvider, failure: StorageFailure },
+    Refused(Refusal),
+    /// Positions can be replaced, unlike an immutable refused object.
+    InvalidPositions(Refusal),
+    Dropped(DropReason),
+    ProviderPending { action: ProviderAccessAction, account: String },
+    PendingOwner { account: String },
+    AccountInUse { account: String },
+    AccessRemains { account: String, shares: Vec<RetainedAccess> },
+    DeleteAccessKey(AccessKeyToDelete),
+    FileUnavailable(FileSourceFailure),
+    Disagrees,
+    Failed(LocalFailure),
+    Paused,
+    Removed,
+}
+
+pub enum Retry {
+    Automatic,
+    AfterUpdate,
+    AppAction,
+    Never,
+}
+
+impl BlockedReason {
+    /// Automatic: missing objects, prerequisites, keys, pending provider/owner
+    /// work, shared-account waits, invalid replaceable positions, and storage
+    /// Network/RateLimited/NotFound/SessionExpired.
+    /// AfterUpdate: Refused and UpdateRequired.
+    /// Never: a dropped immutable entry or this device's removal.
+    /// AppAction: every other reason, including source files and disagreements.
+    /// A replay change can clear any derived reason without retrying its subject.
+    pub fn retry(&self) -> Retry;
 }
 
 /// Why a store log entry was dropped (§9).
@@ -1821,9 +1913,12 @@ impl CovenHandle {
     /// The sync status, live. The first value is the current status.
     pub fn subscribe_sync_status(&self) -> watch::Receiver<SyncStatus>;
 
-    /// Local judgments and peer reports, including while disconnected.
-    /// The first value is the current list; later values follow committed changes.
-    pub fn subscribe_stuck_logs(&self) -> LiveQuery<Vec<StuckLog>>;
+    /// Current local blocks and relevant authenticated peer reports, including
+    /// while disconnected. Sorted by subject, then reporting device (§19.1).
+    pub async fn blocked(&self) -> CovenResult<Vec<BlockedRecord>>;
+
+    /// The same internal query as blocked(), on the app's live-query mechanism.
+    pub fn subscribe_blocked(&self) -> LiveQuery<Vec<BlockedRecord>>;
 
     /// How many uploads and downloads run at once.
     pub fn transfer_limits(&self) -> TransferLimits;
@@ -1899,19 +1994,15 @@ loop {
   retains its progress across network failures.
 - Every unfinished operation is a row in `_coven_operations`
   ([§18](coven.md#18-operations)).
-- A failed step goes to the app call that started its operation while
-  that call waits. Permanent failures of app work remain available through
-  `blocked_operations`, including when no app call is waiting. Each result
-  carries its id, app purpose and failure; journal steps and initiators stay
-  internal.
-- Automatic snapshot writing, retention and internal reloads never appear in that list.
-  Their failures fail the sync pass through `SyncStatus::Failed`; coven keeps
-  their progress and retries them on the next pass. They cannot be retried or
-  discarded through the blocked-operation calls.
-- An app-requested reload remains app work, as do keeping a reset or schema
-  change and revoking access after a remote removal. Calls that publish a
-  single entry, such as removing a device, return failures directly and do
-  not create operation rows.
+- A failed step returns its typed error to a waiting caller and records its
+  first blocker in `blocked()` (E5). Pending work appears there too.
+- Automatic snapshot writing, retention and reloads use the same list.
+  Their operation records cannot be discarded through the app-work calls.
+- App work includes keeping a reset or schema change, an app-requested
+  reload, and provider access work. Single-entry calls return their errors
+  directly; a reserved entry still has its own blocked subject.
+- A record stores a typed reason, not an error string. The immediate call
+  retains the native cause; reopening retains the reason and subject.
 
 ```rust
 /// The local integer primary key of one unfinished operation (§18).
@@ -1931,8 +2022,12 @@ pub enum OperationKind {
     RevokeAccess,
     /// Migrate the schema, snapshot it and raise the version.
     SchemaChange,
-    /// Reload at the app's request, keeping its waiting writes.
+    /// Reload an audience, requested by the app or required by sync.
     ReloadFromSnapshot,
+    /// Write and verify a snapshot for retention.
+    WriteSnapshot,
+    /// Delete only history whose coverage and finality allow it.
+    Retention,
     /// Grant access, approve or decline a join, and settle the invite.
     Invite,
     /// Snapshot and reset an audience (§19.3).
@@ -1943,10 +2038,6 @@ pub enum OperationKind {
 pub type OperationError = SyncError;
 
 impl CovenHandle {
-    /// App work that failed permanently (§18), including revocations
-    /// that need the owner's action (§13).
-    pub async fn blocked_operations(&self) -> Result<Vec<BlockedOperation>, OperationError>;
-
     /// Runs a failed operation again from the step after its last completed
     /// one. An operation whose cause still stands fails again.
     pub async fn retry_blocked_operation(&self, operation: OperationId) -> Result<(), OperationError>;
@@ -1964,14 +2055,6 @@ impl CovenHandle {
     /// a snapshot, then records the reset in the store log. Every other
     /// device reloads from that snapshot.
     pub async fn reset_store(&self) -> Result<(), SyncError>;
-}
-
-/// App work stopped by a permanent failure, awaiting retry or discard.
-pub struct BlockedOperation {
-    pub id: OperationId,
-    /// What the operation was for in app terms.
-    pub kind: OperationKind,
-    pub failure: String,
 }
 ```
 
@@ -1997,38 +2080,15 @@ pub struct BlockedOperation {
 /// Live upload-queue results, ending when the store closes (E7).
 pub struct UploadsLiveQuery { /* private fields */ }
 
-/// A file upload attempt failed (§16.5, E7).
-pub enum UploadFailure {
-    /// Reading or checking the source file failed.
-    File(FileReadError),
-    /// The provider refused or failed the upload.
-    Storage(StorageError),
-    /// Creating the independent file key failed.
-    Crypto(CryptoError),
-    /// A prior process recorded this failure category.
-    Recorded(RecordedUploadFailure),
-}
-
-/// Actionable categories that can be retained across a process restart.
-pub enum RecordedUploadFailure {
-    NoStorage,
-    File,
-    Local,
-    Crypto,
-    Storage(StorageFailure),
-}
-
-/// The failed files and their causes from one upload drain (E7).
-pub type UploadFailures = Vec<(FileRef, Arc<UploadFailure>)>;
-
 impl CovenHandle {
     /// A live query over the upload queue: every file waiting to upload, with
     /// its progress. The first result is the current state.
     pub fn subscribe_uploads(&self) -> UploadsLiveQuery;
 
-    /// Retries every waiting upload now, instead of after its retry delay,
-    /// which starts at 1 second and doubles to at most 5 minutes on an
-    /// in-memory monotonic timer. Restarting retries at once (§16.5).
+    /// Retries waiting uploads now; individual failures stay in blocked().
+    /// Overrides an automatic retry delay or retries a repaired source.
+    /// Automatic delays start at 1 second and double to at most 5 minutes
+    /// on an in-memory monotonic timer; a restart retries at once (§16.5).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError>;
 
     /// Pauses uploads, or resumes them. A paused upload keeps its place,
@@ -2050,9 +2110,6 @@ pub struct UploadQueue {
 pub struct QueuedUpload {
     pub file: FileRef,
     pub phase: UploadPhase,
-    /// Failed attempts so far.
-    pub attempts: u64,
-    pub last_failure: Option<Arc<UploadFailure>>,
     pub queued_at: SystemTime,
 }
 
@@ -2069,9 +2126,8 @@ pub enum UploadPhase {
 }
 
 pub enum DrainOutcome {
-    Drained { uploaded: usize, failures: UploadFailures },
+    Drained { uploaded: usize },
     QueueEmpty,
-    AllInBackoff,
     Paused,
 }
 ```
@@ -2131,7 +2187,8 @@ pub enum EagerCacheFillStatus {
     Downloading(PinProgress),
     /// The app stopped these downloads.
     Cancelled(PinProgress),
-    /// A download failed, with the progress reached before it failed.
+    /// A download failed; its file also appears in blocked(). Independent
+    /// downloads continue, with their progress reported on this same stream.
     Failed { progress: PinProgress, error: Arc<FileReadError> },
 }
 
@@ -2282,7 +2339,7 @@ match stream.read_at(resume_at, 256 * 1024).await {
 - Removing an account can leave access through a parent, a grant reaching other
   accounts, an unidentified recipient, or the owner. `MemberRemoval::AccessRemains`
   returns these grants and their reasons for the app to present to the owner.
-  The revocation remains a blocked operation until the app retries after the
+  The revocation remains in blocked() until the app retries after the
   owner changes those grants, or discards the operation to acknowledge them.
   This also preserves the result when no app call is waiting, including a
   revocation initiated by applying another device's removal.
@@ -2316,18 +2373,14 @@ impl CovenHandle {
     /// Changes a member's role, as an admin (§9).
     pub async fn set_member_role(&self, member: &MemberId, role: MemberRole) -> Result<(), SyncError>;
 
-    /// S3 keys an admin must delete in the provider's console (§13), until
-    /// their deletion is confirmed. Available without running a sync pass.
-    pub async fn access_keys_to_delete(&self) -> Result<Vec<AccessKeyToDelete>, SyncError>;
-
     /// Records that the admin deleted an S3 key in the provider's console,
-    /// so access_keys_to_delete stops listing it (§13).
+    /// so blocked() removes its DeleteAccessKey record (§13).
     pub async fn confirm_access_key_deleted(&self, access_key_id: &str) -> Result<(), SyncError>;
 
     /// Removes a member and all their devices, rotates the store key, and
     /// revokes all their recorded storage access (§13). The result describes
     /// their current replayed access, with retained grants from any recorded
-    /// account. On S3, access_keys_to_delete lists every recorded key until
+    /// account. On S3, blocked() lists every recorded key until
     /// confirmed deleted, including keys in dropped entries.
     pub async fn remove_member(&self, member: &MemberId) -> Result<MemberRemoval, SyncError>;
 
@@ -2343,9 +2396,9 @@ pub struct AccessKeyToDelete {
     pub member: Option<MemberId>,
 }
 
-// These notices live in the device-local _coven_access_keys_to_delete table,
-// outside the operation journal. confirm_access_key_deleted marks the key as
-// confirmed; access_keys_to_delete omits it, and later records cannot make it pending again.
+// Pending notices are DeleteAccessKey records in _coven_blocked. Confirmation
+// is retained separately by key id, so later entries and retries cannot restore
+// an already-confirmed notice.
 
 /// Revoked sharing or remaining owner actions (§13).
 pub enum MemberRemoval {
@@ -2605,13 +2658,21 @@ pub struct JoinRequest {
 /// name, its provider, and whether the provider needs a sign-in first.
 pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError>;
 
+/// Bootstrap progress, using the same records before an open handle exists.
+pub enum BootstrapStatus {
+    Connecting,
+    WaitingForApproval,
+    Loading,
+    Blocked(Vec<BlockedRecord>),
+}
+
 /// Opens the store on a new device from the person's restore code, scanned
 /// or typed. The builder holds its own sign-in when `needs_oauth`.
 pub async fn restore_from_code(
     builder: CovenBuilder,
     code: &str,
     device_name: &str,
-    on_status: impl Fn(&str),
+    on_status: impl Fn(BootstrapStatus),
     cancel: &watch::Receiver<bool>,
 ) -> Result<CovenHandle, BootstrapError>;
 
@@ -2621,7 +2682,7 @@ pub async fn restore_from_code(
 pub async fn restore_from_keychain(
     builder: CovenBuilder,
     device_name: &str,
-    on_status: impl Fn(&str),
+    on_status: impl Fn(BootstrapStatus),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Option<CovenHandle>, BootstrapError>;
 
@@ -2639,7 +2700,7 @@ pub async fn join_with_invite(
     builder: CovenBuilder,
     code: &str,
     device_name: &str,
-    on_status: impl Fn(&str),
+    on_status: impl Fn(BootstrapStatus),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Option<CovenHandle>, BootstrapError>;
 

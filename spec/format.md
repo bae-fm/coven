@@ -311,20 +311,59 @@
   store_log       EntryPositions
   schema_version  u32
   fingerprints    [audience:Audience | key:uuid | fingerprint:32 bytes]   store first, increasing
-  stuck           [log:u8 | device:DeviceId | number:u64 | failure:u8]
+  blocked         [subject | reason]
   ```
 
-  `log` is 0 for a device write log, 1 for a store log. `number` is positive
-  and identifies the refused write or entry in that device's log. `failure`
-  is 0 for decryption/authentication, 1 for signature, 2 for parsing, 3 for
-  an invalid write. Records are strictly ordered by `(log, device)`, at most
-  one per log. Only judgments made by the posting device appear here; peer
-  reports, local judgment times and coven versions do not travel. The D9
-  signature authenticates the complete list as that device's report (§19.1).
-  Store-log positions also acknowledge received entries, kept or dropped.
-  Posting requires every earlier reserved own entry and write to be settled;
-  a reader fetches entries through those positions before using the post to
-  establish finality (§9). Storage age alone does not establish finality.
+- Positions describe a causally closed applied past, with own writes
+  uploaded. Store-log acknowledgements also require earlier reserved own
+  entries to be settled (§6, §9).
+  - Blocked reports can change while positions stay at the last publishable
+    past. Omit fingerprints unless they describe exactly that past.
+  - Read the entries an acknowledgement names before using it for finality.
+    Storage age alone is not an acknowledgement.
+- A report's subject has one of these tags:
+
+  | Tag | Subject | Fields |
+  | --- | --- | --- |
+  | 0 | Write | `WriteId` |
+  | 1 | Entry | `EntryId` |
+  | 2 | Key copy | `audience:Audience \| key:uuid \| member:MemberId` |
+  | 3 | File | `device:DeviceId \| file:uuid` |
+  | 4 | Snapshot | `SnapshotId` |
+  | 5 | Positions | `DeviceId` |
+
+- A report's reason has one of these tags:
+
+  | Tag | Reason | Fields |
+  | --- | --- | --- |
+  | 0 | Refused | `failure:u8` |
+  | 1 | Missing | `path:text` |
+  | 2 | Waits | `prerequisite:u8`, then fields below |
+  | 3 | Key unavailable | `audience:Audience \| key:uuid` |
+  | 4 | Update required | `kind:u8 \| version:u32` |
+  | 5 | File unavailable | `failure:u8` |
+  | 6 | Invalid positions | `failure:u8` |
+
+- Refusal tags: 0 decryption/authentication, 1 signature, 2 parse,
+  3 invalid write, 4 not authorized, 5 invalid causality, 6 wrong identity.
+- Wire prerequisites are 0 followed by an object path as `text`, or
+  1 followed by a device id whose registration is missing. Other waits
+  remain local because they name no object or member key copy a peer can supply.
+- Update kind 0 means app schema; kind 1 means coven format and its version
+  must fit u16. File-failure tags are 0 missing, 1 changed, 2 integrity.
+- Every path is canonical D10 text for this store. Refused applies only to
+  immutable subjects. Invalid positions applies only to Positions.
+  File unavailable applies only to File, whose device must be the poster.
+- Reports order by subject tag, then its fields in D2 order, with at most
+  one first blocker per subject. The posting device is `reported_by`;
+  that field is not repeated in each record.
+  - Only observations made by the poster travel. Never forward a peer's report.
+  - Key-copy reports concern copies sealed to the poster's member.
+  - No local times, paths to user files, attempt counts, operation ids or
+    coven package versions travel.
+  - The signature authenticates the complete list (§19.1). A list exceeding
+    D1/D2 or the provider's replacement limit fails publication and records
+    a Positions blocker; it is never silently truncated.
 
 - A join request (kind 9):
   `invite:uuid | keys:MemberKeys | device_name:name`.
@@ -373,12 +412,14 @@
     These checks add no receipt or field to the object.
   - Both signatures must verify with the member the store log names for the
     device in the path, as of the entries the reader has applied. An unknown
-    device, missing signature or wrong signer makes the object damaged (§19.1).
+    device waits for its registration. A missing signature or wrong signer
+    is a permanent refusal once the author is known (§19.1).
 - Posted positions have exactly one chunk followed by the author's 64-byte
   `coven/object-signature/v1` signature. Every read verifies it against the
   member the applied store log names for the device in the path, before using
-  positions or fingerprints. An unknown device or missing or wrong signature
-  is damaged and counts as not posted (§19.1).
+  positions, fingerprints or blocked reports. An unknown device waits for
+  registration; a missing or wrong signature has reason InvalidPositions.
+  Neither counts as posted (§19.1).
 - A chunk is `length:u32 | nonce:24 bytes | ciphertext | tag:16 bytes`:
   XChaCha20-Poly1305 under the encryption key derived from the named key.
   Writes and store log entries derive the nonce with HMAC-SHA256 from that
@@ -437,7 +478,7 @@
 | `<store>/devices/<device>/<n>` | A device's write `n` |
 | `<store>/store-log/<device>/<n>` | A device's store log entry `n` |
 | `<store>/snapshots/<audience>/<device>/<n>` | A device's snapshot `n` of an audience: `store`, or a circle's id |
-| `<store>/positions/<device>` | A device's posted positions and stuck records, replaced as either changes |
+| `<store>/positions/<device>` | A device's posted positions and blocked records, replaced as either changes |
 | `<store>/keys/store/<key>/<member>` | A store key sealed to a member |
 | `<store>/keys/circles/<circle>/<key>/<member>` | A circle key sealed to a member |
 | `<store>/files/<device>/<file>` | An uploaded file |
