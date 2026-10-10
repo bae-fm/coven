@@ -211,7 +211,7 @@ impl ByteRange {
     pub fn is_empty(self) -> bool;
 }
 
-/// A complete object returned by the app's CloudKit list call.
+/// A complete object returned by CloudKit listing or status (§4).
 pub struct StoredObject {
     /// Validated path relative to the store's location.
     pub path: ObjectPath,
@@ -221,6 +221,8 @@ pub struct StoredObject {
     /// Immutable objects retain their first stored time across retries. Replaced
     /// positions carry their replacement time, used to observe storage time (§9).
     pub stored_at: SystemTime,
+    /// Opaque native identity that changes on every replacement (§4).
+    pub revision: String,
 }
 
 /// A durable upload prepared by the app's CloudKit bridge (§16.5).
@@ -255,7 +257,10 @@ pub trait CloudKitOps: Send + Sync {
     async fn replace(&self, location: &StorageConfig, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError>;
     /// Reads the whole object or only the asset parts covering the range (§16.3).
     async fn read(&self, location: &StorageConfig, path: &ObjectPath, range: Option<ByteRange>) -> Result<Vec<u8>, StorageError>;
-    /// Lists complete objects with encrypted size and server publication time,
+    /// Status for exactly this path; None means confirmed absent. A failure
+    /// must not return None. Pending assets are not complete objects (§4).
+    async fn status(&self, location: &StorageConfig, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError>;
+    /// Lists complete objects with encrypted size, revision and server publication time,
     /// following every native query cursor; pending assets are not listed.
     async fn list(&self, location: &StorageConfig, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError>;
     /// Deletes an object and its parts; an already absent object succeeds (§18).
@@ -2254,7 +2259,7 @@ impl CovenHandle {
     /// file facts return `DbError::DamagedDatabase`.
     pub async fn file_ref(&self, table: &str, key: impl Into<RowKey>) -> Result<FileRef, DbError>;
 
-    /// Checks storage presence, the uploader's current state and its signed
+    /// Calls single-object status, then checks the uploader's current state and its signed
     /// undeliverable-file report (§16.1). Checks the reference against its row.
     /// Network failures and denied access are errors, not Missing.
     pub async fn file_status(&self, file: &FileRef) -> Result<FileStatus, FileReadError>;

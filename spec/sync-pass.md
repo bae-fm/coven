@@ -19,10 +19,9 @@ and report the failure. Explicitly observed objects can still be downloaded.
 For an immutable object, reuse checked facts by `(path, size, stored_at)`.
 A previously observed immutable path whose size or stored time changes
 reports `StorageFailure::Protocol`; keep the old evidence rather than apply
-another version. For posted positions, changed size or stored
-time triggers a read; equal metadata permits reuse only with the sound
-replacement identity required by §4.1. A provider revision, if adopted,
-participates in that comparison.
+another version. For posted positions, compare path, size, stored time
+and provider revision. Read only a new revision or missing retained bytes;
+equal size and time alone never establish that a replacement is unchanged.
 
 These local records survive reopening and have no pass-end expiry:
 
@@ -257,9 +256,8 @@ usable snapshot uses this same reload path, not another discovery pass.
 Every create uses fixed attempted bytes and the collision rule of §10;
 sealed keys retain §11's first-valid-copy rule. For a lost reply or occupied
 path, reuse cached stored bytes when they establish the comparison, or
-make the one needed comparison read. Provider-checksum substitution is
-still open. Record known returned object metadata; where a provider omits
-it, status versus a confirming listing is the §4.1 decision, counted here.
+make the one needed comparison read. Metadata cannot replace that byte comparison. Record returned metadata;
+where a provider omits it, use the single-object status call, counted here.
 Never invent a publication time from the device clock.
 
 ### 6. Send waiting writes, then receive writes

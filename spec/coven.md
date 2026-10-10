@@ -301,6 +301,10 @@ can meet the first two observations while failing the third.
     ([One sync pass](sync-pass.md#one-stream-checked-as-it-arrives));
   - list a prefix, with when storage stored each object; each query is scoped
     to that prefix, across all its pages, without a change feed;
+  - get one object's status by its exact path: absent, or its complete
+    encrypted size, first publication or replacement time, object id and
+    revision. A revision changes on every replacement, even when size and
+    timestamp match. An error is never absence;
   - delete;
   - grant and revoke a member's access, where the provider can: Google
     Drive, Dropbox, OneDrive and iCloud share with an account.
@@ -313,6 +317,14 @@ can meet the first two observations while failing the third.
   Failed discovery never installs a partial catalog as complete.
   - Ana's `files/` folder can hold 20,000 photos. Reading `store-log/`
     never enumerates those photos or another store's objects.
+- Status uses S3 HEAD, Drive file metadata (an exact name lookup when its id
+  is unknown), Dropbox or OneDrive metadata, or a CloudKit record fetch.
+  File status and upload confirmation use this call, not a folder listing.
+  Count any name lookup separately. A revision proves freshness, not byte
+  equality: occupied immutable paths still require §10's complete comparison.
+  Snapshot confirmation still checks the complete-object checksum (§15).
+  - Ben replaces his positions twice within one storage clock tick with
+    equal-length bytes. Ana notices the new revision and reads the new post.
 - Storage times come from the provider, on one clock for this store.
   An immutable object's time is its first complete publication; retrying
   an occupied path does not change it. Replacing posted positions gets
@@ -403,32 +415,6 @@ must charge listing pages, including retained history; it cannot be stated
 as one miss per writer. Exact-name reads also have provider-specific request
 costs: [Drive downloads require a file id](https://developers.google.com/workspace/drive/api/reference/rest/v3/files/get),
 so an unknown name first needs an exact parent/name query.
-
-#### Open decision: single-object status and replacement identity
-
-§4 offers listing and reading but no status call. Adding one could return
-presence, size, publication time, object id, revision and a named checksum:
-S3 HEAD, Drive file metadata by its recorded id, Dropbox metadata, OneDrive
-item metadata, or a CloudKit record fetch. Then file status and upload
-confirmation need not list the uploader's history. Without it, use a
-completed pass listing when the caller accepts that observation, or perform
-and count a fresh listing; stale cached absence is not current file status.
-A status call does not replace discovery of unknown paths.
-
-Size and stored time identify unchanged immutable objects under §4. For
-replaced positions, equal-length replacements within one timestamp tick
-can have the same pair. Either the contract guarantees a distinct stored
-time for every replacement, or it exposes a revision token and readers
-compare that too. Reading every peer on every pass avoids trusting that
-pair but fails the download bound. Cached positions reuse is conditional
-on a sound replacement identity; an ETag is not automatically a checksum.
-
-Occupied-path comparisons in §10 currently require complete byte equality.
-Keeping that rule can require a full read; using a provider checksum
-instead changes its evidence. Each provider's checksum algorithm and
-integrity assumptions would need to be specified. A metadata revision alone
-cannot prove equality. The body-read allowance must also include §15's
-post-upload verification when no complete-object checksum is available.
 
 #### Open decision: storage time in a quiet store
 
@@ -2793,7 +2779,8 @@ Carol's tablet:
     No later write marks it uploaded or changes the row when transfer ends.
   - Pinning and caching change no file reference. A `FileRef` stays valid
     across upload completion.
-- File status is derived when asked (E8), in this order:
+- File status makes a fresh single-object status call (§4), then combines
+  that observation with the current uploader and reports (E8), in this order:
   - **Available:** storage contains the complete file at its fixed path.
   - **Missing:** storage confirms absence, and its uploader was removed
     or replaced, or reports that it cannot upload this file (§19.1, D8).
@@ -3485,7 +3472,7 @@ Carol's tablet:
     checks. One completed positions scan replaces the received reports
     atomically. A failed scan leaves the previous reports and records why.
     The pass reuses peer objects whose listed identity is unchanged (§3.1,
-    §4.1); agreement and retention use that same decoded state. An equal
+    §4); agreement and retention use that same decoded state. An equal
     received report set needs no replacement transaction.
   - A device can publish these records while its write positions wait (§6).
     Silence or different positions alone never proves an immutable refusal.
