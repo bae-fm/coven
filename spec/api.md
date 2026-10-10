@@ -914,10 +914,9 @@ impl FileDecl {
     /// Defaults to `hash`.
     pub fn with_hash_column(self, column: impl Into<String>) -> Self;
 
-    /// The column holding where the file is, which coven fills in:
-    /// `uploaded` with the file's id and key, or the id of the device that
-    /// attached it, while waiting to upload (§16.1, §16.2). Read it through
-    /// `FileRef::location`.
+    /// The column holding the fixed path, uploader and file key chosen by
+    /// the attaching write (§16.1, D12). `FileRef::path` reads its path;
+    /// `file_status` checks availability without changing this column.
     /// Must allow NULL; app SQL cannot assign it. Defaults to `location`.
     pub fn with_location_column(self, column: impl Into<String>) -> Self;
 
@@ -1382,8 +1381,8 @@ while let Ok(values) = lost.next().await {
     reloads, then reloads snapshots if they cover missing logs (§15).
   - It uploads waiting writes, resumes operations waiting for those uploads,
     downloads writes and completes any reload they require.
-  - File uploads and eager downloads follow. Writes authored by file uploads
-    are uploaded before snapshot writing, retention and posted positions.
+  - File uploads and eager downloads follow, then snapshot writing,
+    retention and posted positions. Upload completion creates no write.
   - Every subject that cannot advance has its first blocker in `blocked()`.
     This includes missing prerequisites, key copies, damaged objects, dropped
     entries, fingerprint disagreements, pending operations and file failures.
@@ -2091,13 +2090,13 @@ impl CovenHandle {
 - A row moves to another audience by an ordinary write that changes its
   root's audience column, or points a descendant at a parent in another
   audience ([§14.2](coven.md#142-moving-rows)).
-  - The write commits at once on this device; its moved rows' uploaded
-    files stay where they are ([§16.1](coven.md#161-kinds-and-where-files-are)).
+  - The write commits at once on this device; its moved rows' file
+    references stay fixed ([§16.1](coven.md#161-kinds-and-where-files-are)).
 - Files enter the upload queue as the attaching write commits, including
-  with no storage connected. Once stored, a file's where-column changes from
-  the attaching device's id to `uploaded` ([§16.1](coven.md#161-kinds-and-where-files-are)).
-  Pinning and the cache keep uploaded files on a device without changing
-  that column.
+  with no storage connected. That write fixes the path and key. Upload
+  completion changes no row or `FileRef`; `file_status` derives availability
+  ([§16.1](coven.md#161-kinds-and-where-files-are)). Pinning and caching
+  change no file reference either.
 - Upload attempts read the source again, checking its size and whole-file
   content hash before transfer, and the first-read hash of each plaintext
   chunk before encryption. A changed user original reports `UserFileChanged`;
@@ -2149,8 +2148,6 @@ pub enum UploadPhase {
     /// Verifying chunks, encrypting and sending them: encrypted bytes the
     /// provider has received of the total.
     Uploading { bytes_sent: u64, bytes_total: u64 },
-    /// Stored; the write that refers to it can upload (§16.5).
-    Stored,
 }
 
 pub enum DrainOutcome {
@@ -2227,6 +2224,11 @@ impl CovenHandle {
     /// file facts return `DbError::DamagedDatabase`.
     pub async fn file_ref(&self, table: &str, key: impl Into<RowKey>) -> Result<FileRef, DbError>;
 
+    /// Checks storage presence, the uploader's current state and its signed
+    /// undeliverable-file report (§16.1). Checks the reference against its row.
+    /// Network failures and denied access are errors, not Missing.
+    pub async fn file_status(&self, file: &FileRef) -> Result<FileStatus, FileReadError>;
+
     /// Reads a whole file, checking it against its row.
     pub async fn read_file(&self, file: &FileRef) -> Result<Vec<u8>, FileReadError>;
 
@@ -2287,16 +2289,25 @@ impl FileRef {
     pub fn plaintext_size(&self) -> u64;
     /// The row's audience, whose encrypted writes carry the file's key (§16.1).
     pub fn audience(&self) -> Audience;
-    /// Where the file is (§16.1).
-    pub fn location(&self) -> FileLocation;
+    /// The fixed destination chosen by the attaching write, even before upload.
+    pub fn path(&self) -> ObjectPath;
+    pub fn id(&self) -> FileId;
+    pub fn uploader(&self) -> DeviceId;
 }
 
-pub enum FileLocation {
-    /// The where-column holds `uploaded <device id> <file id> <key in lowercase hex>`
-    /// (Appendix D12); the reference retains both privately.
-    Uploaded,
-    /// Waiting to upload on the device that attached it.
-    OnDevice(DeviceId),
+/// Current remote availability; never persisted in the app row (§16.1).
+pub enum FileStatus {
+    Available,
+    /// Confirmed absent; this active device has not reported it undeliverable.
+    Uploading { device: DeviceId },
+    /// Confirmed absent, with a reason the uploader cannot supply it.
+    Missing { device: DeviceId, reason: FileMissingReason },
+}
+
+pub enum FileMissingReason {
+    DeviceRemoved,
+    DeviceReplaced,
+    Source(FileSourceFailure),
 }
 
 impl FileStream {
@@ -2318,10 +2329,12 @@ impl FileRangeStream<'_> {
 }
 
 pub enum FileReadError {
-    /// An uploaded file was read with no storage connected.
+    /// Remote status or uncached bytes were requested with no storage connected.
     NoStorage,
-    /// The file is only on another device, which the app can name.
-    OnOtherDevice { id: String, device: DeviceId },
+    /// Storage confirms absence; the active uploader has not reported failure.
+    Uploading { id: String, device: DeviceId },
+    /// Storage confirms absence and the uploader cannot supply it (§16.1).
+    Missing { id: String, device: DeviceId, reason: FileMissingReason },
     /// A user-provided file is gone from its recorded path.
     UserFileMissing { id: String, path: PathBuf },
     /// A user-provided file's size, modification time or checked content no

@@ -606,11 +606,16 @@
     `coven/file-chunk/v1`, the path, the cleartext header and the index.
   - Chunk `i` starts at `11 + i × (65,536 + 16)`, so any range is read
     without the rest.
-- The file's key and id are in its row's where-column, which coven writes
-  as the text `uploaded <device id> <file id> <key in lowercase hex>`, or the decimal
-  id of the device that attached it while it waits to upload
-  ([§16.1](coven.md#161-kinds-and-where-files-are)). A file moves only from
-  that device id to `uploaded`; pinning and caching do not change this value.
+- The attaching write sets the where-column to the text
+  `file <device id> <file id> <key in lowercase hex>`.
+  - The device id is decimal without leading zeros; the file id is its
+    canonical UUID. The key is 32 bytes, encoded as 64 lowercase hex digits.
+    Components have one ASCII space between them and no surrounding spaces.
+  - The store id is the row's store, giving the fixed path
+    `<store>/files/<device>/<file>`. The key stays inside encrypted row data.
+  - Upload completion, pinning and caching never change this reference.
+    Availability is derived from storage and D8 reports (§16.1), not encoded
+    in a write. A row without a file has NULL here and in its hash column.
 
 ### D13 Codes
 
@@ -653,8 +658,8 @@
 - The sealed fixtures are `sealed-write.hex`, `sealed-store-log.hex`,
   `sealed-snapshot.hex`, `sealed-positions.hex` and `sealed-join-request.hex`;
   `sealed-store-key.hex` and `sealed-circle-key.hex` hold the two key boxes.
-  `file.hex` has a full 64-KiB chunk and a 29-byte last chunk; `uploaded-file.txt`
-  pins its device-qualified path and uploaded row reference. The code frames
+  `file.hex` has a full 64-KiB chunk and a 29-byte last chunk; `file-reference.txt`
+  pins its device-qualified path and fixed row reference. The code frames
   are `restore-code.hex` and `invite-code.hex`, with their text in `codes.txt`.
   All key material and fixed nonces in these fixtures are public test data.
   Ciphertext, HKDF and signatures must be calculated independently using

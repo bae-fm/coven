@@ -132,8 +132,7 @@
   - every operation with several steps resumes and finishes, for example:
     - rotating the key, then removing the member;
     - writing a snapshot ([§15](#15-snapshots)), then deleting the logs it
-      covers;
-    - uploading a file, then marking it stored.
+      covers.
 - **Revocation:** before sending a write for the first time, a device
   catches up on membership changes and seals it with the newest usable key.
   An ex-member cannot read a write first sent by a device that already
@@ -1975,7 +1974,7 @@ Carol's tablet:
   - Moving them back later is a re-add ([§8.3](#83-deletes)).
 - A move is an ordinary write, such as `UPDATE notes SET audience = …`.
   - It commits at once on the moving device.
-  - Its moved rows' uploaded files stay where they are: each file's key
+  - Its moved rows' file references stay fixed: each file's key
     travels in its row ([§16.1](#161-kinds-and-where-files-are)).
 - E.g. Ana moves note 42 and its attachments from the store into her
   circle: Ben's devices delete them, and Ana's insert them in the circle.
@@ -2358,7 +2357,7 @@ Carol's tablet:
   - whether a row, once it has a file, may be pointed at a different one;
   - which column holds the file's *content hash*, the SHA-256 of its
     bytes, which coven fills in when a write attaches the file;
-  - which column holds where the file is, which coven fills in
+  - which column holds the file's fixed storage reference, filled by coven
     ([§16.1](#161-kinds-and-where-files-are));
   - the file's kind, user-provided or app-provided;
   - whether devices download an uploaded file as soon as its row arrives,
@@ -2381,25 +2380,34 @@ Carol's tablet:
   These hashes stay local; they are not part of the storage format.
 - The app can hand them over as a stream, so a large file never has to fit
   in memory.
-- Every row of a synced table syncs, but each file is in one of two
-  places:
-  - *uploaded*: stored encrypted, and read the same way on every device;
-  - *waiting to upload*: on the device that attached it, as the user's
-    original or coven's own copy, until storage is connected and the upload
-    succeeds.
-- The row's where-column says which: `uploaded`, with the file's id and
-  key, or the id of the device that attached it while it waits to upload.
-  - So every device knows where each file is, and can say so.
-  - Reading a file that is on another device fails with an error of its
-    own, naming that device.
-- Every attached file enters the upload queue in the write that attaches it,
-  even with no storage connected. Uploading stores it
-  ([§16.5](#165-uploads-and-deletion)), then writes `uploaded` to its row.
-  This is the file's only location transition; pinning and the cache decide
-  which devices keep uploaded bytes locally.
-  - A user-provided original stays where it is.
-  - From then on every device reads the uploaded copy, the one it came
-    from included; coven never reads the original again.
+- The attaching write picks the file's random id and key, records its
+  uploader, and fixes its path as `<store>/files/<device>/<file>`.
+  - Its where-column carries that reference from the start (D12).
+    It does not say whether an upload has finished.
+  - The same transaction queues the file, even with no storage connected.
+    No later write marks it uploaded or changes the row when transfer ends.
+  - Pinning and caching change no file reference. A `FileRef` stays valid
+    across upload completion.
+- File status is derived when asked (E8), in this order:
+  - **Available:** storage contains the complete file at its fixed path.
+  - **Missing:** storage confirms absence, and its uploader was removed
+    or replaced, or reports that it cannot upload this file (§19.1, D8).
+  - **Uploading on D:** storage confirms absence and D is still active,
+    with no report that it cannot supply the file. This includes a paused
+    queue or an offline uploader; it does not promise current byte transfer.
+  - A network or permission failure is an error, never proof of absence.
+    With no storage configured, the call returns `NoStorage`.
+  - Storage presence wins over an old missing-source report. A report's
+    absence does not mean the object exists.
+- A read can still use a checked local source or cached bytes. If it needs
+  absent remote bytes, its typed error distinguishes uploading from missing
+  and names the uploader. The app can ask for a missing file to be attached again.
+- After a successful upload, reads on the attaching device use the cache
+  or storage; coven never reads its user-provided original again.
+  - The original stays where it is and is never changed or deleted.
+- E.g. Ana attaches photo A to row 7, then Ben replaces it with photo B.
+  Ana's upload of A finishes later. It changes no row and cannot restore A
+  over B; each file keeps the reference chosen when it was attached.
 - A row with no file has NULL in its hash and where-columns, so both
   must allow NULL; the app never writes them, and coven fills them in the
   write that attaches a file.
@@ -2423,8 +2431,8 @@ Carol's tablet:
 - The content hash is a column of the row, and syncs inside encrypted
   writes like any other.
 - Every device checks a downloaded file against it.
-- Uploading a file picks a random id and a random key for it, stores it
-  encrypted at `<store>/files/<device>/<id>`, and writes both into its row's where-column.
+- Uploading stores the file encrypted at its already chosen path,
+  `<store>/files/<device>/<file>`, using its attaching write's random key.
   - The provider sees only a random name, never a hash of the content.
   - Each upload is a copy of its own: identical files attached to two
     rows are stored twice, and deleting one never touches the other.
@@ -2483,16 +2491,17 @@ Carol's tablet:
 
 - The attaching write queues each file atomically with its row. It waits
   there until storage is connected and the upload succeeds.
-- The queue retains its captured size, content hash and chunk hashes, and
-  fixes its independent id and key before the first upload attempt. It
-  keeps no encrypted copy.
+- The queue retains the attaching write's fixed id, key and captured
+  reference, with its size, content hash and chunk hashes. It keeps no
+  encrypted copy.
 - Every attempt, including retries and resumed provider sessions, checks
   the source's size and whole-file content hash, and a user-provided
   original's recorded modification time, before sending file bytes.
   As it streams, it checks each plaintext chunk against its recorded hash
   before encrypting or sending that chunk. A missing or changed source
-  fails the upload with the existing file error; a differing chunk is
-  never encrypted or sent.
+  fails the upload with the existing file error and records
+  `FileUnavailable` for this device and file (§19.1). Its positions publish
+  that typed reason; a differing chunk is never encrypted or sent.
   - A retry must encrypt the same plaintext under the same key and chunk
     nonces ([§11.1](#111-cryptography)). The per-chunk check guarantees
     this even if the source changes after the whole-file check, without
@@ -2515,15 +2524,18 @@ Carol's tablet:
     verifying the source again with the same id, key and chunk hashes.
   - Any object past the provider's single request limit goes up this way,
     a large write or snapshot included.
-- The write that marks a file uploaded is made only once the file is
-  stored, so no device ever sees a row whose uploaded file isn't there
-  yet, and no write ever waits for a file.
+- Upload completion removes the queue row and its blocked record in one
+  local transaction. It creates no app write, changes no row or file version,
+  and does not delay the attaching write's upload.
+  - A crash before that transaction retries the fixed upload. An occupied
+    path counts only after its bytes compare equal (§10).
+  - Rows may arrive before their files. No write waits for file bytes.
 - Physical deletion of a circle's rows, files and objects, pre-migration
   inputs and local file sources also waits for every entry it depends on
   to be final (§9). Current replay alone cannot release them.
-- An uploaded file is deleted once no synced row in any kept snapshot or
-  log write refers to it as uploaded. Local rows, waiting writes and
-  unfinished upload publication also protect the file.
+- A stored file is deleted only when no retained row, loss, snapshot or
+  log write refers to its fixed path. Local rows, waiting writes, upload
+  queues and inputs retained for non-final entries protect it too.
   - Check local protection first. If it protects every eligible listed
     file, no snapshot rows or log parts need reading for file retention.
   - Otherwise stream the necessary retained data into the database's
@@ -2531,7 +2543,7 @@ Carol's tablet:
     Keep checked references and metadata for the current pass so an object
     already read for loading or retention is not downloaded again. Do not
     stage retained objects in temporary files for this check.
-- Its storage path and uploaded row reference carry the uploader's device
+- Its storage path and fixed row reference carry the uploader's device
   id, so ownership remains known after the last reference disappears.
 - If retained data belongs to an unreadable audience, lacks a key copy,
   or fails validation,
@@ -2562,8 +2574,8 @@ Carol's tablet:
     - Native error objects are available in the running process. Reopening
       exposes the persisted failure category rather than reconstructing an
       operating-system or provider error from text.
-    - A stored upload whose row changed remains recorded as unused until
-      the uploaded-file deletion rules permit removing it;
+    - A stored file whose row changed is considered for storage deletion
+      under the same retained-reference checks; no marking write is queued;
   - `_coven_cache`: each cached file or chunk, its namespace, size, when it
     was last read, and whether it is pinned;
   - `_coven_cache_budgets`: each namespace's budget;
@@ -3028,8 +3040,9 @@ Carol's tablet:
   update requirements, and this device's undeliverable files.
   - Publish only observations made here, never reports received from peers.
   - Authenticate each report. Retain it when it names this device's object,
-    an object needed from this device, or a key copy sealed to this member.
-  - Peer reports inform the author; they do not dictate its own download
+    an object needed from this device, a key copy sealed to this member,
+    or an undeliverable file referenced by this device's retained data.
+  - Peer reports inform the author or file reader; they do not dictate its own download
     checks. One completed positions scan replaces the received reports
     atomically. A failed scan leaves the previous reports and records why.
   - A device can publish these records while its write positions wait (§6).
