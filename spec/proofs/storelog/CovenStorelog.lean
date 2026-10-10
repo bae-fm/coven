@@ -18,3 +18,7 @@ import CovenStorelog.ExamplesVersions
 import CovenStorelog.ExamplesAudienceVersions
 import CovenStorelog.ExamplesGifts
 import CovenStorelog.ExamplesCircleDeletion
+import CovenStorelog.ReplayPrefix
+import CovenStorelog.FinalityReplay
+import CovenStorelog.Finality
+import CovenStorelog.FinalityExamples

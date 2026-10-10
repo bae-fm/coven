@@ -15,45 +15,52 @@ inductive Pass where
 
 /-- Each pass follows timestamp order. Authority is first, including when
 an effect is already present. A winning candidate drops all its opponents. -/
-def scan (M : Log) (views : Nat → State) : List Nat → Result → Pass
-  | [], r => .complete r
-  | w :: ws, r =>
-      if w ∈ r.dropped then scan M views ws r else
+def scan (M : Log) (views : Nat → State) (todo : List Nat) (r : Result)
+    (conflict : Nat → Nat → Bool := pairConflict M views)
+    (prefer : Nat → Nat → Bool := before M) : Pass :=
+  match todo with
+  | [] => .complete r
+  | w :: ws =>
+      if w ∈ r.dropped then scan M views ws r conflict prefer else
       if !authorized (views w) (M w) then
-        scan M views ws { r with dropped := w :: r.dropped }
+        scan M views ws { r with dropped := w :: r.dropped } conflict prefer
       else if alreadyInPlace r.state (M w) then
-        scan M views ws { r with kept := w :: r.kept }
+        scan M views ws { r with kept := w :: r.kept } conflict prefer
       else match checkedEffect r.state w (M w) with
-        | none => scan M views ws { r with dropped := w :: r.dropped }
+        | none => scan M views ws { r with dropped := w :: r.dropped } conflict prefer
         | some next =>
-            let opponents := r.kept.filter (pairConflict M views w)
-            if !opponents.all (before M w) then
-              scan M views ws { r with dropped := w :: r.dropped }
+            let opponents := r.kept.filter (conflict w)
+            if !opponents.all (prefer w) then
+              scan M views ws { r with dropped := w :: r.dropped } conflict prefer
             else if opponents.isEmpty then
-              scan M views ws { r with state := next, kept := w :: r.kept }
+              scan M views ws { r with state := next, kept := w :: r.kept } conflict prefer
             else .restart (opponents ++ r.dropped)
 
 /-- Bounded replay. The termination proof establishes that the chosen bound
 cannot be exhausted; no unfinished replay is returned as a state. -/
-def settleN (M : Log) (views : Nat → State) (entries : List Nat) :
-    Nat → List Nat → Option Result
-  | 0, _ => none
-  | fuel + 1, dropped =>
-      match scan M views entries ⟨State.empty, [], dropped⟩ with
+def settleN (M : Log) (views : Nat → State) (entries : List Nat)
+    (fuel : Nat) (dropped : List Nat)
+    (conflict : Nat → Nat → Bool := pairConflict M views)
+    (prefer : Nat → Nat → Bool := before M) : Option Result :=
+  match fuel with
+  | 0 => none
+  | fuel + 1 =>
+      match scan M views entries ⟨State.empty, [], dropped⟩ conflict prefer with
       | .complete r => some r
-      | .restart drops => settleN M views entries fuel drops
+      | .restart drops => settleN M views entries fuel drops conflict prefer
 
 def Progress (entries old new : List Nat) : Prop :=
   (∀ w ∈ old, w ∈ new) ∧ ∃ w ∈ entries, w ∉ old ∧ w ∈ new
 
 /-- A restart includes every old drop and at least one previously live entry.
 The witness is an applied opponent, not an unreceived or already lost entry. -/
-theorem scan_progress (M : Log) (views : Nat → State) (entries old : List Nat)
+theorem scan_progress (M : Log) (views : Nat → State)
+    (conflict prefer : Nat → Nat → Bool) (entries old : List Nat)
     (todo : List Nat) (r : Result)
     (ht : ∀ w ∈ todo, w ∈ entries)
     (hd : ∀ w ∈ old, w ∈ r.dropped)
     (hk : ∀ w ∈ r.kept, w ∈ entries ∧ w ∉ old)
-    {drops : List Nat} (h : scan M views todo r = .restart drops) :
+    {drops : List Nat} (h : scan M views todo r conflict prefer = .restart drops) :
     Progress entries old drops := by
   induction todo generalizing r with
   | nil => cases h
@@ -90,7 +97,7 @@ theorem scan_progress (M : Log) (views : Nat → State) (entries old : List Nat)
                     cases h
                     constructor
                     · exact fun x hx => List.mem_append_right _ (hd x hx)
-                    · have hn : r.kept.filter (pairConflict M views w) ≠ [] := by
+                    · have hn : r.kept.filter (conflict w) ≠ [] := by
                         simpa using hn
                       obtain ⟨x, hx⟩ := List.exists_mem_of_ne_nil _ hn
                       have hkeep := (List.mem_filter.mp hx).1
@@ -142,15 +149,17 @@ theorem restart_decreases {entries old new : List Nat} (h : Progress entries old
 /-- Every replay finishes after at most one more pass than there are live
 entries. Each restart strictly decreases their number. -/
 theorem settleN_total (M : Log) (views : Nat → State) (entries : List Nat)
-    (fuel : Nat) (drops : List Nat) (hbound : remaining entries drops < fuel) :
-    ∃ r, settleN M views entries fuel drops = some r := by
+    (fuel : Nat) (drops : List Nat) (hbound : remaining entries drops < fuel)
+    (conflict : Nat → Nat → Bool := pairConflict M views)
+    (prefer : Nat → Nat → Bool := before M) :
+    ∃ r, settleN M views entries fuel drops conflict prefer = some r := by
   induction fuel generalizing drops with
   | zero => omega
   | succ fuel ih =>
-      cases hs : scan M views entries ⟨State.empty, [], drops⟩ with
+      cases hs : scan M views entries ⟨State.empty, [], drops⟩ conflict prefer with
       | complete r => exact ⟨r, by simp [settleN, hs]⟩
       | restart new =>
-          have hp := scan_progress M views entries drops entries ⟨State.empty, [], drops⟩
+          have hp := scan_progress M views conflict prefer entries drops entries ⟨State.empty, [], drops⟩
             (fun _ h => h) (fun _ h => h) (by simp) hs
           have decrease := restart_decreases hp
           obtain ⟨r, hr⟩ := ih new (by omega)

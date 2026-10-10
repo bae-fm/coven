@@ -3,14 +3,19 @@ import CovenStorelog.Replay
 namespace CovenStorelog
 
 /-- The bound cannot be exhausted: each restart removes a received entry. -/
-def settle (M : Log) (views : Nat → State) (entries : List Nat) : Result :=
-  (settleN M views entries (entries.length + 1) []).get (by
+def settle (M : Log) (views : Nat → State) (entries : List Nat)
+    (conflict : Nat → Nat → Bool := pairConflict M views)
+    (prefer : Nat → Nat → Bool := before M) : Result :=
+  (settleN M views entries (entries.length + 1) [] conflict prefer).get (by
     obtain ⟨r, hr⟩ := settleN_total M views entries (entries.length + 1) [] (by
-      simp [remaining])
+      simp [remaining]) conflict prefer
     simp [hr])
 
-theorem settle_eq_some (M : Log) (views : Nat → State) (entries : List Nat) :
-    settleN M views entries (entries.length + 1) [] = some (settle M views entries) := by
+theorem settle_eq_some (M : Log) (views : Nat → State) (entries : List Nat)
+    (conflict : Nat → Nat → Bool := pairConflict M views)
+    (prefer : Nat → Nat → Bool := before M) :
+    settleN M views entries (entries.length + 1) [] conflict prefer =
+      some (settle M views entries conflict prefer) := by
   exact (Option.some_get _).symm
 
 def materialize (M : Log) (n : Nat) (S : EntrySet) (views : Nat → State) : Result :=

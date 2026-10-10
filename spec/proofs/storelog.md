@@ -378,3 +378,60 @@
   The differential test compares both batch and incremental Rust replay with
   Lean, and the Rust examples compare every causal arrival order through both
   paths. This optimization is not a separate Lean theorem.
+
+### C10 Finality by storage time
+
+`FinalityReplay`, `ReplayPrefix`, `Finality` and `FinalityExamples` reuse the
+terminating replay and effects with a separate policy: no key-only conflicts,
+no conflicts between removals or between circle deletion and circle changes;
+contradictory member/device statements and competing snapshots remain. The tiers
+are store removal (including devices), circle deletion, circle removal, other
+changes, then admin grants; ties use the smaller author timestamp.
+
+Author timestamps have arbitrary order consistent with recorded reads. Storage
+supplies distinct immutable landing times after path tie-breaking, in duration
+units that are not renumbered. `Valid.online` requires every entry visible at
+first attempt to have been read; retries preserve that past. W is arbitrary;
+examples use 30 days. The finite universe can contain any continuation, including
+future entries with earlier author timestamps, so every finite prefix of an
+infinite continuation is covered. Storage clock assignment, path ordering,
+complete storage reads and delivery buffering are outside the implementation proof.
+
+**Storage-history stability is proved** by `storage_stability`. Every surviving
+recent entry read the old prefix by quietness; every surviving future entry read
+it by rule 1 (`survivor_reads_old`). The old candidates therefore precede the
+others in timestamp replay, without conflicts back into them.
+`ReplayPrefix.settle_prefix` proves that later restarts preserve both kept and
+dropped identities. `device_stability` covers every further receipt sequence
+once the old prefix has arrived; `old_closed` also covers its authority evidence.
+
+**Unqualified device stability fails with two entries plus creation.** Two
+devices concurrently reset to different snapshots after reading creation. A has
+stamp 1 and lands on day 1; B has stamp 2 and lands on day 2. Neither fails rule 1.
+At day 32, (2, 32] is quiet and B meets rule 2. A device with only creation and B
+keeps B; receiving A afterward drops B (`delayed_delivery_counterexample`).
+`causal_deliveries` checks these receipt orders; `one_change_no_delayed_flip`
+proves that one non-creation entry cannot exhibit this missing-old-entry failure.
+
+The storage rule needs no longer window. Qualify device finality with **receipt
+of the prefix through T−W and evidence that the window is quiet**. Reading through
+T establishes that evidence; an incomplete local list cannot certify absence of
+late entries. Receipt of recent entries is otherwise unnecessary for stability.
+`cutoff_receipt_needed` shows the receipt cutoff cannot uniformly be moved earlier:
+an unread entry exactly at T−W can still change a status. Particular histories
+can need less evidence.
+
+**Agreement, progress and rule-1 agreement are proved.** `agreement` gives equal
+results and rule-2 selected sets for equal entries at the same storage observation
+time. `progress` finalizes the old prefix after W without late landings.
+`drop_agreement` ignores receipt order and local clocks; `drop_decided` makes the
+judgment permanent after receiving the entry's landing prefix. Incomplete evidence
+can disagree: moving B's landing to day 32 makes A a missing 31-day rejection
+witness (`missing_drop_witness`). An apparent acceptance is not yet a decision.
+
+`quiet_window_needed` checks the late-entry chain that defeats an age-only rule;
+`drop_rule_needed` checks why a backdated retry must be rejected.
+`exact_boundaries` checks rejection strictly after W and finality at exactly W,
+with the lower window endpoint excluded. `Axioms.lean` audits all named results;
+the existing proofs check rebuilds these modules. Rust and `spec/coven.md` retain
+their existing behavior and wording.
