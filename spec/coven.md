@@ -849,15 +849,14 @@ Two mechanisms order writes:
     leaf shape; excluded writes need no duplicate header or row changes.
 - Store-log publication uses `_coven_store_log_uploads`: the next local entry's
   number, canonical plaintext record and sealing key id.
-  `_coven_store_log_key_uploads` holds its prerequisite sealed-key paths and fixed
-  bytes. These contain no unsealed keys. Both commit before the first storage
-  attempt; applying the published entry and its replay removes them atomically
-  ([§9](#9-members-and-roles), [§18](#18-operations)).
-- `_coven_key_uploads` holds the paths and fixed sealed bytes of copies shared
-  for historical keys ([§11](#11-keys)). These copies have no pending
-  local entry; their bytes commit before their first attempt and are removed
-  after storage accepts a copy or the path is found occupied. No unsealed keys
-  are kept here.
+- `_coven_key_uploads` is the one sealed-copy queue. It holds each writer-owned
+  path, fixed sealed bytes, and an optional `before_entry: EntryId`. A set
+  entry means the copy must be confirmed before publishing that entry; no
+  entry means historical sharing (§11). The entry and its prerequisite copies
+  commit together before any storage attempt. There are no unsealed keys here.
+  Confirmed copies leave this queue; applying a published entry and its replay
+  removes its entry row atomically (§9, §18). Occupancy of this writer's path
+  requires §10's byte comparison, not an assumption that another writer won.
 - The store log's effects that the database applies are kept with it:
   - `_coven_circles.deleted` records whether each circle is deleted; local
     writes, downloaded writes and row recomputation all read that same fact
@@ -1546,19 +1545,22 @@ Carol's tablet:
     finality;
   - `_coven_store_log_uploads`: locally authored entries with their numbers,
     timestamps, recorded past, plaintext and sealing key id fixed before upload;
-    `_coven_store_log_key_uploads`: their sealed-key objects, uploaded first.
+    `_coven_key_uploads`: sealed objects whose `before_entry` names this entry,
+    confirmed first.
     An entry receives its number when these rows commit. A pending entry is
     published before another is made, so numbering remains contiguous. Once
     stored, it is applied through the same replay boundary as a download, and
     that transaction deletes its queue rows. If publication or its reply fails,
     the next store-log step re-seals that plaintext with the recorded key,
     deriving its nonce as in §6, and sends identical bytes;
-  - `_coven_key_uploads`: historical sealed copies, fixed before their
-    first attempt independently of the entry queue. Each attempt chooses
-    recipients from the latest replay; a queued copy for a member outside that
-    audience waits without being sent or resealed. A stored copy, including one
-    another device stored first, retires its local queue row. Failure reaches
-    the caller, and the next store-log call retries before publishing entries;
+  - The same `_coven_key_uploads` holds historical copies with no
+    `before_entry`. Before a first attempt, choose recipients from the latest
+    replay; a queued copy for a member outside that audience waits without
+    being sent or resealed. An attempted object always retries its fixed bytes.
+    Confirmation of those bytes retires the queue row. Before a first attempt,
+    a verified copy at another writer's path can satisfy the need and remove
+    the unattempted row. Failure reaches the caller and remains visible;
+    prerequisite copies must be confirmed before their entry is published;
   - the replay's result: `_coven_members` (every member a kept entry
     added, their public keys and role, and whether they were removed),
     `_coven_devices` (every device a kept entry added, its member and name,
@@ -3335,6 +3337,11 @@ Carol's tablet:
   - A large file's provider session is recorded in its queue row, with the
     last part stored, so after a crash it continues from there
     ([§16.6](#166-what-a-device-keeps-about-files)).
+
+Ana's historical K1 copy for Ben has no `before_entry`. Her new K2 copy
+for Carol names rotation entry Ana/9, so that entry cannot be published until
+the copy is confirmed. Both use the same queue and the same byte-preserving
+retry rule.
 
 ### 18.2 Example
 
