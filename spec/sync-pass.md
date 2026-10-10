@@ -321,10 +321,12 @@ the operation's progress. Failure retains protection and its blocker.
 
 Consider files when a row/loss/protected-input change, history deletion,
 finality change, upload completion, ownership change or newly discovered
-file can affect their retention. List only **`<store>/files/<device>/`**
-for this device and each removed device this device is authorized to delete
-for. No eligible work means no files listing. Discovery of delayed file
-publication without another event remains an open decision in §4.1.
+file can affect their retention. On every pass, list
+**`<store>/files/<device>/`** for this device and each removed device it is
+authorized to delete for. Reuse that complete observation for retention.
+Even with no changed references, it must discover a delayed upload. Count
+every page; §4.1 leaves next-number discovery out because deletion can hide
+later objects.
 
 Use the durable reference index, checking local protection first. Read a
 retained object's body only if reference completeness is missing and the

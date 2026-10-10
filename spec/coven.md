@@ -417,22 +417,6 @@ as one miss per writer. Exact-name reads also have provider-specific request
 costs: [Drive downloads require a file id](https://developers.google.com/workspace/drive/api/reference/rest/v3/files/get),
 so an unknown name first needs an exact parent/name query.
 
-#### Open decision: discovering delayed file publication
-
-File retention runs when references, protection, ownership or uploaded-file
-presence change. An upload can finish after a removed device's files were
-scanned, without another row write. Event-only retention on a provider with
-no file change feed can then miss the orphan indefinitely.
-
-Options are observing file changes through the shared feed, periodic scans
-of owned and assigned removed-device file prefixes with backoff, or a
-publication protocol that makes every completion discoverable. Periodic
-scans add their page costs even when nothing changed; a new protocol must
-cover an upload whose sender crashes before reporting success. Without
-one of these choices, both timely file cleanup and a history-independent
-idle bound cannot be promised. A global `files/` scan is not implicit work
-in every pass.
-
 #### Open decision: discovering join approval
 
 A joiner knows its invite and member ids, but the invite has no store key id
@@ -2902,9 +2886,12 @@ Carol's tablet:
     retained-input budget; checked references have no pass-end expiry.
   - Reconsider deletion when references, protected inputs, finality,
     ownership or file presence change. Use the pass's history catalogs and
-    list only file prefixes this device may delete from. Discovering a
-    delayed upload without another event is an
-    [open decision](#open-decision-discovering-delayed-file-publication).
+    observe every file prefix this device may delete from on every pass.
+    A newly listed file triggers these checks even without a new row write.
+    §4.1 explains why a missing next number cannot replace this observation.
+  - Ana removes Ben while his last photo upload is still in flight. It lands
+    after her previous scan. The next complete scan of Ben's assigned file
+    prefix discovers it; retained references still decide whether it can go.
 - Its storage path and fixed row reference carry the uploader's device
   id, so ownership remains known after the last reference disappears.
 - If retained data belongs to an unreadable audience, lacks a key copy,
