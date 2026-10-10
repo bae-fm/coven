@@ -135,12 +135,17 @@
       covers.
 - **Revocation:** before sending a write for the first time, a device
   catches up on membership changes and lists sealed key copies at sync-pass
-  start, then seals with the newest usable key. An ex-member cannot read a
-  write first sent by a device that already knew they had left, provided no
-  copy of its key is made for them after that pass's listing (§11).
+  start, then seals with the newest usable key. An ex-member cannot read
+  other members' writes first sent by devices that already knew they had
+  left, provided no copy of the sealing key is made for them after that
+  pass's listing (§11).
   - A tried write retains its first attempt's key and bytes on every retry.
     Nothing is dropped or rewritten for revocation; storage access is cut
     off separately (§13).
+  - The removed member's own pre-removal circle writes are outside this
+    promise (§14.6). E.g. Ben queues a Gifts edit, then learns Ana removed
+    him. He may still first-send that edit with the old key he already has;
+    Ana's first attempts follow the revocation rule above.
 - **Bounded storage:** device logs and superseded snapshots are deleted once
   snapshots cover them and the store-log decisions they depend on are final
   (§9, §15). An absent device does not hold finality back.
@@ -1967,7 +1972,7 @@ Carol's tablet:
   the removal or expiry that needs it came about. The device retains the
   confirmation by key id: another entry, invite, retry or restart cannot
   bring that deletion notice back.
-- A removed member's old keys cannot read writes first sent by a device
+- A removed member's old keys cannot read other members' writes first sent by a device
   that already knew of the removal, subject to §11's window for copies made
   after its listing (§3). Earlier attempted writes keep their keys on retry;
   provider revocation cuts off access to those objects.
