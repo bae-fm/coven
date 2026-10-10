@@ -22,7 +22,6 @@ use coven_merge::Audience;
 use coven_storage::{ObjectPath, ObjectPrefix, Storage, StorageFailure};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
 
 /// Owns store-log, key and snapshot synchronization capabilities (§20.2).
 /// Calls require exclusive access so one install never authors or applies two
@@ -255,10 +254,6 @@ impl StoreLogSync {
                 }
             }
         }
-        let now = match self.clock.now().duration_since(UNIX_EPOCH) {
-            Ok(duration) => duration.as_millis(),
-            Err(_) => 0,
-        };
         loop {
             let mut advanced = false;
             for (id, stored) in &entries {
@@ -324,9 +319,6 @@ impl StoreLogSync {
                         continue;
                     }
                 };
-                if u128::from(entry.timestamp.milliseconds()) > now + 300_000 {
-                    continue;
-                }
                 match object::ready(&local.log, &entry, local.store) {
                     Ok(true) => {
                         self.apply(&mut local, entry, &member, &mut ring, &mut damages)

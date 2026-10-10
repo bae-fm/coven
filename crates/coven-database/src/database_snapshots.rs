@@ -166,7 +166,7 @@ impl Database {
                             &inner.access.write_schema,
                             reload,
                             files,
-                            (inner.access.device, inner.clock.now()),
+                            inner.access.device,
                         )
                     })
                 })?;

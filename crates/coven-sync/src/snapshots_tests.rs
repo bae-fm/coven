@@ -131,10 +131,11 @@ async fn fingerprint(device: &Device) -> Vec<(Audience, coven_crypto::Fingerprin
 }
 
 #[tokio::test]
-async fn threshold_snapshot_and_later_writes_reload_on_a_new_device() {
+async fn far_future_threshold_snapshot_and_later_writes_reload_on_a_new_device() {
     let storage = snapshot_storage();
     let mut a = notes_device(storage.clone(), 1).await;
     a.create(key(1)).await;
+    a.clock.set(UNIX_EPOCH + Duration::from_secs(365 * 86400));
     write_rows(&a, 0, 10, 32768, Audience::Store).await;
     upload(&a, &storage).await;
     a.sync.write_snapshots().await.unwrap();
@@ -154,15 +155,21 @@ async fn threshold_snapshot_and_later_writes_reload_on_a_new_device() {
             .len(),
         1
     );
+    a.clock.set(UNIX_EPOCH - Duration::from_secs(1));
     write_rows(&a, 40, 1, 17, Audience::Store).await;
+    let tail = a.db.test_queued_writes().await.unwrap().pop().unwrap();
     upload(&a, &storage).await;
     let mut b = notes_device(storage.clone(), 2).await;
     add_device(&mut b).await;
+    b.clock.set(UNIX_EPOCH - Duration::from_secs(1));
     b.sync.reload_from_snapshots().await.unwrap();
     assert_eq!(tables(&a).await, tables(&b).await);
     assert_eq!(fingerprint(&a).await, fingerprint(&b).await);
     assert!(a.db.operations().await.unwrap().is_empty());
     assert!(b.db.operations().await.unwrap().is_empty());
+    write_rows(&b, 41, 1, 17, Audience::Store).await;
+    let next = b.db.test_queued_writes().await.unwrap().pop().unwrap();
+    assert!(next.header.timestamp > tail.header.timestamp);
 }
 
 #[tokio::test]

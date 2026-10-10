@@ -2,7 +2,7 @@ use crate::{MergeError, Timestamp};
 use coven_foundation::id_source::DeviceId;
 
 #[test]
-fn clocks_counters_devices_and_hold_boundary() {
+fn clocks_counters_and_devices_stay_ordered() {
     let ana = Timestamp::new(60_000, 0, DeviceId(9)).unwrap();
     let ben = Timestamp::next(Some(ana), 30_000, DeviceId(1)).unwrap();
     assert_eq!(
@@ -19,10 +19,6 @@ fn clocks_counters_devices_and_hold_boundary() {
         Timestamp::next(Some(full), 60_000, DeviceId(0)).unwrap(),
         Timestamp::new(70_001, 0, DeviceId(0)).unwrap()
     );
-    let held = Timestamp::new(400_000, u16::MAX, DeviceId(3)).unwrap();
-    assert!(held.must_wait(99_999));
-    assert!(!held.must_wait(100_000));
-    assert!(!held.must_wait(u64::MAX));
     assert_eq!(
         Timestamp::next(None, 0, DeviceId(0)).unwrap(),
         Timestamp::new(0, 0, DeviceId(0)).unwrap()
@@ -30,8 +26,8 @@ fn clocks_counters_devices_and_hold_boundary() {
     assert!(
         Timestamp::new(1, 0, DeviceId(2)).unwrap() > Timestamp::new(1, 0, DeviceId(1)).unwrap()
     );
-    // A downloaded, held write still raises the next local stamp.
-    assert!(Timestamp::next(Some(held), 1, DeviceId(1)).unwrap() > held);
+    let future = Timestamp::new(31_536_000_000, u16::MAX, DeviceId(3)).unwrap();
+    assert!(Timestamp::next(Some(future), 1, DeviceId(1)).unwrap() > future);
 }
 
 #[test]

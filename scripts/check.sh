@@ -97,7 +97,7 @@ lean_proof() {
     fi
 }
 
-# Merge and replay have Rust differential tests. Their data coupling also has
+# Merge, replay and clocks have Rust differential tests. Data coupling also has
 # checked counterexamples (spec/proofs/storelog-data.md).
 proofs() {
     lean_proof "the merge" spec/proofs/merge CovenMerge covenMerge
@@ -120,6 +120,13 @@ proofs() {
         runner="$runner.exe"
     fi
     COVEN_STORELOG_LEAN="$runner" cargo test -p coven-sync --all-features lean_differential -- --ignored
+
+    step "Rust / Lean differential clock test"
+    runner="$(cd spec/proofs/storage && pwd)/.lake/build/bin/clockRunner"
+    if [ -f "$runner.exe" ]; then
+        runner="$runner.exe"
+    fi
+    COVEN_CLOCK_LEAN="$runner" cargo test -p coven-database --all-features lean_differential_clocks -- --ignored
 }
 
 if [ "$part" != proofs ]; then

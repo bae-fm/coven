@@ -11,9 +11,8 @@ use coven_format::{
     write::{WriteDisposition, WriteHeader, WritePart, WriteRecord},
 };
 use coven_foundation::id_source::{CircleId, DeviceId};
-use coven_merge::{Audience, ColumnValue, Operation, Timestamp, WriteId, WritePast};
+use coven_merge::{Audience, ColumnValue, Operation, WriteId, WritePast};
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A write whose signature and opened parts sync has already authenticated.
 #[derive(Clone, Debug)]
@@ -68,8 +67,6 @@ pub enum WriteWait {
     SchemaVersion(u32),
     /// The local breaking migration awaits publication and snapshot reload.
     SchemaPublication(u32),
-    /// The timestamp is more than five minutes ahead of the receiving clock.
-    Clock(Timestamp),
 }
 
 pub(crate) fn positions(database: &DatabaseConnection) -> Result<WritePositions, DbError> {
@@ -88,7 +85,6 @@ pub(crate) fn positions(database: &DatabaseConnection) -> Result<WritePositions,
 pub(crate) fn apply(
     database: &DatabaseConnection,
     schema: &WriteSchema,
-    now: SystemTime,
     download: DownloadedWrite,
     files: &crate::file_write::FileWrite<'_>,
 ) -> Result<ApplyOutcome, DbError> {
@@ -105,7 +101,7 @@ pub(crate) fn apply(
         if positions.covers(header.position) {
             return Ok(ApplyOutcome::AlreadyApplied);
         }
-        if let Some(wait) = prerequisite(database, now, header)? {
+        if let Some(wait) = prerequisite(database, header)? {
             return Ok(ApplyOutcome::Waiting(wait));
         }
         let deleted = crate::store_log_tables::deleted_circles(database)?;
@@ -118,7 +114,6 @@ pub(crate) fn apply(
 
 pub(crate) fn prerequisite(
     database: &DatabaseConnection,
-    now: SystemTime,
     header: &WriteHeader,
 ) -> Result<Option<WriteWait>, DbError> {
     let positions = positions(database)?;
@@ -143,13 +138,6 @@ pub(crate) fn prerequisite(
         return Ok(Some(WriteWait::Writes(missing)));
     }
     crate::download_checks::past(database, header)?;
-    let milliseconds = match now.duration_since(UNIX_EPOCH) {
-        Ok(elapsed) => elapsed.as_millis(),
-        Err(_) => 0,
-    };
-    if u128::from(header.timestamp.milliseconds()) > milliseconds + 300_000 {
-        return Ok(Some(WriteWait::Clock(header.timestamp)));
-    }
     if header.schema_version > database.schema_version()? {
         return Ok(Some(WriteWait::SchemaVersion(header.schema_version)));
     }

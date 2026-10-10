@@ -22,7 +22,7 @@ pub(crate) fn load<R: Read, W: Read>(
     schema: &WriteSchema,
     reload: crate::SnapshotReload<R, W>,
     files: &crate::file_write::FileWrite<'_>,
-    author: (coven_foundation::id_source::DeviceId, std::time::SystemTime),
+    device: coven_foundation::id_source::DeviceId,
 ) -> Result<(), DbError> {
     database.transaction(|database| {
         let crate::SnapshotReload {
@@ -100,7 +100,7 @@ pub(crate) fn load<R: Read, W: Read>(
                 return Err(invalid("reload repeats an audience"));
             }
         }
-        let mut coverage = crate::snapshot_coverage::SnapshotCoverage::new(database, author.0)?;
+        let mut coverage = crate::snapshot_coverage::SnapshotCoverage::new(database, device)?;
         let visible = AppView::after(before, schema);
         let old_store = MergeStore::from_schema(before, &schema.schema);
         let deleted = crate::store_log_tables::deleted_circles(database)?;
@@ -129,7 +129,7 @@ pub(crate) fn load<R: Read, W: Read>(
         .replace(&old, touched)?;
         crate::snapshot_state::drop_tables(database)?;
         affected.extend(crate::snapshot_writes::apply(
-            database, schema, author.1, writes, absent, coverage, &deleted,
+            database, schema, writes, absent, coverage, &deleted,
         )?);
         // Retention sees the final state, including every replayed waiting write.
         files.retain_rows(affected, &deleted)?;

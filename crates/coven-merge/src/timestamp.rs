@@ -26,8 +26,8 @@ impl Timestamp {
         })
     }
 
-    /// Stamp a new write after the latest timestamp seen, including downloaded
-    /// writes not yet applied. The caller persists that latest timestamp.
+    /// Stamp a local write or entry after the latest timestamp from local work
+    /// and applied incoming work. The caller persists that latest timestamp.
     /// A counter overflow advances the millisecond; exhaustion is an error.
     pub fn next(latest: Option<Self>, clock_ms: u64, device: DeviceId) -> Result<Self, MergeError> {
         if clock_ms > Self::MAX_MILLISECONDS {
@@ -44,12 +44,6 @@ impl Timestamp {
                 None => Err(MergeError::TimestampExhausted),
             },
         }
-    }
-
-    /// Whether this write waits because it is more than five minutes ahead of
-    /// the receiving device's clock. Exactly five minutes ahead does not wait.
-    pub fn must_wait(self, receiving_clock_ms: u64) -> bool {
-        self.milliseconds > receiving_clock_ms && self.milliseconds - receiving_clock_ms > 300_000
     }
 
     /// The wall-clock part, in milliseconds.

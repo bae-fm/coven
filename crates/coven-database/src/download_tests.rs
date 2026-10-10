@@ -4,9 +4,10 @@ use crate::write::tests::{count, notes, records, sql, NOTES};
 use crate::{Database, Migration, RowIdentity, SyncedTable};
 use coven_foundation::id_source::{CircleId, KeyId};
 use coven_foundation::{clock::FixedClock, id_source::SequentialIds};
+use coven_merge::Timestamp;
 use rusqlite::params;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
 async fn open(store: &TestStore) -> Database {
     store
@@ -157,6 +158,8 @@ async fn waiting_downloads_do_not_advance_local_timestamps_even_after_reopen() {
         .await
         .unwrap();
     let mut write = records(&source).remove(0);
+    write.header.timestamp =
+        Timestamp::new(31_536_000_000, 0, write.header.position.device).unwrap();
     write.header.schema_version = 2;
     assert_eq!(
         receiver
@@ -164,15 +167,6 @@ async fn waiting_downloads_do_not_advance_local_timestamps_even_after_reopen() {
             .await
             .unwrap(),
         ApplyOutcome::Waiting(WriteWait::SchemaVersion(2))
-    );
-    write.header.schema_version = 1;
-    write.header.timestamp = Timestamp::new(301_001, 0, write.header.position.device).unwrap();
-    assert_eq!(
-        receiver
-            .apply_downloaded(write.clone().into())
-            .await
-            .unwrap(),
-        ApplyOutcome::Waiting(WriteWait::Clock(write.header.timestamp))
     );
     assert_eq!(count(&receiver, "_coven_writes"), 0);
     receiver.close().await.unwrap();

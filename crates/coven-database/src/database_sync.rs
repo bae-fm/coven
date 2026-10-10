@@ -67,7 +67,6 @@ impl Database {
                             writer,
                             reader,
                             &inner.access.write_schema,
-                            inner.clock.now(),
                             files,
                             &store_log,
                             authenticate,
@@ -125,13 +124,7 @@ impl Database {
     ) -> Result<crate::ApplyOutcome, DbError> {
         self.call(move |inner| {
             inner.with_files(Vec::new(), |writer, files| {
-                crate::download::apply(
-                    writer,
-                    &inner.access.write_schema,
-                    inner.clock.now(),
-                    write,
-                    files,
-                )
+                crate::download::apply(writer, &inner.access.write_schema, write, files)
             })
         })
         .await

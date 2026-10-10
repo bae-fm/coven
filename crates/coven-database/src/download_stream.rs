@@ -30,7 +30,6 @@ impl<R: Read> DownloadedWriteStream<R> {
         database: &crate::sqlite::DatabaseConnection,
         before: &crate::sqlite::DatabaseConnection,
         schema: &crate::write_schema::WriteSchema,
-        now: std::time::SystemTime,
         files: &crate::file_write::FileWrite<'_>,
         store_log: &coven_format::value::EntryPositions,
         authenticate: impl FnOnce() -> Result<(), crate::DbError>,
@@ -49,7 +48,7 @@ impl<R: Read> DownloadedWriteStream<R> {
             if crate::download::positions(database)?.covers(self.header.header.position) {
                 return Ok(crate::ApplyOutcome::AlreadyApplied);
             }
-            if let Some(wait) = crate::download::prerequisite(database, now, &self.header.header)? {
+            if let Some(wait) = crate::download::prerequisite(database, &self.header.header)? {
                 return Ok(crate::ApplyOutcome::Waiting(wait));
             }
             crate::download_stage::begin(database)?;

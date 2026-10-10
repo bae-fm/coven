@@ -13,7 +13,6 @@ use coven_foundation::id_source::{CircleId, DeviceId};
 use coven_merge::{WriteId, WritePast};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
-use std::time::SystemTime;
 
 enum Source<R> {
     Download(DownloadedWriteStream<R>),
@@ -24,7 +23,6 @@ enum Source<R> {
 pub(crate) fn apply<R: Read>(
     database: &DatabaseConnection,
     schema: &WriteSchema,
-    now: SystemTime,
     downloads: Vec<DownloadedWriteStream<R>>,
     absent: Vec<WriteId>,
     mut coverage: SnapshotCoverage,
@@ -147,7 +145,7 @@ pub(crate) fn apply<R: Read>(
                 )?;
                 return Ok(());
             }
-            if let Some(wait) = crate::download::prerequisite(database, now, &write.header)? {
+            if let Some(wait) = crate::download::prerequisite(database, &write.header)? {
                 return Err(match wait {
                     WriteWait::Writes(missing) => SnapshotError::MissingWrites { missing },
                     wait => SnapshotError::WriteWaiting(wait),

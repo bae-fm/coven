@@ -11,7 +11,7 @@ use coven_storage::{
     test_utils::{Faults, MemoryStorage},
     StorageConfig,
 };
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -262,12 +262,13 @@ async fn three_devices_publish_concurrent_changes_and_converge() {
 }
 
 #[tokio::test]
-async fn missing_causal_entry_waits_in_storage_then_applies() {
+async fn far_future_entry_waits_for_its_missing_causal_entry_then_applies() {
     let storage = storage();
     let mut a = device(storage.clone(), 1, member(1), store(1)).await;
     let mut b = device(storage.clone(), 2, member(1), store(1)).await;
     let first = a.create(key(1)).await;
     b.sync().await;
+    a.clock.set(UNIX_EPOCH + Duration::from_secs(365 * 86400));
     let second = a
         .sync
         .make_and_upload_entry(StoreChange::CreateCircle {
@@ -455,9 +456,10 @@ async fn own_device_removal_and_setup_race_stop_sync() {
 }
 
 #[tokio::test]
-async fn missing_or_damaged_sealed_keys_wait_without_advancing_the_entry() {
+async fn far_future_entry_waits_for_missing_or_damaged_sealed_keys() {
     let storage = storage();
     let mut a = device(storage.clone(), 1, member(1), store(1)).await;
+    a.clock.set(UNIX_EPOCH + Duration::from_secs(365 * 86400));
     a.create(key(1)).await;
     let path = ObjectPath::store_key(key(1), &a.member.member_id());
     let original = storage.read(&path).await.unwrap();
@@ -495,13 +497,13 @@ async fn missing_or_damaged_sealed_keys_wait_without_advancing_the_entry() {
 }
 
 #[tokio::test]
-async fn future_entry_waits_and_a_restored_device_starts_at_one() {
+async fn far_future_entry_applies_and_a_restored_device_stamps_after_it() {
     let storage = storage();
     let mut a = device(storage.clone(), 1, member(1), store(1)).await;
     let mut b = device(storage.clone(), 2, member(1), store(1)).await;
     a.create(key(1)).await;
     b.sync().await;
-    a.clock.set(UNIX_EPOCH + Duration::from_secs(302));
+    a.clock.set(UNIX_EPOCH + Duration::from_secs(365 * 86400));
     let future = a
         .sync
         .make_and_upload_entry(StoreChange::AddDevice {
@@ -511,10 +513,9 @@ async fn future_entry_waits_and_a_restored_device_starts_at_one() {
         .await
         .unwrap();
     b.sync().await;
-    assert!(!b.log().await.replay.entries.contains_key(&future));
-    b.clock.set(UNIX_EPOCH + Duration::from_secs(2));
-    b.sync().await;
     assert!(b.log().await.replay.entries.contains_key(&future));
+    b.clock.set(UNIX_EPOCH - Duration::from_secs(1));
+    b.restart(storage.clone()).await;
     let id = b.device().await;
     let restored = b
         .sync
@@ -531,6 +532,19 @@ async fn future_entry_waits_and_a_restored_device_starts_at_one() {
             number: 1
         }
     );
+    let log = b.log().await;
+    let timestamp = |id| {
+        log.entries
+            .iter()
+            .find(|e| e.entry.position == id)
+            .unwrap()
+            .entry
+            .timestamp
+    };
+    assert!(timestamp(restored) > timestamp(future));
+    a.clock.set(UNIX_EPOCH - Duration::from_secs(1));
+    a.sync().await;
+    assert_eq!(a.log().await, log);
 }
 
 #[tokio::test]
