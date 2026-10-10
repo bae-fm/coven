@@ -121,11 +121,11 @@ import CovenStorelogData
 #print axioms CovenStorelogData.KeySelection.newest_maximal
 #print axioms CovenStorelogData.KeySelection.selection_is_newest
 #print axioms CovenStorelogData.KeySelection.first_attempt_safe
-#print axioms CovenStorelogData.KeySelection.known_excluded_cannot_read
-#print axioms CovenStorelogData.KeySelection.retirement_persists
-#print axioms CovenStorelogData.KeySelection.observed_exposure_retires
+#print axioms CovenStorelogData.KeySelection.listed_excluded_cannot_read
+#print axioms CovenStorelogData.KeySelection.exposure_persists_while_excluded
+#print axioms CovenStorelogData.KeySelection.listed_exposure_retires
 #print axioms CovenStorelogData.KeySelection.retry_fixed
-#print axioms CovenStorelogData.KeySelection.revocation_with_complete_knowledge
+#print axioms CovenStorelogData.KeySelection.revocation_between_listings
 
 #print axioms CovenStorelogData.Blocked.every_blocked_subject
 #print axioms CovenStorelogData.Blocked.only_first_reason
@@ -159,16 +159,14 @@ import CovenStorelogData
 #print axioms CovenStorelogData.LostValues.pending_not_in_fingerprint
 #print axioms CovenStorelogData.LostValues.final_loss_stable
 
-#print axioms CovenStorelogData.SecurityExamples.revocation_counterexample
-#print axioms CovenStorelogData.SecurityExamples.learning_delivery_prevents_reuse
+#print axioms CovenStorelogData.SecurityExamples.residual_window_counterexample
+#print axioms CovenStorelogData.SecurityExamples.listing_prevents_reuse
 #print axioms CovenStorelogData.SecurityExamples.serialized_regrant
 #print axioms CovenStorelogData.SecurityExamples.rotations_coexist
 #print axioms CovenStorelogData.Blocked.latest_reason_replaces_previous
 #print axioms CovenStorelogData.Blocked.progress_removes_block
 #print axioms CovenStorelogData.RetentionSafety.first_finality_wait_visible
 
-#print axioms CovenStorelogData.CurrentReplay.read_no_conflict
-#print axioms CovenStorelogData.CurrentReplay.equal_received
 #print axioms CovenStorelogData.ReplayEffects.scan_realizes
 #print axioms CovenStorelogData.ReplayEffects.settleN_realizes
 #print axioms CovenStorelogData.ReplayEffects.entry_fate
@@ -191,8 +189,18 @@ import CovenStorelogData
 #print axioms CovenStorelogData.CurrentExamples.passed_position_does_not_lose_part
 #print axioms CovenStorelogData.CurrentExamples.inclusive_window_boundary
 #print axioms CovenStorelogData.SecurityExamples.storage_history_valid
-#print axioms CovenStorelogData.CurrentExamples.empty_circle_dependency_gap
+#print axioms CovenStorelogData.CurrentExamples.empty_circle_rows_and_cause
 #print axioms CovenStorelogData.StorageFinality.complete_old
 #print axioms CovenStorelogData.StorageFinality.finality_persists
 #print axioms CovenStorelogData.StorageFinality.established_stable
 #print axioms CovenStorelogData.StorageFinality.incomplete_listing_blocks_finality
+
+#print axioms CovenStorelogData.KeySelection.copies_persist
+
+#print axioms CovenStorelogData.KeySelection.listing_failure_blocks
+
+#print axioms CovenStorelogData.KeySelection.selected_introduction_authorized
+
+#print axioms CovenStorelogData.SecurityExamples.sharing_history
+
+#print axioms CovenStorelogData.SecurityExamples.recipient_return_releases_retirement

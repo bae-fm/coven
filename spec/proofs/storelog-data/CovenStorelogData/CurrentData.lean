@@ -1,6 +1,7 @@
 import CovenStorelogData.ReplayEffects
 import CovenStorelogData.EntryFate
 import CovenStorelogData.Blocked
+import CovenStorelogData.LostValues
 
 /-! §9, §10, §14.4–7. Database projections retain their original inputs.
 A returning circle reloads from storage without treating passed positions as
@@ -15,6 +16,17 @@ def observe {W Col K : Type} [DecidableEq W] [DecidableEq Col] [DecidableEq K]
   let result := CurrentReplay.resolve H Wtime n (entrySet received)
   let view := CovenMerge.view (inputs schema writes H.log result original)
   ⟨original, view, CovenMerge.lossRecord original view⟩
+
+/-- Deleted-circle loss metadata uses the same replay as row visibility. -/
+def circleLossCause (H : Finality.History) (Wtime n : Nat) (received : List Nat)
+    (row : Row) : Option LostValues.Cause :=
+  match row.audience with
+  | .store => none
+  | .circle c =>
+      if deletedCircle H.log (CurrentReplay.resolve H Wtime n (entrySet received)) c then
+        (CurrentReplay.circleCause H Wtime n (entrySet received) c).map
+          LostValues.Cause.deletedCircle
+      else none
 
 theorem entries_preserve_inputs {W Col K : Type}
     [DecidableEq W] [DecidableEq Col] [DecidableEq K]

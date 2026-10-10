@@ -1,4 +1,4 @@
-import CovenStorelogData.CurrentReplay
+import CovenStorelog.CurrentReplay
 import CovenStorelogData.RetentionSafety
 
 /-! §9: strict old prefix, inclusive recent window, complete storage listing.
@@ -56,7 +56,7 @@ theorem kept_prefix (H : Finality.History) (W n T : Nat) (S : EntrySet)
     let live := admitted H W n views S
     let P := (List.range n).filter (fun e => live e && old H W T e)
     ReplayPrefix.Agree P (CurrentReplay.resolve H W n S).kept
-      (settle H.log views P (conflict H.log views) (prefer H.log views)).kept := by
+      (settle H.log views P (conflict H.log views) (prefer H.log views) (realize views)).kept := by
   dsimp only
   let views := CurrentReplay.authorViews H W n n
   let live := admitted H W n views S
@@ -86,7 +86,7 @@ theorem kept_prefix (H : Finality.History) (W n T : Nat) (S : EntrySet)
         simpa only [P, List.mem_filter, List.mem_range, Bool.and_eq_true] using ha
       exact CurrentReplay.read_no_conflict H.log views b a (read b a hb ha hl hn ho)
   have result := ReplayPrefix.settle_prefix H.log views (conflict H.log views)
-    (prefer H.log views) P suffix ((List.nodup_range (n := n)).filter _) sep
+    (prefer H.log views) P suffix ((List.nodup_range (n := n)).filter _) sep (realize views)
   rw [← splitList] at result
   exact result.1
 
@@ -110,7 +110,7 @@ theorem stability (H : Finality.History) (W n T : Nat) (S U : EntrySet)
       have h := settleN_accounting H.log views
         ((List.range n).filter (admitted H W n views V))
         ((List.nodup_range (n := n)).filter _) (by simp)
-        (settle_eq_some H.log views _ (conflict H.log views) (prefer H.log views))
+        (settle_eq_some H.log views _ (conflict H.log views) (prefer H.log views) (realize views))
       intro kept
       have mem := (h.covered e).mpr (Or.inr (Or.inl kept))
       have no : admitted H W n views V e = false := by

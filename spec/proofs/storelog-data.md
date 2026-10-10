@@ -6,10 +6,14 @@ of keys, provider requests, physical storage, and what the app reads.
 
 ## Results against the current spec
 
-**The absolute Revocation sentence fails.**
-[§3](../coven.md#3-guarantees) says an ex-member cannot read a write first sent
-by a device that already knew they had left. [§11](../coven.md#11-keys), however,
-only prevents using a key whose exposure that device knows about.
+**Revocation is proved with the stated listing window.**
+[§11](../coven.md#11-keys) requires each pass to list sealed copies alongside
+the store log. `KeySelection.revocation_between_listings` proves that a key
+selected for a first attempt has no copy for an excluded member in storage,
+provided no such copy appears after that listing. The theorem names this
+residual window as `noLaterCopy`; it assumes neither local memory of a dropped
+entry nor a separate retirement table. Failed or incomplete listings produce
+no pass (`listing_failure_blocks`).
 
 Ana and Ben are admins; Carol is a member. Three concurrent entries, in
 stamp order, demote Ben, promote Carol, and let Ben remove Ana. Ben's removal
@@ -18,28 +22,28 @@ the demotion: the removal now drops because it would leave no admin. The tablet
 shares K with the restored Ana, as §11 requires. Carol's promotion then arrives
 and the removal returns: Carol can remain admin without Ana.
 
-Ben's phone receives the removal, promotion, then demotion. It never sees its
-removal drop, and does not know that its tablet shared K with Ana. Both devices
-have the same final entries. The phone knows Ana is removed and first sends a
-write with K; Ana has K. S3 access deletion can still be waiting for console
-action (§13).
+Ben's phone receives the removal, promotion, then demotion, keeping the removal
+throughout. A complete listing finds Ana's copy anyway, and the phone retires K
+for first attempts (`listing_prevents_reuse`).
 
-`SecurityExamples.revocation_counterexample` and the following Lean `example`
-check both causal orders, the intermediate drop and permitted holder, the
-returning removal, the phone's key choice, and Ana's receipt. After setup this
-needs three changes to make an entry kept, dropped, then kept again, one
-unobserved historical-key copy, and one first send. The changes target different
-members, so the result does not depend on the old key-conflict rules. The
-receipt abstracts completed sealing and opening; encryption is not proved.
-The history runs through `CurrentReplay`, with the shrunk conflict relation.
-`storage_history_valid` also checks online first attempts and storage landings.
+**Revocation without the window hypothesis fails.** Move that one share to
+after the phone's listing: it selects K during the pass, while Ana can obtain
+the new copy. `residual_window_counterexample` and the following Lean `example`
+check this history, including the next listing refusing K.
+`sharing_history` checks both causal orders, the intermediate drop, the allowed
+share, and the removal's return. `storage_history_valid` checks online first
+attempts and storage landings. After setup the witness has three concurrent
+changes, one later sealed copy and one first send. S3 access deletion can still
+await console action. The theorem can cover the whole period a write remains
+readable by extending `later` to that period; it cannot prevent later disclosure.
+Receipts abstract completed sealing and opening, not encryption.
 
 **Entry fate and data convergence are proved for the modeled effects.**
 `ReplayEffects.entry_fate` proves that applying the final kept entries alone
-reproduces the actual restart replay's state. It uses the shared store-log
-engine and its checked effects; it does not assume the result already equals
-that fold. `CurrentData.convergence` connects equal received entries and equal
-causal, readable writes to equal rows and losses. Original merge inputs remain
+and then removing circles left empty reproduces the actual replay's state.
+It uses the shared engine and its recorded-past removal effects; it does not
+assume the result already equals that fold. `CurrentData.convergence` connects
+equal received entries and equal causal, readable writes to equal rows and losses. Original merge inputs remain
 intact when membership or deletion changes.
 
 `CurrentExamples.entry_only_deletion_restores` checks §14.7's deletion and its
@@ -51,30 +55,29 @@ the blocked list. `stale_reload_keeps_positions` prevents an old prepared
 reload from replacing a newer entry view. `CurrentData.stopped_forever` proves
 that an installation stops receiving after its own removal.
 
-Two shared-engine gaps prevent claiming the entire requested model. Its action
-type has no rotation entry; key selection models their introductions, but
-rotation admission and conflicts are not integrated into replay. Its effects
-erase empty circles during replay, while §14.6 requires testing emptiness after
-replay. `CurrentExamples.empty_circle_dependency_gap` and the following
-`example` check two removals followed by a concurrent addition: the inherited
-effect drops the addition, whereas §14.6 says it can populate the circle.
-This is a model defect, not a counterexample to that section. Fixing these
-requires extending the shared replay's action/effect interface.
+Rotations and replay-empty circles use `CovenStorelog.CurrentReplay` directly;
+there is no second replay policy in this package. `empty_circle_rows_and_cause`
+checks Ana and Ben's concurrent removals: Gifts is hidden, the loss names the
+latest kept removal, and Carol's concurrent addition restores its original row
+and clears that cause. `ReplayEffects.entry_fate` and `StorageFinality` use the
+same effect function, including the finishing projection.
 
-**The local key rule is proved.** `KeySelection.first_attempt_safe` proves that
-selection requires current membership, an authorized received introduction,
-custody, no retirement, and no known delivery to an excluded member.
-`selection_is_newest` proves the timestamp and key-id ordering.
-`observed_exposure_retires` and `retirement_persists` preserve retirement across
-later membership changes. `known_excluded_cannot_read` proves the conclusion
-about known deliveries. `revocation_with_complete_knowledge` identifies the
-extra assumption required to turn it into a conclusion about all deliveries;
-the counterexample does not satisfy that assumption. Attempted retries retain
-their key and bytes. Several rotation keys can coexist.
+**Key selection is proved against storage evidence.**
+`first_attempt_safe` requires current membership, an authorized received
+introduction, custody and no listed copy for an excluded member.
+`listed_exposure_retires` and `exposure_persists_while_excluded` make permanent
+copies disqualify the key for as long as their recipients remain excluded.
+A recipient returning no longer disqualifies that key; there is no remembered
+retirement bit. `selection_is_newest` proves timestamp and key-id ordering,
+and attempted retries retain their key and bytes.
 
-The key model takes authorized received introductions as an input. It does not
-prove rotation-entry admission or key generation. Recipients are members;
-removing one device does not remove its member or rotate member keys (§13).
+`selectInReplay` derives membership and historical authority from the shared
+replay. `selected_introduction_authorized` connects selection to a received,
+authorized introducing action, including tag 15's actual audience and id.
+`rotations_coexist` checks Ben and Carol's concurrent rotations after Ana's
+removal: both stay kept, and the later usable key is selected. Fresh random ids
+and successful key acquisition are inputs. Recipients are members; removing
+one device does not remove its member or rotate member keys (§13).
 
 **Provider completion is proved for one owner's device.**
 [§4](../coven.md#4-storage-providers-and-access) promises intended access, not
@@ -138,21 +141,22 @@ reader's acknowledgement.
 The model supplies complete storage metadata as an input; provider listing and
 authentication are outside the proof. Dependency expressions must name every
 entry that can affect an input. Their extraction from arbitrary SQL is outside
-the model. The shared-engine gaps described above also limit the modeled
-replays covered by the finality theorem.
+the model. The theorem applies to the shared current replay, including
+rotations and circles hidden only after replay.
 
 ## Entry fate, convergence, and the retained histories
 
 `Model`, `Operations`, `Keys`, `Delivery`, `EntryEffects`, `Snapshots` and
 `Retention` retain the earlier executable behavior. Their counterexamples are
 historical witnesses, not assertions that the current spec still requires that
-behavior. They do not implement the shrunk conflict list or rotation entries.
+behavior. Their replay uses the historical conflict list. `Keys.introduced`
+also recognizes rotation entries for the current selection model.
 
 `EntryFate` retains originals and computes current effects from replay. Its
 `effects_ignore_dropped`, `views_converge`, and `rebuild_converges` prove the
 corresponding conditional results for the historical replay and valid readable
-merge inputs. The `CurrentReplay`, `ReplayEffects`, `CurrentData` and
-`StorageFinality` modules carry the updated results above. Equal encrypted
+merge inputs. The shared `CovenStorelog.CurrentReplay`, `ReplayEffects`,
+`CurrentData` and `StorageFinality` modules carry the updated results above. Equal encrypted
 objects alone do not imply readable inputs when historical keys are missing.
 
 The current spec resolves or narrows the historical witnesses as follows:
@@ -178,10 +182,10 @@ The current spec resolves or narrows the historical witnesses as follows:
   every snapshot dependency is outside the model.
 - **Snapshots under dropped removal keys:** §9 and §11 retain those keys for
   reading. The old kept-only catalog predicate is not the current rule.
-- **Re-kept keys and historical disclosures:** permanent device-local
-  retirement rules out known exposed-key reuse. Unobserved disclosures remain
-  possible, as the current Revocation counterexample shows. Key custody and
-  current key ids need not converge across devices with different knowledge.
+- **Re-kept keys and historical disclosures:** the sealed-copy listing exposes
+  earlier disclosures even to devices that never saw the introducing entry
+  drop. Copies after that listing remain the explicit residual window.
+  Different custody or listing times can still produce different key choices.
 - **Provider revocation and stale requests:** intended access follows replay
   both ways; serialized requests cover the single-device ordering failure.
   Actual grants during a pending request and irreversible S3 console deletion
@@ -205,11 +209,11 @@ The current spec resolves or narrows the historical witnesses as follows:
 
 ## Readings and limits
 
-“Usable” is device-local knowledge, exactly as §11 defines it. The absolute
-sentence in §3 is tested separately rather than silently weakened to that
-meaning. Historical-key redistribution follows the sharing device's current
-audience, as §11 requires. Current membership and historical authority remain
-separate inputs.
+“Usable” combines device custody with a complete storage listing and current
+replay. A listing is a captured observation, not a claim that storage cannot
+change afterward. Historical-key sharing follows the sharing device's current
+audience. §3 excludes a departing author's own pre-removal writes; this model's
+revocation witness concerns Ben's new writes, not that exception.
 
 Physical cleanup requires all deciding entries to be final and all other
 checks to pass. Finality is not inferred from completing an operation or from

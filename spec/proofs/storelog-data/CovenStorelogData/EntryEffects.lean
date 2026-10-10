@@ -170,8 +170,8 @@ def accessEntry (s3 : Bool) (log : Log) (bound : Nat)
     (fun s m => revokeAccess s3 log received after.result m s) s)
 
 /-- Replay-derived projections, including current key ids, cannot depend on
-which received entries were temporarily kept. This covers all fourteen Action
-constructors, not a separately enumerated list of metadata operations. -/
+which received entries were temporarily kept. This covers every Action
+constructor, not a separately enumerated list of metadata operations. -/
 theorem derived_effects_converge {α : Type} (project : Result → α)
     (log : Log) (bound : Nat) {a b : List Nat}
     (ca : CausalOrder log a) (cb : CausalOrder log b)

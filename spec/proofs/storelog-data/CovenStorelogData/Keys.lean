@@ -14,6 +14,7 @@ structure Key where
 def introduced (M : Log) (e : Nat) : List Key :=
   let audiences : List Audience := match (M e).action with
     | .create _ => [.store]
+    | .rotateKey audience _ => [audience]
     | .makeCircle c _ | .removeFromCircle c _ => [.circle c]
     | .removeMember _ circles => .store :: circles.map Audience.circle
     | _ => []
@@ -31,6 +32,7 @@ def initialRecipients (M : Log) (k : Key) : List Nat :=
   let s := authorView M k.entry
   match (M k.entry).action with
   | .create _ | .makeCircle _ _ => [(M k.entry).author]
+  | .rotateKey audience _ => audienceMembers s audience
   | .removeMember m _ | .removeFromCircle _ m =>
       (audienceMembers s k.audience).filter (· != m)
   | _ => []

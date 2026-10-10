@@ -25,7 +25,6 @@ import CovenStorelogData.Access
 import CovenStorelogData.RetentionSafety
 import CovenStorelogData.LostValues
 import CovenStorelogData.SecurityExamples
-import CovenStorelogData.CurrentReplay
 import CovenStorelogData.StorageFinality
 import CovenStorelogData.ReplayEffects
 import CovenStorelogData.CurrentData

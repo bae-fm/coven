@@ -2,6 +2,7 @@ import CovenStorelogData.CurrentData
 import CovenStorelogData.DeliveryExamples
 import CovenStorelogData.StorageFinality
 import CovenStorelogData.SecurityExamples
+import CovenStorelog.CurrentExamples
 
 namespace CovenStorelogData.CurrentExamples
 open CovenStorelog
@@ -49,31 +50,21 @@ theorem passed_position_does_not_lose_part :
     CurrentData.writable (CurrentData.finishReload skipped (.ok (reloadData, [0]))) = true := by
   decide
 
-/-- The shared engine erases a circle as soon as concurrent removals empty it.
-§14.6 instead needs that decision after replay so the concurrent addition can
-populate it. This checks the dependency gap, not a counterexample to §14.6. -/
-def emptyCircleLog : Log
-  | 0 => entry 0 0 [] (.create "ana")
-  | 1 => entry 0 0 [0] (.addMember 1 .member "ben")
-  | 2 => entry 0 0 [0, 1] (.addMember 2 .member "carol")
-  | 3 => entry 0 0 [0, 1, 2] (.addMember 3 .admin "dan")
-  | 4 => entry 1 1 (List.range 4) (.addDevice 1 1)
-  | 5 => entry 0 0 (List.range 5) (.addDevice 0 2)
-  | 6 => entry 0 0 (List.range 6) (.makeCircle 0 "Gifts")
-  | 7 => entry 0 0 (List.range 7) (.addToCircle 0 1)
-  | 8 => entry 0 0 (List.range 8) (.removeFromCircle 0 1)
-  | 9 => entry 0 2 (List.range 8) (.removeMember 0 [0])
-  | _ => entry 1 1 (List.range 8) (.addToCircle 0 2)
+/-- Ana and Ben's concurrent removals hide Gifts after replay. Carol's
+concurrent addition restores its original rows without changing either removal. -/
+def emptyCircleView (received : List Nat) := CurrentData.observe
+  DeliveryExamples.schema DeliveryExamples.writes
+  CovenStorelog.CurrentExamples.emptyCircleHistory 30 11 received original
 
-def emptyCircleHistory : Finality.History := ⟨emptyCircleLog, id, fun e => min e 8⟩
-def emptyCircleResult := CurrentReplay.resolve emptyCircleHistory 30 11 (entrySet (List.range 11))
-
-theorem empty_circle_dependency_gap : Valid emptyCircleLog 11 ∧
-    8 ∈ emptyCircleResult.kept ∧ 9 ∈ emptyCircleResult.kept ∧
-    10 ∈ emptyCircleResult.dropped ∧ lookup emptyCircleResult.state.circles 0 = none := by
-  exact ⟨validCheck_sound _ _ (by decide), by decide⟩
-
-example : 10 ∈ emptyCircleResult.dropped ∧ lookup emptyCircleResult.state.circles 0 = none := by decide
+theorem empty_circle_rows_and_cause :
+    (emptyCircleView (List.range 10)).view.shown DeliveryExamples.row = false ∧
+    ((emptyCircleView (List.range 10)).losses DeliveryExamples.row none).isSome = true ∧
+    CurrentData.circleLossCause CovenStorelog.CurrentExamples.emptyCircleHistory 30 11
+      (List.range 10) DeliveryExamples.row = some (.deletedCircle 9) ∧
+    (emptyCircleView (List.range 11)).view.shown DeliveryExamples.row = true ∧
+    (emptyCircleView (List.range 11)).losses DeliveryExamples.row none = none ∧
+    CurrentData.circleLossCause CovenStorelog.CurrentExamples.emptyCircleHistory 30 11
+      (List.range 11) DeliveryExamples.row = none := by decide
 
 theorem inclusive_window_boundary :
     StorageFinality.quiet SecurityExamples.storageHistory 30 9 38 = false ∧

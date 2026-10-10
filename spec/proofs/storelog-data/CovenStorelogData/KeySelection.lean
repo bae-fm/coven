@@ -1,8 +1,9 @@
-import CovenStorelog.Model
+import CovenStorelog.CurrentReplay
+import CovenStorelogData.Keys
 
-/-! §11: immutable key introductions, member disclosure, and device-local
-selection. An excluded device of a remaining member does not rotate keys (§13).
-Cryptographic possession is abstracted by a receipt, not by membership. -/
+/-! §11: a successful pass lists immutable sealed copies from storage.
+The listing is shared exposure evidence; custody remains device-local.
+A later share changes storage, never the already captured pass. -/
 namespace CovenStorelogData.KeySelection
 open CovenStorelog
 
@@ -12,53 +13,54 @@ structure Key where
   audience : Audience
   deriving DecidableEq, Repr
 
-structure Knowledge where
+/-- Abstract paths keys/store/key/member and keys/circles/circle/key/member.
+Fresh key ids identify one introduction; ciphertext is outside the model. -/
+abbrev Copies := List (Key × Nat)
+
+structure Pass where
   custody : List Key
-  delivered : List (Key × Nat)
-  retired : List Key
+  copies : Copies
   deriving DecidableEq, Repr
 
-def exposed (members : Audience → List Nat) (known : Knowledge) (key : Key) : Bool :=
-  known.delivered.any fun (k, m) => k == key && m ∉ members key.audience
+inductive ListingFailure where
+  | network | permission | incomplete
+  deriving DecidableEq, Repr
 
-/-- Run after adopting membership or learning a delivery. Retired ids never
-return to selection, even if the exposing entry later returns (§9, §11). -/
-def learn (members : Audience → List Nat) (known : Knowledge)
-    (receipts : List (Key × Nat)) : Knowledge :=
-  let next := { known with delivered := known.delivered ++ receipts }
-  { next with retired := known.retired ++
-      (next.delivered.map Prod.fst).filter (exposed members next) }
+/-- One complete listing per pass. An error cannot reuse a previous listing. -/
+def beginPass (custody : List Key) (stored : Copies)
+    (read : Except ListingFailure Unit) : Except ListingFailure Pass :=
+  read.map fun _ => ⟨custody, stored⟩
 
-def usable (members : Audience → List Nat) (authorized : Nat → Bool)
-    (known : Knowledge) (key : Key) : Bool :=
-  authorized key.entry && key ∈ known.custody && key ∉ known.retired &&
-    !exposed members known key
+def exposed (members : Audience → List Nat) (pass : Pass) (key : Key) : Bool :=
+  pass.copies.any fun (k, m) => k == key && m ∉ members key.audience
+
+def usable (members : Audience → List Nat) (authorized : Key → Bool)
+    (pass : Pass) (key : Key) : Bool :=
+  authorized key && key ∈ pass.custody && !exposed members pass key
 
 def newer (a b : Key) : Bool :=
   b.entry < a.entry || (b.entry == a.entry && b.id < a.id)
 
-/-- Keys are ordered by introduction timestamp (the entry id in Appendix C),
-then id. Multiple concurrent rotations remain candidates. -/
+/-- Introduction timestamp, then key id. Concurrent rotations coexist. -/
 def newest : List Key → Option Key
   | [] => none
   | k :: ks => match newest ks with
     | none => some k
     | some other => some (if newer k other then k else other)
 
-def select (members : Audience → List Nat) (authorized : Nat → Bool)
-    (known : Knowledge) (who : Nat) (audience : Audience) : Option Key :=
+def select (members : Audience → List Nat) (authorized : Key → Bool)
+    (pass : Pass) (who : Nat) (audience : Audience) : Option Key :=
   if who ∈ members audience then
-    newest (known.custody.filter fun key => key.audience == audience &&
-      usable members authorized known key)
+    newest (pass.custody.filter fun key => key.audience == audience &&
+      usable members authorized pass key)
   else none
 
-/-- §11 permits sharing historical keys, including retired ones, with the
-current audience. The caller checks that the device has not stopped (§10).
-The completed receipt updates the sharing device's knowledge only. -/
-def share (members : Audience → List Nat) (known : Knowledge)
-    (recipient : Nat) (key : Key) : Option Knowledge :=
-  if key ∈ known.custody ∧ recipient ∈ members key.audience then
-    some { known with delivered := known.delivered ++ [(key, recipient)] }
+/-- Historical-key sharing adds permanent storage evidence, independently of
+which other devices saw this replay. The caller must still be running (§10). -/
+def share (members : Audience → List Nat) (custody : List Key) (stored : Copies)
+    (recipient : Nat) (key : Key) : Option Copies :=
+  if key ∈ custody ∧ recipient ∈ members key.audience then
+    some (stored ++ [(key, recipient)])
   else none
 
 theorem newest_mem {keys : List Key} {key : Key} (h : newest keys = some key) :
@@ -119,78 +121,122 @@ theorem newest_maximal {keys : List Key} {key : Key} (h : newest keys = some key
             · exact Bool.eq_false_iff.mpr loses
             · exact greatest other present
 
-theorem selection_is_newest (members : Audience → List Nat) (authorized : Nat → Bool)
-    (known : Knowledge) (who : Nat) (audience : Audience) (key : Key)
-    (selected : select members authorized known who audience = some key)
-    (other : Key) (held : other ∈ known.custody) (same : other.audience = audience)
-    (allowed : usable members authorized known other = true) : newer other key = false := by
+theorem selection_is_newest (members : Audience → List Nat) (authorized : Key → Bool)
+    (pass : Pass) (who : Nat) (audience : Audience) (key : Key)
+    (selected : select members authorized pass who audience = some key)
+    (other : Key) (held : other ∈ pass.custody) (same : other.audience = audience)
+    (allowed : usable members authorized pass other = true) : newer other key = false := by
   unfold select at selected
   split at selected
   · exact newest_maximal selected other (List.mem_filter.mpr ⟨held, by simp [same, allowed]⟩)
   · cases selected
 
-theorem first_attempt_safe (members : Audience → List Nat) (authorized : Nat → Bool)
-    (known : Knowledge) (who : Nat) (audience : Audience) (key : Key)
-    (sent : select members authorized known who audience = some key) :
+theorem first_attempt_safe (members : Audience → List Nat) (authorized : Key → Bool)
+    (pass : Pass) (who : Nat) (audience : Audience) (key : Key)
+    (sent : select members authorized pass who audience = some key) :
     who ∈ members audience ∧ key.audience = audience ∧
-    authorized key.entry = true ∧ key ∈ known.custody ∧ key ∉ known.retired ∧
-    exposed members known key = false := by
+    authorized key = true ∧ key ∈ pass.custody ∧ exposed members pass key = false := by
   unfold select at sent
   split at sent
   · rename_i hm
     have h := (List.mem_filter.mp (newest_mem sent)).2
     simp only [Bool.and_eq_true, beq_iff_eq, usable, decide_eq_true_eq,
       Bool.not_eq_true'] at h
-    exact ⟨hm, h.1, h.2.1.1.1, h.2.1.1.2, h.2.1.2, h.2.2⟩
+    exact ⟨hm, h.1, h.2.1.1, h.2.1.2, h.2.2⟩
   · cases sent
 
-theorem known_excluded_cannot_read (members : Audience → List Nat)
-    (authorized : Nat → Bool) (known : Knowledge) (who : Nat) (audience : Audience)
-    (key : Key) (sent : select members authorized known who audience = some key)
-    (excluded : m ∉ members audience) : (key, m) ∉ known.delivered := by
+theorem listed_excluded_cannot_read (members : Audience → List Nat)
+    (authorized : Key → Bool) (pass : Pass) (who : Nat) (audience : Audience)
+    (key : Key) (sent : select members authorized pass who audience = some key)
+    (excluded : m ∉ members audience) : (key, m) ∉ pass.copies := by
   intro delivered
-  have hs := first_attempt_safe members authorized known who audience key sent
-  have hx : exposed members known key = true := by
+  have hs := first_attempt_safe members authorized pass who audience key sent
+  have hx : exposed members pass key = true := by
     apply List.any_eq_true.mpr
     exact ⟨(key, m), delivered, by simp [hs.2.1, excluded]⟩
-  simp [hs.2.2.2.2.2] at hx
+  simp [hs.2.2.2.2] at hx
 
-theorem retirement_persists (members : Audience → List Nat) (known : Knowledge)
-    (receipts : List (Key × Nat)) (key : Key) (h : key ∈ known.retired) :
-    key ∈ (learn members known receipts).retired := List.mem_append_left _ h
+theorem listed_exposure_retires (members : Audience → List Nat) (authorized : Key → Bool)
+    (pass : Pass) (key : Key) (m : Nat)
+    (listed : (key, m) ∈ pass.copies) (excluded : m ∉ members key.audience) :
+    usable members authorized pass key = false := by
+  have exposed : exposed members pass key = true :=
+    List.any_eq_true.mpr ⟨(key, m), listed, by simp [excluded]⟩
+  simp [usable, exposed]
 
-theorem observed_exposure_retires (members : Audience → List Nat) (known : Knowledge)
-    (receipts : List (Key × Nat)) (key : Key) (m : Nat)
-    (delivered : (key, m) ∈ known.delivered ++ receipts)
+theorem copies_persist (members : Audience → List Nat) (custody : List Key)
+    (before after : Copies) (recipient : Nat) (key : Key)
+    (stored : share members custody before recipient key = some after) :
+    ∀ copy ∈ before, copy ∈ after := by
+  unfold share at stored
+  split at stored
+  · cases stored; exact fun _ h => List.mem_append_left _ h
+  · cases stored
+
+/-- Changing the introducing entry's fate cannot erase a stored copy. As long
+as its recipient stays excluded, every complete subsequent listing retires it. -/
+theorem exposure_persists_while_excluded (members : Audience → List Nat)
+    (authorized : Key → Bool) (custody : List Key) (before later : Copies)
+    (key : Key) (m : Nat) (copied : (key, m) ∈ before)
     (excluded : m ∉ members key.audience) :
-    key ∈ (learn members known receipts).retired := by
-  apply List.mem_append_right
-  apply List.mem_filter.mpr
-  constructor
-  · exact List.mem_map.mpr ⟨(key, m), delivered, rfl⟩
-  · apply List.any_eq_true.mpr
-    exact ⟨(key, m), delivered, by simp [excluded]⟩
+    usable members authorized ⟨custody, before ++ later⟩ key = false :=
+  listed_exposure_retires members authorized _ key m (List.mem_append_left _ copied) excluded
+
+/-- The only new secrecy premise after a complete listing: no copy of the
+selected key for this excluded member appears after the listing. This may
+cover an entire pass or the later period while an old write remains readable. -/
+theorem revocation_between_listings (members : Audience → List Nat)
+    (authorized : Key → Bool) (custody : List Key) (listed later : Copies)
+    (who : Nat) (audience : Audience) (key : Key)
+    (sent : select members authorized ⟨custody, listed⟩ who audience = some key)
+    (excluded : m ∉ members audience) (noLaterCopy : (key, m) ∉ later) :
+    (key, m) ∉ listed ++ later := by
+  intro copied
+  rcases List.mem_append.mp copied with before | after
+  · exact listed_excluded_cannot_read members authorized _ who audience key sent excluded before
+  · exact noLaterCopy after
+
+theorem listing_failure_blocks (custody : List Key) (stored : Copies) (failure : ListingFailure) :
+    beginPass custody stored (.error failure) = .error failure := rfl
+
+/-- Removal and creation keys use their checked wire ids as an input; tag 15
+carries its id directly. Membership/authority are derived by the shared replay. -/
+def introductions (M : Log) (ids : Nat → Audience → Nat) (e : Nat) : List Key :=
+  (introduced M e).map fun k =>
+    ⟨match (M e).action with | .rotateKey _ id => id | _ => ids e k.audience,
+      e, k.audience⟩
+
+def receivedAuthorized (H : Finality.History) (W n : Nat) (received : EntrySet)
+    (ids : Nat → Audience → Nat) (key : Key) : Bool :=
+  key.entry < n && received key.entry &&
+    authorized (CurrentReplay.authorViews H W n n key.entry) (H.log key.entry) &&
+    CurrentReplay.keysMatch (CurrentReplay.authorViews H W n n key.entry) (H.log key.entry) &&
+    key ∈ introductions H.log ids key.entry
+
+def selectInReplay (H : Finality.History) (W n : Nat) (received : EntrySet)
+    (ids : Nat → Audience → Nat) (pass : Pass) (who : Nat) (audience : Audience) : Option Key :=
+  select (audienceMembers (CurrentReplay.resolve H W n received).state)
+    (receivedAuthorized H W n received ids) pass who audience
+
+theorem selected_introduction_authorized (H : Finality.History) (W n : Nat)
+    (received : EntrySet) (ids : Nat → Audience → Nat) (pass : Pass)
+    (who : Nat) (audience : Audience) (key : Key)
+    (sent : selectInReplay H W n received ids pass who audience = some key) :
+    received key.entry = true ∧
+    authorized (CurrentReplay.authorViews H W n n key.entry) (H.log key.entry) = true ∧
+    key ∈ introductions H.log ids key.entry := by
+  have h := (first_attempt_safe _ _ pass who audience key sent).2.2.1
+  simp only [receivedAuthorized, Bool.and_eq_true, decide_eq_true_eq] at h
+  exact ⟨h.1.1.1.2, h.1.1.2, h.2⟩
 
 structure Attempt where
   key : Key
   bytes : List Nat
   deriving DecidableEq, Repr
 
-/-- §3 and §18: an attempted object retries its original key and bytes. -/
 def retry (attempt : Attempt) : Attempt := attempt
 
 theorem retry_fixed (attempt : Attempt) :
     (retry attempt).key = attempt.key ∧ (retry attempt).bytes = attempt.bytes := ⟨rfl, rfl⟩
-
-/-- This extra premise is exactly what would turn local knowledge into actual
-secrecy. §11 does not supply it for unobserved historical-key sharing. -/
-theorem revocation_with_complete_knowledge (members : Audience → List Nat)
-    (authorized : Nat → Bool) (known : Knowledge) (actual : List (Key × Nat))
-    (complete : ∀ receipt ∈ actual, receipt ∈ known.delivered)
-    (who : Nat) (audience : Audience) (key : Key)
-    (sent : select members authorized known who audience = some key)
-    (excluded : m ∉ members audience) : (key, m) ∉ actual := by
-  exact fun h => known_excluded_cannot_read members authorized known who audience key sent
-    excluded (complete _ h)
 
 end CovenStorelogData.KeySelection
