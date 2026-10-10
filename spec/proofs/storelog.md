@@ -1,9 +1,10 @@
 ## Appendix C. Proof of the store log
 
-- Lean checks the store log's replay against
-  [§9](../coven.md#9-members-and-roles): it terminates, every
-  causal arrival order ends in the same state and entry dispositions, and §9's
-  invariants and examples hold.
+- Lean checks the store log's terminating replay and entry accounting.
+  C1–C9 describe the historical policy still compared with Rust; their key
+  conflicts and examples are not the current §9 policy. C10 proves finality
+  for its stated policy. C11 models current §9, rotation entries and §14.6's
+  empty circles, sharing the same replay engine.
 - The development is in `spec/proofs/storelog/`, without Mathlib, using
   the toolchain pinned by [Appendix B](merge.md).
 
@@ -342,8 +343,8 @@
 - `scripts/check.sh` rebuilds it from scratch and audits source and
   printed axioms. The merge proof and its differential test retain their
   own checks.
-- The model deletes a circle when its last member leaves or is removed
-  from the store, as §13 and §14.6 state.
+- The historical effect deletes a circle immediately when a removal empties
+  it. C11 postpones the combined-removal case until replay finishes (§14.6).
 - Signatures supply a verified author. Seal receipts stand for completed
   writes of the matching encrypted key. Signature verification, encryption,
   key generation and sealing, truthful circle-key lists, storage durability,
@@ -435,3 +436,46 @@ witness (`missing_drop_witness`). An apparent acceptance is not yet a decision.
 with the lower window endpoint excluded. `Axioms.lean` audits all named results;
 the existing proofs check rebuilds these modules. Rust and `spec/coven.md` retain
 their existing behavior and wording.
+
+### C11 Rotations and circles left empty after replay
+
+`CurrentReplay` applies §9's contradiction rules, storage-time rejection,
+recorded-past authority and exact circle-key lists. `Action.rotateKey` carries
+D6's tag-15 audience and key id. `rotation_authority` proves that a kept
+rotation's author belonged to its audience in its recorded past.
+`rotations_conflict_with_nothing` covers every action in both directions.
+An outside admin replaces circle keys through a store-removal entry, not tag 15.
+
+Ana and Ben can rotate Gifts concurrently; both entries stay. Dan, an admin
+outside Gifts, cannot rotate it. Ben's concurrent removal does not erase the
+authority his rotation had when written. `CurrentExamples.rotation_entries`
+and `removed_rotator_keeps_recorded_authority` check these histories.
+`deleted_circle_keeps_rotation` checks that a concurrent circle deletion also
+leaves the rotation kept: it changes no membership and recreates no circle.
+
+The engine takes an effect function. `CurrentReplay.realize` uses the shared
+membership effects but deletes a circle during replay only for an explicit
+deletion or a removal that saw its sole member. Other removals retain an empty
+member list until `finish` projects the completed result. Author views use
+that same projection. `finished_circles_nonempty` proves that no empty circle
+is exposed as active; the finishing step changes no kept or dropped identity.
+
+Ana's phone removes Ben from Gifts while her tablet removes Ana from the store.
+Both saw two circle members. The completed replay hides Gifts and
+`circleCause` names the later kept removal. Carol's concurrent addition can
+still populate it: the removals stay kept and Gifts returns with Carol.
+`concurrent_addition_populates_empty_circle` failed with the historical effect
+and passes with the new effect. `empty_circle_cause` checks both results;
+`explicit_deletion_still_wins` checks that a real deletion still defeats an add.
+
+`empty_cause_latest` proves that a derived cause is a kept removal affecting
+that circle and that no later such removal was kept. “Affecting” uses circle
+membership in the removal's recorded past, including a repeated removal that
+is already satisfied in replay. `equal_received` covers state agreement.
+The generic termination, authority, accounting and prefix proofs apply to the
+selected effect. C10's existing theorems keep their original policy, and the
+Rust runner keeps `resolve`'s historical effects and conflict rules.
+
+Key bytes, sealing, provider listings and physical deletion remain outside
+this package. The data package supplies key selection and retained row inputs.
+All named C11 results are included in `Axioms.lean`.

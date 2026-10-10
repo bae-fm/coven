@@ -66,8 +66,9 @@ def Accounted (entries : List Nat) : Pass → Prop
 theorem scan_accounting (M : Log) (views : Nat → State) (entries : List Nat)
     {todo : List Nat} {r : Result} (h : Accounting entries todo r)
     (conflict : Nat → Nat → Bool := pairConflict M views)
-    (prefer : Nat → Nat → Bool := before M) :
-    Accounted entries (scan M views todo r conflict prefer) := by
+    (prefer : Nat → Nat → Bool := before M)
+    (realize : State → Nat → Entry → Option State := checkedEffect) :
+    Accounted entries (scan M views todo r conflict prefer realize) := by
   induction todo generalizing r with
   | nil => exact h
   | cons w ws ih =>
@@ -79,7 +80,7 @@ theorem scan_accounting (M : Log) (views : Nat → State) (entries : List Nat)
         · exact ih h.drop
         · split
           · exact ih (h.keep hd r.state)
-          · cases checkedEffect r.state w (M w) with
+          · cases realize r.state w (M w) with
             | none => exact ih h.drop
             | some next =>
                 simp only
@@ -96,7 +97,8 @@ theorem settleN_accounting (M : Log) (views : Nat → State) (entries : List Nat
     (hu : entries.Nodup) {fuel : Nat} {drops : List Nat} {out : Result}
     (hd : ∀ w ∈ drops, w ∈ entries)
     {conflict prefer : Nat → Nat → Bool}
-    (h : settleN M views entries fuel drops conflict prefer = some out) : Accounting entries [] out := by
+    {realize : State → Nat → Entry → Option State}
+    (h : settleN M views entries fuel drops conflict prefer realize = some out) : Accounting entries [] out := by
   induction fuel generalizing drops with
   | zero => cases h
   | succ fuel ih =>
@@ -105,8 +107,8 @@ theorem settleN_accounting (M : Log) (views : Nat → State) (entries : List Nat
         intro w
         simp only [List.not_mem_nil, false_or]
         exact ⟨Or.inl, fun hx => hx.elim id (hd w)⟩
-      have hs := scan_accounting M views entries hi conflict prefer
-      cases he : scan M views entries ⟨State.empty, [], drops⟩ conflict prefer with
+      have hs := scan_accounting M views entries hi conflict prefer realize
+      cases he : scan M views entries ⟨State.empty, [], drops⟩ conflict prefer realize with
       | complete r =>
           simp only [settleN, he, Option.some.injEq] at h
           subst out

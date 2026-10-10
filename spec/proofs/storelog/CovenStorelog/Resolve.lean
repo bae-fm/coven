@@ -5,17 +5,19 @@ namespace CovenStorelog
 /-- The bound cannot be exhausted: each restart removes a received entry. -/
 def settle (M : Log) (views : Nat → State) (entries : List Nat)
     (conflict : Nat → Nat → Bool := pairConflict M views)
-    (prefer : Nat → Nat → Bool := before M) : Result :=
-  (settleN M views entries (entries.length + 1) [] conflict prefer).get (by
+    (prefer : Nat → Nat → Bool := before M)
+    (realize : State → Nat → Entry → Option State := checkedEffect) : Result :=
+  (settleN M views entries (entries.length + 1) [] conflict prefer realize).get (by
     obtain ⟨r, hr⟩ := settleN_total M views entries (entries.length + 1) [] (by
-      simp [remaining]) conflict prefer
+      simp [remaining]) conflict prefer realize
     simp [hr])
 
 theorem settle_eq_some (M : Log) (views : Nat → State) (entries : List Nat)
     (conflict : Nat → Nat → Bool := pairConflict M views)
-    (prefer : Nat → Nat → Bool := before M) :
-    settleN M views entries (entries.length + 1) [] conflict prefer =
-      some (settle M views entries conflict prefer) := by
+    (prefer : Nat → Nat → Bool := before M)
+    (realize : State → Nat → Entry → Option State := checkedEffect) :
+    settleN M views entries (entries.length + 1) [] conflict prefer realize =
+      some (settle M views entries conflict prefer realize) := by
   exact (Option.some_get _).symm
 
 def materialize (M : Log) (n : Nat) (S : EntrySet) (views : Nat → State) : Result :=

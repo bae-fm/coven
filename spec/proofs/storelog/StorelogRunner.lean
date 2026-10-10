@@ -42,6 +42,7 @@ private def readAction (j : Json) : Except String Action := do
   | 11 => pure (.raiseSchema (← nat j "version") (← readSnapshot j))
   | 13 => pure (.reset (← readSnapshot j))
   | 14 => pure (.setAccess (← nat j "member") (← j.getObjValAs? String "access"))
+  | 15 => pure (.rotateKey (← readAudience j) (← nat j "key"))
   | _ => throw "unknown action"
 
 private def readEntry (j : Json) : Except String Entry := do

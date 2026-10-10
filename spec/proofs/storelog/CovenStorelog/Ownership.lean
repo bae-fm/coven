@@ -255,4 +255,9 @@ theorem effect_references {s t : State} {w : Nat} {e : Entry}
       · cases h; exact ⟨hs.devices, hs.nonempty, hs.circles⟩
       · cases h
 
+  | rotateKey audience key =>
+      simp only [effect, ha, Option.some.injEq] at h
+      subst t
+      exact hs
+
 end CovenStorelog

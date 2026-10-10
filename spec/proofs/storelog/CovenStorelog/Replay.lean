@@ -17,23 +17,24 @@ inductive Pass where
 an effect is already present. A winning candidate drops all its opponents. -/
 def scan (M : Log) (views : Nat → State) (todo : List Nat) (r : Result)
     (conflict : Nat → Nat → Bool := pairConflict M views)
-    (prefer : Nat → Nat → Bool := before M) : Pass :=
+    (prefer : Nat → Nat → Bool := before M)
+    (realize : State → Nat → Entry → Option State := checkedEffect) : Pass :=
   match todo with
   | [] => .complete r
   | w :: ws =>
-      if w ∈ r.dropped then scan M views ws r conflict prefer else
+      if w ∈ r.dropped then scan M views ws r conflict prefer realize else
       if !authorized (views w) (M w) then
-        scan M views ws { r with dropped := w :: r.dropped } conflict prefer
+        scan M views ws { r with dropped := w :: r.dropped } conflict prefer realize
       else if alreadyInPlace r.state (M w) then
-        scan M views ws { r with kept := w :: r.kept } conflict prefer
-      else match checkedEffect r.state w (M w) with
-        | none => scan M views ws { r with dropped := w :: r.dropped } conflict prefer
+        scan M views ws { r with kept := w :: r.kept } conflict prefer realize
+      else match realize r.state w (M w) with
+        | none => scan M views ws { r with dropped := w :: r.dropped } conflict prefer realize
         | some next =>
             let opponents := r.kept.filter (conflict w)
             if !opponents.all (prefer w) then
-              scan M views ws { r with dropped := w :: r.dropped } conflict prefer
+              scan M views ws { r with dropped := w :: r.dropped } conflict prefer realize
             else if opponents.isEmpty then
-              scan M views ws { r with state := next, kept := w :: r.kept } conflict prefer
+              scan M views ws { r with state := next, kept := w :: r.kept } conflict prefer realize
             else .restart (opponents ++ r.dropped)
 
 /-- Bounded replay. The termination proof establishes that the chosen bound
@@ -41,13 +42,14 @@ cannot be exhausted; no unfinished replay is returned as a state. -/
 def settleN (M : Log) (views : Nat → State) (entries : List Nat)
     (fuel : Nat) (dropped : List Nat)
     (conflict : Nat → Nat → Bool := pairConflict M views)
-    (prefer : Nat → Nat → Bool := before M) : Option Result :=
+    (prefer : Nat → Nat → Bool := before M)
+    (realize : State → Nat → Entry → Option State := checkedEffect) : Option Result :=
   match fuel with
   | 0 => none
   | fuel + 1 =>
-      match scan M views entries ⟨State.empty, [], dropped⟩ conflict prefer with
+      match scan M views entries ⟨State.empty, [], dropped⟩ conflict prefer realize with
       | .complete r => some r
-      | .restart drops => settleN M views entries fuel drops conflict prefer
+      | .restart drops => settleN M views entries fuel drops conflict prefer realize
 
 def Progress (entries old new : List Nat) : Prop :=
   (∀ w ∈ old, w ∈ new) ∧ ∃ w ∈ entries, w ∉ old ∧ w ∈ new
@@ -60,7 +62,7 @@ theorem scan_progress (M : Log) (views : Nat → State)
     (ht : ∀ w ∈ todo, w ∈ entries)
     (hd : ∀ w ∈ old, w ∈ r.dropped)
     (hk : ∀ w ∈ r.kept, w ∈ entries ∧ w ∉ old)
-    {drops : List Nat} (h : scan M views todo r conflict prefer = .restart drops) :
+    {drops : List Nat} {realize : State → Nat → Entry → Option State} (h : scan M views todo r conflict prefer realize = .restart drops) :
     Progress entries old drops := by
   induction todo generalizing r with
   | nil => cases h
@@ -83,7 +85,7 @@ theorem scan_progress (M : Log) (views : Nat → State)
         · exact ih { r with dropped := w :: r.dropped } hws hd' hk h
         · split at h
           · exact ih { r with kept := w :: r.kept } hws hd hk' h
-          · cases he : checkedEffect r.state w (M w) with
+          · cases he : realize r.state w (M w) with
             | none =>
                 simp only [he] at h
                 exact ih { r with dropped := w :: r.dropped } hws hd' hk h
@@ -151,12 +153,13 @@ entries. Each restart strictly decreases their number. -/
 theorem settleN_total (M : Log) (views : Nat → State) (entries : List Nat)
     (fuel : Nat) (drops : List Nat) (hbound : remaining entries drops < fuel)
     (conflict : Nat → Nat → Bool := pairConflict M views)
-    (prefer : Nat → Nat → Bool := before M) :
-    ∃ r, settleN M views entries fuel drops conflict prefer = some r := by
+    (prefer : Nat → Nat → Bool := before M)
+    (realize : State → Nat → Entry → Option State := checkedEffect) :
+    ∃ r, settleN M views entries fuel drops conflict prefer realize = some r := by
   induction fuel generalizing drops with
   | zero => omega
   | succ fuel ih =>
-      cases hs : scan M views entries ⟨State.empty, [], drops⟩ conflict prefer with
+      cases hs : scan M views entries ⟨State.empty, [], drops⟩ conflict prefer realize with
       | complete r => exact ⟨r, by simp [settleN, hs]⟩
       | restart new =>
           have hp := scan_progress M views conflict prefer entries drops entries ⟨State.empty, [], drops⟩

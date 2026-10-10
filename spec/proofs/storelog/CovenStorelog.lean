@@ -22,3 +22,5 @@ import CovenStorelog.ReplayPrefix
 import CovenStorelog.FinalityReplay
 import CovenStorelog.Finality
 import CovenStorelog.FinalityExamples
+import CovenStorelog.CurrentReplay
+import CovenStorelog.CurrentExamples

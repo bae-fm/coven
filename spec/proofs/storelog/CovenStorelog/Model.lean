@@ -37,6 +37,7 @@ inductive Action where
   | removeFromCircle (circle member : Nat)
   | raiseSchema (version : Nat) (snapshot : SnapshotId)
   | reset (snapshot : SnapshotId)
+  | rotateKey (audience : Audience) (key : Nat)
   deriving DecidableEq, Repr
 
 /-- The creation tag, independently of its initial access. -/
@@ -142,6 +143,8 @@ def authorized (s : State) (e : Entry) : Bool :=
       inCircle s c e.author
   | .reset ⟨.store, _⟩ => admin s e.author
   | .reset ⟨.circle c, _⟩ => inCircle s c e.author
+  | .rotateKey .store _ => member s e.author
+  | .rotateKey (.circle c) _ => inCircle s c e.author
 
 def alreadyInPlace (s : State) (e : Entry) : Bool :=
   match e.action with
@@ -159,21 +162,24 @@ def alreadyInPlace (s : State) (e : Entry) : Bool :=
   | .raiseSchema v snapshot => (lookup s.versions snapshot.audience).any
       (fun x => v < x.number || (v == x.number && snapshot.number == x.snapshot))
   | .reset snapshot => lookup s.resets snapshot.audience == some snapshot.number
+  | .rotateKey _ _ => false
 
 /-- Removing a circle's last member deletes the circle. -/
 def withoutMember (circle : Circle) (m : Nat) : Option Circle :=
   let members := circle.members.filter (· != m)
   if members.isEmpty then none else some { circle with members }
 
-def removeFromCircles (circles : List (Nat × Circle)) (m : Nat) : List (Nat × Circle) :=
-  circles.filterMap fun (c, circle) => (withoutMember circle m).map (c, ·)
+def removeFromCircles (circles : List (Nat × Circle)) (m : Nat)
+    (remove : Nat → Circle → Nat → Option Circle := fun _ => withoutMember) : List (Nat × Circle) :=
+  circles.filterMap fun (c, circle) => (remove c circle m).map (c, ·)
 
 def audienceExists (s : State) : Audience → Bool
   | .store => s.created
   | .circle c => (lookup s.circles c).isSome
 
 /-- Realize a change after the authority and already-in-place checks. -/
-def effect (s : State) (w : Nat) (e : Entry) : Option State := do
+def effect (s : State) (w : Nat) (e : Entry)
+    (remove : Nat → Circle → Nat → Option Circle := fun _ => withoutMember) : Option State := do
   match e.action with
   | .create access =>
       if s.created then none else some { State.empty with
@@ -189,7 +195,7 @@ def effect (s : State) (w : Nat) (e : Entry) : Option State := do
       if member s m then some { s with
         members := erase s.members m
         devices := s.devices.filter (fun p => p.2 != m)
-        circles := removeFromCircles s.circles m } else none
+        circles := removeFromCircles s.circles m remove } else none
   | .changeRole m r =>
       if member s m then some { s with members := put s.members m r } else none
   | .addDevice m d =>
@@ -215,7 +221,7 @@ def effect (s : State) (w : Nat) (e : Entry) : Option State := do
   | .removeFromCircle c m =>
       let circle ← lookup s.circles c
       if m ∈ circle.members then
-        match withoutMember circle m with
+        match remove c circle m with
         | none => some { s with circles := erase s.circles c }
         | some next => some { s with circles := put s.circles c next }
       else none
@@ -227,8 +233,11 @@ def effect (s : State) (w : Nat) (e : Entry) : Option State := do
       if audienceExists s snapshot.audience then
         some { s with resets := put s.resets snapshot.audience snapshot.number } else none
 
-def checkedEffect (s : State) (w : Nat) (e : Entry) : Option State := do
-  let next ← effect s w e
+  | .rotateKey _ _ => some s
+
+def checkedEffect (s : State) (w : Nat) (e : Entry)
+    (remove : Nat → Circle → Nat → Option Circle := fun _ => withoutMember) : Option State := do
+  let next ← effect s w e remove
   if safe next then some next else none
 
 end CovenStorelog

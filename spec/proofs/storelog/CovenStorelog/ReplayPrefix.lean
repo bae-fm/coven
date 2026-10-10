@@ -6,14 +6,15 @@ within a replay; it does not replace replay with pairwise winner selection. -/
 namespace CovenStorelog
 namespace ReplayPrefix
 
+variable {realize : State → Nat → Entry → Option State}
 variable (M : Log) (views : Nat → State) (conflict prefer : Nat → Nat → Bool)
 
-abbrev run := scan M views (conflict := conflict) (prefer := prefer)
+abbrev run := scan M views (conflict := conflict) (prefer := prefer) (realize := realize)
 
 theorem scan_append (xs ys : List Nat) (r : Result) :
-    run M views conflict prefer (xs ++ ys) r =
-      match run M views conflict prefer xs r with
-      | .complete q => run M views conflict prefer ys q
+    run (realize := realize) M views conflict prefer (xs ++ ys) r =
+      match run (realize := realize) M views conflict prefer xs r with
+      | .complete q => run (realize := realize) M views conflict prefer ys q
       | .restart ds => .restart ds := by
   induction xs generalizing r with
   | nil => rfl
@@ -25,7 +26,7 @@ theorem scan_append (xs ys : List Nat) (r : Result) :
         · exact ih _
         · split
           · exact ih _
-          · cases checkedEffect r.state w (M w) with
+          · cases realize r.state w (M w) with
             | none => exact ih _
             | some next =>
                 simp only
@@ -38,7 +39,7 @@ theorem scan_append (xs ys : List Nat) (r : Result) :
 /-- A completed pass never removes a kept or dropped identity; only a restart
 can remove a kept identity. Outside the todo list it adds neither. -/
 theorem complete_frame {todo : List Nat} {r q : Result}
-    (h : run M views conflict prefer todo r = .complete q) (x : Nat) :
+    (h : run (realize := realize) M views conflict prefer todo r = .complete q) (x : Nat) :
     (x ∈ r.kept → x ∈ q.kept) ∧ (x ∈ r.dropped → x ∈ q.dropped) ∧
     (x ∉ todo → (x ∈ q.kept ↔ x ∈ r.kept) ∧
       (x ∈ q.dropped ↔ x ∈ r.dropped)) := by
@@ -46,7 +47,7 @@ theorem complete_frame {todo : List Nat} {r q : Result}
   | nil => cases h; exact ⟨id, id, fun _ => ⟨Iff.rfl, Iff.rfl⟩⟩
   | cons w ws ih =>
       simp only [run, scan] at h
-      repeat' first | split at h | cases he : checkedEffect r.state w (M w)
+      repeat' first | split at h | cases he : realize r.state w (M w)
           <;> simp only [he] at h
       all_goals first
         | cases h
@@ -61,8 +62,8 @@ theorem complete_frame {todo : List Nat} {r q : Result}
 /-- Repeating a completed pass with its final drops skips exactly the failed
 entries. It reproduces the same state and kept list. -/
 theorem reseed {todo : List Nat} {r q : Result} (hu : todo.Nodup)
-    (h : run M views conflict prefer todo r = .complete q) :
-    run M views conflict prefer todo { r with dropped := q.dropped } = .complete q := by
+    (h : run (realize := realize) M views conflict prefer todo r = .complete q) :
+    run (realize := realize) M views conflict prefer todo { r with dropped := q.dropped } = .complete q := by
   induction todo generalizing r with
   | nil => cases h; rfl
   | cons w ws ih =>
@@ -87,7 +88,7 @@ theorem reseed {todo : List Nat} {r q : Result} (hu : todo.Nodup)
             simpa [hout, ha, hi] using
               ih (r := { r with kept := w :: r.kept}) hu h
           · rename_i hi
-            cases he : checkedEffect r.state w (M w) with
+            cases he : realize r.state w (M w) with
             | none =>
                 simp only [he] at h
                 have hout := (complete_frame M views conflict prefer h w).2.1 List.mem_cons_self
@@ -120,8 +121,8 @@ def SamePass (P : List Nat) : Pass → Pass → Prop
 
 theorem transport (P todo : List Nat) (s : State) (ks ds es : List Nat)
     (ht : ∀ x ∈ todo, x ∈ P) (hd : Agree P ds es) :
-    SamePass P (run M views conflict prefer todo ⟨s, ks, ds⟩)
-      (run M views conflict prefer todo ⟨s, ks, es⟩) := by
+    SamePass P (run (realize := realize) M views conflict prefer todo ⟨s, ks, ds⟩)
+      (run (realize := realize) M views conflict prefer todo ⟨s, ks, es⟩) := by
   induction todo generalizing s ks ds es with
   | nil => exact ⟨rfl, rfl, hd⟩
   | cons w ws ih =>
@@ -136,7 +137,7 @@ theorem transport (P todo : List Nat) (s : State) (ks ds es : List Nat)
         · exact ih s ks _ _ hws hd'
         · split
           · exact ih s _ ds es hws hd
-          · cases checkedEffect s w (M w) with
+          · cases realize s w (M w) with
             | none => exact ih s ks _ _ hws hd'
             | some next =>
                 simp only
@@ -155,7 +156,7 @@ def Framed (P : List Nat) (r : Result) : Pass → Prop
 entries conflicts with the prefix. A completed suffix preserves kept ids too. -/
 theorem suffix_frame (P todo : List Nat) (r : Result)
     (ht : ∀ w ∈ todo, w ∉ P ∧ ∀ x ∈ P, conflict w x = false) :
-    Framed P r (run M views conflict prefer todo r) := by
+    Framed P r (run (realize := realize) M views conflict prefer todo r) := by
   induction todo generalizing r with
   | nil => exact ⟨fun _ _ => Iff.rfl, fun _ _ => Iff.rfl⟩
   | cons w ws ih =>
@@ -164,9 +165,9 @@ theorem suffix_frame (P todo : List Nat) (r : Result)
         fun y hy => ht y (List.mem_cons_of_mem _ hy)
       have hn : ∀ x ∈ P, x ≠ w := fun x hx he => hw.1 (he ▸ hx)
       have drop (s : State) :
-          Framed P r (run M views conflict prefer ws ⟨s, r.kept, w :: r.dropped⟩) := by
+          Framed P r (run (realize := realize) M views conflict prefer ws ⟨s, r.kept, w :: r.dropped⟩) := by
         have hh := ih ⟨s, r.kept, w :: r.dropped⟩ hws
-        cases he : run M views conflict prefer ws ⟨s, r.kept, w :: r.dropped⟩ with
+        cases he : run (realize := realize) M views conflict prefer ws ⟨s, r.kept, w :: r.dropped⟩ with
         | complete q =>
             simp only [he, Framed] at hh ⊢
             exact ⟨hh.1, fun x hx => by simpa [hn x hx] using hh.2 x hx⟩
@@ -174,9 +175,9 @@ theorem suffix_frame (P todo : List Nat) (r : Result)
             simp only [he, Framed] at hh ⊢
             exact fun x hx => by simpa [hn x hx] using hh x hx
       have keep (s : State) :
-          Framed P r (run M views conflict prefer ws ⟨s, w :: r.kept, r.dropped⟩) := by
+          Framed P r (run (realize := realize) M views conflict prefer ws ⟨s, w :: r.kept, r.dropped⟩) := by
         have hh := ih ⟨s, w :: r.kept, r.dropped⟩ hws
-        cases he : run M views conflict prefer ws ⟨s, w :: r.kept, r.dropped⟩ with
+        cases he : run (realize := realize) M views conflict prefer ws ⟨s, w :: r.kept, r.dropped⟩ with
         | complete q =>
             simp only [he, Framed] at hh ⊢
             exact ⟨fun x hx => by simpa [hn x hx] using hh.1 x hx, hh.2⟩
@@ -188,7 +189,7 @@ theorem suffix_frame (P todo : List Nat) (r : Result)
         · exact drop r.state
         · split
           · exact keep r.state
-          · cases checkedEffect r.state w (M w) with
+          · cases realize r.state w (M w) with
             | none => exact drop r.state
             | some next =>
                 simp only
@@ -204,15 +205,15 @@ statuses. The suffix may change arbitrarily and restart repeatedly. -/
 theorem after_complete (P suffix : List Nat) (hu : P.Nodup)
     (ht : ∀ w ∈ suffix, w ∉ P ∧ ∀ x ∈ P, conflict w x = false)
     {fuel : Nat} {ds : List Nat} {q out : Result}
-    (hp : run M views conflict prefer P ⟨State.empty, [], ds⟩ = .complete q)
-    (h : settleN M views (P ++ suffix) fuel ds conflict prefer = some out) :
+    (hp : run (realize := realize) M views conflict prefer P ⟨State.empty, [], ds⟩ = .complete q)
+    (h : settleN M views (P ++ suffix) fuel ds conflict prefer realize = some out) :
     Agree P out.kept q.kept ∧ Agree P out.dropped q.dropped := by
   induction fuel generalizing ds q with
   | zero => cases h
   | succ fuel ih =>
-      have hs := suffix_frame M views conflict prefer P suffix q ht
+      have hs := suffix_frame (realize := realize) M views conflict prefer P suffix q ht
       simp only [settleN, scan_append, hp] at h
-      cases he : run M views conflict prefer suffix q with
+      cases he : run (realize := realize) M views conflict prefer suffix q with
       | complete r =>
           simp only [he, Option.some.injEq] at h
           subst out
@@ -220,10 +221,10 @@ theorem after_complete (P suffix : List Nat) (hu : P.Nodup)
       | restart es =>
           simp only [he, Framed] at h hs
           have hr := reseed M views conflict prefer hu hp
-          have hc := transport M views conflict prefer P P State.empty [] q.dropped es
+          have hc := transport (realize := realize) M views conflict prefer P P State.empty [] q.dropped es
             (fun _ hh => hh) (fun x hx => (hs x hx).symm)
           simp only [hr] at hc
-          cases hn : run M views conflict prefer P ⟨State.empty, [], es⟩ with
+          cases hn : run (realize := realize) M views conflict prefer P ⟨State.empty, [], es⟩ with
           | restart more => simp [hn, SamePass] at hc
           | complete next =>
               simp only [hn, SamePass] at hc
@@ -239,13 +240,13 @@ prefix completes; all subsequent restarts preserve its result. -/
 theorem settleN_prefix (P suffix : List Nat) (hu : P.Nodup)
     (ht : ∀ w ∈ suffix, w ∉ P ∧ ∀ x ∈ P, conflict w x = false)
     {fuel fullFuel : Nat} {ds : List Nat} {q out : Result}
-    (hp : settleN M views P fuel ds conflict prefer = some q)
-    (h : settleN M views (P ++ suffix) fullFuel ds conflict prefer = some out) :
+    (hp : settleN M views P fuel ds conflict prefer realize = some q)
+    (h : settleN M views (P ++ suffix) fullFuel ds conflict prefer realize = some out) :
     Agree P out.kept q.kept ∧ Agree P out.dropped q.dropped := by
   induction fuel generalizing ds fullFuel with
   | zero => cases hp
   | succ fuel ih =>
-      cases he : run M views conflict prefer P ⟨State.empty, [], ds⟩ with
+      cases he : run (realize := realize) M views conflict prefer P ⟨State.empty, [], ds⟩ with
       | complete r =>
           simp only [settleN, he, Option.some.injEq] at hp
           subst q
@@ -259,14 +260,15 @@ theorem settleN_prefix (P suffix : List Nat) (hu : P.Nodup)
               exact ih hp h
 
 theorem settle_prefix (P suffix : List Nat) (hu : P.Nodup)
-    (ht : ∀ w ∈ suffix, w ∉ P ∧ ∀ x ∈ P, conflict w x = false) :
-    Agree P (settle M views (P ++ suffix) conflict prefer).kept
-      (settle M views P conflict prefer).kept ∧
-    Agree P (settle M views (P ++ suffix) conflict prefer).dropped
-      (settle M views P conflict prefer).dropped :=
+    (ht : ∀ w ∈ suffix, w ∉ P ∧ ∀ x ∈ P, conflict w x = false)
+    (realize : State → Nat → Entry → Option State := checkedEffect) :
+    Agree P (settle M views (P ++ suffix) conflict prefer realize).kept
+      (settle M views P conflict prefer realize).kept ∧
+    Agree P (settle M views (P ++ suffix) conflict prefer realize).dropped
+      (settle M views P conflict prefer realize).dropped :=
   settleN_prefix M views conflict prefer P suffix hu ht
-    (settle_eq_some M views P conflict prefer)
-    (settle_eq_some M views (P ++ suffix) conflict prefer)
+    (settle_eq_some M views P conflict prefer realize)
+    (settle_eq_some M views (P ++ suffix) conflict prefer realize)
 
 end ReplayPrefix
 end CovenStorelog

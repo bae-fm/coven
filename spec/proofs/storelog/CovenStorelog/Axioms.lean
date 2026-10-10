@@ -231,3 +231,17 @@ import CovenStorelog
 #print axioms CovenStorelog.Finality.Examples.decided_conflicts
 #print axioms CovenStorelog.Finality.Examples.finite_valid
 #print axioms CovenStorelog.Finality.Examples.cutoff_receipt_needed
+
+#print axioms CovenStorelog.CurrentReplay.empty_cause_latest
+#print axioms CovenStorelog.CurrentReplay.finished_circles_nonempty
+#print axioms CovenStorelog.CurrentReplay.kept_authorized
+#print axioms CovenStorelog.CurrentReplay.rotation_authority
+#print axioms CovenStorelog.CurrentReplay.rotations_conflict_with_nothing
+#print axioms CovenStorelog.CurrentReplay.equal_received
+#print axioms CovenStorelog.CurrentExamples.concurrent_addition_populates_empty_circle
+#print axioms CovenStorelog.CurrentExamples.empty_circle_cause
+#print axioms CovenStorelog.CurrentExamples.rotation_entries
+#print axioms CovenStorelog.CurrentExamples.removed_rotator_keeps_recorded_authority
+#print axioms CovenStorelog.CurrentExamples.explicit_deletion_still_wins
+
+#print axioms CovenStorelog.CurrentExamples.deleted_circle_keeps_rotation

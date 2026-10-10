@@ -78,7 +78,9 @@ theorem scan_kept (M : Log) (views : Nat → State) (entries : List Nat)
     {todo : List Nat} {r out : Result}
     (ht : ∀ w ∈ todo, w ∈ entries)
     (hk : ∀ w ∈ r.kept, w ∈ entries ∧ authorized (views w) (M w) = true)
-    (h : scan M views todo r = .complete out) :
+    {conflict prefer : Nat → Nat → Bool}
+    {realize : State → Nat → Entry → Option State}
+    (h : scan M views todo r conflict prefer realize = .complete out) :
     ∀ w ∈ out.kept, w ∈ entries ∧ authorized (views w) (M w) = true := by
   induction todo generalizing r with
   | nil => cases h; exact hk
@@ -98,7 +100,7 @@ theorem scan_kept (M : Log) (views : Nat → State) (entries : List Nat)
             · exact hk x hx
           split at h
           · exact ih hws hk' h
-          · cases he : checkedEffect r.state w (M w) with
+          · cases he : realize r.state w (M w) with
             | none => simp only [he] at h; exact ih (r := { r with dropped := w :: r.dropped }) hws hk h
             | some next =>
                 simp only [he] at h
@@ -110,13 +112,15 @@ theorem scan_kept (M : Log) (views : Nat → State) (entries : List Nat)
 
 theorem settleN_kept (M : Log) (views : Nat → State) (entries : List Nat)
     {fuel : Nat} {drops : List Nat} {out : Result}
-    (h : settleN M views entries fuel drops = some out) :
+    {conflict prefer : Nat → Nat → Bool}
+    {realize : State → Nat → Entry → Option State}
+    (h : settleN M views entries fuel drops conflict prefer realize = some out) :
     ∀ w ∈ out.kept, w ∈ entries ∧ authorized (views w) (M w) = true := by
   induction fuel generalizing drops with
   | zero => cases h
   | succ fuel ih =>
       simp only [settleN] at h
-      cases he : scan M views entries ⟨State.empty, [], drops⟩ with
+      cases he : scan M views entries ⟨State.empty, [], drops⟩ conflict prefer realize with
       | complete r =>
           simp only [he, Option.some.injEq] at h
           subst out
