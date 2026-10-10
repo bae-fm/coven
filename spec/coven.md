@@ -614,7 +614,8 @@ Two mechanisms order writes:
     write 9 and does not pass it or expose its values for restoration.
   - So a write made after its device read its own removal never counts,
     and a write from a device whose addition a later entry drops still
-    counts if its author had read that addition.
+    passes this authority check if its author had read that addition.
+    A kept removal or replacement also imposes §10's landing deadline.
 - A device has always read its own earlier writes, except effects explicitly
   discarded by an adopted reset or breaking-change snapshot (§17.1, §19.3).
   Their numbers are passed; their discarded values are not new writes' inputs.
@@ -1613,7 +1614,7 @@ Carol's tablet:
     (§11). There is no shared current-key field or local retired-key table;
     permanent sealed copies are the shared record of who can hold each key.
   - Removed members and removed or replaced devices stay. Their stored
-    writes still count when authorized, checked with their keys
+    writes still count when their authority and landing checks pass, using their keys
     ([§10](#10-device-identity)).
   - A causally ready batch of entries and its resulting replay commit in
     one transaction, so the tables always hold the replay of exactly the
@@ -1663,7 +1664,9 @@ Carol's tablet:
   - Online calls read the log first, but an upload racing another device
     or retrying after a connection failure can still land late. The rule
     applies to every store-log entry, including device registrations.
-    Ordinary app writes have no such age limit (§15).
+    App writes do not inherit this permanent entry rule. A retired device's
+    writes have the replay-dependent landing deadline in §10; active
+    devices' ordinary late writes follow §15.
 - An entry is *final* once later arrivals cannot change whether replay
   keeps or drops it. At an observed storage time T:
   - entries stored strictly before T minus 30 days are final if no entry
@@ -1921,12 +1924,14 @@ Carol's tablet:
   - Judge an old-id write by its `store_log_read`, and an old-id entry by
     its `had_read` including its implicit earlier own entries. It counts
     only if that past contains no kept replacement of the old id, just as
-    an object made before reading removal can count. The ordinary authority,
-    causality, landing, schema and reset rules still apply.
-  - Publication after replacement does not change what the object had read.
-    There is no upper number to extend and no wait for another replacement
-    to include it. Retain relevant inputs until the deciding entries are
-    final; a changed replay recomputes admission atomically (§9).
+    an object made before reading removal can count. A write must also land
+    within the retirement deadline below; entries keep §9's permanent
+    landing rule. Ordinary authority, causality, schema and reset rules apply.
+  - Publication after replacement does not change what the object had read,
+    but its storage time decides the landing check. There is no upper number
+    to extend and no wait for another replacement to include it. Retain
+    relevant inputs until the deciding entries are final; a changed replay
+    recomputes write admission atomically (§9).
   - A still-running old copy stops sending when it reads its replacement,
     and resets the same way, choosing its own fresh id. It does not take
     over the id of the device whose replacement it read.
@@ -1941,9 +1946,10 @@ Carol's tablet:
     Edits made only in the restored copy are discarded, with an app notice.
 - Ana's still-running old phone can have write 8 in flight when that
   replacement lands. If write 8 was made before the old phone read the
-  replacement, readers count it under the ordinary write rules. It needs
-  no second replacement to admit it. Reading the replacement stops the
-  old phone before it can make or send further work.
+  replacement and lands no more than 30 storage days after it, readers
+  count it under the ordinary write rules. It needs no second replacement.
+  A landing after that deadline is excluded while the replacement is kept.
+  Reading the replacement stops the old phone before further work or retries.
 - A restored copy that is behind storage never sends. A backup restored
   on the same installation with custody intact, nothing newer in storage,
   and no removal or replacement continues as that device. The checks cannot
@@ -1967,13 +1973,31 @@ Carol's tablet:
 - A write counts only if its author was a member, and its device one of
   theirs, in the store log the write had read ([§7.1](#71-causality)), so
   a write by Ana's phone counts as Ana's.
-- A removed or replaced device's writes still count if they reached storage
-  and were made before it read its removal or a kept replacement, subject
-  to the same authority, schema and reset rules as other writes.
+- For every kept entry retiring a write's device, the write counts only if
+  its `store_log_read` does not include that entry and storage published the
+  complete write no more than 30 days after the entry's storage time.
+  Retirement is removal of the device, removal of its member, or replacement
+  of its id. Exactly 30 days is allowed. Ordinary authority, causality,
+  schema and reset checks still apply.
+  - Use first complete publication times, never authored timestamps or
+    device clocks. Retries change neither bytes nor storage time (§4).
+  - A later write is dropped as `Dropped(LandedTooLate)` for its write
+    subject. Consume its position without its effects; this is not a
+    permanent refusal and does not stop the log. Retain its original inputs
+    and storage facts while a replay could restore it.
+  - This write verdict depends on kept retirements. Recompute it with replay
+    and rebuild affected data atomically (§9). If the retiring entry drops,
+    this exclusion disappears; another kept retirement can still exclude it.
+    Equal storage times, recorded reads and kept entries give equal verdicts.
+  - Entries instead keep §9's permanent rule: more than 30 days after any
+    unread entry excludes them, whether that entry is kept or dropped.
+    Dropping a retirement can restore a write, never an entry that landed
+    too late. Neither landing rule relies on §10's request-duration assumption.
 - A device that reads its own removal, or its member's, stops syncing for
   good and tells the app ([E5](api.md#e5-storage-and-sync)).
 - Removing a device takes away its storage access, so nothing it writes
-  afterwards can reach other devices.
+  after confirmed cut-off can reach other devices. Until then, readers
+  enforce the admission and landing rules above (§13).
 
 ## 11. Keys
 
@@ -2291,6 +2315,11 @@ Carol's tablet:
 
 ## 13. Removing members and devices
 
+- A removed device's writes count only before it read the kept retirement
+  and if they landed within 30 storage days of it (§10). This applies to a
+  member removal's devices too, independently of provider cut-off. Replaced
+  ids have the same write deadline. Dropping the retirement recomputes the
+  write verdict; entries keep §9's permanent landing rule instead.
 - Removing a device, such as Ana's lost phone, is an entry in the
   store log ([§9](#9-members-and-roles)), and cuts the device off from storage.
 - Providers can't cut off one device alone, so Ana cuts off all of hers,
@@ -2863,7 +2892,8 @@ Carol's tablet:
   - Its own writes still waiting in `_coven_uploads` keep their numbers, and
     it uploads them after.
   - Every device judges them under the schema and reset rules (§17.1,
-    §19.3). Ordinary late writes apply once their prior reads are covered
+    §19.3), with §10's landing deadline for retired devices. Ordinary late
+    writes from active devices apply once their prior reads are covered
     or applied; pre-reset writes outside the chosen snapshot are ignored.
   - E.g. Ana's old phone made writes 31 to 33 offline, then stayed offline
     for a year:
@@ -3665,7 +3695,8 @@ holds failures and rejected entries, without making either wait look completed.
   - file sources that cannot be uploaded, paused transfers, and provider
     work waiting for the owner, a request, or an app action;
   - a dropped entry, including “landed too late” on its author's device,
-    or a fingerprint disagreement.
+    a retired device's write that landed too late (§10), or a fingerprint
+    disagreement.
 - E.g. Carol's tablet has Ben's write 9, which read Ana's write 4. GETting
   Ana's next write, 4, returns a miss.
   - Ana's next log position reports the missing object.
@@ -3680,9 +3711,11 @@ holds failures and rejected entries, without making either wait look completed.
   - a missing file source, retained provider grant or disagreement needs
     an app action;
   - replay drops are recomputed on replay, not downloaded repeatedly;
-    a “landed too late” drop never becomes eligible again. It passes the
-    entry's position and remains reported even if a new entry succeeds.
-    A reset can clear the report, but cannot undo that drop.
+    an entry's “landed too late” drop never becomes eligible again. It
+    passes the entry's position and remains reported even if a new entry
+    succeeds. A reset can clear the report, but cannot undo that drop.
+    A write's retirement deadline is instead replay-dependent (§10):
+    dropping the retirement can restore the write without downloading it again.
 - A permanent refusal requires a complete download and a failed check:
   decryption, authentication, signature, parsing, authorization, identity,
   causality or merge validation. Calls and pending records use the same

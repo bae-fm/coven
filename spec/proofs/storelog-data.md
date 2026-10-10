@@ -105,6 +105,23 @@ assume the result already equals that fold. `CurrentData.convergence` connects
 equal received entries and equal causal, readable writes to equal rows and losses. Original merge inputs remain
 intact when membership or deletion changes.
 
+Those equal write inputs must satisfy §10's admission rule. For every kept
+entry removing a device or its member, or replacing its id, a write must
+not have read that entry and must land no more than 30 storage days after
+it. Publication at the deadline counts; a later write is excluded while
+the retirement is kept. Equal storage times, recorded reads and kept entries
+produce the same verdict; replay recomputes it atomically from retained
+inputs. Dropping a retirement can restore a write, but cannot undo §9's
+permanent rejection of an entry landing more than 30 days after any unread
+entry, kept or dropped. Neither rule needs the request-duration assumption.
+
+`CurrentData.convergence` assumes equal causal write inputs; it does not
+prove this storage-time admission calculation. Required checks cover
+removed and replaced devices, the exact boundary and a later landing,
+different arrival orders, and replay reversal restoring the write without
+restoring a permanently late entry. The retained inputs include the write's
+first storage time and recorded store-log reads until its verdict is final.
+
 `CurrentExamples.entry_only_deletion_restores` checks §14.7's deletion and its
 reversal without a row write. `deleted_return_reloads` includes a circle that
 was absent before replay. `passed_position_does_not_lose_part` loads a formerly

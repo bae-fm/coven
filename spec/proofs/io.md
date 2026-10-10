@@ -160,6 +160,15 @@ derives closure using the provider's publication witnesses.
 last send at 31, replacement read and landing at 32. Stopping upon the read
 and bounded request duration both hold, but do not justify the earlier drain.
 
+§10's write admission has a separate landing deadline: a write must not
+have read a kept retirement and must land no more than 30 storage days
+after it. Dropping that retirement recomputes admission. Entries instead
+keep §9's permanent deadline against any unread entry, kept or dropped.
+These admission rules do not establish `ClosedAfter`, which concerns raw
+publication, nor are they proved by `Retired` or the trace's delivery theorem.
+The write-time verdict and replay reversal remain verification obligations
+([store-log data](storelog-data.md), [storage](storage.md)).
+
 `drained_not_polled` and `drained_not_named` exclude a drained writer from
 subsequent idle log requests, including after reopening saved state. This
 models the IO audit's **Decisions item 15**; its earlier finding numbered 15
@@ -302,6 +311,13 @@ no Rust behavior.
   copies followed by valid ones, and other-recipient exposure. Invite cursors do
   not replace earlier copy history. After request deletion, refresh copies and
   membership before reporting decline. Known required gaps remain pending.
+- Ana's old phone has write 8 in flight when its replacement lands. Check
+  publication exactly 30 storage days later and after that deadline. Repeat
+  for device and member removal, independently of provider cutoff. Retain
+  excluded inputs while reversal is possible; dropping the retirement can
+  restore the write, never an entry rejected by §9's permanent rule. Equal
+  immutable times and kept entries must yield equal verdicts across arrival
+  orders and device clocks.
 - Check the freshness gate immediately before every send, including the file
   worker, out-of-loop calls and SDK retries. Exercise just before and exactly
   at five minutes, sleep, reopen, reconnect, failed catch-up and a catch-up

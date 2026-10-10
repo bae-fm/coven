@@ -143,6 +143,12 @@
     implicit in `had_read`; an explicit own-device position is refused.
   - A migration write has no parts; every other write has at least one
     ([§17.1](coven.md#171-host-application)).
+- Retain the write's first complete publication time from provider metadata.
+  For each kept removal or replacement retiring its device, §10 requires
+  `store_log_read` not to contain that entry and publication no more than
+  30 storage days after it. Exactly 30 days is allowed. A too-late write's
+  position is consumed without its effects; the verdict is recomputed when
+  retirement replay changes. No timestamp or verdict is added to these bytes.
 - A part's stream is its records, one frame each, in increasing `RowId`
   order, each of the part's audience; `length` counts every byte of them,
   including each seven-byte frame prefix. Record counts and total stream
@@ -196,8 +202,10 @@
   compare its `had_read`, including implicit own entries, with the complete
   stored history for §9's landing rule. A retry keeps both bytes and time.
 - “Landed too late” excludes the entry's change from replay, not its identity
-  from consumed positions. The drop and finality are derived from storage
-  times and recorded reads; neither changes these bytes.
+  from consumed positions. This drop is permanent and compares against any
+  unread stored entry, kept or dropped. Unlike D5's write deadline, dropping
+  the retiring entry never restores a too-late entry. The drop and finality
+  are derived from storage times and recorded reads; neither changes these bytes.
 
 | Tag | Change | Fields |
 | --- | --- | --- |
@@ -229,9 +237,9 @@
   distinct from the added device. It carries no log ends. Concurrent
   replacements each keep their new id and mark the old id replaced (§10).
   An old-id write counts only before it read a kept replacement, by D5's
-  `store_log_read`; an entry uses `had_read` with implicit own entries.
-  Ordinary authority and admission checks still apply. Replacement
-  introduces no key.
+  `store_log_read`, and within §10's write landing deadline; an entry uses
+  `had_read` with implicit own entries and §9's permanent landing rule.
+  Ordinary authority and admission checks still apply. Replacement introduces no key.
 - Set-access is about its author, the member whose access it records.
 - `key` and `key_hash` occur only on creation and rotation: the id and
   SHA-256 of the exact 32 key bytes ([§11](coven.md#11-keys)). The hash is
@@ -361,8 +369,9 @@
   - Positions are not a log discovery index. A writer can crash after
     uploading an object and before posting; readers GET the next log number
     regardless of what any positions object says (§6).
-  - Entry drop reasons remain local: each device computes “landed too late”
-    from D6 and storage metadata, including for its own entries.
+  - Drop reasons remain local: each device computes an entry's permanent
+    “landed too late” verdict from D6 and storage metadata, and a write's
+    replay-dependent retirement deadline from D5 and kept entries.
 - A report's subject has one of these tags:
 
   | Tag | Subject | Fields |

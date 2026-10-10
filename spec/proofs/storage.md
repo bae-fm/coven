@@ -57,23 +57,33 @@ preservation of deliberately discarded local edits.
 
 ## Replacement judged by recorded reads
 
-`ReplacementRead` supplies the results behind §10 and D6's replacement
-rule: the add-device entry names the old id but carries no log ends.
+`ReplacementRead` proves the recorded-read condition in §10 and D6:
+the add-device entry names the old id but carries no log ends.
 `registration_authority` requires the same member and a distinct new id.
-`accepts_iff` and `before_read_counts` judge admission solely by whether
-the object's recorded past includes a kept replacement of its device.
+`accepts_iff` and `before_read_counts` check whether the object's recorded
+past includes a kept replacement of its device. This is one admission
+condition, not the complete landing verdict.
 `replacement_order_irrelevant` covers concurrent replacements without
 combining counters.
 
-**Stored pre-read objects are preserved.** `stored_object_survives` combines
+§10 also requires a write to land no more than 30 storage days after every
+kept entry retiring its device. Retirement includes member removal, device
+removal and replacement. Exactly 30 days is allowed; later writes are
+excluded while that retirement is kept. Dropping it recomputes admission
+from retained inputs. Entries instead keep §9's permanent rule against any
+unread entry, kept or dropped; they never revive after a time-based drop.
+These landing checks do not depend on the provider request-duration assumption.
+
+**Stored bytes are preserved; receipt is conditional.** `stored_object_survives` combines
 create-once storage with receipt: later publications preserve the original
-bytes and time, and delivery includes the identity whenever the object had
-not read a kept replacement of its device. There is no upper write or entry
-number. `racing_upload_kept` checks an old copy whose write 2 lands after a
-replacement that saw only write 1. It counts without another replacement.
+bytes and time. Its receipt result assumes the other admission checks
+already passed; it does not model the 30-day write deadline. There is no
+upper write or entry number. `racing_upload_kept` checks an old copy whose
+write 2 lands after a replacement that saw only write 1.
 Ana's restored phone can therefore register a replacement while her old
 phone's write 2 is in flight: both stored writes remain receivable, provided
-the old phone made them before reading its replacement.
+the old phone made them before reading its replacement and each passes
+its landing and ordinary admission checks.
 
 **No duplicate application and agreement are proved.**
 `no_duplicate_application` covers arbitrary deliveries, including repeats.
@@ -96,8 +106,8 @@ checks one committed, unstored write discarded on reset. Two copies can also
 pass the check and publish different bytes to write 1: the first value remains,
 the other copy resets (`colliding_copies_lose_one_value`). Both have literal
 Lean `example` witnesses. These are the same losses §10 explicitly permits;
-removing log ends neither prevents them nor introduces a loss of the stored
-pre-read object.
+the landing deadline separately decides whether a stored pre-read object's
+effects count.
 
 **“A restored copy never sends” fails.** In `restored_copy_can_send`, a backup
 contains one queued write. Restoring on the installation that still holds its
@@ -114,13 +124,17 @@ The readings chosen are: “before it read” means the immutable recorded past
 of the copy that made the object, not whether another copy has read it;
 any kept replacement in that past excludes an old-id object; a write's
 `store_log_read` and an entry's expanded `had_read` supply that past.
-Publication after replacement is allowed when creation preceded that read.
-Agreement requires the same received objects and replayed replacements.
+Publication after replacement can count when creation preceded that read
+and the landing check passes. Agreement requires the same received objects,
+their storage times and replayed retirements.
 Restore includes replacing the database from a backup while custody survives;
 it does not imply that the app's explicit reset path was invoked.
 
 Authentication, honest recording of reads, membership authority, entry landing
-rejection, and which replacements replay keeps remain inputs. Replaying a
+rejection, the write landing deadline and which retirements replay keeps
+remain inputs. The write deadline is a required verification obligation,
+not proved by `ReplacementRead`: check removal and replacement, equality
+at 30 days, a later landing, and reversal restoring only the write. Replaying a
 changed replacement set rebuilds admission from retained objects. Files and
 snapshots do not have these write/entry read fields, so their own acceptance,
 physical cleanup, fresh-id generation and replacement registration liveness
@@ -149,8 +163,8 @@ The model has no key-copy counter and does not prove that added check.
 `Identity` also contains a separate model with recorded replacement ends.
 Its `ends_*`, `combined_end_keeps_completed` and `beyond_end_waits` results
 concern that model, not §10's admission rule. The `ReplacementRead` results
-above justify admission without those ends; neither policy is inferred
-from the other one's theorems.
+above establish the recorded-read condition without those ends; neither
+policy is inferred from the other one's theorems.
 
 `reset_unavailable`, `reset_uses_fresh_id` and `reset_discards_queue` describe
 the bootstrap boundary: retry keeps the chosen replacement; failure cannot

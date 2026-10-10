@@ -366,8 +366,11 @@ identify parts. An already cached wait is not a download trigger.
 Stream each uncached object once and check chunks as below. Apply each
 write atomically only after all checks, with its header facts and file
 references. Skipped audiences, resets and schema exclusions keep their
-existing rules. A missing required uncovered path is a blocker; retry only
-when its shared backoff permits, reusing this pass's absence observation.
+existing rules. Apply §10's retirement landing deadline from retained write
+and entry storage times and current replay; consume an excluded write's
+position while keeping inputs needed for reversal. Entries retain §9's
+permanent landing rule. A missing required uncovered path is a blocker;
+retry only when its shared backoff permits, reusing this pass's absence observation.
 
 ### 7. Fill the eager file cache
 

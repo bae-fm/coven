@@ -1880,10 +1880,11 @@ impl PendingReason {
     /// work, shared-account waits, invalid replaceable positions, and storage
     /// Network/RateLimited/NotFound/SessionExpired.
     /// AfterUpdate: Refused and UpdateRequired.
-    /// Never: a dropped entry (including LandedTooLate) or this device's removal.
+    /// Never: a dropped entry or write, or this device's removal.
     /// AppAction: every other reason, including source files and disagreements.
     /// A replay change can clear a replay-dependent reason without retrying
-    /// its subject. It cannot undo LandedTooLate.
+    /// its subject. It cannot undo an entry's LandedTooLate, but can undo a
+    /// write's retirement-dependent LandedTooLate (§10).
     pub fn retry(&self) -> Retry;
 }
 
@@ -1894,11 +1895,13 @@ pub enum EntryTarget {
     Circle(CircleId),
 }
 
-/// Why a store log entry was dropped (§9).
+/// Why an entry or a retired device's write was dropped (§9, §10).
 pub enum DropReason {
     /// Storage published this entry more than 30 days after an entry it had
     /// not read (§9). Shown as “landed too late”, including on its author's
     /// device. Permanent across replay and updates; the entry's position passes.
+    /// For a write, publication exceeded a kept retirement's 30-day deadline
+    /// (§10). Its position passes, but dropping that retirement can restore it.
     LandedTooLate,
     /// A conflicting concurrent entry beat it.
     BeatenBy(EntryId),
