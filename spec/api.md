@@ -1385,18 +1385,26 @@ while let Ok(values) = lost.next().await {
   Reconnecting an existing device keeps its registered name. Changed provider
   access is published as `Set access` before committing the new credentials.
 - A started connection runs one complete sync at a time, immediately after a
-  local write or `sync_now`, and every 30 seconds while idle. Calls arriving
-  during a sync request another pass; stopping and closing finish the active
-  pass first.
-  - Before any upload, a pass checks this device's identity and storage
-    counters (§10), then reads the store log for a replacement. Other calls
-    that send objects use the same check before sending.
-  - A pass applies the store log and keys, resumes operations and required
-    reloads, then reloads snapshots if they cover missing logs (§15).
-  - It uploads waiting writes, resumes operations waiting for those uploads,
-    downloads writes and completes any reload they require.
-  - File uploads and eager downloads follow, then snapshot writing,
-    retention and posted positions. Upload completion creates no write.
+  local write or `sync_now`, and every 30 seconds while idle, subject to
+  connection backoff and provider cooldowns. Stopping and closing finish the
+  active pass first.
+  - [One sync pass](sync-pass.md) specifies every listing, read trigger,
+    send and cache lifetime in order; [§3.1](coven.md#31-io-bounds) states
+    the request and local-work bounds. Provider-dependent choices remain
+    explicit under [§4.1](coven.md#41-open-decisions-for-io-bounds).
+  - Before any upload, the pass uses its complete catalogs, checked own
+    positions and snapshots, received store log and device custody to check
+    identity, counters, removal and replacement (§10). Other senders use
+    the same serialized check. They do not make independent duplicate scans.
+  - The pass unlocks each required custody once and reuses it throughout.
+    Its listings and retained checked bytes serve operations, reloads,
+    writes, file transfers, snapshots, retention and agreement together.
+  - Own positions are posted only when their complete publishable contents
+    change, or the post is absent. Upload completion creates no app write.
+  - Calls or app writes arriving during sync retain one wake if this pass
+    has not serviced them. Its own queue, operation and cache commits do
+    not trigger an immediate second pass. Waiting work uses the shared
+    backoff rules; a completion notification alone is not new evidence.
   - Every subject that cannot advance has its first blocker in `blocked()`.
     This includes missing prerequisites, key copies, damaged objects, dropped
     entries, fingerprint disagreements, pending operations and file failures.

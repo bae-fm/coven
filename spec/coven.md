@@ -10,6 +10,7 @@
   - [4.1 Open decisions for IO bounds](#41-open-decisions-for-io-bounds)
 - [5. Local database](#5-local-database)
 - [6. Syncing writes](#6-syncing-writes)
+  - [One sync pass](sync-pass.md)
 - [7. Order](#7-order)
   - [7.1 Causality](#71-causality)
   - [7.2 Timestamps](#72-timestamps)
@@ -159,6 +160,7 @@
 
 ### 3.1 IO bounds
 
+The request order and cache lifetimes are in [One sync pass](sync-pass.md).
 These are requirements on a device's sync, not estimates for a particular
 store. An **open decision** in §4.1 means its dependent bound is conditional;
 neither a model nor an implementation may claim that bound by assuming the
@@ -290,7 +292,9 @@ can meet the first two observations while failing the third.
   - create an object, refusing an existing path without replacing its bytes,
     in one request or, past the provider's single request limit, through its
     resumable upload;
-  - read it, whole and by range;
+  - read it, whole and by range; complete-object reads stream with bounded
+    buffers so the reader checks chunks without a request per chunk
+    ([One sync pass](sync-pass.md#one-stream-checked-as-it-arrives));
   - list a prefix, with when storage stored each object;
   - delete;
   - grant and revoke a member's access, where the provider can: Google
@@ -480,7 +484,11 @@ range requests and permits more than one stream over an object's lifetime.
 In either case checked facts survive passes, and duplicate consumers share
 the same bytes. Header facts alone cannot reconstruct discarded bodies.
 The lifetime single-stream bound and cache-retention policy remain
-conditional; pass boundaries never discard reusable facts.
+conditional; pass boundaries never discard reusable facts. E1's CloudKit
+bridge currently specifies a whole-result byte vector. A streaming bridge
+return or a stream over bounded native assets must replace that shape to
+meet the buffering requirement; native asset requests still count under
+the transfer decision below. No bridge signature is chosen here.
 
 #### Open decision: key-copy observation after finality
 
@@ -497,6 +505,22 @@ continued keys listings (a fifth logical idle scan, with its pages), or a
 publication rule that supplies this proof while preserving fixed attempted
 bytes and revocation. The four-scan idle count is conditional on this
 decision; sealed copies already observed remain known permanently (§11).
+
+#### Open decision: discovering delayed file publication
+
+File retention runs when references, protection, ownership or uploaded-file
+presence change. An upload can finish after a removed device's files were
+scanned, without another row write. Event-only retention on a provider with
+no file change feed can then miss the orphan indefinitely.
+
+Options are observing file changes through the shared feed, periodic scans
+of owned and assigned removed-device file prefixes with backoff, or a
+publication protocol that makes every completion discoverable. Periodic
+scans add their page costs even when nothing changed; a new protocol must
+cover an upload whose sender crashes before reporting success. Without
+one of these choices, both timely file cleanup and a history-independent
+idle bound cannot be promised. A global `files/` scan is not implicit work
+in every pass.
 
 #### Open decision: discovering join approval
 
