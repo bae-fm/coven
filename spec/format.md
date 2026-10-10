@@ -274,6 +274,9 @@
     migration. Migration-frozen values have empty parent maps, keeping their
     written scalar values and names independently of the current schema.
     Active losses follow merge and removal rules; frozen ones do not.
+    Dropping a table or column freezes its affected pending losses with
+    their original cause, names and setters; a row loss keeps its whole
+    value map. Freezing does not require current schema columns (§17.1).
   - A schema-change version is positive and at most the snapshot's schema
     version.
   - Loss identity orders by row, generation, values identity, frozen flag,

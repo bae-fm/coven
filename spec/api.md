@@ -1260,6 +1260,9 @@ pub struct LostValue {
     /// What replaced it: a write that hadn't read it, the removal rules, or
     /// a breaking change that excluded it.
     pub replaced_by: Replacement,
+    /// Old-shape values kept independently of the current schema (§17.1).
+    /// Their table or columns may no longer exist; dismissal still works.
+    pub frozen: bool,
     /// Entries whose outcome can still change this loss (§9), sorted by id.
     /// Empty when no non-final entry affects it. This is computed locally;
     /// it is not part of the loss's fingerprint or snapshot identity.

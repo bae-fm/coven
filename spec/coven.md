@@ -2645,6 +2645,16 @@ Carol's tablet:
 - Pre-migration inputs remain until the deciding entries are final (§9).
   If a deletion changes before then, recompute the migration's derived
   state from those inputs; do not revive erased cells by guessing values.
+- Dropping a table or column does not dismiss its pending losses.
+  - Freeze each affected loss as old-shape data before removing its schema
+    records. A whole-row loss keeps the whole captured row.
+  - Keep its table and column names, key, audience, scalar values, setters
+    and original cause. Strip live parent links; the old schema need not exist.
+  - Frozen records no longer take part in merge or current removal rules.
+    They remain readable, dismissible, snapshotted and fingerprinted.
+  - E.g. Ana's migration drops `notes.color` while Ben's losing value “blue”
+    is still pending. Every device keeps that loss under `notes.color`;
+    opening the new schema does not silently discard it.
 - Waiting writes keep their device ids, numbers, timestamps and causal
   positions. A breaking change never renumbers or redoes them.
 - Settle every attempted upload by resending its original bytes (§6).
