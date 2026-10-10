@@ -1106,6 +1106,10 @@ handle
 - Reads run on several read-only connections at once ([§5](coven.md#5-local-database)).
 - A *live query* runs once, then again whenever a write commits that changes
   rows it read.
+- Subscriptions show current results, including replay changes. Their callback
+  histories need not match between devices (§9).
+- A loss with `pending_entries` can disappear on replay. Offer a removed row
+  elsewhere with the same key (§8); copying to a new key can produce two rows.
 
 ```rust
 /// SQL access to one read-only database snapshot (§5, E4).
@@ -1254,6 +1258,10 @@ pub struct LostValue {
     /// What replaced it: a write that hadn't read it, the removal rules, or
     /// a breaking change or reset the write hadn't read.
     pub replaced_by: Replacement,
+    /// Entries whose outcome can still change this loss (§9), sorted by id.
+    /// Empty when no non-final entry affects it. This is computed locally;
+    /// it is not part of the loss's fingerprint or snapshot identity.
+    pub pending_entries: Vec<EntryId>,
     /* private identity for dismissing this loss, including its audience */
 }
 

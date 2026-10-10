@@ -953,6 +953,16 @@ Carol's tablet:
   taken out as under restrict.
 - Coven takes rows out with SQLite's foreign keys enforced, children
   first, so SQLite's own actions reach only local children.
+- Before an entry-dependent removal changes local children, coven retains
+  their rows and reference values. Those actions are derived effects, not
+  app edits.
+  - If replay reverses the removal, restore the children and references.
+    Apply any explicit local edits made since against the retained values;
+    a later app delete or replacement is not undone.
+  - Keep these inputs until the responsible entries are final (§9).
+  - E.g. Carol's local pin points at note 7 in Gifts. A provisional circle
+    deletion hides both. If the deletion drops, the note and pin return.
+    If Carol explicitly deleted that pin meanwhile, it stays deleted.
 - A synced row coven deletes or takes out can have children that only this
   device has, in local tables, so a local foreign key must never stop it:
   - coven refuses, checked when the database opens and after migrating, a
@@ -1306,8 +1316,21 @@ Carol's tablet:
     ([§10](#10-device-identity)).
   - An entry and the replay it causes commit in one transaction, so the
     tables always hold the replay of exactly the entries kept.
-- What depends on the replay follows its latest result, both ways: an
-  arriving entry can drop one kept before.
+- Every store-log effect is computed from the entries received. An
+  arriving entry can drop one kept before, or bring a dropped one back.
+  - Keep the original inputs until every entry the effect depends on is
+    final: rows, merge records, losses, file references and local sources,
+    boundary snapshots and pre-migration data.
+  - Applying a new replay replaces its derived database state atomically.
+    If rebuilding fails, keep the previous committed state and report the
+    failure; do not publish positions over the unfinished work.
+  - Snapshot eligibility follows the received entries too. A snapshot's
+    usable key does not cease to exist because its introducing removal
+    was dropped (§11). Retention cannot erase inputs a later replay needs.
+  - Local data changed by foreign-key actions follows the same rule (§8.4).
+    Clearing a reset's error records is reversible until that reset is final.
+  - App subscriptions report current results. Devices need not produce
+    the same sequence of callbacks while they receive different entries.
   - E.g. Ben deletes Gifts, and Carol's device applies it. Then Ana's
     removal of Ben from the store arrives, made concurrently: a store
     removal beats a circle deletion, which is dropped. On Carol's device
@@ -2029,7 +2052,8 @@ Carol's tablet:
   every log they reach.
   - A device's own `_coven_uploads`, `_coven_operations` and `_coven_stuck_logs`
     aren't in it. Loading keeps that local state, except that committing a
-    changed reset clears local stuck judgments (§19.1).
+    changed reset suppresses local stuck judgments (§19.1). Their inputs
+    remain until that reset is final (§9).
   - Snapshots live at `<store>/snapshots/<audience>/<device>/<n>`, where the
     audience is `store` or a circle's id.
   - Its prefix, outside its encryption, names its audience, its key and
@@ -2529,6 +2553,8 @@ Carol's tablet:
   - Their values stay as written: a reference whose foreign key the
     migration drops keeps its written value as plain data
     ([§8.4](#84-foreign-keys)).
+  - The pre-migration inputs remain available until the deciding entry is
+    final (§9); replay can replace this derived result before then.
 - A device that updates runs the migration's second part on its own
   writes still waiting in `_coven_uploads`, then uploads them.
   - Without a second part, it uploads them marked lost, and every device
@@ -2783,8 +2809,11 @@ Carol's tablet:
     version's local judgments, allowing each object one new attempt. A new
     refusal records the current version. Reopening the same version does
     not retry identical bytes.
-  - Committing a changed audience reset clears local judgments in the same
-    transaction as its reload; a failed reload clears nothing. The object
+  - Committing a changed audience reset removes local judgments from the
+    current list in the same transaction as its reload; a failed reload
+    changes nothing. Retain the suppressed judgments until the reset is
+    final, and restore them if replay drops the reset without a replacing
+    reset. The object
     may be unreadable, so its audience need not be known: this clears the
     device's local judgments for both kinds of log. Loading snapshots alone
     does not clear them or bypass required store-log history (§15).

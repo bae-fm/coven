@@ -297,6 +297,9 @@
   mismatched counts, audiences and coverage. EOF without the end marker is
   truncation; no records may follow the marker.
 - No local row ids, uploads, operations or storage paths occur in a snapshot.
+  Retained inputs for undoing a non-final entry's effects are local state;
+  they are not lost merely because a snapshot replaces the visible state.
+  `LostValue.pending_entries` is computed from replay and finality, not encoded.
 
 ### D8 Small frames
 
