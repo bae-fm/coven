@@ -225,6 +225,15 @@ pub struct StoredObject {
     pub revision: String,
 }
 
+/// Encrypted response bytes with bounded buffering (§4).
+pub struct StorageStream { /* private fields */ }
+
+impl StorageStream {
+    /// The next bounded buffer, EOF, or the original typed storage failure.
+    /// A native asset request is charged separately from this logical stream.
+    pub async fn next(&mut self) -> Result<Option<Vec<u8>>, StorageError>;
+}
+
 /// A durable upload prepared by the app's CloudKit bridge (§16.5).
 pub struct CloudKitUpload {
     /// The bridge's recorded session capability, erased on drop.
@@ -256,7 +265,7 @@ pub trait CloudKitOps: Send + Sync {
     /// Replaces complete posted positions or a clock object atomically (§6, §9).
     async fn replace(&self, location: &StorageConfig, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError>;
     /// Reads the whole object or only the asset parts covering the range (§16.3).
-    async fn read(&self, location: &StorageConfig, path: &ObjectPath, range: Option<ByteRange>) -> Result<Vec<u8>, StorageError>;
+    async fn read(&self, location: &StorageConfig, path: &ObjectPath, range: Option<ByteRange>) -> Result<StorageStream, StorageError>;
     /// Status for exactly this path; None means confirmed absent. A failure
     /// must not return None. Pending assets are not complete objects (§4).
     async fn status(&self, location: &StorageConfig, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError>;

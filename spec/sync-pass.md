@@ -60,8 +60,8 @@ These local records survive reopening and have no pass-end expiry:
   input still waiting for keys, causes, schema or an atomic reload. Keep
   the bytes, checked facts and first unmet prerequisite across passes;
   learning a key is a reason to open cached bytes, not fetch them again.
-  Full-object versus retained-range policy, its disk budget and eviction
-  are open (§4.1). Losing bytes is explicit eviction work, never ordinary
+  Keep fetched ranges under a configured retained-input disk budget.
+  Losing bytes is explicit eviction work, never ordinary
   pass cleanup. Durable refusals and file-protection uncertainty are not
   evicted merely to permit another attempt.
 - **Sealed-key presence:** observed copy paths remain known, since sealed
@@ -170,8 +170,9 @@ In this order, list once each:
 Read previously unchecked snapshot prefixes needed for selection, coverage
 or identity, and this device's positions only if their observed identity
 is new or the local checked record is missing. Reuse authored or previously
-verified evidence. A matching confirmed own post needs no GET. Prefix-only
-versus complete-object reads follow the unresolved choice in §4.1.
+verified evidence. A matching confirmed own post needs no GET. Header and
+prefix inspection uses retained ranges; load a body only when
+a consumer needs it, as specified below.
 
 Check §10 from these complete listings, the already received store log,
 checked own positions/snapshot evidence and the device-only custody id.
@@ -273,7 +274,10 @@ request order, without beginning a second full pass.
 For downloads, select paths not yet consumed for the audiences this device
 must load. A listed path with no local checked input is a read trigger;
 an already cached wait is not. Use the header to order causes and identify
-parts. Stream uncached objects once and check chunks as below. Apply each
+parts. Fetch known needed objects ahead in parallel within the configured
+transfer limit, retaining their results; reception order never bypasses
+causal or per-log application gates. Stream each uncached object once and
+check chunks as below. Apply each
 write atomically only after all checks, with its header facts and file
 references. Skipped audiences, resets and schema exclusions keep their
 existing rules. A missing uncovered path is a blocker; do not repeatedly
@@ -376,13 +380,31 @@ Never fetch the complete object again to justify the verdict. If transport
 fails before completion, it remains a failed read, not a permanent refusal.
 An update that permits another check uses the retained bytes first.
 
-The range-only alternative in §4.1 may inspect a header or prefix without
-loading the body. It must use D1/D2 bounds, cache every fetched interval,
-and never assume a fixed initial buffer contains every valid prefix. Its
-extra streams are measured under that conditional lifetime-read bound.
+A consumer needing only a write header or signed snapshot prefix starts
+with a bounded range, capped by object size. If that range does not contain
+the whole header, one second range extends the contiguous retained prefix.
+When the first range cannot reveal the exact end, extend to the maximum
+header end permitted by D1/D2, capped by object size; never assume the next
+length field fits the first buffer. Parse and bound every count before use.
+This permits at most two header requests, even for the largest position vectors.
+Retain any body bytes returned with that range too.
 
-**Carol's import.** A write of 50,000 notes arrives through one body
-stream. Its chunks are checked as they arrive. Its complete signature must
+When a consumer later needs the body, one streaming range reads from the
+retained prefix's end to EOF. Hash the cached prefix and the arriving suffix
+as one signed object. A direct full read needs no preliminary header request.
+The retained-input budget may evict completed inputs no pending apply or
+reversible effect needs; record eviction and charge any later fetch to it.
+A disk failure fails the requesting work and records its reason. Never drop
+pending bytes or advance positions while reporting success.
+
+CloudKit streams bounded asset parts through E1's bridge. Each native asset
+request is counted as a transfer part; one logical stream is not a claim of
+one native request for an object held in several assets.
+
+**Carol's import.** Retention has already checked Ana's write header.
+Carol later applies the 50,000-note import: she hashes that retained header
+and reads only the remaining bytes through one body stream. Its chunks are
+checked as they arrive. Its complete signature must
 verify before the atomic apply; neither retention nor a later agreement
 check downloads that write again.
 

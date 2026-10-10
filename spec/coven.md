@@ -201,8 +201,9 @@ a zero-body pass cannot hide a listing of the whole history.
 - **Bytes:** without failures or eviction, received bytes must be bounded
   by a provider constant plus the metadata and bodies newly needed by this
   device, never by unchanged stored history. A newly needed range is charged
-  once. Prefix inspection followed by loading must not repeatedly transfer
-  the same prefix; its exact request bound is open (§4.1).
+  once. Prefix inspection uses at most two range reads. Loading fetches the
+  uncached remainder in one body stream, reusing the retained prefix
+  ([One sync pass](sync-pass.md#one-stream-checked-as-it-arrives)).
 - **Waiting:** every automatic wait has a bounded request rate, including
   operations, invites, joining, missing keys and provider throttling.
   Delays are 1, 2, 4, …, 256, then 300 seconds between unsuccessful attempts,
@@ -415,28 +416,6 @@ must charge listing pages, including retained history; it cannot be stated
 as one miss per writer. Exact-name reads also have provider-specific request
 costs: [Drive downloads require a file id](https://developers.google.com/workspace/drive/api/reference/rest/v3/files/get),
 so an unknown name first needs an exact parent/name query.
-
-#### Open decision: partial reads and retained bytes
-
-§15 permits header-only retention and prefix-only snapshot selection. A
-snapshot prefix grows with its position vectors; a write header can occupy
-a whole frame. Neither a 4-KiB nor a 64-KiB first read always contains it.
-§14.4 may later need parts the device could not previously decrypt.
-
-One option streams and retains the complete sealed object on first demand,
-even for a prefix consumer or a key wait. It gives one body request per
-object but transfers unused bodies and needs a disk budget and eviction
-policy. The other retains inspected byte ranges and fetches only missing
-ranges later; it preserves prefix-only traffic but requires a bound on
-range requests and permits more than one stream over an object's lifetime.
-In either case checked facts survive passes, and duplicate consumers share
-the same bytes. Header facts alone cannot reconstruct discarded bodies.
-The lifetime single-stream bound and cache-retention policy remain
-conditional; pass boundaries never discard reusable facts. E1's CloudKit
-bridge currently specifies a whole-result byte vector. A streaming bridge
-return or a stream over bounded native assets must replace that shape to
-meet the buffering requirement; native asset requests still count under
-the transfer decision below. No bridge signature is chosen here.
 
 #### Open decision: key-copy observation after finality
 
@@ -2673,7 +2652,7 @@ Carol's tablet:
     uses the facts retained when that device authored, applied or checked
     the write. Only missing header facts require a read; keep its result
     across passes. A header-only read needs no parts or whole-object author
-    signature, subject to §4.1's partial-read decision. These fields describe
+    signature. These fields describe
     the object being deleted; they grant no author authority and apply no
     rows. Loading a write still checks its complete signature (§6).
 - A write waiting for entries or a key copy holds retention back, with a
@@ -2932,8 +2911,8 @@ Carol's tablet:
     Keep checked references and metadata by immutable object identity across
     passes and reopening, with an explicit completeness record. Loading and
     retention share this index; an object already checked is not downloaded
-    again. Whether to retain sealed bodies or inspected ranges is open in
-    §4.1; neither choice discards checked references at pass end.
+    again. Keep inspected ranges and any subsequently loaded body under the
+    retained-input budget; checked references have no pass-end expiry.
   - Reconsider deletion when references, protected inputs, finality,
     ownership or file presence change. Use the pass's history catalogs and
     list only file prefixes this device may delete from. Discovering a
