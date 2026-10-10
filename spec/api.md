@@ -2230,6 +2230,10 @@ loop {
 - Coven reads a file from wherever it is: the user's original, coven's own
   copy, the cache, or storage ([§16](coven.md#16-files)).
 
+Ana's photo cannot be downloaded while her voice note continues arriving.
+The photo's reason is in `blocked()`; eager-fill status still describes the
+files and bytes completed. There is no competing failure state in that progress.
+
 ```rust
 /// Progress while keeping files whole on this device (§16.4, E8).
 pub struct PinProgress {
@@ -2243,7 +2247,8 @@ pub struct PinProgress {
     pub bytes_total: u64,
 }
 
-/// Downloads of files declared CacheEager (§16.4, E8).
+/// Progress of files declared CacheEager (§16.4, E8).
+/// Failures appear only in blocked(); independent downloads keep progressing.
 pub enum EagerCacheFillStatus {
     /// No files are waiting to download.
     Idle,
@@ -2251,9 +2256,6 @@ pub enum EagerCacheFillStatus {
     Downloading(PinProgress),
     /// The app stopped these downloads.
     Cancelled(PinProgress),
-    /// A download failed; its file also appears in blocked(). Independent
-    /// downloads continue, with their progress reported on this same stream.
-    Failed { progress: PinProgress, error: Arc<FileReadError> },
 }
 
 impl CovenHandle {
