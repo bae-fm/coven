@@ -2823,8 +2823,10 @@ Carol's tablet:
 
 - The attaching write queues each file atomically with its row. It waits
   there until storage is connected and the upload succeeds.
-- The queue retains the attaching write's fixed id, key and captured
-  reference, with its size, content hash and chunk hashes. It keeps no
+- The queue retains the attaching write's fixed id, key, captured reference
+  and source location, with its size, content hash, original modification
+  time when applicable, and queue-owned chunk hashes. Retargeting the row
+  cannot replace the source facts of an already queued file. It keeps no
   encrypted copy.
 - Every attempt, including retries and resumed provider sessions, checks
   the source's size and whole-file content hash, and a user-provided
@@ -2918,14 +2920,15 @@ Carol's tablet:
     modification time, by its row and column;
   - `_coven_device_files`: each app-provided file waiting to upload, and
     where in coven's own folder;
-  - `_coven_file_chunks`: plaintext chunk hashes recorded with the local
-    source, retained until it is uploaded or its local file facts go;
+  - `_coven_file_chunks`: one plaintext hash per 64-KiB chunk, keyed by the
+    fixed `(store, device, file id, chunk index)` reference. The upload queue
+    owns these rows; attachment inserts them with the queue, and confirmed
+    upload completion deletes them with it. Hashes use separate rows so
+    file length does not become a single SQLite-value limit;
   - `_coven_file_uploads`: the upload queue, each file's captured reference,
-    independent id and key, and its provider session while one is in progress;
+    source location and original-source metadata, independent id and key,
+    and its provider session while one is in progress;
     failures and waits use `_coven_blocked`, not a second failure column;
-    - `_coven_file_upload_chunks` holds its chunk hashes, copied from the
-      local source when queued and deleted with the queue row. Keeping
-      hashes in separate rows avoids a single SQLite value limiting file size.
     - Provider sessions belong to this queue; file upload operations do not
       keep a second recording of the same session.
     - Native error objects are available in the running process. Reopening
@@ -2938,6 +2941,12 @@ Carol's tablet:
   - `_coven_cache_budgets`: each namespace's budget and cached byte total,
     updated with its cache records so a budget check needs no full sum;
   - `_coven_file_removals`: unused local copies waiting to be deleted.
+- Reading a not-yet-uploaded original finds its hashes through the row's
+  fixed where-column reference. There is no row-and-column hash copy to keep
+  in sync with the queue. After upload, reads use cache or storage (§16.1).
+  - Ana attaches A, then the row is pointed at B before A finishes. A's
+    queued reference still owns A's hashes; B's attachment records B's hashes
+    under B's own id. Finishing A cannot delete B's facts.
 - The bytes themselves are files in the store's directory: coven's own
   copies, and the cache.
 - A file's bytes are written and synced to disk before the row that names
