@@ -1439,7 +1439,7 @@ while let Ok(values) = lost.next().await {
   - Keep whether the provider answered; `StorageFailure::Network` alone
     cannot decide this. A server error response is not an offline device.
   - A denied store listing can fail the pass. A refused write, missing key,
-    unpublished schema, failed file or retention operation blocks its subject
+    unpublished schema, failed file or retention wait stops its subject
     and lets independent work continue; it does not set `Failed`.
   - Removal records a `Connection` block with `Removed`, and stops the loop
     for good. Local failures also name their blocked subject and preserve
@@ -2069,7 +2069,8 @@ loop {
 - A failed step returns its typed error to a waiting caller and records its
   first blocker in `blocked()` (E5). Pending work appears there too.
 - Automatic snapshot writing, retention and reloads use the same list.
-  Their operation records cannot be discarded through the app-work calls.
+  Retention is derived each pass and has a path subject, with no operation
+  row. Automatic operation records cannot be discarded through app-work calls.
 - App work includes keeping a reset or schema change and an app-requested
   reload. Provider access work is recorded by replay; the app may retry a
   failed request but cannot discard the current access intention.
@@ -2100,8 +2101,6 @@ pub enum OperationKind {
     RotateKey,
     /// Write and verify a snapshot for retention.
     WriteSnapshot,
-    /// Delete only history whose coverage and finality allow it.
-    Retention,
     /// Grant access, approve or decline a join, and settle the invite.
     Invite,
     /// Snapshot and reset an audience (§19.3).

@@ -134,8 +134,8 @@
     (§10, §19.2);
   - every operation with several steps resumes and finishes, for example:
     - publishing sealed key copies, then the rotation entry naming their key;
-    - writing a snapshot ([§15](#15-snapshots)), then deleting the logs it
-      covers.
+    - writing and verifying a snapshot ([§15](#15-snapshots)).
+    Retention separately deletes the history that snapshots safely cover.
 - **Revocation:** before sending a write for the first time, a device
   catches up on membership changes and lists sealed key copies at sync-pass
   start, then seals with the newest usable key. An ex-member cannot read
@@ -3255,15 +3255,15 @@ Carol's tablet:
   - Thereafter it wakes for commands, changed prerequisites or due retry
     timers, following [the pass's waiting rules](sync-pass.md#waiting-without-repeated-work).
     It does not scan and replay the store log every second while waiting.
-  - Determine snapshot growth and retention eligibility from local indexed
-    facts before creating maintenance operations. An idle check creates no
-    operation row; an unchanged blocker causes no durable rewrite.
+  - Determine snapshot growth from local indexed facts before creating a
+    snapshot operation. Retention derives eligible deletions each pass and
+    has no operation row; an unchanged blocker causes no durable rewrite.
 - A step that cannot advance records its first blocker in `_coven_blocked`
   in the same transaction that records what the step completed.
   - A waiting app call receives the typed error. The record retains its
     category across restart without converting an error into text.
-  - Every operation is visible there, including snapshots, retention,
-    internal reloads and pending provider access work.
+  - Every operation is visible there, including snapshots, internal reloads
+    and pending provider access work. Retention uses its own path subject.
   - The reason determines retry: automatic, after an update, app action,
     or never (§19.1, E5). Unrelated operations can still advance.
   - The app can retry or discard its own blocked operations with E6.
@@ -3303,9 +3303,15 @@ Carol's tablet:
 - Writing a snapshot ([§15](#15-snapshots)):
   1. write it, sealed, to a temporary file, record it and check it locally
      against the captured database state;
-  2. upload it and compare the stored bytes' checksum;
-  3. delete the log objects, older snapshots and files it lets go
-     ([§16.5](#165-uploads-and-deletion)).
+  2. upload it and compare the stored bytes' checksum. This ends the operation.
+- Retention is one derived pass step, not an operation. It computes eligible
+  log, snapshot and file deletions from verified coverage, finality, reader
+  positions, ownership and retained references (§15, §16.5). Delete is
+  idempotent. A failure has a `Retention { path }` record; no journal step
+  duplicates eligibility or needs resuming.
+  - Ana's snapshot is confirmed before she closes the app. Its publication
+    is complete even though an absent reader still retains write 9. A later
+    pass deletes 9 once the reader or storage-age condition permits it.
 - Making a circle ([§14.3](#143-circles)):
   1. make its first key and its id, and record them;
   2. upload the key sealed to this member;

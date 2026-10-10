@@ -344,8 +344,9 @@ From the same write, snapshot and positions catalogs, delete only objects
 whose coverage, finality, age/reader positions and ownership satisfy §15.
 A header missing from the local facts requires one authenticated read,
 retained across passes; existing facts require no remote reads. Each
-successful deletion updates the local catalog and reference index with
-the operation's progress. Failure retains protection and its blocker.
+successful deletion updates the local catalog and reference index. Retention
+has no operation row; eligibility is derived again from the committed facts.
+Failure retains protection and its `Retention { path }` record.
 
 Consider files when a row/loss/protected-input change, history deletion,
 finality change, upload completion, ownership change or newly discovered
