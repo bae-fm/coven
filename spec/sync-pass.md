@@ -182,13 +182,6 @@ this work and uses a current completed check plus the occupied-path rule;
 it cannot reuse evidence from before reconnect, reset or intervening work
 that invalidates it. Its required refreshes count as that call's requests.
 
-If incremental discovery is selected, a complete durable catalog plus a
-fully consumed feed update replaces these four logical listings. Fetch the
-feed before processing entries, and use its same result for all four views.
-For finality, the update must begin after observing `T`. It must meet
-§4.1's completeness and scope conditions;
-there are no additional prefix scans merely to give another consumer a view.
-
 ### 4. Observe keys and peers
 
 List **`<store>/keys/` completely on every pass**, including every
@@ -409,23 +402,34 @@ check downloads that write again.
 
 ## Counting a pass
 
-**Ben receives one note.** All four base prefixes fit one S3 page. There
-is one new readable write, its key is held, all caches are present, no
-maintenance or retry is due, and no snapshot grows enough to publish.
-Assume the chosen adapter needs no extra lookup or confirmation requests.
-Under the conditional four-scan design, Ben makes four LIST requests, one
-streaming GET for the write and one changed-positions PUT: **six requests**.
-The next unchanged pass makes four LISTs and no GET or PUT. A fifth keys
-scan, if selected under §4.1, adds its pages to both counts.
+Let `L_p(x)` be all native requests needed for one complete scoped listing
+of `x` on provider `p`, including pages and required folder traversal.
+Let `U` contain this device and every removed device whose files it may
+delete. For a warm idle pass with usable credentials:
 
-If the store-log listing instead requires two pages, those counts become
-seven and five without any extra body download. With a suitable one-page
-feed replacing the four scans, they become three and one. Additional
-provider lookups, redirects or confirmation requests must be added; these
-examples do not disguise them as part of the streaming GET. A clock probe,
-file range, generated snapshot or operation request also has its own entry
-in the count, as §4.1 requires.
+```
+D_p = L_p(store-log/) + L_p(devices/) + L_p(snapshots/)
+    + L_p(positions/) + L_p(keys/) + sum(d in U, L_p(files/d/))
+R_idle,p = D_p
+```
 
+This formula applies to S3, Google Drive, Dropbox, OneDrive and CloudKit.
+S3 counts prefix pages. Drive and OneDrive also count every folder query
+needed for their scoped traversal. Dropbox counts recursive folder pages;
+CloudKit counts native query pages. No provider has a history-independent
+constant under complete discovery. There are zero idle body reads or writes.
+
+**Ben receives one note.** Each base prefix and his own file prefix fits
+one S3 page; he owns no removed-device cleanup. The idle pass is **six LIST
+requests**. One new readable note, with no extra maintenance, adds one body
+GET and one changed-positions PUT: **eight requests**. A second files page
+makes those seven and nine. Other providers use their measured `D_p`, plus
+their native read and publication overhead.
+
+A due clock observation adds a replacement and a status call, including
+any native overhead. Open invites add their due request checks. A new file
+or snapshot, retention deletion, permission call, lookup, redirect or retry
+is charged to its separate §3.1 term; none is hidden behind 'one arrival'.
 ## Waiting without repeated work
 
 The operation worker wakes for a command, a committed prerequisite change,

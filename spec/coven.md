@@ -162,16 +162,16 @@
 
 The request order and cache lifetimes are in [One sync pass](sync-pass.md).
 These are requirements on a device's sync, not estimates for a particular
-store. An **open decision** in §4.1 means its dependent bound is conditional;
-neither a model nor an implementation may claim that bound by assuming the
-decision away. The confidentiality, integrity, finality and atomicity rules
-above still apply to every option.
+store. Discovery charges every scoped listing page (§4.1); there is no
+history-independent idle-request claim. All read, transfer, retry and local
+work limits below apply without assuming a change feed or an unknown method.
+The confidentiality, integrity, finality and atomicity rules still apply.
 
 A *steady store* has a complete local catalog, unchanged storage and local
 work, no evicted input needed by this pass, and no due retry, finality or
 retention deadline. Its connection and credentials are usable. Starting with
-an empty catalog, recovering an expired change cursor, and rebuilding an
-evicted cache are measured separately as initialization or eviction work.
+an empty catalog and rebuilding an evicted cache are measured separately as
+initialization or eviction work.
 Repeatedly discarding a catalog at pass end is not eviction.
 
 Count actual provider requests, including pagination, metadata lookups,
@@ -180,16 +180,35 @@ fetches three pages counts as three requests. Count received metadata as well
 as object bodies in downloaded bytes. Also report body bytes separately, so
 a zero-body pass cannot hide a listing of the whole history.
 
-- **Idle requests:** a pass in a steady store must make at most `C_p`
-  requests for provider `p`, independent of stored bytes, object count,
-  history length, members and devices. `C_p` is fixed by the chosen provider
-  design, never fitted to the test store. Full prefix listings do not satisfy
-  this for unbounded history (§4.1).
-- **New objects:** after `k` newly visible object versions, the target is
-  at most `C_p + c_p * k` requests, with fixed `c_p`. Replaced positions
-  count as new versions; deletions and locally requested work must be
-  accounted for explicitly, not hidden in `C_p`. How transfers and work
-  caused by an arrival fit this bound remains open (§4.1).
+- **Request accounting:** separate discovery `D`, object reads `O`, transfer
+  parts/ranges `F`, produced objects `P`, deletions `X`, and provider access
+  work `A`. Also count `M`, the metadata lookups, redirects, session-control
+  calls and confirmations not included in another term, and `E`, failed or
+  repeated requests. No request belongs to two terms.
+  - `D` is the actual complete listing-page and folder-traversal count.
+    `O` counts distinct object versions whose headers or bodies are needed.
+    At most two header ranges and one remaining-body stream are allowed
+    per object without failures or eviction: at most `3 * O` requests.
+  - `F` counts every file range, upload part and native asset-part read;
+    these are excluded from the object-stream count. `P` counts each
+    create or replacement publication request; session begin/status/finish
+    requests belong to `M`, and their parts to `F`.
+  - `X` counts deletion requests, including native deletion of asset parts.
+    `A` counts permission reads, pages, grants, revokes and due job polls.
+    `M` includes fresh single-object status and occupied-path comparison
+    overhead. A required complete-byte comparison or snapshot verification
+    body instead contributes an object to `O`.
+  - Thus `R <= D + 3 * O + F + P + X + A + M + E`. Initialization and
+    eviction are reported separately with the same terms. An arrival that
+    causes a snapshot or historical-key sharing contributes to `P`, not an
+    unspecified constant per arrival. A file's length contributes to `F`.
+- **Idle requests:** `O = F = P = X = A = M = E = 0`, so `R = D`.
+  Complete scans of store-log, devices, snapshots, positions and keys, plus
+  each file prefix this device may delete from, determine `D`. History can
+  increase their page count. More devices can increase folder traversal.
+- **New objects:** checked immutable facts and retained bytes are reused.
+  Charge only newly needed versions to `O`; changed positions count as new
+  versions. Work induced by them stays in its own term above.
 - **Downloads:** each immutable object is downloaded at most once per
   device while its retained bytes or sufficient checked facts remain.
   Reopening, another consumer, a missing prerequisite, or another pass does
@@ -198,10 +217,10 @@ a zero-body pass cannot hide a listing of the whole history.
   A partial failed transfer is not a completed download: retry its missing
   bytes where supported and charge every retransmitted byte separately.
   Eviction permits another fetch, which is counted as eviction work.
-- **Bytes:** without failures or eviction, received bytes must be bounded
-  by a provider constant plus the metadata and bodies newly needed by this
-  device, never by unchanged stored history. A newly needed range is charged
-  once. Prefix inspection uses at most two range reads. Loading fetches the
+- **Bytes:** report discovery metadata separately from new header, body and
+  file-range bytes. Complete listings can repeat unchanged metadata; body
+  reads cannot repeat unchanged retained bytes. A newly needed range is
+  charged once. Prefix inspection uses at most two range reads. Loading fetches the
   uncached remainder in one body stream, reusing the retained prefix
   ([One sync pass](sync-pass.md#one-stream-checked-as-it-arrives)).
 - **Waiting:** every automatic wait has a bounded request rate, including
@@ -229,23 +248,20 @@ Local work has bounds too:
   performs zero full-log decodes and zero replays. Decode arriving entries
   once and replay each causally ready batch once; author-view checks remain
   distinct from the replay of the resulting received set (§9).
-- An idle pass takes the database writer zero times, except for the one
-  conditional cursor commit below. No writer connection
+- An idle pass takes the database writer zero times. No writer connection
   is held across a storage request, custody call, timer wait, whole-object
   decoding, or store-log replay. Read-only decisions use read connections;
   a writer is held only to validate and commit actual state changes. An
   atomic apply can include its database work; it cannot include a download.
   Each transaction acquires the writer once; count failed transaction
   attempts separately rather than hiding repeated holds in a success count.
-- An unchanged idle pass commits zero durable transactions. If a chosen
-  feed requires saving an advanced cursor even with no object changes,
-  allow at most one transaction for it, declared as part of that design.
+- An unchanged idle pass commits zero durable transactions.
   No unchanged operation rows, blocked records or last-checked timestamps
   are rewritten. Completion status is an in-memory notification (E5).
 - Hot lookups use indexes: object identity; write audience and position;
   snapshot coverage; peer device and observed version; references by file
   path and retaining object; blocked subject/reporter and retry reason;
-  store-log storage time; retired key id; pending uploads and operations.
+  store-log storage time; key introductions and observed copies; pending uploads and operations.
   Eager-file work selects changed references lacking complete cached bytes,
   rather than scanning every app row on every pass. Cache budget checks
   use a maintained namespace total, not a sum over every cached chunk.
@@ -257,13 +273,13 @@ files, more devices and enough objects to cross listing pages. Assert hot
 query plans with representative populated tables: a scan of unchanged app
 or history rows is not an indexed lookup. Exercise warm passes, reopening,
 cache eviction, interrupted streams, withheld prerequisites and rate limits
-separately. A formula with an unresolved provider constant is a conditional
-requirement, not a passing measurement.
+separately. Measure each term above; a logical call never hides native work.
 
 **Ana's quiet library.** Adding 20,000 old files changes neither her idle
-body downloads (zero) nor local durable work (zero, or one cursor commit).
-It must not increase her idle request count. Four paginated prefix scans
-can meet the first two observations while failing the third.
+body downloads (zero) nor local durable work (zero). It can increase her
+file-discovery pages. Ben's single new note can trigger a snapshot and an
+eager file download: count the note under `O`, the snapshot under `P`, and
+the file's ranges under `F`.
 
 ## 4. Storage providers and access
 
@@ -416,22 +432,6 @@ must charge listing pages, including retained history; it cannot be stated
 as one miss per writer. Exact-name reads also have provider-specific request
 costs: [Drive downloads require a file id](https://developers.google.com/workspace/drive/api/reference/rest/v3/files/get),
 so an unknown name first needs an exact parent/name query.
-
-#### Open decision: request bounds for transfers and resulting work
-
-One newly arrived write can reference an arbitrarily long file or trigger
-a snapshot of existing rows. One store-log entry can change membership,
-requiring copies of many historical keys. Files use bounded range reads,
-and uploads above a provider's limit require parts (§16). These requests cannot be bounded by
-a constant times the number of arriving objects alone.
-
-One option states separate bounds for discovery and object reads, then adds
-explicit terms for transferred parts/ranges, produced objects, deletions and
-access operations. Another changes the object and operation limits or the
-meaning of `k` to count all those units. Merely moving work to a worker or
-another pass does not satisfy the original whole-pass bound. Record both
-total traffic and the proposed terms until this choice is made. The literal
-`C_p + c_p * k` bound is conditional.
 
 #### Open decision: retry bounds across restarts
 
