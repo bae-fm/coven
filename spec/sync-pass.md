@@ -449,11 +449,12 @@ immediately. An app retry can override ordinary backoff, never this cooldown.
 
 A joiner keeps its encrypted request, discovered metadata, downloaded
 entries and negative observations across polling iterations. It does not
-run a complete store sync on every wait. Before a key id is known, use the
-explicit discovery alternative in §4.1. Once a candidate key path is known,
-probe only that missing copy on its due timer, using cached bytes thereafter.
-Also observe the request's continued presence through the chosen status or
-catalog mechanism: key absence alone cannot report a decline. Observing
+run a complete store sync on every wait. The invite supplies the initial
+key and inviting writer, so each due approval probe uses status on one exact
+key-copy path. Read a present copy once and use cached bytes thereafter.
+Also use status for the request's continued presence: key absence alone
+cannot report a decline. An absent-key polling attempt costs two logical
+status calls, one for the copy and one for the request, plus provider lookups. Observing
 request deletion requires §12.2's fresh membership/key check before deciding
 the outcome. A keys-only result cannot admit a member without replay.
 

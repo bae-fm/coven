@@ -2631,7 +2631,7 @@ pub struct CodeInfo {
 pub enum CodeKind {
     /// Holds the person's member keys, location and S3 key where needed.
     Restore,
-    /// Holds an invite id and secret; approval is still required.
+    /// Holds an invite id, secret, initial key id and inviting writer; approval is required.
     Invite,
 }
 

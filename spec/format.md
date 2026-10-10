@@ -662,7 +662,9 @@
     member's access key, at most 16 KiB. OAuth tokens are device-only and
     never appear in a restore code.
 - An invite code (kind 11): `store:uuid | name:name | invite:uuid |
-  secret:32 bytes | storage:bytes`.
+  secret:32 bytes | initial_key:uuid | inviting_writer:DeviceId | storage:bytes`.
+  The key is the one introduced by creation. Together with the joining
+  member's id, these fields determine the approval-copy path in D10.
 - As text, a code is `CVR1-` (restore) or `CVI1-` (invite), then unpadded
   uppercase base32 (`A`–`Z`, `2`–`7`) of its frame followed by a CRC-32C
   of the frame, big-endian.

@@ -417,20 +417,6 @@ as one miss per writer. Exact-name reads also have provider-specific request
 costs: [Drive downloads require a file id](https://developers.google.com/workspace/drive/api/reference/rest/v3/files/get),
 so an unknown name first needs an exact parent/name query.
 
-#### Open decision: discovering join approval
-
-A joiner knows its invite and member ids, but the invite has no store key id
-(D13), and sealed-key paths put the random key id before the member id
-(D10). “Poll its sealed key copy” is not yet one known-path request.
-
-Keeping the format requires a cached keys catalog with incremental discovery,
-or repeated keys listings charged by page. Alternatively an invite could
-name an initial key id, or an authenticated result at a known invite path
-could name the copies. Either changes the format or publication protocol.
-Every option must still distinguish decline from approval racing deletion
-of the request (§12.2), wait for effective membership, and expose permission
-errors. A bounded single-object join probe remains conditional.
-
 #### Open decision: request bounds for transfers and resulting work
 
 One newly arrived write can reference an arbitrarily long file or trigger
@@ -2081,7 +2067,8 @@ Carol's tablet:
 - An admin adds a person with an *invite*, a code shown as a QR code,
   holding:
   - the store's id, name and location;
-  - the invite's id, and a one-time *invite secret*;
+  - the invite's id, a one-time *invite secret*, the initial store key id
+    from the creation entry, and the inviting writer's device id;
   - on S3, an access key the admin made for the new person in the
     provider's console and entered.
 - E.g. Ana adds Carol, on Google Drive:
@@ -2104,6 +2091,15 @@ Carol's tablet:
 - The invite only lets a device ask; Ana's approval is what lets Carol in.
 - Only the device that made the invite holds its secret, so only it shows
   and approves the invite's requests.
+- Carol polls exactly
+  `<store>/keys/<inviting writer>/store/<initial key>/<Carol's member id>`
+  with the single-object status call, under the shared backoff. The approving
+  device publishes that historical copy before the membership entry, even
+  if the store has since rotated. Once present, Carol reads and retains it.
+  No polling iteration scans every device's entry 1 while she waits.
+  - Ana's invite names K1 and her phone. Ana rotates to K2 before approving
+    Carol; approval still publishes K1 at the promised path, then supplies
+    K2 and every other historical store key.
 - Carol's phone learns the outcome from storage:
   - her store key sealed to her, then the store log entry adding her:
     she's in;
