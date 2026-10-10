@@ -1249,7 +1249,7 @@ Carol's tablet:
     writes ([§6](#6-syncing-writes)).
   - The device in the path is only where the entry was written from.
   - Each device numbers its own entries, so no two entries ever get the
-    same path.
+    same path. There is no shared sequence or cross-device slot to claim.
   - Whose entry it is comes from its signature: an entry signed with Ana's
     key is Ana's, whichever of her devices wrote it.
 
@@ -1265,6 +1265,20 @@ Carol's tablet:
 
   - The store's first entry creates it, names its first admin, and adds
     the device that wrote it, with its name.
+- Administrative actions require storage to be reachable. Before starting
+  membership, role, access, circle or reset work, catch up on the store log
+  and validate against that view.
+  - Without storage, or if the catch-up fails, return the typed failure
+    without reserving an entry or starting an operation.
+  - An already-started operation keeps its durable progress after a
+    connection failure; its immutable attempted entries still retry (§18).
+  - Two online devices can still act concurrently: each can finish reading
+    before the other's entry is stored. Replay decides their result.
+  - Local app writes and local schema migration remain available offline.
+    Publishing a schema raise needs storage, like publishing any entry.
+  - E.g. Ana's phone cannot queue “remove Ben” while offline. Once it
+    catches up online, the call either starts with that membership view
+    or returns the reason the change is no longer allowed.
 - Roles:
   - several equal admins;
   - only admins add and remove members, and change roles;
@@ -1456,7 +1470,8 @@ Carol's tablet:
   Ana adds Carol             Ben removes Dan            the removal
   ```
 
-- E.g. Ana, Ben and Carol are admins, and each, offline, removes another:
+- E.g. Ana, Ben and Carol are admins. Each reads the store log, then
+  removes another before receiving the others' entries:
 
   ```
   first stamp    Ana removes Ben
@@ -1543,7 +1558,7 @@ Carol's tablet:
 - Sealed circle keys live at `<store>/keys/circles/<circle>/<key>/<member>`
   ([§14.3](#143-circles)).
 - So two concurrent removals never write their keys to the same paths.
-  - E.g. Ana removes Dan while Ben, offline, removes Erin: each removal
+  - E.g. Ana removes Dan while Ben, on another device, removes Erin: each removal
     names its own new store key; the two conflict, since each key is
     sealed to the member the other removes, so the earlier applies and
     the other is redone against it ([§9](#9-members-and-roles)).
@@ -1803,7 +1818,7 @@ Carol's tablet:
   ([§9](#9-members-and-roles)).
   - Otherwise the new member would hold only the old key, and couldn't
     read anything written after the rotation.
-  - E.g. Ana adds Carol while Ben, offline, removes Dan: on every device
+  - E.g. Ana adds Carol while Ben, on another device, removes Dan: on every device
     Carol's add is dropped and tracked in the replay. Ana can invite Carol again.
   - Carol's phone shows the join as dropped; Ana invites her again, or
     cancels the invite, which takes back the storage access it granted
@@ -2670,9 +2685,11 @@ Carol's tablet:
     concurrent entry already removed.
 - A device runs one operation that writes store log entries at a time, and
   none while it reloads from a snapshot.
-- The app call that starts an operation returns once it finishes or fails
-  for good; without storage it waits. Dropping the call doesn't stop the
-  operation.
+- An app call first satisfies the online checks of §9. Once its operation
+  starts, the call returns when it finishes or cannot proceed without app
+  action. Dropping the call does not stop the recorded operation.
+- Work already recorded can wait for storage to return. This does not
+  allow an offline call to start a new administrative action.
 - Steps are ordered so other devices never see a half-done operation.
 - Anything another device reads, such as a store log entry, is uploaded
   last, after everything it refers to.

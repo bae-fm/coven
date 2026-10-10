@@ -1893,6 +1893,10 @@ loop {
 
 ### E6 Operations and recovery
 
+- Administrative calls first catch up on reachable storage (§9). No storage
+  returns `SyncError::NoStorage`; a failed read returns its typed error.
+  Neither starts an operation or reserves an entry. Already-started work
+  retains its progress across network failures.
 - Every unfinished operation is a row in `_coven_operations`
   ([§18](coven.md#18-operations)).
 - A failed step goes to the app call that started its operation while
@@ -2273,6 +2277,7 @@ match stream.read_at(resume_at, 256 * 1024).await {
 
 - Only admins add and remove members, and change roles; each member removes
   their own devices, and admins any device ([§9](coven.md#9-members-and-roles)).
+- Administrative calls require an online store-log catch-up (§9, E6).
 - Removing a member is an operation ([§18.1](coven.md#181-operations)).
 - Removing an account can leave access through a parent, a grant reaching other
   accounts, an unidentified recipient, or the owner. `MemberRemoval::AccessRemains`
@@ -2814,6 +2819,7 @@ pub trait MemberKeyCustody: Send + Sync {
 ### E12 Circles
 
 - A circle's members add and remove its members ([§14.3](coven.md#143-circles)).
+  Circle changes first catch up on reachable storage (§9, E6).
 - Circle calls return `SyncError` ([E5](#e5-storage-and-sync)), as member calls
   do ([E9](#e9-members-and-devices)). `CircleNotMember`, `CircleDeleted` and
   `NotStoreMember` retain the circle or member id the app can act on.
