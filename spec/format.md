@@ -5,10 +5,11 @@
   to [§19](coven.md#19-recovery) store, laid out exactly.
 - `coven-format` implements it, with crypto's ciphers for the sealed layers
   ([§20.1](coven.md#201-crates)).
-- It is format 2 ([§17.2](coven.md#172-covens-schema)). A
-  change to any layout here is a new format version, and older versions'
-  readers stay. Coven writes the newest format and reads every older one
-  without a store-wide version raise ([§17.2](coven.md#172-covens-schema)).
+- It is format 1, the first; no older format exists
+  ([§17.2](coven.md#172-covens-schema)). After release, a change to any
+  layout here is a new format version, and older versions' readers stay.
+  Coven writes the newest format and reads every older one without a
+  store-wide version raise ([§17.2](coven.md#172-covens-schema)).
 - Coven's local `_coven_` tables keep their own encodings, versioned by the
   database's schema; they reuse the primitives of D2, and appear here only
   where they must agree across devices: the fingerprint (D11). Their SQL
