@@ -378,8 +378,7 @@ Two mechanisms order writes:
 - The stamping rule:
   - each device keeps the latest timestamp it has seen, from its own writes
     and every write it applies, saved on disk;
-  - a write that waits, such as one stamped too far ahead, isn't seen yet,
-    so a device with a wrong clock can't drag the others' stamps forward;
+  - a write waiting for a cause or a key is not seen until it applies;
   - to stamp a new write:
     - if its wall clock is past that, it uses the wall clock, counter 0;
     - otherwise it uses that latest time, counter raised by one;
@@ -391,11 +390,20 @@ Two mechanisms order writes:
   - A wall clock past the last time 48 bits hold, in the year 10889, or a
     latest timestamp already at that time with its counter at the maximum,
     fails the write with `DbError::ClockOutOfRange`.
-- A write stamped more than five minutes ahead of the receiving device's
-  clock waits until that clock catches up, instead of being applied.
-- Store log entries are stamped the same way, from the same latest
-  timestamp, and applying one advances it like applying a write; one
-  stamped more than five minutes ahead waits too.
+- A write applies once its causes and keys are available, whatever its
+  timestamp says about the receiving device's clock.
+- Store log entries use the same latest timestamp. Applying an entry
+  advances it; an entry never waits for the wall clock either.
+- Loading a snapshot adopts its applied writes' timestamps under the same
+  rule. Snapshot loading and retention impose no wall-clock hold.
+- A far-ahead clock can move other devices' timestamps forward.
+  - E.g. Ana's phone jumps a year ahead and edits note 42. Ben's laptop
+    applies that edit as soon as its causes arrive.
+  - Ben's next edit is stamped after Ana's, even with his clock set right.
+  - Carol's concurrent edit, made without reading Ana's and with the
+    earlier stamp, loses; its value is recorded as usual (§8).
+  - Until real time catches up, devices that have seen the future stamp
+    keep using that time with increasing counters. Sync does not freeze.
 
 ### 7.3 Example
 
