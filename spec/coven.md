@@ -140,10 +140,12 @@
   - A tried write retains its first attempt's key and bytes on every retry.
     Nothing is dropped or rewritten for revocation; storage access is cut
     off separately (§13).
-- **History cleanup:** snapshots let devices delete covered logs and older
-  snapshots once the store-log decisions they depend on are final (§9).
-  An absent device can delay finality and require retaining that history.
-  The store log and sealed keys remain.
+- **Bounded storage:** device logs and superseded snapshots are deleted once
+  snapshots cover them and the store-log decisions they depend on are final
+  (§9, §15). An absent device does not hold finality back.
+  - A store whose admins keep racing settles once more than 30 storage days
+    have passed since its last late entry (§9).
+  - The store log, sealed keys and still-required boundary snapshots remain.
 - **Nothing waits silently:** whatever coven cannot apply or deliver is in
   the blocked list, with its subject and typed reason (§19.1).
 
@@ -184,6 +186,10 @@
   - delete;
   - grant and revoke a member's access, where the provider can: Google
     Drive, Dropbox, OneDrive and iCloud share with an account.
+- Storage times come from the provider, on one clock for this store.
+  An immutable object's time is its first complete publication; retrying
+  an occupied path does not change it. Replacing posted positions gets
+  the replacement's storage time. Publication times do not go backwards.
 - Device paths have one intended writer: the device they name. Retrying
   that writer uses fixed bytes. A copied identity can violate this;
   the checks in §10 detect it before sending or when a path is occupied.
@@ -346,8 +352,8 @@
   - Pending uploads can prevent advancing that past. Blocked records still
     travel: reuse the last publishable positions and omit fingerprints
     unless they describe exactly those positions.
-  - Store-log acknowledgements obey §9, including settling reserved entries
-    before acknowledging beyond them.
+  - Store-log positions count consumed entries, kept or dropped. They do
+    not establish finality; that uses storage times and recorded reads (§9).
   - The object's member signature is checked against the member the received
     store log names for its device. An unknown device waits for registration;
     a wrong or missing signature is refused (§19.1).
@@ -1306,6 +1312,8 @@ Carol's tablet:
     without reserving an entry or starting an operation.
   - An already-started operation keeps its durable progress after a
     connection failure; its immutable attempted entries still retry (§18).
+    An entry that lands too late is dropped under the rule below. Its
+    publication is settled, but its requested change has not succeeded.
   - Two online devices can still act concurrently: each can finish reading
     before the other's entry is stored. Replay decides their result.
   - Local app writes and local schema migration remain available offline.
@@ -1328,12 +1336,14 @@ Carol's tablet:
   whatever order they arrived in.
   - The machine-checked store-log model ([Appendix C](proofs/storelog.md))
     must establish this for these conflict and replay rules, including
-    concurrent changes to different members and circle deletion.
+    concurrent changes to different members, circle deletion, and the
+    storage-time drop and finality rules below.
 - A device applies an entry once it has every entry that entry had read.
 - Each device keeps, in coven's local tables:
   - `_coven_store_log`: every entry it has applied, as downloaded and
-    checked, its immutable author-view checks, and whether the replay kept
-    or dropped it;
+    checked, its storage time, its immutable author-view checks, whether
+    it landed too late, whether replay kept or dropped it, and established
+    finality;
   - `_coven_store_log_uploads`: locally authored entries with their numbers,
     timestamps, recorded past, plaintext and sealing key id fixed before upload;
     `_coven_store_log_key_uploads`: their sealed-key objects, uploaded first.
@@ -1390,32 +1400,77 @@ Carol's tablet:
     that took them out no longer holds ([§14.7](#147-deleting-a-circle)).
   - Entries waiting on ones they had read stay in storage until those
     arrive.
-- An entry is *final* when no concurrent entry can still arrive.
-  - Every device that could have authored a concurrent entry must have
-    posted signed store-log positions including it.
-  - Before posting, a device settles every earlier reserved store-log
-    entry and every earlier own write. A post acknowledges the entry even
-    if that device's replay drops it.
-  - Read each acknowledging device's log through the entry position in
-    its post before treating the acknowledgement as proof of finality.
-    This includes its entries that arrived after the entry being judged.
-  - A newly added device catches up before authoring (§12.1). Removal in
-    the current replay alone does not excuse a device's acknowledgement:
-    that removal can still be dropped.
-  - Posts from currently known devices alone are insufficient if a
-    concurrent registration could introduce another author. Until every
-    possible author's acknowledgement is established, finality is unproved
-    and cleanup retains the inputs.
-  - Silence, including 30 days without a post, is not acknowledgement.
-    An immutable attempted entry may still be uploaded on return.
-- Only physical cleanup waits for finality. Key rotation and provider
-  revocation act on the current replay immediately.
-- E.g. Ana's phone resets the store while Ben's laptop is unreachable.
-  Carol's tablet loads Ana's snapshot, but retains the previous inputs.
-  Ben's signed post eventually includes the reset. Carol first reads the
-  entries his post names; one could contain a competing reset. Once every
-  possible author has acknowledged and those entries are present, cleanup
-  can use the final winner.
+- An entry *lands* when storage publishes its complete object. Use that
+  storage time, never its author's timestamp or a receiving device's clock.
+  Thirty days means 30 × 24 hours.
+  - An entry is *late* if it landed without having read every entry stored
+    before it. Its recorded positions include its own earlier entries,
+    and count both kept and dropped entries as read.
+  - Drop an entry if it lands more than 30 days after the storage time of
+    any entry it had not read. Exactly 30 days does not drop it.
+  - Judge this against all stored entries, including dropped ones and
+    entries from newly discovered devices, not only the author's past.
+    Complete that check before replay or saving author-view checks.
+  - This drop is permanent: keep the entry and pass its position, but
+    exclude its change from every replay, including author views. It is
+    not a damaged object and does not stop its device's log.
+    Its keys and recorded storage access still follow §11 and §13.
+  - Its author's device records `Dropped(LandedTooLate)` in the blocked
+    list: “landed too late”. A new attempt at the action catches up online
+    and uses a new entry; it cannot rewrite the stored one (§18).
+  - Online calls read the log first, but an upload racing another device
+    or retrying after a connection failure can still land late. The rule
+    applies to every store-log entry, including device registrations.
+    Ordinary app writes have no such age limit (§15).
+- An entry is *final* once later arrivals cannot change whether replay
+  keeps or drops it. At an observed storage time T:
+  - entries stored strictly before T minus 30 days are final if no entry
+    stored from T minus 30 days through T is late;
+  - include both ends of that recent window, and include dropped entries
+    when checking it. Entries with the same storage time stay on the
+    same side of the window;
+  - this test advances finality only after more than 30 days without a
+    late entry. An entry once final stays final; later races cannot reopen it.
+    The retained store log also lets a device establish finality from an
+    earlier qualifying window.
+- Establish T from storage before starting a complete store-log listing.
+  Read and judge every entry through T, including unknown devices' logs,
+  before advancing finality. A gap, unreadable entry or failed listing
+  blocks that check and the cleanup that needs it (§19.1).
+  - A provider-assigned stored time already observed is a lower bound on
+    storage's current time. A quiet store needing cleanup replaces this
+    device's signed posted positions, then reads their new stored time
+    before listing the store log. This uses the existing positions object,
+    with the same rules for publishable positions and fingerprints (§6).
+  - No device's acknowledgement is required. A sleeping device or a
+    concurrently registered one has the same landing deadline as any other.
+- Why this holds:
+  - every entry in the recent window read all the older entries;
+  - every future entry that escapes the time-based drop must also read
+    all those older entries;
+  - those reads force later timestamps (§7.2) and prevent concurrency with
+    the older entries. Replay therefore keeps the same older prefix and
+    cannot change its kept or dropped results, even through a chain.
+- E.g. Ana and Carol are admins; Ana and Ben share Gifts. Ben's fast clock
+  makes the timestamp order A, C, B:
+  - Day 0: Ana's phone stores reset A. Ben's laptop has already attempted
+    deletion B without reading A; its upload has not landed.
+  - Day 28: Carol's tablet reads A and attempts removal C of Ben from the
+    store. C has a later stamp than A but an earlier one than B.
+  - Day 29: B lands. It missed A by 29 days, so it survives and defeats A.
+    B is late, so A cannot become final on day 30.
+  - Day 31: C lands. It read A and missed B by only two days, so it
+    survives. C defeats B before B can defeat A; replay keeps A and C.
+    C is late too, so the wait starts again.
+  - After day 61, with no further late entry, all three results are final.
+    Cleanup can release the inputs no longer needed by the winning reset.
+    If C had instead landed after day 59, it would have missed B by more
+    than 30 days and been dropped as “landed too late”.
+- Only physical cleanup waits: logs covered by snapshots, a deleted
+  circle's rows, files and objects, pre-breaking-change inputs, and local
+  sources kept for reversible effects. Release them once every entry they
+  depend on is final and their other retention checks pass (§15, §16.5).
+  Key rotation and provider revocation act on the current replay immediately.
 - The member list is what you get by replaying the applied entries in
   timestamp order, from the first.
   - Each time an entry arrives, the device replays them all again, from
@@ -1427,7 +1482,8 @@ Carol's tablet:
     removal's circle keys match, a removed device's observed owner, and
     the circles a member removal deletes in that view. These commit in
     the same transaction as the entry and are reused on later replays.
-    Kept and dropped marks still start afresh for each arriving entry.
+    Replay marks start afresh for each arriving entry; the permanent
+    “landed too late” exclusions remain.
 - At its place in the replay, an entry applies only if its author's role
   allowed it, in the member list the author had read.
 - Then, an entry whose change is already in place applies and changes
@@ -1443,10 +1499,11 @@ Carol's tablet:
     with.
 - When an entry beats some already applied, they are all dropped, and the
   replay starts again without them.
-  - A dropped entry stays dropped until that replay ends; the next arrival
-    starts a new replay with every entry.
-- A dropped entry has a blocked record with its replay reason. The record
-  changes or disappears with replay; it is not a permanent byte judgment.
+  - A replay-dropped entry stays dropped until that replay ends; the next
+    arrival starts afresh, still excluding entries that landed too late.
+- A dropped entry has a blocked record with its reason. Replay reasons
+  can change until finality; “landed too late” cannot. Neither is a
+  permanent refusal of the entry's bytes (§19.1).
 - Whose entry it is comes from its signature, not from the device it was
   written from, so a new device adds itself, signed with its member's key
   ([§12.1](#121-a-persons-new-device)).
@@ -1516,8 +1573,9 @@ Carol's tablet:
   - A device that already observed its own removal stops for good (§10).
     It does not keep reading to discover a later reversal. In this case,
     another device of the remaining member may need to add it again.
-- A dropped entry stays dropped for that replay even if its defeater later
-  drops. The next arriving entry starts a fresh replay with all entries.
+- A replay-dropped entry stays dropped for that replay even if its defeater
+  later drops. The next arrival starts a fresh replay, with time-based drops
+  still excluded.
 
 ## 10. Device identity
 
@@ -1559,6 +1617,9 @@ Carol's tablet:
   - A still-running old copy stops sending when it reads its replacement,
     and resets the same way. Its replacement records any additional stored
     objects, so another copy's completed upload is not lost.
+  - Replacement does not exempt an entry from §9's landing rule. A stale
+    registration or replacement retry that lands too late is consumed and
+    reported; registering again uses a new entry after catching up online.
 - E.g. Ana backs up her phone after write 5, then uploads writes 6 and 7.
   Her restored phone still has counter 5.
   - Its storage check finds 7 before it sends anything. It registers as
@@ -1742,6 +1803,8 @@ Carol's tablet:
   carry OAuth tokens.
 - The new device then adds itself to the store log, signing with the
   member key ([§9](#9-members-and-roles)).
+  It catches up before reserving its entry and follows the same landing
+  rule as existing devices; finality does not depend on knowing it in advance.
 - The person writes the code down when they create or join a store, as
   part of setup.
 - On Apple platforms, coven writes the code to iCloud Keychain whenever it
@@ -2279,12 +2342,10 @@ Carol's tablet:
     object unnecessary, is final (§9);
   - every device's posted write position has passed it, or storage has
     held it for 30 days.
-  - Age compares storage times only: “now” is the newest stored time in
-    the complete listing for this store, and the object's age is the
-    difference from its listed stored time. An empty listing proves no age.
-  - A quiet store can delay cleanup; it cannot make an object old early.
-    Device-made write and entry timestamps are never compared with these
-    storage times.
+  - Age compares storage times only: use the observed storage time T from
+    §9 and the object's first stored time. Refreshing signed posted positions
+    lets a quiet store establish age without waiting for another app write.
+    Device-made write and entry timestamps never establish storage age.
   - E.g. Ana's phone clock jumps ahead a year. A log stored yesterday is
     still only one storage day old, so that jump cannot release it.
   - Every device means every active device in the store log; removed and
@@ -2866,6 +2927,10 @@ Carol's tablet:
   first step, against the member list it then has.
   - Unless the drop leaves nothing to do, such as removing a member a
     concurrent entry already removed.
+  - Starting over repeats §9's online catch-up and validation. This also
+    applies after “landed too late”: the old entry remains dropped and
+    reported, and any replacement has a new number and recorded past.
+    A failed validation reaches the caller and blocks the operation.
 - A device runs one operation that writes store log entries at a time, and
   none while it reloads from a snapshot.
 - An app call first satisfies the online checks of §9. Once its operation
@@ -3004,7 +3069,8 @@ Carol's tablet:
     `Waits(EntryFinality(entry))` naming that entry (§9);
   - file sources that cannot be uploaded, paused transfers, and provider
     work waiting for the owner, a request, or an app action;
-  - a replay-dropped entry or a fingerprint disagreement.
+  - a dropped entry, including “landed too late” on its author's device,
+    or a fingerprint disagreement.
 - E.g. Carol's tablet has Ben's write 9, which read Ana's write 4. Storage
   currently lists only Ana's writes 1 to 3.
   - Ana's next log position reports the missing object.
@@ -3018,7 +3084,10 @@ Carol's tablet:
     format, waits for the applicable update;
   - a missing file source, retained provider grant or disagreement needs
     an app action;
-  - a dropped entry is recomputed on replay, not downloaded repeatedly.
+  - replay drops are recomputed on replay, not downloaded repeatedly;
+    a “landed too late” drop never becomes eligible again. It passes the
+    entry's position and remains reported even if a new entry succeeds.
+    A reset can clear the report, but cannot undo that drop.
 - A permanent refusal requires a complete download and a failed check:
   decryption, authentication, signature, parsing, authorization, identity,
   causality or merge validation. For example, a write cannot have a timestamp

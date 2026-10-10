@@ -218,6 +218,8 @@ pub struct StoredObject {
     /// Complete encrypted length in bytes.
     pub size: u64,
     /// Server publication time of the complete object, not the uploading device's clock.
+    /// Immutable objects retain their first stored time across retries. Replaced
+    /// positions carry their replacement time, used to observe storage time (§9).
     pub stored_at: SystemTime,
 }
 
@@ -1262,6 +1264,8 @@ pub struct LostValue {
     /// Entries whose outcome can still change this loss (§9), sorted by id.
     /// Empty when no non-final entry affects it. This is computed locally;
     /// it is not part of the loss's fingerprint or snapshot identity.
+    /// Storage-time finality can change this list without changing the loss;
+    /// that committed change also notifies subscribe_lost_values().
     pub pending_entries: Vec<EntryId>,
     /* private identity for dismissing this loss, including its audience */
 }
@@ -1851,14 +1855,19 @@ impl BlockedReason {
     /// work, shared-account waits, invalid replaceable positions, and storage
     /// Network/RateLimited/NotFound/SessionExpired.
     /// AfterUpdate: Refused and UpdateRequired.
-    /// Never: a dropped immutable entry or this device's removal.
+    /// Never: a dropped entry (including LandedTooLate) or this device's removal.
     /// AppAction: every other reason, including source files and disagreements.
-    /// A replay change can clear any derived reason without retrying its subject.
+    /// A replay change can clear a replay-dependent reason without retrying
+    /// its subject. It cannot undo LandedTooLate.
     pub fn retry(&self) -> Retry;
 }
 
 /// Why a store log entry was dropped (§9).
 pub enum DropReason {
+    /// Storage published this entry more than 30 days after an entry it had
+    /// not read (§9). Shown as “landed too late”, including on its author's
+    /// device. Permanent across replay and updates; the entry's position passes.
+    LandedTooLate,
     /// A conflicting concurrent entry beat it.
     BeatenBy(EntryId),
     /// At its place in the replay, the member, device or circle it changes
@@ -2031,6 +2040,10 @@ loop {
   returns `SyncError::NoStorage`; a failed read returns its typed error.
   Neither starts an operation or reserves an entry. Already-started work
   retains its progress across network failures.
+- A tried entry still publishes its fixed bytes. If it lands too late, its
+  `Entry` subject reports `Dropped(LandedTooLate)`; publication settles but
+  the action has not succeeded. Starting the operation over catches up again
+  and uses a new entry. Its old entry's blocked record remains (§18, §19.1).
 - Every unfinished operation is a row in `_coven_operations`
   ([§18](coven.md#18-operations)).
 - A failed step returns its typed error to a waiting caller and records its

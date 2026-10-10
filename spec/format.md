@@ -190,6 +190,14 @@
   change     u8, then its fields
   ```
 
+- The storage time is provider metadata, not an author-supplied field.
+  Readers retain the first complete publication time with the entry and
+  compare its `had_read`, including implicit own entries, with the complete
+  stored history for §9's landing rule. A retry keeps both bytes and time.
+- “Landed too late” excludes the entry's change from replay, not its identity
+  from consumed positions. The drop and finality are derived from storage
+  times and recorded reads; neither changes these bytes.
+
 | Tag | Change | Fields |
 | --- | --- | --- |
 | 0 | Create store | `store:uuid \| name:name \| admin:MemberKeys \| access:MemberAccess \| device_name:name \| key:uuid` |
@@ -336,12 +344,15 @@
   ```
 
 - Positions describe a causally closed applied past, with own writes
-  uploaded. Store-log acknowledgements also require earlier reserved own
-  entries to be settled (§6, §9).
+  uploaded. Consumed store-log entries include dropped ones, including
+  those that landed too late (§6, §9).
   - Blocked reports can change while positions stay at the last publishable
     past. Omit fingerprints unless they describe exactly that past.
-  - Read the entries an acknowledgement names before using it for finality.
-    Storage age alone is not an acknowledgement.
+  - Positions are not finality acknowledgements. Their provider-assigned
+    replacement time can supply T for §9's subsequent store-log check.
+    Replacing a post to observe time advances no positions by itself.
+  - Entry drop reasons remain local: each device computes “landed too late”
+    from D6 and storage metadata, including for its own entries.
 - A report's subject has one of these tags:
 
   | Tag | Subject | Fields |
