@@ -1406,6 +1406,22 @@ while let Ok(values) = lost.next().await {
     blocked records. Live queries report committed changes (E4).
   - Reset and coven-update retry rules are in §19.1. Neither a disagreement
     nor a peer's silence triggers recovery on its own.
+- `Offline` describes the last failed attempt, not the connection's history.
+  `Failed` means storage answered with an error that prevented the whole pass.
+  - Keep whether the provider answered; `StorageFailure::Network` alone
+    cannot decide this. A server error response is not an offline device.
+  - A denied store listing can fail the pass. A refused write, missing key,
+    unpublished schema, failed file or retention operation blocks its subject
+    and lets independent work continue; it does not set `Failed`.
+  - Removal records a `Connection` block with `Removed`, and stops the loop
+    for good. Local failures also name their blocked subject and preserve
+    their typed cause for a waiting caller.
+  - If the database cannot record a blocker, stop the loop and fail database
+    calls and live queries with that cause until the store is reopened.
+    Never expose an apparently empty blocked list after losing its update.
+- E.g. Ana syncs successfully, then loses Wi-Fi. The next attempt is
+  `Offline`. A later provider error denying the store listing is `Failed`.
+  One bad photo while the rest syncs leaves `Synced` with a file blocker.
 - A device that isn't connected still reads and writes
   ([§3](coven.md#3-guarantees)); its writes wait in `_coven_uploads`.
 - `start_sync` builds the provider client if absent, reading credentials from
@@ -1648,8 +1664,8 @@ pub enum SyncError {
     Rejected(DropReason),
     /// An object required by the change failed its checks.
     Damaged(DamagedObject),
-    /// The device must stop syncing: removed or update required.
-    Stopped(SyncFailure),
+    /// This device or its member was removed; syncing stops for good (§10).
+    Removed,
     /// No storage is connected for a call that requires it.
     NoStorage,
     /// The provider refused or failed the call.
@@ -1673,8 +1689,8 @@ pub enum SyncError {
     /// The member's provider account holds the store, so they can't be
     /// removed (§4, §13).
     StoreOwner,
-    /// The store needs a newer schema, or an object needs a newer coven (§17).
-    UpdateRequired,
+    /// This call needs a newer app schema or coven format (§17).
+    UpdateRequired(RequiredUpdate),
     /// A restore code could not be decoded (E9).
     Code(CodeError),
     /// A create-store entry or credential update names another store (E9).
@@ -1908,9 +1924,9 @@ impl CovenHandle {
 
     /// Finishes the active pass and file transfers, then drops unlocked keys and
     /// the provider client. Keeps credentials and location for the next start.
-    /// Completion publishes `Stopped`, or `Disconnected` if no storage is set up;
-    /// a failure to release storage publishes `Failed`.
-    pub fn stop_sync(&self);
+    /// Completion publishes `Stopped`, or `Disconnected` if no storage is set up.
+    /// A release failure is returned and recorded as a connection blocker.
+    pub async fn stop_sync(&self) -> Result<(), SyncError>;
 
     /// Syncs now instead of at the next idle tick. While idle, coven syncs
     /// every 30 seconds, and at once after a local write.
@@ -1965,14 +1981,16 @@ pub enum SyncStatus {
     Disconnected,
     /// Storage is set up and syncing is stopped; no provider client is required.
     Stopped,
-    /// Storage hasn't been reached since connecting; retains the network cause.
+    /// The last attempt could not reach storage, regardless of earlier success.
+    /// The request preventing the pass received no usable provider response.
     Offline { error: Arc<StorageError> },
     /// The initial sync is queued or a sync is running.
     Syncing,
-    /// The last sync finished.
+    /// The last pass finished; individual subjects may still be blocked.
     Synced { finished_at: SystemTime },
-    /// The last sync failed as a whole.
-    Failed { error: SyncFailure },
+    /// Storage answered with an error preventing the whole pass.
+    /// Per-object and maintenance failures belong only in blocked().
+    Failed { error: Arc<StorageError> },
 }
 
 /// Storage this device has set up, with whether it holds the store key.
@@ -1984,17 +2002,6 @@ pub struct ConnectedStorage {
 pub enum StoreKeyState {
     Available,
     Locked,
-}
-
-pub enum SyncFailure {
-    /// The store needs a newer schema, or an object needs a newer coven (§17).
-    UpdateRequired,
-    /// This device, or its member, was removed from the store (§10).
-    Removed,
-    /// Storage refused or failed a request.
-    Storage(Arc<StorageError>),
-    /// Anything else, with its cause.
-    Other(Arc<dyn std::error::Error + Send + Sync>),
 }
 ```
 

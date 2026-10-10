@@ -2640,8 +2640,9 @@ Carol's tablet:
   - That device runs the migration's first part on its database, writes a
     snapshot in the new version ([§15](#15-snapshots)), and records the store's new version
     in the store log ([§9](#9-members-and-roles)).
-  - A device whose app is older can't sync until it updates; it then
-    reloads from that snapshot.
+  - An older app cannot apply that audience's newer schema. It records
+    `UpdateRequired` and reloads from the snapshot after updating.
+    Store-log reads and independent work continue (§19.1).
   - It snapshots every audience it can read, with one entry raising each
     to the new version; the store's own entry raises the store.
   - For a circle it can't read, the first device of one of that circle's
@@ -3286,6 +3287,8 @@ Carol's tablet:
 - Errors are typed enums per crate; an error is never turned into text
   to be passed on, and nothing returns `Result<_, String>`.
 - Failed app calls and whole-pass sync failures retain typed causes.
+  `Offline` means the last attempt could not reach storage; `Failed` means
+  storage answered with an error preventing the whole pass (E5).
   Every object or operation that cannot advance has a typed blocked record,
   including maintenance, prerequisites and relevant signed peer reports
   (§19.1, E5). A persisted reason never substitutes text for its category.
