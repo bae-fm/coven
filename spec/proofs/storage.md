@@ -55,6 +55,67 @@ the row merge, schema exclusions or reset-selected row values. These theorems
 do not promise eventual delivery, successful replacement registration, or
 preservation of deliberately discarded local edits.
 
+## Replacement judged by recorded reads
+
+`ReplacementRead` models the proposed alternative to §10 and D6: the
+add-device entry names the old id but carries no log ends. The written
+closed-end rule remains in `Identity`; the two policies are separate.
+
+**Stored pre-read objects are preserved.** `stored_object_survives` combines
+create-once storage with receipt: later publications preserve the original
+bytes and time, and delivery includes the identity whenever the object had
+not read a kept replacement of its device. There is no upper write or entry
+number. `racing_upload_kept` checks an old copy whose write 2 lands after a
+replacement that saw only write 1. It counts without another replacement.
+
+**No duplicate application and agreement are proved.**
+`no_duplicate_application` covers arbitrary deliveries, including repeats.
+`receipt_after_restore` covers a loaded snapshot followed by repeated log
+delivery. `devices_converge` gives the same applied identity set for the same
+objects and kept replacements, whatever their order or repetition. Atomic
+effects by identity and immutable stored bytes are the same abstraction used
+above; this is not a second proof of the row merge or eventual delivery.
+
+**Post-read objects are rejected.** `after_read_rejected` covers writes and
+store-log entries: reading any kept replacement of the old id excludes the
+object. `old_copy_stops` makes observation enter reset and prevents further
+commits or sends from that copy. `observed_replacement_blocks_send` covers
+every send kind, including a backup whose local read positions were erased.
+`reset_uses_new_path` gives the resetting copy its own fresh id and write 1.
+`restored_and_live_copies_stop` checks these transitions together.
+
+**Unqualified no-loss still fails.** `ReplacementRead.Examples.unsent_loss`
+checks one committed, unstored write discarded on reset. Two copies can also
+pass the check and publish different bytes to write 1: the first value remains,
+the other copy resets (`colliding_copies_lose_one_value`). Both have literal
+Lean `example` witnesses. These are the same losses §10 explicitly permits;
+removing log ends neither prevents them nor introduces a loss of the stored
+pre-read object.
+
+**“A restored copy never sends” fails.** In `restored_copy_can_send`, a backup
+contains one queued write. Restoring on the installation that still holds its
+custody id leaves no larger stored counter and no replacement to discover.
+The check passes and the write is sent under the old id. The literal Lean
+`example` needs one write and one send, with no earlier attempted write.
+Missing custody, a larger observed counter, or an observed replacement blocks
+the send; the checks cannot establish that every restore changes ids.
+
+The readings chosen are: “before it read” means the immutable recorded past
+of the copy that made the object, not whether another copy has read it;
+any kept replacement in that past excludes an old-id object; a write's
+`store_log_read` and an entry's expanded `had_read` supply that past.
+Publication after replacement is allowed when creation preceded that read.
+Agreement requires the same received objects and replayed replacements.
+Restore includes replacing the database from a backup while custody survives;
+it does not imply that the app's explicit reset path was invoked.
+
+Authentication, honest recording of reads, membership authority, entry landing
+rejection, and which replacements replay keeps remain inputs. Replaying a
+changed replacement set rebuilds admission from retained objects. Files and
+snapshots do not have these write/entry read fields, so their own acceptance,
+physical cleanup, fresh-id generation and replacement registration liveness
+are outside this variant. Their outgoing sends still use the shared gate.
+
 ## Checks and closed logs
 
 `checkIdentity` models the checks §10 actually lists: non-backed-up custody,

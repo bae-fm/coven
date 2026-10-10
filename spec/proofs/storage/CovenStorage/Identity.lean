@@ -208,8 +208,11 @@ theorem reset_unavailable (l : Local) (r : Replacement) :
 /-- Checked stored history has loaded, and a fresh registration is kept.
 Earlier registration attempts may have landed too late (§9, §10).
 Data writes and snapshots start from zero. -/
+def loadDevice (fresh registrationNumber : Nat) (loaded : Applied) : Local :=
+  ⟨fresh, ⟨⟨0, registrationNumber⟩, 0⟩, [], receiveAll [] loaded⟩
+
 def finishReset (r : Replacement) (loaded : Applied) : Local :=
-  ⟨r.fresh, ⟨⟨0, r.registrationNumber⟩, 0⟩, [], receiveAll [] loaded⟩
+  loadDevice r.fresh r.registrationNumber loaded
 
 /-- §10: once an entry is consumed as too late, catching up online permits
 a new entry, under the same installation id, with newly observed ends. -/
@@ -233,7 +236,7 @@ theorem reset_loads_once (r : Replacement) (loaded later : Applied) :
       p ∈ loaded ∨ p ∈ later) := by
   constructor
   · exact receipt_no_duplicates _ _ (receipt_no_duplicates [] loaded (by simp))
-  · intro p; simp [finishReset, receipt_members]
+  · intro p; simp [finishReset, loadDevice, receipt_members]
 
 /-- §5, §6: commit reserves a fresh contiguous write number together with
 the effect and queue record. The next attempt may still be untried. -/

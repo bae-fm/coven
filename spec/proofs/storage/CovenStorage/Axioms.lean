@@ -85,3 +85,26 @@ import CovenStorage
 #print axioms CovenStorage.retries_identical
 #print axioms CovenStorage.Examples.content_free_rollback_nonce_reuse
 #print axioms CovenStorage.Examples.entry_chunks_and_prefixes_separated
+
+#print axioms CovenStorage.ReplacementRead.registration_authority
+#print axioms CovenStorage.ReplacementRead.accepts_iff
+#print axioms CovenStorage.ReplacementRead.before_read_counts
+#print axioms CovenStorage.ReplacementRead.after_read_rejected
+#print axioms CovenStorage.ReplacementRead.replacement_order_irrelevant
+#print axioms CovenStorage.ReplacementRead.loaded_iff
+#print axioms CovenStorage.ReplacementRead.no_duplicate_application
+#print axioms CovenStorage.ReplacementRead.no_stored_write_lost
+#print axioms CovenStorage.ReplacementRead.stored_object_survives
+#print axioms CovenStorage.ReplacementRead.devices_converge
+#print axioms CovenStorage.ReplacementRead.receipt_after_restore
+#print axioms CovenStorage.ReplacementRead.old_copy_stops
+#print axioms CovenStorage.ReplacementRead.observed_replacement_blocks_send
+#print axioms CovenStorage.ReplacementRead.missing_custody_blocks_restore
+#print axioms CovenStorage.ReplacementRead.reset_uses_new_path
+
+#print axioms CovenStorage.ReplacementRead.Examples.racing_upload_kept
+#print axioms CovenStorage.ReplacementRead.Examples.restored_and_live_copies_stop
+#print axioms CovenStorage.ReplacementRead.Examples.post_read_objects_rejected
+#print axioms CovenStorage.ReplacementRead.Examples.restored_copy_can_send
+#print axioms CovenStorage.ReplacementRead.Examples.unsent_loss
+#print axioms CovenStorage.ReplacementRead.Examples.colliding_copies_lose_one_value

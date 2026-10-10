@@ -3,3 +3,5 @@ import CovenStorage.Identity
 import CovenStorage.Files
 import CovenStorage.Clocks
 import CovenStorage.Examples
+import CovenStorage.ReplacementRead
+import CovenStorage.ReplacementReadExamples
