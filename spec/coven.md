@@ -2762,8 +2762,8 @@ Carol's tablet:
   2 while leaving 3. List the audience's retained snapshots and check their
   signed prefixes by range to choose the newest under the ordering below;
   cached checked prefixes need no second read. Fetch a body only to load it.
-- A new device, or one away for 30 storage days or more, performs this
-  discovery for each readable audience before treating write misses as
+- A new device, or one that fails the recent-return check below, performs
+  this discovery for each readable audience before treating write misses as
   no new work. Apply the newest usable snapshot only if its signed write
   positions go past where that audience left off on some writer. Otherwise
   keep the local state and continue from its next write numbers. The atomic
@@ -2780,25 +2780,45 @@ Carol's tablet:
   finished pass with unresolved history does not move this checkpoint.
   A pending file or retention operation alone does not prevent it.
   - On return, replace this device's clock object and read its storage time
-    `T`; away is `T - S`, never the difference between device wall clocks.
-    No saved checkpoint means new. At exactly 30 days use snapshot discovery.
-    A failed time observation cannot justify the recent-return rule.
+    `T`. Pair it with a monotonic reading taken before starting the clock
+    replacement, so elapsed time includes the replacement, status request
+    and sleep. Reusing this sample keeps that same monotonic starting point.
+    No saved checkpoint means new. A failed time observation or missing
+    monotonic evidence cannot justify the recent-return rule.
   - The identity check comes before that replacement (§10). On reopening,
     use the read-only snapshot/positions evidence first; when away is not
     yet known, conservatively inspect the readable snapshot folders too.
     Reuse those observations after the clock result, without relisting.
   - During a running session, a monotonic timer schedules the next clock
-    check before the known interval reaches 30 days. A suspended session
-    refreshes storage time on return. Local time schedules; storage time
-    decides. Each qualifying pass can reuse a storage sample known before
-    its discovery as `S`; keeping an older sample is conservative. An idle
-    pass neither rewrites its clock object nor commits an unchanged checkpoint.
-- Before 30 storage days since that checkpoint, an unrequired write's
-  next-number miss means nothing new: earlier work was already consumed,
-  and a write published since that pass cannot yet meet the 30-day deletion
-  alternative. Reader positions cannot release an unconsumed write either.
+    check before the recent-return deadline below. A suspended session
+    refreshes storage time on return; reopening cannot reuse a preceding
+    session's monotonic reading. Each qualifying pass can reuse a storage
+    sample known before its discovery as `S`; keeping an older sample is
+    conservative. An idle pass neither rewrites its clock object nor commits
+    an unchanged checkpoint.
+- At each use of an unrequired write's next-number miss, check
+  `T + monotonic elapsed < S + 29 days`, with elapsed measured from the
+  reading paired with `T`, including sleep. Only while it holds does the
+  recent-return rule let the miss mean nothing new. Check when using the
+  result, including a cached or parallel read's miss, not just at pass start.
+  The one-day margin precedes the 30-day storage-age deletion threshold.
+
+  At equality or later, use the away-device path: discover snapshots and
+  complete any required reload before using further write misses. A snapshot
+  listing from before expiry cannot certify misses after expiry. A failed
+  discovery or reload leaves history pending and keeps the old checkpoint.
+
+  Earlier work was already consumed at the saved checkpoint, and a write
+  published since that pass is protected while the check holds. Reader
+  positions cannot release an unconsumed write either.
   Missing history required by a known object remains a pending condition;
   it never counts as a successful catch-up.
+  - **Ben's pass crosses the deadline.** His checkpoint is day 0. A pass
+    starts on day 29, but its read of Ana's day-1 write returns a miss on
+    day 31, after retention deleted it. The start cannot certify that miss:
+    the recent-return check already fails at day 29, and Ben must discover
+    snapshots before using it. A pass starting before day 29 must take the
+    same path if it crosses the deadline before using a miss.
 - A device writes one for an audience once that audience's parts after
   its latest snapshot add up to more bytes than that snapshot, or than
   1 MiB while the audience has none.

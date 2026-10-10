@@ -151,13 +151,17 @@ return interval: a new device has no checkpoint; a returning device compares
 a fresh clock-object storage time with the last completed catch-up's saved
 storage time. A resumed session
 refreshes time, and a running session's monotonic timer schedules its next
-check before the known interval reaches 30 days. No due time-dependent
-work means no time probe.
+check before `T + monotonic elapsed` reaches `S + 29 days` (§15). This
+scheduling never replaces the check at each write miss. No due
+time-dependent work means no time probe.
 
 If a monotonic timer says a threshold may be reached and the known `T`
 cannot decide it, replace `<store>/clock/<this device>` and read its status.
 These are two logical requests; provider overhead is counted separately.
 A device clock only schedules a check; storage time decides it.
+For §15's recent-return check, pair the returned `T` with the monotonic
+reading from before the replacement request. Include request time and sleep
+in elapsed time; retaining a sample never restarts its elapsed timer.
 A sample still before the threshold schedules another check with backoff.
 A probe that writes anything must first satisfy §10 with the catalog and
 identity steps below, using read-only snapshot discovery conservatively
@@ -239,7 +243,7 @@ retention and reports share it. Positions never supply log discovery bounds:
 uploading and posting are separate requests, so a crash between them must
 not hide an uploaded object.
 
-For a new device or one away at least 30 storage days, list each readable
+For a new device or one failing §15's recent-return check, list each readable
 **`<store>/snapshots/<audience>/`** folder. Check previously unchecked signed
 prefixes by range to select the newest usable snapshot. Load it only if it
 covers past that audience's local position on some writer; otherwise keep
@@ -378,9 +382,13 @@ operation whose own-upload prerequisite this satisfies, using step 5's
 request order, without beginning a second full pass.
 
 For downloads, GET each undrained device's next write number, reusing this
-device's identity read. Before 30 storage days since the last completed
-catch-up, a miss means no new writes at that observation (§15). A new or
-long-absent device first uses step 3's snapshot discovery and reload.
+device's identity read. At each use of a miss, including a cached or parallel
+read's result, check `T + monotonic elapsed < S + 29 days` (§15), counting
+sleep. A pass-start check cannot authorize a later miss.
+At equality or later, take step 3's away-device snapshot discovery and
+complete any required reload before using further write misses. Discovery
+from before expiry is insufficient. A new device or one without usable time
+evidence takes that path too; failure leaves history pending.
 A known required missing write is a prerequisite, not a terminal idle miss.
 On a hit, fetch ahead within the configured transfer limit and stop at the
 first miss. Retain completed reads; reception order never bypasses causal
