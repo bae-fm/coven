@@ -45,7 +45,7 @@ These local records survive reopening and have no pass-end expiry:
   locally retained bytes, retried when those prerequisites arrive.
 - **Own post:** the exact canonical D8 plaintext last confirmed published,
   with the stored metadata when known. Compare all its fields, including
-  schema, fingerprints and blocked reports, before sealing another post.
+  schema, fingerprints and pending reports, before sealing another post.
   Random sealing bytes are not a reason to replace an unchanged post.
 - **File references:** an index from each retained write or snapshot to
   the fixed file paths it mentions, with whether all relevant contents
@@ -152,7 +152,7 @@ Judge landing times against the entire completed listing, then check
 author views and apply causally ready entries in batches. One batch needs
 one replay of the received set and one atomic commit, not one full replay and
 transaction per received entry. Author-view checks still use exactly each
-entry's recorded past. Entries blocked on a key or cause stay cached.
+entry's recorded past. Entries waiting for a key or cause stay cached.
 Independent ready entries can proceed, but a gap or unreadable entry
 through `T` prevents finality and any cleanup depending on it.
 Do not read at or past a log's permanent refusal (§19.1). An incomplete
@@ -368,7 +368,7 @@ gates permit it. A failure never turns an unknown reference set into empty.
 ### 9. Post changed positions and finish
 
 Derive the last publishable causally closed positions, fingerprints for
-exactly that state, and this device's publishable blocked records (D8).
+exactly that state, and this device's publishable pending records (D8).
 Compare the complete canonical plaintext with the last confirmed post.
 Replace **`<store>/positions/<this device>` at most once**, and only on
 change; initial publication or observed disappearance also needs a post.
@@ -379,7 +379,7 @@ that work. Failed publication retains the last confirmed post.
 
 No heartbeat, idle timestamp, unchanged refusal or time observation causes
 a replacement. Positions advance only over committed, fully realized work;
-blocked changes can travel with the preceding positions (§6).
+pending changes can travel with the preceding positions (§6).
 
 Publish the completion status in memory. Upload marking, queue removal,
 cache publication, received reports and this pass's own operation commits

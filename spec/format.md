@@ -343,13 +343,13 @@
   store_log       EntryPositions
   schema_version  u32
   fingerprints    [audience:Audience | key:uuid | fingerprint:32 bytes]   store first, increasing
-  blocked         [subject | reason]
+  pending         [subject | reason]
   ```
 
 - Positions describe a causally closed applied past, with own writes
   uploaded. Consumed store-log entries include dropped ones, including
   those that landed too late (§6, §9).
-  - Blocked reports can change while positions stay at the last publishable
+  - Pending reports can change while positions stay at the last publishable
     past. Omit fingerprints unless they describe exactly that past.
   - Positions are not finality acknowledgements. Their provider-assigned
     replacement time, observed after a changed post, can supply T for §9's
@@ -393,7 +393,7 @@
   immutable subjects. Invalid positions applies only to Positions.
   File unavailable applies only to File, whose device must be the poster.
 - Reports order by subject tag, then its fields in D2 order, with at most
-  one first blocker per subject. The posting device is `reported_by`;
+  one first unmet condition per subject. The posting device is `reported_by`;
   that field is not repeated in each record.
   - Only observations made by the poster travel. Never forward a peer's report.
   - Key-copy reports concern copies sealed to the poster's member.
@@ -460,7 +460,7 @@
 - Posted positions have exactly one chunk followed by the author's 64-byte
   `coven/object-signature/v1` signature. Every read verifies it against the
   member the applied store log names for the device in the path, before using
-  positions, fingerprints or blocked reports. An unknown device waits for
+  positions, fingerprints or pending reports. An unknown device waits for
   registration; a missing or wrong signature has reason InvalidPositions
   and does not count as posted (§19.1).
 - Clock observations use the same one-chunk framing and author signature.
@@ -526,7 +526,7 @@
 | `<store>/store-log/<device>/<n>` | A device's store log entry `n` |
 | `<store>/snapshots/<audience>/<device>/<n>` | A device's snapshot `n` of an audience: `store`, or a circle's id |
 | `<store>/clock/<device>` | A signed, sealed clock observation, replaced only for a due storage-time check |
-| `<store>/positions/<device>` | A device's posted positions and blocked records, replaced as either changes |
+| `<store>/positions/<device>` | A device's posted positions and pending records, replaced as either changes |
 | `<store>/keys/<writer>/store/<key>/<member>` | A store key sealed to a member |
 | `<store>/keys/<writer>/circles/<circle>/<key>/<member>` | A circle key sealed to a member |
 | `<store>/files/<device>/<file>` | An uploaded file |

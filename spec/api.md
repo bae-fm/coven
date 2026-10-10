@@ -1114,7 +1114,7 @@ handle
   rows it read.
 - Each table-backed built-in read uses one pre-built internal query for
   its one-shot call and `subscribe_x() -> LiveQuery<T>` counterpart:
-  - `blocked` and `lost_values` on the handle;
+  - `pending` and `lost_values` on the handle;
   - `members` on the handle, and `list` and `members` on `Circles`;
   - `rows_pinned` on the handle, with the same table and keys in both calls.
 - These reads work without storage and use the app's normal read and live-query
@@ -1421,17 +1421,17 @@ while let Ok(values) = lost.next().await {
     has not serviced them. Its own queue, operation and cache commits do
     not trigger an immediate second pass. Waiting work uses the shared
     backoff rules; a completion notification alone is not new evidence.
-  - Every subject that cannot advance has its first blocker in `blocked()`.
+  - Every subject that cannot advance has its first unmet condition in `pending()`.
     This includes missing prerequisites, key copies, damaged objects, dropped
     entries, fingerprint disagreements, pending operations and file failures.
   - Independent work continues. Per-object and maintenance blockers do not
     fail sync status; a failed required reload prevents positions advancing
     past that reload, and is recorded under its audience and operation.
   - Posted positions never advance over unfinished work. A device can replace
-    its previous post with updated blocked records while its positions wait.
+    its previous post with updated pending records while its positions wait.
     It omits fingerprints unless they describe exactly the posted positions.
   - A finished pass publishes its completion time; `Synced` can coexist with
-    blocked records. Live queries report committed changes (E4).
+    pending records. Live queries report committed changes (E4).
   - Reset and coven-update retry rules are in §19.1. Neither a disagreement
     nor a peer's silence triggers recovery on its own.
 - `Offline` describes the last failed attempt, not the connection's history.
@@ -1442,11 +1442,11 @@ while let Ok(values) = lost.next().await {
     unpublished schema, failed file or retention wait stops its subject
     and lets independent work continue; it does not set `Failed`.
   - Removal records a `Connection` block with `Removed`, and stops the loop
-    for good. Local failures also name their blocked subject and preserve
+    for good. Local failures also name their pending subject and preserve
     their typed cause for a waiting caller.
   - If the database cannot record a blocker, stop the loop and fail database
     calls and live queries with that cause until the store is reopened.
-    Never expose an apparently empty blocked list after losing its update.
+    Never expose an apparently empty pending list after losing its update.
 - E.g. Ana syncs successfully, then loses Wi-Fi. The next attempt is
   `Offline`. A later provider error denying the store listing is `Failed`.
   One bad photo while the rest syncs leaves `Synced` with a file blocker.
@@ -1466,7 +1466,7 @@ Storage failures retain the same `StorageFailure` through setup, sync status,
 uploads, reads and operations. Their `StorageError` carries the native cause
 where one exists; setup adds the failed check or its distinct local failure
 without reclassifying storage failures. Missing member keys are always
-`StorageFailure::MemberKeysMissing`. Blocked records retain this same
+`StorageFailure::MemberKeysMissing`. Pending records retain this same
 classification when the native cause cannot survive closing the app.
 
 ```rust
@@ -1680,7 +1680,7 @@ pub enum StoreKeyUnlockError {
 /// Sync or a store-log change failed (§9, §13, §17, E5).
 pub enum SyncError {
     /// This call requires work that cannot yet advance (§19.1).
-    Blocked(Box<BlockedRecord>),
+    Pending(Box<PendingRecord>),
     /// The proposed entry violates its byte format.
     Format(coven_format::Error),
     /// A required key is absent from custody, or its material conflicts.
@@ -1722,7 +1722,7 @@ pub enum SyncError {
     WrongMember { expected: MemberId, actual: MemberId },
     /// The requested journal row is not failed work eligible for this call:
     /// retry accepts provider work; discard accepts only app-owned work.
-    NotBlocked(OperationId),
+    NotPending(OperationId),
     /// Decoding persisted operation data failed, retaining its cause.
     OperationData(serde_json::Error),
 }
@@ -1757,16 +1757,16 @@ pub struct SnapshotId {
 }
 
 /// One thing coven cannot currently apply or deliver (§19.1).
-pub struct BlockedRecord {
-    pub subject: BlockedSubject,
+pub struct PendingRecord {
+    pub subject: PendingSubject,
     /// The first unmet condition for this subject, kept as a typed value.
-    pub reason: BlockedReason,
+    pub reason: PendingReason,
     /// This device for a local observation; otherwise the signed report's author.
     pub reported_by: DeviceId,
 }
 
 /// Stable identities; a record is keyed by subject and reporting device.
-pub enum BlockedSubject {
+pub enum PendingSubject {
     Write(WriteId),
     Entry(EntryId),
     KeyCopy { audience: Audience, key: KeyId, member: MemberId },
@@ -1833,7 +1833,7 @@ pub enum ProviderAccessAction {
 }
 
 /// Reasons describe the current block, including work waiting without an error.
-pub enum BlockedReason {
+pub enum PendingReason {
     Missing { path: ObjectPath },
     Waits(Prerequisite),
     KeyUnavailable { audience: Audience, key: KeyId },
@@ -1863,7 +1863,7 @@ pub enum Retry {
     Never,
 }
 
-impl BlockedReason {
+impl PendingReason {
     /// Automatic: missing objects, prerequisites, keys, pending provider/owner
     /// work, shared-account waits, invalid replaceable positions, and storage
     /// Network/RateLimited/NotFound/SessionExpired.
@@ -1933,7 +1933,7 @@ impl CovenHandle {
     /// Opens store keys from their copies sealed to this member in storage
     /// (§11), keeps them in custody, and connects without starting sync.
     /// Uses the member-key session already held at open; it does not unlock
-    /// custody again. Key selection follows §11; other waits remain in blocked().
+    /// custody again. Key selection follows §11; other waits remain in pending().
     pub async fn unlock_store_key(&self) -> Result<ConnectedStorage, StoreKeyUnlockError>;
 
     /// Whether the held session has the store key: `Available` or `Locked`.
@@ -1972,10 +1972,10 @@ impl CovenHandle {
 
     /// Current local blocks and relevant authenticated peer reports, including
     /// while disconnected. Sorted by subject, then reporting device (§19.1).
-    pub async fn blocked(&self) -> CovenResult<Vec<BlockedRecord>>;
+    pub async fn pending(&self) -> CovenResult<Vec<PendingRecord>>;
 
-    /// The same internal query as blocked(), on the app's live-query mechanism.
-    pub fn subscribe_blocked(&self) -> LiveQuery<Vec<BlockedRecord>>;
+    /// The same internal query as pending(), on the app's live-query mechanism.
+    pub fn subscribe_pending(&self) -> LiveQuery<Vec<PendingRecord>>;
 
     /// How many uploads and downloads run at once.
     pub fn transfer_limits(&self) -> TransferLimits;
@@ -2015,10 +2015,10 @@ pub enum SyncStatus {
     Offline { error: Arc<StorageError> },
     /// The initial sync is queued or a sync is running.
     Syncing,
-    /// The last pass finished; individual subjects may still be blocked.
+    /// The last pass finished; individual subjects may still be pending.
     Synced { finished_at: SystemTime },
     /// Storage answered with an error preventing the whole pass.
-    /// Per-object and maintenance failures belong only in blocked().
+    /// Per-object and maintenance failures belong only in pending().
     Failed { error: Arc<StorageError> },
 }
 
@@ -2063,11 +2063,11 @@ loop {
 - A tried entry still publishes its fixed bytes. If it lands too late, its
   `Entry` subject reports `Dropped(LandedTooLate)`; publication settles but
   the action has not succeeded. Starting the operation over catches up again
-  and uses a new entry. Its old entry's blocked record remains (§18, §19.1).
+  and uses a new entry. Its old entry's pending record remains (§18, §19.1).
 - Every unfinished operation is a row in `_coven_operations`
   ([§18](coven.md#18-operations)).
 - A failed step returns its typed error to a waiting caller and records its
-  first blocker in `blocked()` (E5). Pending work appears there too.
+  first unmet condition in `pending()` (E5). Pending work appears there too.
 - Automatic snapshot writing, retention and reloads use the same list.
   Retention is derived each pass and has a path subject, with no operation
   row. Automatic operation records cannot be discarded through app-work calls.
@@ -2075,7 +2075,7 @@ loop {
   reload. Provider access work is recorded by replay; the app may retry a
   failed request but cannot discard the current access intention.
   Single-entry calls return their errors directly; a reserved entry still
-  has its own blocked subject.
+  has its own pending subject.
 - A record stores a typed reason, not an error string. The immediate call
   retains the native cause; reopening retains the reason and subject.
 
@@ -2113,12 +2113,12 @@ pub type OperationError = SyncError;
 impl CovenHandle {
     /// Runs failed app-owned or provider access work again from the step
     /// after its last completed one. A cause that still stands fails again.
-    pub async fn retry_blocked_operation(&self, operation: OperationId) -> Result<(), OperationError>;
+    pub async fn retry_pending_operation(&self, operation: OperationId) -> Result<(), OperationError>;
 
     /// Abandons a failed operation and deletes its row. Steps already done
     /// stay done; each kind's steps are ordered so other devices never see a
     /// half-done operation (§18).
-    pub async fn discard_blocked_operation(&self, operation: OperationId) -> Result<(), OperationError>;
+    pub async fn discard_pending_operation(&self, operation: OperationId) -> Result<(), OperationError>;
 
     /// Reloads this device from the latest snapshot, keeping its waiting
     /// writes, as an operation (§19.2).
@@ -2159,7 +2159,7 @@ impl CovenHandle {
     /// its progress. The first result is the current state.
     pub fn subscribe_uploads(&self) -> UploadsLiveQuery;
 
-    /// Retries waiting uploads now; individual failures stay in blocked().
+    /// Retries waiting uploads now; individual failures stay in pending().
     /// Overrides ordinary backoff or retries a repaired source, but never
     /// bypasses a provider Retry-After cooldown.
     /// Automatic delays start at 1 second and double to at most 5 minutes
@@ -2231,7 +2231,7 @@ loop {
   copy, the cache, or storage ([§16](coven.md#16-files)).
 
 Ana's photo cannot be downloaded while her voice note continues arriving.
-The photo's reason is in `blocked()`; eager-fill status still describes the
+The photo's reason is in `pending()`; eager-fill status still describes the
 files and bytes completed. There is no competing failure state in that progress.
 
 ```rust
@@ -2248,7 +2248,7 @@ pub struct PinProgress {
 }
 
 /// Progress of files declared CacheEager (§16.4, E8).
-/// Failures appear only in blocked(); independent downloads keep progressing.
+/// Failures appear only in pending(); independent downloads keep progressing.
 pub enum EagerCacheFillStatus {
     /// No files are waiting to download.
     Idle,
@@ -2423,14 +2423,14 @@ match stream.read_at(resume_at, 256 * 1024).await {
 - The pending list describes unresolved access work. Each owner's device
   serializes grant and revoke requests, and performs the opposite request
   when replay reverses the intention (§4, §13).
-  Pending and failed work appears in `blocked()`, with the operation id for
+  Pending and failed work appears in `pending()`, with the operation id for
   retry. Derived provider work cannot be discarded while its current
   intention remains unmet: disappearance from this list must not hide a
   retained grant. A replay change can replace or remove that intention.
 - Removing an account can leave access through a parent, a grant reaching other
-  accounts, an unidentified recipient, or the owner. `BlockedReason::AccessRemains`
+  accounts, an unidentified recipient, or the owner. `PendingReason::AccessRemains`
   retains these grants and their reasons for the app to present to the owner.
-  The revocation remains in `blocked()` until a retry confirms the owner
+  The revocation remains in `pending()` until a retry confirms the owner
   removed those grants, or replay no longer requires that revocation.
   This also preserves the result when no app call is waiting, including a
   revocation initiated by applying another device's removal.
@@ -2468,11 +2468,11 @@ impl CovenHandle {
     pub async fn set_member_role(&self, member: &MemberId, role: MemberRole) -> Result<(), SyncError>;
 
     /// Records that the admin deleted an S3 key in the provider's console,
-    /// so blocked() removes its DeleteAccessKey record (§13).
+    /// so pending() removes its DeleteAccessKey record (§13).
     pub async fn confirm_access_key_deleted(&self, access_key_id: &str) -> Result<(), SyncError>;
 
     /// Publishes the removal of this member and all their devices (§13).
-    /// Returns once the entry is kept. Provider work appears only in blocked(),
+    /// Returns once the entry is kept. Provider work appears only in pending(),
     /// including owner waits, retained grants and S3 keys until confirmed deleted.
     pub async fn remove_member(&self, member: &MemberId) -> Result<(), SyncError>;
 
@@ -2488,7 +2488,7 @@ pub struct AccessKeyToDelete {
     pub member: Option<MemberId>,
 }
 
-// Pending notices are DeleteAccessKey records in _coven_blocked. Confirmation
+// Pending notices are DeleteAccessKey records in _coven_pending. Confirmation
 // is retained separately by key id, so later entries and retries cannot restore
 // an already-confirmed notice.
 
@@ -2752,7 +2752,7 @@ pub enum BootstrapStatus {
     Connecting,
     WaitingForApproval,
     Loading,
-    Blocked(Vec<BlockedRecord>),
+    Pending(Vec<PendingRecord>),
 }
 
 /// Opens the store on a new device from the person's restore code, scanned

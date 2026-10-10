@@ -156,7 +156,7 @@
     have passed since its last late entry (§9).
   - The store log, sealed keys and still-required boundary snapshots remain.
 - **Nothing waits silently:** whatever coven cannot apply or deliver is in
-  the blocked list, with its subject and typed reason (§19.1).
+  the pending list, with its subject and typed reason (§19.1).
 
 ### 3.1 IO bounds
 
@@ -257,11 +257,11 @@ Local work has bounds too:
   Each transaction acquires the writer once; count failed transaction
   attempts separately rather than hiding repeated holds in a success count.
 - An unchanged idle pass commits zero durable transactions.
-  No unchanged operation rows, blocked records or last-checked timestamps
+  No unchanged operation rows, pending records or last-checked timestamps
   are rewritten. Completion status is an in-memory notification (E5).
 - Hot lookups use indexes: object identity; write audience and position;
   snapshot coverage; peer device and observed version; references by file
-  path and retaining object; blocked subject/reporter and retry reason;
+  path and retaining object; pending subject/reporter and retry reason;
   store-log storage time; key introductions and observed copies; pending uploads and operations.
   Eager-file work selects changed references lacking complete cached bytes,
   rather than scanning every app row on every pass. Cache budget checks
@@ -370,7 +370,7 @@ the file's ranges under `F`.
     completed request has become obsolete, it records and performs the
     opposite request before reporting that account's work complete;
   - pending and failed requests remain in the existing operation journal
-    and the blocked list (§18, §19.1). Security work starts immediately;
+    and the pending list (§18, §19.1). Security work starts immediately;
     it does not wait for entry finality.
   - Sharing is per account, not per invite: taking access back takes the
     account's access, whatever shared it.
@@ -536,11 +536,11 @@ and pending-work gates are in [One sync pass](sync-pass.md).
   coven's `_coven_positions` table: one row per device, naming its last
   applied write's number.
 - It posts positions to storage at `<store>/positions/<device>`, replacing
-  its object when positions or blocked records change (D8).
+  its object when positions or pending records change (D8).
   - In its own write log it posts only writes already uploaded.
   - The posted positions form a causally closed applied past: every cause
     of every included write is included, and no unfinished reload is passed.
-  - Pending uploads can prevent advancing that past. Blocked records still
+  - Pending uploads can prevent advancing that past. Pending records still
     travel: reuse the last publishable positions and omit fingerprints
     unless they describe exactly those positions.
   - Store-log positions count consumed entries, kept or dropped. They do
@@ -548,7 +548,7 @@ and pending-work gates are in [One sync pass](sync-pass.md).
   - The object's member signature is checked against the member the received
     store log names for its device. An unknown device waits for registration;
     a wrong or missing signature is refused (§19.1).
-- A missing prerequisite or failed read gets a blocked record. A complete
+- A missing prerequisite or failed read gets a pending record. A complete
   immutable write or entry that fails a permanent check stops its log at
   that object. Independent logs continue (§19.1).
 - A device finds devices it doesn't know yet, and their logs, by listing
@@ -1618,7 +1618,7 @@ Carol's tablet:
     exclude its change from every replay, including author views. It is
     not a damaged object and does not stop its device's log.
     Its keys and recorded storage access still follow §11 and §13.
-  - Its author's device records `Dropped(LandedTooLate)` in the blocked
+  - Its author's device records `Dropped(LandedTooLate)` in the pending
     list: “landed too late”. A new attempt at the action catches up online
     and uses a new entry; it cannot rewrite the stored one (§18).
   - Online calls read the log first, but an upload racing another device
@@ -1719,7 +1719,7 @@ Carol's tablet:
   replay starts again without them.
   - A replay-dropped entry stays dropped until that replay ends; the next
     ready batch starts afresh, still excluding entries that landed too late.
-- A dropped entry has a blocked record with its reason. Replay reasons
+- A dropped entry has a pending record with its reason. Replay reasons
   can change until finality; “landed too late” cannot. Neither is a
   permanent refusal of the entry's bytes (§19.1).
 - Whose entry it is comes from its signature, not from the device it was
@@ -1830,7 +1830,7 @@ Carol's tablet:
   - Concurrent replacements both apply. Their recorded ends combine by
     taking the greatest write and entry numbers, independently.
   - Readers consume the old logs through those ends. An object beyond a
-    closed end is blocked pending a replacement entry that includes it;
+    closed end is waiting for a replacement entry that includes it;
     it is never silently accepted or discarded. Retain the relevant inputs
     until the replacement entries are final (§9).
   - A still-running old copy stops sending when it reads its replacement,
@@ -1952,7 +1952,7 @@ Carol's tablet:
   - Usable means introduced by a received authorized entry, available in
     custody, and with no copy in this pass's listing for an excluded member.
   - If no usable key exists, rotate or wait for its sealed copy, recording
-    the first blocker. Never use a known exposed key as a fallback.
+    the first unmet condition. Never use a known exposed key as a fallback.
 - Share every historical key with current members who lack it. A membership
   reversal does not revoke an authorized key introduction. Sharing adds a permanent sealed copy;
   every device's next listing can observe it.
@@ -2190,7 +2190,7 @@ Carol's tablet:
   them in any entry the store log holds, kept or dropped: create-store and
   add-member entries naming them, and set-access entries signed by them.
   Dropping an entry does not undo the provider access it records.
-  - Every distinct S3 key id gets a `DeleteAccessKey` blocked record until the
+  - Every distinct S3 key id gets a `DeleteAccessKey` pending record until the
     admin confirms its deletion. A replacement concurrent with removal
     therefore lists both the old and the new key, even though removal
     defeats the set-access entry in replay.
@@ -2218,7 +2218,7 @@ Carol's tablet:
 - The member whose provider account holds the store can't be removed:
   the store would go with their account. Removing them fails with
   `SyncError::StoreOwner`.
-- On S3, `blocked()` lists keys the admin must delete until
+- On S3, `pending()` lists keys the admin must delete until
   the admin confirms they are gone ([E9](api.md#e9-members-and-devices)), however
   the removal or expiry that needs it came about. The device retains the
   confirmation by key id: another entry, invite, retry or restart cannot
@@ -2384,7 +2384,7 @@ Carol's tablet:
     the reload, merge records and positions together before allowing new
     app writes into the circle; until then they return
     `DbError::AudienceReloading`. Other audiences remain usable.
-  - Missing keys, snapshots or history appear in the blocked list. The
+  - Missing keys, snapshots or history appear in the pending list. The
     circle remains unavailable until the reload can commit.
   - E.g. Ben's laptop skips Ana's Gifts writes 9 and 10 after his removal.
     When Ben rejoins, it loads both even though its log position is 10.
@@ -2500,9 +2500,9 @@ Carol's tablet:
 - A snapshot is the synced tables and coven's merge tables
   ([§8](#8-merge)) as one device has them, encrypted, with how far into
   every log they reach.
-  - A device's own `_coven_uploads`, `_coven_operations` and `_coven_blocked`
+  - A device's own `_coven_uploads`, `_coven_operations` and `_coven_pending`
     aren't in it. Loading keeps that local state, except that committing a
-    changed reset suppresses blocked records (§19.1). Their inputs
+    changed reset suppresses pending records (§19.1). Their inputs
     remain until that reset is final (§9).
   - Snapshots live at `<store>/snapshots/<audience>/<device>/<n>`, where the
     audience is `store` or a circle's id.
@@ -2610,7 +2610,7 @@ Carol's tablet:
   Loading preserves them in `_coven_lost`, and every loss counts in its
   audience's fingerprint (§19.1).
 - Each device advances its posted positions only over fully realized work.
-  It can post new blocked records without advancing them (§6).
+  It can post new pending records without advancing them (§6).
 - Deleting a log object requires all of the following:
   - snapshots cover every part of it;
   - every store-log entry that makes this coverage usable, or makes the
@@ -2636,12 +2636,12 @@ Carol's tablet:
     the object being deleted; they grant no author authority and apply no
     rows. Loading a write still checks its complete signature (§6).
 - A write waiting for entries or a key copy holds retention back, with a
-  `Retention` blocked record naming that first prerequisite. It does not
+  `Retention` pending record naming that first prerequisite. It does not
   fail the pass. Arrival of the prerequisite permits another attempt.
 - A log with a permanent refusal is not read at or past that object,
   including for retention and reload. Keep those objects and any files
   whose absence cannot be proved without them.
-  - A reload requiring that gap fails atomically with `SyncError::Blocked`.
+  - A reload requiring that gap fails atomically with `SyncError::Pending`.
   - A snapshot covering it can load without reading it. The refusal remains
     recorded until the reset or update rules of §19.1 permit a new attempt.
 - A device deletes a snapshot of its own once a newer one of the same
@@ -2880,7 +2880,7 @@ Carol's tablet:
     verifying the source again with the same id, key and chunk hashes.
   - Any object past the provider's single request limit goes up this way,
     a large write or snapshot included.
-- Upload completion removes the queue row and its blocked record in one
+- Upload completion removes the queue row and its pending record in one
   local transaction. It creates no app write, changes no row or file version,
   and does not delay the attaching write's upload.
   - A crash before that transaction retries the fixed upload. An occupied
@@ -2938,7 +2938,7 @@ Carol's tablet:
   - `_coven_file_uploads`: the upload queue, each file's captured reference,
     source location and original-source metadata, independent id and key,
     and its provider session while one is in progress;
-    failures and waits use `_coven_blocked`, not a second failure column;
+    failures and waits use `_coven_pending`, not a second failure column;
     - Provider sessions belong to this queue; file upload operations do not
       keep a second recording of the same session.
     - Native error objects are available in the running process. Reopening
@@ -3264,7 +3264,7 @@ Carol's tablet:
   - Determine snapshot growth from local indexed facts before creating a
     snapshot operation. Retention derives eligible deletions each pass and
     has no operation row; an unchanged blocker causes no durable rewrite.
-- A step that cannot advance records its first blocker in `_coven_blocked`
+- A step that cannot advance records its first unmet condition in `_coven_pending`
   in the same transaction that records what the step completed.
   - A waiting app call receives the typed error. The record retains its
     category across restart without converting an error into text.
@@ -3272,7 +3272,7 @@ Carol's tablet:
     and pending provider access work. Retention uses its own path subject.
   - The reason determines retry: automatic, after an update, app action,
     or never (§19.1, E5). Unrelated operations can still advance.
-  - The app can retry or discard its own blocked operations with E6.
+  - The app can retry or discard its own pending operations with E6.
     It can also retry failed provider access work. It cannot discard that
     current intention or automatic maintenance through those calls.
   - A failed reload leaves the old database in place. No positions pass
@@ -3372,8 +3372,12 @@ retry rule.
 
 ### 19.1 Noticing
 
-- `_coven_blocked` holds one record per subject and reporting device.
-  The app reads it with `blocked()` or `subscribe_blocked()` (E5).
+Ana is offline with a photo waiting to upload. Ben's key has not arrived.
+Both appear in `pending()` with their own first unmet condition; the list also
+holds failures and rejected entries, without making either wait look completed.
+
+- `_coven_pending` holds one record per subject and reporting device.
+  The app reads it with `pending()` or `subscribe_pending()` (E5).
   - The subject identifies the write, entry, key copy, snapshot, positions,
     file, operation, retention target, audience, join request or connection.
   - An agreement check names both its audience and the peer.
@@ -3425,7 +3429,7 @@ retry rule.
     A different installed version permits one new attempt. Reopening the
     same version does not retry the same immutable bytes. A permitted
     check uses retained bytes first; only eviction requires another download.
-  - A successful changed reset clears the current blocked list atomically
+  - A successful changed reset clears the current pending list atomically
     with its reload. A failed reload changes nothing. Retain suppressed
     records until the reset is final; if the reset drops, recompute the list
     from those inputs (§9). Still-unmet conditions are recorded when
@@ -3483,12 +3487,12 @@ retry rule.
     one of them wrong;
   - on different versions they can't compare: an added column exists on
     one device only.
-- A fingerprint mismatch is an `Agreement` blocked subject naming the
+- A fingerprint mismatch is an `Agreement` pending subject naming the
   audience and peer, with reason `Disagrees`.
   - Compare only fingerprints using the same key as well as the same
     write positions, store-log positions and schema version.
   - E.g. Ana and Ben reach the same positions in Gifts but their hashes
-    differ. Each app sees the peer and Gifts in its blocked list.
+    differ. Each app sees the peer and Gifts in its pending list.
   - Neither device can tell which copy is right. Recovery requires the
     person's choice of reload (§19.2) or reset (§19.3).
 
@@ -3692,7 +3696,7 @@ retry rule.
 - Failed app calls and whole-pass sync failures retain typed causes.
   `Offline` means the last attempt could not reach storage; `Failed` means
   storage answered with an error preventing the whole pass (E5).
-  Every object or operation that cannot advance has a typed blocked record,
+  Every object or operation that cannot advance has a typed pending record,
   including maintenance, prerequisites and relevant signed peer reports
   (§19.1, E5). A persisted reason never substitutes text for its category.
 - A source file holds at most 1,000 lines, and its tests live beside it

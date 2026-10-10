@@ -125,8 +125,8 @@ observed counter beyond the local reservations, from any of those sources.
 The examples include a deleted log whose snapshot or posted positions still
 expose the rollback. A reserved upload already present in storage is allowed.
 
-`sends_require_check`, `failed_scan_sends_nothing` and
-`blocked_gate_emits_nothing` cover writes, entries, snapshots, files, key copies
+`sends_require_check`, `failed_scan_sends_nothing` and the identity gate's
+no-send theorem cover writes, entries, snapshots, files, key copies
 and positions. The caller supplies a completed scan or its failure, never a
 successful partial listing. Proving that a provider adapter performs that
 complete scan is outside this package.
@@ -238,7 +238,7 @@ against a row, cache eviction, and physical file deletion.
 **Clock skew does not hold application or make storage ages early.**
 `no_clock_hold` proves that a write or entry with available causes and keys
 applies for every receiving wall clock, including a negative one and an incoming
-maximum timestamp. `waiting_is_not_seen` keeps blocked input out of the latest
+maximum timestamp. `waiting_is_not_seen` keeps pending input out of the latest
 timestamp. `snapshot_upper` proves that loading adopts all applied timestamps.
 
 `age_never_early` and `finality_age_never_early` prove that an observed lower

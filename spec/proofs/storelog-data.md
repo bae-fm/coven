@@ -64,7 +64,7 @@ reversal without a row write. `deleted_return_reloads` includes a circle that
 was absent before replay. `passed_position_does_not_lose_part` loads a formerly
 skipped part even though its overall position already passed. Missing reload
 inputs retain the old data and positions, refuse circle writes and appear in
-the blocked list. `stale_reload_keeps_positions` prevents an old prepared
+the pending list. `stale_reload_keeps_positions` prevents an old prepared
 reload from replacing a newer entry view. `CurrentData.stopped_forever` proves
 that an installation stops receiving after its own removal.
 
@@ -100,12 +100,12 @@ leaves the in-flight request intact. `completion_matches_or_queues` proves that
 successful completion either matches the current intention or records the
 required next request. `obsolete_completion_queues_opposite` and
 `SecurityExamples.serialized_regrant` check revoke followed by re-grant.
-`blocked_until_finished` keeps pending work observable. Confirmed S3 key ids
+The access-work visibility theorem keeps pending work observable. Confirmed S3 key ids
 never reappear in deletion notices. Provider implementation and coordination
 between different owner devices are outside this proof.
 
-**Every modeled blocked subject is visible with its first reason.**
-`Blocked.every_blocked_subject`, `only_first_reason`, and `first_unmet` connect
+**Every modeled pending subject is visible with its first reason.**
+The model's visibility theorem, `only_first_reason`, and `first_unmet` connect
 the processing conditions to the list required by
 [§19.1](../coven.md#191-noticing) and [E5](../api.md#e5-storage-and-sync).
 Observation replaces that subject and reporting device's previous record.
@@ -205,7 +205,7 @@ The current spec resolves or narrows the historical witnesses as follows:
   Actual grants during a pending request and irreversible S3 console deletion
   are explicit §4/§13 exceptions, not reversible database effects.
 - **Reset-cleared reports:** §19.1 makes suppression reversible until final.
-  `Blocked.dropped_reset_restores` proves restoration from retained observations.
+  The model's reset-reversal theorem proves restoration from retained observations.
 - **Callbacks and copying a lost row:** E4 promises current query results,
   not matching callback histories. Copying to a different key can duplicate a
   row; E4 now says so. A pending loss can disappear on replay.
@@ -215,7 +215,7 @@ The current spec resolves or narrows the historical witnesses as follows:
 - **Stopped members/devices and unavailable historical keys:** §10 expressly
   stops an installation for good. `CurrentData.stopped_forever` checks that gate;
   the legacy `observeEntries` alternative is not the current spec. §11 expressly
-  allows required old objects to remain blocked when no reachable device can
+  allows required old objects to remain pending when no reachable device can
   supply their key. `KeyExamples.readability_counterexample` checks that case.
 - **Registration, private credentials and old secrets:** stopping does not
   erase previously installed data or disclosed secrets. Replay derives public
@@ -242,7 +242,7 @@ which removing Ben defeats Ben's deletion. Circle-member removal does not
 require its author's continued membership, matching §14.6's concurrent
 removals example. Historical authority is still checked in the recorded past.
 
-The blocked list describes current work. Reset suppression retains its inputs;
+The pending list describes current work. Reset suppression retains its inputs;
 new observations can record still-unmet conditions. One-shot reads and
 subscriptions share a query; callback histories are outside state equality.
 Error categories are modeled, while provider-specific payloads and query
