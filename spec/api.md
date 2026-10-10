@@ -776,9 +776,10 @@ impl CovenBuilder {
 
     /// Opens the store for reading and writing, taking the store's lock.
     /// Opening always migrates coven's tables before the app's schema, then
-    /// resumes unfinished operations and committed file work. An empty journal
-    /// needs no keys; resumed steps read keys when needed. Local database calls
-    /// need no unlocked key. Opening does not start
+    /// unlocks each configured key custody once for this handle's session,
+    /// then resumes unfinished operations and committed file work. Empty
+    /// custody is allowed; malformed or inaccessible custody fails opening.
+    /// Local database calls need no store key. Opening does not start
     /// the sync loop; `start_sync` starts it. A store with storage set up
     /// opens as `Stopped`; otherwise its status is `Disconnected`.
     pub async fn open(self, store: StoreId) -> CovenResult<CovenHandle>;
@@ -818,7 +819,8 @@ pub enum IdentityCustody {
 
 impl CovenHandle {
     /// Closes the store: stops syncing, operation and file work, closes every
-    /// connection and releases the writer lock. Open file streams and outstanding file I/O
+    /// connection, erases the unlocked custody sessions and releases the writer
+    /// lock. Open file streams and outstanding file I/O
     /// retain their shared deletion guards. Later database calls on any clone
     /// fail with `DbError::StoreClosed`; custody calls fail with `KeyError::StoreClosed`.
     /// Reports connection-close failures; cancellation does not stop closing.
@@ -1410,7 +1412,7 @@ while let Ok(values) = lost.next().await {
     positions and snapshots, received store log and device custody to check
     identity, counters, removal and replacement (§10). Other senders use
     the same serialized check. They do not make independent duplicate scans.
-  - The pass unlocks each required custody once and reuses it throughout.
+  - The pass borrows the keys unlocked at open for the handle's session.
     Its listings and retained checked bytes serve operations, reloads,
     writes, file transfers, snapshots, retention and agreement together.
   - Own positions are posted only when their complete publishable contents
@@ -1453,8 +1455,9 @@ while let Ok(values) = lost.next().await {
 - `start_sync` builds the provider client if absent, reading credentials from
   custody, then starts the loop. Tokens refresh on provider rejection (§4).
   Starting an already running loop, or a store with no storage set up, does nothing.
-- `stop_sync` finishes the active pass and file transfers, then drops the keys
-  sync unlocked and all workers' references to the provider client. Credentials
+- `stop_sync` finishes the active pass and file transfers, then drops all
+  workers' references to the provider client. The open handle keeps its session
+  keys until close or explicit forgetting. Credentials
   and the storage location remain available for the next `start_sync`.
 - `disconnect_storage` also removes this device's storage credentials. It leaves
   storage's contents untouched; syncing requires storage setup again.
@@ -1937,10 +1940,12 @@ impl CovenHandle {
 
     /// Opens store keys from their copies sealed to this member in storage
     /// (§11), keeps them in custody, and connects without starting sync.
-    /// Key selection follows §11; other object-key waits remain in blocked().
+    /// Uses the member-key session already held at open; it does not unlock
+    /// custody again. Key selection follows §11; other waits remain in blocked().
     pub async fn unlock_store_key(&self) -> Result<ConnectedStorage, StoreKeyUnlockError>;
 
-    /// Whether key custody holds the store key: `Available` or `Locked`.
+    /// Whether the held session has the store key: `Available` or `Locked`.
+    /// Reads no custody and derives no passphrase key.
     pub fn store_key_state(&self) -> Result<StoreKeyState, KeyError>;
 
     /// Finishes the active pass, removes this device's storage credentials and
@@ -1949,12 +1954,12 @@ impl CovenHandle {
     pub async fn disconnect_storage(&self) -> Result<(), SyncError>;
 
     /// Starts syncing, building the provider client if absent from the configured
-    /// location and custody credentials, refreshing once on rejection. Reads keys
-    /// from custody. Does nothing if already running or no storage is set up.
+    /// location and custody credentials, refreshing once on rejection. Borrows
+    /// keys already unlocked for the handle's session. Does nothing if already running or no storage is set up.
     pub async fn start_sync(&self) -> Result<(), SyncError>;
 
-    /// Finishes the active pass and file transfers, then drops unlocked keys and
-    /// the provider client. Keeps credentials and location for the next start.
+    /// Finishes the active pass and file transfers, then drops the provider
+    /// client. Keeps session keys, credentials and location for the next start.
     /// Completion publishes `Stopped`, or `Disconnected` if no storage is set up.
     /// A release failure is returned and recorded as a connection blocker.
     pub async fn stop_sync(&self) -> Result<(), SyncError>;
@@ -2948,9 +2953,9 @@ impl CovenHandle {
     /// Joining and restoring put the keys there themselves.
     pub fn initialize_identity(&self) -> Result<MemberId, IdentityError>;
 
-    /// Removes the store keys from key custody and drops any connection that
-    /// holds them unlocked. If custody can't remove them, the connection
-    /// stays.
+    /// Finishes work using store keys, removes them from custody, erases
+    /// them from the held session and drops the provider connection.
+    /// A failed custody removal retains the previous session and connection.
     pub async fn forget_store_keys(&self) -> Result<(), KeyError>;
 
     /// Keeps an app secret, such as an API token, in the same keychain and
@@ -2969,21 +2974,37 @@ impl CovenHandle {
     /// Failure or a crash between these steps may leave an extra name; retrying is safe.
     pub fn delete_host_secret(&self, name: &str) -> Result<(), KeyError>;
 }
+```
 
+- A custody owner unlocks once at open and retains the capability needed to
+  persist through that session. Custom custody obeys the same lifetime:
+  `persist` must reuse its unlocked derivation, and `close` erases it.
+  Ana adding a historical key saves the changed keyring without another
+  passphrase derivation. An empty session can acquire keys during setup.
+
+```rust
 /// The app's own store for the store keys and circle keys this device holds.
 pub trait StoreKeyCustody: Send + Sync {
-    /// The keys, or `None` when this device has never held any.
+    /// Called once at open; None when this device has never held keys.
+    /// Retains the unlocked persistence capability until close.
     fn unlock(&self) -> Result<Option<StoreKeyring>, KeyError>;
     /// Keeps `keyring`, replacing what was kept.
     fn persist(&self, keyring: &StoreKeyring) -> Result<(), KeyError>;
     fn forget(&self) -> Result<(), KeyError>;
+    /// Erases held memory after users finish; performs no persistence or IO.
+    /// Fallible saves complete through persist before dependent work starts.
+    fn close(&self);
 }
 
 /// The app's own store for this member's keys.
 pub trait MemberKeyCustody: Send + Sync {
+    /// Called once at open; persistence reuses the held session capability.
     fn unlock(&self) -> Result<Option<MemberKeys>, KeyError>;
     fn persist(&self, keys: &MemberKeys) -> Result<(), KeyError>;
     fn forget(&self) -> Result<(), KeyError>;
+    /// Erases held memory after users finish; performs no persistence or IO.
+    /// Fallible saves complete through persist before dependent work starts.
+    fn close(&self);
 }
 ```
 

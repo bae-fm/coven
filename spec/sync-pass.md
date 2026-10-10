@@ -2,10 +2,9 @@
 
 This is the request order for [§6](coven.md#6-syncing-writes) and
 [E5](api.md#e5-storage-and-sync). Its bounds are requirements in
-[§3.1](coven.md#31-io-bounds); unresolved alternatives live under
-[§4.1](coven.md#41-open-decisions-for-io-bounds). A conditional request below
-is made only when its condition holds. An unresolved provider capability is
-not assumed to exist.
+[§3.1](coven.md#31-io-bounds). The next-number discovery conflict remains in
+[§4.1](coven.md#41-open-decisions-for-io-bounds); all other bounds use the
+settled contract. A request below is made only when its stated condition holds.
 
 ## What survives a pass
 
@@ -93,14 +92,15 @@ committed local write and commands it will service. Use the owner's decoded
 log and indexed pending work; create no snapshot or retention operation
 merely to find out that nothing needs doing.
 
-Acquire the member keys and store keyring once each, as needed, into the
-pass's task-scoped custody values. Every read, apply, upload and operation
-step in the pass borrows them. Persist acquired or generated keys only when
-they change, before any durable step depends on their survival. Persistence
-must not reread custody for each object. The derivation/session choice is
-open in §4.1. Drop the pass's unlocked values when its work ends, including
-failure; separately running file tasks retain only their own required keys.
+Borrow the member keys and keyring unlocked when the handle opened. Every
+pass, file task and operation uses that same session. Persist acquired or
+generated keys only when they change, before durable work depends on them.
+The custody owner retains its unlocked persistence capability; neither a
+read nor a save re-derives the passphrase key.
 
+**Ana reopens Household.** Her passphrase unlocks each configured custody
+once. Syncing a thousand objects uses those held keys. Stopping and starting
+sync does not unlock again; closing the handle erases the session.
 Choose an already observed storage time `T` before the store-log scan, if
 one is available. With no time sample yet, discovery and ordinary sync
 still proceed; finality and age-based deletion wait for a qualifying scan.

@@ -240,11 +240,10 @@ a zero-body pass cannot hide a listing of the whole history.
 
 Local work has bounds too:
 
-- A pass unlocks store-key custody at most once and member-key custody at
-  most once: one task-scoped acquisition of each, at most two custody reads
-  in total, regardless of writes, keys or peers. No per-object unlocks.
-  Persist only changed keys; a bound on passphrase derivations while
-  persisting requires the custody decision in §4.1.
+- Opening unlocks store-key custody and member-key custody once each for
+  the handle's session. A warm pass performs zero unlocks or passphrase
+  derivations. Persist only changed keys through the same unlocked custody
+  session; persistence does not derive the passphrase key again.
 - Decode the saved store log at most once when the sync owner starts, on a
   read connection; keep the decoded value between passes. A warm idle pass
   performs zero full-log decodes and zero replays. Decode arriving entries
@@ -411,9 +410,9 @@ the file's ranges under `F`.
 
 ### 4.1 Open decisions for IO bounds
 
-The choices below are unresolved. They state what each option would require;
-they do not add a provider method, change a path, or weaken a guarantee by
-implication.
+The remaining discovery decision conflicts with retention. The complete
+scoped listings in §4 remain the required mechanism; this section identifies
+the missing guarantee that prevents replacing them with next-number reads.
 
 #### Open decision: gap-free discovery after deletion
 
@@ -435,17 +434,6 @@ as one miss per writer. Exact-name reads also have provider-specific request
 costs: [Drive downloads require a file id](https://developers.google.com/workspace/drive/api/reference/rest/v3/files/get),
 so an unknown name first needs an exact parent/name query.
 
-#### Open decision: custody sessions
-
-E11's separate `unlock` and `persist` methods do not give persistence a
-pass-scoped unlocked capability. A passphrase implementation could derive
-again on every persistence call. Either introduce a custody session that
-unlocks once and saves changed keys through that capability, or bound calls
-only and permit additional derivations on persistence. Retaining an unlocked
-derivation in the custody owner across passes changes its secret lifetime.
-The once-per-custody read bound stands; the at-most-one derivation per
-custody per pass bound is conditional on this choice.
-
 ## 5. Local database
 
 - The app declares which tables sync. The rest stay on the device.
@@ -463,8 +451,8 @@ custody per pass bound is conditional on this choice.
   - so every committed write gets uploaded, even after a crash.
 - A write needs no key: the record waits unencrypted and unsigned, and its
   upload encrypts and signs it ([§6](#6-syncing-writes)).
-  - So the app writes before any key is unlocked
-    ([E1](api.md#e1-opening)).
+  - So local writes need no store key, including before storage or identity
+    has been initialized ([E1](api.md#e1-opening)).
 - A write record, for a write that fixes a note's title and deletes a tag:
 
   ```
@@ -3625,7 +3613,8 @@ Carol's tablet:
   when absent, using custody credentials, then starts the loop. Tokens refresh
   on rejection (§4). Repeated starts keep the running loop and client.
 - `stop_sync` finishes the active pass and file transfers before releasing
-  unlocked keys and every worker's provider reference. It retains the location
+  every worker's provider reference. Session keys stay with the open handle;
+  closing or explicit key forgetting erases them. It retains the location
   and custody credentials for the next start. `disconnect_storage` also forgets
   this device's storage credentials, leaving remote contents untouched (E5).
 - An owner never hands out what it holds, by returning it or by a public
