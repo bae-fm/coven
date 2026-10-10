@@ -115,3 +115,84 @@ import CovenStorelogData
 #print axioms CovenStorelogData.EntryFate.Tests.device_never_resumes
 #print axioms CovenStorelogData.EntryFate.Tests.observing_resumes
 #print axioms CovenStorelogData.EntryFate.Tests.removal_status_returns
+
+#print axioms CovenStorelogData.KeySelection.newest_mem
+#print axioms CovenStorelogData.KeySelection.newer_trans
+#print axioms CovenStorelogData.KeySelection.newest_maximal
+#print axioms CovenStorelogData.KeySelection.selection_is_newest
+#print axioms CovenStorelogData.KeySelection.first_attempt_safe
+#print axioms CovenStorelogData.KeySelection.known_excluded_cannot_read
+#print axioms CovenStorelogData.KeySelection.retirement_persists
+#print axioms CovenStorelogData.KeySelection.observed_exposure_retires
+#print axioms CovenStorelogData.KeySelection.retry_fixed
+#print axioms CovenStorelogData.KeySelection.revocation_with_complete_knowledge
+
+#print axioms CovenStorelogData.Blocked.every_blocked_subject
+#print axioms CovenStorelogData.Blocked.only_first_reason
+#print axioms CovenStorelogData.Blocked.first_unmet
+#print axioms CovenStorelogData.Blocked.observed_block_visible
+#print axioms CovenStorelogData.Blocked.paired_reads
+#print axioms CovenStorelogData.Blocked.save_failure_visible
+#print axioms CovenStorelogData.Blocked.dropped_reset_restores
+
+#print axioms CovenStorelogData.Access.no_overlapping_request
+#print axioms CovenStorelogData.Access.completion_matches_or_queues
+#print axioms CovenStorelogData.Access.obsolete_completion_queues_opposite
+#print axioms CovenStorelogData.Access.pending_visible
+#print axioms CovenStorelogData.Access.blocked_until_finished
+#print axioms CovenStorelogData.Access.confirmed_never_reported
+
+#print axioms CovenStorelogData.RetentionSafety.dependency_agreement
+#print axioms CovenStorelogData.RetentionSafety.deletion_requires_final
+#print axioms CovenStorelogData.RetentionSafety.deleted_input_never_needed
+#print axioms CovenStorelogData.RetentionSafety.retention_preserves_possible_replay
+#print axioms CovenStorelogData.RetentionSafety.bounded_after_finality
+#print axioms CovenStorelogData.RetentionSafety.retained_count_bound
+#print axioms CovenStorelogData.RetentionSafety.loss_protects_file
+#print axioms CovenStorelogData.RetentionSafety.reversible_input_protects_file
+#print axioms CovenStorelogData.RetentionSafety.unreadable_prevents_deletion
+#print axioms CovenStorelogData.RetentionSafety.absent_device_does_not_prevent_age
+
+#print axioms CovenStorelogData.LostValues.pending_exact
+#print axioms CovenStorelogData.LostValues.all_dependencies_final
+#print axioms CovenStorelogData.LostValues.paired_reads
+#print axioms CovenStorelogData.LostValues.pending_not_in_fingerprint
+#print axioms CovenStorelogData.LostValues.final_loss_stable
+
+#print axioms CovenStorelogData.SecurityExamples.revocation_counterexample
+#print axioms CovenStorelogData.SecurityExamples.learning_delivery_prevents_reuse
+#print axioms CovenStorelogData.SecurityExamples.serialized_regrant
+#print axioms CovenStorelogData.SecurityExamples.rotations_coexist
+#print axioms CovenStorelogData.Blocked.latest_reason_replaces_previous
+#print axioms CovenStorelogData.Blocked.progress_removes_block
+#print axioms CovenStorelogData.RetentionSafety.first_finality_wait_visible
+
+#print axioms CovenStorelogData.CurrentReplay.read_no_conflict
+#print axioms CovenStorelogData.CurrentReplay.equal_received
+#print axioms CovenStorelogData.ReplayEffects.scan_realizes
+#print axioms CovenStorelogData.ReplayEffects.settleN_realizes
+#print axioms CovenStorelogData.ReplayEffects.entry_fate
+#print axioms CovenStorelogData.StorageFinality.survivor_reads_old
+#print axioms CovenStorelogData.StorageFinality.kept_prefix
+#print axioms CovenStorelogData.StorageFinality.stability
+#print axioms CovenStorelogData.StorageFinality.retention_finality
+#print axioms CovenStorelogData.StorageFinality.retention_preserves_replay
+#print axioms CovenStorelogData.StorageFinality.progress
+#print axioms CovenStorelogData.StorageFinality.bounded_storage
+#print axioms CovenStorelogData.CurrentData.entries_preserve_inputs
+#print axioms CovenStorelogData.CurrentData.convergence
+#print axioms CovenStorelogData.CurrentData.deleted_return_reloads
+#print axioms CovenStorelogData.CurrentData.rejoin_reloads_skipped
+#print axioms CovenStorelogData.CurrentData.failed_reload_keeps_inputs
+#print axioms CovenStorelogData.CurrentData.failed_reload_visible
+#print axioms CovenStorelogData.CurrentData.stale_reload_keeps_positions
+#print axioms CovenStorelogData.CurrentData.stopped_forever
+#print axioms CovenStorelogData.CurrentExamples.entry_only_deletion_restores
+#print axioms CovenStorelogData.CurrentExamples.passed_position_does_not_lose_part
+#print axioms CovenStorelogData.CurrentExamples.inclusive_window_boundary
+#print axioms CovenStorelogData.SecurityExamples.storage_history_valid
+#print axioms CovenStorelogData.CurrentExamples.empty_circle_dependency_gap
+#print axioms CovenStorelogData.StorageFinality.complete_old
+#print axioms CovenStorelogData.StorageFinality.finality_persists
+#print axioms CovenStorelogData.StorageFinality.established_stable
+#print axioms CovenStorelogData.StorageFinality.incomplete_listing_blocks_finality
