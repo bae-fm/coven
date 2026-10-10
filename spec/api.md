@@ -1114,12 +1114,18 @@ handle
   rows it read.
 - Each table-backed built-in read uses one pre-built internal query for
   its one-shot call and `subscribe_x() -> LiveQuery<T>` counterpart:
-  - `pending` and `lost_values` on the handle;
+  - `pending`, `lost_values`, `uploads`, `device_reset` and
+    `eager_cache_fill_status` on the handle;
+  - `pin_progress`, with the same fixed file references in both calls;
   - `members` on the handle, and `list` and `members` on `Circles`;
   - `rows_pinned` on the handle, with the same table and keys in both calls.
 - These reads work without storage and use the app's normal read and live-query
   machinery. Subscriptions observe committed changes to the same query inputs.
-  Upload byte progress and join requests keep their own streams (E7, E10).
+  No app-facing channel mirrors database state in memory. Upload progress is
+  the persisted session's provider-confirmed bytes; eager and pin progress
+  come from committed cache coverage. Only non-database state such as sync
+  status and join requests uses its own stream (E5, E10). Internal caches
+  rebuilt from the database are not additional app-facing state.
 - E.g. Ana's app reads `members()` to draw its first list, or subscribes with
   `subscribe_members()` to receive that same list and later committed changes.
 - Subscriptions show current results, including replay changes. Their callback
@@ -1964,11 +1970,13 @@ impl CovenHandle {
     /// The sync status, live. The first value is the current status.
     pub fn subscribe_sync_status(&self) -> watch::Receiver<SyncStatus>;
 
-    /// The latest device reset completed by this handle, initially None.
-    /// A subscriber receives the current value, including a reset during open.
-    /// Show that unsent edits were discarded, or may be lost for a damaged
-    /// database (§10, §19.2).
-    pub fn subscribe_device_reset(&self) -> watch::Receiver<Option<DeviceReset>>;
+    /// The latest completed replacement stored in this installation, or None.
+    /// It survives reopening; unsent edits were discarded, or may be lost
+    /// for a damaged database (§10, §19.2).
+    pub async fn device_reset(&self) -> CovenResult<Option<DeviceReset>>;
+
+    /// The same pre-built query, including a replacement completed during open.
+    pub fn subscribe_device_reset(&self) -> LiveQuery<Option<DeviceReset>>;
 
     /// Current local blocks and relevant authenticated peer reports, including
     /// while disconnected. Sorted by subject, then reporting device (§19.1).
@@ -2151,13 +2159,13 @@ impl CovenHandle {
   file id, key and chunk hashes, without an encrypted local copy.
 
 ```rust
-/// Live upload-queue results, ending when the store closes (E7).
-pub struct UploadsLiveQuery { /* private fields */ }
-
 impl CovenHandle {
-    /// A live query over the upload queue: every file waiting to upload, with
-    /// its progress. The first result is the current state.
-    pub fn subscribe_uploads(&self) -> UploadsLiveQuery;
+    /// Queue, pause setting and provider-confirmed session progress in one
+    /// committed database snapshot, available while disconnected.
+    pub async fn uploads(&self) -> CovenResult<UploadQueue>;
+
+    /// The same pre-built query, through the app's live-query mechanism.
+    pub fn subscribe_uploads(&self) -> LiveQuery<UploadQueue>;
 
     /// Retries waiting uploads now; individual failures stay in pending().
     /// Overrides ordinary backoff or retries a repaired source, but never
@@ -2169,12 +2177,7 @@ impl CovenHandle {
 
     /// Pauses uploads, or resumes them. A paused upload keeps its place,
     /// including a provider upload session in progress.
-    pub fn set_uploads_paused(&self, paused: bool);
-}
-
-impl UploadsLiveQuery {
-    /// The current state at once, then the next state each time it changes.
-    pub async fn next(&mut self) -> Result<UploadQueue, DbError>;
+    pub async fn set_uploads_paused(&self, paused: bool) -> CovenResult<()>;
 }
 
 pub struct UploadQueue {
@@ -2192,11 +2195,9 @@ pub struct QueuedUpload {
 pub enum UploadPhase {
     /// Not started, or waiting for its retry delay.
     Waiting,
-    /// Checking the source before transfer: bytes checked of its size.
-    Preparing { bytes_read: u64, bytes_total: u64 },
-    /// Verifying chunks, encrypting and sending them: encrypted bytes the
-    /// provider has received of the total.
-    Uploading { bytes_sent: u64, bytes_total: u64 },
+    /// Encrypted bytes confirmed by the provider and persisted in the
+    /// resumable session. Sending bytes alone does not advance this value.
+    Uploading { bytes_confirmed: u64, bytes_total: u64 },
 }
 
 pub enum DrainOutcome {
@@ -2213,8 +2214,8 @@ let mut uploads = handle.subscribe_uploads();
 loop {
     let state = uploads.next().await?;
     for upload in &state.files {
-        if let UploadPhase::Uploading { bytes_sent, bytes_total } = upload.phase {
-            show_progress(upload.file.key(), bytes_sent, bytes_total);
+        if let UploadPhase::Uploading { bytes_confirmed, bytes_total } = upload.phase {
+            show_progress(upload.file.key(), bytes_confirmed, bytes_total);
         }
     }
     if state.files.is_empty() {
@@ -2241,9 +2242,9 @@ pub struct PinProgress {
     pub files_completed: u64,
     /// Files requested, including those already present.
     pub files_total: u64,
-    /// Bytes downloaded by this call so far.
-    pub bytes_downloaded: u64,
-    /// Bytes this call needs to download, excluding bytes already cached.
+    /// Verified bytes present in the committed cache for the requested files.
+    pub bytes_cached: u64,
+    /// Total plaintext size of the requested files, including cached bytes.
     pub bytes_total: u64,
 }
 
@@ -2283,13 +2284,15 @@ impl CovenHandle {
     pub async fn user_file(&self, table: &str, key: impl Into<RowKey>) -> Result<Option<UserFile>, DbError>;
 
     /// Keeps uploaded files whole on this device regardless of the cache
-    /// budget, downloading what is missing. `on_progress` is called before
-    /// the first download, as bytes arrive, and as each file is kept.
-    pub async fn pin(
-        &self,
-        files: &[FileRef],
-        on_progress: &(dyn Fn(PinProgress) + Send + Sync),
-    ) -> Result<(), FileReadError>;
+    /// budget, downloading what is missing before the call returns.
+    /// Progress is read from pin_progress().
+    pub async fn pin(&self, files: &[FileRef]) -> Result<(), FileReadError>;
+
+    /// Verified cache coverage for these fixed references, in one snapshot.
+    pub async fn pin_progress(&self, files: Vec<FileRef>) -> CovenResult<PinProgress>;
+
+    /// The same pre-built cache query with the same fixed references.
+    pub fn subscribe_pin_progress(&self, files: Vec<FileRef>) -> LiveQuery<PinProgress>;
 
     /// Stops keeping files; they stay in the cache until the budget evicts them.
     pub async fn unpin(&self, files: &[FileRef]) -> Result<(), FileReadError>;
@@ -2316,10 +2319,13 @@ impl CovenHandle {
     /// Progress of downloading every file declared to download as soon as
     /// its row arrives that this device doesn't have yet, such as after
     /// loading a snapshot to join or recover (§16, §19.2).
-    pub fn subscribe_eager_cache_fill_status(&self) -> watch::Receiver<EagerCacheFillStatus>;
+    pub async fn eager_cache_fill_status(&self) -> CovenResult<EagerCacheFillStatus>;
 
-    /// Stops those downloads without stopping sync.
-    pub fn cancel_eager_cache_fill(&self);
+    /// The same query over cache reservations, cancellation and verified ranges.
+    pub fn subscribe_eager_cache_fill_status(&self) -> LiveQuery<EagerCacheFillStatus>;
+
+    /// Records cancellation of the current eager requests without stopping sync.
+    pub async fn cancel_eager_cache_fill(&self) -> CovenResult<()>;
 }
 
 impl FileRef {

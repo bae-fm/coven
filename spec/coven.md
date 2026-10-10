@@ -1819,7 +1819,13 @@ Carol's tablet:
   - Use the existing new-device installation path (§12.1), with a fresh id.
     Load the stored history, then allow app writes again.
   - Tell the app which old id was replaced and why, and that unsent edits
-    were discarded. The reset notice is separate from ordinary sync status (E5).
+    were discarded. Store the `DeviceReset` record in `_coven_device_reset`
+    in the replacement database before publishing its usable handle (E5).
+    Bootstrap retains the old/new ids and reason until that record commits;
+    directory publication and returning a usable handle require that commit.
+    The record survives reopening, is local to this installation and is not
+    snapshot data. `device_reset()` and `subscribe_device_reset()` use the
+    same query.
   - Until replacement finishes, keep the installation unavailable. Retry
     through the existing bootstrap state, using the same new id and entry.
     Never reopen the discarded copy as a working store.
@@ -2828,6 +2834,21 @@ Carol's tablet:
     or a crash leaves no partially downloaded file exempt from eviction.
 - The app can remove an uploaded file from the cache, which never touches
   storage.
+- Eager-fill work and progress are derived from cache reservations and verified
+  cached ranges. Reservations retain the requested fixed references and
+  cancellation; they do not duplicate byte counters or failure reasons.
+  Completed reservations stay in their requested set until that set finishes,
+  then retire together. Evicting a completed fill does not request it again.
+  A new changed file reference can request a new fill.
+  - `eager_cache_fill_status()` and its subscription execute one query.
+    Cancellation commits before it is reported. Failures remain in `pending()`.
+  - `pin_progress(files)` and its subscription query verified cache coverage
+    for the same references. Neither pinning nor eager fill reports bytes
+    that have arrived but have not passed authentication and committed.
+- Ana restarts after the provider confirmed two upload parts and the cache
+  committed three download ranges. Her first reads and subscriptions show
+  those same parts and ranges, even before storage reconnects. If open
+  replaced her old device, both reset-notice reads return that stored notice.
 
 ### 16.5 Uploads and deletion
 
@@ -2874,8 +2895,14 @@ Carol's tablet:
   upload, in parts.
   - Providers require it above a size, such as Google Drive above 5 MB per
     request.
-  - The upload session is recorded, so after a crash the upload continues
-    from the last part stored, instead of starting over.
+  - The upload session records each provider-confirmed part and its byte count
+    before reporting progress. Resuming and the app's `uploads()` /
+    `subscribe_uploads()` pair read that same state. Bytes written to a socket
+    are not progress; no separate progress writes or memory channel exist.
+  - Upload pause state is also persisted. One-request uploads remain
+    `Waiting` until confirmed completion removes them from the queue.
+  - After a crash, an extant session continues from its confirmed parts;
+    no confirmed part is forgotten merely because the app reopened.
   - A session the provider has since expired starts over, reading and
     verifying the source again with the same id, key and chunk hashes.
   - Any object past the provider's single request limit goes up this way,
@@ -2946,8 +2973,10 @@ Carol's tablet:
       operating-system or provider error from text.
     - A stored file whose row changed is considered for storage deletion
       under the same retained-reference checks; no marking write is queued;
-  - `_coven_cache`: each cached file or chunk, its namespace, size, when it
-    was last read, and whether it is pinned;
+  - `_coven_cache`: each cached file or chunk, its namespace, verified range,
+    size, when it was last read, and whether it is pinned. Cache reservations
+    retain the fixed references requested for eager fill and cancellation,
+    including requests that have not received any bytes;
   - `_coven_cache_budgets`: each namespace's budget and cached byte total,
     updated with its cache records so a budget check needs no full sum;
   - `_coven_file_removals`: unused local copies waiting to be deleted.
@@ -3520,8 +3549,11 @@ holds failures and rejected entries, without making either wait look completed.
     There is no separate recovery journal or recovery marker.
   - Load storage under the fresh id, then publish the replacement handle.
     Never import unsent rows or files from the damaged directory.
-  - Tell the app that unsent edits may have been lost. The returned handle's
-    device-reset notice names the old and new ids and `DatabaseDamage` (E5).
+  - Before publishing that handle, commit its `_coven_device_reset` record
+    with the old and new ids and `DatabaseDamage` (E5). Both notice queries
+    report that unsent edits may have been lost, including after reopening.
+    Failure to store the notice fails replacement; it cannot publish a usable
+    handle that conceals the discarded installation.
 - E.g. Ana's laptop has uploaded through write 12, but its damaged database
   may contain write 13. Resetting loads the stored history through 12 under
   a new device id. Coven does not guess which fragments of 13 are usable;
