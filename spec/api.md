@@ -82,7 +82,7 @@ pub enum Audience {
   container, owner and zone; all bytes it receives are encrypted.
   Paths expose `as_str`, `parse` for returned names, and `is_replaceable`;
   prefixes expose `as_str`. The bridge receives locations chosen by coven.
-- The bridge creates objects once and replaces posted positions atomically.
+- The bridge creates objects once and replaces posted positions and clock objects atomically.
   Large uploads use bounded CKAssets, keep their ids and parts across
   restarts, and publish a record only after all parts are stored.
 - Bridge failures keep their native cause in `StorageError::Provider`,
@@ -183,7 +183,7 @@ impl ObjectPath {
     pub fn parse(value: &str) -> Result<Self, StorageError>;
     /// The path bound into the object's encryption.
     pub fn as_str(&self) -> &str;
-    /// Whether this is a posted-positions path, the only kind that may be replaced.
+    /// Whether this is a posted-positions or clock path, the replaceable kinds.
     pub fn is_replaceable(&self) -> bool;
 }
 
@@ -219,7 +219,7 @@ pub struct StoredObject {
     pub size: u64,
     /// Server publication time of the complete object, not the uploading device's clock.
     /// Immutable objects retain their first stored time across retries. Replaced
-    /// positions carry their replacement time, used to observe storage time (§9).
+    /// positions and clock objects carry their replacement time (§9).
     pub stored_at: SystemTime,
     /// Opaque native identity that changes on every replacement (§4).
     pub revision: String,
@@ -253,7 +253,7 @@ pub trait CloudKitOps: Send + Sync {
     fn single_request_limit(&self) -> u64;
     /// Creates complete encrypted bytes using the server's create-only policy.
     async fn create(&self, location: &StorageConfig, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError>;
-    /// Replaces a complete posted-positions object atomically (§6).
+    /// Replaces complete posted positions or a clock object atomically (§6, §9).
     async fn replace(&self, location: &StorageConfig, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError>;
     /// Reads the whole object or only the asset parts covering the range (§16.3).
     async fn read(&self, location: &StorageConfig, path: &ObjectPath, range: Option<ByteRange>) -> Result<Vec<u8>, StorageError>;

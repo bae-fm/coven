@@ -110,8 +110,9 @@ entry's window and the strict boundary for finality; equality at 30 days
 does not establish it. No pending time-dependent work means no time probe.
 
 If a monotonic timer says a threshold may be reached and the known `T`
-cannot decide it, the storage-time decision in §4.1 governs the extra
-request. A device clock only schedules a check; storage time decides it.
+cannot decide it, replace `<store>/clock/<this device>` and read its status.
+These are two logical requests; provider overhead is counted separately.
+A device clock only schedules a check; storage time decides it.
 A sample still before the threshold schedules another check with backoff.
 A probe that writes anything must first satisfy §10 with the catalog and
 identity steps below, then start a new complete store-log scan after its

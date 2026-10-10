@@ -327,7 +327,7 @@ can meet the first two observations while failing the third.
     equal-length bytes. Ana notices the new revision and reads the new post.
 - Storage times come from the provider, on one clock for this store.
   An immutable object's time is its first complete publication; retrying
-  an occupied path does not change it. Replacing posted positions gets
+  an occupied path does not change it. Replacing posted positions or a clock object gets
   the replacement's storage time. Publication times do not go backwards.
 - Device paths have one intended writer: the device they name. Retrying
   that writer uses fixed bytes. A copied identity can violate this;
@@ -415,23 +415,6 @@ must charge listing pages, including retained history; it cannot be stated
 as one miss per writer. Exact-name reads also have provider-specific request
 costs: [Drive downloads require a file id](https://developers.google.com/workspace/drive/api/reference/rest/v3/files/get),
 so an unknown name first needs an exact parent/name query.
-
-#### Open decision: storage time in a quiet store
-
-§9 needs a storage time observed **before** the complete store-log scan.
-Reposting unchanged positions to obtain it contradicts posting only on
-change. Choose between a provider response time with the same authoritative
-clock and ordering guarantees as publication times, or a dedicated encrypted
-time-probe object whose create, metadata observation and deletion are counted.
-The latter needs an agreed path and lifecycle; D10 has no probe path.
-Neither choice may use the device clock as evidence of storage age.
-The source must report complete publication time as §4 requires; an
-upload-session initiation time cannot stand in for completion.
-
-Until one is specified, known stored times remain valid lower bounds, but
-an otherwise quiet store cannot be promised prompt finality or age-based
-cleanup. The bounds for a due time observation are conditional on this
-choice. Repeated unchanged positions writes are not an implicit exception.
 
 #### Open decision: partial reads and retained bytes
 
@@ -1740,12 +1723,17 @@ Carol's tablet:
     indicate that finality or retention could cross its next threshold.
     The device's timer schedules the check; it never proves storage age.
     An observation still short of the threshold backs off before retrying.
-  - Unchanged positions are not replaced to observe time. The authoritative
-    time source for a quiet store is an
-    [open decision](#open-decision-storage-time-in-a-quiet-store), including
-    its requests and ordering before the complete store-log scan. Until
-    that source is specified, a quiet store's prompt cleanup is conditional;
-    the finality test itself is unchanged.
+  - For a fresh time, replace `<store>/clock/<device>` with a sealed,
+    signed clock object, then read its complete publication time with status.
+    This device is its only writer. Keep one object, replacing it only when
+    time-dependent work is due; positions are never reposted for time.
+    The identity check precedes the replacement. The store-log listing that
+    uses this T starts after the status response. A failed replacement or
+    status call supplies no new T and remains visible as pending work.
+  - Ana's covered log waits for its thirtieth storage day. Her timer wakes
+    sync, which replaces her clock object and reads its status: two logical
+    requests, plus any provider lookup or confirmation calls. If storage
+    still says day 29, she keeps the log and schedules another check.
   - No device's acknowledgement is required. A sleeping device or a
     concurrently registered one has the same landing deadline as any other.
 - Why this holds:
@@ -1897,7 +1885,8 @@ Carol's tablet:
   - The device id also lives in custody that backups do not copy. A missing
     or different custody id requires the same device reset.
   - Finish this check before sending writes, entries, snapshots, files,
-    key copies or positions, including sends outside the periodic sync loop.
+    key copies, positions or clock observations, including sends outside
+    the periodic sync loop.
     A failed check sends nothing and reports its blocker.
   - Check the store log for this id's replacement before sending too.
 - A stale copy resets as a new device using storage and saved custody.
@@ -2671,7 +2660,7 @@ Carol's tablet:
     held it for 30 days.
   - Age compares storage times only: use the observed storage time T from
     §9 and the object's first stored time. A quiet store's due observation
-    follows §9 and its open time-source decision; unchanged positions are
+    uses the per-device clock object in §9; unchanged positions are
     not refreshed. Device-made write and entry timestamps never establish
     storage age.
   - E.g. Ana's phone clock jumps ahead a year. A log stored yesterday is

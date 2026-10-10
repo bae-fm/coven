@@ -116,6 +116,7 @@
 | 9 | Join request | D8 |
 | 10 | Restore code | D13 |
 | 11 | Invite code | D13 |
+| 12 | Clock observation | D8 |
 
 ### D5 Writes
 
@@ -353,7 +354,7 @@
   - Positions are not finality acknowledgements. Their provider-assigned
     replacement time, observed after a changed post, can supply T for §9's
     subsequent store-log check. Unchanged posts are not replaced to observe
-    time; a quiet store's time source remains an open decision (§4.1).
+    time; a quiet store instead replaces its clock object (§9).
   - Entry drop reasons remain local: each device computes “landed too late”
     from D6 and storage metadata, including for its own entries.
 - A report's subject has one of these tags:
@@ -402,6 +403,10 @@
     D1/D2 or the provider's replacement limit fails publication and records
     a Positions blocker; it is never silently truncated.
 
+- A clock observation (kind 12) contains `device:DeviceId`, matching its
+  path. It asserts no device time. Its sealed object's provider-assigned
+  publication time supplies T only to a subsequent complete store-log scan.
+
 - A join request (kind 9):
   `invite:uuid | keys:MemberKeys | device_name:name`.
 
@@ -420,6 +425,7 @@
   | 34 | Snapshot | `audience:Audience \| key:uuid \| writes:WritePositions \| store_log:EntryPositions` |
   | 35 | Posted positions | `key:uuid` |
   | 36 | Join request | nothing |
+  | 39 | Clock observation | `key:uuid` |
 
 - Every store-log entry has the same 19-byte prefix including kind and
   version. The create-store frame supplies the first admin's signing key;
@@ -455,8 +461,11 @@
   `coven/object-signature/v1` signature. Every read verifies it against the
   member the applied store log names for the device in the path, before using
   positions, fingerprints or blocked reports. An unknown device waits for
-  registration; a missing or wrong signature has reason InvalidPositions.
-  Neither counts as posted (§19.1).
+  registration; a missing or wrong signature has reason InvalidPositions
+  and does not count as posted (§19.1).
+- Clock observations use the same one-chunk framing and author signature.
+  They contain no positions, fingerprints or reports; the time probe reads
+  their provider metadata through status, not their body.
 - A chunk is `length:u32 | nonce:24 bytes | ciphertext | tag:16 bytes`:
   XChaCha20-Poly1305 under the encryption key derived from the named key.
   Writes and store log entries derive the nonce with HMAC-SHA256 from that
@@ -473,7 +482,7 @@
     `part_keys[i]`, cut into 64 KiB chunks, the last shorter;
   - a snapshot: one section, its frames cut into 64 KiB chunks, to the end
     of the encrypted data, before the final signature;
-  - an entry, positions or a join request: one section of one chunk
+  - an entry, positions, clock observation or a join request: one section of one chunk
     holding its frame.
   - The write prefix has exactly one key per declared part, including no
     part keys for a migration write.
@@ -516,6 +525,7 @@
 | `<store>/devices/<device>/<n>` | A device's write `n` |
 | `<store>/store-log/<device>/<n>` | A device's store log entry `n` |
 | `<store>/snapshots/<audience>/<device>/<n>` | A device's snapshot `n` of an audience: `store`, or a circle's id |
+| `<store>/clock/<device>` | A signed, sealed clock observation, replaced only for a due storage-time check |
 | `<store>/positions/<device>` | A device's posted positions and blocked records, replaced as either changes |
 | `<store>/keys/store/<key>/<member>` | A store key sealed to a member |
 | `<store>/keys/circles/<circle>/<key>/<member>` | A circle key sealed to a member |
@@ -563,8 +573,9 @@
   format and sealing key ids remain fixed for retries; deterministic sealing
   and Ed25519 signing reproduce the complete object byte for byte.
 
-  This derivation does not apply to snapshots, sealed keys, positions or join
-  requests; snapshots and sealed keys retain their originally sealed bytes.
+  This derivation does not apply to snapshots, sealed keys, positions,
+  clock observations or join requests; snapshots and sealed keys retain
+  their originally sealed bytes.
 - An invite's secret derives its join request's key with
   `coven/join-request/v1`.
 - A sealed key at `<store>/keys/…` is:
@@ -671,7 +682,8 @@
     across creation and addition, and a removal replacing two circles' keys;
   - a dismissal frame;
   - a snapshot with every section and active, frozen and excluded losses;
-  - a migration write.
+  - a migration write;
+  - a clock frame and sealed clock object, with its path and author signature.
 - Every successful decode re-encodes to the same bytes; tests decode every
   truncation and single-bit change of every fixture without panicking.
 
