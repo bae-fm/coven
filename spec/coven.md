@@ -2009,6 +2009,19 @@ Carol's tablet:
   can't read ([§7.1](#71-causality)).
   - A device has applied every entry the write had read, so it knows each
     part's key; it skips a part only when it isn't in that key's audience.
+- When replay makes a circle readable again, reload everything skipped
+  while it was unreadable. A deleted circle returning follows the same rule.
+  - Do not use the device's overall passed positions as proof that it read
+    those parts. Load the circle's usable snapshot and remaining history.
+  - Align it with the other audiences at the common point in §15. Commit
+    the reload, merge records and positions together before allowing new
+    app writes into the circle; until then they return
+    `DbError::AudienceReloading`. Other audiences remain usable.
+  - Missing keys, snapshots or history appear in the blocked list. The
+    circle remains unavailable until the reload can commit.
+  - E.g. Ben's laptop skips Ana's Gifts writes 9 and 10 after his removal.
+    When Ben rejoins, it loads both even though its log position is 10.
+    The same happens if Gifts was deleted and that deletion later drops.
 - A part sealed with a dropped removal's key counts like any other part:
   the members that removal left out get the key ([§11](#11-keys)), and a
   device in the key's audience waits for its copy before applying the

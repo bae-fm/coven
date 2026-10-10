@@ -336,7 +336,7 @@ pub enum DbError {
     /// A write puts a row in a circle this member isn't in, or in no circle
     /// the store log has (§14.5, §14.6).
     NotInCircle(CircleId),
-    /// A required reset or schema reload has not committed.
+    /// A required reset, schema or skipped-history reload has not committed.
     AudienceReloading(Audience),
     /// An inserted row's independent key holds no UUID (§8.5).
     KeyNotUuid { table: String, key: RowKey },
@@ -2925,7 +2925,8 @@ impl Circles<'_> {
     pub async fn delete(&self, circle: CircleId) -> Result<(), SyncError>;
 
     /// Adds a store member to the circle. They get its current and earlier
-    /// keys, so they read its history.
+    /// keys, so they read its history. Rejoining devices reload skipped parts,
+    /// including when replay returns a deleted circle (§14.4).
     pub async fn add_member(&self, circle: CircleId, member: &MemberId) -> Result<(), SyncError>;
 
     /// Removes someone from the circle and replaces its key (§14.6).

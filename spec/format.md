@@ -306,7 +306,9 @@
   Every named write ID and applied write's read positions are covered by
   the prefix's write positions. Positions describe consumed writes,
   including excluded writes and ignored pre-reset writes. Reset eligibility
-  uses D5's `store_log_read`, not its write positions. Excluded writes'
+  uses D5's `store_log_read`, not its write positions. A position that passed
+  an unreadable circle's parts does not prove they were loaded; rejoining
+  loads that audience's snapshot and skipped history (§14.4). Excluded writes'
   headers and dependencies are not retained in loss records.
 - The decoder refuses incorrect section/record order, duplicate identities,
   mismatched counts, audiences and coverage. EOF without the end marker is
