@@ -1,4 +1,4 @@
-import CovenStorelogData.Blocked
+import CovenStorelogData.Pending
 
 /-! §9, §15, §16.5. Retention decisions carry the entries they depend on.
 A condition says when an original is required; a covered replacement is a
@@ -40,7 +40,7 @@ theorem dependency_agreement (need : Need) (before after : Nat → Bool)
 
 inductive Kind where
   | deviceLog | snapshot | row | mergeRecord | loss | fileReference
-  | localSource | localChild | boundary | preMigration | blockedObservation
+  | localSource | localChild | boundary | preMigration | pendingObservation
   deriving DecidableEq, Repr
 
 structure Input where
@@ -49,15 +49,15 @@ structure Input where
   needed : Need
   /-- Snapshot coverage, ownership, age/posted positions and authenticated
   absence of references must all succeed. No device clock appears here. -/
-  checks : List CovenStorelogData.Blocked.Condition
+  checks : List CovenStorelogData.Pending.Condition
   deriving DecidableEq, Repr
 
 /-- The first non-final dependency is observable maintenance work (E5). -/
-def conditions (final : Nat → Bool) (input : Input) : List CovenStorelogData.Blocked.Condition :=
+def conditions (final : Nat → Bool) (input : Input) : List CovenStorelogData.Pending.Condition :=
   (input.needed.entries.map fun e => ⟨final e, .waits (.entryFinality e)⟩) ++ input.checks
 
 def work (path : String) (reporter : Nat) (final : Nat → Bool) (input : Input) :
-    CovenStorelogData.Blocked.Work :=
+    CovenStorelogData.Pending.Work :=
   ⟨.retention path, reporter, conditions final input⟩
 
 theorem first_finality_wait_visible (path : String) (reporter : Nat)
@@ -65,11 +65,11 @@ theorem first_finality_wait_visible (path : String) (reporter : Nat)
     (dependencies : input.needed.entries = before ++ entry :: after)
     (earlier : ∀ e ∈ before, final e = true) (waiting : final entry = false) :
     ⟨.retention path, reporter, .waits (.entryFinality entry)⟩ ∈
-      CovenStorelogData.Blocked.records [work path reporter final input] := by
-  apply CovenStorelogData.Blocked.every_blocked_subject _ _ _ List.mem_cons_self
+      CovenStorelogData.Pending.records [work path reporter final input] := by
+  apply CovenStorelogData.Pending.every_pending_subject _ _ _ List.mem_cons_self
   simp only [work, conditions, dependencies, List.map_append, List.map_cons,
     List.append_assoc, List.cons_append]
-  apply CovenStorelogData.Blocked.first_unmet
+  apply CovenStorelogData.Pending.first_unmet
   · intro condition hc
     obtain ⟨e, he, rfl⟩ := List.mem_map.mp hc
     exact earlier e he

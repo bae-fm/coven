@@ -9,11 +9,10 @@ namespace CovenStorelogData
 
 open CovenStorelog
 
-/-- store_log_keys.rs::needed includes dropped removals, but not dropped
-creations. Acquiring a copy never removes material already in custody. -/
+/-- Every received authorized introduction stays available for reading,
+regardless of replay fate. Acquiring never removes material in custody. -/
 def neededKeys (log : Log) (result : Result) : List Key :=
-  (result.kept ++ result.dropped.filter (fun e => isRemoval (log e).action))
-    |>.flatMap (introduced log)
+  ((result.kept ++ result.dropped).flatMap (introduced log)).filter (authorizedKey log)
 
 def acquireKeys (log : Log) (result : Result) (copies : Copies)
     (member device : Nat) (held : List Key) : List Key :=
@@ -28,13 +27,6 @@ theorem custody_persists (log : Log) (result : Result) (copies : Copies)
   split
   · exact h
   · exact List.mem_append_left _ h
-
-/-- The effective introductions select current keys. A kept no-op does not
-introduce a current key (effects.rs and §11). Historical custody is separate. -/
-def currentKeys (log : Log) (bound : Nat) (result : Result) : List Key :=
-  (effectiveEntries log bound result).foldl (fun keys e =>
-    (introduced log e).foldl (fun keys k =>
-      k :: keys.filter (fun old => old.audience != k.audience)) keys) []
 
 /-- §16.6: a local fact names either owned bytes or the user's original.
 Forgetting an original removes its registration, never the user's bytes. -/

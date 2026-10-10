@@ -1,6 +1,6 @@
 import CovenStorelogData.ReplayEffects
 import CovenStorelogData.EntryFate
-import CovenStorelogData.Blocked
+import CovenStorelogData.Pending
 import CovenStorelogData.LostValues
 
 /-! §9, §10, §14.4–7. Database projections retain their original inputs.
@@ -11,19 +11,19 @@ open CovenStorelog
 
 def observe {W Col K : Type} [DecidableEq W] [DecidableEq Col] [DecidableEq K]
     (schema : Schema W Col K) (writes : CovenMerge.Writes W Row Col)
-    (H : Finality.History) (Wtime n : Nat) (received : List Nat)
+    (H : CurrentReplay.History) (Wtime n : Nat) (received : List Nat)
     (original : CovenMerge.St W Row Col) : CovenMerge.Device W Row Col :=
   let result := CurrentReplay.resolve H Wtime n (entrySet received)
-  let view := CovenMerge.view (inputs schema writes H.log result original)
+  let view := CovenMerge.view (inputs schema writes H.membership.log result original)
   ⟨original, view, CovenMerge.lossRecord original view⟩
 
 /-- Deleted-circle loss metadata uses the same replay as row visibility. -/
-def circleLossCause (H : Finality.History) (Wtime n : Nat) (received : List Nat)
+def circleLossCause (H : CurrentReplay.History) (Wtime n : Nat) (received : List Nat)
     (row : Row) : Option LostValues.Cause :=
   match row.audience with
   | .store => none
   | .circle c =>
-      if deletedCircle H.log (CurrentReplay.resolve H Wtime n (entrySet received)) c then
+      if deletedCircle H.membership.log (CurrentReplay.resolve H Wtime n (entrySet received)) c then
         (CurrentReplay.circleCause H Wtime n (entrySet received) c).map
           LostValues.Cause.deletedCircle
       else none
@@ -31,14 +31,14 @@ def circleLossCause (H : Finality.History) (Wtime n : Nat) (received : List Nat)
 theorem entries_preserve_inputs {W Col K : Type}
     [DecidableEq W] [DecidableEq Col] [DecidableEq K]
     (schema : Schema W Col K) (writes : CovenMerge.Writes W Row Col)
-    (H : Finality.History) (Wtime n : Nat) (received : List Nat)
+    (H : CurrentReplay.History) (Wtime n : Nat) (received : List Nat)
     (original : CovenMerge.St W Row Col) :
     (observe schema writes H Wtime n received original).merged = original := rfl
 
 theorem convergence {W Col K : Type}
     [DecidableEq W] [DecidableEq Col] [DecidableEq K]
     (schema : Schema W Col K) (writes : CovenMerge.Writes W Row Col)
-    (valid : CovenMerge.Valid writes) (H : Finality.History) (Wtime n : Nat)
+    (valid : CovenMerge.Valid writes) (H : CurrentReplay.History) (Wtime n : Nat)
     (A B : List Nat) (sameEntries : ∀ e, e ∈ A ↔ e ∈ B)
     (x y : List W) (hx : CovenMerge.CausalOrder writes x)
     (hy : CovenMerge.CausalOrder writes y) (sameWrites : ∀ w, w ∈ x ↔ w ∈ y) :
@@ -59,7 +59,7 @@ theorem deleted_return_reloads (before after : CovenStorelog.State) (m c : Nat)
   exact returned
 
 inductive CircleStatus where
-  | available | outside | reloading (reason : Blocked.Reason)
+  | available | outside | reloading (reason : Pending.Reason)
   deriving DecidableEq, Repr
 
 structure CircleReader (W Col : Type) where
@@ -76,7 +76,7 @@ def circleReplay {W Col : Type} (before after : CovenStorelog.State)
 def writable {W Col : Type} (reader : CircleReader W Col) : Bool :=
   reader.status == .available
 
-def reloadWork {W Col : Type} (c reporter : Nat) (reader : CircleReader W Col) : Blocked.Work :=
+def reloadWork {W Col : Type} (c reporter : Nat) (reader : CircleReader W Col) : Pending.Work :=
   ⟨.audience (.circle c), reporter, match reader.status with
     | .reloading reason => [⟨false, reason⟩]
     | _ => []⟩
@@ -84,7 +84,7 @@ def reloadWork {W Col : Type} (c reporter : Nat) (reader : CircleReader W Col) :
 /-- Storage has prepared the usable snapshot and remaining readable history at
 the common point (§15). Previous passed positions never filter this input. -/
 def finishReload {W Col : Type} (reader : CircleReader W Col)
-    (prepared : Except Blocked.Reason (Reloaded W Col × List W)) : CircleReader W Col :=
+    (prepared : Except Pending.Reason (Reloaded W Col × List W)) : CircleReader W Col :=
   match prepared with
   | .error reason => { reader with status := .reloading reason }
   | .ok (data, positions) => ⟨data, positions, .available⟩
@@ -93,16 +93,16 @@ def finishReload {W Col : Type} (reader : CircleReader W Col)
 cannot replace a newer replay or advance its positions (§9, §14.4). -/
 def commitReload {W Col : Type} (c : Nat) (expected current : List Nat)
     (reader : CircleReader W Col)
-    (prepared : Except Blocked.Reason (Reloaded W Col × List W)) : CircleReader W Col :=
+    (prepared : Except Pending.Reason (Reloaded W Col × List W)) : CircleReader W Col :=
   if expected == current then finishReload reader prepared
   else finishReload reader (.error (.waits (.reload (.circle c))))
 
 def prepareReload {W Col : Type} [DecidableEq W]
     (writes : CovenMerge.Writes W Row Col) (headers : W → Header W)
-    (H : Finality.History) (Wtime n : Nat) (received : List Nat) (circle : Nat)
+    (H : CurrentReplay.History) (Wtime n : Nat) (received : List Nat) (circle : Nat)
     (snapshots : SnapshotId → Snapshot W Col) (original : Snapshot W Col)
     (history : List W) : Reloaded W Col :=
-  EntryFate.rebuild writes headers H.log n (CurrentReplay.resolve H Wtime n (entrySet received))
+  EntryFate.rebuild writes headers H.membership.log n (CurrentReplay.resolve H Wtime n (entrySet received))
     (.circle circle) snapshots original history
 
 theorem rejoin_reloads_skipped {W Col : Type} (a b : CircleReader W Col)
@@ -110,20 +110,20 @@ theorem rejoin_reloads_skipped {W Col : Type} (a b : CircleReader W Col)
     finishReload a (.ok (data, positions)) = finishReload b (.ok (data, positions)) := rfl
 
 theorem failed_reload_keeps_inputs {W Col : Type} (reader : CircleReader W Col)
-    (reason : Blocked.Reason) :
+    (reason : Pending.Reason) :
     (finishReload reader (.error reason)).data = reader.data ∧
     (finishReload reader (.error reason)).positions = reader.positions ∧
     writable (finishReload reader (.error reason)) = false := ⟨rfl, rfl, rfl⟩
 
 theorem failed_reload_visible {W Col : Type} (c reporter : Nat)
-    (reader : CircleReader W Col) (reason : Blocked.Reason) :
+    (reader : CircleReader W Col) (reason : Pending.Reason) :
     ⟨.audience (.circle c), reporter, reason⟩ ∈
-      Blocked.records [reloadWork c reporter (finishReload reader (.error reason))] := by
-  simp [Blocked.records, Blocked.first, reloadWork, finishReload]
+      Pending.records [reloadWork c reporter (finishReload reader (.error reason))] := by
+  simp [Pending.records, Pending.first, reloadWork, finishReload]
 
 theorem stale_reload_keeps_positions {W Col : Type} (c : Nat)
     (expected current : List Nat) (changed : expected ≠ current)
-    (reader : CircleReader W Col) (prepared : Except Blocked.Reason (Reloaded W Col × List W)) :
+    (reader : CircleReader W Col) (prepared : Except Pending.Reason (Reloaded W Col × List W)) :
     (commitReload c expected current reader prepared).data = reader.data ∧
     (commitReload c expected current reader prepared).positions = reader.positions ∧
     writable (commitReload c expected current reader prepared) = false := by
@@ -136,13 +136,13 @@ structure Installation where
   stopped : Bool
   deriving DecidableEq, Repr
 
-def receive (H : Finality.History) (W n m d : Nat) (s : Installation) (e : Nat) : Installation :=
+def receive (H : CurrentReplay.History) (W n m d : Nat) (s : Installation) (e : Nat) : Installation :=
   if s.stopped then s else
     let entries := s.received ++ [e]
     let result := CurrentReplay.resolve H W n (entrySet entries)
     ⟨entries, !running result.state m d⟩
 
-theorem stopped_forever (H : Finality.History) (W n m d : Nat) (s : Installation)
+theorem stopped_forever (H : CurrentReplay.History) (W n m d : Nat) (s : Installation)
     (stopped : s.stopped = true) (arrivals : List Nat) :
     arrivals.foldl (receive H W n m d) s = s := by
   induction arrivals with

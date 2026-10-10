@@ -53,23 +53,22 @@ def view {W Col K : Type} [DecidableEq W] [DecidableEq Col] [DecidableEq K]
     children := resources.children.filter data.view.shown
     uploaded := resources.uploaded
     eligibleSnapshots := (resources.snapshots.filter fun snapshot =>
-      snapshotKeyAllowed log s.log.result snapshot && allowsSnapshot log bound s.log.result snapshot
+      snapshotKeyAllowed log s.log.received snapshot && allowsSnapshot log bound s.log.result snapshot
     ).map (·.id)
     localReports := reports log bound s.log.result resources.localReports
     peerReports := resources.peerReports
     desiredAccess := desiredAccess s.log.result }
 
 /-- After replay has decided fate, none of these effects reads the dropped
-list or receipt history. Keep historical entries to verify authority, but
-compute effects from the kept replay alone. This is not a claim that replaying
-a history with causal evidence deleted would have the same author views. -/
+list. Snapshot keys use received introductions and their historical authority;
+other projections use the kept replay. Deleting causal evidence is not covered. -/
 theorem effects_ignore_dropped {W Col K : Type}
     [DecidableEq W] [DecidableEq Col] [DecidableEq K]
     (schema : Schema W Col K) (writes : CovenMerge.Writes W Row Col)
     (log : Log) (bound : Nat) (resources : Resources W Col)
-    (s : CovenStorelogData.State W Col) (received : EntrySet) (dropped : List Nat) :
+    (s : CovenStorelogData.State W Col) (dropped : List Nat) :
     view schema writes log bound resources
-      { s with log := ⟨received, { s.log.result with dropped }⟩ } =
+      { s with log := ⟨s.log.received, { s.log.result with dropped }⟩ } =
     view schema writes log bound resources s := rfl
 
 /-- No circle-delete write occurs in this machine. Every interleaving of entry

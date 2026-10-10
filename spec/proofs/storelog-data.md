@@ -4,13 +4,15 @@ The Lean package is [storelog-data](storelog-data/). It imports the merge and
 store-log packages. Its executable models distinguish database state, knowledge
 of keys, provider requests, physical storage, and what the app reads.
 
-## Model boundary for key introductions
-
-The executable removal witnesses carry key introductions on removals. §11
-instead uses separate authorized rotations after membership changes. The
-model's receipts abstract successful sealing and opening; they do not check
-D6's SHA-256 key commitment or the writer-specific D10 paths. The claims
-below describe those executable inputs, not a proof of these format checks.
+The package uses the store-log package's `CurrentReplay.Action`, `Entry`
+and `History` directly. Removals carry only their targets; creation and
+rotation carry `KeyCommitment`. `CurrentReplay` supplies received and
+recorded-past replay, and `ReplayPolicy` supplies admission and effects for
+the data and retention proofs. No local action or replay adapter is needed.
+`KeySelection.Key` is the shared `CurrentKeys.Introduction`; authorization
+uses its received-introduction catalog, and ordering uses its newest-key
+functions. This package adds receipt-based sharing and publication phases,
+data loading, provider work and their visibility in the pending list.
 
 Exposure in §11 is conservative: any copy addressed to an excluded member
 retires its named key. Ana cannot decrypt a box for excluded Dan to check
@@ -19,48 +21,73 @@ a recipient still rejects a key whose hash differs from K2's introduction.
 The model's successful receipts do not prove this third-party detection or
 the recipient's hash check; both are format/IO verification obligations.
 
-Ana removes Ben, then Carol rotates K for the remaining members. If a
-concurrent replay returns Ben, historical sharing supplies him K. This is
-the spec's corresponding disclosure history; the checked witness below
-attaches K to the removal instead.
-
 ## Results and their assumptions
 
 **Revocation is proved with the stated observation window.**
-[§11](../coven.md#11-keys) requires each pass to read every known writer's new
-copies through a next-number miss alongside the store log. Retained permanent
-copies and these reads supply the model's complete copy observation.
-`KeySelection.revocation_between_listings` proves that a key
-selected for a first attempt has no copy for an excluded member in storage,
-provided no such copy appears after that observation. The theorem names this
-residual window as `noLaterCopy`; it assumes neither local memory of a dropped
-entry nor a separate retirement table. Failed or incomplete observations
-produce no pass (`listing_failure_blocks`). The theorem names use “listing”
-for this supplied set; they do not prove the numbered discovery algorithm.
+§11 requires each pass to read every known writer's new copies through a
+next-number miss alongside the store log. Retained permanent copies and these
+reads supply the model's complete copy observation; theorem names use
+“listing” for this supplied set and do not prove the numbered discovery
+algorithm. [§3](../coven.md#3-guarantees), [§11](../coven.md#11-keys) and the
+[three pass phases](../sync-pass.md#requests-in-order) are represented by
+`KeyPhases.begin`, `rotate` and `firstSend`. Both membership and key-copy
+observations must complete. A currently running audience member publishes
+rotation copies and then the entry before ordinary data can use its key.
+`rotation_by_remaining_member` proves that the rotator still belongs and
+runs; `rotation_requires_publication` proves that both receipts are required;
+`HistoricalExamples.rotation_in_second_phase` checks Carol rotating after
+Ana's key-free removal of Ben, then first-sending with K2. Provider access
+can remain pending while this protected data proceeds.
 
-Ana and Ben are admins; Carol is a member. Three concurrent entries, in
-stamp order, demote Ben, promote Carol, and let Ben remove Ana. Ben's removal
-introduces K, sealed to Ben and Carol. Ben's tablet receives the removal and
-the demotion: the removal now drops because it would leave no admin. The tablet
-shares K with the restored Ana, as §11 requires. Carol's promotion then arrives
-and the removal returns: Carol can remain admin without Ana.
+`KeySelection.revocation_between_listings` and `KeyPhases.revocation` prove
+that a selected sealing key has no copy for an excluded member in the listed
+storage plus later copies, provided `noLaterCopy` holds. The latter connects
+the result to the sending device's replay and first-send path, and proves
+that the sender differs from the excluded member. The departed author's own
+pre-removal circle writes are outside this path and this secrecy promise.
+Attempted retries retain their original key and bytes. The absence of a
+copy expresses unreadability in the receipt model, not a cryptographic proof.
 
-Ben's phone receives the removal, promotion, then demotion, keeping the removal
-throughout. Reading the tablet's new copies finds Ana's copy anyway, and
-the phone retires K for first attempts (`listing_prevents_reuse`).
+**Revocation without the window hypothesis fails.** Ana and Ben are admins;
+Carol is a member. Three concurrent entries demote Ben, promote Carol, and
+let Ben remove Ana. Carol receives the removal and separately rotates K.
+Ben's tablet later sees the removal drop on demotion, shares K with the
+restored Ana, then sees the removal return when Carol's promotion arrives.
+Ben's phone receives promotion before demotion and keeps the removal
+throughout. Its complete copy observation still finds Ana's permanent copy and
+refuses K (`SecurityExamples.listing_prevents_reuse`).
 
-**Revocation without the window hypothesis fails.** Move that one share to
-after the phone's miss for that writer: it selects K during the pass, while
-Ana can obtain the new copy. `residual_window_counterexample` and the
-following Lean `example` check this history, including the next observation
-refusing K.
-`sharing_history` checks both causal orders, the intermediate drop, the allowed
-share, and the removal's return. `storage_history_valid` checks online first
-attempts and storage landings. After setup the witness has three concurrent
-changes, one later sealed copy and one first send. S3 access deletion can still
-await console action. The theorem can cover the whole period a write remains
-readable by extending `later` to that period; it cannot prevent later disclosure.
-Receipts abstract completed sealing and opening, not encryption.
+Move that share after the phone's miss for that writer: it selects K while Ana can obtain
+the new copy. `residual_window_counterexample` and a Lean `example` check the
+failure and the next observation refusing K. `sharing_history` checks both causal
+orders, the intermediate drop and the allowed share; `storage_history_valid`
+checks online first attempts and storage landings. Extending `later` to the
+whole readable lifetime of a write strengthens the premise to that period;
+it cannot prevent later disclosure.
+
+**Historical sharing and continued readability are proved.**
+`HistoricalExamples.removal_reversal_and_sharing` checks the history in
+[§14.4](../coven.md#144-writes): Ana removes Ben, Carol rotates Gifts to K2
+and writes, then Ben's earlier concurrent removal of Ana returns Ben.
+The history uses S3, where neither admin owns the other's provider account.
+Carol is still running and shares K2. `ben_never_stopped` checks that Ben's
+receiving installation never stops; it sees its removal only after it drops.
+`historical_parts_apply` opens that copy, applies the original part on Ben,
+and checks that Carol's already applied value survives the replay.
+`membership_keeps_part_visible` checks the resulting app views on both devices.
+`historical_snapshot_loads` loads the same snapshot under K2 on both sides
+of the membership reversal. Missing K2 produces a key wait.
+
+`KeySelection.authorized_introduction_persists` proves the general rule:
+retaining an authorized introduction keeps it authorized regardless of the
+new membership replay. `HistoricalKeys.historical_key_stays_readable`,
+`parts_stay_loadable` and `snapshots_stay_loadable` connect that rule to
+current audience membership and custody. They preserve the ordinary part
+checks for historical writer authority, received entry past and schema/reset
+boundaries; they do not promise to bypass another missing prerequisite.
+`membership_preserves_applied` proves that replay alone never changes the
+retained applied data. The snapshot catalog also uses received authorized
+introductions, without a kept-entry requirement.
 
 **Entry fate and data convergence are proved for the modeled effects.**
 `ReplayEffects.entry_fate` proves that applying the final kept entries alone
@@ -79,8 +106,9 @@ the pending list. `stale_reload_keeps_positions` prevents an old prepared
 reload from replacing a newer entry view. `CurrentData.stopped_forever` proves
 that an installation stops receiving after its own removal.
 
-Rotations and replay-empty circles use `CovenStorelog.CurrentReplay` directly;
-there is no second replay policy in this package. `empty_circle_rows_and_cause`
+Rotations and replay-empty circles use the shared conflict and effect
+functions through `CurrentReplay`; admission has no removal-key prerequisite.
+`empty_circle_rows_and_cause`
 checks Ana and Ben's concurrent removals: Gifts is hidden, the loss names the
 latest kept removal, and Carol's concurrent addition restores its original row
 and clears that cause. `ReplayEffects.entry_fate` and `StorageFinality` use the
@@ -95,28 +123,45 @@ A recipient returning no longer disqualifies that key; there is no remembered
 retirement bit. `selection_is_newest` proves timestamp and key-id ordering,
 and attempted retries retain their key and bytes.
 
-`selectInReplay` derives membership and historical authority from the shared
-replay. `selected_introduction_authorized` connects selection to a received,
+`selectInReplay` derives membership and historical authority from the
+key-free replay. `selected_introduction_authorized` connects selection to a received,
 authorized introducing action, including tag 15's actual audience and id.
 `rotations_coexist` checks Ben and Carol's concurrent rotations after Ana's
 removal: both stay kept, and the later usable key is selected. Fresh random ids
 and successful key acquisition are inputs. Recipients are members; removing
 one device does not remove its member or rotate member keys (§13).
 
-**Provider completion is proved for one owner's device.**
-[§4](../coven.md#4-storage-providers-and-access) promises intended access, not
-instant equality between every device's replay and the provider. `Access.start`
-refuses to start a second request while one is in flight. A changed intention
-leaves the in-flight request intact. `completion_matches_or_queues` proves that
-successful completion either matches the current intention or records the
-required next request. `obsolete_completion_queues_opposite` and
+**Provider scheduling and completion are proved for one owner's device.**
+[§13](../coven.md#13-removing-members-and-devices) has one scheduling boundary:
+`Access.applyEntries` commits the received entries, replay and resulting access
+intention together. A failed commit retains the previous state and returns
+the failure. `removalCall` only observes whether its entry is kept; it returns
+unit without changing the journal or contacting the provider.
+`apply_records_intention`, `apply_removal_visible` and
+`HistoricalExamples.removal_access_one_path` connect that transaction to the
+pending revoke or owner wait, before any provider completion.
+
+`Access.start` refuses another request while one is in flight. A changed
+intention leaves that request intact. `completion_matches_or_queues` proves
+that successful completion matches the current intention or queues the next
+request. `obsolete_completion_queues_opposite` and
 `SecurityExamples.serialized_regrant` check revoke followed by re-grant.
-The access-work visibility theorem keeps pending work observable. Confirmed S3 key ids
-never reappear in deletion notices. Provider implementation and coordination
-between different owner devices are outside this proof.
+`HistoricalExamples.replay_reversal_queues_regrant` connects that sequence
+to the atomic entry-application boundary.
+Unchanged replay preserves a reported failure, including retained grants.
+An explicit due retry uses the current intention and remains visible.
+`pending_until_finished`, `owner_wait_visible`, `retained_grant_visible` and
+`finished_work_absent` connect those states to the pending query.
+
+Every recorded S3 key, including a later dropped access entry, contributes
+until confirmed deleted (`credential_pending_visible`,
+`dropped_access_stays_pending`). Confirmed ids never reappear. The account
+proof quantifies over one already recorded account; provider account discovery,
+provider implementation and coordination between owner devices are outside it.
+The existing journal supplies operation ids for the pending subjects.
 
 **Every modeled pending subject is visible with its first reason.**
-The model's visibility theorem, `only_first_reason`, and `first_unmet` connect
+`Pending.every_pending_subject`, `only_first_reason`, and `first_unmet` connect
 the processing conditions to the list required by
 [§19.1](../coven.md#191-noticing) and [E5](../api.md#e5-storage-and-sync).
 Observation replaces that subject and reporting device's previous record.
@@ -138,7 +183,7 @@ all causes affecting the loss; their extraction from full replay is not proved.
 
 **Retention safety is connected to storage-time finality.**
 `StorageFinality` reuses C10's `ReplayPrefix.settle_prefix` and `range_split`
-with `CurrentReplay`'s conflict relation. It uses §9's strict old prefix and
+with the shared `ReplayPolicy` conflict relation. It uses §9's strict old prefix and
 inclusive recent window; tied storage times stay together. Time rejection
 checks the complete stored history, including dropped entries and entries
 outside an author's past, before computing author views.
@@ -167,23 +212,26 @@ reader's acknowledgement.
 The model supplies complete storage metadata as an input; numbered discovery and
 authentication are outside the proof. Dependency expressions must name every
 entry that can affect an input. Their extraction from arbitrary SQL is outside
-the model. The theorem applies to the shared current replay, including
+the model. The theorem applies to the key-free replay, including
 rotations and circles hidden only after replay.
 
 ## Entry fate, convergence, and the retained histories
 
-`Model`, `Operations`, `Keys`, `Delivery`, `EntryEffects`, `Snapshots` and
-`Retention` retain the earlier executable behavior. Their counterexamples are
+`Model`, `Operations`, `Delivery`, the non-key effects in `EntryEffects`,
+`Snapshots` and the earlier retention predicates retain historical executable
+behavior. `Keys` and the retained delivery and unavailable-key witnesses use
+separate rotations; removals introduce no keys anywhere in this package.
+Their counterexamples are
 historical witnesses, not assertions that the current spec still requires that
-behavior. Their replay uses the historical conflict list. `Keys.introduced`
-also recognizes rotation entries for the current selection model.
+behavior. Their replay uses the historical conflict list. `KeySelection` and
+`HistoricalKeys` carry the received-authorization and
+current pass rules.
 
 `EntryFate` retains originals and computes current effects from replay. Its
 `effects_ignore_dropped`, `views_converge`, and `rebuild_converges` prove the
 corresponding conditional results for the historical replay and valid readable
-merge inputs. The shared `CovenStorelog.CurrentReplay`, `ReplayEffects`,
-`CurrentData` and `StorageFinality` modules carry the updated results above. Equal encrypted
-objects alone do not imply readable inputs when historical keys are missing.
+merge inputs. `CurrentReplay`, `ReplayEffects`, `CurrentData` and `StorageFinality` carry the
+updated results above. Equal encrypted objects alone do not imply readable inputs when historical keys are missing.
 
 The current spec resolves or narrows the historical witnesses as follows:
 
@@ -207,10 +255,11 @@ The current spec resolves or narrows the historical witnesses as follows:
   this provided its conditions name all such entries. Automatic discovery of
   every snapshot dependency is outside the model.
 - **Snapshots under historical keys:** §9 and §11 retain authorized introduced
-  keys for reading, independently of later membership replay. The executable
-  dropped-removal-key witness uses its own removal representation.
-- **Re-kept keys and historical disclosures:** the sealed-copy observation exposes
-  earlier disclosures even to devices that never saw the introducing entry
+  keys for reading, independently of later membership replay.
+  `HistoricalExamples.historical_snapshot_loads` checks the rotation history;
+  `HistoricalKeys.snapshots_stay_loadable` proves the general key condition.
+- **Membership reversals and historical disclosures:** the sealed-copy observation exposes
+  earlier disclosures even to devices that never saw the removal
   drop. Copies published after that writer's miss remain the residual window.
   Different custody or observation times can still produce different key choices.
 - **Provider revocation and stale requests:** intended access follows replay
@@ -240,7 +289,8 @@ The current spec resolves or narrows the historical witnesses as follows:
 replay. Each writer's miss bounds that observation; storage can still
 change afterward. Historical-key sharing follows the sharing device's current
 audience. §3 excludes a departing author's own pre-removal writes; this model's
-revocation witness concerns Ben's new writes, not that exception.
+revocation theorem covers current members' first sends; the witnesses include
+Carol's new circle data and Ben's new store data.
 
 Physical cleanup requires all deciding entries to be final and all other
 checks to pass. Finality is not inferred from completing an operation or from
@@ -260,6 +310,15 @@ new observations can record still-unmet conditions. One-shot reads and
 subscriptions share a query; callback histories are outside state equality.
 Error categories are modeled, while provider-specific payloads and query
 scheduling are not.
+
+Receipts abstract completed sealing, opening and publication. Introductions
+carry the shared D6 key commitments. This package does not execute their
+SHA-256 check, D10's writer-specific copy paths, fresh-id generation or
+actual ciphertext validation; the store-log package separately proves its
+parameterized hash and opened-copy checks. Rotation failure receipts
+do not grant a usable key; incomplete physical publications and their retries
+are outside this pass model. Other first-send gates, complete write causality
+and whole-object signature validation are inputs to the modeled key/data boundary.
 
 Encryption, signatures, real provider behavior, SQL execution, crashes, and
 Rust/Lean equivalence remain outside the model. No Rust code or differential

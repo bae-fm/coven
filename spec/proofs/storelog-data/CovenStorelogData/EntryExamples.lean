@@ -131,64 +131,11 @@ def keyLog : Log
   | _ => entry 0 0 (List.range 6) (.removeMember 2 [])
 
 def keyResult (tail : List Nat) := resolve keyLog 9 (entrySet (List.range 6 ++ tail))
-def returningKey : Key := ⟨8, .store⟩
-def keyCopies : Copies := introductionCopies keyLog (List.range 9)
-def transientCopies := redistribute keyLog (keyResult [8, 7]) keyCopies
-def finalCopies := redistribute keyLog (keyResult [6, 7, 8]) transientCopies
-def directCopies := redistribute keyLog (keyResult [6, 7, 8]) keyCopies
-
 theorem keys_valid : Valid keyLog 9 ∧
     CausalOrder keyLog (List.range 6 ++ [8, 7, 6]) ∧
     CausalOrder keyLog (List.range 9) := by
   refine ⟨validCheck_sound _ _ (by decide), ?_, ?_⟩
   all_goals apply causalCheck_sound _ .nil; decide
-
-/-- Redistribution is irreversible knowledge: Carol gets key 8 while its
-removal is dropped. Re-keeping it makes that same disclosed key current. -/
-theorem rekept_key_counterexample :
-    8 ∈ (keyResult [8]).kept ∧ 8 ∈ (keyResult [8, 7]).dropped ∧
-    8 ∈ (keyResult [6, 7, 8]).kept ∧
-    currentKeys keyLog 9 (keyResult [6, 7, 8]) = [returningKey] ∧
-    member (keyResult [6, 7, 8]).state 2 = false ∧
-    (returningKey, 2) ∈ finalCopies ∧ (returningKey, 2) ∉ directCopies ∧
-    redistribute keyLog (keyResult [6, 7, 8]) finalCopies = finalCopies ∧
-    redistribute keyLog (keyResult [6, 7, 8]) directCopies = directCopies := by decide
-
-example : finalCopies ≠ directCopies := by decide
-
-/-- Carol acquired the disclosed key before removal, so stopping sync cannot
-erase it. With no temporary drop she never obtains it, even with more rounds. -/
-example : returningKey ∈ acquireKeys keyLog (keyResult [6, 7, 8]) finalCopies 2 2
-    (acquireKeys keyLog (keyResult [8, 7]) transientCopies 2 2 []) := by decide
-
-theorem undisclosed_forever : ∀ n,
-    (returningKey, 2) ∉ rounds keyLog (keyResult [6, 7, 8]) n directCopies :=
-  unavailable_forever keyLog (keyResult [6, 7, 8]) directCopies (by decide)
-    returningKey 2 (by decide)
-
-/-- The same disclosure crosses a circle boundary: Ben's store removal
-rotates Gifts, and beats Ana's concurrent circle removal until demotion makes
-Ben's removal unsafe. Carol remains a store member in the final state. -/
-def circleKeyLog : Log
-  | 6 => entry 0 0 (List.range 6) (.makeCircle 0 "Gifts")
-  | 7 => entry 0 0 (List.range 7) (.addToCircle 0 1)
-  | 8 => entry 0 0 (List.range 8) (.addToCircle 0 2)
-  | 9 => entry 0 3 (List.range 9) (.changeRole 1 .member)
-  | 10 => entry 1 1 (List.range 9) (.removeMember 0 [0])
-  | 11 => entry 0 0 (List.range 9) (.removeFromCircle 0 2)
-  | n => keyLog n
-
-theorem circle_keys_valid : Valid circleKeyLog 12 := validCheck_sound _ _ (by decide)
-
-theorem rekept_circle_key_counterexample :
-    let copies := introductionCopies circleKeyLog (List.range 12)
-    let interim := resolve circleKeyLog 12 (entrySet (List.range 9 ++ [10, 11]))
-    let final := resolve circleKeyLog 12 (entrySet (List.range 12))
-    let key := Key.mk 11 (.circle 0)
-    11 ∈ interim.dropped ∧ 11 ∈ final.kept ∧
-    key ∈ currentKeys circleKeyLog 12 final ∧ inCircle final.state 0 2 = false ∧
-    (key, 2) ∈ redistribute circleKeyLog final (redistribute circleKeyLog interim copies) ∧
-    (key, 2) ∉ redistribute circleKeyLog final copies := by decide
 
 /-- Adding Carol to Gifts uploads its history key before the entry; Ben's
 concurrent removal of Ana beats the addition. Carol remains a store member,

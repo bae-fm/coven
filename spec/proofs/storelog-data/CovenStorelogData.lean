@@ -20,7 +20,7 @@ import CovenStorelogData.EntryFateLive
 import CovenStorelogData.EntryFate_tests
 import CovenStorelogData.EntryFateKeys_tests
 import CovenStorelogData.KeySelection
-import CovenStorelogData.Blocked
+import CovenStorelogData.Pending
 import CovenStorelogData.Access
 import CovenStorelogData.RetentionSafety
 import CovenStorelogData.LostValues
@@ -29,3 +29,6 @@ import CovenStorelogData.StorageFinality
 import CovenStorelogData.ReplayEffects
 import CovenStorelogData.CurrentData
 import CovenStorelogData.CurrentExamples
+import CovenStorelogData.KeyPhases
+import CovenStorelogData.HistoricalKeys
+import CovenStorelogData.HistoricalExamples

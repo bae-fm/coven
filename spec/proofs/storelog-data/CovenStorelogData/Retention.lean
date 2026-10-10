@@ -23,15 +23,14 @@ def allowsSnapshot {W Col : Type} (log : Log) (bound : Nat) (result : Result)
   | none => true
   | some (e, id) => s.id == id || e ∈ s.entries
 
-/-- snapshot_catalog.rs chooses only keys named by kept entries, including
-kept no-ops. Dropped-removal keys still open writes, but not snapshots. -/
-def snapshotKeyAllowed {W Col : Type} (log : Log) (result : Result)
+/-- Membership replay never revokes an authorized received introduction. -/
+def snapshotKeyAllowed {W Col : Type} (log : Log) (received : EntrySet)
     (s : StoredSnapshot W Col) : Bool :=
-  s.key ∈ result.kept.flatMap (introduced log)
+  received s.key.entry && authorizedKey log s.key
 
 def snapshotCandidates {W Col : Type} (log : Log) (bound : Nat) (result : Result)
     (audience : Audience) (stored : List (StoredSnapshot W Col)) : List (StoredSnapshot W Col) :=
-  stored.filter (fun s => s.id.audience == audience && snapshotKeyAllowed log result s &&
+  stored.filter (fun s => s.id.audience == audience && snapshotKeyAllowed log (entrySet (result.kept ++ result.dropped)) s &&
     allowsSnapshot log bound result s)
 
 /-- The first catalog item: greatest coverage, then lexicographically first
@@ -54,7 +53,7 @@ def pruneSnapshots {W Col : Type} [DecidableEq W]
     (stored : List (StoredSnapshot W Col)) : List (StoredSnapshot W Col) :=
   let pinned := pending ++ (boundaryEntries log bound result).map Prod.snd
   stored.filter fun s => !(s.id.audience == chosen.id.audience &&
-    snapshotKeyAllowed log result s && s.id != chosen.id && s.uploader == own &&
+    snapshotKeyAllowed log (entrySet (result.kept ++ result.dropped)) s && s.id != chosen.id && s.uploader == own &&
     s.id ∉ pinned && s.contents.included.all (· ∈ chosen.contents.included))
 
 /-- snapshot_boundaries loads every effective boundary's named prefix before

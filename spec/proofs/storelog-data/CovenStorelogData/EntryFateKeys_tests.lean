@@ -30,9 +30,9 @@ theorem unseen_delivery_counterexample :
 
 example : safeKey before actual (refresh before known old fresh) ≠ true := by decide
 
-/-- The re-kept removal history is repaired when disclosure is known: Carol
-learned the removal's key while its entry was dropped; it is replaced, never
-reused. The history without that disclosure keeps its original safe key. -/
+/-- Disclosed keys must be replaced when their recipient leaves.
+These delivery receipts test exposure independently of key publication;
+SecurityExamples checks separate rotation entries and the pass listing. -/
 def returning : FreshKey := ⟨0, 8, .store⟩
 def replacement : FreshKey := ⟨0, 9, .store⟩
 def unexposed : Deliveries := [(returning, ⟨0, 0⟩), (returning, ⟨1, 1⟩)]

@@ -79,22 +79,22 @@ theorem settleN_realizes (M : Log) (views : Nat → State)
           simp only [settleN, pass] at h
           exact ih h
 
-theorem entry_fate (H : Finality.History) (W n : Nat) (S : EntrySet) :
+theorem entry_fate (H : CurrentReplay.History) (W n : Nat) (S : EntrySet) :
     let views := CurrentReplay.authorViews H W n n
-    let candidates := (List.range n).filter (CurrentReplay.admitted H W n views S)
+    let candidates := (List.range n).filter (ReplayPolicy.admitted H.membership W n S none)
     let result := CurrentReplay.resolve H W n S
-    (applyKept (CurrentReplay.realize views) H.log
+    (applyKept (ReplayPolicy.realize views) H.membership.log
       (candidates.filter (· ∈ result.kept)) State.empty).map
-        (fun state => (CurrentReplay.finish ⟨state, [], []⟩).state) = some result.state := by
+        (fun state => (ReplayPolicy.finish ⟨state, [], []⟩).state) = some result.state := by
   dsimp only
   let views := CurrentReplay.authorViews H W n n
-  let candidates := (List.range n).filter (CurrentReplay.admitted H W n views S)
-  have raw := settleN_realizes H.log views
-    (CurrentReplay.conflict H.log views) (CurrentReplay.prefer H.log views) candidates
+  let candidates := (List.range n).filter (ReplayPolicy.admitted H.membership W n S none)
+  have raw := settleN_realizes H.membership.log views
+    (ReplayPolicy.conflict H.membership.log views) (ReplayPolicy.prefer H.membership.log views) candidates
     ((List.nodup_range (n := n)).filter _)
-    (settle_eq_some H.log views candidates (CurrentReplay.conflict H.log views)
-      (CurrentReplay.prefer H.log views) (CurrentReplay.realize views))
+    (settle_eq_some H.membership.log views candidates (ReplayPolicy.conflict H.membership.log views)
+      (ReplayPolicy.prefer H.membership.log views) (ReplayPolicy.realize views))
   with_unfolding_all exact (congrArg
-    (Option.map (fun state => (CurrentReplay.finish ⟨state, [], []⟩).state)) raw)
+    (Option.map (fun state => (ReplayPolicy.finish ⟨state, [], []⟩).state)) raw)
 
 end CovenStorelogData.ReplayEffects

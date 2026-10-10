@@ -4,8 +4,8 @@ namespace CovenStorelogData
 
 open CovenStorelog
 
-/-- Fresh ids are abstracted by the introducing entry and audience. One
-member removal can introduce both a store key and several circle keys. -/
+/-- Fresh ids are abstracted by the introducing entry and audience.
+Only creation and rotation introduce keys (§11). -/
 structure Key where
   entry : Nat
   audience : Audience
@@ -15,8 +15,7 @@ def introduced (M : Log) (e : Nat) : List Key :=
   let audiences : List Audience := match (M e).action with
     | .create _ => [.store]
     | .rotateKey audience _ => [audience]
-    | .makeCircle c _ | .removeFromCircle c _ => [.circle c]
-    | .removeMember _ circles => .store :: circles.map Audience.circle
+    | .makeCircle c _ => [.circle c]
     | _ => []
   audiences.map (Key.mk e)
 
@@ -26,20 +25,16 @@ def audienceMembers (s : CovenStorelog.State) : Audience → List Nat
     | none => []
     | some circle => circle.members.filter (member s)
 
-/-- store_log_keys.rs::seal uses the author's pre-entry view, excluding
-the removed member. A deleting entry has no separate row-encryption key. -/
+/-- Creation seals to its author; rotation seals to its recorded audience. -/
 def initialRecipients (M : Log) (k : Key) : List Nat :=
   let s := authorView M k.entry
   match (M k.entry).action with
   | .create _ | .makeCircle _ _ => [(M k.entry).author]
   | .rotateKey audience _ => audienceMembers s audience
-  | .removeMember m _ | .removeFromCircle _ m =>
-      (audienceMembers s k.audience).filter (· != m)
   | _ => []
 
-def isRemoval (a : Action) : Bool := match a with
-  | .removeMember _ _ | .removeFromCircle _ _ => true
-  | _ => false
+def authorizedKey (M : Log) (k : Key) : Bool :=
+  authorized (authorView M k.entry) (M k.entry) && k ∈ introduced M k.entry
 
 abbrev Copies := List (Key × Nat)
 
@@ -58,8 +53,9 @@ def shareAddition (M : Log) (e : Nat) (copies : Copies) : Option Copies := do
     | .addToCircle c m => some (Audience.circle c, m)
     | _ => none
   let prior := resolve M e (entrySet (M e).past)
-  let needed := ((M e).past.filter fun p => p ∈ prior.kept || isRemoval (M p).action)
-    |>.flatMap (introduced M) |>.filter (fun k => k.audience == audience)
+  let needed := ((M e).past.filter fun p => p ∈ prior.kept || p ∈ prior.dropped)
+    |>.flatMap (introduced M) |>.filter (fun k =>
+      authorizedKey M k && k.audience == audience)
   if !needed.all (fun k => (k, (M e).author) ∈ copies) then none else
     some (copies ++ (copies.filterMap fun (k, m) =>
       if m == (M e).author && k.audience == audience then some (k, recipient) else none))
@@ -73,9 +69,9 @@ def running (s : CovenStorelog.State) (member device : Nat) : Bool :=
 device to fetch all its stored copies. No network failure or unfair schedule
 is needed for the counterexample. Copies already stored never disappear. -/
 def redistribute (M : Log) (result : Result) (copies : Copies) : Copies :=
-  let keys := result.dropped.flatMap (introduced M)
+  let keys := (result.kept ++ result.dropped).flatMap (introduced M)
   copies ++ keys.flatMap fun k =>
-    if isRemoval (M k.entry).action && result.state.devices.any (fun (d, m) =>
+    if authorizedKey M k && result.state.devices.any (fun (d, m) =>
         running result.state m d && (k, m) ∈ copies) then
       (audienceMembers result.state k.audience).filterMap fun m =>
         if (k, m) ∈ copies then none else some (k, m)
@@ -117,5 +113,10 @@ part as applied; a skipped part is counted only for an outside reader. -/
 theorem required_key_waits (M : Log) (result : Result) (copies : Copies) (k : Key) (m : Nat)
     (missing : (k, m) ∉ copies) (required : mustRead M result k m = true) :
     part M result copies k m = .wait := by simp [part, missing, required]
+
+theorem removals_introduce_no_keys (M : Log) (e m c : Nat) :
+    ((M e).action = .removeMember m [] → introduced M e = []) ∧
+    ((M e).action = .removeFromCircle c m → introduced M e = []) := by
+  constructor <;> intro h <;> simp [introduced, h]
 
 end CovenStorelogData

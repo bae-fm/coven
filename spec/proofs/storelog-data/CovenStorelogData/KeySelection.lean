@@ -1,4 +1,4 @@
-import CovenStorelog.CurrentReplay
+import CovenStorelog.CurrentKeys
 import CovenStorelogData.Keys
 
 /-! §11: a successful pass lists immutable sealed copies from storage.
@@ -7,14 +7,10 @@ A later share changes storage, never the already captured pass. -/
 namespace CovenStorelogData.KeySelection
 open CovenStorelog
 
-structure Key where
-  id : Nat
-  entry : Nat
-  audience : Audience
-  deriving DecidableEq, Repr
+abbrev Key := CurrentKeys.Introduction
 
-/-- Abstract paths keys/store/key/member and keys/circles/circle/key/member.
-Fresh key ids identify one introduction; ciphertext is outside the model. -/
+/-- Receipts name the shared, authorized introduction and its recipient.
+Fresh key ids identify one introduction; ciphertext is outside this model. -/
 abbrev Copies := List (Key × Nat)
 
 structure Pass where
@@ -38,15 +34,10 @@ def usable (members : Audience → List Nat) (authorized : Key → Bool)
     (pass : Pass) (key : Key) : Bool :=
   authorized key && key ∈ pass.custody && !exposed members pass key
 
-def newer (a b : Key) : Bool :=
-  b.entry < a.entry || (b.entry == a.entry && b.id < a.id)
+abbrev newer := CurrentKeys.newer
 
 /-- Introduction timestamp, then key id. Concurrent rotations coexist. -/
-def newest : List Key → Option Key
-  | [] => none
-  | k :: ks => match newest ks with
-    | none => some k
-    | some other => some (if newer k other then k else other)
+abbrev newest := CurrentKeys.newest
 
 def select (members : Audience → List Nat) (authorized : Key → Bool)
     (pass : Pass) (who : Nat) (audience : Audience) : Option Key :=
@@ -64,62 +55,21 @@ def share (members : Audience → List Nat) (custody : List Key) (stored : Copie
   else none
 
 theorem newest_mem {keys : List Key} {key : Key} (h : newest keys = some key) :
-    key ∈ keys := by
-  induction keys with
-  | nil => cases h
-  | cons k ks ih =>
-      simp only [newest] at h
-      cases hn : newest ks with
-      | none => simp [hn] at h; subst key; simp
-      | some other =>
-          simp only [hn, Option.some.injEq] at h
-          split at h
-          · subst key; simp
-          · subst key; exact List.mem_cons_of_mem _ (ih hn)
+    key ∈ keys := CurrentKeys.newest_mem keys key h
 
 theorem newer_trans {a b c : Key} (ab : newer a b = true) (bc : newer b c = true) :
     newer a c = true := by
-  simp only [newer, Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq,
+  simp only [newer, CurrentKeys.newer, Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq,
     beq_iff_eq] at *
   omega
 
 theorem newest_maximal {keys : List Key} {key : Key} (h : newest keys = some key) :
     ∀ other ∈ keys, newer other key = false := by
-  induction keys generalizing key with
-  | nil => cases h
-  | cons k ks ih =>
-      simp only [newest] at h
-      cases hn : newest ks with
-      | none =>
-          have empty : ks = [] := by
-            cases ks with
-            | nil => rfl
-            | cons a rest =>
-                simp only [newest] at hn
-                cases hr : newest rest <;> simp [hr] at hn
-          subst ks
-          simp only [hn, Option.some.injEq] at h
-          subst key
-          simp [newer]
-      | some winner =>
-          have greatest := ih hn
-          simp only [hn, Option.some.injEq] at h
-          split at h
-          · rename_i wins
-            subst key
-            intro other present
-            rcases List.mem_cons.mp present with rfl | present
-            · simp [newer]
-            · cases ho : newer other k
-              · rfl
-              · have ht := newer_trans ho wins
-                simp [greatest other present] at ht
-          · rename_i loses
-            subst key
-            intro other present
-            rcases List.mem_cons.mp present with rfl | present
-            · exact Bool.eq_false_iff.mpr loses
-            · exact greatest other present
+  intro other present
+  have maximal := CurrentKeys.newest_maximal keys key h other present
+  simp only [newer, CurrentKeys.newer, Bool.or_eq_false_iff, Bool.and_eq_false_iff,
+    decide_eq_false_iff_not, beq_eq_false_iff_ne]
+  constructor <;> omega
 
 theorem selection_is_newest (members : Audience → List Nat) (authorized : Key → Bool)
     (pass : Pass) (who : Nat) (audience : Audience) (key : Key)
@@ -199,35 +149,46 @@ theorem revocation_between_listings (members : Audience → List Nat)
 theorem listing_failure_blocks (custody : List Key) (stored : Copies) (failure : ListingFailure) :
     beginPass custody stored (.error failure) = .error failure := rfl
 
-/-- Removal and creation keys use their checked wire ids as an input; tag 15
-carries its id directly. Membership/authority are derived by the shared replay. -/
-def introductions (M : Log) (ids : Nat → Audience → Nat) (e : Nat) : List Key :=
-  (introduced M e).map fun k =>
-    ⟨match (M e).action with | .rotateKey _ id => id | _ => ids e k.audience,
-      e, k.audience⟩
+/-- Key introductions use the shared action's creation/rotation projection. -/
+def introductions (M : CurrentReplay.Log) (e : Nat) : List Key :=
+  ((M e).action.introduction.map fun (audience, key) => ⟨e, audience, key⟩).toList
 
-def receivedAuthorized (H : Finality.History) (W n : Nat) (received : EntrySet)
-    (ids : Nat → Audience → Nat) (key : Key) : Bool :=
-  key.entry < n && received key.entry &&
-    authorized (CurrentReplay.authorViews H W n n key.entry) (H.log key.entry) &&
-    CurrentReplay.keysMatch (CurrentReplay.authorViews H W n n key.entry) (H.log key.entry) &&
-    key ∈ introductions H.log ids key.entry
+def receivedAuthorized (H : CurrentReplay.History) (W n : Nat) (received : EntrySet)
+    (key : Key) : Bool :=
+  key ∈ CurrentKeys.receivedIntroductions H W n received
 
-def selectInReplay (H : Finality.History) (W n : Nat) (received : EntrySet)
-    (ids : Nat → Audience → Nat) (pass : Pass) (who : Nat) (audience : Audience) : Option Key :=
+def selectInReplay (H : CurrentReplay.History) (W n : Nat) (received : EntrySet)
+    (pass : Pass) (who : Nat) (audience : Audience) : Option Key :=
   select (audienceMembers (CurrentReplay.resolve H W n received).state)
-    (receivedAuthorized H W n received ids) pass who audience
+    (receivedAuthorized H W n received) pass who audience
 
-theorem selected_introduction_authorized (H : Finality.History) (W n : Nat)
-    (received : EntrySet) (ids : Nat → Audience → Nat) (pass : Pass)
-    (who : Nat) (audience : Audience) (key : Key)
-    (sent : selectInReplay H W n received ids pass who audience = some key) :
+theorem selected_introduction_authorized (H : CurrentReplay.History) (W n : Nat)
+    (received : EntrySet) (pass : Pass) (who : Nat) (audience : Audience) (key : Key)
+    (sent : selectInReplay H W n received pass who audience = some key) :
     received key.entry = true ∧
-    authorized (CurrentReplay.authorViews H W n n key.entry) (H.log key.entry) = true ∧
-    key ∈ introductions H.log ids key.entry := by
+    CurrentReplay.authorized (CurrentReplay.authorViews H W n n key.entry) (H.log key.entry) = true ∧
+    key ∈ introductions H.log key.entry := by
   have h := (first_attempt_safe _ _ pass who audience key sent).2.2.1
-  simp only [receivedAuthorized, Bool.and_eq_true, decide_eq_true_eq] at h
-  exact ⟨h.1.1.1.2, h.1.1.2, h.2⟩
+  have accepted : key ∈ CurrentKeys.receivedIntroductions H W n received := by
+    simpa [receivedAuthorized] using h
+  obtain ⟨present, authorized, introduction⟩ := (CurrentKeys.introduction_source _ _ _ _).mp accepted
+  exact ⟨(List.mem_filter.mp present).2, authorized, by simp [introductions, introduction]⟩
+
+/-- Authorization is an immutable recorded-past check. A changed membership
+replay cannot revoke it, even if the introducing entry is no longer kept. -/
+theorem authorized_introduction_persists (H : CurrentReplay.History) (W n : Nat)
+    (before after : EntrySet) (key : Key)
+    (accepted : receivedAuthorized H W n before key = true)
+    (retained : after key.entry = true) :
+    receivedAuthorized H W n after key = true := by
+  have present : key ∈ CurrentKeys.receivedIntroductions H W n before := by
+    simpa [receivedAuthorized] using accepted
+  obtain ⟨present, authorized, introduction⟩ := (CurrentKeys.introduction_source _ _ _ _).mp present
+  change decide (_ ∈ _) = true
+  apply decide_eq_true
+  apply (CurrentKeys.introduction_source _ _ _ _).mpr
+  exact ⟨List.mem_filter.mpr ⟨(List.mem_filter.mp present).1, by simpa using retained⟩,
+    authorized, introduction⟩
 
 structure Attempt where
   key : Key

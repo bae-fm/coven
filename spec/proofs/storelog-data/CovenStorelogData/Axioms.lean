@@ -56,10 +56,6 @@ import CovenStorelogData
 #print axioms CovenStorelogData.EntryExamples.access_valid
 #print axioms CovenStorelogData.EntryExamples.access_fate_counterexample
 #print axioms CovenStorelogData.EntryExamples.keys_valid
-#print axioms CovenStorelogData.EntryExamples.rekept_key_counterexample
-#print axioms CovenStorelogData.EntryExamples.undisclosed_forever
-#print axioms CovenStorelogData.EntryExamples.circle_keys_valid
-#print axioms CovenStorelogData.EntryExamples.rekept_circle_key_counterexample
 #print axioms CovenStorelogData.EntryExamples.addition_valid
 #print axioms CovenStorelogData.EntryExamples.addition_key_counterexample
 #print axioms CovenStorelogData.EntryExamples.introductions_valid
@@ -73,7 +69,6 @@ import CovenStorelogData
 #print axioms CovenStorelogData.EntryExamples.reset_judgments_counterexample
 #print axioms CovenStorelogData.RetentionExamples.valid_log
 #print axioms CovenStorelogData.RetentionExamples.snapshot_pin_contract_counterexample
-#print axioms CovenStorelogData.RetentionExamples.rotated_snapshot_counterexample
 #print axioms CovenStorelogData.RetentionExamples.frozen_file_counterexample
 
 #print axioms CovenStorelogData.EntryFate.views_converge
@@ -127,19 +122,19 @@ import CovenStorelogData
 #print axioms CovenStorelogData.KeySelection.retry_fixed
 #print axioms CovenStorelogData.KeySelection.revocation_between_listings
 
-#print axioms CovenStorelogData.Blocked.every_blocked_subject
-#print axioms CovenStorelogData.Blocked.only_first_reason
-#print axioms CovenStorelogData.Blocked.first_unmet
-#print axioms CovenStorelogData.Blocked.observed_block_visible
-#print axioms CovenStorelogData.Blocked.paired_reads
-#print axioms CovenStorelogData.Blocked.save_failure_visible
-#print axioms CovenStorelogData.Blocked.dropped_reset_restores
+#print axioms CovenStorelogData.Pending.every_pending_subject
+#print axioms CovenStorelogData.Pending.only_first_reason
+#print axioms CovenStorelogData.Pending.first_unmet
+#print axioms CovenStorelogData.Pending.observed_wait_visible
+#print axioms CovenStorelogData.Pending.paired_reads
+#print axioms CovenStorelogData.Pending.save_failure_visible
+#print axioms CovenStorelogData.Pending.dropped_reset_restores
 
 #print axioms CovenStorelogData.Access.no_overlapping_request
 #print axioms CovenStorelogData.Access.completion_matches_or_queues
 #print axioms CovenStorelogData.Access.obsolete_completion_queues_opposite
 #print axioms CovenStorelogData.Access.pending_visible
-#print axioms CovenStorelogData.Access.blocked_until_finished
+#print axioms CovenStorelogData.Access.pending_until_finished
 #print axioms CovenStorelogData.Access.confirmed_never_reported
 
 #print axioms CovenStorelogData.RetentionSafety.dependency_agreement
@@ -163,8 +158,8 @@ import CovenStorelogData
 #print axioms CovenStorelogData.SecurityExamples.listing_prevents_reuse
 #print axioms CovenStorelogData.SecurityExamples.serialized_regrant
 #print axioms CovenStorelogData.SecurityExamples.rotations_coexist
-#print axioms CovenStorelogData.Blocked.latest_reason_replaces_previous
-#print axioms CovenStorelogData.Blocked.progress_removes_block
+#print axioms CovenStorelogData.Pending.latest_reason_replaces_previous
+#print axioms CovenStorelogData.Pending.progress_removes_record
 #print axioms CovenStorelogData.RetentionSafety.first_finality_wait_visible
 
 #print axioms CovenStorelogData.ReplayEffects.scan_realizes
@@ -204,3 +199,44 @@ import CovenStorelogData
 #print axioms CovenStorelogData.SecurityExamples.sharing_history
 
 #print axioms CovenStorelogData.SecurityExamples.recipient_return_releases_retirement
+
+#print axioms CovenStorelog.CurrentReplay.equal_received
+#print axioms CovenStorelogData.KeyPhases.incomplete_membership_waits
+#print axioms CovenStorelogData.KeyPhases.incomplete_listing_waits
+#print axioms CovenStorelogData.KeyPhases.rotation_requires_publication
+#print axioms CovenStorelogData.KeyPhases.revocation
+#print axioms CovenStorelogData.HistoricalKeys.shared_copy_acquired
+#print axioms CovenStorelogData.HistoricalKeys.acquired_keys_retained
+#print axioms CovenStorelogData.HistoricalKeys.membership_preserves_applied
+#print axioms CovenStorelogData.HistoricalKeys.historical_key_stays_readable
+#print axioms CovenStorelogData.HistoricalKeys.snapshots_stay_loadable
+#print axioms CovenStorelogData.HistoricalKeys.parts_stay_loadable
+#print axioms CovenStorelogData.HistoricalExamples.valid_history
+#print axioms CovenStorelogData.HistoricalExamples.rotation_in_second_phase
+#print axioms CovenStorelogData.HistoricalExamples.failed_rotation_waits
+#print axioms CovenStorelogData.HistoricalExamples.carol_revokes_ben
+#print axioms CovenStorelogData.HistoricalExamples.removal_reversal_and_sharing
+#print axioms CovenStorelogData.HistoricalExamples.historical_parts_apply
+#print axioms CovenStorelogData.HistoricalExamples.historical_snapshot_loads
+#print axioms CovenStorelogData.HistoricalExamples.removal_access_one_path
+#print axioms CovenStorelogData.HistoricalExamples.dropped_access_stays_pending
+#print axioms CovenStorelogData.Access.apply_records_intention
+#print axioms CovenStorelogData.Access.failed_apply_preserves_state
+#print axioms CovenStorelogData.Access.removal_returns_without_provider
+#print axioms CovenStorelogData.Access.apply_removal_visible
+#print axioms CovenStorelogData.Access.owner_wait_visible
+#print axioms CovenStorelogData.Access.finished_work_absent
+#print axioms CovenStorelogData.Access.replay_preserves_failure
+#print axioms CovenStorelogData.Access.recorded_removed_key_visible
+#print axioms CovenStorelogData.Access.credential_pending_visible
+#print axioms CovenStorelogData.Access.retained_grant_visible
+#print axioms CovenStorelogData.removals_introduce_no_keys
+#print axioms CovenStorelogData.KeySelection.authorized_introduction_persists
+
+#print axioms CovenStorelogData.KeyPhases.rotation_by_remaining_member
+#print axioms CovenStorelogData.Access.retry_keeps_work_visible
+
+#print axioms CovenStorelogData.HistoricalExamples.ben_never_stopped
+#print axioms CovenStorelogData.HistoricalExamples.replay_reversal_queues_regrant
+
+#print axioms CovenStorelogData.HistoricalExamples.membership_keeps_part_visible

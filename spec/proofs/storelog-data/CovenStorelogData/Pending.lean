@@ -2,7 +2,7 @@ import CovenStorelog.Model
 
 /-! §18, §19.1, E4–E5. Work and its first unmet condition are committed together.
 A failed database commit is a failed read, never a successful empty list. -/
-namespace CovenStorelogData.Blocked
+namespace CovenStorelogData.Pending
 open CovenStorelog
 
 inductive Subject where
@@ -24,7 +24,7 @@ inductive Prerequisite where
 
 inductive DropReason where
   | landedTooLate | beatenBy (entry : Nat) | targetGone | noAdminLeft
-  | notAllowed | wrongCircleKeys
+  | notAllowed
   deriving DecidableEq, Repr
 
 inductive Failure where
@@ -83,11 +83,11 @@ structure Record where
 def records (work : List Work) : List Record :=
   work.filterMap fun w => (first w.conditions).map (Record.mk w.subject w.reporter)
 
-theorem every_blocked_subject (work : List Work) (w : Work) (reason : Reason)
-    (present : w ∈ work) (blocked : first w.conditions = some reason) :
+theorem every_pending_subject (work : List Work) (w : Work) (reason : Reason)
+    (present : w ∈ work) (waiting : first w.conditions = some reason) :
     ⟨w.subject, w.reporter, reason⟩ ∈ records work := by
   apply List.mem_filterMap.mpr
-  exact ⟨w, present, by simp [blocked]⟩
+  exact ⟨w, present, by simp [waiting]⟩
 
 theorem only_first_reason (work : List Work) (record : Record)
     (present : record ∈ records work) :
@@ -115,10 +115,10 @@ transaction as its progress. A task with no unmet conditions emits no record. -/
 def observe (work : List Work) (next : Work) : List Work :=
   next :: work.filter (fun w => !(w.subject == next.subject && w.reporter == next.reporter))
 
-theorem observed_block_visible (work : List Work) (next : Work) (reason : Reason)
+theorem observed_wait_visible (work : List Work) (next : Work) (reason : Reason)
     (h : first next.conditions = some reason) :
     ⟨next.subject, next.reporter, reason⟩ ∈ records (observe work next) :=
-  every_blocked_subject _ _ _ List.mem_cons_self h
+  every_pending_subject _ _ _ List.mem_cons_self h
 
 theorem latest_reason_replaces_previous (work : List Work) (next : Work) (record : Record)
     (present : record ∈ records (observe work next))
@@ -130,7 +130,7 @@ theorem latest_reason_replaces_previous (work : List Work) (next : Work) (record
   · have hh := (List.mem_filter.mp hw).2
     simp [hs, hr, subject, reporter] at hh
 
-theorem progress_removes_block (work : List Work) (next : Work)
+theorem progress_removes_record (work : List Work) (next : Work)
     (advanced : first next.conditions = none) :
     ∀ record ∈ records (observe work next),
       ¬(record.subject = next.subject ∧ record.reporter = next.reporter) := by
@@ -155,13 +155,13 @@ def query : Database → Except Failure (List Record)
   | .failed cause => .error cause
 
 /-- Both paired E4 reads execute this same query against a committed snapshot. -/
-def blocked := query
-def subscribeBlocked := query
+def pending := query
+def subscribePending := query
 
-theorem paired_reads (db : Database) : blocked db = subscribeBlocked db := rfl
+theorem paired_reads (db : Database) : pending db = subscribePending db := rfl
 
 theorem save_failure_visible (work : List Work) (next : Work) (cause : Failure) :
-    blocked (commit (.available work) next (.error cause)) = .error cause := rfl
+    pending (commit (.available work) next (.error cause)) = .error cause := rfl
 
 /-- A reset suppresses prior observations while effective; the observations
 remain inputs until finality. Later observations are separate work (§19.1). -/
@@ -183,4 +183,4 @@ theorem dropped_reset_restores (observations : List Observation)
   simp only [Bool.not_eq_true']
   exact List.any_eq_false.mpr (fun e he => by simp [gone o ho e he])
 
-end CovenStorelogData.Blocked
+end CovenStorelogData.Pending

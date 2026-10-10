@@ -62,25 +62,6 @@ example :
     (pruneSnapshots log 7 (result [3, 4, 5, 6]) 2 [] (snapshot 3) stored).map
       (fun s => s.id) = stored.map (fun s => s.id) := by decide
 
-/-- Keys of dropped removals open writes, but the snapshot catalog excludes
-those keys. Its covered write can already have been deleted after 30 days. -/
-def rotatedSnapshot : StoredSnapshot (Fin 4) (Fin 2) :=
-  ⟨⟨.store, 2⟩, 0, EntryExamples.returningKey, List.range 6 ++ [8],
-    ⟨CovenMerge.step MigrationExamples.writes CovenMerge.St.init 0, [0], [], []⟩⟩
-
-theorem rotated_snapshot_counterexample :
-    snapshotKeyAllowed EntryExamples.keyLog (EntryExamples.keyResult [8])
-      rotatedSnapshot = true ∧
-    snapshotKeyAllowed EntryExamples.keyLog (EntryExamples.keyResult [8, 7])
-      rotatedSnapshot = false ∧
-    rotatedSnapshot.contents.data.cell MigrationExamples.note 0 = some 0 ∧
-    mayDeleteWrite (0 : Fin 4) [.store] [rotatedSnapshot] false true = true ∧
-    (snapshotCandidates EntryExamples.keyLog 9 (EntryExamples.keyResult [8, 7])
-      .store [rotatedSnapshot]).isEmpty = true := by decide
-
-example : snapshotKeyAllowed EntryExamples.keyLog (EntryExamples.keyResult [8, 7, 6])
-    rotatedSnapshot = true := by decide
-
 /-- A frozen loss still carries its value/setter, but file reference scanning
 only visits merge/synced rows. This is the state produced when migration retires
 a hidden file row; it is not an ordinary causal deletion of that row. -/
