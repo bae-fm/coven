@@ -388,8 +388,8 @@ The specification stores one optional monotonic horizon H. The required
 representation theorem is that the established final set is exactly the
 entries stored strictly before H, with ties at H excluded, and that every
 advance preserves or increases H. No qualifying window means an empty final
-set. This representation theorem is not provided by the proofs described
-below; their window certificates establish replay stability.
+set. [One horizon for current §9](#one-horizon-for-current-9) proves it
+(`final_iff_before_horizon`, `horizon_never_back`).
 
 `FinalityReplay`, `ReplayPrefix`, `Finality` and `FinalityExamples` reuse the
 terminating replay and effects with a separate policy: no key-only conflicts,
