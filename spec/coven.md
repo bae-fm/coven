@@ -130,9 +130,10 @@
       covers;
     - uploading a file, then marking it stored.
 - **Revocation:** an ex-member can't read anything written after they left.
-- **Bounded storage:** cloud history doesn't grow forever: device logs and
-  old snapshots are deleted once newer snapshots cover them; only the
-  store log and sealed keys stay, growing with membership changes alone.
+- **History cleanup:** snapshots let devices delete covered logs and older
+  snapshots once the store-log decisions they depend on are final (§9).
+  An absent device can delay finality and require retaining that history.
+  The store log and sealed keys remain.
 
 ## 4. Storage providers and access
 
@@ -1313,6 +1314,32 @@ Carol's tablet:
     that took them out no longer holds ([§14.7](#147-deleting-a-circle)).
   - Entries waiting on ones they had read stay in storage until those
     arrive.
+- An entry is *final* when no concurrent entry can still arrive.
+  - Every device that could have authored a concurrent entry must have
+    posted signed store-log positions including it.
+  - Before posting, a device settles every earlier reserved store-log
+    entry and every earlier own write. A post acknowledges the entry even
+    if that device's replay drops it.
+  - Read each acknowledging device's log through the entry position in
+    its post before treating the acknowledgement as proof of finality.
+    This includes its entries that arrived after the entry being judged.
+  - A newly added device catches up before authoring (§12.1). Removal in
+    the current replay alone does not excuse a device's acknowledgement:
+    that removal can still be dropped.
+  - Posts from currently known devices alone are insufficient if a
+    concurrent registration could introduce another author. Until every
+    possible author's acknowledgement is established, finality is unproved
+    and cleanup retains the inputs.
+  - Silence, including 30 days without a post, is not acknowledgement.
+    An immutable attempted entry may still be uploaded on return.
+- Only physical cleanup waits for finality. Key rotation and provider
+  revocation act on the current replay immediately.
+- E.g. Ana's phone resets the store while Ben's laptop is unreachable.
+  Carol's tablet loads Ana's snapshot, but retains the previous inputs.
+  Ben's signed post eventually includes the reset. Carol first reads the
+  entries his post names; one could contain a competing reset. Once every
+  possible author has acknowledged and those entries are present, cleanup
+  can use the final winner.
 - The member list is what you get by replaying the applied entries in
   timestamp order, from the first.
   - Each time an entry arrives, the device replays them all again, from
@@ -2093,9 +2120,12 @@ Carol's tablet:
   every loss counts in its audience's fingerprint (§19.1).
 - Each device posts its positions only after uploading its own earlier
   writes.
-- A log object is deleted once snapshots cover every part of it, and either
-  every device's posted position has passed it or storage has held it for
-  30 days.
+- Deleting a log object requires all of the following:
+  - snapshots cover every part of it;
+  - every store-log entry that makes this coverage usable, or makes the
+    object unnecessary, is final (§9);
+  - every device's posted write position has passed it, or storage has
+    held it for 30 days.
   - Age compares storage times only: “now” is the newest stored time in
     the complete listing for this store, and the object's age is the
     difference from its listed stored time. An empty listing proves no age.
@@ -2121,7 +2151,8 @@ Carol's tablet:
   A reload requiring such a gap write fails atomically with
   `SyncError::StuckLog`; a snapshot covering it can load without reading it.
 - A device deletes a snapshot of its own once a newer one of the same
-  audience covers everything it covers.
+  audience covers everything it covers, and the entries that make that
+  replacement usable are final (§9).
   - A snapshot named by a kept reset or version-raise entry that changes
     the replayed state stays: new devices need its authenticated coverage
     to judge late writes and select a snapshot following that boundary.
@@ -2329,6 +2360,9 @@ Carol's tablet:
 - The write that marks a file uploaded is made only once the file is
   stored, so no device ever sees a row whose uploaded file isn't there
   yet, and no write ever waits for a file.
+- Physical deletion of a circle's rows, files and objects, pre-migration
+  inputs and local file sources also waits for every entry it depends on
+  to be final (§9). Current replay alone cannot release them.
 - An uploaded file is deleted once no synced row in any kept snapshot or
   log write refers to it as uploaded. Local rows, waiting writes and
   unfinished upload publication also protect the file.

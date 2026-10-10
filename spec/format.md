@@ -316,6 +316,10 @@
   one per log. Only judgments made by the posting device appear here; peer
   reports, local judgment times and coven versions do not travel. The D9
   signature authenticates the complete list as that device's report (§19.1).
+  Store-log positions also acknowledge received entries, kept or dropped.
+  Posting requires every earlier reserved own entry and write to be settled;
+  a reader fetches entries through those positions before using the post to
+  establish finality (§9). Storage age alone does not establish finality.
 
 - A join request (kind 9):
   `invite:uuid | keys:MemberKeys | device_name:name`.
