@@ -3,8 +3,10 @@
 - Lean checks the store log's terminating replay and entry accounting.
   C1–C9 describe the historical policy still compared with Rust; their key
   conflicts and examples are not the current §9 policy. C10 proves finality
-  for its stated policy. C11 models current §9, rotation entries and §14.6's
-  empty circles, sharing the same replay engine.
+  for its stated policy. C11 models rotation entries and §14.6's empty
+  circles, sharing the same replay engine. The executable action type still
+  carries removal-key data; it does not check the key-free removal encoding
+  or the key-hash field required by D6.
 - The development is in `spec/proofs/storelog/`, without Mathlib, using
   the toolchain pinned by [Appendix B](merge.md).
 
@@ -510,12 +512,15 @@ replay functions.
 
 ### C11 Rotations and circles left empty after replay
 
-`CurrentReplay` applies §9's contradiction rules, storage-time rejection,
-recorded-past authority and exact circle-key lists. `Action.rotateKey` carries
+`CurrentReplay` applies the contradiction rules, storage-time rejection and
+recorded-past authority. Its exact circle-key-list check belongs to its
+executable removal representation, not the key-free removals in D6. `Action.rotateKey` carries
 D6's tag-15 audience and key id. `rotation_authority` proves that a kept
 rotation's author belonged to its audience in its recorded past.
 `rotations_conflict_with_nothing` covers every action in both directions.
-An outside admin replaces circle keys through a store-removal entry, not tag 15.
+Under §11 an outside admin never creates a circle key. Ana removes Carol
+from the store; Ben, still in Gifts, rotates Gifts' exposed key. The model's
+removal payload is not evidence for this publication order or its hash checks.
 
 Ana and Ben can rotate Gifts concurrently; both entries stay. Dan, an admin
 outside Gifts, cannot rotate it. Ben's concurrent removal does not erase the

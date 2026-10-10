@@ -133,7 +133,7 @@
     storage. Edits it had not uploaded are lost, and the app is told
     (§10, §19.2);
   - every operation with several steps resumes and finishes, for example:
-    - rotating the key, then removing the member;
+    - publishing sealed key copies, then the rotation entry naming their key;
     - writing a snapshot ([§15](#15-snapshots)), then deleting the logs it
       covers.
 - **Revocation:** before sending a write for the first time, a device
@@ -850,7 +850,7 @@ Two mechanisms order writes:
   attempt; applying the published entry and its replay removes them atomically
   ([§9](#9-members-and-roles), [§18](#18-operations)).
 - `_coven_key_uploads` holds the paths and fixed sealed bytes of copies shared
-  after a removal is dropped ([§11](#11-keys)). These copies have no pending
+  for historical keys ([§11](#11-keys)). These copies have no pending
   local entry; their bytes commit before their first attempt and are removed
   after storage accepts a copy or the path is found occupied. No unsealed keys
   are kept here.
@@ -1540,7 +1540,7 @@ Carol's tablet:
     that transaction deletes its queue rows. If publication or its reply fails,
     the next store-log step re-seals that plaintext with the recorded key,
     deriving its nonce as in §6, and sends identical bytes;
-  - `_coven_key_uploads`: sealed copies for dropped removals, fixed before their
+  - `_coven_key_uploads`: historical sealed copies, fixed before their
     first attempt independently of the entry queue. Each attempt chooses
     recipients from the latest replay; a queued copy for a member outside that
     audience waits without being sent or resealed. A stored copy, including one
@@ -1576,8 +1576,8 @@ Carol's tablet:
     If rebuilding fails, keep the previous committed state and report the
     failure; do not publish positions over the unfinished work.
   - Snapshot eligibility follows the received entries too. A snapshot's
-    usable key does not cease to exist because its introducing removal
-    was dropped (§11). Retention cannot erase inputs a later replay needs.
+    authorized key remains readable when membership replay changes (§11).
+    Retention cannot erase inputs a later replay needs.
   - Local data changed by foreign-key actions follows the same rule (§8.4).
     Clearing a reset's error records is reversible until that reset is final.
   - App subscriptions report current results. Devices need not produce
@@ -1683,9 +1683,8 @@ Carol's tablet:
   - The member list an entry's author had read is the replay of just the
     entries that entry had read.
   - That past never changes once the entry is applied. The device keeps
-    the checks derived from it with the entry: authority, whether a
-    removal's circle keys match, a removed device's observed owner, and
-    the circles a member removal deletes in that view. These commit in
+    the checks derived from it with the entry: authority, a removed device's
+    observed owner, and the circles a member removal deletes in that view. These commit in
     the same transaction as the entry and are reused on later replays.
     Replay marks start afresh for each ready batch; the permanent
     “landed too late” exclusions remain.
@@ -1737,7 +1736,7 @@ Carol's tablet:
   member. This classification does not change on later replay.
 - Deletion conflicts with changes requiring the circle because they cannot
   both take effect on an existing circle. The deletion wins by the tiers
-  below; there is no extra conflict merely because both entries supply keys.
+  below; sharing a key or changing keys is not itself a conflict.
 - Of two conflicting entries, the one that beats the other is:
   1. removing a member or device from the store;
   2. deleting a circle, including removing its last member in the author's view;
@@ -1869,23 +1868,44 @@ Carol's tablet:
   that brings it in names it ([§9](#9-members-and-roles)):
   - the store's first key, the entry creating the store; a circle's first
     key, the entry making the circle;
-  - each later key, a removal or a rotation entry naming its audience.
+  - each later key, a rotation entry naming its audience. Removals carry
+    no keys. After audience creation, rotation is the only way a new store
+    or circle key is made.
+- Every key-introducing entry—create store, create circle or rotate key—also
+  carries `key_hash`, SHA-256 of the exact 32 key bytes, inside the encrypted
+  entry. After opening a copy, check its audience, id and hash against that
+  authorized introduction before accepting the key for ordinary reads or
+  sending. A mismatch is an invalid copy and supplies neither the key nor
+  evidence of its exposure.
+  - A candidate needed to open its introducing entry is tentative until that
+    entry's signature, authority, identity and hash checks succeed. It may
+    open that entry for validation, but cannot enter the accepted key set
+    or authorize other data before those checks.
+  - A publisher validates its locally authored introduction against the
+    caught-up view before reserving it. Its fresh key may seal that introduction
+    itself; other first attempts wait until the entry is stored and kept.
+    This applies to creation and rotation and does not authorize unrelated
+    data with an unpublished key.
+  - Dan plants chosen bytes under K2's copy path for Ana. Ana opens the box
+    but rejects its hash; those bytes cannot become K2 in her custody.
+- A listed box addressed to someone else cannot be opened by this device.
+  Its plaintext hash therefore cannot be checked from the listing. Such a
+  copy remains potential exposure under the conservative listing rule;
+  ignoring forged third-party boxes requires evidence beyond D11's anonymous
+  sealed box. Ana holding K2 cannot decrypt Dan's box merely by knowing K2.
 - Each store key is sealed to every member's public key, and the sealed
   copies are kept in storage, at `<store>/keys/<writer>/store/<key>/<member>`.
 - Sealed circle keys live at `<store>/keys/<writer>/circles/<circle>/<key>/<member>`
   ([§14.3](#143-circles)).
-- Concurrent removals use distinct key paths and can both apply.
-  - E.g. Ana removes Dan while Ben removes Erin. Each made a key without
-    seeing the other removal. Once both entries arrive, any key delivered
-    to Dan or Erin is retired and a remaining device rotates again.
-- A dropped removal's keys may already seal writes or entries made before
-  its drop was known. Current members must still be able to read them.
-  - Every device holding such a key seals it to current audience members
-    who lack a copy. Any valid copy for that member supplies the key; each writer has its own path.
-  - E.g. Ana and Ben are the last two admins and remove each other.
-    Ana's earlier entry wins. A remaining device holding Ben's key seals
-    it to Ana, who can then read objects Ben sealed with it. If no reachable
-    device holds that key, the objects stay in the blocked list as key waits.
+- Concurrent removals change membership independently. Once both arrive,
+  keys known to have reached either excluded member are retired for first
+  attempts. A remaining member uses an existing usable replacement or makes
+  one by rotation. Removal never makes a key on behalf of a circle outsider.
+- Historical keys remain readable when replay changes membership. Every
+  device holding one shares it with current audience members lacking it.
+  If no reachable device holds a needed key, its objects remain key waits.
+  - Ana removes Ben; Carol rotates to K2. If a concurrent replay returns
+    Ben, Carol supplies him K2 so he can read objects already sealed with it.
 - Several keys for one audience may coexist. Each object names the one
   that sealed it; arrival of another key does not invalidate old objects.
 - Ana's phone and Ben's laptop can both seal K to Carol. They publish
@@ -1904,9 +1924,11 @@ Carol's tablet:
   - Retirement is derived from this listing and replay, not remembered in
     a separate local table. A recipient returning to the audience is no
     longer excluded; other excluded recipients' copies still retire the key.
-  - A current audience member's device makes a fresh key, seals it to the
-    current members, then publishes a rotation entry. An admin can also
-    replace a circle's key through a store-removal entry when required (§13).
+  - If no usable replacement is held, a current audience member's device
+    acquires one or makes a fresh key, seals it to current members, then
+    publishes a rotation entry. Old exposed copies remain listed forever;
+    their presence does not cause another rotation once a usable replacement
+    is held. Only a current circle member makes its replacement key (§13).
   - Several devices may rotate at once. Their keys have distinct ids;
     both remain readable. A rotation conflicts with no entry; its author
     must belong to its audience in its recorded past (D6).
@@ -1915,11 +1937,10 @@ Carol's tablet:
   entry's timestamp, then key id.
   - Usable means introduced by a received authorized entry, available in
     custody, and with no copy in this pass's listing for an excluded member.
-  - An entry that is a membership no-op can still supply a readable key.
   - If no usable key exists, rotate or wait for its sealed copy, recording
     the first blocker. Never use a known exposed key as a fallback.
-- Share every historical key with current members who lack it, even if its
-  introducing removal was dropped. Sharing adds a permanent sealed copy;
+- Share every historical key with current members who lack it. A membership
+  reversal does not revoke an authorized key introduction. Sharing adds a permanent sealed copy;
   every device's next listing can observe it.
 - The guarantee uses the sending device's replay and listing from the start
   of this pass. There are no per-write or per-upload membership or key-copy
@@ -1942,7 +1963,8 @@ Carol's tablet:
   ([§16.1](#161-kinds-and-where-files-are)).
 - A member's key opens every store key sealed to that member. A device
   reads the named copies from storage; key selection follows the rule above.
-- The store key is replaced whenever a member is removed.
+- Removal retires keys exposed to that member for first attempts. A remaining
+  member's device publishes a rotation before using a replacement key.
   - First attempts made after learning the removal use a key eligible under
     the pass's listing, subject to the residual window above.
   - Devices keep the old keys, to read writes made before.
@@ -2131,20 +2153,16 @@ Carol's tablet:
     console.
 - No keys change: the phone still holds Ana's key, but can't reach storage
   to read or write anything new.
-- Removing a member removes them and all their devices, in this order
-  ([§18.1](#181-operations)):
-  - the store key is rotated: a new one, sealed to each remaining member's
-    public key ([§11](#11-keys));
-  - so is the key of each circle they were in: a new one, sealed to that
-    circle's remaining members ([§14.6](#146-leaving-a-circle));
-  - the store log entry removing them is written; it names the new keys,
-    and the circles whose keys it replaced, which must be exactly the
-    circles they shared with others in the author's view, or the replay
-    drops the entry ([§9](#9-members-and-roles));
-  - their recorded storage access is taken back: the store's folder is
-    unshared from each provider account, by the store owner's device,
-    or on S3 coven tells the admin to delete every recorded key in the
-    provider's console ([§12.2](#122-adding-a-person)).
+- Removing a member is a store-log entry naming that member. It removes
+  them and their devices; it contains no store key or circle-key list.
+  Replay still derives deletion of circles whose sole member the author
+  removed (§9). Key selection and rotation then follow §11.
+  - Ana removes Carol, who shares Gifts with Ben. Ana is outside Gifts:
+    she makes no Gifts key. Ben's device sees Carol's old copy and rotates
+    Gifts before a first send. If Ben is offline, no remaining device sends
+    new Gifts data until a member can supply a usable key.
+- Their recorded storage access is taken back by the store owner's device,
+  or on S3 the admin deletes every recorded key in the provider's console.
 - Taking back a removed member's access covers every access recorded for
   them in any entry the store log holds, kept or dropped: create-store and
   add-member entries naming them, and set-access entries signed by them.
@@ -2186,13 +2204,6 @@ Carol's tablet:
   that already knew of the removal, subject to §11's window for copies made
   after its listing (§3). Earlier attempted writes keep their keys on retry;
   provider revocation cuts off access to those objects.
-- The removing device makes a new key for a circle its member isn't in,
-  seals it, and doesn't keep it.
-  - E.g. Ana removes Carol, who shares "Gifts" with Ben; Ana isn't in
-    Gifts. Ana's phone makes Gifts' next key, seals it to Ben alone, and
-    forgets it. Ana still can't read Gifts.
-  - The phone holds that key for a moment; members are trusted not to be
-    hostile ([§2](#2-threat-model)).
 - A circle the removed member was alone in is deleted by the same entry:
   no one is left who could read it ([§14.7](#147-deleting-a-circle)).
 - Adding a different member concurrently with a removal does not conflict.
@@ -2355,16 +2366,12 @@ Carol's tablet:
   - E.g. Ben's laptop skips Ana's Gifts writes 9 and 10 after his removal.
     When Ben rejoins, it loads both even though its log position is 10.
     The same happens if Gifts was deleted and that deletion later drops.
-- A part sealed with a dropped removal's key counts like any other part:
-  the members that removal left out get the key ([§11](#11-keys)), and a
-  device in the key's audience waits for its copy before applying the
-  part, as it waits for any write it hasn't got.
-  - E.g. Ana removes Ben and makes key K2, and her devices write with it;
-    then Ben's earlier, concurrent removal of Ana wins. Carol holds K2;
-    Ben, still a member, gets K2 from whichever device holding it sees the
-    drop first, then applies those parts, so they agree.
-  - So nothing a device has applied is ever taken back because its key's
-    entry was dropped.
+- A part sealed with an authorized historical key counts like any other
+  part. Current audience members wait for their copy before applying it.
+  - Ana removes Ben, then Carol rotates to K2 and writes with it. Ben's
+    concurrent removal of Ana can return Ben to the audience. Carol shares
+    K2 with Ben; he applies those same parts. No applied value is taken back
+    merely because membership changed around the key's introduction.
 - All members can see that a circle exists, who writes to it, when, and how
   much.
 
@@ -2398,7 +2405,8 @@ Carol's tablet:
 ### 14.6 Leaving a circle
 
 - E.g. Ana and Ben share a circle, and Ana removes Ben from it.
-  - The circle key is replaced, sealed to Ana alone.
+  - The removal entry names Ben and the circle. Ana's device then rotates
+    the exposed circle key, sealing its replacement to Ana alone.
   - Ben keeps the rows he already had. Remaining members' devices use a
     fresh key for first attempts once they know he has left. Earlier
     attempted writes keep their original keys (§11).
@@ -3147,13 +3155,13 @@ Carol's tablet:
 ## 18. Operations
 
 - An *operation* is work that takes several steps, any of which a crash can
-  interrupt, such as removing a member.
+  interrupt, such as publishing a rotation.
 - Coven keeps every unfinished operation in one local table:
 
   ```sql
   CREATE TABLE _coven_operations (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind        TEXT NOT NULL,     -- 'remove member', 'reload from snapshot', …
+    kind        TEXT NOT NULL,     -- 'rotate key', 'reload from snapshot', …
     last_step   INTEGER NOT NULL,  -- 0 before the first step completes
     data        BLOB NOT NULL,     -- what this kind's steps need, in its own shape
     started_by  TEXT NOT NULL      -- the app call that started it, or 'coven'
@@ -3167,7 +3175,7 @@ Carol's tablet:
 
   ```
   id   kind                   last_step   data                                started_by
-  1    remove member          2           member: ben, new store key: …       remove_member call
+  1    rotate key             2           audience: store, key: …             coven
   2    reload from snapshot   1           snapshot: <store>/snapshots/store/ana-phone/7,    coven
                                           temporary file: …
   ```
@@ -3237,19 +3245,16 @@ Carol's tablet:
 ### 18.1 Operations
 
 - Removing a member ([§13](#13-removing-members-and-devices)):
-  1. make the new store key, and a new key for each circle the member
-     shared with others, with their ids, and record them in the
-     operation's row with the member list they were made from;
-  2. upload each new key sealed to each remaining member of its audience;
-  3. upload the store log entry removing the member;
-  4. revoke the member's storage access, or on S3 tell the admin to delete
-     their key in the provider's console.
-- Removing someone from a circle ([§14.6](#146-leaving-a-circle)):
-  1. make the circle's new key and its id, and record them in the
-     operation's row;
-  2. upload it sealed to each remaining circle member;
-  3. upload the store log entry removing them from the circle, naming the
-     new key.
+  1. upload the store-log entry naming the member;
+  2. revoke the recorded storage access, or on S3 tell the admin which
+     access keys to delete in the provider's console.
+- Removing someone from a circle ([§14.6](#146-leaving-a-circle)) publishes
+  one entry naming the circle and member. It is not a multi-step operation.
+- Rotating an audience key ([§11](#11-keys)):
+  1. a current member makes the key and id, records its SHA-256 commitment,
+     and persists the key in custody;
+  2. upload fixed sealed copies to the current audience members;
+  3. upload the rotation entry with the audience, key id and key hash.
 - A breaking schema change ([§17](#17-schema-changes)):
   1. migrate the database, with its migration write, in one transaction;
   2. upload a snapshot in the new version;
@@ -3293,25 +3298,23 @@ Carol's tablet:
 
 ### 18.2 Example
 
-- Ana removes Ben, and her phone crashes after uploading the sealed keys:
+- Carol rotates the store key after Ana removes Ben. Her phone crashes
+  after uploading K2's sealed copies:
 
   ```
   _coven_operations
-    kind            last step   data              started by
-    remove member   2           new store key     Ana's "remove Ben"
+    kind         last step   data                          started by
+    rotate key   2           store, K2, key hash            coven
 
   storage
-    <store>/keys/store/7f3a…/ana     uploaded
-    <store>/keys/store/7f3a…/carol   uploaded
-    <store>/store-log/ana-phone/9   not yet: the removal entry
+    <store>/keys/carol-phone/store/K2/ana       uploaded
+    <store>/keys/carol-phone/store/K2/carol     uploaded
+    <store>/store-log/carol-phone/9             not yet: the rotation
   ```
 
-- No other device sees anything yet: the sealed keys are unreferenced until
-  the entry exists.
-- When the phone restarts, coven resumes at step 3 with the recorded key.
-- If it made a new key instead, the sealed copies already uploaded would
-  hold a different one; recording it in step 1 is what prevents that.
-
+- The copies cannot authorize K2 for sending until its introduction is read.
+- On restart Carol resumes at step 3 with the same key, hash and sealed bytes.
+  Generating another key would disagree with the copies already published.
 ## 19. Recovery
 
 - Recovery is for any state coven's rules didn't produce: a write that

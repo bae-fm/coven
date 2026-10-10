@@ -4,7 +4,20 @@ The Lean package is [storelog-data](storelog-data/). It imports the merge and
 store-log packages. Its executable models distinguish database state, knowledge
 of keys, provider requests, physical storage, and what the app reads.
 
-## Results against the current spec
+## Model boundary for key introductions
+
+The executable removal witnesses carry key introductions on removals. §11
+instead uses separate authorized rotations after membership changes. The
+model's receipts abstract successful sealing and opening; they do not check
+D6's SHA-256 key commitment or the writer-specific D10 paths. The claims
+below describe those executable inputs, not a proof of these format checks.
+
+Ana removes Ben, then Carol rotates K for the remaining members. If a
+concurrent replay returns Ben, historical sharing supplies him K. This is
+the spec's corresponding disclosure history; the checked witness below
+attaches K to the removal instead.
+
+## Results and their assumptions
 
 **Revocation is proved with the stated listing window.**
 [§11](../coven.md#11-keys) requires each pass to list sealed copies alongside
@@ -180,8 +193,9 @@ The current spec resolves or narrows the historical witnesses as follows:
   boundary, not just currently selected ones. The dependency theorem covers
   this provided its conditions name all such entries. Automatic discovery of
   every snapshot dependency is outside the model.
-- **Snapshots under dropped removal keys:** §9 and §11 retain those keys for
-  reading. The old kept-only catalog predicate is not the current rule.
+- **Snapshots under historical keys:** §9 and §11 retain authorized introduced
+  keys for reading, independently of later membership replay. The executable
+  dropped-removal-key witness uses its own removal representation.
 - **Re-kept keys and historical disclosures:** the sealed-copy listing exposes
   earlier disclosures even to devices that never saw the introducing entry
   drop. Copies after that listing remain the explicit residual window.

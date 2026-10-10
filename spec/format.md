@@ -201,21 +201,21 @@
 
 | Tag | Change | Fields |
 | --- | --- | --- |
-| 0 | Create store | `store:uuid \| name:name \| admin:MemberKeys \| access:MemberAccess \| device_name:name \| key:uuid` |
+| 0 | Create store | `store:uuid \| name:name \| admin:MemberKeys \| access:MemberAccess \| device_name:name \| key:uuid \| key_hash:32 bytes` |
 | 1 | Add member | `keys:MemberKeys \| role:u8 \| access:MemberAccess` |
-| 2 | Remove member | `member:MemberId \| key:uuid \| circle_keys:[circle:uuid \| key:uuid]` |
+| 2 | Remove member | `member:MemberId` |
 | 3 | Change role | `member:MemberId \| role:u8` |
 | 4 | Add device | `device:DeviceId \| name:name \| replaces:Option<device:DeviceId \| last_write:u64 \| last_entry:u64>` |
 | 5 | Remove device | `device:DeviceId` |
-| 6 | Create circle | `circle:uuid \| name:name \| key:uuid` |
+| 6 | Create circle | `circle:uuid \| name:name \| key:uuid \| key_hash:32 bytes` |
 | 7 | Rename circle | `circle:uuid \| name:name` |
 | 8 | Delete circle | `circle:uuid` |
 | 9 | Add circle member | `circle:uuid \| member:MemberId` |
-| 10 | Remove circle member | `circle:uuid \| member:MemberId \| key:uuid` |
+| 10 | Remove circle member | `circle:uuid \| member:MemberId` |
 | 11 | Raise schema | `version:u32 \| snapshot:SnapshotId` |
 | 13 | Reset | `snapshot:SnapshotId` |
 | 14 | Set access | `access:MemberAccess` |
-| 15 | Rotate key | `audience:Audience \| key:uuid` |
+| 15 | Rotate key | `audience:Audience \| key:uuid \| key_hash:32 bytes` |
 
 - Tag 12 is unused. The other tags retain their numbers.
 - A role is `0` admin or `1` member. `SnapshotId` is
@@ -230,14 +230,14 @@
   zero means that log is empty. Concurrent replacements combine each end
   by maximum (§10). Replacement is not removal and introduces no key.
 - Set-access is about its author, the member whose access it records.
-- `key` names the key the entry brings in ([§11](coven.md#11-keys));
-  a removal's `circle_keys` are strictly increasing by circle. Their count
-  is present even when zero. Key ids have no numerical ordering or succession.
-  A removal carries no list of deleted circles.
+- `key` and `key_hash` occur only on creation and rotation: the id and
+  SHA-256 of the exact 32 key bytes ([§11](coven.md#11-keys)). The hash is
+  inside the encrypted entry, never a cleartext path component. Key ids
+  have no numerical ordering or succession. Removals contain neither keys
+  nor a deleted-circle list; the author's recorded view determines deletion.
 - A rotation changes no membership. Its author must be a member of the
   audience in the entry's recorded past and it conflicts with no entry.
-  An outside store admin replaces circle keys through the store-removal
-  entry (tag 2), not a standalone rotation (tag 15). Concurrent rotations
+  An outside store admin cannot introduce a circle key. Concurrent rotations
   coexist (§11).
 - Raised versions are at least 1, and a raise names a snapshot of the
   audience it raises; a reset names the audience it resets. A creation's
@@ -591,7 +591,9 @@
     `coven/sealed-box/v1`, `store` or `circle`, the path, the ephemeral key
     and the member's sealing key; that context is also the associated data.
   - The plaintext is `key:uuid | key bytes:32` for a store key, and
-    `circle:uuid | key:uuid | key bytes:32` for a circle key.
+    `circle:uuid | key:uuid | key bytes:32` for a circle key. The recipient
+    checks SHA-256 of those 32 bytes against the authorized D6 introduction;
+    a mismatch is invalid, not another value under that key id.
 - A fingerprint ([§19.1](coven.md#191-noticing)) is
   HMAC-SHA256, under the audience's fingerprint key, of the raw concatenation
   `coven/agreement/root/v1 | audience | sum`. This outer concatenation has no
@@ -681,8 +683,9 @@
   sealed key, file and code, including:
   - a write with a store part and a circle part, the first spanning three
     chunks;
-  - all fifteen store-log change tags, including both member-access variants
-    across creation and addition, and a removal replacing two circles' keys;
+  - every store-log change tag, including both member-access variants
+    across creation and addition, key-free removals, and all three kinds of
+    key introduction with their key hashes;
   - a dismissal frame;
   - a snapshot with every section and active, frozen and excluded losses;
   - a migration write;

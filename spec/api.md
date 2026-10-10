@@ -1902,9 +1902,6 @@ pub enum DropReason {
     NoAdminLeft,
     /// Its author's role didn't allow it, in the member list they had read.
     NotAllowed,
-    /// A removal's replaced circle keys didn't name exactly the circles the
-    /// removed member shared with others, in its author's view (§13).
-    WrongCircleKeys,
 }
 
 impl CovenHandle {
@@ -2090,10 +2087,8 @@ pub struct OperationId(pub i64);
 
 /// The app purpose of an unfinished operation (§18.1, §19.3).
 pub enum OperationKind {
-    /// Remove a member and replace the store key.
+    /// Publish a member removal and take back its recorded provider access.
     RemoveMember,
-    /// Remove a circle member and replace its key.
-    RemoveCircleMember,
     /// Make a circle and publish its first sealed key.
     CreateCircle,
     /// Seal the circle's history and add a member.
@@ -2479,7 +2474,7 @@ impl CovenHandle {
     /// so blocked() removes its DeleteAccessKey record (§13).
     pub async fn confirm_access_key_deleted(&self, access_key_id: &str) -> Result<(), SyncError>;
 
-    /// Removes a member and all their devices, rotates the store key, and
+    /// Removes a member and all their devices, then
     /// revokes all their recorded storage access (§13). The result describes
     /// their current replayed access, with retained grants from any recorded
     /// account. On S3, blocked() lists every recorded key until
@@ -3015,9 +3010,8 @@ pub trait MemberKeyCustody: Send + Sync {
 - Circle-changing calls return `SyncError` ([E5](#e5-storage-and-sync)), as member calls
   do ([E9](#e9-members-and-devices)). `CircleNotMember`, `CircleDeleted` and
   `NotStoreMember` retain the circle or member id the app can act on.
-- Removing someone from a circle is an operation that replaces the circle's
-  key ([§18.1](coven.md#181-operations)); its failure is retried or abandoned with
-  the calls of [E6](#e6-operations-and-recovery).
+- Removing someone from a circle publishes one entry and returns once it is
+  kept. Rotation follows in the sync pass; it is not part of that call (§11).
 
 ```rust
 /// Circle calls borrowing the open store that owns their work (§14, E12).
@@ -3043,7 +3037,7 @@ impl Circles<'_> {
     /// including when replay returns a deleted circle (§14.4).
     pub async fn add_member(&self, circle: CircleId, member: &MemberId) -> Result<(), SyncError>;
 
-    /// Removes someone from the circle and replaces its key (§14.6).
+    /// Removes someone with one entry; remaining members rotate exposed keys (§14.6).
     pub async fn remove_member(&self, circle: CircleId, member: &MemberId) -> Result<(), SyncError>;
 
     /// The circles this member is in.
