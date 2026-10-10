@@ -192,29 +192,21 @@
   whole and ranged reads and listing, then deletes the object and checks it is
   absent. A failure names the failed check and preserves the previous connection
   ([E5](api.md#e5-storage-and-sync)).
-- Setting up a store refuses a location that already holds another store,
-  or anything that isn't a coven store.
-  - Two devices setting up different stores in one empty location at the
-    same moment can both succeed; whichever store's first entry has the
-    larger timestamp finds the other's when it next syncs, stops syncing,
-    and reports the location taken.
-  - The creation entry's cleartext prefix carries its store id, timestamp,
-    and author's public signing key. Its signature covers this prefix and
-    the ciphertext, bound to the entry path. That lets a racing store check
-    the creation timestamp without possessing the other store's key. Opening
-    the entry also requires these fields to match its encrypted contents
-    ([Appendix D, D9](format.md#d9-sealed-objects)).
-  - The app sets it up somewhere else. With the previous connection retained,
-    setup copies this store's immutable encrypted history and files, preserving
-    other devices' signatures and excluding the competing store's objects. It
-    publishes the creation object last and completes an interrupted copy before
-    committing the new location. Subsequent sync uploads waiting local writes.
-    Relocation requires the previous location to remain readable.
+- Every storage path starts with the store's id, including the provider
+  check's temporary object ([D10](format.md#d10-paths)).
+  - Several stores can share one bucket prefix, folder or zone.
+  - Setup reads and writes only this store's prefix; other stores and
+    unrelated objects outside it do not compete with this store.
+  - E.g. Ana creates Household and Ben creates Garden in the same folder.
+    Their store ids differ, so their first entries have different paths.
+- Reconnecting uses the recorded provider location. Setup does not move an
+  existing store to another location: its other devices still use the
+  location in their restore codes.
 - S3 has no standard way to make or delete access keys; each S3 provider
   has its own, so on S3 an admin makes and deletes members' keys in the
   provider's console, and coven says when.
-- Posted positions live at `positions/<device>` ([§6](#6-syncing-writes)).
-- Sealed circle keys live at `keys/circles/<circle>/<key>/<member>`
+- Posted positions live at `<store>/positions/<device>` ([§6](#6-syncing-writes)).
+- Sealed circle keys live at `<store>/keys/circles/<circle>/<key>/<member>`
   ([§14.3](#143-circles)).
 
 ## 5. Local database
@@ -276,7 +268,7 @@
     a write exceeding it fails at commit with `DbError::TooLarge`.
   - E.g. Ana imports 50,000 notes in one transaction: one write, in many
     chunks.
-  - It is named `devices/<device>/<n>`, created once and never changed.
+  - It is named `<store>/devices/<device>/<n>`, created once and never changed.
   - `<n>` counts that device's own writes: 1, 2, 3, with no gaps.
   - Its name is part of its encryption, so the provider can't swap one
     object for another.
@@ -310,7 +302,7 @@
 - Each device remembers how far it has applied every device's log, in
   coven's `_coven_positions` table: one row per device, naming its last
   applied write's number.
-- It also posts those positions to storage at `positions/<device>`,
+- It also posts those positions to storage at `<store>/positions/<device>`,
   replacing its own object when its positions or stuck records change.
   - It includes its own judgments of stuck logs: the log, object and failure
     category (§19.1, D8). Reports received from peers are never republished.
@@ -323,7 +315,7 @@
   device's corresponding log at that object, recorded and exposed as stuck
   (§19.1). Independent logs continue.
 - A device finds devices it doesn't know yet, and their logs, by listing
-  `devices/` and `store-log/` ([E5](api.md#e5-storage-and-sync)).
+  `<store>/devices/` and `<store>/store-log/` ([E5](api.md#e5-storage-and-sync)).
 
 ## 7. Order
 
@@ -422,7 +414,7 @@ Two mechanisms order writes:
     - it uploads the write record.
 - If these were Ana's phone's 4th write and Ben's phone's 9th, storage
   now holds:
-  - `devices/ana-phone/4`:
+  - `<store>/devices/ana-phone/4`:
 
     ```
     ana-phone, write 4, 2026-10-02 13:01:00.000 #0
@@ -431,7 +423,7 @@ Two mechanisms order writes:
     signed with Ana's key
     ```
 
-  - `devices/ben-phone/9`:
+  - `<store>/devices/ben-phone/9`:
 
     ```
     ben-phone, write 9, 2026-10-02 13:01:00.000 #1
@@ -675,7 +667,7 @@ Two mechanisms order writes:
   ```
 
 - At 14:30 the tablet comes back online and uploads the write record to
-  `devices/carol-tablet/2`.
+  `<store>/devices/carol-tablet/2`.
 - Carol's tablet never read Ben's write 9, and Ben's phone never read
   Carol's write 2. The two writes are concurrent, so only their
   timestamps can order them.
@@ -1220,7 +1212,7 @@ Carol's tablet:
     snapshot ([§15](#15-snapshots)).
   - An entry names the store log entries its author had read, and is
     signed with its author's member key.
-  - Entries live at `store-log/<device>/<n>`, numbered like a device's
+  - Entries live at `<store>/store-log/<device>/<n>`, numbered like a device's
     writes ([§6](#6-syncing-writes)).
   - The device in the path is only where the entry was written from.
   - Each device numbers its own entries, so no two entries ever get the
@@ -1229,12 +1221,12 @@ Carol's tablet:
     key is Ana's, whichever of her devices wrote it.
 
     ```
-    store-log/ana-phone/1      create the store, Ana as admin       signed with Ana's key
-    store-log/ana-phone/2      add member Ben, with his public key  signed with Ana's key
+    <store>/store-log/ana-phone/1      create the store, Ana as admin       signed with Ana's key
+    <store>/store-log/ana-phone/2      add member Ben, with his public key  signed with Ana's key
                                had read: ana-phone 1
-    store-log/ben-laptop/1     add device ben-phone                 signed with Ben's key
+    <store>/store-log/ben-laptop/1     add device ben-phone                 signed with Ben's key
                                had read: ana-phone 2
-    store-log/ana-ipad/1       make Ben an admin                    signed with Ana's key
+    <store>/store-log/ana-ipad/1       make Ben an admin                    signed with Ana's key
                                had read: ana-phone 2
     ```
 
@@ -1429,12 +1421,12 @@ Carol's tablet:
     lost. Her new phone is restored from the backup:
 
     ```
-    devices/ana-phone/
+    <store>/devices/ana-phone/
       5   in the backup
       6   written after the backup
       7   written after the backup
 
-    devices/ana-phone-2/
+    <store>/devices/ana-phone-2/
       1   the restored phone's first write
     ```
 
@@ -1471,8 +1463,8 @@ Carol's tablet:
     key, the entry making the circle;
   - each later key, the removal that replaced the one before.
 - Each store key is sealed to every member's public key, and the sealed
-  copies are kept in storage, at `keys/store/<key>/<member>`.
-- Sealed circle keys live at `keys/circles/<circle>/<key>/<member>`
+  copies are kept in storage, at `<store>/keys/store/<key>/<member>`.
+- Sealed circle keys live at `<store>/keys/circles/<circle>/<key>/<member>`
   ([§14.3](#143-circles)).
 - So two concurrent removals never write their keys to the same paths.
   - E.g. Ana removes Dan while Ben, offline, removes Erin: each removal
@@ -1616,7 +1608,7 @@ Carol's tablet:
      - Every key, so Carol reads a late write made under an older one.
   5. Carol's phone opens the store key, adds itself to the store log, and
      Carol writes down her own restore code.
-- The join request is stored at `join-requests/<invite id>`.
+- The join request is stored at `<store>/join-requests/<invite id>`.
   - It is encrypted with a key derived from the invite secret, and signed
     with Carol's new member key.
   - Ana's device holds the secret too, so it opens and checks the request.
@@ -1855,7 +1847,7 @@ Carol's tablet:
   ([§9](#9-members-and-roles)).
 - Each circle has its own key, sealed to each of its members' public keys,
   like the store key ([§11](#11-keys)).
-  - Its sealed copies live at `keys/circles/<circle>/<key>/<member>`
+  - Its sealed copies live at `<store>/keys/circles/<circle>/<key>/<member>`
     ([§11](#11-keys)).
   - It is replaced whenever someone leaves the circle.
   - Someone joining a circle gets its earlier keys too, so they can read its
@@ -1871,7 +1863,7 @@ Carol's tablet:
   - E.g. Ana adds a note and pins it, in one transaction:
 
     ```
-    devices/ana-phone/12
+    <store>/devices/ana-phone/12
       header, sealed with the store key:             ana-phone, write 12, timestamp, had read …
       part 1, chunk 0, sealed with the store key:    notes  row 47  insert "Paint colors"
       part 2, chunk 0, sealed with Ana's circle key: pins   row 4   insert note → 47
@@ -1963,7 +1955,7 @@ Carol's tablet:
   ben-phone, write 31
     notes  row 7  generation 1  delete
     notes  row 8  generation 1  delete
-  store-log/ben-phone/4   delete circle Gifts
+  <store>/store-log/ben-phone/4   delete circle Gifts
   ```
 
   - Notes 7 and 8 are deleted on both devices.
@@ -1982,7 +1974,7 @@ Carol's tablet:
   - A device's own `_coven_uploads`, `_coven_operations` and `_coven_stuck_logs`
     aren't in it. Loading keeps that local state, except that committing a
     changed reset clears local stuck judgments (§19.1).
-  - Snapshots live at `snapshots/<audience>/<device>/<n>`, where the
+  - Snapshots live at `<store>/snapshots/<audience>/<device>/<n>`, where the
     audience is `store` or a circle's id.
   - Its prefix, outside its encryption, names its audience, its key and
     its positions, so any device can choose one and decide what it
@@ -1995,7 +1987,7 @@ Carol's tablet:
     store log names for the device in its path; loading also verifies the
     complete object's signature before applying anything from it (D9).
   - A snapshot *covers* a write when the write is within its positions:
-    `snapshots/store/ana-phone/3` covers ana-phone's writes 1 to 40.
+    `<store>/snapshots/store/ana-phone/3` covers ana-phone's writes 1 to 40.
 - A device writes one for an audience once that audience's parts after
   its latest snapshot add up to more bytes than that snapshot, or than
   1 MiB while the audience has none.
@@ -2012,8 +2004,8 @@ Carol's tablet:
 - Two devices can write one at the same time, and both are correct:
 
   ```
-  snapshots/store/ana-phone/3     ana-phone up to 40, ben-laptop up to 22
-  snapshots/store/ben-laptop/1    ana-phone up to 38, ben-laptop up to 25
+  <store>/snapshots/store/ana-phone/3     ana-phone up to 40, ben-laptop up to 22
+  <store>/snapshots/store/ben-laptop/1    ana-phone up to 38, ben-laptop up to 25
   ```
 
 - A new device loads either, then fetches every write after its positions,
@@ -2195,7 +2187,7 @@ Carol's tablet:
   writes like any other.
 - Every device checks a downloaded file against it.
 - Uploading a file picks a random id and a random key for it, stores it
-  encrypted at `files/<device>/<id>`, and writes both into its row's where-column.
+  encrypted at `<store>/files/<device>/<id>`, and writes both into its row's where-column.
   - The provider sees only a random name, never a hash of the content.
   - Each upload is a copy of its own: identical files attached to two
     rows are stored twice, and deleting one never touches the other.
@@ -2525,7 +2517,7 @@ Carol's tablet:
   ```
   id   kind                   last_step   data                                started_by
   1    remove member          2           member: ben, new store key: …       remove_member call
-  2    reload from snapshot   1           snapshot: snapshots/store/ana-phone/7,    coven
+  2    reload from snapshot   1           snapshot: <store>/snapshots/store/ana-phone/7,    coven
                                           temporary file: …
   ```
 
@@ -2645,9 +2637,9 @@ Carol's tablet:
     remove member   2           new store key     Ana's "remove Ben"
 
   storage
-    keys/store/7f3a…/ana     uploaded
-    keys/store/7f3a…/carol   uploaded
-    store-log/ana-phone/9   not yet: the removal entry
+    <store>/keys/store/7f3a…/ana     uploaded
+    <store>/keys/store/7f3a…/carol   uploaded
+    <store>/store-log/ana-phone/9   not yet: the removal entry
   ```
 
 - No other device sees anything yet: the sealed keys are unreferenced until

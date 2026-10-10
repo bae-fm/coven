@@ -175,7 +175,7 @@ pub struct StoreKeyring { /* private fields */ }
 /// The app's provider client ids and sign-in clock, kept private (E10).
 pub struct OAuthClients { /* private fields */ }
 
-/// A validated encrypted-object path in the store (§4).
+/// A validated encrypted-object path, beginning with its store id (§4).
 pub struct ObjectPath { /* private fields */ }
 
 impl ObjectPath {
@@ -1343,10 +1343,10 @@ while let Ok(values) = lost.next().await {
 
 - *Setting up storage* creates the store at a location on a provider, the
   first time it connects, and connects this device to it.
-  - At a location that already holds this store, such as after
-    `disconnect_storage`, setup reconnects to it; one that holds another
-    store, or anything that isn't a coven store, fails with
-    `LocationOccupied`.
+  - Paths start with this store's id. Other stores can share the location.
+  - After `disconnect_storage`, setup reconnects at the recorded location.
+    It refuses a different location with `LocationChangeUnsupported`;
+    setup does not relocate a store already used by other devices.
   - Creating uploads the store's first entry and its key sealed to this
     member; waiting writes then go up through sync like any others.
 - The app calls `authenticate(provider)` on the handle before OAuth setup.
@@ -1435,7 +1435,7 @@ pub enum CloudProvider {
 
 /// A store's location, with credentials kept separately (§4, E5).
 pub enum StorageConfig {
-    /// An existing S3 bucket and the prefix reserved for this store.
+    /// An existing S3 bucket and a base prefix that may hold several stores.
     S3 {
         /// The bucket's name.
         bucket: String,
@@ -1443,14 +1443,14 @@ pub enum StorageConfig {
         region: String,
         /// A compatible provider's endpoint, or None for AWS's regional endpoint.
         endpoint: Option<Url>,
-        /// The store's prefix, without leading or trailing slashes.
+        /// The base prefix, without leading or trailing slashes; paths add the store id.
         prefix: String,
     },
-    /// A store folder in Google Drive.
+    /// A Google Drive folder; paths within it start with the store id.
     GoogleDrive { folder_id: String },
     /// A Dropbox shared folder namespace, independent of each member's mount path.
     Dropbox { namespace_id: String },
-    /// A store folder in a OneDrive drive.
+    /// A OneDrive folder; paths within it start with the store id.
     OneDrive { drive_id: String, folder_id: String },
     /// The CloudKit zone reached by the app's bridge.
     CloudKit {
@@ -1582,8 +1582,8 @@ impl ProviderResponse {
 pub enum StorageSetupError {
     /// A provider check failed; cleanup failures retain both causes.
     ProviderCheck { check: StorageCheck, source: StorageError },
-    /// Another store already occupies the location.
-    LocationOccupied,
+    /// An existing store cannot be relocated by setting up another location.
+    LocationChangeUnsupported,
     /// The provider refused or failed setup.
     Storage(StorageError),
     /// Sign-in failed or was cancelled.
@@ -1638,7 +1638,7 @@ pub enum SyncError {
     Rejected(DropReason),
     /// An object required by the change failed its checks.
     Damaged(DamagedObject),
-    /// The device must stop syncing: removed, location taken, or update required.
+    /// The device must stop syncing: removed or update required.
     Stopped(SyncFailure),
     /// No storage is connected for a call that requires it.
     NoStorage,
@@ -1851,9 +1851,6 @@ pub enum SyncFailure {
     UpdateRequired,
     /// This device, or its member, was removed from the store (§10).
     Removed,
-    /// Another store was set up in this location at the same moment, first;
-    /// set this one up somewhere else (§4).
-    LocationTaken,
     /// Storage refused or failed a request.
     Storage(Arc<StorageError>),
     /// Anything else, with its cause.

@@ -5,7 +5,7 @@
   to [§19](coven.md#19-recovery) store, laid out exactly.
 - `coven-format` implements it, with crypto's ciphers for the sealed layers
   ([§20.1](coven.md#201-crates)).
-- It is format 1 ([§17.2](coven.md#172-covens-schema)). A
+- It is format 2 ([§17.2](coven.md#172-covens-schema)). A
   change to any layout here is a new format version, and older versions'
   readers stay. Coven writes the newest format and reads every older one
   without a store-wide version raise ([§17.2](coven.md#172-covens-schema)).
@@ -218,8 +218,8 @@
   is present even when zero. Key ids have no numerical ordering or succession.
   A removal carries no list of deleted circles.
 - Raised versions are at least 1, and a raise names a snapshot of the
-  audience it raises; a reset names the audience it resets. The sealed
-  creation identity must agree with the plaintext creation (D9).
+  audience it raises; a reset names the audience it resets. A creation's
+  store id must agree with its path (D9).
 
 ### D7 Snapshots
 
@@ -331,19 +331,15 @@
   | Kind | Object | Prefix |
   | --- | --- | --- |
   | 32 | Write | `header_key:uuid \| part_keys:[uuid]` |
-  | 33 | Store log entry | `key:uuid \| origin:option<store:uuid, timestamp:Timestamp, author:MemberId>` |
+  | 33 | Store log entry | `key:uuid` |
   | 34 | Snapshot | `audience:Audience \| key:uuid \| writes:WritePositions \| store_log:EntryPositions` |
   | 35 | Posted positions | `key:uuid` |
   | 36 | Join request | nothing |
 
-- A store-log `origin` is `0` for an ordinary entry, or `1` followed by
-  the store id, timestamp and author's public signing key for a create-store
-  entry. No other tag is valid. The complete store-log prefix is 20 or 84
-  bytes including kind and version. The creation signature is checked with
-  this public key before comparing stores in the setup race (§4), without
-  decrypting either store. Its timestamp's device must match the path, whose
-  number is 1. After opening, the origin must equal the creation frame's
-  fields; it is required exactly on create-store entries.
+- Every store-log entry has the same 19-byte prefix including kind and
+  version. The create-store frame supplies the first admin's signing key;
+  decrypt it, verify the signature with that key, and require its store id
+  to match the path. Creation is entry 1 of its authoring device (D6).
 - A snapshot has two 64-byte Ed25519 signatures:
 
   ```
@@ -412,7 +408,7 @@
 - E.g. Ana's write 12, with a store part and a Gifts part:
 
   ```
-  20 0001                       kind 32, version 1
+  20 0002                       kind 32, version 2
   <store key id>                header_key
   00000002 <store key id> <Gifts key id>    part_keys
   <length><nonce><header frame sealed><tag>                 section 0
@@ -425,18 +421,18 @@
 
 | Path | Holds |
 | --- | --- |
-| `devices/<device>/<n>` | A device's write `n` |
-| `store-log/<device>/<n>` | A device's store log entry `n` |
-| `snapshots/<audience>/<device>/<n>` | A device's snapshot `n` of an audience: `store`, or a circle's id |
-| `positions/<device>` | A device's posted positions and stuck records, replaced as either changes |
-| `keys/store/<key>/<member>` | A store key sealed to a member |
-| `keys/circles/<circle>/<key>/<member>` | A circle key sealed to a member |
-| `files/<device>/<file>` | An uploaded file |
-| `join-requests/<invite>` | A join request |
+| `<store>/devices/<device>/<n>` | A device's write `n` |
+| `<store>/store-log/<device>/<n>` | A device's store log entry `n` |
+| `<store>/snapshots/<audience>/<device>/<n>` | A device's snapshot `n` of an audience: `store`, or a circle's id |
+| `<store>/positions/<device>` | A device's posted positions and stuck records, replaced as either changes |
+| `<store>/keys/store/<key>/<member>` | A store key sealed to a member |
+| `<store>/keys/circles/<circle>/<key>/<member>` | A circle key sealed to a member |
+| `<store>/files/<device>/<file>` | An uploaded file |
+| `<store>/join-requests/<invite>` | A join request |
 
 - A device id and `n` are decimal, with no leading zeros; `n` is at least 1.
-- Ids are lowercase hyphenated UUIDs; a member is its public key in
-  lowercase hex.
+- Store, circle, key, invite and file ids are lowercase hyphenated UUIDs.
+  A member is its public key in lowercase hex.
 - A path is used exactly as written here, with no other spelling, and is
   bound into its object's authentication.
 
@@ -470,7 +466,7 @@
   requests; snapshots and sealed keys retain their originally sealed bytes.
 - An invite's secret derives its join request's key with
   `coven/join-request/v1`.
-- A sealed key at `keys/…` is:
+- A sealed key at `<store>/keys/…` is:
 
   ```
   kind:u8 (37) | version:u16 | ephemeral:32 bytes | nonce:24 bytes | ciphertext | tag:16 bytes
@@ -519,7 +515,7 @@
 
 ### D12 Files
 
-- An uploaded file at `files/<device>/<file>` is:
+- An uploaded file at `<store>/files/<device>/<file>` is:
 
   ```
   kind:u8 (38) | version:u16 | size:u64 | chunks
@@ -560,7 +556,8 @@
 
 ### D14 What the fixtures pin
 
-- `coven-format`'s fixtures hold, as hex, one of each frame, sealed object,
+- Each supported format keeps its own fixtures. The current format's
+  `coven-format` fixtures must hold, as hex, one of each frame, sealed object,
   sealed key, file and code, including:
   - a write with a store part and a circle part, the first spanning three
     chunks;
@@ -572,7 +569,7 @@
 - Every successful decode re-encodes to the same bytes; tests decode every
   truncation and single-bit change of every fixture without panicking.
 
-- `v1.hex` pins the plaintext frames, then a write prefix/header/part chunks
+- `v2.hex` pins the plaintext frames, then a write prefix/header/part chunks
   and a snapshot prefix/plaintext chunks. Frame mutations exercise the payload decoder,
   including dismissal and migration frames; a successful mutation must
   re-encode to exactly the mutated bytes.
@@ -583,7 +580,7 @@
   pins its device-qualified path and uploaded row reference. The code frames
   are `restore-code.hex` and `invite-code.hex`, with their text in `codes.txt`.
   All key material and fixed nonces in these fixtures are public test data.
-  Ciphertext, HKDF and signatures were calculated independently using
+  Ciphertext, HKDF and signatures must be calculated independently using
   Python hashlib/hmac and libsodium; tests open them through the Rust APIs.
   Snapshot fixtures pin both signatures and the positions fixture pins its
   author signature. Tests reject every truncation and every single-bit change
