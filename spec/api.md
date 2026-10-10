@@ -1797,6 +1797,8 @@ pub enum Refusal {
     NotAuthorized,
     InvalidCausality,
     WrongIdentity,
+    /// Authenticated file plaintext disagrees with the row's content hash.
+    ContentHash,
 }
 
 pub enum RequiredUpdate {
@@ -1842,7 +1844,7 @@ pub enum PendingReason {
     AccountInUse { account: String },
     AccessRemains { account: String, shares: Vec<RetainedAccess> },
     DeleteAccessKey(AccessKeyToDelete),
-    FileUnavailable(FileSourceFailure),
+    FileUnavailable(FileMissingReason),
     Disagrees,
     Failed(LocalFailure),
     Paused,

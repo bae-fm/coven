@@ -2841,6 +2841,33 @@ Carol's tablet:
 - Reading a range whose chunks aren't cached, while offline, returns the
   storage network failure and its native cause for the app to show or log.
 - Pinning a file ahead of time is how it becomes available offline.
+- File reads, pinning and eager fill share verified cache ranges and one
+  pending record per fixed file subject. An immediate call retains its typed
+  cause; the list records the first unmet condition:
+  - no connection is `NoStorage`; network and provider failures retain the
+    provider's `Storage` category and retry temporary failures with §16.5's
+    persisted delay;
+  - confirmed absence with an active, capable uploader is
+    `Waits(Object(path))`; removal, replacement or a reported source failure
+    is `FileUnavailable(FileMissingReason)`, requiring app action;
+  - a complete chunk failing authentication is `Refused(Decryption)`;
+    authenticated bytes disagreeing with the row's content hash are
+    `Refused(ContentHash)`. Neither retries the same immutable bytes
+    automatically. §19.1's applicable update can permit a recheck;
+  - a failed local cache write is `Failed(Disk)`; database failure is
+    `Failed(Database)`. No failed range is marked cached or pinned.
+- A file key travels inside its row. If the audience key needed to read that
+  row has not arrived, the write or snapshot waits with `KeyUnavailable`
+  before it can yield a `FileRef`; there is no invented file download with
+  an unknown reference. Acquiring the key reuses the retained encrypted input.
+- Ben's eager download has two verified ranges when Wi-Fi drops. The list
+  reports the network failure and progress remains at the two committed
+  ranges. Retry fetches the remainder. A bad final content hash instead
+  leaves a permanent refusal and publishes no completed file or pin.
+- The download verification boundary, including disk-full injection through
+  the real Rust reader, is specified in [IO and observable work](proofs/io.md).
+  It must check that bytes are authenticated before delivery and the complete
+  sequential read checks its content hash before releasing its final buffer.
 
 ### 16.4 Cache
 

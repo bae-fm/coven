@@ -381,7 +381,8 @@
   | 6 | Invalid positions | `failure:u8` |
 
 - Refusal tags: 0 decryption/authentication, 1 signature, 2 parse,
-  3 invalid write, 4 not authorized, 5 invalid causality, 6 wrong identity.
+  3 invalid write, 4 not authorized, 5 invalid causality, 6 wrong identity,
+  7 file content hash. Content-hash refusal applies only to File.
 - Wire prerequisites are 0 followed by an object path as `text`, or
   1 followed by a device id whose registration is missing, or 2 followed
   by a device id awaiting a replacement that includes a stored object
@@ -392,6 +393,9 @@
 - Every path is canonical D10 text for this store. Refused applies only to
   immutable subjects. Invalid positions applies only to Positions.
   File unavailable applies only to File, whose device must be the poster.
+  Its wire failure is the local `FileMissingReason::Source` case; uploader
+  removal or replacement is derived from the store log and is not posted
+  as someone else's source report.
 - Reports order by subject tag, then its fields in D2 order, with at most
   one first unmet condition per subject. The posting device is `reported_by`;
   that field is not repeated in each record.
