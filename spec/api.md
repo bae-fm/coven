@@ -1709,10 +1709,6 @@ pub enum SyncError {
     Crypto(CryptoError),
     /// The request or invitation is absent, expired, or no longer matches.
     InvitationChanged,
-    /// The member's role does not permit this entry (§9).
-    PermissionDenied,
-    /// Removing or demoting the member would leave no admin (§9).
-    LastAdmin,
     /// The member's provider account holds the store, so they can't be
     /// removed (§4, §13).
     StoreOwner,
@@ -1724,12 +1720,6 @@ pub enum SyncError {
     WrongStore { expected: StoreId, actual: StoreId },
     /// A credential update's code names another member (E9).
     WrongMember { expected: MemberId, actual: MemberId },
-    /// Circle membership is required by this operation.
-    CircleNotMember(CircleId),
-    /// The circle has been deleted or does not exist.
-    CircleDeleted(CircleId),
-    /// The target is not an active store member.
-    NotStoreMember(MemberId),
     /// The requested journal row is not failed work eligible for this call:
     /// retry accepts provider work; discard accepts only app-owned work.
     NotBlocked(OperationId),
@@ -1886,6 +1876,13 @@ impl BlockedReason {
     pub fn retry(&self) -> Retry;
 }
 
+/// The absent target named by a rejected store-log change (§9).
+pub enum EntryTarget {
+    Member(MemberId),
+    Device(DeviceId),
+    Circle(CircleId),
+}
+
 /// Why a store log entry was dropped (§9).
 pub enum DropReason {
     /// Storage published this entry more than 30 days after an entry it had
@@ -1896,7 +1893,7 @@ pub enum DropReason {
     BeatenBy(EntryId),
     /// At its place in the replay, the member, device or circle it changes
     /// no longer existed.
-    TargetGone,
+    TargetGone(EntryTarget),
     /// Applying it would have left the store without an admin.
     NoAdminLeft,
     /// Its author's role didn't allow it, in the member list they had read.
@@ -2990,8 +2987,11 @@ pub trait MemberKeyCustody: Send + Sync {
 - A circle's members add and remove its members ([§14.3](coven.md#143-circles)).
   Circle changes first catch up on reachable storage (§9, E6).
 - Circle-changing calls return `SyncError` ([E5](#e5-storage-and-sync)), as member calls
-  do ([E9](#e9-members-and-devices)). `CircleNotMember`, `CircleDeleted` and
-  `NotStoreMember` retain the circle or member id the app can act on.
+  do ([E9](#e9-members-and-devices)). Pre-validation uses replay's rules:
+  `Rejected(NotAllowed)` for authority, `Rejected(NoAdminLeft)` for the
+  last-admin rule, and `Rejected(TargetGone(target))` for an absent member,
+  device or circle. The target retains its typed id. `StoreOwner` remains
+  a separate provider constraint.
 - Removing someone from a circle publishes one entry and returns once it is
   kept. Rotation follows in the sync pass; it is not part of that call (§11).
 

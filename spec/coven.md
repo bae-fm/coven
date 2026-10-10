@@ -1498,7 +1498,9 @@ Carol's tablet:
     the device that wrote it, with its name.
 - Administrative actions require storage to be reachable. Before starting
   membership, role, access, circle or reset work, catch up on the store log
-  and validate against that view.
+  and run the candidate through the same authority and replay rules against
+  that view. Return `SyncError::Rejected(DropReason)` if they reject it;
+  validation has no separate membership-rejection vocabulary.
   - Without storage, or if the catch-up fails, return the typed failure
     without reserving an entry or starting an operation.
   - An already-started operation keeps its durable progress after a
@@ -1511,7 +1513,9 @@ Carol's tablet:
     Publishing a schema raise needs storage, like publishing any entry.
   - E.g. Ana's phone cannot queue “remove Ben” while offline. Once it
     catches up online, the call either starts with that membership view
-    or returns the reason the change is no longer allowed.
+    or returns the reason the change is no longer allowed. If Ana is the
+    sole admin, demoting her returns `Rejected(NoAdminLeft)`—the same reason
+    replay gives that candidate in that view.
 - Roles:
   - several equal admins;
   - only admins add and remove members, and change roles;
