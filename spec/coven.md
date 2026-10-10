@@ -474,6 +474,7 @@ the file's ranges under `F`.
 A sync pass has three phases: catch up on membership and key copies; make
 keys and provider access match that view; then sync data. The request order
 and pending-work gates are in [One sync pass](sync-pass.md).
+File uploads run in their own worker (§16.5); a pass does not wait for them.
 
 - Each device uploads its writes to its own log in storage, and the other
   devices download them.
@@ -3034,6 +3035,12 @@ Carol's tablet:
 
 - The attaching write queues each file atomically with its row. It waits
   there until storage is connected and the upload succeeds.
+- A separate file-upload worker services that queue outside sync passes.
+  It wakes for queued work, changed prerequisites or a due retry, and shares
+  the connection's identity check, transfer limits and backoff. It uses the
+  file key fixed at attachment; it does not select an audience key.
+  Pass completion does not wait for file uploads, and upload completion
+  supplies retention evidence without scheduling another full pass.
 - The queue retains the attaching write's fixed id, key, captured reference
   and source location, with its size, content hash, original modification
   time when applicable, and queue-owned chunk hashes. Retargeting the row
@@ -3555,6 +3562,7 @@ Carol's tablet:
   3. on decline or expiry, take back the access instead.
 - Uploading a write or a file is not an operation: it waits in its queue
   until stored ([§6](#6-syncing-writes), [§16.5](#165-uploads-and-deletion)).
+  Writes are sent by the pass; files by the separate upload worker.
   - A large file's provider session is recorded in its queue row, with the
     last part stored, so after a crash it continues from there
     ([§16.6](#166-what-a-device-keeps-about-files)).

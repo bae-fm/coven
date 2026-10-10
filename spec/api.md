@@ -1429,6 +1429,8 @@ while let Ok(values) = lost.next().await {
   - The pass borrows the keys unlocked at open for the handle's session.
     Its observations and retained checked bytes serve operations, reloads,
     writes, file transfers, snapshots, retention and agreement together.
+    File uploads run in their own worker (§16.5), sharing those observations,
+    identity checks, transfer limits and backoff. A pass does not await them.
   - Own positions are posted only when their complete publishable contents
     change, or the post is absent. Upload completion creates no app write.
   - Calls or app writes arriving during sync retain one wake if this pass

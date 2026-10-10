@@ -351,14 +351,7 @@ references. Skipped audiences, resets and schema exclusions keep their
 existing rules. A missing required uncovered path is a blocker; retry only
 when its shared backoff permits, reusing this pass's absence observation.
 
-### 7. Transfer files
-
-Run due file uploads and newly needed eager downloads. Each upload uses
-its captured reference and source checks (§16.5). Use one create below
-the provider's single-request limit; crossing a 64-KiB encryption chunk
-boundary alone does not start a resumable session. Above the provider's
-limit, begin or resume its recorded session, check confirmed progress,
-send remaining parts and finish. Completion changes no app row.
+### 7. Fill the eager file cache
 
 Eager work comes from changed file references, previously failed downloads
 now due, or an explicit cache request. Query missing cached ranges with
@@ -368,10 +361,8 @@ fetch with another reader of the same range. Files retain §16.3's bounded
 ranges and per-chunk authentication; these are explicit exceptions to a
 single whole-object request. Account for their header and every range.
 
-The source's required whole-file check before an upload (§16.5), snapshot
-writer verification (§15), and cache publication (§16.6) remain local IO;
-none may hold the database writer across disk reading or cryptography.
-This pass does not replace those requirements with an unchecked shortcut.
+Cache publication (§16.6) remains local IO; it never holds the database
+writer across disk reading or cryptography.
 
 ### 8. Write snapshots and retain history
 
@@ -449,6 +440,26 @@ arrived after the pass's captured work and was not serviced, retain that
 wake and run once more. Otherwise wait for the idle schedule, a genuine
 external change, a new app command or the earliest due retry. Do not lose a
 write racing pass completion.
+
+## File uploads outside the pass
+
+The file-upload worker runs independently of these steps. A queued file,
+changed prerequisite or due retry wakes it; a pass never waits for its
+uploads. It shares the identity check (§10), transfer limits, retained
+observations and provider cooldown with the pass. Each upload uses its
+captured reference, fixed file key and source checks (§16.5), without
+selecting an audience key.
+
+Use one create within the provider's single-request limit; crossing a
+64-KiB encryption chunk boundary alone does not start a resumable session.
+Above the provider's limit, begin or resume the recorded session, check
+confirmed progress, send remaining parts and finish. The source's whole-file
+check never holds the database writer across disk reading or cryptography.
+Completion changes no app row; it supplies new retention evidence without
+starting a full pass. Stopping sync waits for active transfers too (E5).
+
+Count the worker's requests and bytes separately from pass completion,
+using the same §3.1 terms. Moving work outside a pass does not omit its IO.
 
 ## One stream, checked as it arrives
 

@@ -40,6 +40,12 @@ owner. `CompletedPass` requires completed scans of its known writers. It does
 not prove that an indefinitely growing log eventually yields a miss, or that
 a provider implements complete paginated listings.
 
+Hold a file upload in flight while a pass catches up, sends and receives
+writes, and posts positions. The pass must finish independently. Count the
+upload worker's requests and bytes with the same terms; it shares identity
+checks, transfer limits and backoff, uses the attachment's fixed file key,
+and cannot make upload completion trigger another full pass.
+
 ## Discovery obligations
 
 **1. Gap-free publication — proved.** `Publication.reachable_valid`,
