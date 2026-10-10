@@ -245,3 +245,32 @@ import CovenStorelog
 #print axioms CovenStorelog.CurrentExamples.explicit_deletion_still_wins
 
 #print axioms CovenStorelog.CurrentExamples.deleted_circle_keeps_rotation
+
+#print axioms CovenStorelog.Horizon.advance_iff
+#print axioms CovenStorelog.Horizon.accumulated_iff
+#print axioms CovenStorelog.Horizon.final_iff_before_horizon
+#print axioms CovenStorelog.Horizon.advance_never_back
+#print axioms CovenStorelog.Horizon.horizon_never_back
+#print axioms CovenStorelog.Horizon.horizon_mono_checks
+#print axioms CovenStorelog.Horizon.recovered_iff
+#print axioms CovenStorelog.Horizon.recovered_never_back
+#print axioms CovenStorelog.Horizon.final_stays_final
+#print axioms CovenStorelog.Horizon.ties_together
+#print axioms CovenStorelog.Horizon.boundary_not_final
+#print axioms CovenStorelog.Horizon.failed_check_preserves
+#print axioms CovenStorelog.Horizon.quiet_reads
+#print axioms CovenStorelog.Horizon.survivor_reads_old
+#print axioms CovenStorelog.Horizon.current_prefix
+#print axioms CovenStorelog.Horizon.excluded_disposition
+#print axioms CovenStorelog.Horizon.old_closed
+#print axioms CovenStorelog.Horizon.current_stability
+#print axioms CovenStorelog.Horizon.horizon_stability
+
+#print axioms CovenStorelog.Horizon.Examples.tied_causal
+#print axioms CovenStorelog.Horizon.Examples.tied_online
+#print axioms CovenStorelog.Horizon.Examples.tied_boundaries
+#print axioms CovenStorelog.Horizon.Examples.late_drop_does_not_reopen
+#print axioms CovenStorelog.Horizon.Examples.inclusive_recent_window
+#print axioms CovenStorelog.Horizon.Examples.earlier_window_recovered
+#print axioms CovenStorelog.Horizon.Examples.latest_check_forgets_finality
+#print axioms CovenStorelog.Horizon.Examples.current_replay_stays_fixed

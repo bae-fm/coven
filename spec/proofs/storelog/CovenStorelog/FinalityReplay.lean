@@ -60,8 +60,8 @@ theorem preference_strict (M : Log) :
         beq_iff_eq]
       omega
 
-/-- Storage supplies one immutable, strictly ordered landing time. Ties in
-provider timestamps are ordered by path before entering this scalar timeline.
+/-- Immutable landing and first-attempt duration values. Equal stored times
+are representable; constraints belong to each model's validity predicate.
 Author ids retain only timestamp order; storage durations are never renumbered. -/
 structure History where
   log : Log

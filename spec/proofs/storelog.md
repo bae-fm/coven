@@ -389,6 +389,10 @@ contradictory member/device statements and competing snapshots remain. The tiers
 are store removal (including devices), circle deletion, circle removal, other
 changes, then admin grants; ties use the smaller author timestamp.
 
+That development retains its earlier boundary convention and distinct storage
+times. The horizon proof below uses current §9: a strict old boundary, both
+recent endpoints included, tied provider times, and `CurrentReplay`'s policy.
+
 Author timestamps have arbitrary order consistent with recorded reads. Storage
 supplies distinct immutable landing times after path tie-breaking, in duration
 units that are not renumbered. `Valid.online` requires every entry visible at
@@ -433,9 +437,76 @@ witness (`missing_drop_witness`). An apparent acceptance is not yet a decision.
 `quiet_window_needed` checks the late-entry chain that defeats an age-only rule;
 `drop_rule_needed` checks why a backdated retry must be rejected.
 `exact_boundaries` checks rejection strictly after W and finality at exactly W,
-with the lower window endpoint excluded. `Axioms.lean` audits all named results;
-the existing proofs check rebuilds these modules. Rust and `spec/coven.md` retain
-their existing behavior and wording.
+with the lower window endpoint excluded. These are the earlier model's
+boundaries, not current §9's. `Axioms.lean` audits all named results;
+the existing proofs check rebuilds these modules.
+
+#### One horizon for current §9
+
+`Horizon` models the current finality test in
+[§9](../coven.md#9-members-and-roles). At observation time T it certifies entries
+stored strictly before T−W, provided no late entry landed in the inclusive
+window [T−W, T]. W is 30 days in the examples. Late entries count in this
+check even when their changes have been permanently dropped. Provider times
+keep their duration meaning; equal times are allowed and never ordered by path.
+
+**The final set is exactly one prefix.** `final_iff_before_horizon` equates
+two separately defined things: an entry was certified by at least one
+completed quiet check, and its storage time is strictly less than the saved
+horizon. Updating that horizon takes the greater of its previous value and
+a newly certified cutoff. No per-entry finality flags or list of past checks
+is needed by that update; the list in the proof records its history.
+
+**The horizon never moves backward.** `horizon_never_back` covers any later
+checks, including repeated or older observations and windows containing late
+entries. `final_stays_final` preserves every certified entry.
+`failed_check_preserves` leaves the horizon unchanged when the complete scan
+fails. It does not treat an incomplete scan as a quiet one.
+
+**Ties stay together.** `ties_together` gives equal finality for equal stored
+times. `boundary_not_final` keeps entries exactly at the horizon outside the
+final set. `tied_boundaries` checks two resets stored on day 1: neither is
+final at day 31, and both are final at day 32. `inclusive_recent_window`
+checks a late entry on day 40: it blocks the day-70 check, including when
+permanently dropped, and permits advancement on day 71.
+
+**Earlier windows can be recovered.** `recovered_iff` describes the greatest
+prefix certified by any qualifying window through an observed time T.
+`recovered_never_back` proves that a later observation cannot shrink it.
+The definition enumerates integer time units as a mathematical description,
+not an implementation requirement. `earlier_window_recovered` checks that
+retained history through day 40 recovers day 39's quiet cutoff, even though
+the device did not check then and a late entry blocks day 40's own window.
+
+**The saved prefix has stable replay results.** `horizon_stability` applies
+the actual `CurrentReplay` rules. Once two received sets contain that prefix,
+they agree on every prefix entry's kept and dropped result, regardless of
+which later entries either has received. The finite history can include any
+continuation, including earlier author timestamps and tied landing times.
+`survivor_reads_old` proves the needed read relationship; `current_prefix`
+uses the existing proof of replay through restarts. `old_closed` places the
+prefix's recorded authority evidence in the prefix too, assuming reads name
+objects already stored. Equal stored times are permitted in that assumption.
+
+**Recomputing only the latest test fails.** Creation is followed by reset A
+on day 1. Day 32 certifies A. Reset B, attempted without reading A, lands
+on day 40 and is permanently dropped. The latest window is no longer quiet,
+but A remains final. `latest_check_forgets_finality` and its literal Lean
+`example` check that a fresh set from day 40 alone loses A, while retaining
+the horizon preserves it. This is a counterexample to discarding earlier
+certificates, not to §9's once-final rule.
+
+The reading chosen for “the final set” is **everything certified by the
+specified quiet-window rule**, including earlier qualifying windows. It does
+not mean every entry whose particular result could be proved fixed by some
+other argument; for example, permanent time rejection already fixes some
+drops before they cross this horizon. Storage times are nonnegative integer
+duration units. A successful check means all entries through its observation
+time were read and judged, including unknown devices' logs. The model does
+not prove provider clock behavior, listing completeness, persistence of the
+saved number, physical cleanup, or Rust correspondence. All named horizon
+results are included in `Axioms.lean`; the Rust comparison retains its existing
+replay functions.
 
 ### C11 Rotations and circles left empty after replay
 

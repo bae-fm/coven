@@ -24,3 +24,5 @@ import CovenStorelog.Finality
 import CovenStorelog.FinalityExamples
 import CovenStorelog.CurrentReplay
 import CovenStorelog.CurrentExamples
+import CovenStorelog.Horizon
+import CovenStorelog.HorizonExamples
