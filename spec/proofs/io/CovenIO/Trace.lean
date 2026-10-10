@@ -127,53 +127,130 @@ theorem no_duplicate_download {a b : Cache} {events : List CacheEvent} (run : Ca
       · subst e; rw [retained_never_fetched a v retained] at step; cases step
       · exact tail.1 hm
 
-inductive PassEvent where
-  | beginPass
-  | checked (gate : CovenStorage.Gate)
-  | request (value : Request)
+/-- Every actor, including each SDK retry, goes through the same send rule. -/
+inductive Actor where
+  | pass | upload | outside
+  deriving DecidableEq, Repr
+
+structure Catchup where
+  started : Nat
+  finished : Nat
+  identity : CovenStorage.Gate
+  retired : Bool
+  deriving DecidableEq, Repr
+
+def SendAllowed (catchup : Catchup) (time : Nat) : Prop :=
+  catchup.identity = .send ∧ catchup.retired = false ∧
+  catchup.started ≤ catchup.finished ∧ catchup.finished ≤ time ∧ time < catchup.started + freshFor
+
+instance (catchup : Catchup) (time : Nat) : Decidable (SendAllowed catchup time) :=
+  inferInstanceAs (Decidable (_ ∧ _ ∧ _ ∧ _ ∧ _))
+
+def sends : Request → Bool
+  | .create _ _ | .replace _ _ | .beginUpload _ _ | .uploadPart _ _ _ | .finishUpload _ _ => true
+  | _ => false
+
+def fileUpload : Request → Bool
+  | .create (.file _ _) _ | .replace (.file _ _) _ |
+    .beginUpload _ _ | .uploadPart _ _ _ | .finishUpload _ _ => true
+  | _ => false
+
+structure Sender where
+  starting : Option Nat
+  completed : Option Catchup
+  deriving DecidableEq, Repr
+
+inductive IOEvent where
+  | beginPass (time : Nat)
+  | checked (time : Nat) (gate : CovenStorage.Gate) (retired : Bool)
+  | request (actor : Actor) (time : Nat) (value : Request)
   | invalidate
   deriving DecidableEq, Repr
 
-def sends : Request → Bool
-  | .create _ _ | .replace _ _ => true
-  | _ => false
+def permitted (completed : Option Catchup) (time : Nat) : Bool :=
+  match completed with | none => false | some c => decide (SendAllowed c time)
 
-def gateStep (checked : Bool) : PassEvent → Option Bool
-  | .beginPass | .invalidate => some false
-  | .checked gate => some (decide (gate = .send))
-  | .request r => if sends r && !checked then none else some checked
+def gateStep (s : Sender) : IOEvent → Option Sender
+  | .beginPass time => some { s with starting := some time }
+  | .invalidate => some ⟨none, none⟩
+  | .checked time gate retired => do
+      let start ← s.starting
+      if start ≤ time then some ⟨none, some ⟨start, time, gate, retired⟩⟩ else none
+  | .request actor time r =>
+      if actor = .pass ∧ fileUpload r then none
+      else if (sends r || decide (actor = .upload)) && !permitted s.completed time then none
+      else some s
 
-inductive PassTrace : Bool → List PassEvent → Bool → Prop
-  | nil (s : Bool) : PassTrace s [] s
-  | cons {a b c : Bool} {e : PassEvent} {es : List PassEvent} :
-      gateStep a e = some b → PassTrace b es c → PassTrace a (e :: es) c
+inductive IOTrace : Sender → List IOEvent → Sender → Prop
+  | nil (s : Sender) : IOTrace s [] s
+  | cons {a b c : Sender} {e : IOEvent} {es : List IOEvent} :
+      gateStep a e = some b → IOTrace b es c → IOTrace a (e :: es) c
 
-theorem send_requires_check (checked after : Bool) (r : Request)
-    (sending : sends r = true) (step : gateStep checked (.request r) = some after) : checked = true := by
-  cases checked <;> simp_all [gateStep]
+theorem send_requires_check (before after : Sender) (actor : Actor) (time : Nat) (r : Request)
+    (sending : sends r = true ∨ actor = .upload)
+    (step : gateStep before (.request actor time r) = some after) :
+    ∃ c, before.completed = some c ∧ SendAllowed c time := by
+  simp only [gateStep] at step
+  split at step
+  · cases step
+  · split at step
+    · cases step
+    · rename_i allowed
+      have checked : permitted before.completed time = true := by
+        rcases sending with sending | rfl <;> simp_all
+      cases hc : before.completed with
+      | none => simp [permitted, hc] at checked
+      | some c => exact ⟨c, rfl, by simpa [permitted, hc] using checked⟩
 
-/-- Without a successful completed check, an unchecked pass cannot gain
-send authority through a read, a failed check, a reset or another pass. -/
-theorem check_precedes_send {events : List PassEvent} {before after : Bool}
-    (run : PassTrace before events after) (unchecked : before = false)
-    (noCheck : .checked .send ∉ events) :
-    after = false ∧ ∀ r, .request r ∈ events → sends r = false := by
+/-- Request evidence is extracted from the shared trace, not supplied as an
+independent worker assumption. The immediately preceding state holds it. -/
+theorem check_precedes_send {events : List IOEvent} {before after : Sender}
+    (run : IOTrace before events after) (actor : Actor) (time : Nat) (r : Request)
+    (member : .request actor time r ∈ events) (sending : sends r = true ∨ actor = .upload) :
+    ∃ c, SendAllowed c time := by
   induction run with
-  | nil => simp_all
+  | nil => cases member
   | @cons a b c e es step rest ih =>
-      subst a
-      have head : e ≠ .checked .send := by intro eq; subst e; simp at noCheck
-      have next : b = false := by
-        cases e with
-        | beginPass | invalidate => simpa [gateStep] using step.symm
-        | checked g => cases g <;> simp_all [gateStep]
-        | request r => cases hs : sends r <;> simp_all [gateStep]
-      subst b
-      have tail := ih rfl (fun hm => noCheck (List.mem_cons_of_mem _ hm))
-      refine ⟨tail.1, ?_⟩
-      intro r hr
-      rcases List.mem_cons.mp hr with eq | hm
-      · subst e; cases hs : sends r <;> simp_all [gateStep]
-      · exact tail.2 r hm
+      rcases List.mem_cons.mp member with eq | hm
+      · subst e
+        obtain ⟨catchup, _, allowed⟩ := send_requires_check a b actor time r sending step
+        exact ⟨catchup, allowed⟩
+      · exact ih hm
+
+def passRequests (events : List IOEvent) : List Request :=
+  events.filterMap fun event => match event with
+    | .request .pass _ r => some r
+    | _ => none
+
+theorem pass_no_file_uploads {events : List IOEvent} {before after : Sender}
+    (run : IOTrace before events after) : ∀ r ∈ passRequests events, fileUpload r = false := by
+  induction run with
+  | nil => simp [passRequests]
+  | @cons a b c e es step rest ih =>
+      cases e with
+      | request actor time value =>
+          cases actor with
+          | pass =>
+              have noUpload : fileUpload value = false := by
+                cases h : fileUpload value <;> simp_all [gateStep]
+              simpa [passRequests, noUpload] using
+                (show ∀ r, r = value ∨ r ∈ passRequests es → fileUpload r = false from
+                  fun r hr => hr.elim (fun eq => eq ▸ noUpload) (ih r))
+          | upload | outside => simpa [passRequests] using ih
+      | beginPass | checked | invalidate => simpa [passRequests] using ih
+
+theorem upload_worker_gated {events : List IOEvent} {before after : Sender}
+    (run : IOTrace before events after) (time : Nat) (r : Request)
+    (member : .request .upload time r ∈ events) : ∃ c, SendAllowed c time :=
+  check_precedes_send run .upload time r member (Or.inr rfl)
+
+theorem expired_sends_nothing (c : Catchup) (time : Nat) (expired : c.started + freshFor ≤ time) :
+    permitted (some c) time = false := by
+  simp only [permitted, decide_eq_false_iff_not]
+  intro allowed
+  exact Nat.not_lt_of_ge expired allowed.2.2.2.2
+
+theorem invalidation_clears (s : Sender) :
+    gateStep s .invalidate = some ⟨none, none⟩ := rfl
 
 end CovenIO

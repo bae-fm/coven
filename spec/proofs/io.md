@@ -6,11 +6,12 @@ It uses Appendix B's Lean 4.34.1 toolchain and the standard library, without
 Mathlib. `CovenIO/Axioms.lean` audits every named theorem; `scripts/check.sh`
 builds the package and rejects unfinished proofs and additional axioms.
 
-**Several unconditional claims fail.** A latest snapshot by total write count
-need not cover a deleted write. A pass can cross the retention deadline while
-reading. Equal provider timestamps do not establish a completed time interval.
-Successful requests can encounter a permanent refusal. The checked histories
-below are results, not assumptions hidden inside proofs.
+The publication-time snapshot invariant, per-miss deadline, preceding-unit
+clock observation, retirement verdict and gated-send deadline are checked.
+Two stronger claims have checked counterexamples: checking snapshot coverage
+before an upload does not serialize concurrent publications, and a merely
+nondecreasing provider clock need not advance at the rate of an elapsed timer.
+The conditions and remaining boundaries are stated below.
 
 ## Storage and execution
 
@@ -40,11 +41,12 @@ owner. `CompletedPass` requires completed scans of its known writers. It does
 not prove that an indefinitely growing log eventually yields a miss, or that
 a provider implements complete paginated listings.
 
-Hold a file upload in flight while a pass catches up, sends and receives
-writes, and posts positions. The pass must finish independently. Count the
-upload worker's requests and bytes with the same terms; it shares identity
-checks, transfer limits and backoff, uses the attachment's fixed file key,
-and cannot make upload completion trigger another full pass.
+The shared request trace distinguishes the pass, upload worker and calls
+outside the loop. Pass requests exclude file uploads, including parts and
+session completion; eager file downloads remain in the pass. Every worker
+request checks the same completed catch-up and identity evidence. Native
+multipart storage behavior and asynchronous scheduling remain outside the
+model; session requests are represented for their gate and request accounting.
 
 ## Discovery obligations
 
@@ -78,65 +80,89 @@ bytes are refused; entry 2 remains unread. There is no failed provider request.
 Thus “no failed request” alone is insufficient. A completed terminal scan and
 successful durable retention are the conditions used in the theorems.
 
-**3. Long absence and new devices — retention proved; selected-snapshot
-completeness has a checked counterexample.** `deleted_write_covered` proves
-that every part of every deleted write has a retained covering snapshot,
-through any sequence of publications and permitted deletions. Deleting a
-snapshot requires another retained snapshot covering all its positions.
+**3. Current snapshots (item 19) — proved at publication; checked
+counterexamples for concurrent uploads and an earlier selection.**
+`current_matches_listing` connects the current map to the retained audience's
+latest storage time, with smaller path breaking ties. Each audience has one
+current snapshot. Coverage means its signed positions include the write.
+Old snapshot deletion leaves this current projection unchanged.
 
-That invariant does not justify selecting only the snapshot with the greatest
-sum of positions. In `Examples.incomparable_latest`, Ana's snapshot covers
-Ana 1; Ben's covers Ben 1–2. Both are retained and valid. Ana 1 reaches 30
-storage days and is legally deleted. `deletion_history_reachable` checks
-the retention transitions. `latest_selected_incomparable` selects Ben's
-snapshot, which advances Ben but covers none of Ana. GET Ana 1 then misses
-(`newest_snapshot_misses_deleted_write`). This uses one audience, so it
-fails before common-point loading becomes relevant.
+`RetainStep.publish` checks that a candidate covers the current snapshot at
+publication. `coverage_never_shrinks` proves that all later current snapshots
+dominate their predecessors. `deleted_write_covered` and
+`selection_covers_deleted` prove current coverage of every deleted write
+through arbitrary allowed transitions. No additional selected-snapshot
+dominance hypothesis remains. `Examples.incomparable_latest` rejects Ben's
+incomparable snapshot against Ana's current one;
+`incomparable_deletion_impossible` rejects that state in `RetainRun`.
 
-`selection_covers_deleted` proves the sufficient condition: selected snapshots
-dominate **all** retained coverage. This is an additional condition, not a
-consequence of §15's total-count ordering. `selected_snapshot_suffix_available`
-derives availability of the uncovered suffix through concurrent retention;
-`discovery_complete` then applies to its reads. Selecting, fetching and atomically
-loading usable snapshots across audiences, including intervening writes,
-remains outside the general completeness claim. The model does not silently
-replace the specified selection rule.
+That publication-time rule is stronger than checking before sending.
+`SnapshotPublication` separates preparation from landing. Its checked
+`concurrent_snapshot_history` has one audience, two snapshots and one deletion:
+both writers prepare while there is no current snapshot; Ana's lands covering
+Ana 1; Ana 1 is deleted at its 30-day deadline; Ben's lands one second later,
+covering Ben 1 only. Both preparation checks and the deletion check passed.
+`concurrent_snapshot_loses_deleted_write` proves the resulting invariant false.
+This failure requires neither a timestamp tie nor an inaccurate listing.
+No cross-device publication serialization is specified by the two rules.
 
-**4. Recent-return misses — proved at observation time; unconditional misses
-have checked counterexamples.** `recent_write_protected` rules out both
-deletion alternatives when the reader is active, its posted position does
-not exceed committed consumption, and storage time is strictly before
-S+30 days. Unconsumed writes published since the qualifying pass have times
-at least S. A missing or invalid post is conservatively zero.
+Even enforcing the publication-time rule does not protect a snapshot already
+selected by a reader. `loaded_snapshot_can_become_stale` selects coverage
+through write 1, then publishes coverage through write 2 and deletes write 2.
+The reader's selected snapshot does not cover the deleted suffix.
+`selected_snapshot_suffix_available` therefore uses the current coverage at
+each observation, proved by `RetainRun`, rather than assuming a fixed selection
+dominates all future snapshots. Keeping a selection usable during reload,
+fetching its bodies and atomically loading the common point across audiences
+remain outside this completeness theorem.
 
-`Examples.snapshot_next_number_wrong` deletes snapshot 2 after a covering
-snapshot 3; GET 2 cannot discover 3. `away_write_miss` deletes an unconsumed
-write at 30 days while Ben is away. `pass_crosses_deadline` starts at day 29
-with checkpoint day 0, but reads a day-1 write after deletion at day 31.
-Starting before the deadline is insufficient; the rule must still hold when
-a miss is used. `exact_boundary_discovers` sends equality at 30 days to
-snapshot discovery. `unresolved_preserves_checkpoint` prevents unfinished
-history from refreshing S. A pending file alone need not block S.
+**4. Recent-return misses (item 20) — proved with a clock-advance bound;
+checked counterexample without it.** `needsSnapshots` evaluates
+`T + elapsed >= S + 29 days` at the miss. `readRecentLog` preserves failures
+and refusals and returns `snapshots` when a terminal miss expires.
+`accepted_miss_is_recent` proves that accepted misses passed this test at
+their own time; `pass_crosses_deadline` now produces snapshot discovery.
+Equality at 29 days takes that route too (`exact_boundary_discovers`).
 
-**5. Finality input — proved for a completed publication frontier; literal
-timestamp completeness has a checked counterexample.** The scans supply
-all permanent entries published before their qualifying folder observation.
-`through_time` translates that to all entries with stored time at most T
-only under the stated fence: those entries were already published before
-the observation. Nondecreasing timestamps alone do not imply this.
+`miss_before_retention` uses the one-day margin to prove storage time is
+strictly before S+30 days, provided storage time at the miss is at most
+`T + elapsed + one day`. `recent_return_complete` uses this fact at the
+terminal miss, at any point in a pass, to exclude both deletion alternatives.
+It also needs an active reader, honest posted positions, a qualifying saved
+checkpoint and the published prefix. `recent_prefix_available` supplies the
+stronger all-read-instances form. Unresolved history cannot refresh the
+checkpoint (`unresolved_preserves_checkpoint`); pending files alone can.
 
-`Examples.timestamp_not_frontier` observes T=10 and lists folders, then an
-unknown writer publishes entry 1 with the same stored time 10. No clock goes
-backward. The earlier listing cannot contain that writer. Closing an entire
-provider timestamp tick, or an equivalent publication fence, remains outside
-the modeled contract; no finality advance is claimed without it.
+The clock bound is not a consequence of §4's nondecreasing publication times.
+`clock_jump_defeats_recent_miss` checks checkpoint 0, a write and sample at
+second 1, elapsed 0, then a provider advance to day 30 plus one second.
+Deletion is permitted and the executable scan accepts its resulting miss.
+A physical relationship between provider time and the monotonic timer,
+including sample age and sleep, must establish the bound. Without it the
+unconditional recent-return claim fails. `snapshot_next_number_wrong` and
+`away_write_miss` retain the independent reasons that old snapshots and writes
+cannot be discovered by next number after deletion.
 
-`Refinement.finality_precondition` produces the exact
-`CovenStorelog.Horizon.CompleteOld` hypothesis named `hs` by
-`Horizon.current_stability` in [C10](storelog.md#c10-finality-by-storage-time).
-Its `hq` quiet-window evidence and `hv` causal validity remain separate.
-This uses the current strict-boundary, tied-time theorem, not the earlier
-`Finality` model's distinct-time convention.
+**5. Finality input (item 21) — proved without a publication fence.**
+`observationTime` subtracts one positive provider unit from the clock object's
+storage time. `old_immutable_present` proves backward through `ProviderRun`
+that an immutable object with an earlier timestamp was already present at
+that clock publication. It permits arbitrarily many equal-time publications.
+`through_time` consequently supplies all permanent objects through the
+preceding-unit cutoff from completed discovery of that publication frontier.
+
+`Refinement.finality_precondition` constructs the actual
+`CovenStorelog.Horizon.CompleteOld` input of `Horizon.current_stability` in
+[C10](storelog.md#c10-finality-by-storage-time). It takes immutable path/time
+representation and completed entry receipt, with no separate timestamp fence.
+`Examples.timestamp_not_frontier` checks that the later time-10 entry is
+outside the corrected cutoff 9, so that example no longer contradicts it.
+If natural-number subtraction underflows, the old prefix is empty; no finality
+is certified for an entry. Provider units are positive multiples of the model's
+base time unit. Subsecond adapter representation remains outside the model.
+The quiet-window test, causal validity, decoding and complete paginated
+folder/entry reads are still required; this proof does not infer them from a
+successful clock request alone.
 
 **6. Positions as discovery bounds — checked counterexample.**
 `Examples.positions_not_index` uploads write 9 while the confirmed post
@@ -144,65 +170,63 @@ still says 8. An exact GET returns 9. A crash between these requests changes
 neither stored object. Posted positions protect retention; they do not bound
 discovery.
 
-**7. Retired devices — proved conditionally.** `Retired.drain_complete`
-combines a completed scan, required write availability and `ClosedAfter`:
-no new object from that writer can land after that frontier. Confirmed
-provider cutoff, including already issued sessions, can supply closure for
-an access epoch. §6 instead drains removed and replaced ids after a kept
-retirement has been final for **more than one day and five minutes**; it
-does not wait for provider cutoff. The finality observation and §10's fresh
-catch-up gate plus one-day request-duration assumption must establish that
-frontier. The model takes closure as an input; it does not derive it from
-these timers or from retirement finality.
+**7. Retired devices (items 15, 16 and 18) — verdict and timed closure
+proved; complete drains require successful discovery.**
+`Retired.writeAllowed` uses only immutable write storage time and recorded
+reads, and the kept entries that retire its device. Retirement includes
+removal of the device, removal of its member and replacement of its id.
+`write_verdict_agrees` proves agreement for the same kept entries and reads,
+independently of list order. `kept_retirement_rejects` rejects a read retirement
+or landing strictly after its 30-day deadline. `dropped_retirement_restores`
+removes that exclusion when no other kept retirement blocks the write.
+`retired_write_boundary_and_restore` checks equality, one second beyond,
+restoration after dropping the retirement, and the recorded-read rejection.
+Ordinary authority, schema and reset eligibility remain separate.
 
-For replacement, `ReplacementWindow` explicitly requires every old-copy send
-to precede its reading replacement, including attempted retries, and every
-such landing to be at or before the drain frontier. `replacement_closed`
-derives closure using the provider's publication witnesses.
-`replacement_needs_landing_frontier` shows why “each request takes at most
-30 days” alone is insufficient: replacement at day 0, finality/drain at 31,
-last send at 31, replacement read and landing at 32. Stopping upon the read
-and bounded request duration both hold, but do not justify the earlier drain.
-This remains a counterexample to those weaker conditions, not to the later
-drain under §6 and §10. Their timing-to-closure argument is not machine-checked.
+This rule applies only to writes. Entries retain §9's permanent deadline
+against any unread entry, including one replay drops. No retirement-dependent
+entry revival is introduced. Applying these write verdicts to data and
+persisting their reversible effects remain outside IO.
 
-§10's write admission has a separate landing deadline: a write must not
-have read a kept retirement and must land no more than 30 storage days
-after it. Dropping that retirement recomputes admission. Entries instead
-keep §9's permanent deadline against any unread entry, kept or dropped.
-These admission rules do not establish `ClosedAfter`, which concerns raw
-publication, nor are they proved by `Retired` or the trace's delivery theorem.
-The write-time verdict and replay reversal remain verification obligations
-([store-log data](storelog-data.md), [storage](storage.md)).
+`Retired.final_retirement_seen` invokes the actual C10 stability theorem:
+a completed catch-up containing the old prefix keeps a final kept retirement.
+`Retired.Publication` records the completed catch-up, send, landing, successful
+shared gate and one-day request-duration bound. A catch-up started at or after
+finality observes retirement; an earlier one can authorize a send only until
+five minutes after its start. `publication_before_deadline` proves every such
+landing is before finality plus one day and five minutes.
+`last_send_settles` checks a last permitted integer-second send with a full-day
+publication delay. The bound starts at finality, never the retirement's
+publication or catch-up completion.
 
-`drained_not_polled` and `drained_not_named` exclude a drained writer from
-subsequent idle log requests, including after reopening saved state.
-Literal “no request names the device” would also prohibit reading surviving
-files or deleting retained history. A checked file-range example shows that
-broader reading conflicts with fixed paths.
+`retirement_closed` derives `ClosedAfter` from these publication witnesses and
+the immutable provider transition relation. It applies to entries, writes and
+key copies, including exposure to other recipients. `Retired.drain_complete`
+uses that derived closure; it no longer takes `ClosedAfter` as a hypothesis.
+The drain waits for a storage observation strictly after the deadline and
+then completes its scans. Entries and copies derive availability from
+permanent storage. Writes still need the current-snapshot/recent-read
+availability conditions above; the snapshot races prevent an unconditional
+write-drain claim for arbitrary concurrent histories.
 
-Exactness has three grounds in the spec. Writes cannot count after the
-kept retirement's 30-day landing deadline (§10). Entry admission already
-has §9's permanent unread-entry deadline. Key-copy exposure cannot be undone
-by rejecting a late object; its complete history needs the freshness and
-request-duration bound, followed by the post-finality wait. These arguments
-also need the finality-input fence in obligation 5 and write availability
-through the scan in obligations 3–4. The checked counterexamples there block
-an unconditional end-to-end drain claim.
+The timing argument uses a common duration scale for finality, catch-up start,
+send and landing. An implementation must relate its monotonic timer to storage
+time and enforce the remote one-day publication bound, including lost replies.
+Client timeout alone is insufficient. Provider clock jumps remain outside
+that duration interpretation, just as they defeat the recent-return rule.
+`replacement_needs_landing_frontier` retains the counterexample to the weaker
+conditions of stopping only upon reading replacement and 30-day requests.
 
-The local catalog saves the qualifying finality time `F` with the retiring
-entry and device id, retaining it across reopening. Drain reads follow a
-storage observation `T > F + one day + five minutes`. Only successful terminal
-observations of all three logs, retained inputs and settled in-flight reads
-permit the atomic `_coven_drained_devices` mark. Failed work stays pending
-under shared backoff. Replay atomically discards timing and marks whose basis
-is no longer kept, and resumes polling an active id. Correctly established
-final entries cannot drop. Persisting these facts, deriving status from kept
-entries and applying that transition are outside the model's polling theorem.
+`drained_not_polled` and `drained_not_named` exclude the drained writer from
+later idle log probes. Surviving files can still name that writer.
+The model does not implement the atomic durable transaction saving finality
+`F`, all three successful terminal observations and the drain mark, nor replay
+invalidation of obsolete marks. A correctly established final basis cannot
+drop. Failed or incomplete scans do not certify completion.
 
 `failed_scan_not_complete` and `completed_scan_retained` model the durable
-one-time removed-device file-folder scan. Correct orphan enumeration,
-access restoration epochs and reference-safe deletion still need Rust tests.
+one-time removed-device file-folder scan. Orphan enumeration, restoration of
+access and reference-safe deletion remain implementation obligations.
 
 ## Requests and retained observations
 
@@ -232,30 +256,35 @@ actual range formation is outside the model. Partial failures can retry
 uncommitted bytes, with repeated bytes charged. The revision theorem covers
 equal-size, equal-time replacements.
 
-**9. Identity before sends — proved.** `send_requires_check` and
-`check_precedes_send` require a successful completed check before any
-create/replace request in that pass. Pass start or invalidation clears
-authority; a failed check cannot grant it. Clock objects share this gate.
-This restates storage's `sends_require_check` shape using its actual `Gate`
-type. Complete own-counter evidence, out-of-loop serialization and reset
-implementation remain outside the trace proof.
+**9. Send gates and out-of-band uploads (items 17 and 18) — proved for
+the shared trace.** `send_requires_check` and `check_precedes_send` extract
+successful identity, active membership and completed catch-up evidence for
+every send. The elapsed limit is strict and measured from catch-up start;
+completion cannot refresh that start. Starting another catch-up keeps the
+last completed evidence, with its original expiry. Reopen, reconnect and reset
+invalidate it. `expired_sends_nothing`, `invalidation_clears` and
+`fresh_gate_boundaries` cover expiry, absent evidence and a catch-up that
+itself takes five minutes. Times stand for monotonic readings including
+sleep; obtaining those readings is an input. The gate checks that start,
+completion and send occur in that order.
 
-§10 also requires every sender's last completed membership and key-copy
-catch-up to have **started** less than five minutes ago, on a monotonic
-clock including sleep. This covers the file worker and out-of-loop calls,
-retries, SDK retries, parts and session completion. An expired sender waits
-for the next pass; completion cannot restart freshness. Reopen, reconnect
-and reset invalidate that evidence. A fresh clock replacement needs this
-catch-up too, and its storage time qualifies only subsequent discovery.
-The trace's Boolean gate proves identity ordering, not this elapsed-time rule.
+`pass_no_file_uploads` proves the pass's request projection contains no file
+creates, replacements, upload-session starts, parts or completions.
+`upload_worker_gated` proves every upload-worker request passes the shared
+gate, including confirmation reads, retries, parts and session completion.
+`upload_parts_use_gate` checks the last permitted second and expiry.
+`upload_uses_last_completed_catchup` checks an upload while another catch-up
+is pending, using the still-fresh completed one.
+The same trace accounts for calls outside the loop and clock replacement.
+A request queued before expiry has no exception.
 
-With §10's assumption that every request settles within one day, including
-remote publication after a lost reply, all retired-writer publications settle
-within one day and five minutes after the kept retirement becomes final.
-Before finality, replay can drop and restore retirement, so publication time
-cannot start that bound. Deriving this bound from actual catch-up coverage,
-monotonic timing and request duration remains outside the model; it also
-requires the finality input condition in obligation 5.
+The literal statement “the pass contains no file transfers” is false:
+`pass_can_download_file` is a checked pass trace with an eager file-range read,
+as required by sync-pass step 7. The chosen reading of item 17 is no file
+**uploads** in the pass. Captured attachment keys, source validation, actual
+transfer limits, worker scheduling and its independence from pass completion
+remain outside this trace model. Moving requests to the worker does not
+remove them from total IO accounting.
 
 ## Downloads and their visible outcomes
 
@@ -352,7 +381,9 @@ no Rust behavior.
   after a lost reply. No client timeout alone proves remote cancellation.
 - Test clock sampling, exactly 30 days, suspension, failed probes and checkpoint
   posting. Read-only identity discovery precedes clock replacement and is reused.
-  Address the checked snapshot-selection and timestamp-frontier failures above.
+  Exercise concurrent snapshot publication, a selection becoming stale during
+  reload, per-miss expiry and provider clock advance. Same-tick publications
+  must stay outside the preceding-unit finality observation.
 - Exercise due-only snapshot growth/coverage, unchanged waits with backoff,
   indexed cached header facts, multiple audiences and atomic common-point reloads.
   Share retained inputs across consumers and verify authors before applying data.
@@ -387,15 +418,20 @@ no Rust behavior.
   final alternative basis still supports a mark; a new device inherits none.
 - Retain drained entries for finality input and drained copies for exposure
   and key selection. Test the last permitted send and one-day publication
-  against the post-finality wait. These checks must satisfy the finality and
-  write-availability conditions above, not assume timestamp or snapshot
-  completeness that the model counterexamples disprove.
+  against the post-finality wait. These checks must establish the complete entry
+  receipt and write-availability conditions above, including concurrent
+  snapshot changes during discovery.
 - Confirm cutoff includes in-flight sessions, orphan scans survive reopen, a new
   access epoch requires a new scan, and rows, losses, history and non-final effects
   continue protecting file deletion.
 
-Chosen readings: numbering starts at 1; durations use storage seconds; abstract
-path ids preserve path ordering; completion requires terminal observation and
-committed input; recent means recent at each read; replacement needs a settled
-landing frontier; “stop polling” concerns logs; byte receipt does not imply
-application. Every additional condition is stated above.
+Chosen readings: snapshot coverage is enforced at publication for the
+invariant theorem; its pre-send implementation is checked separately and
+fails under concurrency. Path ties choose the smaller path. A write miss is
+recent only at its own observation, with a strict 29-day limit and an explicit
+provider/elapsed-time bound. Finality uses the preceding provider unit, with
+underflow certifying no old entries. Retirement timing begins at finality and
+uses a shared duration scale. Dropping one retirement restores admission only
+when no other kept retirement blocks it. Out-of-band file work means uploads;
+eager downloads remain in the pass. Numbering starts at 1, completion requires
+retained input and terminal observation, and byte receipt is not application.

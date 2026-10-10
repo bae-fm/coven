@@ -86,16 +86,24 @@ theorem coupled_write_consumed {W Col : Type} [DecidableEq W]
     write ∈ (CovenStorelogData.receiveWrite writes log member device copies header keys reader write).consumed := by
   simp [CovenStorelogData.receiveWrite, fresh, reload, running, headerReady, partsReady]
 
-/-- Exact named connection to C10: the `hs` argument of
-`CovenStorelog.Horizon.current_stability` is `Horizon.CompleteOld`.
-The global quiet-window test (`hq`), valid causality (`hv`) and timestamp
-fence required to compute that test remain separate obligations. -/
-theorem finality_precondition (H : CovenStorelog.Finality.History) (window bound T : Nat)
-    (received : CovenStorelog.EntrySet)
-    (complete : ∀ e, e < bound → H.stored e ≤ T → received e = true) :
-    CovenStorelog.Horizon.CompleteOld H window bound T received := by
+/-- C10's CompleteOld input from a clock publication and completed entry
+reads. The quiet-window test and causal validity remain C10's own premises.
+Objects in the finite continuation are represented by their immutable paths
+and storage times; the provider run allows publication after the scan. -/
+theorem finality_precondition (H : CovenStorelog.Finality.History) (window bound unit : Nat)
+    (received : CovenStorelog.EntrySet) (clock future : Provider)
+    (run : ProviderRun clock future) (positive : 0 < unit)
+    (writer number : Nat → Nat)
+    (represented : ∀ e, e < bound → ∃ o,
+      future.objects (.log .entry (writer e) (number e)) = some o ∧ o.value.storedAt = H.stored e)
+    (complete : ∀ e, e < bound → ∀ o,
+      clock.objects (.log .entry (writer e) (number e)) = some o → received e = true) :
+    CovenStorelog.Horizon.CompleteOld H window bound (observationTime clock.time unit) received := by
   intro e he ho
-  have older : H.stored e + window < T := of_decide_eq_true ho
-  exact complete e he (by omega)
+  have older : H.stored e + window < observationTime clock.time unit := of_decide_eq_true ho
+  obtain ⟨o, found, stored⟩ := represented e he
+  apply complete e he o
+  apply through_time run unit positive (by unfold observationTime at older; omega) _ o rfl found
+  omega
 
 end CovenIO.Refinement

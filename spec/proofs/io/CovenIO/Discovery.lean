@@ -122,7 +122,7 @@ theorem permanent_receipt_exact (states : Nat → Provider) (kind : Kind)
 At every request instant, its retained metadata and posted-position evidence
 rule out both deletion alternatives. -/
 theorem recent_prefix_available (world : World) (writer start finish first target : Nat)
-    (snapshots : List Snapshot) (active : List Nat) (posted : Nat → Nat → Nat)
+    (snapshots : Current) (active : List Nat) (posted : Nat → Nat → Nat)
     (checkpoint reader : Nat) (storageTime : Nat → Nat) (metadata : Nat → Write)
     (activeReader : reader ∈ active)
     (metadataNumber : ∀ n, (metadata n).number = n)
@@ -140,19 +140,47 @@ theorem recent_prefix_available (world : World) (writer start finish first targe
       checkpoint reader first True (metadata n) activeReader (honest n)
       (by rw [metadataNumber]; exact hn) (afterCheckpoint n hn hn') (recent t ht he) deleted)
 
+/-- At each observation use the current snapshots. A previously loaded
+snapshot can become stale during a concurrent publication and deletion. -/
 theorem selected_snapshot_suffix_available (world : World) (writer start finish first target : Nat)
-    (history : Nat → Retention) (selected : List Snapshot) (metadata : Nat → Write)
-    (invariant : ∀ t, (history t).Valid)
-    (selection : ∀ t, start ≤ t → t ≤ finish → CompleteSelection (history t).snapshots selected)
-    (uncovered : ∀ n, first < n → n ≤ target → ¬ Covered selected (metadata n))
+    (history : Nat → Retention) (metadata : Nat → Write)
+    (runs : ∀ t, RetainRun (history t))
+    (uncovered : ∀ t, start ≤ t → t ≤ finish → ∀ n, first < n → n ≤ target →
+      ¬ Covered (history t).current (metadata n))
     (storedOrDeleted : ∀ t, start ≤ t → t ≤ finish → ∀ n, first < n → n ≤ target →
       (∃ o, world t (.log .write writer n) = some o) ∨ (metadata n) ∈ (history t).deleted) :
     Available world .write writer start finish first target := by
   intro t ht he n hn hn'
   rcases storedOrDeleted t ht he n hn hn' with stored | deleted
   · exact stored
-  · exact False.elim (uncovered n hn hn' (selection_covers_deleted (history t) (invariant t)
-      selected (selection t ht he) (metadata n) deleted))
+  · exact False.elim (uncovered t ht he n hn hn'
+      (selection_covers_deleted (history t) (runs t) (metadata n) deleted))
+
+/-- Only the terminal miss needs the recent-return test. The miss may occur
+anywhere in the pass; no assumption about its start time occurs here. -/
+theorem recent_return_complete {world : World} {writer start first finish last : Nat}
+    {trace : List ReadEvent} (scan : Scan world .write writer start first finish last trace)
+    (target checkpoint observed elapsed storageTime reader : Nat)
+    (current : Current) (active : List Nat) (posted : Nat → Nat → Nat) (metadata : Nat → Write)
+    (member : reader ∈ active)
+    (numbers : ∀ n, (metadata n).number = n)
+    (honest : ∀ n, posted reader (metadata n).writer ≤ first)
+    (afterCheckpoint : ∀ n, first < n → n ≤ target → checkpoint ≤ (metadata n).storedAt)
+    (recent : needsSnapshots (some checkpoint) observed elapsed = false)
+    (clockBound : storageTime ≤ observed + elapsed + day)
+    (storedOrDeleted : ∀ n, first < n → n ≤ target →
+      (∃ o, world finish (.log .write writer n) = some o) ∨
+      Deletable current active posted storageTime True (metadata n)) : target ≤ last := by
+  obtain ⟨_, passed, absent⟩ := scan_terminal scan
+  apply Nat.le_of_not_gt
+  intro short
+  have hn : first < last + 1 := by omega
+  have ht : last + 1 ≤ target := by omega
+  rcases storedOrDeleted (last + 1) hn ht with ⟨o, found⟩ | deleted
+  · rw [absent] at found; cases found
+  · exact recent_write_protected current active posted storageTime checkpoint reader first True
+      (metadata (last + 1)) member (honest _) (by rw [numbers]; omega)
+      (afterCheckpoint _ hn ht) (miss_before_retention _ _ _ _ recent clockBound) deleted
 
 /-- Folder membership is derived from permanent entry 1, not posted numbers.
 Every relevant writer must have a registration reachable in this observation. -/
@@ -165,11 +193,20 @@ theorem writer_discovered (world : World) (before listed : Nat) (writers : List 
     (permanent : world listed (.log .entry writer 1) = world before (.log .entry writer 1)) :
     writer ∈ writers := complete writer o (permanent.trans registered)
 
-/-- Complete observations through an event frontier, plus a timestamp fence,
-establish C10's input. Nondecreasing timestamps alone do not give that fence. -/
-theorem through_time (stored : Nat → Nat) (publishedBefore received : Nat → Prop) (T : Nat)
-    (fence : ∀ e, stored e ≤ T → publishedBefore e)
-    (complete : ∀ e, publishedBefore e → received e) :
-    ∀ e, stored e ≤ T → received e := fun e h => complete e (fence e h)
+/-- Subtract a positive provider unit. With nonnegative times, a clock
+before its first complete unit cannot certify a nonempty old prefix. -/
+def observationTime (clockTime unit : Nat) : Nat := clockTime - unit
+
+/-- Earlier stored times were already present at the clock publication.
+This follows from provider transitions, without a publication-fence premise. -/
+theorem through_time {clock future : Provider} (run : ProviderRun clock future)
+    (unit : Nat) (positive : 0 < unit) (enough : unit ≤ clock.time)
+    (p : Path) (o : Object) (fixed : permanent p = true)
+    (published : future.objects p = some o)
+    (old : o.value.storedAt ≤ observationTime clock.time unit) : clock.objects p = some o := by
+  have immutable : replaceable p = false := by cases p <;> simp_all [permanent, replaceable]
+  apply old_immutable_present run p o immutable published
+  unfold observationTime at old
+  omega
 
 end CovenIO

@@ -3,7 +3,7 @@ import CovenIO.Discovery
 namespace CovenIO
 
 inductive Stop where
-  | miss | exhausted | refused
+  | miss | snapshots | exhausted | refused
   | failed (reason : Failure)
   deriving DecidableEq, Repr
 
@@ -61,6 +61,29 @@ theorem executed_scan (world : World) (failure : Nat → Option Failure) (refuse
                   have done : (readLog world failure refused kind writer fuel (time + 1) (position + 1)).stop = .miss := by
                     simpa [readLog, hf, ho, hr] using complete
                   simpa [readLog, hf, ho, hr] using Scan.hit time position object ho (ih _ _ done)
+
+/-- A terminal write miss is interpreted at its own monotonic time. The
+caller continues snapshot discovery when the return window has expired. -/
+def readRecentLog (world : World) (failure : Nat → Option Failure) (refused : Object → Bool)
+    (writer fuel time position : Nat) (saved : Option Nat) (observed : Nat)
+    (elapsed : Nat → Nat) : Execution :=
+  let result := readLog world failure refused .write writer fuel time position
+  if result.stop = .miss ∧ needsSnapshots saved observed (elapsed result.time) then
+    { result with stop := .snapshots }
+  else result
+
+theorem accepted_miss_is_recent (world : World) (failure : Nat → Option Failure)
+    (refused : Object → Bool) (writer fuel time position : Nat) (saved : Option Nat)
+    (observed : Nat) (elapsed : Nat → Nat)
+    (accepted : (readRecentLog world failure refused writer fuel time position saved observed elapsed).stop = .miss) :
+    let result := readLog world failure refused .write writer fuel time position
+    result.stop = .miss ∧ needsSnapshots saved observed (elapsed result.time) = false := by
+  dsimp only [readRecentLog] at accepted
+  dsimp only
+  split at accepted
+  · cases accepted
+  · rename_i no
+    exact ⟨accepted, by cases h : needsSnapshots saved observed _ <;> simp_all⟩
 
 /-- An observation covers each discovered writer in each of the three logs.
 Starting positions denote durable bytes or applied snapshot coverage, never

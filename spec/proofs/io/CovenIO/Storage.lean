@@ -86,11 +86,15 @@ inductive Request where
   | create (path : Path) (bytes : Bytes)
   | replace (path : Path) (bytes : Bytes)
   | delete (path : Path)
+  | beginUpload (writer file : Nat)
+  | uploadPart (writer file : Nat) (bytes : Bytes)
+  | finishUpload (writer file : Nat)
   deriving DecidableEq, Repr
 
 def Request.names (writer : Nat) : Request → Bool
   | .list (.files w) => w == writer
   | .list _ => false
+  | .beginUpload w _ | .uploadPart w _ _ | .finishUpload w _ => w == writer
   | .get p | .status p | .range p _ _ | .create p _ | .replace p _ | .delete p =>
       p.writer == writer
 
@@ -197,7 +201,7 @@ theorem served_transition (s : Provider) (paths : List Path) (request : Request)
       cases allowed : permanent p with
       | true => exact Or.inl (by simp [serve, allowed])
       | false => exact Or.inr (by simpa [serve, allowed] using ProviderStep.delete s p allowed)
-  | list | get | status | range => exact Or.inl rfl
+  | list | get | status | range | beginUpload | uploadPart | finishUpload => exact Or.inl rfl
 
 theorem permanent_step {a b : Provider} (step : ProviderStep a b) (p : Path) (o : Object)
     (fixed : permanent p = true) (found : a.objects p = some o) : b.objects p = some o := by
@@ -226,6 +230,45 @@ theorem permanent_retained {a b : Provider} (run : ProviderRun a b) (p : Path) (
   induction run with
   | refl => exact found
   | step _ step ih => exact permanent_step step p o fixed ih
+
+/-- Immutable objects with earlier timestamps cannot first appear in a
+later provider transition, even if many transitions share a timestamp. -/
+theorem old_immutable_step {a b : Provider} (step : ProviderStep a b) (p : Path) (o : Object)
+    (fixed : replaceable p = false) (found : b.objects p = some o)
+    (older : o.value.storedAt < a.time) : a.objects p = some o := by
+  cases step with
+  | tick => exact found
+  | create q bytes =>
+      by_cases same : p = q
+      · subst q
+        cases previous : a.objects p with
+        | some old => simpa [put, previous] using found
+        | none =>
+            have eq : o = ⟨⟨bytes, a.time⟩, 0⟩ := by simpa [put, previous] using found.symm
+            subst o; simp at older
+      · simpa [put, same] using found
+  | replace q bytes allowed =>
+      have different : p ≠ q := by
+        intro eq; subst q; simp_all
+      simpa [replace, different] using found
+  | delete q allowed =>
+      by_cases same : p = q
+      · subst q; simp [erase] at found
+      · simpa [erase, same] using found
+
+theorem provider_time_grows {a b : Provider} (run : ProviderRun a b) : a.time ≤ b.time := by
+  induction run with
+  | refl => exact Nat.le_refl _
+  | step _ step ih => exact Nat.le_trans ih (storage_time_monotone step)
+
+theorem old_immutable_present {a b : Provider} (run : ProviderRun a b) (p : Path) (o : Object)
+    (fixed : replaceable p = false) (found : b.objects p = some o)
+    (older : o.value.storedAt < a.time) : a.objects p = some o := by
+  induction run with
+  | refl => exact found
+  | step previous step ih =>
+      exact ih (old_immutable_step step p o fixed found
+        (Nat.lt_of_lt_of_le older (provider_time_grows previous)))
 
 structure CopyPrefix where
   audience : Nat
