@@ -1735,21 +1735,7 @@ pub struct DamagedObject {
     /// The object's path in storage.
     pub path: String,
     /// Which check failed, retaining its cause.
-    pub failure: ObjectCheckFailure,
-}
-
-/// The checks whose failure makes a stored object damaged (§19.1).
-pub enum ObjectCheckFailure {
-    /// The object would not decrypt or authenticate.
-    Decryption(CryptoError),
-    /// Its member signature did not verify.
-    Signature(CryptoError),
-    /// Its bytes could not be parsed.
-    Parse(Arc<dyn std::error::Error + Send + Sync>),
-    /// Its write failed the merge or application schema's checks.
-    InvalidWrite(Arc<DbError>),
-    /// Its author or device lacked authority in its recorded store-log past.
-    NotAuthorized,
+    pub failure: Refusal,
 }
 
 /// One audience snapshot, identified by its storage path (§15).
@@ -1798,12 +1784,15 @@ pub enum Prerequisite {
     EntryFinality(EntryId),
 }
 
-/// A permanent check on complete immutable bytes, retried once after an update.
+/// One vocabulary for failed object checks in calls and pending records.
+/// Immediate calls retain native causes. Persisted and peer reports retain
+/// the same variant without a native cause; equality and D8 encode the
+/// variant only, never the process-local error object.
 pub enum Refusal {
-    Decryption,
-    Signature,
-    Parse,
-    InvalidWrite,
+    Decryption { cause: Option<Arc<CryptoError>> },
+    Signature { cause: Option<Arc<CryptoError>> },
+    Parse { cause: Option<Arc<dyn std::error::Error + Send + Sync>> },
+    InvalidWrite { cause: Option<Arc<DbError>> },
     NotAuthorized,
     InvalidCausality,
     WrongIdentity,

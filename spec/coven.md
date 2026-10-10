@@ -3467,8 +3467,15 @@ holds failures and rejected entries, without making either wait look completed.
     A reset can clear the report, but cannot undo that drop.
 - A permanent refusal requires a complete download and a failed check:
   decryption, authentication, signature, parsing, authorization, identity,
-  causality or merge validation. For example, a write cannot have a timestamp
-  no later than one of its causes. Network failures are not permanent checks.
+  causality or merge validation. Calls and pending records use the same
+  `Refusal` type, including `InvalidCausality` and `WrongIdentity`; the
+  failing call also retains its native check cause when there is one.
+  Persisted and signed reports keep the same variant, never a serialized
+  process-local error.
+  - Ben's write has a timestamp no later than Ana's write it read. Reading
+    it returns `DamagedObject { failure: Refusal::InvalidCausality, .. }`;
+    its pending reason is `Refused(InvalidCausality)`. Neither path turns
+    that permanent check into a network failure.
   - A refused write or entry stops its own log at that number. Later writes
     in that log and dependent work cannot pass it; independent logs continue.
   - Keep the coven package version of the local refusal internally.
