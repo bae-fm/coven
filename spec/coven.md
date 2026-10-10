@@ -134,9 +134,10 @@
     - writing a snapshot ([§15](#15-snapshots)), then deleting the logs it
       covers.
 - **Revocation:** before sending a write for the first time, a device
-  catches up on membership changes and seals it with the newest usable key.
-  An ex-member cannot read a write first sent by a device that already
-  knew they had left.
+  catches up on membership changes and lists sealed key copies at sync-pass
+  start, then seals with the newest usable key. An ex-member cannot read a
+  write first sent by a device that already knew they had left, provided no
+  copy of its key is made for them after that pass's listing (§11).
   - A tried write retains its first attempt's key and bytes on every retry.
     Nothing is dropped or rewritten for revocation; storage access is cut
     off separately (§13).
@@ -1373,10 +1374,9 @@ Carol's tablet:
     its schema version, snapshot, and raise entry), and
     `_coven_resets` (each audience's reset snapshot).
   - Keys themselves are only ever in key custody (§11). Key selection uses
-    introductions in the received entries and this device's exposure knowledge;
-    there is no single shared current-key field.
-  - `_coven_retired_keys` remembers ids this device knows reached an excluded
-    member. Replay cannot erase that knowledge or permit using them again.
+    introductions in the received entries and the pass's sealed-copy listing
+    (§11). There is no shared current-key field or local retired-key table;
+    permanent sealed copies are the shared record of who can hold each key.
   - Removed members and removed or replaced devices stay. Their stored
     writes still count when authorized, checked with their keys
     ([§10](#10-device-identity)).
@@ -1515,8 +1515,8 @@ Carol's tablet:
   - different states for the same member or device, such as granting and
     removing the same membership, or assigning different roles;
   - one removes a member or device the other's change requires to exist;
-  - one deletes a circle the other changes, adds to, removes from, rotates
-    a key for, resets or raises;
+  - one deletes a circle the other changes, adds to, removes from, resets
+    or raises. A rotation changes no membership and conflicts with nothing;
   - two raises to the same audience and version with different snapshots,
     two resets of one audience with different snapshots, or a reset and
     raise of that same audience.
@@ -1686,37 +1686,51 @@ Carol's tablet:
     device holds that key, the objects stay in the blocked list as key waits.
 - Several keys for one audience may coexist. Each object names the one
   that sealed it; arrival of another key does not invalidate old objects.
-- A key known to have reached someone now outside its audience is retired
-  for new sealing. Keep it for reading and for identical attempted retries.
-  - This includes delivery by an addition or removal that replay drops.
-  - Once a device observes that exposure, it never selects that key for
-    a first attempt again, even if the introducing entry returns.
+- Each sync pass lists sealed store and circle key copies alongside the
+  store log, at the paths above. Complete both reads before selecting keys
+  for first attempts. A failed or incomplete listing blocks those attempts
+  and records the failure (§19.1); an older listing cannot stand in for it.
+  - A listed copy means its recipient may hold the key, whether or not the
+    recipient has downloaded it. Copies remain in storage for good.
+  - A key with a copy for someone the current replay excludes from its
+    audience is retired for first attempts. Keep it for reading and for
+    identical attempted retries. An addition or removal that drops does not
+    erase its copies; an introducing entry returning does not erase them either.
+  - Retirement is derived from this listing and replay, not remembered in
+    a separate local table. A recipient returning to the audience is no
+    longer excluded; other excluded recipients' copies still retire the key.
   - A current audience member's device makes a fresh key, seals it to the
     current members, then publishes a rotation entry. An admin can also
-    rotate a circle's key when store removal requires it (§13).
+    replace a circle's key through a store-removal entry when required (§13).
   - Several devices may rotate at once. Their keys have distinct ids;
-    both remain readable, and neither rotation defeats the other.
+    both remain readable. A rotation conflicts with no entry; its author
+    must belong to its audience in its recorded past (D6).
 - For a first attempt in an audience this member still belongs to, use
   the newest usable key this device holds, ordered by its introducing
   entry's timestamp, then key id.
   - Usable means introduced by a received authorized entry, available in
-    custody, and not known to have reached an excluded member.
+    custody, and with no copy in this pass's listing for an excluded member.
   - An entry that is a membership no-op can still supply a readable key.
   - If no usable key exists, rotate or wait for its sealed copy, recording
     the first blocker. Never use a known exposed key as a fallback.
 - Share every historical key with current members who lack it, even if its
-  introducing removal was dropped. This does not make a retired key usable
-  for first attempts again.
-- The guarantee is what the sending device knew, not instantaneous global
-  secrecy. Sync reads the store log at the start of the pass, then seals
-  first attempts with the keys it holds. It does not reread membership for
-  each write or upload.
-  - E.g. Ana and Ben concurrently change Gifts' membership. Carol gets a
-    key from an addition that later drops. Once Ana learns Carol is out,
-    Ana rotates before first sending another Gifts write.
-  - Ben may not have learned yet. Writes he first sent before learning
-    remain readable with that old key while Carol still has storage access.
-    Revocation ends that access; on S3 an admin deletes her key in the console.
+  introducing removal was dropped. Sharing adds a permanent sealed copy;
+  every device's next listing can observe it.
+- The guarantee uses the sending device's replay and listing from the start
+  of this pass. There are no per-write or per-upload membership or key-copy
+  checks. First attempts use that pass's selection; tried writes keep their bytes.
+  - E.g. Ben's tablet sees Ana's removal drop and shares key K with her.
+    Ben's phone sees the removal kept throughout. Its next sealed-copy
+    listing still finds K's copy for Ana: it retires K and rotates before
+    first sending another store write.
+  - A copy made after the phone's listing is the residual window. The phone
+    may first-send with K during that pass while Ana can obtain the new copy.
+    Its next listing retires K if Ana is still excluded. This is accepted;
+    no per-write check closes it.
+  - Writes first sent before the sender learned of a removal also remain
+    readable under their old keys while the recipient has storage access.
+    Revocation ends that access; on S3 an admin deletes the access key in
+    the console.
 - Every object encrypted with a store or circle key names that key outside
   its encryption, so a reader knows which key opens it.
 - A file's independent key is carried in its row's encrypted writes
@@ -1724,7 +1738,8 @@ Carol's tablet:
 - A member's key opens every store key sealed to that member. A device
   reads the named copies from storage; key selection follows the rule above.
 - The store key is replaced whenever a member is removed.
-  - First attempts made after learning the removal use an unexposed key.
+  - First attempts made after learning the removal use a key eligible under
+    the pass's listing, subject to the residual window above.
   - Devices keep the old keys, to read writes made before.
 - Each device keeps its member's key in the OS keychain.
 - Storage access, not keys, is what keeps a removed device out.
@@ -1953,8 +1968,9 @@ Carol's tablet:
   confirmation by key id: another entry, invite, retry or restart cannot
   bring that deletion notice back.
 - A removed member's old keys cannot read writes first sent by a device
-  that already knew of the removal (§3, §11). Earlier attempted writes keep
-  their keys on retry; provider revocation cuts off access to those objects.
+  that already knew of the removal, subject to §11's window for copies made
+  after its listing (§3). Earlier attempted writes keep their keys on retry;
+  provider revocation cuts off access to those objects.
 - The removing device makes a new key for a circle its member isn't in,
   seals it, and doesn't keep it.
   - E.g. Ana removes Carol, who shares "Gifts" with Ben; Ana isn't in

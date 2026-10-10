@@ -234,8 +234,10 @@
   is present even when zero. Key ids have no numerical ordering or succession.
   A removal carries no list of deleted circles.
 - A rotation changes no membership. Its author must be a member of the
-  audience in the entry's recorded past; a store admin may rotate a circle
-  key as part of store removal. Concurrent rotations coexist (§11).
+  audience in the entry's recorded past and it conflicts with no entry.
+  An outside store admin replaces circle keys through the store-removal
+  entry (tag 2), not a standalone rotation (tag 15). Concurrent rotations
+  coexist (§11).
 - Raised versions are at least 1, and a raise names a snapshot of the
   audience it raises; a reset names the audience it resets. A creation's
   store id must agree with its path (D9).
