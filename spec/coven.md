@@ -325,12 +325,16 @@
   newest usable key under §11. Pre-removal circle writes follow §14.6.
   Every attempt re-seals the plaintext with those keys and signs with the
   device's member key. Each chunk's nonce is derived from its encryption
-  key, path, section and index ([D11](format.md#d11-keys-contexts-and-fingerprints));
+  key, path, cleartext prefix, section, index and the SHA-256 of that
+  chunk's plaintext ([D11](format.md#d11-keys-contexts-and-fingerprints));
   Ed25519 signatures are deterministic, so retries produce identical bytes.
   The queue keeps no ciphertext.
-  - A path is used once, and the plaintext and key choices never change
-    after the first attempt. Migrations convert only untried writes,
-    before any nonce is used ([§17.1](#171-host-application)).
+  - The plaintext, format and key choices never change after the first
+    attempt. Migrations convert only untried writes (§17.1).
+  - E.g. Ana encrypts write 6, then restores a backup that forgot the
+    attempt. A different edit at write 6 has different nonce inputs even
+    if her custody id survives. The same holds for two live copies.
+    Identical retries still reproduce the original object.
   - E.g. Ana's phone commits a Gifts pin offline, then reads her removal
     from Gifts before uploading it: the pin's part is sealed with the
     Gifts key she held, and counts like any write made before she read
@@ -1633,8 +1637,8 @@ Carol's tablet:
     can have several authors and follow §11's first-valid-copy rule instead.
   - A read failure keeps the attempt pending; occupation alone proves nothing.
   - Two live copies can pass the check together and send different bytes
-    under one nonce before a create is refused. This race can reuse a nonce
-    once; the byte check detects the collision and resets the losing copy.
+    to one path. Content-bound nonces separate their encryption (§11.1);
+    the byte check still resets the losing copy and discards its unsent edits.
 - Every write record is signed with the key of the member whose device
   wrote it, so who wrote what is authentic.
 - This is about authenticity, not trust.
@@ -1758,9 +1762,11 @@ Carol's tablet:
     file's own key, so retrying an upload sends the same bytes;
   - for writes and store log entries, the first 24 bytes of HMAC-SHA256
     under the encryption key, over a context binding the object's path,
-    section and chunk index ([D11](format.md#d11-keys-contexts-and-fingerprints));
-    paths are never reused, and plaintext and sealing keys are fixed before
-    using a nonce ([§6](#6-syncing-writes));
+    cleartext prefix, section, chunk index and SHA-256 of that chunk's
+    plaintext ([D11](format.md#d11-keys-contexts-and-fingerprints)). Binding
+    the prefix also separates changed authentication data. Rollback and
+    copied identities need no unique-path assumption for this separation;
+    it still relies on SHA-256 and the truncated HMAC resisting collisions;
   - for everything else, random.
 - A key is sealed to a member with an anonymous sealed box: X25519 with
   XChaCha20-Poly1305.
@@ -2865,8 +2871,7 @@ Carol's tablet:
   any of them.
 - A write or store log entry already tried is retried in the format of
   its first attempt, so re-sealing it reproduces the same bytes under the
-  same nonces ([§6](#6-syncing-writes)); a different format would reuse
-  those nonces for different bytes.
+  same content-bound nonces ([§6](#6-syncing-writes)).
 - An older coven that encounters an object in a newer format asks for an
   update and waits, as with schema additions. Once updated, it reads that
   object and continues.

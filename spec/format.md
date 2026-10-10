@@ -457,7 +457,8 @@
 - A chunk is `length:u32 | nonce:24 bytes | ciphertext | tag:16 bytes`:
   XChaCha20-Poly1305 under the encryption key derived from the named key.
   Writes and store log entries derive the nonce with HMAC-SHA256 from that
-  encryption key, path, section and chunk index (D11); other objects use
+  encryption key, path, cleartext prefix, section, chunk index and chunk
+  plaintext hash (D11); other objects use
   random nonces. Readers use the nonce field as stored. `length` is the
   ciphertext's, which is the plaintext's, so the chunk takes `length + 44` bytes. Empty chunks are
   refused. A chunk holding one frame has 7 bytes to 16 MiB of plaintext; a
@@ -539,17 +540,26 @@
 
   ```
   HMAC-SHA256(encryption_key,
-    context(UTF8("coven/object-nonce/v1"), UTF8(path), u64(section), u64(index)))[0..24]
+    context(UTF8("coven/object-nonce/v2"), UTF8(path), prefix,
+      u64(section), u64(index), SHA256(plaintext)))[0..24]
   ```
 
   Here `encryption_key` is the 32-byte key derived with `coven/encryption/v1`,
-  `path` is the exact D10 path, and the numbers are big-endian eight-byte
+  `path` is the exact D10 path, `prefix` is the exact cleartext
+  `kind | version | prefix` from D9, and `plaintext` is this chunk's complete
+  plaintext, including any frame bytes. The numbers are big-endian eight-byte
   strings, each context field length-prefixed as above. Sections and indices
   start at zero as in D9; an entry uses section 0, index 0. The label separates
-  nonce derivation from other contexts. Every path is used once, and its
-  plaintext, prefix and sealing key ids are immutable before the first nonce
-  is used. §17.1 converts only untried writes. Re-sealing and deterministic
-  Ed25519 signing therefore reproduce the complete object byte for byte.
+  nonce derivation from other contexts. Hashing bounds the content field at
+  32 bytes and uses the existing SHA-256 primitive. Neither plaintext nor its
+  unkeyed hash is published; only the keyed nonce reaches storage.
+
+  A different chunk or prefix changes these inputs even after rollback or
+  copying a device. Collision resistance, rather than mathematical injectivity
+  of a 24-byte value, is the cryptographic boundary. The plaintext, prefix,
+  format and sealing key ids remain fixed for retries; deterministic sealing
+  and Ed25519 signing reproduce the complete object byte for byte.
+
   This derivation does not apply to snapshots, sealed keys, positions or join
   requests; snapshots and sealed keys retain their originally sealed bytes.
 - An invite's secret derives its join request's key with
@@ -662,8 +672,8 @@
 - Every successful decode re-encodes to the same bytes; tests decode every
   truncation and single-bit change of every fixture without panicking.
 
-- `v2.hex` pins the plaintext frames, then a write prefix/header/part chunks
-  and a snapshot prefix/plaintext chunks. Frame mutations exercise the payload decoder,
+- `v2.hex` pins the plaintext frames, then write prefix/header/part chunks
+  and snapshot prefix/plaintext chunks. Frame mutations exercise the payload decoder,
   including dismissal and migration frames; a successful mutation must
   re-encode to exactly the mutated bytes.
 - The sealed fixtures are `sealed-write.hex`, `sealed-store-log.hex`,
@@ -678,3 +688,8 @@
   Snapshot fixtures pin both signatures and the positions fixture pins its
   author signature. Tests reject every truncation and every single-bit change
   of those signatures, and verify their path and author bindings.
+
+- Fixtures must pin D11's content-bound nonce recipe:
+  Ana retries an identical chunk, changes its plaintext at the same path,
+  and changes only the cleartext prefix. The first case repeats every byte;
+  the latter two use different nonce inputs.
