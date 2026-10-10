@@ -247,16 +247,16 @@
   devices; had-read positions name other devices only, with own earlier
   writes implicit.
 - Every loss uses section 4, whether a cell lost concurrently, removal rules
-  hid a row, a schema change or reset excluded a write, or a breaking
+  hid a row, a schema change excluded a write, or a breaking
   migration froze a removed row's losses ([§17.1](coven.md#171-host-application)).
   - `values` is `0 | column:name | cell:Cell` for a cell or
     `1 | cells:map<name, Cell>` for a whole row. All values are as written,
     without foreign-key null substitution. Dismissed cells are absent;
     dismissal that empties a row removes its record.
   - `cause` is `0 | replacing:WriteId`, `1 | rules:set<Rule>`, or
-    `2 | excluded:WriteId | boundary`, where `boundary` is
-    `0 | version:u32` for a schema change or `1 | entry:EntryId` for a reset.
-    A replacing write requires cell values; rules and boundaries require
+    `2 | excluded:WriteId | version:u32` for a schema change.
+    Resets create no loss records (§19.3).
+    A replacing write requires cell values; rules and schema changes require
     row values. Each excluded cell's setter is the excluded write. Its ID
     remains even for a deletion with no old values.
   - A cell's generation is its incarnation; a removed row's is its generation
@@ -269,7 +269,7 @@
     written scalar values and names independently of the current schema.
     Active losses follow merge and removal rules; frozen ones do not.
   - A schema-change version is positive and at most the snapshot's schema
-    version; a reset entry is covered by its store-log positions.
+    version.
   - Loss identity orders by row, generation, values identity, frozen flag,
     cause tag, then excluded write ID when present. Values identity is
     `0 | column:name | setter:WriteId` for a cell or
@@ -295,8 +295,9 @@
 - All rows and the plaintext header have the sealed prefix's audience.
   Every named write ID and applied write's read positions are covered by
   the prefix's write positions. Positions describe consumed writes,
-  including excluded ones; excluded writes' headers and dependencies are
-  not retained in loss records.
+  including excluded writes and ignored pre-reset writes. Reset eligibility
+  uses D5's `store_log_read`, not its write positions. Excluded writes'
+  headers and dependencies are not retained in loss records.
 - The decoder refuses incorrect section/record order, duplicate identities,
   mismatched counts, audiences and coverage. EOF without the end marker is
   truncation; no records may follow the marker.

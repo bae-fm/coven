@@ -336,6 +336,8 @@ pub enum DbError {
     /// A write puts a row in a circle this member isn't in, or in no circle
     /// the store log has (§14.5, §14.6).
     NotInCircle(CircleId),
+    /// The audience's required reset has not committed.
+    AudienceReloading(Audience),
     /// An inserted row's independent key holds no UUID (§8.5).
     KeyNotUuid { table: String, key: RowKey },
     /// A downloaded write fails the merge's checks, such as a timestamp no
@@ -1256,7 +1258,7 @@ pub struct LostValue {
     /// One cell's value, or a whole removed row's values.
     pub lost: Lost,
     /// What replaced it: a write that hadn't read it, the removal rules, or
-    /// a breaking change or reset the write hadn't read.
+    /// a breaking change that excluded it.
     pub replaced_by: Replacement,
     /// Entries whose outcome can still change this loss (§9), sorted by id.
     /// Empty when no non-final entry affects it. This is computed locally;
@@ -1287,8 +1289,6 @@ pub enum Replacement {
     /// A breaking schema change the write hadn't read, named by the
     /// schema version it raised the store to (§17.1).
     SchemaChange { version: u32 },
-    /// A reset the write hadn't read (§19.3).
-    Reset(EntryId),
 }
 
 pub enum RemovalRule {
@@ -2056,8 +2056,9 @@ impl CovenHandle {
     pub async fn reload_from_snapshot(&self) -> Result<(), OperationError>;
 
     /// Resets the store from this device's copy, as an admin (§19.3): writes
-    /// a snapshot, then records the reset in the store log. Every other
-    /// device reloads from that snapshot.
+    /// a snapshot, then records the reset in the store log. Every device,
+    /// including this one, reloads from it. Pre-reset writes outside it are
+    /// ignored without loss records; queued writes still upload to fill the log.
     pub async fn reset_store(&self) -> Result<(), SyncError>;
 }
 ```
@@ -2931,7 +2932,8 @@ impl Circles<'_> {
     /// A circle's members who are still in the store.
     pub async fn members(&self, circle: CircleId) -> Result<Vec<CircleMemberInfo>, SyncError>;
 
-    /// Resets a circle's rows from this device's copy (§19.3).
+    /// Resets a circle from this copy; only the snapshot and writes that
+    /// read the reset count in that circle, on this device too (§19.3).
     pub async fn reset(&self, circle: CircleId) -> Result<(), SyncError>;
 }
 

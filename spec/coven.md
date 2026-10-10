@@ -631,7 +631,7 @@ Two mechanisms order writes:
     - the value that lost, or every value of the removed row;
     - the write that set each value;
     - what replaced it: a write that hadn't read it, the rules that removed
-      the row, or a breaking change or reset its write hadn't read;
+      the row, or a breaking change that excluded it;
     - whether its values are frozen: excluded writes, and removed rows'
       losses retired from merge by a breaking migration
       ([§17.1](#171-host-application)), keep their history;
@@ -2185,12 +2185,17 @@ Carol's tablet:
     downloaded first, so no write ever sees one audience at 40 and another
     at 38: every audience reaches the highest point any snapshot reaches.
   - Reloading a device that already has writes works the same way, and the
-    highest point also covers what its waiting writes had read, so they
-    apply on top in that transaction.
+    highest point also covers what its waiting writes had read. Eligible
+    waiting parts apply on top in that transaction; the reset rule (§19.3)
+    ignores pre-reset parts outside the chosen snapshot.
   - These writes are all still in storage: a log object is deleted only
     once snapshots cover every part of it.
-  - So the app writes throughout; a write made while the reload downloads
-    is one more waiting write.
+  - During an ordinary snapshot reload, the app can write throughout; a
+    write made while downloads run is one more waiting write.
+  - When a kept reset is received, writes into its audience wait for the
+    atomic reload with `DbError::AudienceReloading`. Other audiences stay
+    writable. A write must not claim to have read the reset while still
+    using the state it discards.
 - A reload also covers the device's already uploaded own writes and their
   past: its next write implicitly reads every earlier own write ([§7.1](#71-causality)).
   An audience whose snapshot is not being replaced keeps its current positions
@@ -2266,8 +2271,9 @@ Carol's tablet:
     ([§19.1](#191-noticing)).
   - Its own writes still waiting in `_coven_uploads` keep their numbers, and
     it uploads them after.
-  - Every device then applies them like any late write, after their prior
-    reads are covered by the snapshot or applied from the logs.
+  - Every device judges them under the schema and reset rules (§17.1,
+    §19.3). Ordinary late writes apply once their prior reads are covered
+    or applied; pre-reset writes outside the chosen snapshot are ignored.
   - E.g. Ana's old phone made writes 31 to 33 offline, then stayed offline
     for a year:
 
@@ -2275,11 +2281,12 @@ Carol's tablet:
     1. it loads the latest snapshot, which reaches ana-old-phone up to 30
     2. it downloads the writes after the snapshot
     3. it uploads 31 to 33 from _coven_uploads
-    4. every device applies 31 to 33 under the rules of §8
+    4. every device judges 31 to 33 under §8, §17.1 and §19.3
     ```
 
-  - An edit to a cell changed since loses on its stamp, and an edit to a
-    row deleted since loses on its generation.
+  - Without an intervening breaking change or reset, an edit to a cell
+    changed since loses on its stamp, and an edit to a deleted row loses
+    on its generation.
 - A deleted row's `_coven_rows` row stays for good, at one small row each,
   so a write made at its old generation loses however late it arrives.
 
@@ -2992,13 +2999,26 @@ Carol's tablet:
 - A device reloads whenever the replay changes an audience's reset or
   schema version, from the snapshot the kept entry names, so a reset
   dropped by a later entry is followed by the winner's.
-- A write that had read everything the snapshot includes came after the
-  reset, and applies like any write.
-- Any other write the reset snapshot doesn't cover is judged by what it had
-  read:
-  - if it had read a write the snapshot doesn't include, its cause is gone,
-    so it is recorded as lost on every device, and never applied;
-  - otherwise it merges like any late write.
+- A reset replaces that audience with the chosen snapshot. On every
+  device, including its author, only these contents count:
+  - the snapshot's rows and merge records;
+  - later writes whose `store_log_read` includes the kept reset entry.
+- A write outside the snapshot that had not read that entry is ignored
+  for the reset audience, even if it read every write in the snapshot.
+  - Do not apply its row changes or record them as lost.
+  - Count the ignored part as passed, so log positions can advance.
+  - Other audiences' parts follow their own reset and schema rules.
+  - Reading an ignored pre-reset write does not invalidate a post-reset
+    write: the reset deliberately discards that old history.
+- A device still uploads its unsent pre-reset writes, keeping their
+  identities and attempted bytes, so its log has no gaps. It ignores their
+  effects in the reset audience itself, like every other device.
+- E.g. Ana resets from her phone's snapshot, covering Ben's writes through 8.
+  Ben's laptop made writes 9 and 10 without reading the reset; 10 read 9.
+  - Ben uploads both. Neither changes the reset audience or creates a loss.
+  - After reading the reset, Ben makes write 11. It applies on every device.
+  - Ana's own writes made after capturing the snapshot but before reading
+    her reset entry are ignored by the same rule.
 - If two devices reset the same audience at once, the one with the smaller
   timestamp counts; the other's entry is dropped, with its snapshot
   ([§9](#9-members-and-roles)).
