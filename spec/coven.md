@@ -5,7 +5,9 @@
 - [1. Overview](#1-overview)
 - [2. Threat model](#2-threat-model)
 - [3. Guarantees](#3-guarantees)
+  - [3.1 IO bounds](#31-io-bounds)
 - [4. Storage providers and access](#4-storage-providers-and-access)
+  - [4.1 Open decisions for IO bounds](#41-open-decisions-for-io-bounds)
 - [5. Local database](#5-local-database)
 - [6. Syncing writes](#6-syncing-writes)
 - [7. Order](#7-order)
@@ -155,6 +157,107 @@
 - **Nothing waits silently:** whatever coven cannot apply or deliver is in
   the blocked list, with its subject and typed reason (§19.1).
 
+### 3.1 IO bounds
+
+These are requirements on a device's sync, not estimates for a particular
+store. An **open decision** in §4.1 means its dependent bound is conditional;
+neither a model nor an implementation may claim that bound by assuming the
+decision away. The confidentiality, integrity, finality and atomicity rules
+above still apply to every option.
+
+A *steady store* has a complete local catalog, unchanged storage and local
+work, no evicted input needed by this pass, and no due retry, finality or
+retention deadline. Its connection and credentials are usable. Starting with
+an empty catalog, recovering an expired change cursor, and rebuilding an
+evicted cache are measured separately as initialization or eviction work.
+Repeatedly discarding a catalog at pass end is not eviction.
+
+Count actual provider requests, including pagination, metadata lookups,
+redirects, upload-session calls and SDK retries. A logical `list` call that
+fetches three pages counts as three requests. Count received metadata as well
+as object bodies in downloaded bytes. Also report body bytes separately, so
+a zero-body pass cannot hide a listing of the whole history.
+
+- **Idle requests:** a pass in a steady store must make at most `C_p`
+  requests for provider `p`, independent of stored bytes, object count,
+  history length, members and devices. `C_p` is fixed by the chosen provider
+  design, never fitted to the test store. Full prefix listings do not satisfy
+  this for unbounded history (§4.1).
+- **New objects:** after `k` newly visible object versions, the target is
+  at most `C_p + c_p * k` requests, with fixed `c_p`. Replaced positions
+  count as new versions; deletions and locally requested work must be
+  accounted for explicitly, not hidden in `C_p`. How transfers and work
+  caused by an arrival fit this bound remains open (§4.1).
+- **Downloads:** each immutable object is downloaded at most once per
+  device while its retained bytes or sufficient checked facts remain.
+  Reopening, another consumer, a missing prerequisite, or another pass does
+  not justify another download. For replaceable positions this means once
+  per observed version; for range-read files, once per retained chunk.
+  A partial failed transfer is not a completed download: retry its missing
+  bytes where supported and charge every retransmitted byte separately.
+  Eviction permits another fetch, which is counted as eviction work.
+- **Bytes:** without failures or eviction, received bytes must be bounded
+  by a provider constant plus the metadata and bodies newly needed by this
+  device, never by unchanged stored history. A newly needed range is charged
+  once. Prefix inspection followed by loading must not repeatedly transfer
+  the same prefix; its exact request bound is open (§4.1).
+- **Waiting:** every automatic wait has a bounded request rate, including
+  operations, invites, joining, missing keys and provider throttling.
+  Delays are 1, 2, 4, …, 256, then 300 seconds between unsuccessful attempts,
+  measured monotonically. A provider's `Retry-After` can only lengthen them.
+  For `W` unchanged waits in one uninterrupted run, at most
+  `W * (1 + floor(t / 1 second))` attempts start in any interval of length
+  `t`; after reaching the cap it is `W * (1 + floor(t / 300 seconds))`.
+  Multiply by each wait's declared request allowance, counting pages and
+  retries within it. Neither pass completion nor a one-second worker tick
+  resets a delay. Restart and paginated-probe bounds remain open (§4.1).
+
+Local work has bounds too:
+
+- A pass unlocks store-key custody at most once and member-key custody at
+  most once: one task-scoped acquisition of each, at most two custody reads
+  in total, regardless of writes, keys or peers. No per-object unlocks.
+  Persist only changed keys; a bound on passphrase derivations while
+  persisting requires the custody decision in §4.1.
+- Decode the saved store log at most once when the sync owner starts, on a
+  read connection; keep the decoded value between passes. A warm idle pass
+  performs zero full-log decodes and zero replays. Decode arriving entries
+  once and replay each causally ready batch once; author-view checks remain
+  distinct from the replay of the resulting received set (§9).
+- An idle pass takes the database writer zero times, except for the one
+  conditional cursor commit below. No writer connection
+  is held across a storage request, custody call, timer wait, whole-object
+  decoding, or store-log replay. Read-only decisions use read connections;
+  a writer is held only to validate and commit actual state changes. An
+  atomic apply can include its database work; it cannot include a download.
+- An unchanged idle pass commits zero durable transactions. If a chosen
+  feed requires saving an advanced cursor even with no object changes,
+  allow at most one transaction for it, declared as part of that design.
+  No unchanged operation rows, blocked records or last-checked timestamps
+  are rewritten. Completion status is an in-memory notification (E5).
+- Hot lookups use indexes: object identity; write audience and position;
+  snapshot coverage; peer device and observed version; references by file
+  path and retaining object; blocked subject/reporter and retry reason;
+  store-log storage time; retired key id; pending uploads and operations.
+  Eager-file work selects changed references lacking complete cached bytes,
+  rather than scanning every app row on every pass. Cache budget checks
+  use a maintained namespace total, not a sum over every cached chunk.
+
+Tests must count both logical operations and provider requests, transferred
+bytes, custody calls, full-log decodes, writer holds and durable commits.
+Run the same idle and `k`-arrival cases with more unchanged history, more
+files, more devices and enough objects to cross listing pages. Assert hot
+query plans with representative populated tables: a scan of unchanged app
+or history rows is not an indexed lookup. Exercise warm passes, reopening,
+cache eviction, interrupted streams, withheld prerequisites and rate limits
+separately. A formula with an unresolved provider constant is a conditional
+requirement, not a passing measurement.
+
+**Ana's quiet library.** Adding 20,000 old files changes neither her idle
+body downloads (zero) nor local durable work (zero, or one cursor commit).
+It must not increase her idle request count. Four paginated prefix scans
+can meet the first two observations while failing the third.
+
 ## 4. Storage providers and access
 
 - A store lives on one provider: S3, Google Drive, Dropbox, OneDrive, or
@@ -256,6 +359,197 @@
 - Posted positions live at `<store>/positions/<device>` ([§6](#6-syncing-writes)).
 - Sealed circle keys live at `<store>/keys/circles/<circle>/<key>/<member>`
   ([§14.3](#143-circles)).
+
+### 4.1 Open decisions for IO bounds
+
+The choices below are unresolved. They state what each option would require;
+they do not add a provider method, change a path, or weaken a guarantee by
+implication.
+
+#### Open decision: discovery and provider scope
+
+Drive, OneDrive and Dropbox adapters that enumerate their whole configured
+folder or namespace and then filter paths pay for unrelated files on every
+prefix query. Two alternatives are:
+
+- Map each store and logical prefix to a provider folder, querying that
+  folder directly. Keep folder ids and path-to-object ids from listings and
+  creates for the connection's lifetime; do not resolve them again for
+  every read or create. This avoids unrelated prefixes but still returns
+  every retained object in the requested prefix, across all its pages.
+  Changing the physical layout must preserve discovery of existing D10
+  paths; a name-to-id cache alone cannot discover unknown new objects.
+- Add incremental discovery to §4's contract and maintain a durable local
+  catalog: [Drive `changes.list`](https://developers.google.com/workspace/drive/api/guides/manage-changes),
+  [Dropbox `list_folder` cursors](https://docs.dropboxapi.com/dropbox-api/docs/detecting-changes),
+  [OneDrive `delta`](https://learn.microsoft.com/en-us/graph/api/driveitem-delta?view=graph-rest-1.0),
+  and [CloudKit zone change tokens](https://developer.apple.com/documentation/cloudkit/ckfetchrecordzonechangesoperation).
+  Bootstrap establishes the catalog without a gap; a cursor commits only
+  with the catalog changes it covers. Retained download work need not have
+  applied yet, but must not be lost by advancing discovery. Exhaust every
+  page, record deletions, and treat cursor expiry as an explicit catalog
+  rebuild. A feed must establish completeness for §9 and §10, not merely
+  deliver hints. It must distinguish deletion from loss of access.
+
+A user- or drive-wide feed can include unrelated changes; a CloudKit zone
+can hold other stores (§4). Filtering them locally does not make those
+requests free. A store-scoped feed, a dedicated provider container, or a
+bound that explicitly charges unrelated changes are different choices.
+The latter two change §4's shared-location promise or the requested bound.
+
+S3's portable prefix-listing contract has no change cursor.
+[`ListObjectsV2`](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html)
+paginates retained keys. Keeping complete scans preserves the current
+discovery rules but leaves the constant idle-request and metadata-byte
+bounds unmet. A publication index or a required external notification
+service would need a protocol for discovery, deletion, crash safety and
+unknown devices. A notification hint alone cannot establish completeness.
+Fixed-width log numbers could permit ordered suffix listings, but change
+D10 and do not by themselves discover unknown devices or new snapshots.
+No such S3 design is selected here.
+
+With full scans, let `L_p(x)` include all requests and folder lookups to
+list prefix `x`. The steady pass's count is exactly
+`L_p(store-log/) + L_p(devices/) + L_p(snapshots/) + L_p(positions/)`,
+subject to the key-copy decision below. S3 is **4 LIST requests only when
+each prefix fits one page**. On Drive, OneDrive, Dropbox and CloudKit the
+count is the same sum of actual listing costs, not necessarily four.
+
+With a complete saved catalog and a suitable single feed, an empty,
+one-page update costs **1 request** on Drive, OneDrive, Dropbox or CloudKit;
+zero body reads and zero writes follow. Long-poll and subscription setup or
+renewal calls count separately when used. The one-request figure is
+conditional on feed scope and completeness, not a promise for every account
+or an arbitrary shared container. No fixed numeric `C_p` is established
+for any provider until these choices are resolved.
+
+#### Open decision: single-object status and replacement identity
+
+§4 offers listing and reading but no status call. Adding one could return
+presence, size, publication time, object id, revision and a named checksum:
+S3 HEAD, Drive file metadata by its recorded id, Dropbox metadata, OneDrive
+item metadata, or a CloudKit record fetch. Then file status and upload
+confirmation need not list the uploader's history. Without it, use a
+completed pass listing when the caller accepts that observation, or perform
+and count a fresh listing; stale cached absence is not current file status.
+A status call does not replace discovery of unknown paths.
+
+Size and stored time identify unchanged immutable objects under §4. For
+replaced positions, equal-length replacements within one timestamp tick
+can have the same pair. Either the contract guarantees a distinct stored
+time for every replacement, or it exposes a revision token and readers
+compare that too. Reading every peer on every pass avoids trusting that
+pair but fails the download bound. Cached positions reuse is conditional
+on a sound replacement identity; an ETag is not automatically a checksum.
+
+Occupied-path comparisons in §10 currently require complete byte equality.
+Keeping that rule can require a full read; using a provider checksum
+instead changes its evidence. Each provider's checksum algorithm and
+integrity assumptions would need to be specified. A metadata revision alone
+cannot prove equality. The body-read allowance must also include §15's
+post-upload verification when no complete-object checksum is available.
+
+#### Open decision: storage time in a quiet store
+
+§9 needs a storage time observed **before** the complete store-log scan.
+Reposting unchanged positions to obtain it contradicts posting only on
+change. Choose between a provider response time with the same authoritative
+clock and ordering guarantees as publication times, or a dedicated encrypted
+time-probe object whose create, metadata observation and deletion are counted.
+The latter needs an agreed path and lifecycle; D10 has no probe path.
+Neither choice may use the device clock as evidence of storage age.
+
+Until one is specified, known stored times remain valid lower bounds, but
+an otherwise quiet store cannot be promised prompt finality or age-based
+cleanup. The bounds for a due time observation are conditional on this
+choice. Repeated unchanged positions writes are not an implicit exception.
+
+#### Open decision: partial reads and retained bytes
+
+§15 permits header-only retention and prefix-only snapshot selection. A
+snapshot prefix grows with its position vectors; a write header can occupy
+a whole frame. Neither a 4-KiB nor a 64-KiB first read always contains it.
+§14.4 may later need parts the device could not previously decrypt.
+
+One option streams and retains the complete sealed object on first demand,
+even for a prefix consumer or a key wait. It gives one body request per
+object but transfers unused bodies and needs a disk budget and eviction
+policy. The other retains inspected byte ranges and fetches only missing
+ranges later; it preserves prefix-only traffic but requires a bound on
+range requests and permits more than one stream over an object's lifetime.
+In either case checked facts survive passes, and duplicate consumers share
+the same bytes. Header facts alone cannot reconstruct discarded bodies.
+The lifetime single-stream bound and cache-retention policy remain
+conditional; pass boundaries never discard reusable facts.
+
+#### Open decision: key-copy observation after finality
+
+A keys scan is due when received store-log entries change, while an entry
+is non-final, while a current member lacks a copy, or while key publication
+is unsettled. Before stopping scans, also complete one after establishing
+finality. A feed can incorporate key-path changes in the same catalog update.
+
+Skipping all later keys scans requires proving that no delayed or retried
+publication can expose an old key without a new observable store-log change.
+An operation can publish copies before its entry (§18), so log finality
+alone does not prove this. Options are an always-observed key change feed,
+continued keys listings (a fifth logical idle scan, with its pages), or a
+publication rule that supplies this proof while preserving fixed attempted
+bytes and revocation. The four-scan idle count is conditional on this
+decision; sealed copies already observed remain known permanently (§11).
+
+#### Open decision: discovering join approval
+
+A joiner knows its invite and member ids, but the invite has no store key id
+(D13), and sealed-key paths put the random key id before the member id
+(D10). “Poll its sealed key copy” is not yet one known-path request.
+
+Keeping the format requires a cached keys catalog with incremental discovery,
+or repeated keys listings charged by page. Alternatively an invite could
+name an initial key id, or an authenticated result at a known invite path
+could name the copies. Either changes the format or publication protocol.
+Every option must still distinguish decline from approval racing deletion
+of the request (§12.2), wait for effective membership, and expose permission
+errors. A bounded single-object join probe remains conditional.
+
+#### Open decision: request bounds for transfers and resulting work
+
+One newly arrived write can reference an arbitrarily long file, trigger a
+snapshot of existing rows, or change membership requiring copies of many
+historical keys. Files use bounded range reads, and uploads above a
+provider's limit require parts (§16). These requests cannot be bounded by
+a constant times the number of arriving objects alone.
+
+One option states separate bounds for discovery and object reads, then adds
+explicit terms for transferred parts/ranges, produced objects, deletions and
+access operations. Another changes the object and operation limits or the
+meaning of `k` to count all those units. Merely moving work to a worker or
+another pass does not satisfy the original whole-pass bound. Record both
+total traffic and the proposed terms until this choice is made. The literal
+`C_p + c_p * k` bound is conditional.
+
+#### Open decision: retry bounds across restarts
+
+§16.5 restarts automatic delays at zero and keeps no durable wall-clock
+deadline. That bounds attempts in one run, but repeated restarts can issue
+unbounded attempts in a real-time interval, including during `Retry-After`.
+Choose durable retry information with a defined clock/restart rule, a
+provider-enforced cooldown, or explicitly limit the guarantee to one run
+and account for each restart separately. Unchanged paginated probes also
+need either incremental/status requests or an explicit page-work term.
+The unconditional per-device request-rate bound remains open; ordinary
+worker wakes and app retries may never bypass a live provider cooldown.
+
+#### Open decision: custody sessions
+
+E11's separate `unlock` and `persist` methods do not give persistence a
+pass-scoped unlocked capability. A passphrase implementation could derive
+again on every persistence call. Either introduce a custody session that
+unlocks once and saves changed keys through that capability, or bound calls
+only and permit additional derivations on persistence. Retaining an unlocked
+derivation in the custody owner across passes changes its secret lifetime.
+The once-per-custody read bound stands; the at-most-one derivation per
+custody per pass bound is conditional on this choice.
 
 ## 5. Local database
 
