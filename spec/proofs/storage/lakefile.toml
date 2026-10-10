@@ -1,0 +1,5 @@
+name = "covenStorage"
+defaultTargets = ["CovenStorage"]
+
+[[lean_lib]]
+name = "CovenStorage"
