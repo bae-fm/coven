@@ -381,12 +381,6 @@ pub enum DbError {
     MigrationWriteVersion { write: coven_merge::WriteId, schema_version: u32, migration_version: u32 },
     /// A waiting upload disappeared while its conversion was being recorded.
     MigrationUploadMissing { write: coven_merge::WriteId },
-    /// A supplied store-log entry cannot be encoded as a checked entry (§9).
-    InvalidStoreLogEntry { entry: EntryId, error: coven_format::Error },
-    /// A replay result does not cover exactly the stored entries and the incoming entry.
-    StoreLogEntriesChanged,
-    /// An already applied entry was supplied again with different bytes or author-view check.
-    StoreLogEntryChanged(EntryId),
     /// A write changes a file declared write-once (E2).
     FileWriteOnce { table: String, key: RowKey },
     /// A file reference no longer names the row's file (§16.3).
@@ -1707,6 +1701,9 @@ pub enum SyncError {
     Storage(StorageError),
     /// The local database failed.
     Database(DbError),
+    /// An internal invariant failed. The public category is also recorded
+    /// as PendingReason::Failed; the initiating call retains the native cause.
+    Failed { failure: LocalFailure, source: Arc<dyn std::error::Error + Send + Sync> },
     /// Reading or removing credentials or keys failed.
     SecureStorage(KeyError),
     /// Opening the store key failed.

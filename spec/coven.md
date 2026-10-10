@@ -3492,6 +3492,15 @@ holds failures and rejected entries, without making either wait look completed.
   triggers another validation, using retained bytes when available.
 - A damaged local database is detected by SQLite's integrity check or
   decoding its stored facts (§19.2).
+  - Internal store-log failures—an invalid checked entry, a replay set that
+    changed, or changed bytes/checks for an already stored entry—cross the
+    app boundary as `Failed(LocalFailure::Database)`. The initiating call
+    retains its native cause through `SyncError::Failed`; crate-to-crate
+    error variants are not app-facing `DbError` variants.
+  - Ben's replay returns a set missing a received entry. The transaction
+    fails, his entry remains pending with `Failed(Database)`, and positions
+    do not advance. The app sees a database failure, not an action to repair
+    an internal entry handoff.
 - Devices that disagree:
   - each device keeps a *fingerprint* of the data in each audience it can
     read, updated as writes apply;
