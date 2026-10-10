@@ -1712,6 +1712,8 @@ pub enum ObjectCheckFailure {
     Parse(Arc<dyn std::error::Error + Send + Sync>),
     /// Its write failed the merge or application schema's checks.
     InvalidWrite(Arc<DbError>),
+    /// Its author or device lacked authority in its recorded store-log past.
+    NotAuthorized,
 }
 
 /// One audience snapshot, identified by its storage path (§15).

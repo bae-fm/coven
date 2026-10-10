@@ -378,8 +378,14 @@ Two mechanisms order writes:
     with Gifts' key.
 - A write counts only if its author was a member, and its device one of
   theirs, in the store log the write had read, judged like an entry's
-  authority ([§9](#9-members-and-roles)); otherwise every device records
-  it lost.
+  authority ([§9](#9-members-and-roles)). Otherwise refuse it as
+  `NotAuthorized` and block its device's log at that number (§19.1).
+  - It creates no lost values: the app must not be able to restore an
+    unauthorized author's data.
+  - An unknown device registration is a missing prerequisite, not proof
+    of missing authority. Read the recorded store-log past before deciding.
+  - E.g. Ben's write 9 names the entry removing his phone. Carol refuses
+    write 9 and does not pass it or expose its values for restoration.
   - So a write made after its device read its own removal never counts,
     and a write from a device whose addition a later entry drops still
     counts if its author had read that addition.
