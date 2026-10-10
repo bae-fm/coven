@@ -336,7 +336,7 @@ pub enum DbError {
     /// A write puts a row in a circle this member isn't in, or in no circle
     /// the store log has (§14.5, §14.6).
     NotInCircle(CircleId),
-    /// The audience's required reset has not committed.
+    /// A required reset or schema reload has not committed.
     AudienceReloading(Audience),
     /// An inserted row's independent key holds no UUID (§8.5).
     KeyNotUuid { table: String, key: RowKey },
@@ -2960,9 +2960,14 @@ pub struct CircleMemberInfo {
   older version that still wait in `_coven_uploads`.
   - Each breaking migration converts them in version order, keeping the
     device, write number, timestamp and causal positions. Tried uploads keep
-    their exact bytes. Additions run no conversion.
-  - Conversion changes only the waiting records. Their effects are already
-    in the device's merge records, carried through the migration by §17.1.
+    plaintext, format and key ids that reproduce their original bytes; each
+    is settled by resending, never by snapshot coverage. Additions run no conversion.
+  - A write that read an excluded write is excluded too. After an uncovered
+    attempted write, every later queued write is marked lost (§17.1).
+    Conversion cannot rescue a write whose input was discarded.
+  - Conversion changes only eligible untried records. Reloading the kept
+    snapshot applies the same verdict locally. New writes after adopting
+    that boundary do not read the discarded queued effects (§17.1).
 - Coven decides whether a migration is an addition or a breaking change by
   comparing the schema before and after it. Statements that change rows of
   synced tables also make it breaking (§17.1).
@@ -2983,8 +2988,8 @@ impl Migration {
         F: Fn(&MigrationContext<'_>) -> Result<(), DbError> + Send + Sync + 'static;
 
     /// Its second part: changes each row change of a waiting write to fit the
-    /// new schema. Without it, a breaking change's waiting writes upload
-    /// marked lost.
+    /// new schema. It runs only on untried writes whose inputs survive.
+    /// Without it, or when an input was excluded, they upload marked lost.
     pub fn writes<F>(self, f: F) -> Self
     where
         F: Fn(&mut RowChange) -> Result<(), DbError> + Send + Sync + 'static;

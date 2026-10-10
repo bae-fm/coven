@@ -121,7 +121,8 @@
   - a write made after seeing another wins over it on every device;
   - no device sees a write before the writes its author had seen;
   - when a concurrent write replaces or deletes a value, that value is
-    recorded, not silently dropped.
+    recorded, not silently dropped. Values computed by a breaking migration
+    that lost to a concurrent one are replaced by the winner's (§17.1).
 - **Durability:** a crash loses nothing:
   - every committed write is still uploaded;
   - every operation with several steps resumes and finishes, for example:
@@ -382,7 +383,9 @@ Two mechanisms order writes:
   - So a write made after its device read its own removal never counts,
     and a write from a device whose addition a later entry drops still
     counts if its author had read that addition.
-- A device has always read its own earlier writes.
+- A device has always read its own earlier writes, except effects explicitly
+  discarded by an adopted reset or breaking-change snapshot (§17.1, §19.3).
+  Their numbers are passed; their discarded values are not new writes' inputs.
 - So no device ever sees an effect before its cause:
   - cause: every write a write's device had read when making it;
   - effect: the write itself;
@@ -2192,10 +2195,10 @@ Carol's tablet:
     once snapshots cover every part of it.
   - During an ordinary snapshot reload, the app can write throughout; a
     write made while downloads run is one more waiting write.
-  - When a kept reset is received, writes into its audience wait for the
-    atomic reload with `DbError::AudienceReloading`. Other audiences stay
-    writable. A write must not claim to have read the reset while still
-    using the state it discards.
+  - When a kept reset or breaking-schema entry is received, writes into
+    its audience wait for the atomic reload with `DbError::AudienceReloading`.
+    Other audiences stay writable. A write must not claim to have adopted
+    the boundary while still using the state it discards.
 - A reload also covers the device's already uploaded own writes and their
   past: its next write implicitly reads every earlier own write ([§7.1](#71-causality)).
   An audience whose snapshot is not being replaced keeps its current positions
@@ -2623,26 +2626,58 @@ Carol's tablet:
     ([§8.4](#84-foreign-keys)).
   - The pre-migration inputs remain available until the deciding entry is
     final (§9); replay can replace this derived result before then.
-- A device that updates runs the migration's second part on its own
-  writes still waiting in `_coven_uploads`, then uploads them.
-  - Without a second part, it uploads them marked lost, and every device
-    records them in `_coven_lost` without applying them.
-  - A lost write names the breaking change by the schema version it raised
-    the store to, which the device knows when it migrates, before any
-    store log entry for it exists.
-  - It converts or marks only writes no upload has tried yet, before any
-    nonce is used; a tried write's plaintext and sealing key ids stay fixed
-    so retries reproduce its bytes ([§6](#6-syncing-writes)).
-  - E.g. Ana's app renames `title` to `name`, while Ben's phone, offline,
-    edits a title; when Ben updates, his edit becomes a `name` edit, and
-    reaches every device.
-- Writes already uploaded in the old version that the breaking change
-  hadn't read are lost: every device records them in `_coven_lost`, and
-  none applies them.
-- This happens only to a write whose upload was tried before its device
-  updated: one uploaded just as another device made the breaking change,
-  or one whose upload failed partway, since a tried write's bytes are
-  fixed and may already be stored ([§6](#6-syncing-writes)).
+- Waiting writes keep their device ids, numbers, timestamps and causal
+  positions. A breaking change never renumbers or redoes them.
+- Settle every attempted upload by resending its original bytes (§6).
+  - Re-seal the retained plaintext with its first attempt's format and key
+    ids. A positive upload result, or equal bytes already at its path,
+    settles it as stored.
+  - Snapshot coverage does not prove that the log object was stored.
+    Even a write covered by the raise snapshot must finish its upload.
+  - Until settlement, keep its queue record and record the blocker (§19.1).
+- Let S be the snapshot of the kept breaking-change entry for an audience.
+  A device judges waiting and incoming writes by the same rules:
+  - S already determines the effects of writes it covers.
+  - An old-version write outside S is excluded: keep its values as frozen
+    losses, and pass its position without applying its changes.
+  - A write that read an excluded write is excluded too. Its own earlier
+    writes count as read, so every later queued write behind an uncovered
+    attempted write is excluded with it.
+  - An untried queued write is converted only if none of the inputs it read
+    was excluded. Run the migration's second part in version order.
+  - With no conversion, or with an excluded input, upload the untried write
+    marked lost, naming the breaking version. Do not convert its values
+    into a claim that can apply.
+- “Read” here means input to the state on which the write was made.
+  Positions passed as excluded after loading the kept boundary are not
+  inputs to new writes. The write's `store_log_read` records whether its
+  author had adopted that boundary.
+  - After the atomic reload, new writes use S and the eligible writes after
+    it. They do not inherit discarded queued effects merely because the
+    device's log numbers passed them.
+  - Keep exclusion verdicts separately from dismissible loss values while
+    an entry can change. Loading reconstructs required verdicts from the
+    retained boundary and log inputs (§9, §15); dismissing a loss cannot
+    make its write eligible or release these inputs early.
+  - Reset-ignored history follows §19.3 and does not create a schema loss.
+- E.g. Ana raises the store from S, which covers Ben's phone through write 8.
+  Ben's attempted write 9 is unsettled; queued write 10 read it.
+  - Ben resends 9's original bytes until storage confirms them. S does not
+    cover 9, so every device records it lost.
+  - Write 10 is untried but cannot apply: it read 9. Ben uploads it marked
+    lost, and every device reaches the same result.
+  - Ben reloads S under those same rules. His next write, made after that
+    reload and naming the kept raise in `store_log_read`, uses the new
+    state and can apply.
+- If Ben's untried write 9 instead read only inputs S retains, a supplied
+  conversion can turn its old `title` edit into a `name` edit. It then
+  applies on every device that reads that audience.
+- Snapshots may include the author's unuploaded writes. Making the raise
+  snapshot never waits for an empty upload queue; doing so could wait on
+  the very raise needed to upload that queue.
+- Loading the winning snapshot replaces values a losing migration computed.
+  Only its device had those values; recording them as shared losses would
+  make devices disagree. Ordinary excluded writes still keep their losses.
 - If two devices make the same breaking change at once, the one with the
   smaller timestamp counts; the other's entry is dropped, with its snapshot
   ([§9](#9-members-and-roles)).
@@ -2782,13 +2817,16 @@ Carol's tablet:
   2. upload a snapshot in the new version;
   3. upload the store log entry raising the version.
 - Reloading from a snapshot ([§15](#15-snapshots)):
-  1. download the snapshots, and the writes between the lowest and highest
-     points they and the waiting writes reach, to temporary files;
+  1. settle attempted uploads under §17.1, then download the snapshots and
+     writes between the lowest and highest points they and the waiting
+     writes reach, into temporary files, retaining the inputs needed to
+     judge exclusions;
   2. replace the synced tables and coven's merge tables
      ([§8](#8-merge)) with the snapshots, apply those writes, and re-apply
-     the waiting writes, in one transaction;
-  3. migrate the writes waiting in `_coven_uploads`, if the snapshot's
-     version is newer ([§17](#17-schema-changes)).
+     eligible waiting writes, in one transaction. Convert eligible untried
+     writes and record exclusions under §17.1;
+     reset-ignored writes follow §19.3. Positions advance only with this
+     realized state.
 - Writing a snapshot ([§15](#15-snapshots)):
   1. write it, sealed, to a temporary file, record it and check it locally
      against the captured database state;

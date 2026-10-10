@@ -134,6 +134,9 @@
 
   - Schema version zero is representable. A lost disposition's version is
     positive and names the breaking version reached by the store.
+    It also marks an untried write whose input was excluded. An attempted
+    write keeps its original disposition and bytes; readers derive its
+    exclusion from the kept boundary and what it read (§17.1).
   - Parts are in increasing audience order, each with at least one record.
     `rows` counts both row changes and dismissals. Own earlier writes are
     implicit in `had_read`; an explicit own-device position is refused.
