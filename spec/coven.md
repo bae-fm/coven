@@ -862,10 +862,15 @@ Two mechanisms order writes:
   - `_coven_circles.deleted` records whether each circle is deleted; local
     writes, downloaded writes and row recomputation all read that same fact
     ([§9](#9-members-and-roles), [§14.7](#147-deleting-a-circle));
-  - `_coven_applied_boundaries` names each breaking change and reset it has
-    applied, with the writes its snapshot included, so a later write is
-    judged against it ([§17.1](#171-host-application),
-    [§19.3](#193-resetting-a-store)).
+  - `_coven_boundaries`, keyed by the boundary's store-log entry, keeps its
+    audience, kind (raise or reset), snapshot schema version, snapshot id,
+    and verified write/store-log coverage. Late writes and reversal use this
+    same record (§17.1, §19.3). The current reset and raise per audience are
+    selected from kept entries in `_coven_store_log`, not duplicate tables.
+    Superseded boundaries remain while any non-final effect needs them.
+  - Ana's raise and Ben's concurrent reset each have one boundary row. Replay
+    chooses the kept entry; if that choice changes, the retained rows supply
+    the exact snapshot coverage without reconstructing a second history.
 - Fingerprints ([§19.1](#191-noticing)) are kept incrementally:
   `_coven_fingerprint_leaves` holds one hash per row and per loss in
   each audience, and `_coven_fingerprint_sums` their sum per audience, so
@@ -1560,9 +1565,8 @@ Carol's tablet:
     and whether it is active, removed or replaced with closed log ends),
     `_coven_circles` (every circle a kept entry made, its name and whether
     it was deleted), `_coven_circle_members`, `_coven_store` (the store's id
-    and name), `_coven_versions` (one row per audience:
-    its schema version, snapshot, and raise entry), and
-    `_coven_resets` (each audience's reset snapshot).
+    and name). `_coven_boundaries` holds each checked raise/reset boundary;
+    the current boundary per audience is derived from the kept entries.
   - Keys themselves are only ever in key custody (§11). Key selection uses
     introductions in the received entries and the pass's sealed-copy listing
     (§11). There is no shared current-key field or local retired-key table;
