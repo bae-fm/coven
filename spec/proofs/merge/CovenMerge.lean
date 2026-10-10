@@ -9,3 +9,10 @@ import CovenMerge.Fixpoint
 import CovenMerge.Removal
 import CovenMerge.Audience
 import CovenMerge.Examples
+import CovenMerge.Circles
+import CovenMerge.Migration
+import CovenMerge.Snapshot
+import CovenMerge.Reset
+import CovenMerge.Accounting
+import CovenMerge.Boundary
+import CovenMerge.IntegrityExamples

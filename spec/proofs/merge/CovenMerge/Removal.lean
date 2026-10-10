@@ -64,14 +64,19 @@ log.
   (§14.7);
 * `claims`: its claims (§8.5, §14.2);
 * `rank`: its primary key's order, which breaks ties between claims. -/
-structure Inputs (Row K : Type) where
+structure RemovalInputs (Row K Deletion : Type) where
   rows : List Row
   present : Row → Bool
   refs : Row → List (Ref Row)
   checkFails : Row → Bool
-  inDeletedCircle : Row → Bool
+  inDeletedCircle : Row → Deletion
   claims : Row → List (Claim K)
   rank : Row → Nat
+
+/-- Boolean deletion inputs retained for the Rust differential runner and the
+store-log/data compatibility model. Entry-aware inputs use `RemovalInputs`
+with `Option Nat` (§14.7). -/
+abbrev Inputs (Row K : Type) := RemovalInputs Row K Bool
 
 section
 variable {Row K : Type} [DecidableEq Row] [DecidableEq K] (I : Inputs Row K)
@@ -136,6 +141,7 @@ inductive Rule where
   | foreignKey
   | check
   | deletedCircle
+  | deletedCircleEntry (entry : Nat)
   | otherAudience
   | unique
   deriving DecidableEq, Repr
@@ -217,11 +223,12 @@ end
 
 /-! ## End to end -/
 
-/-- The causes of active losses modeled by the merge proof. Schema changes,
-resets and frozen history are outside this model (Appendix B11). -/
+/-- Loss causes (§8, §17.1). The schema cause identifies the migration or
+excluded write as well as the breaking version (format D7). -/
 inductive LossCause (W : Type) where
   | write (setter : W)
   | rules (reasons : List Rule)
+  | schemaChange (version : Nat) (write : W)
   deriving DecidableEq, Repr
 
 /-- One loss record. Values are identified with their setters, as in `St`:

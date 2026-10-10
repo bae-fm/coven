@@ -1,4 +1,4 @@
-import CovenMerge.Audience
+import CovenMerge.Circles
 
 /-!
 # The spec's examples, run through the proven step and rules
@@ -348,40 +348,45 @@ theorem example_8_6 :
 
 end Check
 
-/-! ## §14.7: a row added to a deleted circle
+/-! ## §14.7: a kept entry hides existing and arriving circle rows
 
-Ana and Ben share the circle "Gifts", holding notes 7 and 8. Ben deletes it:
-write 31 deletes notes 7 and 8, and the store log records the circle deleted.
-Ana, offline, adds note 9 to it in write 5. -/
+Ana and Ben share Gifts, holding notes 7 and 8. Ben's entry 4 deletes the
+circle without a row write. Ana's write 5 adds note 9 while offline. -/
 
 namespace DeletedCircle
 
 def M : Writes Nat Nat Nat where
-  ts w := if w = 1 then 1 else if w = 31 then 1600 else 1601
-  past w a := (w = 31 && a = 1) || (w = 5 && a = 1)
+  ts := id
+  past w a := w = 5 && a = 1
   chg w r :=
     if w = 1 ∧ (r = 7 ∨ r = 8) then some ⟨.ins, 0, fun c => c = 0⟩
-    else if w = 31 ∧ (r = 7 ∨ r = 8) then some ⟨.del, 1, fun _ => false⟩
     else if w = 5 ∧ r = 9 then some ⟨.ins, 0, fun c => c = 0⟩
     else none
 
-/-- The store log has deleted "Gifts", which holds notes 7, 8 and 9. -/
-def inputs (st : St Nat Nat Nat) : Inputs Nat Nat where
+def inputs (st : St Nat Nat Nat) : EntryInputs Nat Nat where
   rows := [7, 8, 9]
   present r := st.gen r % 2 == 1
   refs _ := []
   checkFails _ := false
-  inDeletedCircle r := r = 7 ∨ r = 8 ∨ r = 9
+  inDeletedCircle r := if r = 7 ∨ r = 8 ∨ r = 9 then some 4 else none
   claims _ := []
   rank r := r
 
-/-- Notes 7 and 8 are deleted; note 9 is taken out, naming the deleted
-circle, with its title in `_coven_lost`, in either arrival order. -/
+def returned (st : St Nat Nat Nat) : EntryInputs Nat Nat :=
+  { inputs st with inDeletedCircle := fun _ => none }
+
+/-- Existing and late rows keep generation 1 and their values. Dropping the
+entry returns all three without applying any row write. -/
 theorem example_14_7 :
-    (device M inputs [1, 31, 5]).merged.gen 7 = 2 ∧
-    (device M inputs [1, 5, 31]).merged.gen 8 = 2 ∧
-    ((device M inputs [1, 31, 5]).losses 9 none).map (fun l => (l.values 0, l.cause)) = some (some 5, LossCause.rules [Rule.deletedCircle]) ∧
-    ((device M inputs [1, 5, 31]).losses 9 none).map (fun l => (l.values 0, l.cause)) = some (some 5, LossCause.rules [Rule.deletedCircle]) := by decide
+    let st := [1, 5].foldl (step M) (St.init : St Nat Nat Nat)
+    st.gen 7 = 1 ∧ st.gen 8 = 1 ∧ st.gen 9 = 1 ∧
+    (entryView (inputs st)).rules 7 = [.deletedCircleEntry 4] ∧
+    (entryView (inputs st)).rules 8 = [.deletedCircleEntry 4] ∧
+    ((entryDevice M inputs [1, 5]).losses 9 none).map (fun l => (l.values 0, l.cause)) =
+      some (some 5, LossCause.rules [.deletedCircleEntry 4]) ∧
+    (entryView (returned st)).shown 7 = true ∧
+    (entryView (returned st)).shown 8 = true ∧
+    (entryView (returned st)).shown 9 = true := by decide
 
 end DeletedCircle
 

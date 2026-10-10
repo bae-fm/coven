@@ -5,8 +5,8 @@
 - The proof is checked by machine: a Lean 4 development in
   `spec/proofs/merge/`, which has no unproven step and uses no axiom beyond
   Lean's own.
-- Each claim names the Lean theorem that checks it; [B11](#b11-what-lean-checks-and-what-is-prose) lists what is argued
-  only here.
+- Each claim names the Lean theorem that checks it;
+  [B11](#b11-what-lean-checks-and-what-is-outside-the-model) lists the model's limits.
 
 ### B1 The claim
 
@@ -196,7 +196,7 @@ at.
     *stale*: the parent's generation it carries has been deleted since
     ([§8.4](../coven.md#84-foreign-keys));
   - whether the row's merged values fail a CHECK ([§8.6](../coven.md#86-check-constraints));
-  - whether the row is in a circle the store log has deleted ([§14.7](../coven.md#147-deleting-a-circle));
+  - the kept entry that deleted the row's circle, if any ([§14.7](../coven.md#147-deleting-a-circle));
   - each row's unique claims, each with a stamp: the timestamp of the latest
     write that set any of the constraint's columns in it ([§8.5](../coven.md#85-keys-and-uniqueness));
   - each key present in two audiences on the device ([§14.2](../coven.md#142-moving-rows)).
@@ -239,8 +239,11 @@ at.
   3. apply the other rules again until none fires.
 - A removed row's `_coven_lost` row names every rule that holds for it once
   the steps end, and the unique or other-audience rule from step 2.
-- In Lean: `Inputs`, `fires`, `rivalBefore`, `removal`, `view`, in
-  `Removal.lean`.
+- In Lean: `EntryInputs` and `entryView` carry the entry identity. They use
+  `fires`, `rivalBefore`, `removal` and `view` in `Removal.lean` for the same
+  three passes. `Inputs` retains Boolean circle inputs for the existing Rust
+  differential runner; `EntryInputs.erase` supplies those Boolean tests from
+  the entry, so there is only one removal algorithm.
 
 ### B8 Proof for the removal rules
 
@@ -331,10 +334,10 @@ at.
   - [§8.6](../coven.md#86-check-constraints): Ana sets start 10 while Ben sets end 8: the row is taken out,
     naming the CHECK. Ben's later end of 20 brings it back. Lean:
     `example_8_6`.
-  - [§14.7](../coven.md#147-deleting-a-circle): Ben deletes the circle "Gifts" and its notes 7 and 8, while Ana
-    adds note 9 to it. Notes 7 and 8 are deleted, and note 9 is taken out
-    with its title in `_coven_lost`, naming the deleted circle. Lean:
-    `example_14_7`.
+  - [§14.7](../coven.md#147-deleting-a-circle): Ben's entry deletes Gifts while Ana adds note 9.
+    Notes 7, 8 and 9 stay at generation 1, hidden with that entry named in
+    their losses. Dropping the entry returns all three. There is no circle
+    deletion write. Lean: `example_14_7`.
 
 ### B9 Audiences
 
@@ -404,34 +407,191 @@ at.
   `example_8_6`.
 - [§14.2](../coven.md#142-moving-rows): the store's note 1 wins over the circle's. Lean: `Moved.agree`,
   `Moved.store_wins`.
-- [§14.7](../coven.md#147-deleting-a-circle): note 9, added to a deleted circle, is taken out. Lean:
-  `example_14_7`.
+- [§14.7](../coven.md#147-deleting-a-circle): existing and late circle rows keep their
+  generations and setters, are hidden by the named entry, and return when
+  it drops. Lean: `example_14_7`.
 
-### B11 What Lean checks, and what is prose
+### B11 What Lean checks, and what is outside the model
 
-- Lean checks every theorem named above, with no unproven step. The axioms
-  they use are only Lean's own: `propext`, `Classical.choice`, `Quot.sound`.
-  `CovenMerge/Axioms.lean` prints them.
-- What Lean models abstractly:
-  - a write's values: a cell's value is the write that set it;
-  - the removal rules' inputs: any function of the merged state and the
-    store log, in the shape of [B7](#b7-the-removal-rules). The examples compute them from the
-    merged state Lean builds.
-- Argued here only:
-  - that coven computes the rules' inputs from the merged state as [B7](#b7-the-removal-rules) says:
-    - presence from generations;
-    - stale references by comparing generations;
-    - null for a set null reference whose parent's generation was deleted;
-    - CHECK on merged values;
-    - claim stamps from the cells' writes;
-  - that two devices compute the same inputs for a row when the merged
-    states of the rows those inputs read agree, which [B9](#b9-audiences)'s locality theorem
-    then uses;
-  - local triggers: they converge when they compute a function of the
-    current rows, since every change coven makes is ordinary SQL ([§8.7](../coven.md#87-triggers));
-  - files: where a file is ([§16.1](../coven.md#161-kinds-and-where-files-are)) is an ordinary cell, which the merged state
-    covers; uploading and caching aren't modelled;
-  - schema changes ([§17](../coven.md#17-schema-changes)) and resets ([§19.3](../coven.md#193-resetting-a-store)), which this model doesn't
-    include. The separate [store-log/data coupling](storelog-data.md) supplies
-    replay-dependent removal inputs and models snapshot replacement, including
-    a counterexample for losing migration values.
+Lean checks the theorems named in this appendix. `CovenMerge/Axioms.lean`
+prints their axioms; only Lean's `propext`, `Classical.choice` and
+`Quot.sound` are allowed. `scripts/check.sh` rebuilds the package, audits
+these axioms, and runs the existing Rust differential tests.
+
+Values are identified by their setters and cells. A column can be its old
+name, so a frozen record does not require that column in the new schema.
+`freeze_preserves_values` also proves preservation under any fixed mapping
+from these identities to scalar values. The model does not execute SQL,
+compare schemas, rename columns, convert write payloads, or encode snapshots.
+It has no live parent links in loss records; clearing serialized parent maps
+is outside it. Frozen records are held separately from the merge state and
+are never supplied to current removal rules.
+
+The rules take references, CHECK results and claims as inputs. Computing
+those inputs from SQL, reference null substitution, and local insert-to-update
+normalization remain outside the general proofs. The examples compute the
+inputs they use. Same-key uniqueness assumes the ordered audience claims
+specified by §14.2; the proof does not establish those claims from SQL.
+
+Store-log replay supplies the kept entry, its snapshot, and which deletions
+are final. Selecting these is outside this package. Schema eligibility and
+conversion verdicts are also inputs:
+`Boundary.lean` applies them, but does not prove the version/conversion
+algorithm or exclusion of a write that read an excluded input.
+
+As in B3, convergence assumes valid writes. At a reset it additionally
+requires a correct selected snapshot and `ResetGenerations`: a retained
+change's generation was reached by a retained input. This states the
+requirement that authoring uses the reloaded state, rather than discarded
+local generations. `reset_valid` and `reset_causal` then derive the ordinary
+merge's validity and causal-order conditions. The reset example checks its
+write validity, retained generation witnesses and snapshot correctness.
+
+Files, encryption, transport buffering, atomic SQLite installation, retention
+until finality, loss dismissal, fingerprint hashing and trigger execution are outside
+this model. The functions describe a completed atomic reload; they do not
+model a partially installed database. Rust still follows its previous
+behavior. The Boolean inputs and existing merge functions remain available
+for its differential tests and for the separate store-log/data package;
+those tests do not claim to check the new boundary behavior.
+
+### B12 Circle entries, migration deletes and frozen losses
+
+For [§14.7](../coven.md#147-deleting-a-circle), `EntryInputs` holds the
+responsible entry, and `entryView` records `deletedCircleEntry entry`.
+`deleted_rule_names_entry` proves the row is hidden and its loss names that
+entry. `circle_entries_preserve_merge` proves observation changes no merge
+record. `row_returns` proves a present row returns when no reason remains.
+`entry_device_converges` includes the named losses; `entry_device_rule_order`
+allows every order within §8's three passes.
+
+For [§17.1](../coven.md#171-host-application), `independentInputs` removes
+non-final circle causes and reruns all three passes. This also removes their
+effect on children. `nonfinal_only_untouched` proves that a row hidden only
+by those causes is left out of the entire migration write, preserving all
+its merge records and creating no frozen loss. `independent_rule_order` proves
+that decision independent of rule order; `nonfinal_does_not_decide` proves that
+stripping those causes again cannot change it. The checked
+`nonfinal_parent_and_child` history keeps
+a parent and child hidden only by the entry, but deletes a row with an
+independent CHECK failure. Final circle deletions can cause migration deletes.
+
+`withHiddenDeletes` gives the migration write an ordinary delete at each
+selected row's generation. `hidden_generation_delete`, `hidden_delete_even`
+and `migration_keeps_generation_record` prove the next even generation,
+empty live cells and retained delete identity. `migration_removes_live_loss`
+proves the old active removed-row record disappears. `captureHidden` holds
+one frozen whole-row record per deleted row, naming the breaking version and
+migration write and keeping the original setters. `hidden_value_frozen`
+proves this for every captured value, even when the migration had read it.
+
+`late_edit_recorded` proves an eligible edit at the old generation changes
+neither the generation nor the live cell, and records the arriving value
+against the generation's delete. `migration_and_late_edit` checks the three
+writes—insert, migration delete, concurrent edit—in both application orders.
+The migration's known input is kept in its frozen whole-row loss; the unseen
+edit is a separate cell loss. If several writes delete that incarnation,
+§8.3 chooses the earliest delete. An uncovered old-schema edit excluded by
+§17.1 instead gets the frozen schema loss proved by `excluded_values_recorded`.
+
+`migration_converges` covers every valid causal order of the authored
+migration and concurrent edits. The migration is authored from fixed inputs;
+receivers do not recompute its delete generations from their arrival prefix.
+`migration_capture_converges` proves equal author input sets also produce
+equal frozen records. `migration_retains_reversible_rows` checks that dropping
+a non-final deletion returns retained rows, while an independently invalid
+row stays deleted with its frozen loss.
+
+Dropping a table or column calls `freezeDropped` on each affected pending
+loss. `drop_freezes_affected`, `drop_preserves_pending` and
+`drop_preserves_all_pending` prove the affected records become frozen and
+that no record, setter, old name or original cause is removed. A whole-row
+loss keeps the whole row. `dropped_schema_keeps_losses` checks both a pending
+color value and a whole-row loss.
+
+### B13 Reset contents on every device
+
+For [§19.3](../coven.md#193-resetting-a-store), `ResetBoundary` distinguishes
+positions consumed by the snapshot from writes that contributed to its merge
+state. Ignored and excluded writes can have consumed positions without
+contributing values, as [format D7](../format.md#d7-snapshots) requires.
+`consumed_is_not_input` checks that distinction through a later reload.
+
+`reloadReset` starts with the snapshot and applies only uncovered writes
+whose `store_log_read` includes the kept reset. `reset_exact` gives that
+complete state equality. `reset_covered_not_reapplied` and
+`reset_ignored_no_effect` prove that covered writes and unread pre-reset
+writes add nothing, including no merge losses. `post_reset_ignores_old_dependency`
+proves that a post-reset write can read discarded history without inheriting
+its effects. `reset_causal` proves that filtering those parts preserves the
+causal order needed by merge.
+
+`reset_every_device` replaces the target audience regardless of its previous
+local state, including the author's. `reset_other_audience` preserves other
+audiences. `reset_author_and_remote` checks a snapshot covering write 0,
+ignored writes 1 and 2, and a post-reset write 3 that had read write 2. Both
+author and remote end with write 3 and no losses for writes 1 or 2.
+
+`reset_converges` allows different arrival orders and even different sets of
+ignored writes, provided the eligible sets agree. `boundary_converges` and
+`boundary_rule_order` use the shared `Snapshot.lean` proofs to extend this to
+the app view, entry-named removed rows, cell losses, snapshot-frozen records
+and schema-excluded records. Reset
+eligibility is checked before schema exclusion: `boundary_reset_no_loss`
+and `reset_ignored_never_schema_loss` prove that ignored parts do not gain
+schema losses. Frozen records in the chosen snapshot remain included.
+
+A boundary can have no reset entry. Then only the schema verdict filters
+uncovered writes; `no_reset_cannot_ignore` proves none is reset-ignored.
+`migration_without_reset` checks an eligible converted edit losing to the
+snapshot's generation delete, an excluded edit becoming a frozen schema
+loss, and a losing migration's computed value disappearing without a new
+loss. Each uses the same selected snapshot and incoming write.
+
+### B14 Where every value goes
+
+For [§3](../coven.md#3-guarantees), `value_accounted` quantifies over every
+setter in the effective merge history. Each value is either still shown,
+replaced by a write that read it, recorded as a lost cell, or captured in a
+removed row with a rule that holds. `boundary_value_accounted` applies that
+proof to the actual state produced by `boundaryDevice`.
+
+`hidden_value_frozen` accounts for rows a migration deletes.
+`drop_preserves_all_pending` accounts for losses whose schema disappears.
+`excluded_values_recorded` keeps excluded changes, including an empty-valued
+delete's identity. `boundary_accounted` proves the only other dispositions
+are the snapshot, ordinary merge, or exactly the two stated exceptions:
+reset-ignored writes and values computed by a losing migration. This is a
+proof about the model's values and supplied schema verdicts, not a proof of
+an arbitrary application's SQL migration.
+
+`same_key_shows_once` proves two rows with ordered other-audience claims
+cannot both be shown. `same_key_after_return` checks putting a circle row
+into the store with the same key: when the deletion drops, the store row
+still shows and the circle row is hidden by the other-audience rule.
+
+### B15 Checked counterexamples and readings
+
+No counterexample to the modeled current rules is claimed here.
+`UniqueOnce.unique_with_others` remains a checked counterexample to running
+uniqueness in an unrestricted loop: a deleted folder with two notes sharing
+a title can leave one note or neither, depending on rule order. The spec's
+three passes avoid that result; this is not a counterexample to §8.
+
+The readings used are:
+
+- “Any arrival order” permits transport arrival in any order; application
+  still obeys causality. “Any rule order” stays within §8's three passes.
+- Migration judges independent causes by rerunning all three passes without
+  non-final circle deletions, including unique and other-audience claims.
+  Finality and the responsible kept entry are supplied by store-log replay.
+- A late edit that is eligible after schema handling follows the generation
+  delete path. An excluded old-schema edit follows the frozen schema-loss path.
+- Snapshot coverage means consumed positions; contributing inputs are
+  separate. A kept reset filters uncovered writes before schema exclusion;
+  with no reset, only schema eligibility restricts them.
+- “The same key shows once” means at most once: another removal rule may
+  hide both rows. The store copy wins when it survives the other rules.
+- Setter-and-cell identity stands for the written scalar. Freezing captures
+  that identity and the old column name; it never substitutes a current
+  foreign-key value into a loss.

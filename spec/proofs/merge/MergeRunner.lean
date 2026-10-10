@@ -74,7 +74,7 @@ private def readRow (j : Json) : Except String InputRow := do
 private def ruleNumber : Rule → Nat
   | .foreignKey => 0
   | .check => 1
-  | .deletedCircle => 2
+  | .deletedCircle | .deletedCircleEntry _ => 2
   | .otherAudience => 3
   | .unique => 4
 
