@@ -104,9 +104,9 @@ impl StoreLogSync {
                 self.database.confirm_access_key_deleted(key).await?;
                 return Ok(Begun::Value(Output::Unit));
             }
-            Command::BlockedOperations => {
-                return Ok(Begun::Value(Output::BlockedOperations(
-                    self.blocked_operations().await?,
+            Command::PendingOperations => {
+                return Ok(Begun::Value(Output::PendingOperations(
+                    self.pending_operations().await?,
                 )))
             }
             Command::AccessKeysToDelete => {
@@ -120,7 +120,7 @@ impl StoreLogSync {
                 return Ok(Begun::Value(Output::Unit));
             }
             Command::Retry(id) => {
-                let record = self.blocked(id).await?;
+                let record = self.pending(id).await?;
                 let mut data = Data::read(&record)?;
                 if data.completing_reset(&record) {
                     if let Some(reload) = self.pending_reload().await? {
@@ -159,7 +159,7 @@ impl StoreLogSync {
                 return Ok(Begun::Operation(id));
             }
             Command::Discard(id) => {
-                let record = self.blocked(id).await?;
+                let record = self.pending(id).await?;
                 let data = Data::read(&record)?;
                 if let Data::Snapshots(task) = &data {
                     self.discard_snapshot(&record, task.clone()).await?;
@@ -543,25 +543,25 @@ impl StoreLogSync {
         }
     }
 
-    async fn blocked(&self, id: OperationId) -> Result<OperationRecord, SyncError> {
+    async fn pending(&self, id: OperationId) -> Result<OperationRecord, SyncError> {
         let record = self
             .database
             .operation(id)
             .await?
             .filter(|r| r.failure.is_some())
-            .ok_or(SyncError::NotBlocked(id))?;
+            .ok_or(SyncError::NotPending(id))?;
         if Data::read(&record)?.app_kind(&record.started_by).is_none() {
-            return Err(SyncError::NotBlocked(id));
+            return Err(SyncError::NotPending(id));
         }
         Ok(record)
     }
 
-    pub(crate) async fn blocked_operations(&self) -> Result<Vec<BlockedOperation>, SyncError> {
+    pub(crate) async fn pending_operations(&self) -> Result<Vec<PendingOperation>, SyncError> {
         let mut operations = Vec::new();
         for record in self.database.operations().await? {
             if let Some(failure) = &record.failure {
                 if let Some(kind) = Data::read(&record)?.app_kind(&record.started_by) {
-                    operations.push(BlockedOperation {
+                    operations.push(PendingOperation {
                         id: record.id,
                         kind,
                         failure: failure.clone(),

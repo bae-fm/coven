@@ -418,7 +418,7 @@
     coven package versions travel.
   - The signature authenticates the complete list (§19.1). A list exceeding
     D1/D2 or the provider's replacement limit fails publication and records
-    a Positions blocker; it is never silently truncated.
+    a pending Positions record; it is never silently truncated.
 
 - A clock observation (kind 12) contains `device:DeviceId`, matching its
   path. It asserts no device time. Its sealed object's provider-assigned

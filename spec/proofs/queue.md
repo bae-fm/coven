@@ -140,7 +140,7 @@ Every send in the queue's `Step` requires a successful identity check.
 `ready_owns_counters` proves that custody agrees, the device is not replaced,
 and storage has not passed any local reservation. Observed counters include
 authenticated snapshot and posted positions, so deleted log objects can still
-prove a stale copy. A failed read is a blocker, not evidence of empty storage.
+prove a stale copy. A failed read leaves work pending; it is not evidence of empty storage.
 
 ## Checked histories and limits
 

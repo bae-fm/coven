@@ -331,15 +331,15 @@ async fn cancelled_app_future_keeps_running_and_permanent_failure_retries_or_dis
         operations.create_circle("").await,
         Err(SyncError::Database(_))
     ));
-    let blocked = operations.blocked_operations().await.unwrap();
-    assert_eq!(blocked.len(), 1);
-    let blocked = blocked[0].id;
+    let pending = operations.pending_operations().await.unwrap();
+    assert_eq!(pending.len(), 1);
+    let pending = pending[0].id;
     assert!(matches!(
-        operations.retry_blocked_operation(blocked).await,
+        operations.retry_pending_operation(pending).await,
         Err(SyncError::Database(_))
     ));
-    operations.discard_blocked_operation(blocked).await.unwrap();
-    assert!(operations.blocked_operations().await.unwrap().is_empty());
+    operations.discard_pending_operation(pending).await.unwrap();
+    assert!(operations.pending_operations().await.unwrap().is_empty());
     operations.close().await.unwrap();
 }
 
@@ -452,23 +452,23 @@ async fn permanent_storage_failure_preserves_fixed_bytes_for_retry_and_discard()
         ));
         let files = file_owner(&a);
         let operations = { operation_owner(a.sync, files) };
-        let blocked = operations.blocked_operations().await.unwrap();
-        assert_eq!(blocked.len(), 1);
-        assert_eq!(blocked[0].id, id);
-        assert_eq!(blocked[0].kind, OperationKind::CreateCircle);
-        assert!(!blocked[0].failure.is_empty());
+        let pending = operations.pending_operations().await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, id);
+        assert_eq!(pending[0].kind, OperationKind::CreateCircle);
+        assert!(!pending[0].failure.is_empty());
         assert!(matches!(
             storage.read(&object::path(fixed.entry.position)).await,
             Err(error) if error.failure() == StorageFailure::NotFound
         ));
         operations.set_storage(Some(storage.clone())).await.unwrap();
         operations.sync_store_log().await.unwrap();
-        assert_eq!(operations.blocked_operations().await.unwrap().len(), 1);
+        assert_eq!(operations.pending_operations().await.unwrap().len(), 1);
         assert!(a.db.local_store_log().await.unwrap().upload.is_some());
         if discard {
-            operations.discard_blocked_operation(id).await.unwrap();
+            operations.discard_pending_operation(id).await.unwrap();
         } else {
-            operations.retry_blocked_operation(id).await.unwrap();
+            operations.retry_pending_operation(id).await.unwrap();
         }
         assert!(a.db.operations().await.unwrap().is_empty());
         assert_eq!(
@@ -513,19 +513,19 @@ async fn retained_provider_grants_block_both_requested_and_remote_revocations() 
                 }
             );
         }
-        let blocked = operations.blocked_operations().await.unwrap();
-        assert_eq!(blocked.len(), 1);
+        let pending = operations.pending_operations().await.unwrap();
+        assert_eq!(pending.len(), 1);
         assert_eq!(
-            blocked[0].kind,
+            pending[0].kind,
             if remote {
                 OperationKind::RevokeAccess
             } else {
                 OperationKind::RemoveMember
             }
         );
-        let id = blocked[0].id;
+        let id = pending[0].id;
         assert!(
-            matches!(operations.retry_blocked_operation(id).await, Err(SyncError::AccessRemains(found)) if found == shares)
+            matches!(operations.retry_pending_operation(id).await, Err(SyncError::AccessRemains(found)) if found == shares)
         );
         assert!(MemoryStorage::for_recipient(&storage, "cat@example.com")
             .unwrap()
@@ -535,8 +535,8 @@ async fn retained_provider_grants_block_both_requested_and_remote_revocations() 
         storage
             .set_retained_access("cat@example.com", Vec::new())
             .await;
-        operations.retry_blocked_operation(id).await.unwrap();
-        assert!(operations.blocked_operations().await.unwrap().is_empty());
+        operations.retry_pending_operation(id).await.unwrap();
+        assert!(operations.pending_operations().await.unwrap().is_empty());
         assert!(
             matches!(MemoryStorage::for_recipient(&storage, "cat@example.com")
             .unwrap()
@@ -787,15 +787,15 @@ async fn maintenance_failures_are_hidden_and_retry_on_the_next_pass() {
         ));
         let files = file_owner(&a);
         let operations = operation_owner(a.sync, files);
-        assert!(operations.blocked_operations().await.unwrap().is_empty());
+        assert!(operations.pending_operations().await.unwrap().is_empty());
         let failed = a.db.operations().await.unwrap().remove(0);
         assert_eq!(failed.id, id);
         assert!(failed.failure.is_some());
         assert!(
-            matches!(operations.retry_blocked_operation(id).await, Err(SyncError::NotBlocked(found)) if found == id)
+            matches!(operations.retry_pending_operation(id).await, Err(SyncError::NotPending(found)) if found == id)
         );
         assert!(
-            matches!(operations.discard_blocked_operation(id).await, Err(SyncError::NotBlocked(found)) if found == id)
+            matches!(operations.discard_pending_operation(id).await, Err(SyncError::NotPending(found)) if found == id)
         );
         let error = operations.sync().await.unwrap_err();
         assert!(
@@ -811,7 +811,7 @@ async fn maintenance_failures_are_hidden_and_retry_on_the_next_pass() {
 }
 
 #[tokio::test]
-async fn app_reload_and_reset_stay_blocked_until_explicit_retry() {
+async fn app_reload_and_reset_stay_pending_until_explicit_retry() {
     for (command, kind) in [
         (Command::Reload, OperationKind::ReloadFromSnapshot),
         (Command::Reset(Audience::Store), OperationKind::Reset),
@@ -830,11 +830,11 @@ async fn app_reload_and_reset_stay_blocked_until_explicit_retry() {
         ));
         let files = file_owner(&a);
         let operations = operation_owner(a.sync, files);
-        let blocked = operations.blocked_operations().await.unwrap();
-        assert_eq!(blocked.len(), 1);
-        assert_eq!(blocked[0].id, id);
-        assert_eq!(blocked[0].kind, kind);
-        assert!(!blocked[0].failure.is_empty());
+        let pending = operations.pending_operations().await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, id);
+        assert_eq!(pending[0].kind, kind);
+        assert!(!pending[0].failure.is_empty());
         operations.set_storage(Some(storage.clone())).await.unwrap();
         if kind == OperationKind::ReloadFromSnapshot {
             assert!(
@@ -843,7 +843,7 @@ async fn app_reload_and_reset_stay_blocked_until_explicit_retry() {
         } else {
             operations.sync().await.unwrap();
         }
-        assert_eq!(operations.blocked_operations().await.unwrap(), blocked);
+        assert_eq!(operations.pending_operations().await.unwrap(), pending);
         operations.close().await.unwrap();
         a.sync = StoreLogSync::new(
             storage.clone(),
@@ -858,9 +858,9 @@ async fn app_reload_and_reset_stay_blocked_until_explicit_retry() {
         );
         let files = file_owner(&a);
         let operations = operation_owner(a.sync, files);
-        assert_eq!(operations.blocked_operations().await.unwrap(), blocked);
-        operations.retry_blocked_operation(id).await.unwrap();
-        assert!(operations.blocked_operations().await.unwrap().is_empty());
+        assert_eq!(operations.pending_operations().await.unwrap(), pending);
+        operations.retry_pending_operation(id).await.unwrap();
+        assert!(operations.pending_operations().await.unwrap().is_empty());
         operations.close().await.unwrap();
     }
 }
@@ -892,8 +892,8 @@ async fn migration_and_audience_publication_share_the_schema_change_purpose() {
             .await
             .unwrap();
         assert_eq!(
-            a.sync.blocked_operations().await.unwrap(),
-            [BlockedOperation {
+            a.sync.pending_operations().await.unwrap(),
+            [PendingOperation {
                 id,
                 kind: OperationKind::SchemaChange,
                 failure: "publication refused".into(),
@@ -966,9 +966,9 @@ async fn a_reload_failure_during_sync_reaches_its_waiting_app_call() {
         std::task::Poll::Ready(())
     })
     .await;
-    let blocked = operations.blocked_operations().await.unwrap();
-    assert_eq!(blocked.len(), 1);
-    assert_eq!(blocked[0].id, retained[0].id);
-    assert_eq!(blocked[0].kind, OperationKind::ReloadFromSnapshot);
+    let pending = operations.pending_operations().await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, retained[0].id);
+    assert_eq!(pending[0].kind, OperationKind::ReloadFromSnapshot);
     operations.close().await.unwrap();
 }

@@ -18,7 +18,7 @@ structure Evidence where
 
 inductive Preflight where
   | ready
-  | blocked
+  | pending
   | identityMismatch
   | storageAhead
   | replaced
@@ -26,7 +26,7 @@ inductive Preflight where
 
 /-- No read failure is interpreted as empty storage (§10, E5). -/
 def checkIdentity (device : Nat) (reserved : Counters) : Option Evidence → Preflight
-  | none => .blocked
+  | none => .pending
   | some e =>
     if e.custody ≠ some device then .identityMismatch
     else if e.replaced then .replaced

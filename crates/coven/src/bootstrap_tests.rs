@@ -200,7 +200,7 @@ async fn declined_and_expired_requests_finish_without_committing_custody() {
             let request = next_join_request(&owner.handle).await;
             if expiry {
                 owner.clock.set(invite.expires_at);
-                owner.handle.blocked_operations().await.unwrap();
+                owner.handle.pending_operations().await.unwrap();
             } else {
                 owner.handle.decline_join_request(&request).await.unwrap();
             }

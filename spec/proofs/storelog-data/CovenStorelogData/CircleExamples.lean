@@ -111,7 +111,7 @@ example :
 ordinary write has nevertheless already taken effect. -/
 theorem retry_checks_current_membership :
     pollDeletion (W := Fin 3) afterDrop.log.result (.published 6) = .ready ∧
-    retryDeletion (W := Fin 3) afterDrop.log.result.state 1 0 = .blocked ∧
+    retryDeletion (W := Fin 3) afterDrop.log.result.state 1 0 = .pending ∧
     pollDeletion (W := Fin 3) afterDrop.log.result .finished = .finished := by decide
 
 def beforeDelete : CovenMerge.St (Fin 3) Row Unit :=

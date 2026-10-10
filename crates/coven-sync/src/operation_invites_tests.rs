@@ -310,9 +310,9 @@ async fn failed_join_request_still_expires_and_live_requests_are_delivered() {
         .create(&ObjectPath::join_request(invite.id), &[0])
         .await
         .unwrap();
-    assert_eq!(operations.blocked_operations().await.unwrap().len(), 1);
+    assert_eq!(operations.pending_operations().await.unwrap().len(), 1);
     a.clock.set(invite.expires_at);
-    assert!(operations.blocked_operations().await.unwrap().is_empty());
+    assert!(operations.pending_operations().await.unwrap().is_empty());
     assert!(
         matches!(joining.list(&ObjectPrefix::store_logs()).await, Err(error) if error.failure() == StorageFailure::PermissionDenied)
     );
@@ -351,13 +351,13 @@ async fn cancelling_keeps_retained_provider_grants_visible_until_acknowledged() 
         operations.cancel_invite(&invite.id).await,
         Err(SyncError::AccessRemains(_))
     ));
-    let blocked = operations.blocked_operations().await.unwrap();
-    assert_eq!(blocked.len(), 1);
+    let pending = operations.pending_operations().await.unwrap();
+    assert_eq!(pending.len(), 1);
     storage
         .set_retained_access("join@example.com", Vec::new())
         .await;
     operations
-        .retry_blocked_operation(blocked[0].id)
+        .retry_pending_operation(pending[0].id)
         .await
         .unwrap();
     assert!(a.db.operations().await.unwrap().is_empty());

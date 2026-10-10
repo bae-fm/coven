@@ -92,7 +92,7 @@ structure QueuedFile where
 structure State where
   rows : Nat → Option RowFile
   queue : List QueuedFile
-  blocked : List Reference
+  pending : List Reference
   writes : Nat
 
 /-- §16.1: a single transaction publishes all four columns and the queue. -/
@@ -107,10 +107,10 @@ theorem attachment_atomic (s : State) (rowId : Nat) (q : QueuedFile) :
   simp [attach]
 
 /-- §16.5: called only after complete equal bytes have been confirmed.
-Both local queue and blocker disappear in one transaction. -/
+Both local queue and pending record disappear in one transaction. -/
 def complete (s : State) (r : Reference) : State :=
   { s with queue := s.queue.filter (fun q => q.row.reference != r)
-           blocked := s.blocked.filter (· != r) }
+           pending := s.pending.filter (· != r) }
 
 def finish (s : State) (r : Reference) (expected : Bytes)
     (remote : Except ReadFailure (Option Object)) : State × Settlement :=
@@ -134,7 +134,7 @@ theorem completion_changes_no_row (s : State) (r : Reference) (expected : Bytes)
 
 theorem completion_retires_both (s : State) (r : Reference) :
     (∀ q ∈ (complete s r).queue, q.row.reference ≠ r) ∧
-    r ∉ (complete s r).blocked := by
+    r ∉ (complete s r).pending := by
   simp [complete]
 
 theorem completion_idempotent (s : State) (r : Reference) :

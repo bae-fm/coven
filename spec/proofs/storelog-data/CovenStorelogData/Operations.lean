@@ -18,7 +18,7 @@ inductive Deletion (W : Type) where
   | uploaded
   | published (entry : Nat)
   | finished
-  | blocked
+  | pending
   deriving DecidableEq, Repr
 
 /-- A deletion's write is exactly the present rows selected in its transaction;
@@ -57,7 +57,7 @@ def pollDeletion {W : Type} (result : CovenStorelog.Result) : Deletion W → Del
 
 def retryDeletion {W : Type} (s : CovenStorelog.State) (member circle : Nat) : Deletion W :=
   if (CovenStorelog.lookup s.circles circle).isNone then .finished
-  else if CovenStorelog.inCircle s circle member then .ready else .blocked
+  else if CovenStorelog.inCircle s circle member then .ready else .pending
 
 /-- Restart changes only the journal, never the already committed data. -/
 theorem dropped_delete_keeps_write {W Col : Type} [DecidableEq W]

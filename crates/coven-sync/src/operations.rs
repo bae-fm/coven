@@ -68,7 +68,7 @@ pub(crate) enum Command {
         String,
         crate::StorageCommit,
     ),
-    BlockedOperations,
+    PendingOperations,
     AccessKeysToDelete,
     Storage(Option<Arc<dyn Storage>>),
     Close,
@@ -83,7 +83,7 @@ pub(crate) enum Output {
     Circles(Vec<Circle>),
     CircleMembers(Vec<CircleMemberInfo>),
     Invite(Invite),
-    BlockedOperations(Vec<BlockedOperation>),
+    PendingOperations(Vec<PendingOperation>),
     AccessKeysToDelete(Vec<AccessKeyToDelete>),
 }
 
@@ -214,10 +214,10 @@ impl Operations {
     }
     /// Read failed app work, including while stopped. Maintenance failures go
     /// through the sync pass and retry on its next invocation.
-    pub async fn blocked_operations(&self) -> Result<Vec<BlockedOperation>, SyncError> {
-        match self.call(Command::BlockedOperations).await? {
-            Output::BlockedOperations(operations) => Ok(operations),
-            _ => unreachable!("blocked operations result"),
+    pub async fn pending_operations(&self) -> Result<Vec<PendingOperation>, SyncError> {
+        match self.call(Command::PendingOperations).await? {
+            Output::PendingOperations(operations) => Ok(operations),
+            _ => unreachable!("pending operations result"),
         }
     }
     /// Read S3 key deletions still awaiting confirmation, including while stopped.
@@ -283,14 +283,14 @@ impl Operations {
             .await
     }
     /// Resume a failed operation from its next uncompleted step.
-    pub async fn retry_blocked_operation(
+    pub async fn retry_pending_operation(
         &self,
         operation: OperationId,
     ) -> Result<(), OperationError> {
         self.call(Command::Retry(operation)).await.map(|_| ())
     }
     /// Discard a failed operation, publishing any already reserved entry first.
-    pub async fn discard_blocked_operation(
+    pub async fn discard_pending_operation(
         &self,
         operation: OperationId,
     ) -> Result<(), OperationError> {
@@ -440,7 +440,7 @@ impl OperationRun {
                             self.writes.set_storage(Some(storage));
                         }
                         let _ = reply.send(result.map(|()| Output::Unit));
-                    } else if matches!(command, Command::BlockedOperations | Command::AccessKeysToDelete) {
+                    } else if matches!(command, Command::PendingOperations | Command::AccessKeysToDelete) {
                         query = Some((reply, command));
                     } else if matches!(command, Command::SyncAll) {
                         response = Some((reply, self.sync_pass().await.map(|()| Output::Unit)));
@@ -589,7 +589,7 @@ impl OperationRun {
                     }
                     Err(SyncError::Stopped(SyncFailure::UpdateRequired)) => {
                         // The committed operation waits for the next app open;
-                        // an update requirement is not a permanently blocked step.
+                        // an update requirement is not a permanent step failure.
                         if let Some(reply) = self.waiters.remove(&record.id) {
                             let _ = reply.send(Err(SyncFailure::UpdateRequired.into()));
                         }

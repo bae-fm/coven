@@ -221,7 +221,7 @@ operation id, its Circle, its
   responses.
 - `Finalizing` — the successor commit, outcome, and bootstraps are staged and
   about to publish.
-- `Blocked { block }` — the operation cannot publish.
+- A pending record names why the operation cannot publish.
   [`AuthorityLost`](rustdoc:enum:coven::CircleOperationBlock) means the author's
   exact store grant no longer has current write authority; the initiator calls
   `circles.retry_operation(op_id).await?` once authority is restored.
@@ -257,7 +257,7 @@ the commit is out there and nothing has taken its place —
 [`discard_operation`](rustdoc:method:coven::Circles::discard_operation) returns
 `DiscardRequiresNonactivation` and leaves the durable operation unchanged.
 Discarding an ordinary *host write* that a Circle refused is separate, on
-[`WriteStatus`](#offline-and-blocked-writes).
+[`WriteStatus`](#offline-and-pending-writes).
 
 ### Control conflicts
 
@@ -405,15 +405,15 @@ A move out of Local or an unavailable Circle requires every referenced blob's
 verified plaintext before the host transaction commits; missing material fails
 the write rather than deferring a download.
 
-## Offline and blocked writes
+## Offline and pending writes
 
 The [write status](/docs/sync-model#lifecycle) surface is unchanged for Circle
-rows: a host transaction is `LocalOnly`, `LocalOnlyBlocked`, `Pending`,
-`Publishing`, `Published`, `Blocked`, or `Resolved`, whatever its rows' audience. One
+rows: a host transaction is `LocalOnly`, `Pending`, `Publishing`, `Published`,
+or `Resolved`, with a pending record when it cannot advance. One
 [`WriteBlock`](rustdoc:enum:coven::WriteBlock) reason is Circle-specific:
 `RotationRequired { circle_id, removed_members }`, recorded when a write targets
 a Circle whose roster names a removed store member. Repair it by completing the
-Circle's close (or re-adding the member to the store), then retry the blocked
+Circle's close (or re-adding the member to the store), then retry the pending
 write. Circle writes never claim global serializability: a concurrent
 constraint conflict surfaces as a typed deterministic conflict, the same as a
 Store write.

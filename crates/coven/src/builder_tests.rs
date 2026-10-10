@@ -128,8 +128,8 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         Err(FileReadError::Database(DbError::FileRefChanged { .. }))
     ));
     assert!(matches!(
-        handle.retry_blocked_operation(OperationId(-1)).await,
-        Err(OperationError::NotBlocked(OperationId(-1)))
+        handle.retry_pending_operation(OperationId(-1)).await,
+        Err(OperationError::NotPending(OperationId(-1)))
     ));
     handle.get_members().await.unwrap();
     let circle = handle.circles().list().await.unwrap().remove(0);

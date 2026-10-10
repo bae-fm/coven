@@ -68,7 +68,7 @@ import CovenStorage
 #print axioms CovenStorage.reset_loads_once
 #print axioms CovenStorage.commit_reserves_next
 #print axioms CovenStorage.reset_first_write_new_path
-#print axioms CovenStorage.blocked_gate_emits_nothing
+#print axioms CovenStorage.non_sending_gate_emits_nothing
 #print axioms CovenStorage.combined_end_keeps_completed
 #print axioms CovenStorage.beyond_end_waits
 

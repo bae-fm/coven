@@ -142,7 +142,7 @@ async fn opening_and_sql_do_not_unlock_custody_and_callback_failures_roll_back()
         0
     );
     assert!(handle.access_keys_to_delete().await.unwrap().is_empty());
-    assert!(handle.blocked_operations().await.unwrap().is_empty());
+    assert!(handle.pending_operations().await.unwrap().is_empty());
     let reader = builder(&app, layout)
         .key_custody(KeyCustody::Custom(keys.clone()))
         .identity_custody(IdentityCustody::Custom(identity.clone()))

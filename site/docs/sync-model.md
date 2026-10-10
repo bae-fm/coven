@@ -223,7 +223,7 @@ the presence of an uploaded package alone never proves publication.
 Before an append, the write is `Publishing`. A storage or readback failure puts
 it back in `Pending`; the loop's reconnect and backoff policy owns the retry. A
 missing blob, a still-local user blob, invalid package data, or invalid Store
-protocol state becomes typed durable `Blocked` and holds later writes behind it.
+protocol state creates a typed durable pending record and holds later writes behind it.
 After acceptance is verified, local completion records `PublishedWrite::Commit`
 with the exact commit, or `PublishedWrite::Snapshot` when accepted snapshot
 coverage proves completion after the commit's history has retired. The latter
@@ -231,18 +231,17 @@ names the reserved author position and accepted snapshot without inventing an
 exact candidate hash. Publication evidence, replay state, owned cleanup metadata,
 and the write's completion are recorded atomically.
 
-The host lists blocked records with `handle.blocked_writes()`. After repairing
-the named prerequisite, `handle.retry_blocked_write(&write_id)` requeues the
-blocked records and wakes sync. If the write must be abandoned,
-`handle.discard_blocked_write(&write_id)` atomically reverses it and every later
+The host lists pending records with `handle.pending()`. After repairing
+the named prerequisite, retrying a pending write requeues it and wakes sync.
+If the write must be abandoned, discarding it atomically reverses it and every later
 unpublished write whose working rows depend on it. Discarded records remain
 queryable with terminal `Resolved(Discarded)` status and no longer participate
 in preparation.
 
-A retained private-only write that conflicts with accepted shared history becomes
-`LocalOnlyBlocked(RebaseConflict)`. The conflict identifies its `WriteId`, affected
+A retained private-only write that conflicts with accepted shared history has
+a pending record with reason `RebaseConflict`. The conflict identifies its `WriteId`, affected
 rows, and reason. The failed apply preserves the private write and its dependent
-suffix. `retry_blocked_write` returns that write to `LocalOnly`, so it remains
+suffix. Retrying returns that write to `LocalOnly`, so it remains
 private; explicit discard reverses the dependent unpublished suffix as above.
 Private rows already folded into the baseline have no remaining write receipt;
 their conflicts report the row and accepted commit without inventing a `WriteId`.
@@ -398,7 +397,7 @@ stops. Intermediate values may be coalesced. `Failed` preserves the typed cause
 of a whole-pass failure; `Synced` carries only the pass's completion time. Live
 queries notify the app when rows change. Waiting writes, damaged objects,
 fingerprint disagreements and device progress remain internal. The handle's
-`blocked_operations()` and `access_keys_to_delete()` calls expose failures and
+`pending_operations()` and `access_keys_to_delete()` calls expose failures and
 revocation actions that need attention. Removal, a location taken by another store,
 or a required update stops further passes; other pass failures retry on the idle
 interval or an explicit request.

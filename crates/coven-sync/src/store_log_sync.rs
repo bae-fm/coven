@@ -201,7 +201,7 @@ impl StoreLogSync {
                 .iter()
                 .any(|record| record.blocks(coven_format::stuck::LogObject::Entry(*id)))
         });
-        let mut blocked = BTreeSet::new();
+        let mut pending_devices = BTreeSet::new();
         let mut cache = BTreeMap::new();
         let mut origins = Vec::new();
         for (id, stored) in entries
@@ -209,7 +209,7 @@ impl StoreLogSync {
             .filter(|(id, _)| id.number == 1 && !local.log.replay.entries.contains_key(id))
         {
             let path = &stored.path;
-            if blocked.contains(&id.device) {
+            if pending_devices.contains(&id.device) {
                 continue;
             }
             let Some(bytes) = self.read_entry(stored).await? else {
@@ -228,13 +228,13 @@ impl StoreLogSync {
                     }
                     Err(failure) => {
                         self.stuck_entry(*id, path, failure).await?;
-                        blocked.insert(id.device);
+                        pending_devices.insert(id.device);
                     }
                 },
                 Err(error) => {
                     self.stuck_entry(*id, path, ObjectCheckFailure::Parse(Arc::new(error)))
                         .await?;
-                    blocked.insert(id.device);
+                    pending_devices.insert(id.device);
                 }
             }
             cache.insert(*id, bytes);
@@ -251,7 +251,7 @@ impl StoreLogSync {
                     if origin.timestamp < own.timestamp {
                         return Err(SyncFailure::LocationTaken.into());
                     }
-                    blocked.insert(origin.timestamp.device());
+                    pending_devices.insert(origin.timestamp.device());
                 }
             }
         }
@@ -263,7 +263,8 @@ impl StoreLogSync {
             let mut advanced = false;
             for (id, stored) in &entries {
                 let path = &stored.path;
-                if blocked.contains(&id.device) || local.log.replay.entries.contains_key(id) {
+                if pending_devices.contains(&id.device) || local.log.replay.entries.contains_key(id)
+                {
                     continue;
                 }
                 if id.number > 1
@@ -276,7 +277,7 @@ impl StoreLogSync {
                 }
                 if !cache.contains_key(id) {
                     let Some(bytes) = self.read_entry(stored).await? else {
-                        blocked.insert(id.device);
+                        pending_devices.insert(id.device);
                         continue;
                     };
                     cache.insert(*id, bytes);
@@ -286,13 +287,13 @@ impl StoreLogSync {
                     Err(error) => {
                         self.stuck_entry(*id, path, ObjectCheckFailure::Parse(Arc::new(error)))
                             .await?;
-                        blocked.insert(id.device);
+                        pending_devices.insert(id.device);
                         continue;
                     }
                 };
                 if let Err(failure) = object::check_origin(&envelope, path) {
                     self.stuck_entry(*id, path, failure).await?;
-                    blocked.insert(id.device);
+                    pending_devices.insert(id.device);
                     continue;
                 }
                 let SingleChunkObject::StoreLog { key, origin, .. } = &envelope else {
@@ -302,7 +303,7 @@ impl StoreLogSync {
                     .as_ref()
                     .is_some_and(|origin| origin.store != local.store)
                 {
-                    blocked.insert(id.device);
+                    pending_devices.insert(id.device);
                     continue;
                 }
                 if !self
@@ -319,7 +320,7 @@ impl StoreLogSync {
                     Ok(entry) => entry,
                     Err(failure) => {
                         self.stuck_entry(*id, path, failure).await?;
-                        blocked.insert(id.device);
+                        pending_devices.insert(id.device);
                         continue;
                     }
                 };
@@ -334,7 +335,7 @@ impl StoreLogSync {
                     Ok(false) => continue,
                     Err(failure) => {
                         self.stuck_entry(*id, path, failure).await?;
-                        blocked.insert(id.device);
+                        pending_devices.insert(id.device);
                         continue;
                     }
                 }

@@ -388,13 +388,13 @@ async fn a_retained_grant_on_old_access_blocks_removal_until_explicit_retry() {
             .list(&ObjectPrefix::all())
             .await, Err(error) if error.failure() == StorageFailure::PermissionDenied)
     );
-    let blocked = operations.blocked_operations().await.unwrap();
-    assert_eq!(blocked.len(), 1);
+    let pending = operations.pending_operations().await.unwrap();
+    assert_eq!(pending.len(), 1);
     storage
         .set_retained_access("ben@example.com", Vec::new())
         .await;
     operations
-        .retry_blocked_operation(blocked[0].id)
+        .retry_pending_operation(pending[0].id)
         .await
         .unwrap();
     assert!(

@@ -123,7 +123,7 @@ theorem entry_chunks_and_prefixes_separated :
       (NonceContext.mk ⟨9, .write 7 1, 1, 2⟩ [32, 2, 2] [42]) := by decide
 
 /-- The two ends must combine independently; neither replacement alone
-contains all the observed uploads. Objects above an end stay blocked. -/
+contains all the observed uploads. Objects above an end stay pending. -/
 theorem concurrent_replacements :
     (Ends.mk 7 2).combine ⟨6, 3⟩ = ⟨7, 3⟩ ∧
     closedLog ⟨7, 2⟩ .entries 3 = .awaitsReplacement ∧

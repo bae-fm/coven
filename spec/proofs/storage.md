@@ -241,7 +241,7 @@ alone cannot make a device that has not read a replacement know about it.
 **Completion never changes a row.** `attachment_atomic` fixes the whole file
 reference and queues it in the attaching transaction. `completion_changes_no_row`
 proves that finishing any attempt changes neither rows nor the app-write count.
-`completion_retires_both` removes its queue entry and blocker together;
+`completion_retires_both` removes its queue entry and pending record together;
 `completion_idempotent` covers a repeated completion.
 `older_upload_cannot_restore_photo` checks §16.1's example: photo B replaces A,
 then A finishes uploading, leaving B in the row. `unequal_bytes_keep_queue`

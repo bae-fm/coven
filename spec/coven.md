@@ -1930,7 +1930,7 @@ Carol's tablet:
   - Finish this check before sending writes, entries, snapshots, files,
     key copies, positions or clock observations, including sends outside
     the periodic sync loop.
-    A failed check sends nothing and reports its blocker.
+    A failed check sends nothing and reports why it is pending.
   - Check the store log for this id's replacement before sending too.
 - Every sender uses the last completed membership and key-copy catch-up
   (the pass's first phase). Before each send, its start must be less than
@@ -3474,7 +3474,7 @@ Carol's tablet:
     settles it as stored.
   - Snapshot coverage does not prove that the log object was stored.
     Even a write covered by the raise snapshot must finish its upload.
-  - Until settlement, keep its queue record and record the blocker (§19.1).
+  - Until settlement, keep its queue record and record the pending reason (§19.1).
 - Let S be the snapshot of the kept breaking-change entry for an audience.
   A device judges waiting and incoming writes by the same rules:
   - S already determines the effects of writes it covers.
@@ -3630,7 +3630,7 @@ Carol's tablet:
     It does not scan and replay the store log every second while waiting.
   - Determine snapshot growth from local indexed facts before creating a
     snapshot operation. Retention derives eligible deletions each pass and
-    has no operation row; an unchanged blocker causes no durable rewrite.
+    has no operation row; an unchanged pending reason causes no durable rewrite.
 - A step that cannot advance records its first unmet condition in `_coven_pending`
   in the same transaction that records what the step completed.
   - A waiting app call receives the typed error. The record retains its

@@ -231,7 +231,7 @@ impl Network {
                 &*status.borrow()
             )
         });
-        assert!(handle.blocked_operations().await.unwrap().is_empty());
+        assert!(handle.pending_operations().await.unwrap().is_empty());
     }
 
     async fn quiet(&self) {
@@ -640,7 +640,7 @@ async fn reconnecting_with_a_replacement_key_records_the_access_that_removal_rev
             member: Some(member),
         }]
     );
-    assert!(owner.blocked_operations().await.unwrap().is_empty());
+    assert!(owner.pending_operations().await.unwrap().is_empty());
     network.close().await;
 }
 
@@ -725,7 +725,7 @@ async fn an_internal_reload_failure_reports_sync_status_and_retries_without_app_
     .await
     .unwrap()
     .unwrap();
-    assert!(reader.blocked_operations().await.unwrap().is_empty());
+    assert!(reader.pending_operations().await.unwrap().is_empty());
     assert_eq!(storage.read(&positions).await.unwrap(), before);
     storage.create(path, &bytes).await.unwrap();
     network.sync(1).await;

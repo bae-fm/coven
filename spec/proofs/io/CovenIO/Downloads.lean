@@ -173,12 +173,12 @@ def canRetry (s : State) (timer : Waiting.Timer) (now : Nat) : Bool :=
   match pending s with | none => false | some reason => automatic reason && Waiting.due timer now
 
 theorem permanent_never_retries (s : State) (timer : Waiting.Timer) (now : Nat) (reason : Reason)
-    (blocked : pending s = some reason) (permanent : automatic reason = false) :
-    canRetry s timer now = false := by simp [canRetry, blocked, permanent]
+    (has_pending : pending s = some reason) (permanent : automatic reason = false) :
+    canRetry s timer now = false := by simp [canRetry, has_pending, permanent]
 
 theorem temporary_uses_shared_delay (s : State) (timer : Waiting.Timer) (now : Nat)
-    (reason : Reason) (blocked : pending s = some reason) (temporary : automatic reason = true) :
-    canRetry s timer now = Waiting.due timer now := by simp [canRetry, blocked, temporary]
+    (reason : Reason) (has_pending : pending s = some reason) (temporary : automatic reason = true) :
+    canRetry s timer now = Waiting.due timer now := by simp [canRetry, has_pending, temporary]
 
 def absence (path : Path) (uploader : CovenStorage.Files.DeviceState)
     (source : Option CovenStorage.Files.SourceFailure) : Reason :=

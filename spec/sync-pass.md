@@ -392,7 +392,7 @@ references. Skipped audiences, resets and schema exclusions keep their
 existing rules. Apply §10's retirement landing deadline from retained write
 and entry storage times and current replay; consume an excluded write's
 position while keeping inputs needed for reversal. Entries retain §9's
-permanent landing rule. A missing required uncovered path is a blocker;
+permanent landing rule. A missing required uncovered path is a pending prerequisite;
 retry only when its shared backoff permits, reusing this pass's absence observation.
 
 For a retirement past §6's finality wait, combine the write-log miss with
@@ -618,7 +618,7 @@ is no unconditional one-second database/operation scan. A wake reevaluates
 only affected work and never resets an unchanged wait's backoff (§3.1).
 Key waits share the keys observation, invite waits share the join-request
 observation, and agreement/retention share positions. Unchanged app-action
-and after-update blockers issue no automatic requests.
+and after-update pending records issue no automatic requests.
 
 The backoff applies to operations, missing-object probes, invites, join
 outcome polling, file retries, and provider job-status checks. A failed

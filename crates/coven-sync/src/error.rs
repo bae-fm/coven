@@ -72,14 +72,14 @@ pub enum SyncError {
     #[error("invitation or join request is no longer current")]
     InvitationChanged,
     /// The requested journal row is not failed app work available for retry or discard.
-    #[error("operation {0:?} is not blocked")]
-    NotBlocked(crate::OperationId),
+    #[error("operation {0:?} is not pending")]
+    NotPending(crate::OperationId),
     /// Store-log and snapshot publication wait for the retained reload (§18).
     #[error("snapshot reload {0:?} must finish before publishing entries or snapshots")]
     ReloadPending(crate::OperationId),
     /// The reset's shared reload failed and must finish before the reset call can.
     #[error("recovery operation {operation:?} failed: {failure}")]
-    RecoveryBlocked {
+    RecoveryPending {
         /// The failed reload operation.
         operation: crate::OperationId,
         /// Its retained cause.
@@ -90,7 +90,7 @@ pub enum SyncError {
     OperationData(#[from] serde_json::Error),
 
     /// Revocation left grants requiring the owner's action. The operation stays
-    /// blocked so an unattended removal cannot lose this result.
+    /// pending so an unattended removal cannot lose this result.
     #[error("storage access remains through grants: {0:?}")]
     AccessRemains(Vec<coven_storage::RetainedAccess>),
     /// Storage refused or failed a request.

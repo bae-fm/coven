@@ -191,22 +191,22 @@ impl CovenHandle {
     }
     /// Failed app work awaiting retry or discard, also available while stopped.
     /// Maintenance failures appear through sync status and retry on the next pass.
-    pub async fn blocked_operations(&self) -> Result<Vec<BlockedOperation>, OperationError> {
-        self.operations.blocked_operations().await
+    pub async fn pending_operations(&self) -> Result<Vec<PendingOperation>, OperationError> {
+        self.operations.pending_operations().await
     }
     /// Retry a permanently failed operation from its next unfinished step.
-    pub async fn retry_blocked_operation(
+    pub async fn retry_pending_operation(
         &self,
         operation: OperationId,
     ) -> Result<(), OperationError> {
-        self.operations.retry_blocked_operation(operation).await
+        self.operations.retry_pending_operation(operation).await
     }
     /// Abandon a failed operation after publishing any reserved entry.
-    pub async fn discard_blocked_operation(
+    pub async fn discard_pending_operation(
         &self,
         operation: OperationId,
     ) -> Result<(), OperationError> {
-        self.operations.discard_blocked_operation(operation).await
+        self.operations.discard_pending_operation(operation).await
     }
     /// Share access and create an invitation expiring after a day.
     pub async fn create_invite(

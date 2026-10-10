@@ -36,7 +36,7 @@ pub enum OperationKind {
 
 /// App work stopped by a permanent failure, awaiting retry or discard.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BlockedOperation {
+pub struct PendingOperation {
     /// Local journal identity.
     pub id: OperationId,
     /// The work being performed.

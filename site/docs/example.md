@@ -208,7 +208,7 @@ The host reads the current `SyncStatus` through
 `handle.subscribe_sync_status()`. The receiver immediately contains the current
 value and may coalesce intermediate values. A successful pass supplies its
 completion time. Use live queries to refresh views when their rows change;
-query `blocked_operations()` and `access_keys_to_delete()` for pending actions.
+query `pending_operations()` and `access_keys_to_delete()` for pending actions.
 
 ```rust
 let mut status = handle.subscribe_sync_status();
@@ -240,9 +240,9 @@ For write-specific UI, `handle.pending_writes()` lists every unpublished write
 with affected table/primary-key identities. `handle.write_status(&write_id)` and
 `handle.subscribe_write_status(&write_id)` expose its current durable state,
 including its exact published device position or a typed semantic block.
-`handle.blocked_writes()` lists only blocked records. After the prerequisite is
-repaired, `handle.retry_blocked_write(&write_id)` requeues them and wakes sync.
-`handle.discard_blocked_write(&write_id)` atomically reverses that write and
+`handle.pending()` lists pending records. After the prerequisite is
+repaired, retrying a pending write requeues it and wakes sync.
+Discarding a pending write atomically reverses that write and
 every later unpublished write whose local rows depend on it. If candidate objects
 may already exist remotely, discard publishes signed nonactivation authority and
 verifies exact cleanup before reversing local rows.

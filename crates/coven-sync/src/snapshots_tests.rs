@@ -698,7 +698,7 @@ async fn reload_reselects_after_store_log_changes_and_preserves_interleaved_app_
         a.sync
             .make_and_upload_entry(StoreChange::AddDevice {
                 device: DeviceId(77),
-                name: "blocked".into()
+                name: "pending".into()
             })
             .await,
         Err(SyncError::ReloadPending(_))
@@ -855,7 +855,7 @@ async fn a_pass_reuses_loaded_snapshot_and_write_references() {
         let operations = operation_owner(a.sync, files.clone());
         let start = storage.reads().await.len();
         operations.sync().await.unwrap();
-        assert!(operations.blocked_operations().await.unwrap().is_empty());
+        assert!(operations.pending_operations().await.unwrap().is_empty());
         let reads = storage.reads().await;
         let object = &objects[0];
         let bytes: u64 = reads[start..]

@@ -53,7 +53,7 @@ inductive ResetReason where
 
 inductive Gate where
   | send
-  | blocked (failure : ReadFailure)
+  | pending (failure : ReadFailure)
   | reset (reason : ResetReason)
   | stopped
   deriving DecidableEq, Repr
@@ -64,7 +64,7 @@ def checkIdentity (device : Nat) (reserved : Counters) (custody : Option Nat)
     (scan : Except ReadFailure Evidence) : Gate :=
   if custody ≠ some device then .reset .identityMismatch
   else match scan with
-  | .error e => .blocked e
+  | .error e => .pending e
   | .ok e =>
     if e.removed then .stopped
     else if e.replaced then .reset .replaced
@@ -273,7 +273,7 @@ def attemptHead (l : Local) (key format : Nat) (gate : Gate) : Local × Option A
       ({ l with queue := .tried a :: qs }, some a)
   else (l, none)
 
-theorem blocked_gate_emits_nothing (l : Local) (key format : Nat) (gate : Gate)
+theorem non_sending_gate_emits_nothing (l : Local) (key format : Nat) (gate : Gate)
     (h : gate ≠ .send) : attemptHead l key format gate = (l, none) := by
   simp [attemptHead, h]
 
@@ -308,7 +308,7 @@ inductive LogDecision where
   | consume | awaitsReplacement
   deriving DecidableEq, Repr
 
-/-- §10, D8: an object past the end remains blocked, with its input retained. -/
+/-- §10, D8: an object past the end remains pending, with its input retained. -/
 def closedLog (ends : Ends) (kind : LogKind) (number : Nat) : LogDecision :=
   if number ≤ ends.at kind then .consume else .awaitsReplacement
 

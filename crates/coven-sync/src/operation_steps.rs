@@ -66,7 +66,7 @@ impl StoreLogSync {
                         .await?
                         .ok_or(coven_database::DbError::OperationChanged(id))?;
                     if let Some(failure) = reload.failure {
-                        return Err(SyncError::RecoveryBlocked {
+                        return Err(SyncError::RecoveryPending {
                             operation: id,
                             failure,
                         });

@@ -1443,7 +1443,7 @@ while let Ok(values) = lost.next().await {
   - Every subject that cannot advance has its first unmet condition in `pending()`.
     This includes missing prerequisites, key copies, damaged objects, dropped
     entries, fingerprint disagreements, pending operations and file failures.
-  - Independent work continues. Per-object and maintenance blockers do not
+  - Independent work continues. Per-object and maintenance pending records do not
     fail sync status; a failed required reload prevents positions advancing
     past that reload, and is recorded under its audience and operation.
   - Posted positions never advance over unfinished work. A device can replace
@@ -1463,12 +1463,12 @@ while let Ok(values) = lost.next().await {
   - Removal records a `Connection` block with `Removed`, and stops the loop
     for good. Local failures also name their pending subject and preserve
     their typed cause for a waiting caller.
-  - If the database cannot record a blocker, stop the loop and fail database
+  - If the database cannot save a pending record, stop the loop and fail database
     calls and live queries with that cause until the store is reopened.
     Never expose an apparently empty pending list after losing its update.
 - E.g. Ana syncs successfully, then loses Wi-Fi. The next attempt is
   `Offline`. A later provider error denying the store listing is `Failed`.
-  One bad photo while the rest syncs leaves `Synced` with a file blocker.
+  One bad photo while the rest syncs leaves `Synced` with a pending file record.
 - A device that isn't connected still reads and writes
   ([§3](coven.md#3-guarantees)); its writes wait in `_coven_uploads`.
 - `start_sync` builds the provider client if absent, reading credentials from
@@ -1968,7 +1968,7 @@ impl CovenHandle {
     /// Finishes the active pass and file transfers, then drops the provider
     /// client. Keeps session keys, credentials and location for the next start.
     /// Completion publishes `Stopped`, or `Disconnected` if no storage is set up.
-    /// A release failure is returned and recorded as a connection blocker.
+    /// A release failure is returned and recorded as a pending connection record.
     pub async fn stop_sync(&self) -> Result<(), SyncError>;
 
     /// Syncs now instead of at the next idle tick. While idle, coven syncs
