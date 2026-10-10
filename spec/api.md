@@ -1793,7 +1793,6 @@ pub enum Prerequisite {
     Positions(DeviceId),
     /// Physical cleanup cannot release this entry's retained inputs (§9).
     EntryFinality(EntryId),
-    CircleVisible(CircleId),
 }
 
 /// A permanent check on complete immutable bytes, retried once after an update.

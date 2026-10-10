@@ -2477,10 +2477,14 @@ Carol's tablet:
   - If Ana concurrently removed Ben from the store, her higher-tier entry
     wins. Ben's deletion drops, and all three notes return on replay.
 - Devices outside the circle read only the entry, never its row values.
-- A hidden row still retains its local file sources. Uploads of those files
-  wait while the row is hidden only by the deleted-circle rule; dropping
-  the deletion resumes them. A real row delete releases its sources under
-  the ordinary file rules.
+- A row hidden by circle deletion keeps its local file sources and its
+  queued files keep uploading under the ordinary file rules. Hiding a row
+  neither pauses its queue nor changes its fixed file reference.
+  - Ana attaches a photo before Ben's Gifts deletion arrives. The photo
+    still uploads while its row is hidden. If the deletion drops after Ana's
+    phone goes offline, the returning row's photo is already in storage.
+  - A real row delete releases sources only under the ordinary reference
+    and finality checks; a circle deletion is not such a row delete.
 - Physical cleanup waits for the deletion's finality (§9) and the snapshot
   and file-reference checks (§15, §16.5). Loss records that still name a
   file retain it.
