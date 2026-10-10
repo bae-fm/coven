@@ -560,8 +560,9 @@ Two mechanisms order writes:
   3. apply the other rules again, to the losers' children.
 - So every device that applied the same writes sees the same rows, whatever
   order the writes arrived in, and whatever order the rules ran in.
-- The proof is [Appendix B](proofs/merge.md), in its own file, checked
-  by machine for the merged state and the removal rules.
+- The machine-checked merge model ([Appendix B](proofs/merge.md)) must
+  establish this for the merged state and every removal rule, including
+  rows hidden by a kept circle-deletion entry.
 - When a write changes which rows are removed, coven makes the change in
   the app's table with ordinary SQL, which triggers see like any other.
 - Merging uses these internal tables:
@@ -1308,8 +1309,8 @@ Carol's tablet:
 - What depends on the replay follows its latest result, both ways: an
   arriving entry can drop one kept before.
   - E.g. Ben deletes Gifts, and Carol's device applies it. Then Ana's
-    removal of Ben from Gifts arrives, made concurrently with an earlier
-    stamp: it beats the deletion, which is dropped. On Carol's device
+    removal of Ben from the store arrives, made concurrently: a store
+    removal beats a circle deletion, which is dropped. On Carol's device
     Gifts is back, with Ana in it, and its rows return, since the rule
     that took them out no longer holds ([§14.7](#147-deleting-a-circle)).
   - Entries waiting on ones they had read stay in storage until those
@@ -1408,13 +1409,17 @@ Carol's tablet:
     removes Ben from Gifts, and her tablet removes Ana from the store.
   - Each had read Gifts with two members, so neither deletes it. They
     still conflict, since both replace Gifts' key.
-  - If the phone's entry has the earlier stamp, it applies and the
-    tablet's is dropped: both remain admins, and Gifts keeps Ana.
+  - The tablet's store removal wins over the phone's circle removal,
+    whatever their timestamps. Ana leaves the store; Ben remains an admin
+    and the remaining member of Gifts.
 - Of two conflicting entries, the one that beats the other is:
-  - removing a member, a device or someone from a circle, or deleting a
-    circle, over anything else;
-  - anything else over making someone an admin;
-  - otherwise, the one with the smaller timestamp.
+  1. removing a member or device from the store;
+  2. deleting a circle, including removing its last member in the author's view;
+  3. removing someone from a circle;
+  4. other changes, except making someone an admin;
+  5. making someone an admin.
+  - A lower-numbered tier wins; within a tier, the smaller timestamp wins.
+  - These tiers compare conflicting entries only.
 - Concurrent entries, and what applies:
 
   ```
@@ -1986,33 +1991,36 @@ Carol's tablet:
 ### 14.7 Deleting a circle
 
 - Any member of a circle can delete it.
-- Deleting a circle is two things, made together, as an operation
-  ([§18.1](#181-operations)):
-  - a write deleting each of the circle's rows the device has, like any
-    delete, encrypted with the circle's key;
-  - a store log entry removing the circle ([§9](#9-members-and-roles)),
-    uploaded after the write.
-- A row added to the circle concurrently, which the write doesn't name, is
-  taken out by a removal rule when it arrives, and recorded as lost.
-- A device that has applied the deletion refuses a write into the circle,
-  as SQLite refuses a broken foreign key.
-- E.g. Ana and Ben share a circle "Gifts", holding notes 7 and 8; Ben
-  deletes it while Ana, offline, adds note 9 to it.
+- Deleting a circle publishes one store-log entry (§9). It makes no row
+  write and advances no row generation.
+- The deleted-circle rule hides every row in that circle while the replay
+  keeps the deletion, including rows arriving later.
+  - The loss record names `DeletedCircle` and the entry responsible.
+    It describes a deleted circle, not a conflicting edit that lost.
+  - Values and merge records remain available if the entry is dropped.
+    Then the rule disappears and the rows return, unless another rule
+    still hides them.
+- A device that has applied the deletion refuses new writes into the circle.
+- E.g. Ana and Ben share Gifts, holding notes 7 and 8. Ben deletes it while
+  Ana's phone, which has not received the deletion, adds note 9.
 
   ```
-  ben-phone, write 31
-    notes  row 7  generation 1  delete
-    notes  row 8  generation 1  delete
   <store>/store-log/ben-phone/4   delete circle Gifts
   ```
 
-  - Notes 7 and 8 are deleted on both devices.
-  - Note 9 arrives in a deleted circle, so it is taken out and recorded in
-    `_coven_lost`, and Ana's app can offer to put it somewhere else, by
-    inserting it again with its key ([§8](#8-merge)).
-- Devices outside the circle see only the store log entry.
-- The circle's files and log objects go like those of any deleted row
-  ([§15](#15-snapshots), [§16.5](#165-uploads-and-deletion)).
+  - All three notes are hidden under the same deleted-circle rule.
+  - Ana's app can offer to put note 9 elsewhere by inserting it with the
+    same key (§8), so a returning circle cannot create a second copy.
+  - If Ana concurrently removed Ben from the store, her higher-tier entry
+    wins. Ben's deletion drops, and all three notes return on replay.
+- Devices outside the circle read only the entry, never its row values.
+- A hidden row still retains its local file sources. Uploads of those files
+  wait while the row is hidden only by the deleted-circle rule; dropping
+  the deletion resumes them. A real row delete releases its sources under
+  the ordinary file rules.
+- Physical cleanup waits for the deletion's finality (§9) and the snapshot
+  and file-reference checks (§15, §16.5). Loss records that still name a
+  file retain it.
 
 ## 15. Snapshots
 
@@ -2699,10 +2707,8 @@ Carol's tablet:
   3. upload the entry making the circle.
 - Adding someone to a circle: seal each of its keys to them, then upload
   the entry adding them.
-- Deleting a circle ([§14.7](#147-deleting-a-circle)):
-  1. commit the write deleting its rows, recording the operation in the
-     same transaction;
-  2. upload the entry deleting the circle, after the write.
+- Deleting a circle ([§14.7](#147-deleting-a-circle)) publishes its entry.
+  There is no preceding write or wait for row uploads.
 - Inviting a person ([§12.2](#122-adding-a-person)):
   1. share the storage with their account, or record the S3 key the admin
      made in the provider's console, and record the invite;

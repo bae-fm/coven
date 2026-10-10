@@ -272,11 +272,13 @@
     `1 | setters:map<name, WriteId>` for a row. Columns and maps compare
     logically as in D2. Duplicate identities are refused.
 - `Rule` is `0 | ForeignKey`, `1 | check:text` (its name, or its expression
-  when unnamed), `2` deleted circle, `3` another audience's row, or
+  when unnamed), `2 | entry:EntryId` deleted circle, `3` another audience's row, or
   `4 | Unique`. Rules order by tag, then the foreign-key identity, CHECK
-  text or unique identity. Another audience's row names no winner and
+  text, entry id or unique identity. Another audience's row names no winner and
   imposes no ordering on which circle can win. Deleted-circle and
-  other-audience rules require a circle.
+  other-audience rules require a circle. A deleted-circle rule names the
+  kept entry that deleted it, covered by the snapshot's store-log positions.
+  A delete-circle entry has no companion write or row list (D6).
 - Synced-row references obey merge's written-parent checks. A merge row must
   have contiguous generations, valid transition and cell timestamps, no
   cells when deleted, and valid parent generations/audiences. Active cell

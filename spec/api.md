@@ -1286,8 +1286,9 @@ pub enum Replacement {
 pub enum RemovalRule {
     ForeignKey { columns: Vec<String>, parent: String, parent_columns: Vec<String> },
     Check { constraint: String },
-    /// The row is in a deleted circle (§14.7).
-    DeletedCircle,
+    /// The circle is deleted by this kept entry (§14.7). This describes
+    /// the deletion, not a conflicting row edit; the row returns if it drops.
+    DeletedCircle { entry: EntryId },
     /// The same key is present in another audience, whose row is shown
     /// (§14.2).
     OtherAudience,
@@ -1914,8 +1915,6 @@ pub enum OperationKind {
     CreateCircle,
     /// Seal the circle's history and add a member.
     AddCircleMember,
-    /// Delete the circle's rows and publish its deletion.
-    DeleteCircle,
     /// An owner's device takes back access after applying a kept removal.
     RevokeAccess,
     /// Migrate the schema, snapshot it and raise the version.
@@ -2829,8 +2828,8 @@ impl Circles<'_> {
     /// Renames a circle. Its key, members and rows don't change.
     pub async fn rename(&self, circle: CircleId, name: &str) -> Result<(), SyncError>;
 
-    /// Deletes a circle: deletes each of its rows this device has, and
-    /// removes the circle in the store log (§14.7).
+    /// Deletes a circle with one store-log entry. The deletion rule hides
+    /// its rows while the entry is kept; there is no row-delete write (§14.7).
     pub async fn delete(&self, circle: CircleId) -> Result<(), SyncError>;
 
     /// Adds a store member to the circle. They get its current and earlier
