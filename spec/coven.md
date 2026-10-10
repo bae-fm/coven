@@ -635,9 +635,9 @@ Two mechanisms order writes:
     - the write that set each value;
     - what replaced it: a write that hadn't read it, the rules that removed
       the row, or a breaking change that excluded it;
-    - whether its values are frozen: excluded writes, and removed rows'
-      losses retired from merge by a breaking migration
-      ([§17.1](#171-host-application)), keep their history;
+    - whether its values are frozen: schema-excluded writes and rows
+      deleted by a breaking migration retain old-shape values
+      ([§17.1](#171-host-application));
     - for an excluded write, its identity even if a deletion has no old values.
     All losses use this record, one snapshot section and one fingerprint
     leaf shape; excluded writes need no duplicate header or row changes.
@@ -2215,9 +2215,10 @@ Carol's tablet:
   ([§8.4](#84-foreign-keys)).
 - Every loss travels in the same snapshot section ([D7](format.md#d7-snapshots)),
   retaining the row, column when present, written values, setters and cause.
-  Losses frozen by a breaking migration survive without their row's merge
-  records or schema columns. Loading preserves them in `_coven_lost`, and
-  every loss counts in its audience's fingerprint (§19.1).
+  Frozen losses do not require current schema columns. A migration-deleted
+  row keeps its generation records; the frozen values need no live cells.
+  Loading preserves them in `_coven_lost`, and every loss counts in its
+  audience's fingerprint (§19.1).
 - Each device advances its posted positions only over fully realized work.
   It can post new blocked records without advancing them (§6).
 - Deleting a log object requires all of the following:
@@ -2618,14 +2619,32 @@ Carol's tablet:
     does one whose breaking change loses to a concurrent one.
 - An update that runs several breaking migrations makes one migration
   write, and raises the store once, to the newest version.
-- Rows a removal rule had taken out before a breaking change stay out for
-  good: they stay in `_coven_lost`, and coven forgets their other merge
-  records.
-  - Their values stay as written: a reference whose foreign key the
-    migration drops keeps its written value as plain data
-    ([§8.4](#84-foreign-keys)).
-  - The pre-migration inputs remain available until the deciding entry is
-    final (§9); replay can replace this derived result before then.
+- A breaking migration deletes rows already hidden by removal rules through
+  the ordinary generation path (§8.3).
+  - Its migration write moves each such row to the next even generation.
+    Keep `_coven_rows`; late edits at the old generation lose to that delete.
+  - Capture one frozen whole-row loss with the written values and their
+    setters, caused by this breaking version. A plain delete would retain
+    only unread values, but the migration had read them all.
+  - Use the same schema-excluded loss shape as an excluded write.
+    The generation delete removes its live removed-row record.
+  - Frozen values retain their old names and scalar values. References have
+    no live parent links, even if the migration drops their foreign key.
+- A non-final circle deletion cannot decide that a migration loses a row.
+  - Leave out rows whose only removal cause is that `DeletedCircle` rule.
+    Keep their values and merge records for replay.
+  - Judge independent causes with non-final deleted-circle causes absent;
+    a child hidden solely through such a parent is left out too.
+  - A row also failing an independent CHECK or other removal rule still
+    follows the generation-delete and frozen-loss rule.
+  - E.g. Gifts' deletion hides Ana's note 7. Ben's app migrates while that
+    deletion is non-final. The migration retains note 7's inputs; if the
+    deletion drops, note 7 returns through the winning migrated state.
+  - If note 8 independently fails `start <= end`, the migration deletes
+    its generation and keeps one frozen loss even if Gifts returns.
+- Pre-migration inputs remain until the deciding entries are final (§9).
+  If a deletion changes before then, recompute the migration's derived
+  state from those inputs; do not revive erased cells by guessing values.
 - Waiting writes keep their device ids, numbers, timestamps and causal
   positions. A breaking change never renumbers or redoes them.
 - Settle every attempted upload by resending its original bytes (§6).

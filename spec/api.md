@@ -1286,8 +1286,8 @@ pub enum Replacement {
     /// Removal rules took the row out: every one that holds (§8.4, §8.5,
     /// §8.6, §14).
     Rules(Vec<RemovalRule>),
-    /// A breaking schema change the write hadn't read, named by the
-    /// schema version it raised the store to (§17.1).
+    /// A breaking change excluded the write or deleted a hidden row through
+    /// its generation. Frozen values retain their original setters (§17.1).
     SchemaChange { version: u32 },
 }
 

@@ -257,24 +257,27 @@
     without foreign-key null substitution. Dismissed cells are absent;
     dismissal that empties a row removes its record.
   - `cause` is `0 | replacing:WriteId`, `1 | rules:set<Rule>`, or
-    `2 | excluded:WriteId | version:u32` for a schema change.
+    `2 | write:WriteId | version:u32` for a schema-excluded loss.
     Resets create no loss records (§19.3).
     A replacing write requires cell values; rules and schema changes require
-    row values. Each excluded cell's setter is the excluded write. Its ID
-    remains even for a deletion with no old values.
+    row values. The schema loss's `write` is the excluded write, or the
+    migration write that deleted a hidden row through its generation.
+    Excluded-write values name that write as setter; a migration-deleted
+    row keeps each original setter. The identity remains even for an
+    excluded deletion with no old values.
   - A cell's generation is its incarnation; a removed row's is its generation
     when captured. Both are positive and odd. A removed row's
     cells and rules are nonempty. An excluded row keeps the generation of
     its row change; inserts and updates keep their new values and parents,
     deletes their old scalar values with empty parent maps.
-  - `frozen` is true for excluded writes and for losses frozen by a breaking
+  - `frozen` is true for schema-excluded rows and for losses frozen by a breaking
     migration. Migration-frozen values have empty parent maps, keeping their
     written scalar values and names independently of the current schema.
     Active losses follow merge and removal rules; frozen ones do not.
   - A schema-change version is positive and at most the snapshot's schema
     version.
   - Loss identity orders by row, generation, values identity, frozen flag,
-    cause tag, then excluded write ID when present. Values identity is
+    cause tag, then schema loss write ID when present. Values identity is
     `0 | column:name | setter:WriteId` for a cell or
     `1 | setters:map<name, WriteId>` for a row. Columns and maps compare
     logically as in D2. Duplicate identities are refused.
@@ -294,7 +297,8 @@
   removed-row loss must match its present
   merge row's generation and cells. A present merge row has a synced row
   exactly when it has no active removed-row loss. Frozen losses need no
-  merge row or current schema columns.
+  live cells or current schema columns. A migration-deleted row still
+  carries its advanced even generation in section 3 (§17.1).
 - All rows and the plaintext header have the sealed prefix's audience.
   Every named write ID and applied write's read positions are covered by
   the prefix's write positions. Positions describe consumed writes,
@@ -566,7 +570,7 @@
        maps; an encoded empty map if the row is deleted or removed.
   - Every loss has one leaf. Its identity hash has fields `loss` and its
     D7 identity bytes: row, generation, values identity, frozen flag, cause
-    tag, and excluded write ID when present, concatenated using D2/D7
+    tag, and schema loss write ID when present, concatenated using D2/D7
     encodings. Its value hash has one field: the complete D7 loss record,
     without the section tag or frame envelope. Thus every retained value,
     setter and cause participates, with dismissed cells absent.
