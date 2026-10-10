@@ -245,8 +245,15 @@ timestamp. `snapshot_upper` proves that loading adopts all applied timestamps.
 bound on provider time cannot declare the corresponding age before the provider's
 actual time. `wall_jump_changes_no_age_or_retry` makes wall-clock changes irrelevant
 to storage age and the monotonic retry deadline. `retry_delay_bounded` proves
-the five-minute ceiling. These results assume §4's common, nondecreasing provider
-clock; they do not establish it for a real provider.
+the five-minute ceiling within one run. These results assume §4's common,
+nondecreasing provider clock; they do not establish it for a real provider.
+
+The persisted restart rule in §16.5 is outside these theorems: save deadline
+T and the full wait W, then arm a monotonic delay of `max(0, min(T - now, W))`
+on reopen. Ana restarting halfway through an eight-second wait keeps the
+remaining delay. Moving her clock backward cannot make that restart delay
+exceed eight seconds; moving it forward may shorten it. Provider cooldowns
+retain their full W even above the ordinary five-minute cap.
 
 **Successful stamps order every write after everything it read.**
 `stamp_after_every_read` and `stamp_after_snapshot` prove this for arbitrary

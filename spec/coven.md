@@ -234,7 +234,9 @@ a zero-body pass cannot hide a listing of the whole history.
   `t`; after reaching the cap it is `W * (1 + floor(t / 300 seconds))`.
   Multiply by each wait's declared request allowance, counting pages and
   retries within it. Neither pass completion nor a one-second worker tick
-  resets a delay. Restart and paginated-probe bounds remain open (§4.1).
+  resets a delay. Reopen uses the persisted T and W in §16.5. Pages are
+  charged to discovery; the restart rate bound assumes no forward clock
+  jump that makes a still-live wall-clock deadline appear expired.
 
 Local work has bounds too:
 
@@ -432,18 +434,6 @@ must charge listing pages, including retained history; it cannot be stated
 as one miss per writer. Exact-name reads also have provider-specific request
 costs: [Drive downloads require a file id](https://developers.google.com/workspace/drive/api/reference/rest/v3/files/get),
 so an unknown name first needs an exact parent/name query.
-
-#### Open decision: retry bounds across restarts
-
-§16.5 restarts automatic delays at zero and keeps no durable wall-clock
-deadline. That bounds attempts in one run, but repeated restarts can issue
-unbounded attempts in a real-time interval, including during `Retry-After`.
-Choose durable retry information with a defined clock/restart rule, a
-provider-enforced cooldown, or explicitly limit the guarantee to one run
-and account for each restart separately. Unchanged paginated probes also
-need either incremental/status requests or an explicit page-work term.
-The unconditional per-device request-rate bound remains open; ordinary
-worker wakes and app retries may never bypass a live provider cooldown.
 
 #### Open decision: custody sessions
 
@@ -2838,17 +2828,23 @@ Carol's tablet:
   - A provider part may begin or end inside an encrypted chunk. Coven
     reads and verifies the whole plaintext chunk before encrypting it
     and selecting the requested bytes.
-- Retry delays use the sync loop's in-memory monotonic timer: start at
-  1 second and double to at most 5 minutes. Restarting retries at once.
-  - No persisted wall-clock time decides when an upload can retry.
-  - Operations, invites, joining and other automatic waits share this
-    scheduling rule, with `Retry-After` allowed to exceed the cap and block
-    all affected workers ([One sync pass](sync-pass.md#waiting-without-repeated-work)).
-    A bound that survives restart, including a provider cooldown, is an
-    [open decision](#open-decision-retry-bounds-across-restarts); the
-    immediate-restart rule does not establish that stronger guarantee.
-  - E.g. Ana's failed upload is waiting 8 seconds when she sets the clock
-    back a year. It still retries after those 8 seconds.
+- Automatic retry delays start at 1 second and double to at most 5 minutes.
+  Before waiting, persist the not-before wall-clock deadline T and the full
+  wait W with the work. During a running session a monotonic timer enforces
+  the delay; wall-clock changes do not move that timer.
+  - On reopen arm `max(0, min(T - now, W))` on the monotonic timer. Keep the
+    original T and W until an attempt supplies a new delay; reopening does
+    not reset the backoff exponent or replace the persisted deadline.
+  - Operations, invites, joining, missing keys and file retries share this
+    rule. Persist provider/account cooldowns separately at their actual
+    scope before any affected worker can retry. `Retry-After` may make W
+    exceed five minutes; neither restart, sync_now nor app retry discards it.
+  - Ana restarts with four seconds left in an eight-second delay. She waits
+    four seconds. If her clock moved backward, the restart waits at most
+    eight; moving it forward can shorten the wait to zero. This rule bounds
+    restart delays, not real-time cooldown duration under arbitrary clock jumps.
+  - Failure to persist a delay fails the initiating work and prevents automatic
+    retry; it is never converted into permission to retry immediately.
 - A large file goes up through the provider's resumable or multipart
   upload, in parts.
   - Providers require it above a size, such as Google Drive above 5 MB per

@@ -470,4 +470,6 @@ for approval does not replay the store log each second.
 **Ben's throttled laptop.** Storage says to retry after 600 seconds. The
 ordinary backoff cap is 300, but Ben's sync, upload and invite workers all
 wait at least 600 for that provider scope. App writes remain local and
-queued. Restart behavior is the unresolved choice in §4.1.
+queued. The database keeps the provider/account cooldown's T and W.
+Restart arms `max(0, min(T - now, W))`, never an unconditional immediate
+retry. W remains 600 even though ordinary backoff caps at 300 (§16.5).

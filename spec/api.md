@@ -2169,7 +2169,8 @@ impl CovenHandle {
     /// Overrides ordinary backoff or retries a repaired source, but never
     /// bypasses a provider Retry-After cooldown.
     /// Automatic delays start at 1 second and double to at most 5 minutes
-    /// on an in-memory monotonic timer; a restart retries at once (§16.5).
+    /// with persisted deadline T and wait W. Restart waits max(0, min(T-now, W));
+    /// a live provider cooldown is never discarded (§16.5).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError>;
 
     /// Pauses uploads, or resumes them. A paused upload keeps its place,
