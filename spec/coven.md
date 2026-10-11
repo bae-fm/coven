@@ -100,7 +100,10 @@
 - An ex-member may keep a copy of the store key they had.
 - Each person keeps their restore code to themselves, on paper or shown on
   a screen ([§12](#12-joining-and-restore)); anyone who sees it can open
-  the store.
+  the store with storage access. Anyone holding the code (the member key)
+  is that member to coven; coven cannot tell them apart. Theft of a restore
+  code is out of scope: coven offers no recovery from a stolen code. The
+  household removes the member and starts over by hand if needed.
 
 The guarantees assume correct ciphers, signatures, hashes, key derivation,
 random generation and secret custody ([§11.1](#111-cryptography)). No Lean
