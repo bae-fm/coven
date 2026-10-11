@@ -178,7 +178,7 @@ fn file_fixture_opens_reencodes_and_decodes_every_mutation() {
     let mut reference = include_str!("../fixtures/uploaded-file.txt").lines();
     assert_eq!(reference.next().unwrap(), PATH);
     let reference =
-        crate::file_reference::UploadedFileReference::decode(reference.next().unwrap()).unwrap();
+        crate::file_reference::FileReference::decode(reference.next().unwrap()).unwrap();
     let path = crate::path::ObjectPath::file(reference.device, reference.id);
     assert_eq!(path.as_str(), PATH);
     let key = reference.key;

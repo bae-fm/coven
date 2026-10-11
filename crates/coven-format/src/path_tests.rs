@@ -5,8 +5,7 @@ fn uploaded_file_fixture_keeps_its_device_in_the_path() {
     let fixture = include_str!("../fixtures/uploaded-file.txt");
     let path = ObjectPath::parse(fixture.lines().next().unwrap()).unwrap();
     let reference =
-        crate::file_reference::UploadedFileReference::decode(fixture.lines().nth(1).unwrap())
-            .unwrap();
+        crate::file_reference::FileReference::decode(fixture.lines().nth(1).unwrap()).unwrap();
     assert_eq!(ObjectPath::file(reference.device, reference.id), path);
     assert_eq!(path.device(), Some(DeviceId(1)));
     assert!(ObjectPrefix::files().contains(&path));

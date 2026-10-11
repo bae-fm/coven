@@ -2,7 +2,7 @@
 
 use super::Database;
 use crate::{DbError, DownloadedPartStream, DownloadedWriteStream, FileUpload};
-use coven_format::{file_reference::UploadedFileReference, value::Value, write::RowChange};
+use coven_format::{file_reference::FileReference, value::Value, write::RowChange};
 use coven_foundation::id_source::{DeviceId, FileId};
 use coven_merge::{ColumnValue, Operation};
 use std::collections::{BTreeMap, BTreeSet};
@@ -187,7 +187,7 @@ fn retain_value(
     if let crate::file_location::StoredLocation::Uploaded(text) =
         crate::file_location::StoredLocation::decode(value)?
     {
-        let file = UploadedFileReference::decode(text.as_str())?;
+        let file = FileReference::decode(text.as_str())?;
         references.insert((file.device, file.id));
     }
     Ok(())

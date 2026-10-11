@@ -312,8 +312,7 @@ impl FilesInner {
                 .map_err(FileReadError::from)?;
         }
         self.phase(item.id, UploadPhase::Stored);
-        let location =
-            coven_format::file_reference::UploadedFileReference { device, id, key }.encode();
+        let location = coven_format::file_reference::FileReference { device, id, key }.encode();
         let changed = self
             .database
             .finish_upload(item.id, &item.file, location)

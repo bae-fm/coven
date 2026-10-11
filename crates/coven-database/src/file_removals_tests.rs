@@ -274,7 +274,7 @@ async fn a_downloaded_upload_releases_this_devices_owned_copy() {
         .map(|(name, value)| (name.clone(), value.value.clone()))
         .collect();
     columns.get_mut("location").unwrap().value = Value::Text(format!(
-        "uploaded {} {} {}",
+        "file {} {} {}",
         original.device.0,
         uuid::Uuid::from_u128(7),
         "ab".repeat(32)

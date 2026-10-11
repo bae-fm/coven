@@ -114,7 +114,7 @@ impl FileDatabase {
                     let table = schema.table(&declaration.name);
                     let keys = db.query(
                         &format!(
-                            "SELECT {} FROM main.{} WHERE {} LIKE 'uploaded %'",
+                            "SELECT {} FROM main.{} WHERE {} LIKE 'file %'",
                             crate::write_rows::key_columns(table)
                                 .iter()
                                 .map(|c| crate::sql::identifier(&c.name))

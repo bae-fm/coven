@@ -88,7 +88,7 @@ async fn changed_file_references_refuse_a_write_even_if_the_app_ignores_the_erro
 }
 
 #[tokio::test]
-async fn uploaded_locations_retain_the_key_identity_and_refuse_malformed_encodings() {
+async fn file_locations_retain_the_key_identity_and_refuse_malformed_encodings() {
     let store = TestStore::new();
     let db = store
         .schema(tables(Provenance::AppProvided), SCHEMA)
@@ -97,7 +97,7 @@ async fn uploaded_locations_retain_the_key_identity_and_refuse_malformed_encodin
     attach(&db, b"original".to_vec(), true).await;
     let device_ref = db.file_ref("files", "7").await.unwrap();
     let id = uuid::Uuid::from_u128(7);
-    let location = format!("uploaded 1 {id} {}", "ab".repeat(32));
+    let location = format!("file 1 {id} {}", "ab".repeat(32));
     // A committed uploaded-row fixture; transfer completion is exercised by sync.
     db.commit_writer(|sql| {
         sql.internal_execute("UPDATE files SET location=?1", [location])
@@ -122,7 +122,7 @@ async fn uploaded_locations_retain_the_key_identity_and_refuse_malformed_encodin
     db.commit_writer(|sql| {
         sql.internal_execute(
             "UPDATE files SET location=?1",
-            [format!("uploaded 1 {id} {}", "cd".repeat(32))],
+            [format!("file 1 {id} {}", "cd".repeat(32))],
         )
         .unwrap()
     });
@@ -136,7 +136,7 @@ async fn uploaded_locations_retain_the_key_identity_and_refuse_malformed_encodin
         sql.internal_execute(
             "UPDATE files SET location=?1",
             [format!(
-                "uploaded 1 {} {}",
+                "file 1 {} {}",
                 uuid::Uuid::from_u128(8),
                 "cd".repeat(32)
             )],
@@ -157,11 +157,13 @@ async fn uploaded_locations_retain_the_key_identity_and_refuse_malformed_encodin
             FileLocation::OnDevice(coven_foundation::id_source::DeviceId(device))
         );
     }
-    let valid = format!("uploaded 1 {id} {}", "ab".repeat(32));
+    let valid = format!("file 1 {id} {}", "ab".repeat(32));
     let mut malformed: Vec<_> = (0..valid.len())
         .map(|end| valid[..end].to_owned())
         .collect();
     malformed.extend([
+        format!("uploaded 1 {id} {}", "ab".repeat(32)),
+        "on 1".into(),
         "uploaded".into(),
         "uploaded:bad-key".into(),
         "-1".into(),
@@ -173,11 +175,11 @@ async fn uploaded_locations_retain_the_key_identity_and_refuse_malformed_encodin
         "device:7".into(),
         format!("{valid} "),
         format!("{valid}00"),
-        format!("uploaded 1 {id} {}", "AB".repeat(32)),
-        format!("uploaded 1 {id} {}", "zz".repeat(32)),
-        format!("uploaded 1 {} {}", id.simple(), "ab".repeat(32)),
-        format!("uploaded 1  {id} {}", "ab".repeat(32)),
-        format!("uploaded 1 {id} {}", "音".repeat(64)),
+        format!("file 1 {id} {}", "AB".repeat(32)),
+        format!("file 1 {id} {}", "zz".repeat(32)),
+        format!("file 1 {} {}", id.simple(), "ab".repeat(32)),
+        format!("file 1  {id} {}", "ab".repeat(32)),
+        format!("file 1 {id} {}", "音".repeat(64)),
     ]);
     for malformed in malformed {
         db.commit_writer(|sql| {
@@ -205,6 +207,39 @@ async fn uploaded_locations_retain_the_key_identity_and_refuse_malformed_encodin
             Err(DbError::DamagedDatabase)
         ));
     }
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn fixed_file_references_are_found_by_eager_reads_and_retention() {
+    let store = TestStore::new();
+    let declarations = vec![
+        SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
+            "files",
+            Provenance::AppProvided,
+            CacheFill::CacheEager,
+        )),
+    ];
+    let db = store.schema(declarations, SCHEMA).await.unwrap();
+    attach(&db, b"original".to_vec(), true).await;
+    let text = include_str!("../../coven-format/fixtures/uploaded-file.txt")
+        .lines()
+        .nth(1)
+        .unwrap();
+    db.commit_writer(|sql| {
+        sql.internal_execute("UPDATE files SET location=?1", [text])
+            .unwrap()
+    });
+    let files = FileDatabase::new(db.clone()).eager_files().await.unwrap();
+    assert_eq!(files, vec![db.file_ref("files", "7").await.unwrap()]);
+    assert_eq!(
+        db.retained_files().await.unwrap().references,
+        [(
+            coven_foundation::id_source::DeviceId(1),
+            coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0x11; 16]))
+        )]
+        .into()
+    );
     db.close().await.unwrap();
 }
 

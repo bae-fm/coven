@@ -196,7 +196,7 @@ impl UploadedFile {
             directory.lock_read_only()
         }))
         .await?;
-        let coven_format::file_reference::UploadedFileReference { device, id, key } =
+        let coven_format::file_reference::FileReference { device, id, key } =
             file.uploaded()?.ok_or(DbError::DamagedDatabase)?;
         let path = ObjectPath::file(device, id);
         let _file = owner.lock_file(&file).await;

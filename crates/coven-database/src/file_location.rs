@@ -27,8 +27,8 @@ impl StoredLocation {
         let Value::Text(text) = value else {
             return Err(DbError::DamagedDatabase);
         };
-        if text.starts_with("uploaded ") {
-            coven_format::file_reference::UploadedFileReference::decode(text)
+        if text.starts_with("file ") {
+            coven_format::file_reference::FileReference::decode(text)
                 .map_err(|_| DbError::DamagedDatabase)?;
             Ok(Self::Uploaded(SecretText::new(text.clone())))
         } else {

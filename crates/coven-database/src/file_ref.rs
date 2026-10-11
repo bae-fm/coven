@@ -66,15 +66,13 @@ impl FileRef {
     }
     /// The uploaded object's identity and key carried inside the row.
     /// Returns None for a device-local file; this never consults key custody.
-    pub fn uploaded(
-        &self,
-    ) -> Result<Option<coven_format::file_reference::UploadedFileReference>, DbError> {
+    pub fn uploaded(&self) -> Result<Option<coven_format::file_reference::FileReference>, DbError> {
         let StoredLocation::Uploaded(text) = &self.version.location else {
             return Ok(None);
         };
-        Ok(Some(
-            coven_format::file_reference::UploadedFileReference::decode(text.as_str())?,
-        ))
+        Ok(Some(coven_format::file_reference::FileReference::decode(
+            text.as_str(),
+        )?))
     }
     /// Encode captured facts for a device-local journal. Contains the uploaded
     /// file key; callers must keep these bytes private, like the database itself.

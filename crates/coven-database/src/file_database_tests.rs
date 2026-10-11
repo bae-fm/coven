@@ -73,7 +73,7 @@ async fn an_uploading_write_refuses_a_trigger_that_removes_its_file() {
     let store = TestStore::new();
     let mut declarations = tables(Provenance::AppProvided);
     declarations[0] = declarations[0].clone().shared_trigger("remove_uploaded");
-    let database=store.schema(declarations,"CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT,title TEXT); CREATE TRIGGER remove_uploaded AFTER UPDATE OF location ON files WHEN NOT coven_applying() AND NEW.location LIKE 'uploaded %' BEGIN DELETE FROM files WHERE id=NEW.id; END;").await.unwrap();
+    let database=store.schema(declarations,"CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT,title TEXT); CREATE TRIGGER remove_uploaded AFTER UPDATE OF location ON files WHEN NOT coven_applying() AND NEW.location LIKE 'file %' BEGIN DELETE FROM files WHERE id=NEW.id; END;").await.unwrap();
     attach(&database, b"source".to_vec(), true).await.unwrap();
     let owner = FileDatabase::new(database.clone());
     let file = database.file_ref("files", "7").await.unwrap();
@@ -84,7 +84,7 @@ async fn an_uploading_write_refuses_a_trigger_that_removes_its_file() {
         .unwrap();
     owner.record_stored(id).await.unwrap();
     let location = SecretText::new(format!(
-        "uploaded 1 00000000-0000-4000-8000-000000000123 {}",
+        "file 1 00000000-0000-4000-8000-000000000123 {}",
         "11".repeat(32)
     ));
     assert!(matches!(
@@ -166,7 +166,7 @@ async fn chunk_hashes_belong_to_the_queued_version_and_retire_with_it() {
             }
             owner.record_stored(id).await.unwrap();
             let location = SecretText::new(format!(
-                "uploaded 1 00000000-0000-4000-8000-000000000123 {}",
+                "file 1 00000000-0000-4000-8000-000000000123 {}",
                 "11".repeat(32)
             ));
             assert_eq!(
