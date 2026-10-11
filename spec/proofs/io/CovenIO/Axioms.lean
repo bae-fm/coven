@@ -194,6 +194,8 @@ import CovenIO
 #print axioms CovenIO.reload_round_bound
 #print axioms CovenIO.no_reload_after_quiescence
 #print axioms CovenIO.finite_target_reload_bound
+#print axioms CovenIO.SnapshotPublication.due_write_deleted
+#print axioms CovenIO.SnapshotPublication.nonfinal_write_kept
 #print axioms CovenIO.SnapshotPublication.due_pass_deletes
 #print axioms CovenIO.SnapshotPublication.uncovered_pass_keeps
 #print axioms CovenIO.SnapshotPublication.scheduled_deletion_bound
@@ -216,3 +218,50 @@ import CovenIO
 #print axioms CovenIO.ReloadLiveness.busy_reload_never_finishes
 #print axioms CovenIO.ReloadLiveness.fixed_target_already_realized
 #print axioms CovenIO.ReloadLiveness.storage_time_unbounded
+
+#print axioms CovenIO.FixedReload.deleted_number
+#print axioms CovenIO.FixedReload.scan_covered
+#print axioms CovenIO.FixedReload.deleted_selected
+#print axioms CovenIO.FixedReload.skipped_has_no_part
+#print axioms CovenIO.FixedReload.scan_spec
+#print axioms CovenIO.FixedReload.deletion_decreases
+#print axioms CovenIO.FixedReload.terminates
+#print axioms CovenIO.FixedReload.committed_contains
+#print axioms CovenIO.FixedReload.prefix_committed
+
+#print axioms CovenIO.SnapshotRefresh.sum_positions_le
+#print axioms CovenIO.SnapshotRefresh.sum_positions_lt
+#print axioms CovenIO.SnapshotRefresh.newest_rank
+#print axioms CovenIO.SnapshotRefresh.current_rank
+#print axioms CovenIO.SnapshotRefresh.current_exists
+#print axioms CovenIO.SnapshotRefresh.fresh_covers
+#print axioms CovenIO.SnapshotRefresh.refresh_outranks
+#print axioms CovenIO.SnapshotRefresh.refresh_selected
+#print axioms CovenIO.SnapshotRefresh.covered_selection_preserved
+
+#print axioms CovenIO.RetentionDeadline.bounded_witnessed_storage
+
+#print axioms CovenIO.AtomicReload.staging_keeps_visible
+#print axioms CovenIO.AtomicReload.atomic_waiting_ready
+#print axioms CovenIO.AtomicReload.closed_replacement_commits
+
+#print axioms CovenIO.RepairedExamples.selection_races_finish
+#print axioms CovenIO.RepairedExamples.race_sound_loaded
+#print axioms CovenIO.RepairedExamples.race_sound_covering
+#print axioms CovenIO.RepairedExamples.race_catalog_runs
+#print axioms CovenIO.RepairedExamples.combined_race_commits
+#print axioms CovenIO.RepairedExamples.other_audience_finishes
+#print axioms CovenIO.RepairedExamples.cached_catalog_cannot_commit
+#print axioms CovenIO.RepairedExamples.moving_catalog
+#print axioms CovenIO.RepairedExamples.moving_tail_finishes
+#print axioms CovenIO.RepairedExamples.quiet_stall_repaired
+#print axioms CovenIO.RepairedExamples.repaired_pass_reachable
+#print axioms CovenIO.RepairedExamples.joined_dominates
+#print axioms CovenIO.RepairedExamples.quiet_deadline
+#print axioms CovenIO.RepairedExamples.mixed_finality_retention
+#print axioms CovenIO.RepairedExamples.scheduled_cleanup_runs
+#print axioms CovenIO.RepairedExamples.busy_selected
+#print axioms CovenIO.RepairedExamples.busy_cleanup_runs
+#print axioms CovenIO.RepairedExamples.no_first_witness
+#print axioms CovenIO.RepairedExamples.replacement_exceeds_target
+#print axioms CovenIO.RepairedExamples.old_races_preserved

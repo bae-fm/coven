@@ -293,19 +293,44 @@ namespace SnapshotPublication
 /-- One successful retention pass checks every stored write using the same
 eligibility decision as individual DELETE actions. Already removed paths
 remain removed. Provider failure does not count as a successful pass. -/
-def retainPass (order : SnapshotOrder) (s : State)
-    (posted : List (Nat × Nat × Nat)) (final : Bool) : State :=
-  { s with deleted := s.writes.filter (fun w => !s.deleted.contains w && eligible order s w posted final)
+def retainWrites (order : SnapshotOrder) (s : State)
+    (posted : List (Nat × Nat × Nat)) (final : Write → Bool) : State :=
+  { s with deleted := s.writes.filter (fun w => !s.deleted.contains w && eligible order s w posted (final w))
       ++ s.deleted }
 
-theorem due_pass_deletes (order : SnapshotOrder) (s : State)
-    (posted : List (Nat × Nat × Nat)) (final : Bool) (w : Write)
-    (published : w ∈ s.writes) (due : eligible order s w posted final = true) :
-    w ∈ (retainPass order s posted final).deleted := by
+/-- The comparison histories give every candidate the same finality verdict. -/
+abbrev retainPass (order : SnapshotOrder) (s : State)
+    (posted : List (Nat × Nat × Nat)) (final : Bool) : State :=
+  retainWrites order s posted (fun _ => final)
+
+theorem due_write_deleted (order : SnapshotOrder) (s : State)
+    (posted : List (Nat × Nat × Nat)) (final : Write → Bool) (w : Write)
+    (published : w ∈ s.writes) (due : eligible order s w posted (final w) = true) :
+    w ∈ (retainWrites order s posted final).deleted := by
   by_cases removed : w ∈ s.deleted
   · exact List.mem_append_right _ removed
   · apply List.mem_append_left
     exact List.mem_filter.mpr ⟨published, by simp [removed, due]⟩
+
+theorem nonfinal_write_kept (order : SnapshotOrder) (s : State)
+    (posted : List (Nat × Nat × Nat)) (final : Write → Bool) (w : Write)
+    (present : w ∉ s.deleted) (nonfinal : final w = false) :
+    w ∉ (retainWrites order s posted final).deleted := by
+  intro removed
+  rcases List.mem_append.mp removed with fresh | old
+  · have check := (List.mem_filter.mp fresh).2
+    simp only [Bool.and_eq_true] at check
+    have due : Eligible order s.landed s.writers (postedPosition posted) s.time (final w = true) w := by
+      simpa [eligible] using check.2
+    have yes := due.1.2.1
+    simp [nonfinal] at yes
+  · exact present old
+
+theorem due_pass_deletes (order : SnapshotOrder) (s : State)
+    (posted : List (Nat × Nat × Nat)) (final : Bool) (w : Write)
+    (published : w ∈ s.writes) (due : eligible order s w posted final = true) :
+    w ∈ (retainPass order s posted final).deleted :=
+  due_write_deleted order s posted (fun _ => final) w published due
 
 theorem uncovered_pass_keeps (order : SnapshotOrder) (s : State)
     (posted : List (Nat × Nat × Nat)) (final : Bool) (w : Write)

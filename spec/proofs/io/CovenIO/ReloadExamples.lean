@@ -60,7 +60,7 @@ theorem every_pass_retains_uncovered (order : SnapshotOrder) (n : Nat) :
   induction n with
   | zero => exact ⟨by simp [quietPasses, beforeSelection], rfl, rfl, by change otherWrite ∉ beforeSelection.deleted; decide⟩
   | succ n ih =>
-      refine ⟨by simp [quietPasses, retainPass, Nat.add_assoc], ih.2.1, ih.2.2.1, ?_⟩
+      refine ⟨by simp [quietPasses, retainPass, retainWrites, Nat.add_assoc], ih.2.1, ih.2.2.1, ?_⟩
       apply uncovered_pass_keeps order { quietPasses order n with time := month + n + 1 }
         [(0, 1, 1), (1, 1, 1), (2, 1, 1)] true otherWrite ih.2.2.2
       change ¬ Covered (catalogCurrent order (quietPasses order n).landed) otherWrite
