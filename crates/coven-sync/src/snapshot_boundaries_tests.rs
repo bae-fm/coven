@@ -14,14 +14,14 @@ async fn unusable_snapshots_do_not_turn_deleted_history_into_an_empty_audience()
         a.sync.write_snapshot(Audience::Store).await.unwrap();
         assert_eq!(
             storage
-                .list(&ObjectPrefix::device_logs())
+                .list(&ObjectPrefix::device_logs(store(1)))
                 .await
                 .unwrap()
                 .is_empty(),
             deleted
         );
         let object = storage
-            .list(&ObjectPrefix::snapshots())
+            .list(&ObjectPrefix::snapshots(store(1)))
             .await
             .unwrap()
             .remove(0);
@@ -117,7 +117,7 @@ async fn a_removed_device_cannot_start_or_resume_snapshot_publication() {
         ));
         assert!(
             storage
-                .list(&ObjectPrefix::snapshots())
+                .list(&ObjectPrefix::snapshots(store(1)))
                 .await
                 .unwrap()
                 .is_empty(),
@@ -234,7 +234,7 @@ async fn queued_entries_wait_for_reload_and_finishing_a_queued_reset_blocks_new_
     a.sync.sync_store_log().await.unwrap();
     assert_eq!(
         storage
-            .read(&object::path(queued.entry.position))
+            .read(&object::path(store(1), queued.entry.position))
             .await
             .unwrap_err()
             .failure(),
@@ -250,7 +250,7 @@ async fn queued_entries_wait_for_reload_and_finishing_a_queued_reset_blocks_new_
     a.sync.sync_store_log().await.unwrap();
     assert_eq!(
         storage
-            .read(&object::path(queued.entry.position))
+            .read(&object::path(store(1), queued.entry.position))
             .await
             .unwrap(),
         expected
@@ -269,7 +269,7 @@ async fn a_failed_internal_reload_prevents_snapshot_publication_until_it_can_res
         .unwrap();
     let pending = a.db.operations().await.unwrap().remove(0).id;
     let snapshot = storage
-        .list(&ObjectPrefix::snapshots())
+        .list(&ObjectPrefix::snapshots(store(1)))
         .await
         .unwrap()
         .remove(0)
@@ -283,7 +283,7 @@ async fn a_failed_internal_reload_prevents_snapshot_publication_until_it_can_res
             "{error:?}"
         );
         assert!(storage
-            .list(&ObjectPrefix::snapshots())
+            .list(&ObjectPrefix::snapshots(store(1)))
             .await
             .unwrap()
             .is_empty());
@@ -483,7 +483,7 @@ mod reset {
                 }
             }
             let mut published = Vec::new();
-            for object in storage.list(&ObjectPrefix::all()).await.unwrap() {
+            for object in storage.list(&ObjectPrefix::all(store(1))).await.unwrap() {
                 if object.path.snapshot_id().is_some() || object.path.store_log_position().is_some()
                 {
                     published.push((

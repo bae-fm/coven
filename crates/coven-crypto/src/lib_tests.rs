@@ -19,7 +19,7 @@ fn object_chunks_bind_every_coordinate_and_use_stored_random_nonces() {
             for plaintext in [b"".as_slice(), b"row bytes"] {
                 let sealed = keys
                     .seal_object_chunk(
-                        "devices/1/3",
+                        "10101010-1010-1010-1010-101010101010/devices/1/3",
                         b"cleartext prefix",
                         section,
                         index,
@@ -29,7 +29,7 @@ fn object_chunks_bind_every_coordinate_and_use_stored_random_nonces() {
                 assert_eq!(sealed.len(), plaintext.len() + SEALED_OBJECT_CHUNK_OVERHEAD);
                 let repeated = keys
                     .seal_object_chunk(
-                        "devices/1/3",
+                        "10101010-1010-1010-1010-101010101010/devices/1/3",
                         b"cleartext prefix",
                         section,
                         index,
@@ -39,7 +39,7 @@ fn object_chunks_bind_every_coordinate_and_use_stored_random_nonces() {
                 assert_ne!(&sealed[..24], &repeated[..24]);
                 assert_eq!(
                     keys.open_object_chunk(
-                        "devices/1/3",
+                        "10101010-1010-1010-1010-101010101010/devices/1/3",
                         b"cleartext prefix",
                         section,
                         index,
@@ -49,9 +49,26 @@ fn object_chunks_bind_every_coordinate_and_use_stored_random_nonces() {
                     plaintext
                 );
                 for (path, part, chunk) in [
-                    ("devices/2/3", section, index),
-                    ("devices/1/3", section ^ 1, index),
-                    ("devices/1/3", section, index ^ 1),
+                    (
+                        "20202020-2020-2020-2020-202020202020/devices/1/3",
+                        section,
+                        index,
+                    ),
+                    (
+                        "10101010-1010-1010-1010-101010101010/devices/2/3",
+                        section,
+                        index,
+                    ),
+                    (
+                        "10101010-1010-1010-1010-101010101010/devices/1/3",
+                        section ^ 1,
+                        index,
+                    ),
+                    (
+                        "10101010-1010-1010-1010-101010101010/devices/1/3",
+                        section,
+                        index ^ 1,
+                    ),
                 ] {
                     assert!(matches!(
                         keys.open_object_chunk(path, b"cleartext prefix", part, chunk, &sealed),
@@ -63,7 +80,7 @@ fn object_chunks_bind_every_coordinate_and_use_stored_random_nonces() {
                     .derive();
                 assert!(matches!(
                     foreign.open_object_chunk(
-                        "devices/1/3",
+                        "10101010-1010-1010-1010-101010101010/devices/1/3",
                         b"cleartext prefix",
                         section,
                         index,
@@ -76,7 +93,7 @@ fn object_chunks_bind_every_coordinate_and_use_stored_random_nonces() {
                         (
                             end < 24,
                             keys.open_object_chunk(
-                                "devices/1/3",
+                                "10101010-1010-1010-1010-101010101010/devices/1/3",
                                 b"cleartext prefix",
                                 section,
                                 index,
@@ -90,7 +107,7 @@ fn object_chunks_bind_every_coordinate_and_use_stored_random_nonces() {
                     altered[end] ^= 1;
                     assert!(matches!(
                         keys.open_object_chunk(
-                            "devices/1/3",
+                            "10101010-1010-1010-1010-101010101010/devices/1/3",
                             b"cleartext prefix",
                             section,
                             index,
@@ -103,7 +120,7 @@ fn object_chunks_bind_every_coordinate_and_use_stored_random_nonces() {
                 trailing.push(0);
                 assert!(matches!(
                     keys.open_object_chunk(
-                        "devices/1/3",
+                        "10101010-1010-1010-1010-101010101010/devices/1/3",
                         b"cleartext prefix",
                         section,
                         index,
@@ -127,7 +144,7 @@ fn swapping_parts_and_reordering_chunks_is_refused_even_with_identical_plaintext
         .iter()
         .map(|&(section, index)| {
             keys.seal_object_chunk(
-                "devices/1/1",
+                "10101010-1010-1010-1010-101010101010/devices/1/1",
                 b"cleartext prefix",
                 section,
                 index,
@@ -138,8 +155,13 @@ fn swapping_parts_and_reordering_chunks_is_refused_even_with_identical_plaintext
         .collect();
     for (source, chunk) in chunks.iter().enumerate() {
         for (target, &(section, index)) in coordinates.iter().enumerate() {
-            let result =
-                keys.open_object_chunk("devices/1/1", b"cleartext prefix", section, index, chunk);
+            let result = keys.open_object_chunk(
+                "10101010-1010-1010-1010-101010101010/devices/1/1",
+                b"cleartext prefix",
+                section,
+                index,
+                chunk,
+            );
             assert_eq!(result.is_ok(), source == target);
         }
     }
@@ -148,12 +170,20 @@ fn swapping_parts_and_reordering_chunks_is_refused_even_with_identical_plaintext
 #[test]
 fn streamed_object_signatures_bind_path_digest_member_and_domain() {
     let keys = MemberKeys::generate().unwrap();
-    let path = "devices/1/3";
+    let path = "10101010-1010-1010-1010-101010101010/devices/1/3";
     let bytes = b"prefix, chunk lengths, nonces, encrypted bytes and authentication tags";
     let mut whole = ObjectHasher::new();
     whole.update(bytes);
     let digest = whole.finish();
     let signature = keys.sign_object(path, &digest);
+    assert!(keys
+        .member_id()
+        .verify_object(
+            "20202020-2020-2020-2020-202020202020/devices/1/3",
+            &digest,
+            &signature
+        )
+        .is_err());
     for size in 1..=bytes.len() {
         let mut stream = ObjectHasher::new();
         for piece in bytes.chunks(size) {
@@ -164,8 +194,11 @@ fn streamed_object_signatures_bind_path_digest_member_and_domain() {
             .unwrap();
     }
     assert!(matches!(
-        keys.member_id()
-            .verify_object("devices/1/4", &digest, &signature),
+        keys.member_id().verify_object(
+            "10101010-1010-1010-1010-101010101010/devices/1/4",
+            &digest,
+            &signature
+        ),
         Err(CryptoError::Signature)
     ));
     assert!(matches!(
@@ -218,11 +251,18 @@ fn streamed_object_signatures_bind_path_digest_member_and_domain() {
 #[test]
 fn prefix_signatures_bind_exact_bytes_path_member_and_a_separate_domain() {
     let keys = MemberKeys::generate().unwrap();
-    let path = "snapshots/store/1/3";
+    let path = "10101010-1010-1010-1010-101010101010/snapshots/store/1/3";
     let prefix = b"kind, version, audience, key and positions";
     let signature = keys.sign_prefix(path, prefix);
     let author = keys.member_id();
     author.verify_prefix(path, prefix, &signature).unwrap();
+    assert!(author
+        .verify_prefix(
+            "20202020-2020-2020-2020-202020202020/snapshots/store/1/3",
+            prefix,
+            &signature
+        )
+        .is_err());
     author
         .verify(
             &cipher::context(&[b"coven/prefix-signature/v1", path.as_bytes(), prefix]),
@@ -230,7 +270,11 @@ fn prefix_signatures_bind_exact_bytes_path_member_and_a_separate_domain() {
         )
         .unwrap();
     assert!(matches!(
-        author.verify_prefix("snapshots/store/2/3", prefix, &signature),
+        author.verify_prefix(
+            "10101010-1010-1010-1010-101010101010/snapshots/store/2/3",
+            prefix,
+            &signature
+        ),
         Err(CryptoError::Signature)
     ));
     assert!(matches!(
@@ -268,12 +312,18 @@ fn chunk_aad_includes_the_whole_prefix_and_big_endian_coordinates() {
     let section = 0x0102030405060708u64;
     let index = 0x1122334455667788u64;
     let sealed = keys
-        .seal_object_chunk("devices/1/3", prefix, section, index, b"payload")
+        .seal_object_chunk(
+            "10101010-1010-1010-1010-101010101010/devices/1/3",
+            prefix,
+            section,
+            index,
+            b"payload",
+        )
         .unwrap();
     let key = crate::derivation::derive_label(&[17; 32], b"coven/encryption/v1");
     let aad = cipher::context(&[
         b"coven/object-chunk/v1",
-        b"devices/1/3",
+        b"10101010-1010-1010-1010-101010101010/devices/1/3",
         prefix,
         &section.to_be_bytes(),
         &index.to_be_bytes(),
@@ -286,27 +336,33 @@ fn chunk_aad_includes_the_whole_prefix_and_big_endian_coordinates() {
         let mut changed = prefix.to_vec();
         changed[i] ^= 1;
         assert!(matches!(
-            keys.open_object_chunk("devices/1/3", &changed, section, index, &sealed),
+            keys.open_object_chunk(
+                "10101010-1010-1010-1010-101010101010/devices/1/3",
+                &changed,
+                section,
+                index,
+                &sealed
+            ),
             Err(CryptoError::Authentication)
         ));
     }
     for aad in [
         cipher::context(&[
             b"coven/object-chunk/v1",
-            b"devices/1/3",
+            b"10101010-1010-1010-1010-101010101010/devices/1/3",
             prefix,
             &section.to_le_bytes(),
             &index.to_le_bytes(),
         ]),
         cipher::context(&[
             b"coven/object-chunk/v1",
-            b"devices/1/3",
+            b"10101010-1010-1010-1010-101010101010/devices/1/3",
             &section.to_be_bytes(),
             &index.to_be_bytes(),
         ]),
         cipher::context(&[
             b"coven/object/v1",
-            b"devices/1/3",
+            b"10101010-1010-1010-1010-101010101010/devices/1/3",
             prefix,
             &section.to_be_bytes(),
             &index.to_be_bytes(),

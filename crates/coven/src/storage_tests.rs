@@ -283,7 +283,11 @@ async fn disconnect_waits_for_the_active_pass_and_custody_failure_keeps_sync_run
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
     f.storage
-        .hold_next_listing(ObjectPrefix::device_logs(), entered, resumed)
+        .hold_next_listing(
+            ObjectPrefix::device_logs(f.directory.id()),
+            entered,
+            resumed,
+        )
         .await;
     f.handle.sync_now();
     entering.await.unwrap();
@@ -364,7 +368,7 @@ async fn setup_starts_sync_and_committed_writes_wake_it_without_a_tick() {
     .await;
     assert_eq!(
         f.storage
-            .list(&ObjectPrefix::device_logs())
+            .list(&ObjectPrefix::device_logs(f.directory.id()))
             .await
             .unwrap()
             .len(),
@@ -480,7 +484,7 @@ async fn reconnect_is_offline_until_reached_and_stop_and_close_finish_the_active
         let (listed, listing) = tokio::sync::oneshot::channel();
         let (resume, resumed) = tokio::sync::oneshot::channel();
         f.storage
-            .hold_next_listing(ObjectPrefix::device_logs(), listed, resumed)
+            .hold_next_listing(ObjectPrefix::device_logs(f.directory.id()), listed, resumed)
             .await;
         f.handle.sync_now();
         listing.await.unwrap();
@@ -535,126 +539,63 @@ impl StorageConnector for Locations {
 }
 
 #[tokio::test]
-async fn moving_storage_retries_a_partial_copy_before_committing_the_new_location() {
+async fn two_stores_share_one_location_without_reading_each_others_history() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    f.handle
-        .write(|sql| {
-            sql.execute("INSERT INTO notes VALUES('kept','copied')", [])?;
-            Ok(())
-        })
+    let layout = StoreLayout::new(f._root.path().into());
+    let directory = f
+        .app
+        .create_store(&layout, "Garden", Arc::new(UuidIds))
         .await
         .unwrap();
-    f.advance(Duration::from_secs(1));
-    f.handle.sync_now();
-    status(
-        &f.handle,
-        |s| matches!(s, SyncStatus::Synced { finished_at } if *finished_at >= f.clock.now()),
-    )
-    .await;
-    f.handle.close().await.unwrap();
-    let own_objects = f.storage.list(&ObjectPrefix::all()).await.unwrap();
-    // Both creations can publish after observing an empty location. Moving the
-    // losing store must not copy the other store's authenticated origin or keys.
-    let foreign = Fixture::new().await;
-    foreign.setup().await.unwrap();
-    status(&foreign.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    foreign.handle.close().await.unwrap();
-    let foreign_objects = foreign.storage.list(&ObjectPrefix::all()).await.unwrap();
-    for object in &foreign_objects {
-        let bytes = foreign.storage.read(&object.path).await.unwrap();
-        if object.path.is_replaceable() {
-            f.storage.replace(&object.path, &bytes).await.unwrap();
-        } else {
-            f.storage.create(&object.path, &bytes).await.unwrap();
-        }
-    }
-    let mut config = f.storage.config();
-    let StorageConfig::S3 { prefix, .. } = &mut config else {
-        unreachable!()
-    };
-    *prefix = "destination".into();
-    let destination = Arc::new(
-        MemoryStorage::builder()
-            .location(config.clone())
-            .clock(f.clock.clone())
-            .transfer_limits(16, 65536)
-            .build()
-            .unwrap(),
-    );
-    let locations = Arc::new(Locations(vec![f.storage.clone(), destination.clone()]));
-    let handle = builder(
-        &f.app,
-        StoreLayout::new(f._root.path().into()),
-        f.clock.clone(),
-        locations,
-    )
-    .open(f.directory.id())
-    .await
-    .unwrap();
-    let before = handle.restore_code().await.unwrap();
-    let (listed, listing) = tokio::sync::oneshot::channel();
-    let (resume, resumed) = tokio::sync::oneshot::channel();
-    destination
-        .hold_next_listing(ObjectPrefix::all(), listed, resumed)
-        .await;
-    let setup = handle.setup_s3_storage(
-        config.clone(),
-        "Test device",
-        "member-key".into(),
-        SecretText::new("secret".into()),
-    );
-    tokio::pin!(setup);
-    tokio::select! {
-        result = &mut setup => panic!("setup finished while its provider check was held: {result:?}"),
-        _ = listing => {}
-    }
-    // Lose a history copy's reply after the check's test upload has completed.
-    destination
-        .set_faults(Faults {
-            lose_completion_reply: true,
-            ..Faults::none()
-        })
-        .await;
-    resume.send(()).unwrap();
-    assert!(setup.await.is_err());
-    assert!(!destination
-        .list(&ObjectPrefix::all())
+    let other = builder(&f.app, layout, f.clock.clone(), f.connector.clone())
+        .open(directory.id())
         .await
-        .unwrap()
-        .is_empty());
-    assert_eq!(handle.restore_code().await.unwrap(), before);
-    assert!(matches!(
-        &*handle.subscribe_sync_status().borrow(),
-        SyncStatus::Stopped
-    ));
-    handle
+        .unwrap();
+    other.initialize_identity().unwrap();
+    other
         .setup_s3_storage(
-            config.clone(),
-            "Test device",
-            "member-key".into(),
+            f.storage.config(),
+            "Garden device",
+            "garden-key".into(),
             SecretText::new("secret".into()),
         )
         .await
         .unwrap();
-    handle.stop_sync();
-    status(&handle, |s| matches!(s, SyncStatus::Stopped)).await;
-    let new = destination.list(&ObjectPrefix::all()).await.unwrap();
-    assert!(foreign_objects
-        .iter()
-        .all(|foreign| !new.iter().any(|object| object.path == foreign.path)));
-    for object in own_objects
-        .iter()
-        .filter(|object| !object.path.is_replaceable())
-    {
-        assert!(new.iter().any(|copied| copied.path == object.path));
-        assert_eq!(
-            f.storage.read(&object.path).await.unwrap(),
-            destination.read(&object.path).await.unwrap()
-        );
+    status(&other, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    for (handle, body) in [(&f.handle, "Household"), (&other, "Garden")] {
+        handle
+            .write(move |sql| {
+                sql.execute("INSERT INTO notes VALUES('same', ?1)", [body])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
-    handle.close().await.unwrap();
+    f.advance(Duration::from_secs(1));
+    for handle in [&f.handle, &other] {
+        handle.sync_now();
+        status(
+            handle,
+            |s| matches!(s, SyncStatus::Synced { finished_at } if *finished_at >= f.clock.now()),
+        )
+        .await;
+    }
+    for (handle, expected) in [(&f.handle, "Household"), (&other, "Garden")] {
+        let body = handle
+            .read(|sql| {
+                Ok(
+                    sql.query_row("SELECT body FROM notes WHERE id='same'", [], |row| {
+                        row.get::<_, String>(0)
+                    })?,
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(body, expected);
+        handle.close().await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -667,7 +608,7 @@ async fn a_first_pass_that_reaches_storage_then_loses_network_is_failed() {
     let (listed, listing) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
     f.storage
-        .hold_next_listing(ObjectPrefix::device_logs(), listed, resumed)
+        .hold_next_listing(ObjectPrefix::device_logs(f.directory.id()), listed, resumed)
         .await;
     f.handle.start_sync().await.unwrap();
     listing.await.unwrap();
@@ -692,7 +633,7 @@ async fn forgetting_keys_finishes_the_active_pass_before_removing_custody() {
     let (listed, listing) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
     f.storage
-        .hold_next_listing(ObjectPrefix::device_logs(), listed, resumed)
+        .hold_next_listing(ObjectPrefix::device_logs(f.directory.id()), listed, resumed)
         .await;
     f.handle.sync_now();
     listing.await.unwrap();
@@ -740,74 +681,74 @@ struct RefusePersist {
 }
 
 #[tokio::test]
-async fn moving_storage_waits_for_file_publication_before_copying_history() {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        let f = Fixture::new().await;
-        f.handle.close().await.unwrap();
-        let mut config = f.storage.config();
-        let StorageConfig::S3 { prefix, .. } = &mut config else { unreachable!() };
-        *prefix = "destination".into();
-        let destination = Arc::new(MemoryStorage::builder().location(config.clone()).clock(f.clock.clone()).transfer_limits(1024 * 1024,65536).build().unwrap());
-        let handle = builder(&f.app, StoreLayout::new(f._root.path().into()), f.clock.clone(), Arc::new(Locations(vec![f.storage.clone(), destination.clone()])))
-            .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey),
-                SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new("files", Provenance::AppProvided, CacheFill::CacheLazy))])
-            .migrations(vec![Migration::sql(1, "notes", "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,body TEXT NOT NULL)"),
-                Migration::sql(2, "files", "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)")])
-            .open(f.directory.id()).await.unwrap();
-        handle.setup_s3_storage(f.storage.config(), "Test device", "member-key".into(), SecretText::new("secret".into())).await.unwrap();
-        status(&handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-        handle.stop_sync();
-        status(&handle, |s| matches!(s, SyncStatus::Stopped)).await;
-        handle.unlock_store_key().await.unwrap();
-        let (started, uploading) = tokio::sync::oneshot::channel();
-        let (resume, resumed) = tokio::sync::oneshot::channel();
-        f.storage.hold_next_creation(ObjectPrefix::files(), started, resumed).await;
-        handle.write_with_files(|batch| {
-            batch.put_file("files", "one", b"preserved file".to_vec());
-            Ok(())
-        }, |sql| { sql.execute("INSERT INTO files(id) VALUES('one')", [])?; Ok(()) }).await.unwrap();
-        uploading.await.unwrap();
-        let setup = handle.setup_s3_storage(config, "Test device", "member-key".into(), SecretText::new("secret".into()));
-        tokio::pin!(setup);
-        tokio::select! {
-            result = &mut setup => panic!("setup changed location while a file was still publishing: {result:?}"),
-            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
-        }
-        resume.send(()).unwrap();
-        setup.await.unwrap();
-        let file = handle.file_ref("files", "one").await.unwrap();
-        assert_eq!(file.location(), FileLocation::Uploaded);
-        handle.evict_file(&file).await.unwrap();
-        assert_eq!(handle.read_file(&file).await.unwrap(), b"preserved file");
-        assert_eq!(destination.list(&ObjectPrefix::files()).await.unwrap().len(), 1);
-        handle.stop_sync();
-        status(&handle, |s| matches!(s, SyncStatus::Stopped)).await;
-        handle.unlock_store_key().await.unwrap();
-        destination.set_faults(Faults { drop_part: true, ..Faults::none() }).await;
-        handle.write_with_files(|batch| {
-            batch.put_file("files", "partial", vec![91; 1024 * 1024 + 7]);
-            Ok(())
-        }, |sql| { sql.execute("INSERT INTO files(id) VALUES('partial')", [])?; Ok(()) }).await.unwrap();
-        let mut uploads = handle.subscribe_uploads();
-        loop {
-            let queue = uploads.next().await.unwrap();
-            if queue.files.iter().any(|file| file.last_failure.is_some()) { break; }
-        }
-        handle.set_uploads_paused(true);
-        handle.setup_s3_storage(f.storage.config(), "Test device", "member-key".into(), SecretText::new("secret".into())).await.unwrap();
-        handle.set_uploads_paused(false);
-        match handle.retry_uploads_now().await.unwrap() {
-            DrainOutcome::Drained { failures, .. } => assert!(failures.is_empty(), "a recorded upload must resume at the new location"),
-            DrainOutcome::QueueEmpty => {},
-            _ => panic!("explicit retry did not drain the relocated file"),
-        }
-        let file = handle.file_ref("files", "partial").await.unwrap();
-        assert_eq!(file.location(), FileLocation::Uploaded);
-        handle.evict_file(&file).await.unwrap();
-        assert_eq!(handle.read_file(&file).await.unwrap(), vec![91; 1024 * 1024 + 7]);
-        handle.close().await.unwrap();
-    }).await.expect("storage relocation completed");
+async fn setup_refuses_another_location_after_disconnect_and_reopen() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    f.handle.stop_sync();
+    status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
+    let mut config = f.storage.config();
+    let StorageConfig::S3 { prefix, .. } = &mut config else {
+        unreachable!()
+    };
+    *prefix = "destination".into();
+    let destination = Arc::new(
+        MemoryStorage::builder()
+            .location(config.clone())
+            .build()
+            .unwrap(),
+    );
+    let before = f.handle.restore_code().await.unwrap();
+    let error = f
+        .handle
+        .setup_s3_storage(
+            config.clone(),
+            "Test device",
+            "member-key".into(),
+            SecretText::new("secret".into()),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "storage location change is unsupported");
+    assert_eq!(f.handle.restore_code().await.unwrap(), before);
+    f.handle.disconnect_storage().await.unwrap();
+    f.handle.close().await.unwrap();
+    let handle = builder(
+        &f.app,
+        StoreLayout::new(f._root.path().into()),
+        f.clock.clone(),
+        Arc::new(Locations(vec![f.storage.clone(), destination.clone()])),
+    )
+    .open(f.directory.id())
+    .await
+    .unwrap();
+    let error = handle
+        .setup_s3_storage(
+            config,
+            "Test device",
+            "member-key".into(),
+            SecretText::new("secret".into()),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "storage location change is unsupported");
+    assert_eq!(destination.request_count(), 0);
+    assert_eq!(
+        StorageSettings::new(f.directory.clone()).read().unwrap(),
+        Some(f.storage.config())
+    );
+    handle
+        .setup_s3_storage(
+            f.storage.config(),
+            "Ignored",
+            "member-key".into(),
+            SecretText::new("secret".into()),
+        )
+        .await
+        .unwrap();
+    handle.close().await.unwrap();
 }
+
 impl StoreKeyCustody for RefusePersist {
     fn unlock(&self) -> Result<Option<StoreKeyring>, KeyError> {
         Ok(self.keys.lock().unwrap().clone())
@@ -861,7 +802,11 @@ async fn custody_failure_rolls_back_credentials_and_the_reserved_creation_requir
         &*handle.subscribe_sync_status().borrow(),
         SyncStatus::Disconnected
     ));
-    let path = f.storage.list(&ObjectPrefix::store_logs()).await.unwrap()[0]
+    let path = f
+        .storage
+        .list(&ObjectPrefix::store_logs(f.directory.id()))
+        .await
+        .unwrap()[0]
         .path
         .clone();
     let original = f.storage.read(&path).await.unwrap();
@@ -897,7 +842,7 @@ async fn setup_rejects_overwriting_providers_before_committing() {
     ));
     assert!(f
         .storage
-        .list(&ObjectPrefix::all())
+        .list(&ObjectPrefix::all(f.directory.id()))
         .await
         .unwrap()
         .is_empty());
@@ -929,7 +874,11 @@ async fn reconnect_checks_the_provider_and_preserves_the_previous_connection() {
     let before = f.handle.restore_code().await.unwrap();
     let settings = StorageSettings::new(f.directory.clone());
     let location = settings.read().unwrap();
-    let objects = f.storage.list(&ObjectPrefix::all()).await.unwrap();
+    let objects = f
+        .storage
+        .list(&ObjectPrefix::all(f.directory.id()))
+        .await
+        .unwrap();
     f.storage
         .set_faults(Faults {
             overwrite_create: true,
@@ -955,7 +904,13 @@ async fn reconnect_checks_the_provider_and_preserves_the_previous_connection() {
         f.handle.store_key_state().unwrap(),
         StoreKeyState::Available
     );
-    assert_eq!(f.storage.list(&ObjectPrefix::all()).await.unwrap(), objects);
+    assert_eq!(
+        f.storage
+            .list(&ObjectPrefix::all(f.directory.id()))
+            .await
+            .unwrap(),
+        objects
+    );
     assert!(matches!(
         &*f.handle.subscribe_sync_status().borrow(),
         SyncStatus::Stopped
@@ -976,7 +931,13 @@ async fn reconnect_checks_the_provider_and_preserves_the_previous_connection() {
         &*f.handle.subscribe_sync_status().borrow(),
         SyncStatus::Disconnected
     ));
-    assert_eq!(f.storage.list(&ObjectPrefix::all()).await.unwrap(), objects);
+    assert_eq!(
+        f.storage
+            .list(&ObjectPrefix::all(f.directory.id()))
+            .await
+            .unwrap(),
+        objects
+    );
     f.storage.set_faults(Faults::none()).await;
     f.setup().await.unwrap();
     f.handle.close().await.unwrap();

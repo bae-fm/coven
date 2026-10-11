@@ -385,7 +385,7 @@ pub(crate) async fn posted(device: &Device) -> coven_format::objects::PostedPosi
         .settings()
         .unwrap()
         .device_id;
-    let path = ObjectPath::positions(id);
+    let path = ObjectPath::positions(device.store, id);
     let bytes = device.storage.read(&path).await.unwrap();
     let object = SingleChunkObject::decode(&bytes).unwrap();
     let SingleChunkObject::PostedPositions {
@@ -396,7 +396,7 @@ pub(crate) async fn posted(device: &Device) -> coven_format::objects::PostedPosi
     else {
         panic!("positions object")
     };
-    let key_path = ObjectPath::store_key(*key, &member.id);
+    let key_path = ObjectPath::store_key(device.store, *key, &member.id);
     let key =
         coven_format::sealed_key::SealedKey::decode(&device.storage.read(&key_path).await.unwrap())
             .unwrap()
@@ -680,7 +680,7 @@ async fn a_returning_device_loads_snapshots_covering_deleted_writes_and_keeps_it
     network.sync(0).await;
     assert!(network.devices[0]
         .storage
-        .list(&ObjectPrefix::device_logs())
+        .list(&ObjectPrefix::device_logs(network.devices[0].store))
         .await
         .unwrap()
         .is_empty());
@@ -704,7 +704,10 @@ async fn an_internal_reload_failure_reports_sync_status_and_retries_without_app_
     network.devices[0].handle.reset_store().await.unwrap();
     network.sync(0).await;
     let storage = &network.devices[0].storage;
-    let snapshots = storage.list(&ObjectPrefix::snapshots()).await.unwrap();
+    let snapshots = storage
+        .list(&ObjectPrefix::snapshots(network.devices[0].store))
+        .await
+        .unwrap();
     assert_eq!(snapshots.len(), 1);
     let path = &snapshots[0].path;
     let bytes = storage.read(path).await.unwrap();
@@ -717,7 +720,7 @@ async fn an_internal_reload_failure_reports_sync_status_and_retries_without_app_
         .find(|m| m.is_self)
         .unwrap()
         .devices[0];
-    let positions = ObjectPath::positions(device);
+    let positions = ObjectPath::positions(network.devices[0].store, device);
     let before = storage.read(&positions).await.unwrap();
     reader.start_sync().await.unwrap();
     let mut status = reader.subscribe_sync_status();
@@ -773,7 +776,7 @@ mod pending_records {
         network.sync(0).await;
         let storage = &network.devices[0].storage;
         let object = storage
-            .list(&ObjectPrefix::device_logs())
+            .list(&ObjectPrefix::device_logs(network.devices[0].store))
             .await
             .unwrap()
             .pop()

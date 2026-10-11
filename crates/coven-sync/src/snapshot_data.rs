@@ -86,7 +86,7 @@ pub(crate) mod audience {
 mod audiences {
     use super::*;
     #[derive(Serialize, Deserialize)]
-    struct Item(#[serde(with = "audience")] Audience);
+    pub(super) struct Item(#[serde(with = "audience")] pub(super) Audience);
     pub(crate) fn serialize<S: serde::Serializer>(
         values: &[Audience],
         serializer: S,
@@ -125,7 +125,7 @@ pub(crate) enum SnapshotTrigger {
     },
 }
 
-/// The journal uses the canonical snapshot path to retain the format's identity.
+/// The journal retains the audience, device and positive snapshot number.
 pub(crate) mod snapshot_id {
     use super::*;
     use coven_format::store_log::SnapshotId;
@@ -135,14 +135,23 @@ pub(crate) mod snapshot_id {
     ) -> Result<S::Ok, S::Error> {
         let number = std::num::NonZeroU64::new(value.number)
             .ok_or_else(|| serde::ser::Error::custom("zero snapshot number"))?;
-        ObjectPath::snapshot(value.audience.clone(), value.device, number).serialize(serializer)
+        (
+            audiences::Item(value.audience.clone()),
+            value.device,
+            number,
+        )
+            .serialize(serializer)
     }
     pub(crate) fn deserialize<'de, D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> Result<SnapshotId, D::Error> {
-        ObjectPath::deserialize(deserializer)?
-            .snapshot_id()
-            .ok_or_else(|| serde::de::Error::custom("not a snapshot path"))
+        let (audience, device, number) =
+            <(audiences::Item, DeviceId, std::num::NonZeroU64)>::deserialize(deserializer)?;
+        Ok(SnapshotId {
+            audience: audience.0,
+            device,
+            number: number.get(),
+        })
     }
 }
 

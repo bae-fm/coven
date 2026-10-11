@@ -33,7 +33,7 @@ impl StoreLogSync {
                 ..
             }) = &data
             {
-                pinned.insert(snapshot_path(snapshot)?);
+                pinned.insert(snapshot_path(self.directory.id(), snapshot)?);
             }
             if let crate::operation_data::Data::Snapshots(crate::snapshot_data::SnapshotTask {
                 job:
@@ -43,19 +43,22 @@ impl StoreLogSync {
                 ..
             }) = &data
             {
-                pinned.insert(snapshot_path(&coven_format::store_log::SnapshotId {
-                    audience: audience.clone(),
-                    device: *device,
-                    number: pending
-                        .id
-                        .0
-                        .try_into()
-                        .map_err(|_| coven_database::DbError::DamagedDatabase)?,
-                })?);
+                pinned.insert(snapshot_path(
+                    self.directory.id(),
+                    &coven_format::store_log::SnapshotId {
+                        audience: audience.clone(),
+                        device: *device,
+                        number: pending
+                            .id
+                            .0
+                            .try_into()
+                            .map_err(|_| coven_database::DbError::DamagedDatabase)?,
+                    },
+                )?);
             }
         }
         for (_, snapshot) in super::boundaries::entries(&local.log) {
-            pinned.insert(snapshot_path(snapshot)?);
+            pinned.insert(snapshot_path(self.directory.id(), snapshot)?);
         }
         for audience in &readable {
             let candidates = self
@@ -92,7 +95,10 @@ impl StoreLogSync {
         }
         let positions = self.retention_positions(&local.log, damages).await?;
         let mut stuck = crate::pending_logs::local_refusals(&self.database).await?;
-        for object in storage.list(&ObjectPrefix::device_logs()).await? {
+        for object in storage
+            .list(&ObjectPrefix::device_logs(self.directory.id()))
+            .await?
+        {
             let id = object
                 .path
                 .write_id()
@@ -199,7 +205,10 @@ impl StoreLogSync {
     ) -> Result<BTreeMap<DeviceId, WritePositions>, SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let mut positions = BTreeMap::new();
-        for object in storage.list(&ObjectPrefix::positions()).await? {
+        for object in storage
+            .list(&ObjectPrefix::positions(self.directory.id()))
+            .await?
+        {
             match self.open_retention_positions(&object.path, log).await {
                 Ok((device, writes)) => {
                     positions.insert(device, writes);

@@ -118,15 +118,15 @@ fn every_reason_and_nested_tag_has_exact_d8_bytes() {
             &format!("06{tag:02x}"),
         );
     }
-    let path = ObjectPath::parse("devices/2/3").unwrap();
+    let path = ObjectPath::parse("10101010-1010-1010-1010-101010101010/devices/2/3").unwrap();
     for (reason, expected) in [
         (
             PendingReason::Missing { path: path.clone() },
-            "010000000b646576696365732f322f33",
+            "010000003031303130313031302d313031302d313031302d313031302d3130313031303130313031302f646576696365732f322f33",
         ),
         (
             PendingReason::Waits(Prerequisite::Object(path)),
-            "02000000000b646576696365732f322f33",
+            "02000000003031303130313031302d313031302d313031302d313031302d3130313031303130313031302f646576696365732f322f33",
         ),
         (
             PendingReason::Waits(Prerequisite::DeviceRegistration(DeviceId(2))),
@@ -339,11 +339,11 @@ fn pending_paths_reject_local_noncanonical_and_malformed_text() {
     for path in [
         "/Users/member/photo.jpg",
         "../devices/2/3",
-        "devices/02/3",
-        "devices/2/0",
-        "devices/2/3/",
+        "10101010-1010-1010-1010-101010101010/devices/02/3",
+        "10101010-1010-1010-1010-101010101010/devices/2/0",
+        "10101010-1010-1010-1010-101010101010/devices/2/3/",
         "",
-        "devices/2/3\0",
+        "10101010-1010-1010-1010-101010101010/devices/2/3\0",
     ] {
         for prefix in [vec![1], vec![2, 0]] {
             let mut raw = prefix;
@@ -553,10 +553,10 @@ fn pinned_pending_frame_covers_the_complete_report_grammar() {
         .collect();
     for (index, reason) in [
         PendingReason::Missing {
-            path: ObjectPath::parse("devices/2/3").unwrap(),
+            path: ObjectPath::parse("10101010-1010-1010-1010-101010101010/devices/2/3").unwrap(),
         },
         PendingReason::Waits(Prerequisite::Object(
-            ObjectPath::parse("store-log/3/1").unwrap(),
+            ObjectPath::parse("10101010-1010-1010-1010-101010101010/store-log/3/1").unwrap(),
         )),
         PendingReason::Waits(Prerequisite::DeviceRegistration(DeviceId(3))),
         PendingReason::KeyUnavailable {

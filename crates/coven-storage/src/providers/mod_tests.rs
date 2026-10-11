@@ -1,4 +1,5 @@
 use super::OAuthSession;
+use crate::test_utils::STORE_ID;
 use crate::{CloudProvider, OAuthTokens};
 use axum::{
     body::{Body, Bytes},
@@ -114,7 +115,10 @@ pub(crate) async fn assert_token_refresh(
     }))
     .await;
     let storage = make(&server.url);
-    storage.list(&crate::ObjectPrefix::all()).await.unwrap();
+    storage
+        .list(&crate::ObjectPrefix::all(STORE_ID))
+        .await
+        .unwrap();
     let initial = std::mem::take(&mut *requests.lock().unwrap());
     assert!(!initial.is_empty());
     assert!(initial.iter().all(|token| token == "Bearer token"));
@@ -126,7 +130,10 @@ pub(crate) async fn assert_token_refresh(
         })
         .await
         .unwrap();
-    storage.list(&crate::ObjectPrefix::all()).await.unwrap();
+    storage
+        .list(&crate::ObjectPrefix::all(STORE_ID))
+        .await
+        .unwrap();
     let refreshed = requests.lock().unwrap();
     assert_eq!(refreshed.len(), initial.len());
     assert!(refreshed.iter().all(|token| token == "Bearer refreshed"));

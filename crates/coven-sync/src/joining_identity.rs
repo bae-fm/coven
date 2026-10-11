@@ -19,7 +19,7 @@ use zeroize::Zeroizing;
 pub struct JoiningIdentity {
     keys: MemberKeys,
     request: Vec<u8>,
-    invite: coven_foundation::id_source::InviteId,
+    path: ObjectPath,
     attempted: bool,
 }
 
@@ -31,7 +31,7 @@ impl JoiningIdentity {
         code: &InviteCode,
         device_name: &str,
     ) -> Result<Self, SyncError> {
-        let path = ObjectPath::join_request(code.invite);
+        let path = ObjectPath::join_request(code.store, code.invite);
         let prefix = SingleChunkPrefix::JoinRequest;
         let saved = file.read_optional()?;
         if let Some(saved) = saved {
@@ -92,7 +92,7 @@ impl JoiningIdentity {
             return Ok(Self {
                 keys,
                 request,
-                invite: code.invite,
+                path,
                 attempted,
             });
         }
@@ -123,7 +123,7 @@ impl JoiningIdentity {
         let identity = Self {
             keys,
             request,
-            invite: code.invite,
+            path,
             attempted: false,
         };
         identity.save(file, code)?;
@@ -172,11 +172,11 @@ impl JoiningIdentity {
     }
 
     pub(crate) async fn publish(&self, storage: &dyn Storage) -> Result<(), SyncError> {
-        let path = ObjectPath::join_request(self.invite);
-        match storage.create(&path, &self.request).await {
+        let path = &self.path;
+        match storage.create(path, &self.request).await {
             Ok(()) => Ok(()),
             Err(error) if error.failure() == StorageFailure::AlreadyExists => {
-                if storage.read(&path).await? != self.request {
+                if storage.read(path).await? != self.request {
                     return Err(SyncError::InvitationChanged);
                 }
                 Ok(())
@@ -186,7 +186,7 @@ impl JoiningIdentity {
     }
 
     pub(crate) async fn pending(&self, storage: &dyn Storage) -> Result<bool, SyncError> {
-        match storage.read(&ObjectPath::join_request(self.invite)).await {
+        match storage.read(&self.path).await {
             Ok(bytes) if bytes == self.request => Ok(true),
             Ok(_) => Err(SyncError::InvitationChanged),
             Err(error) if error.failure() == StorageFailure::NotFound => Ok(false),

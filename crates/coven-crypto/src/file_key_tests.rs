@@ -1,6 +1,7 @@
 use super::*;
 
-const PATH: &str = "files/1/11111111-1111-1111-1111-111111111111";
+const PATH: &str =
+    "10101010-1010-1010-1010-101010101010/files/1/11111111-1111-1111-1111-111111111111";
 const HEADER: [u8; 11] = [38, 0, 1, 0, 0, 0, 0, 0, 0, 0, 10];
 
 #[test]
@@ -10,7 +11,7 @@ fn file_chunk_matches_an_independent_xchacha_vector() {
     let sealed = key.seal_chunk(PATH, &HEADER, 0, b"hello file");
     assert_eq!(
         hex::encode(&sealed),
-        "5621e82de767c089ad298c5b76f00982eb0d2b879416e4ed0019"
+        "5621e82de767c089ad295c0569aaeded87f0bd359018efce5e88"
     );
     assert_eq!(
         key.open_chunk(PATH, &HEADER, 0, &sealed).unwrap(),
@@ -37,7 +38,15 @@ fn files_bind_the_key_path_header_and_big_endian_index() {
         assert!(wrong.open_chunk(PATH, &HEADER, index, &sealed).is_err());
         assert!(key
             .open_chunk(
-                "files/1/22222222-2222-2222-2222-222222222222",
+                "10101010-1010-1010-1010-101010101010/files/1/22222222-2222-2222-2222-222222222222",
+                &HEADER,
+                index,
+                &sealed
+            )
+            .is_err());
+        assert!(key
+            .open_chunk(
+                "20202020-2020-2020-2020-202020202020/files/1/11111111-1111-1111-1111-111111111111",
                 &HEADER,
                 index,
                 &sealed

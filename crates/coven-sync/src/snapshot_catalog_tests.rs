@@ -21,6 +21,7 @@ fn signed_snapshot(
 async fn unsigned_snapshot(device: &Device, id: coven_format::store_log::SnapshotId) -> Vec<u8> {
     let key_id = device.log().await.replay.state.store.unwrap().key;
     let path = ObjectPath::snapshot(
+        store(1),
         id.audience.clone(),
         id.device,
         id.number.try_into().unwrap(),
@@ -83,6 +84,7 @@ async fn unsigned_snapshot_cannot_replace_rows_or_authorize_log_deletion() {
     upload(&a, &storage).await;
     let id = a.sync.write_snapshot(Audience::Store).await.unwrap();
     let path = ObjectPath::snapshot(
+        store(1),
         id.audience.clone(),
         id.device,
         id.number.try_into().unwrap(),
@@ -100,7 +102,7 @@ async fn unsigned_snapshot_cannot_replace_rows_or_authorize_log_deletion() {
     a.sync.run_retention().await.unwrap();
     assert_eq!(
         storage
-            .list(&ObjectPrefix::device_logs())
+            .list(&ObjectPrefix::device_logs(store(1)))
             .await
             .unwrap()
             .len(),
@@ -129,6 +131,7 @@ async fn another_members_snapshot_signatures_never_authorize_selection_loading_o
         upload(&a, &storage).await;
         let id = a.sync.write_snapshot(Audience::Store).await.unwrap();
         let path = ObjectPath::snapshot(
+            store(1),
             id.audience.clone(),
             id.device,
             id.number.try_into().unwrap(),
@@ -147,7 +150,7 @@ async fn another_members_snapshot_signatures_never_authorize_selection_loading_o
         a.sync.run_retention().await.unwrap();
         assert_eq!(
             storage
-                .list(&ObjectPrefix::device_logs())
+                .list(&ObjectPrefix::device_logs(store(1)))
                 .await
                 .unwrap()
                 .len(),
@@ -199,7 +202,7 @@ async fn another_members_snapshot_signatures_never_authorize_selection_loading_o
         storage.create(&path, &original).await.unwrap();
         a.sync.run_retention().await.unwrap();
         assert!(storage
-            .list(&ObjectPrefix::device_logs())
+            .list(&ObjectPrefix::device_logs(store(1)))
             .await
             .unwrap()
             .is_empty());
@@ -217,7 +220,7 @@ async fn coverage_checks_read_exactly_the_signed_prefix_without_an_audience_key(
     upload(&a, &storage).await;
     a.sync.write_snapshot(Audience::Store).await.unwrap();
     let object = storage
-        .list(&ObjectPrefix::snapshots())
+        .list(&ObjectPrefix::snapshots(store(1)))
         .await
         .unwrap()
         .remove(0);
@@ -248,7 +251,7 @@ async fn signed_coverage_does_not_require_opening_the_body_but_loading_does() {
     upload(&a, &storage).await;
     let id = a.sync.write_snapshot(Audience::Store).await.unwrap();
     let object = storage
-        .list(&ObjectPrefix::snapshots())
+        .list(&ObjectPrefix::snapshots(store(1)))
         .await
         .unwrap()
         .remove(0);
@@ -264,7 +267,7 @@ async fn signed_coverage_does_not_require_opening_the_body_but_loading_does() {
     a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
     a.sync.run_retention().await.unwrap();
     assert!(storage
-        .list(&ObjectPrefix::device_logs())
+        .list(&ObjectPrefix::device_logs(store(1)))
         .await
         .unwrap()
         .is_empty());
@@ -288,12 +291,12 @@ async fn a_truncated_body_does_not_erase_signed_required_history() {
     a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
     a.sync.write_snapshot(Audience::Store).await.unwrap();
     assert!(storage
-        .list(&ObjectPrefix::device_logs())
+        .list(&ObjectPrefix::device_logs(store(1)))
         .await
         .unwrap()
         .is_empty());
     let object = storage
-        .list(&ObjectPrefix::snapshots())
+        .list(&ObjectPrefix::snapshots(store(1)))
         .await
         .unwrap()
         .remove(0);
@@ -319,6 +322,7 @@ async fn reset_boundaries_reject_another_members_prefix_before_changing_rows() {
     upload(&a, &storage).await;
     let id = a.sync.write_snapshot(Audience::Store).await.unwrap();
     let path = ObjectPath::snapshot(
+        store(1),
         id.audience.clone(),
         id.device,
         id.number.try_into().unwrap(),
@@ -348,7 +352,7 @@ async fn authors_must_be_in_the_applied_store_log_and_remain_known_after_removal
     add_device(&mut b).await;
     b.sync.write_snapshot(Audience::Store).await.unwrap();
     super::retention::post(&b, &storage).await;
-    let path = ObjectPath::positions(b.device().await);
+    let path = ObjectPath::positions(store(1), b.device().await);
     let bytes = storage.read(&path).await.unwrap();
     assert!(matches!(
         a.sync.reload_from_snapshots().await,

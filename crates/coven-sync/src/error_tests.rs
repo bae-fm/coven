@@ -31,7 +31,11 @@ fn merge_causality_refusal_preserves_its_native_cause() {
         device: DeviceId(1),
         number: 2,
     };
-    let path = ObjectPath::device_log(write.device, write.number.try_into().unwrap());
+    let path = ObjectPath::device_log(
+        crate::device_log_sync::tests::STORE_ID,
+        write.device,
+        write.number.try_into().unwrap(),
+    );
     let error = crate::write_object::database_failure(
         &path,
         DbError::InvalidWrite {
@@ -63,7 +67,11 @@ fn object_validation_keeps_causes_and_local_failures_stay_local() {
         device: DeviceId(1),
         number: 1,
     };
-    let path = ObjectPath::device_log(write.device, write.number.try_into().unwrap());
+    let path = ObjectPath::device_log(
+        crate::device_log_sync::tests::STORE_ID,
+        write.device,
+        write.number.try_into().unwrap(),
+    );
     for error in [
         DbError::InvalidWrite {
             write,

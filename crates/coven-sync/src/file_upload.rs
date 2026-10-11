@@ -243,7 +243,7 @@ impl FilesInner {
         let identity = item.identity.as_ref().expect("recorded identity");
         let (id, key) = decode_identity(identity.as_bytes()).map_err(FileReadError::from)?;
         let device = upload_device(item)?;
-        let path = ObjectPath::file(device, id);
+        let path = ObjectPath::file(self.directory.id(), device, id);
         if !item.stored {
             let storage = self
                 .storage

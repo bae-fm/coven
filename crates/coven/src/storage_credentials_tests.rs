@@ -145,7 +145,7 @@ async fn dropping_a_replacement_waiter_does_not_interrupt_key_installation_or_pu
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
     f.storage
-        .hold_next_listing(ObjectPrefix::store_logs(), entered, resumed)
+        .hold_next_listing(ObjectPrefix::store_logs(f.directory.id()), entered, resumed)
         .await;
     {
         let replacement = f

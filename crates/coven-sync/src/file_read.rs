@@ -198,7 +198,7 @@ impl UploadedFile {
         .await?;
         let coven_format::file_reference::FileReference { device, id, key } =
             file.uploaded()?.ok_or(DbError::DamagedDatabase)?;
-        let path = ObjectPath::file(device, id);
+        let path = ObjectPath::file(owner.directory.id(), device, id);
         let _file = owner.lock_file(&file).await;
         let _guard = owner.cache.read().await;
         let cached = owner.database.cached(&file, -1).await?;

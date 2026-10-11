@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_utils::STORE_ID;
 
 const ID: &str = "00112233-4455-6677-8899-aabbccddeeff";
 const KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
@@ -146,7 +147,7 @@ fn file_reference_matches_the_pinned_text_and_path() {
     let decoded = FileReference::decode(text).unwrap();
     assert_eq!(decoded.encode().as_str(), text);
     assert_eq!(
-        crate::path::ObjectPath::file(decoded.device, decoded.id).as_str(),
+        crate::path::ObjectPath::file(STORE_ID, decoded.device, decoded.id).as_str(),
         path
     );
 }

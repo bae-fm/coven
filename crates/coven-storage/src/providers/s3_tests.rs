@@ -1,5 +1,6 @@
 use super::*;
 use crate::providers::tests::{query, read, response, TestServer};
+use crate::test_utils::STORE_ID;
 use crate::{check_provider, StorageCheck};
 use axum::{
     body::{Body, Bytes},
@@ -31,7 +32,6 @@ struct Remote {
     refuse_delete: bool,
     deletions: usize,
     fail_completion_reply: bool,
-    setup_barrier: Option<Arc<tokio::sync::Barrier>>,
     broken_check: Option<StorageCheck>,
     forced_error: Option<(&'static str, u16)>,
 }
@@ -42,21 +42,7 @@ async fn endpoint(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
-    let barrier = if query(&uri).contains_key("list-type") {
-        let remote = state.lock().unwrap();
-        if remote.objects.is_empty() {
-            remote.setup_barrier.clone()
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    let reply = respond(&state, method, uri, headers, body);
-    if let Some(barrier) = barrier {
-        barrier.wait().await;
-    }
-    reply
+    respond(&state, method, uri, headers, body)
 }
 fn respond(
     state: &Mutex<Remote>,
@@ -264,7 +250,7 @@ fn provider(url: &str) -> StorageConnection<S3Storage> {
 async fn real_s3_client_conforms_with_pagination() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
-    crate::test_utils::Conformance::new(Arc::new(provider(&server.url)))
+    crate::test_utils::Conformance::new(Arc::new(provider(&server.url)), STORE_ID)
         .run()
         .await
         .unwrap();
@@ -275,7 +261,7 @@ async fn multipart_recovers_a_lost_part_reply() {
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     assert_eq!(storage.single_request_limit(), 5 * 1024 * 1024 * 1024);
-    crate::test_utils::Conformance::new(Arc::new(storage))
+    crate::test_utils::Conformance::new(Arc::new(storage), STORE_ID)
         .lost_part_reply(8 * 1024 * 1024, async {
             state.lock().unwrap().fail_part_reply = true;
         })
@@ -298,7 +284,10 @@ async fn errors_and_manual_key_instructions() {
         ("ServiceUnavailable", 503, StorageFailure::Network),
     ] {
         state.lock().unwrap().forced_error = Some((code, status));
-        let error = storage.list(&ObjectPrefix::all()).await.unwrap_err();
+        let error = storage
+            .list(&ObjectPrefix::all(STORE_ID))
+            .await
+            .unwrap_err();
         assert_eq!(error.failure(), failure);
         assert!(!format!("{error:?} {error}").contains("credential-echo"));
     }
@@ -324,6 +313,7 @@ async fn multipart_sizes_parts_for_the_promised_object() {
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
     let storage = provider(&server.url);
     let path = ObjectPath::file(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(31),
         coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xdd; 16])),
     );
@@ -335,7 +325,7 @@ async fn multipart_sizes_parts_for_the_promised_object() {
 }
 
 #[tokio::test]
-async fn setup_refuses_an_unrelated_object_in_the_location() {
+async fn shared_location_ignores_unrelated_objects() {
     let state = Arc::new(Mutex::new(Remote::default()));
     state
         .lock()
@@ -344,14 +334,11 @@ async fn setup_refuses_an_unrelated_object_in_the_location() {
         .insert("store/unrelated".into(), b"data".to_vec());
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::store_log(
-        coven_foundation::id_source::DeviceId(1),
-        std::num::NonZeroU64::MIN,
-    );
-    assert!(matches!(
-        storage.setup(&path, b"first entry").await.unwrap_err(),
-        StorageSetupError::LocationOccupied
-    ));
+    crate::test_utils::Conformance::new(Arc::new(storage), STORE_ID)
+        .shared_location(coven_foundation::id_source::StoreId(
+            uuid::Uuid::from_bytes([0x20; 16]),
+        ))
+        .await;
     assert_eq!(state.lock().unwrap().objects.len(), 1);
 }
 
@@ -360,7 +347,7 @@ async fn missing_session_and_destination_is_expired() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let error = crate::test_utils::Conformance::new(Arc::new(storage))
+    let error = crate::test_utils::Conformance::new(Arc::new(storage), STORE_ID)
         .expired_session(async {
             state.lock().unwrap().uploads.clear();
         })
@@ -374,6 +361,7 @@ async fn abort_retries_and_preserves_an_object_after_a_lost_completion_reply() {
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     let path = ObjectPath::device_log(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
     );
@@ -390,39 +378,12 @@ async fn abort_retries_and_preserves_an_object_after_a_lost_completion_reply() {
 }
 
 #[tokio::test]
-async fn simultaneous_setups_expose_both_first_entries_for_sync() {
-    use coven_foundation::id_source::DeviceId;
-    let state = Arc::new(Mutex::new(Remote::default()));
-    state.lock().unwrap().setup_barrier = Some(Arc::new(tokio::sync::Barrier::new(2)));
-    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-    let storage = provider(&server.url);
-    let first = ObjectPath::store_log(DeviceId(31), std::num::NonZeroU64::MIN);
-    let other = ObjectPath::store_log(DeviceId(32), std::num::NonZeroU64::MIN);
-    let (left, right) = tokio::join!(
-        storage.setup(&first, b"first store"),
-        storage.setup(&other, b"second store")
-    );
-    assert_eq!(left.unwrap(), storage.config());
-    assert_eq!(right.unwrap(), storage.config());
-    assert_eq!(
-        storage
-            .list(&ObjectPrefix::store_logs())
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|object| object.path)
-            .collect::<Vec<_>>(),
-        [first, other]
-    );
-    assert_eq!(state.lock().unwrap().objects.len(), 2);
-}
-
-#[tokio::test]
 async fn provider_check_cleans_up_after_a_lost_create_reply_and_retains_both_failures() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     let path = ObjectPath::device_log(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
     );
@@ -476,7 +437,7 @@ async fn listing_retains_server_time_and_size_across_pages_and_retries() {
         "time",
     )
     .unwrap();
-    crate::test_utils::Conformance::new(Arc::new(storage))
+    crate::test_utils::Conformance::new(Arc::new(storage), STORE_ID)
         .listing_times(time, async {})
         .await;
 }
@@ -485,6 +446,7 @@ async fn listing_retains_server_time_and_size_across_pages_and_retries() {
 async fn duplicate_listing_entries_merge_or_fail_before_fetching_another_page() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let path = ObjectPath::device_log(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
     );
@@ -504,7 +466,9 @@ async fn duplicate_listing_entries_merge_or_fail_before_fetching_another_page() 
                 response(200, format!("<ListBucketResult>{contents}</ListBucketResult>"))
             }
         })).await;
-        let result = provider(&server.url).list(&ObjectPrefix::all()).await;
+        let result = provider(&server.url)
+            .list(&ObjectPrefix::all(STORE_ID))
+            .await;
         if size == 4 {
             let listed = result.unwrap();
             assert_eq!(listed.len(), 1);
@@ -523,6 +487,7 @@ async fn multipart_publication_and_abort_are_bound_to_the_native_session() {
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     let path = ObjectPath::device_log(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
     );
@@ -562,6 +527,7 @@ async fn resumed_multipart_parts_follow_every_page_before_advancing() {
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     let path = ObjectPath::device_log(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
     );
@@ -595,6 +561,7 @@ async fn interrupted_ranged_body_retains_the_sdk_cause() {
     });
     let storage = provider(&format!("http://{address}"));
     let path = ObjectPath::device_log(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
     );
@@ -630,7 +597,7 @@ async fn permission_failures_reach_every_object_and_upload_caller() {
         },
     ))
     .await;
-    let errors = crate::test_utils::Conformance::new(Arc::new(provider(&server.url)))
+    let errors = crate::test_utils::Conformance::new(Arc::new(provider(&server.url)), STORE_ID)
         .permission_failures(async {
             denied.store(true, Ordering::SeqCst);
         })
@@ -654,7 +621,7 @@ async fn listing_requires_an_explicit_end_or_a_fresh_nonempty_cursor() {
         .await;
         assert_eq!(
             provider(&server.url)
-                .list(&ObjectPrefix::all())
+                .list(&ObjectPrefix::all(STORE_ID))
                 .await
                 .unwrap_err()
                 .failure(),
@@ -672,7 +639,7 @@ async fn multipart_recovery_refuses_incomplete_pages_and_empty_etags_without_adv
             else {response(200,format!("<ListPartsResult>{tail}</ListPartsResult>"))}
         })).await;
         let storage=provider(&server.url);
-        let path=ObjectPath::device_log(coven_foundation::id_source::DeviceId(31),std::num::NonZeroU64::MIN);
+        let path=ObjectPath::device_log(STORE_ID, coven_foundation::id_source::DeviceId(31),std::num::NonZeroU64::MIN);
         let mut upload=storage.begin_upload(&path,4).await.unwrap();
         assert_eq!(storage.upload_part(&mut upload,b"data").await.unwrap_err().failure(),StorageFailure::Protocol);
         assert_eq!(upload.confirmed_bytes(),0);
@@ -691,6 +658,7 @@ async fn recovered_parts_cannot_exceed_the_recordings_part_size() {
     })).await;
     let storage = provider(&server.url);
     let path = ObjectPath::device_log(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
     );
@@ -725,7 +693,7 @@ async fn replacement_key_signs_the_next_request_on_the_existing_client() {
     }))
     .await;
     let storage = provider(&server.url);
-    storage.list(&ObjectPrefix::all()).await.unwrap();
+    storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap();
     storage
         .set_s3_credentials(S3Credentials {
             access_key_id: "replacement".into(),
@@ -733,7 +701,7 @@ async fn replacement_key_signs_the_next_request_on_the_existing_client() {
         })
         .await
         .unwrap();
-    storage.list(&ObjectPrefix::all()).await.unwrap();
+    storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap();
     let signatures = signatures.lock().unwrap();
     assert!(signatures[0].contains("Credential=access/"));
     assert!(signatures[1].contains("Credential=replacement/"));
@@ -754,6 +722,7 @@ async fn provider_check_names_each_failed_operation_and_removes_its_object() {
             TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
         let storage = provider(&server.url);
         let path = ObjectPath::file(
+            STORE_ID,
             coven_foundation::id_source::DeviceId(31),
             coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xab; 16])),
         );
@@ -777,7 +746,7 @@ async fn provider_check_names_each_failed_operation_and_removes_its_object() {
 }
 
 #[tokio::test]
-async fn provider_check_preserves_unrelated_contents_and_reports_occupied() {
+async fn provider_check_preserves_unrelated_contents() {
     let state = Arc::new(Mutex::new(Remote::default()));
     state
         .lock()
@@ -787,15 +756,13 @@ async fn provider_check_preserves_unrelated_contents_and_reports_occupied() {
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     let path = ObjectPath::file(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(31),
         coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xab; 16])),
     );
-    assert!(matches!(
-        check_provider(&storage, &path, b"sealed test bytes")
-            .await
-            .unwrap_err(),
-        StorageSetupError::LocationOccupied
-    ));
+    check_provider(&storage, &path, b"sealed test bytes")
+        .await
+        .unwrap();
     assert_eq!(
         state.lock().unwrap().objects,
         BTreeMap::from([("store/unrelated".into(), b"kept".to_vec())])

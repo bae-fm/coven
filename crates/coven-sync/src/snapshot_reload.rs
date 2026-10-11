@@ -136,7 +136,7 @@ impl StoreLogSync {
                     .storage
                     .as_deref()
                     .ok_or(SyncError::NoStorage)?
-                    .list(&ObjectPrefix::device_logs())
+                    .list(&ObjectPrefix::device_logs(self.directory.id()))
                     .await?
                 {
                     let id = object
@@ -292,7 +292,7 @@ impl StoreLogSync {
                         coven_database::SnapshotError::Write { write, error },
                     )) => {
                         match crate::write_object::database_failure(
-                            &crate::write_seal::path(write),
+                            &crate::write_seal::path(self.directory.id(), write),
                             *error,
                         ) {
                             SyncError::Damaged(damage) => {

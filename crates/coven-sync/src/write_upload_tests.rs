@@ -119,7 +119,10 @@ async fn a_write_exceeds_the_transfer_budget_on_upload_and_download() {
         .await
         .unwrap();
     assert_eq!(devices[0].writes.upload_writes().await.unwrap().len(), 1);
-    let objects = storage.list(&ObjectPrefix::device_logs()).await.unwrap();
+    let objects = storage
+        .list(&ObjectPrefix::device_logs(STORE_ID))
+        .await
+        .unwrap();
     assert!(objects[0].size > 100 * BUDGET as u64);
     devices[1].writes.download_writes().await.unwrap();
     assert!(bounded.largest.load(Ordering::SeqCst) >= 64 * 1024);
@@ -165,7 +168,7 @@ async fn lost_part_replies_and_expired_sessions_preserve_order_and_bytes() {
             matches!(devices[0].writes.upload_writes().await, Err(SyncError::Storage(error)) if error.failure() == coven_storage::StorageFailure::Network)
         );
         assert!(storage
-            .list(&ObjectPrefix::device_logs())
+            .list(&ObjectPrefix::device_logs(STORE_ID))
             .await
             .unwrap()
             .is_empty());
@@ -188,7 +191,11 @@ async fn lost_part_replies_and_expired_sessions_preserve_order_and_bytes() {
         );
         assert_eq!(
             storage
-                .read(&ObjectPath::device_log(DeviceId(1), 1.try_into().unwrap()))
+                .read(&ObjectPath::device_log(
+                    STORE_ID,
+                    DeviceId(1),
+                    1.try_into().unwrap()
+                ))
                 .await
                 .unwrap(),
             fixed
@@ -226,7 +233,7 @@ async fn classified_occupied_paths_count_as_stored_with_and_without_a_session() 
         );
         let fixed = writes::resealed(&devices[0]).await;
         storage
-            .create(&crate::write_seal::path(fixed.0), &fixed.1)
+            .create(&crate::write_seal::path(STORE_ID, fixed.0), &fixed.1)
             .await
             .unwrap();
         let mut fault = Faults::none();

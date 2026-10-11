@@ -5,12 +5,13 @@ use coven_crypto::{DerivedKeys, MemberId, MemberKeys, ObjectHasher, StoreKeyring
 use coven_database::{DbError, EntryOutcome, StoreLog, WaitingUpload};
 use coven_format::sealed_write::{WriteObjectLayout, WriteObjectPrefix};
 use coven_format::write_stream::WriteHeaderFrame;
-use coven_foundation::id_source::KeyId;
+use coven_foundation::id_source::{KeyId, StoreId};
 use coven_merge::{Audience, WriteId};
 use coven_storage::ObjectPath;
 
-pub(crate) fn path(write: WriteId) -> ObjectPath {
+pub(crate) fn path(store: StoreId, write: WriteId) -> ObjectPath {
     ObjectPath::device_log(
+        store,
         write.device,
         write.number.try_into().expect("positive write number"),
     )
@@ -124,6 +125,7 @@ pub(crate) fn select(
 }
 
 pub(crate) fn seal(
+    store: StoreId,
     upload: WaitingUpload<'_>,
     ring: &StoreKeyring,
     member: &MemberKeys,
@@ -145,7 +147,7 @@ pub(crate) fn seal(
         header.parts.iter().map(|p| p.plaintext_length).collect(),
     )?;
     let aad = layout.prefix()?;
-    let path = path(header.header.position);
+    let path = path(store, header.header.position);
     let mut hash = ObjectHasher::new();
     hash.update(&aad);
     emit(&aad)?;

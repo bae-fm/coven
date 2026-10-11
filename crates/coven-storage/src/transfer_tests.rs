@@ -1,5 +1,6 @@
 use super::*;
 use crate::test_utils::MemoryStorage;
+use crate::test_utils::STORE_ID;
 use crate::StorageFailure;
 use coven_foundation::id_source::DeviceId;
 
@@ -13,7 +14,7 @@ fn storage() -> MemoryStorage {
 #[tokio::test]
 async fn create_routes_the_boundary_without_starting_the_unused_request() {
     let storage = storage();
-    let path = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
+    let path = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
     for size in [0, 15, 16] {
         let called = std::sync::atomic::AtomicBool::new(false);
         upload_bytes(&storage, &path, &vec![1; size], async {

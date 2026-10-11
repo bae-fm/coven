@@ -1,4 +1,8 @@
 //! An in-memory provider, fault injection and the shared provider conformance suite.
+/// The store shared by the deterministic storage and format fixtures.
+pub const STORE_ID: coven_foundation::id_source::StoreId =
+    coven_foundation::id_source::StoreId(uuid::Uuid::from_bytes([0x10; 16]));
+
 use crate::session::SessionState;
 use crate::*;
 use async_trait::async_trait;

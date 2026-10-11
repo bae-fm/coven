@@ -209,9 +209,8 @@ impl Files {
         Ok(())
     }
 
-    /// Finish transfers against the old provider before verifying and committing
-    /// a replacement. Holding these guards across setup includes each completed
-    /// upload in a relocation's copy and leaves the old provider on failure.
+    /// Finish transfers before verifying and committing a connection change.
+    /// A failed setup leaves the current connection installed.
     pub(crate) async fn set_storage(
         &self,
         storage: Option<Arc<dyn Storage>>,

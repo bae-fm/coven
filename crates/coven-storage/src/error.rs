@@ -144,9 +144,9 @@ pub enum StorageSetupError {
         #[source]
         source: StorageError,
     },
-    /// The location already contains another store.
-    #[error("storage location is occupied")]
-    LocationOccupied,
+    /// Reconnecting cannot move an established store to another location.
+    #[error("storage location change is unsupported")]
+    LocationChangeUnsupported,
     /// A classified storage failure.
     #[error(transparent)]
     Storage(#[from] StorageError),

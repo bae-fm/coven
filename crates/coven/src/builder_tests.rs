@@ -121,7 +121,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     assert_eq!(file.location(), FileLocation::Uploaded);
     assert_eq!(handle.read_file(&file).await.unwrap(), vec![42; 200_000]);
     let uploaded = file.uploaded().unwrap().unwrap();
-    let path = ObjectPath::file(uploaded.device, uploaded.id);
+    let path = ObjectPath::file(directory.id(), uploaded.device, uploaded.id);
     let reads = storage.reads().await.len();
     let stream = handle.open_file_stream(&file).await.unwrap();
     assert_eq!(stream.read_at(70_000, 37).await.unwrap(), vec![42; 37]);
@@ -610,14 +610,14 @@ mod recovery {
             keys.persist(&ring).unwrap();
             if readable {
                 let snapshot = storage
-                    .list(&ObjectPrefix::snapshots())
+                    .list(&ObjectPrefix::snapshots(directory.id()))
                     .await
                     .unwrap()
                     .remove(0)
                     .path;
                 let snapshot_bytes = storage.read(&snapshot).await.unwrap();
                 let write = storage
-                    .list(&ObjectPrefix::device_logs())
+                    .list(&ObjectPrefix::device_logs(directory.id()))
                     .await
                     .unwrap()
                     .remove(0)
@@ -717,7 +717,7 @@ mod recovery {
             writes.upload_writes().await.unwrap();
             assert_eq!(
                 storage
-                    .list(&ObjectPrefix::device_logs())
+                    .list(&ObjectPrefix::device_logs(directory.id()))
                     .await
                     .unwrap()
                     .len(),

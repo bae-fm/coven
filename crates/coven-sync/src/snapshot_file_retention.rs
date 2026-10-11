@@ -14,7 +14,9 @@ impl StoreLogSync {
         // List first: publication fixes an identity in the local queue before
         // storage can list it, and atomically replaces that queue protection
         // with a waiting write. A later upload is outside this deletion set.
-        let objects = storage.list(&ObjectPrefix::files()).await?;
+        let objects = storage
+            .list(&ObjectPrefix::files(self.directory.id()))
+            .await?;
         let local = self.database.local_store_log().await?;
         let readable: BTreeSet<_> = self.snapshot_audiences(&local.log)?.into_keys().collect();
         let protected = self.database.retained_files().await?;
@@ -24,7 +26,7 @@ impl StoreLogSync {
         let mut references: BTreeSet<_> = protected
             .references
             .into_iter()
-            .map(|(device, id)| ObjectPath::file(device, id))
+            .map(|(device, id)| ObjectPath::file(self.directory.id(), device, id))
             .collect();
         for upload in &protected.uploads {
             if upload.unused {
@@ -35,7 +37,7 @@ impl StoreLogSync {
                 let coven_database::FileLocation::OnDevice(device) = upload.file.location() else {
                     return Err(coven_database::DbError::DamagedDatabase.into());
                 };
-                references.insert(ObjectPath::file(device, id));
+                references.insert(ObjectPath::file(self.directory.id(), device, id));
             }
         }
         let mut paths: BTreeSet<_> = objects.into_iter().map(|object| object.path).collect();
@@ -48,7 +50,7 @@ impl StoreLogSync {
             let coven_database::FileLocation::OnDevice(device) = upload.file.location() else {
                 return Err(coven_database::DbError::DamagedDatabase.into());
             };
-            let path = ObjectPath::file(device, id);
+            let path = ObjectPath::file(self.directory.id(), device, id);
             paths.insert(path.clone());
             unused.insert(path, upload.id);
         }
@@ -67,7 +69,10 @@ impl StoreLogSync {
             return Ok(());
         }
         let mut audiences = BTreeSet::new();
-        for object in storage.list(&ObjectPrefix::snapshots()).await? {
+        for object in storage
+            .list(&ObjectPrefix::snapshots(self.directory.id()))
+            .await?
+        {
             let id = object
                 .path
                 .snapshot_id()
@@ -98,7 +103,7 @@ impl StoreLogSync {
                     Ok(files) => references.extend(
                         files
                             .into_iter()
-                            .map(|(device, id)| ObjectPath::file(device, id)),
+                            .map(|(device, id)| ObjectPath::file(self.directory.id(), device, id)),
                     ),
                     Err(SyncError::Database(coven_database::DbError::Snapshot(
                         coven_database::SnapshotError::Schema { .. },
@@ -123,7 +128,10 @@ impl StoreLogSync {
         }
         let mut replays = ReplayCache::new(&local.log);
         let stuck = crate::pending_logs::local_refusals(&self.database).await?;
-        for object in storage.list(&ObjectPrefix::device_logs()).await? {
+        for object in storage
+            .list(&ObjectPrefix::device_logs(self.directory.id()))
+            .await?
+        {
             if eligible.iter().all(|path| references.contains(path)) {
                 return Ok(());
             }
@@ -168,7 +176,7 @@ impl StoreLogSync {
             references.extend(
                 files
                     .into_iter()
-                    .map(|(device, id)| ObjectPath::file(device, id)),
+                    .map(|(device, id)| ObjectPath::file(self.directory.id(), device, id)),
             );
         }
         for path in eligible {

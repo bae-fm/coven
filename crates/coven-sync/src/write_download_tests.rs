@@ -24,7 +24,7 @@ async fn damaged_objects_roll_back_and_block_only_their_device() {
         )
         .await;
         devices[1].writes.upload_writes().await.unwrap();
-        let path = crate::write_seal::path(record.header.position);
+        let path = crate::write_seal::path(STORE_ID, record.header.position);
         let mut bytes = storage.read(&path).await.unwrap();
         match failure {
             "decryption" => bytes[60] ^= 1,
@@ -35,7 +35,7 @@ async fn damaged_objects_roll_back_and_block_only_their_device() {
             "moved" => {
                 bytes = seal(
                     &record,
-                    &ObjectPath::device_log(DeviceId(99), 1.try_into().unwrap()),
+                    &ObjectPath::device_log(STORE_ID, DeviceId(99), 1.try_into().unwrap()),
                     |_, _| {},
                 )
             }
@@ -51,7 +51,7 @@ async fn damaged_objects_roll_back_and_block_only_their_device() {
         storage.delete(&path).await.unwrap();
         storage.create(&path, &bytes).await.unwrap();
         let object = storage
-            .list(&ObjectPrefix::device_logs())
+            .list(&ObjectPrefix::device_logs(STORE_ID))
             .await
             .unwrap()
             .into_iter()
@@ -259,7 +259,7 @@ async fn only_a_newer_format_requires_an_update() {
         )
         .await;
         devices[0].writes.upload_writes().await.unwrap();
-        let path = ObjectPath::device_log(DeviceId(1), 1.try_into().unwrap());
+        let path = ObjectPath::device_log(STORE_ID, DeviceId(1), 1.try_into().unwrap());
         let original = storage.read(&path).await.unwrap();
         let mut bytes = original.clone();
         bytes[2] = version;
@@ -299,7 +299,7 @@ async fn only_a_newer_format_requires_an_update() {
         assert_eq!(rows(&devices[1].db).await.len(), 1);
         assert!(devices[1].db.operations().await.unwrap().is_empty());
         assert!(storage
-            .list(&ObjectPrefix::snapshots())
+            .list(&ObjectPrefix::snapshots(STORE_ID))
             .await
             .unwrap()
             .is_empty());
@@ -332,13 +332,13 @@ async fn a_newer_schema_does_not_hide_a_damaged_signature() {
         .unwrap();
     let mut record = queued(&devices[0].db).await;
     record.header.schema_version = 2;
-    let path = crate::write_seal::path(record.header.position);
+    let path = crate::write_seal::path(STORE_ID, record.header.position);
     let mut bytes = seal(&record, &path, |_, _| {});
     let last = bytes.len() - 1;
     bytes[last] ^= 1;
     storage.create(&path, &bytes).await.unwrap();
     let object = storage
-        .list(&ObjectPrefix::device_logs())
+        .list(&ObjectPrefix::device_logs(STORE_ID))
         .await
         .unwrap()
         .remove(0);
@@ -415,7 +415,7 @@ async fn missing_read_view_waits_then_replays_after_the_store_log_arrives() {
         sql(&devices[0].db, "UPDATE notes SET title='after'").await;
         devices[0].writes.upload_writes().await.unwrap();
         let object = storage
-            .list(&ObjectPrefix::device_logs())
+            .list(&ObjectPrefix::device_logs(STORE_ID))
             .await
             .unwrap()
             .remove(0);
@@ -484,6 +484,7 @@ async fn retention_waits_for_store_log_entries() {
         .await;
         devices[0].writes.upload_writes().await.unwrap();
         let unused = ObjectPath::file(
+            STORE_ID,
             DeviceId(2),
             coven_foundation::id_source::FileId(Uuid::from_u128(99)),
         );
@@ -510,7 +511,7 @@ async fn authorization_causality_and_identity_refusals_keep_their_report_tags() 
         )
         .await;
         let mut record = queued(&devices[0].db).await;
-        let path = crate::write_seal::path(record.header.position);
+        let path = crate::write_seal::path(STORE_ID, record.header.position);
         match defect {
             "authorization" => record.header.store_log_read.0.clear(),
             "causality" => record.header.timestamp = Timestamp::new(0, 0, DeviceId(1)).unwrap(),
@@ -522,7 +523,7 @@ async fn authorization_causality_and_identity_refusals_keep_their_report_tags() 
             .await
             .unwrap();
         let object = storage
-            .list(&ObjectPrefix::device_logs())
+            .list(&ObjectPrefix::device_logs(STORE_ID))
             .await
             .unwrap()
             .remove(0);

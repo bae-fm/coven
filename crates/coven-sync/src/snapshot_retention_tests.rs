@@ -23,7 +23,7 @@ async fn unsigned_positions_cannot_authorize_log_deletion() {
     upload(&a, &storage).await;
     a.sync.write_snapshot(Audience::Store).await.unwrap();
     post(&a, &storage).await;
-    let path = ObjectPath::positions(a.device().await);
+    let path = ObjectPath::positions(store(1), a.device().await);
     let bytes = storage.read(&path).await.unwrap();
     let unsigned = coven_format::sealed_single::SingleChunkObject::decode(&bytes)
         .unwrap()
@@ -38,7 +38,7 @@ async fn unsigned_positions_cannot_authorize_log_deletion() {
         a.sync.run_retention().await.unwrap();
         assert_eq!(
             storage
-                .list(&ObjectPrefix::device_logs())
+                .list(&ObjectPrefix::device_logs(store(1)))
                 .await
                 .unwrap()
                 .len(),
@@ -48,7 +48,7 @@ async fn unsigned_positions_cannot_authorize_log_deletion() {
     storage.replace(&path, &bytes).await.unwrap();
     a.sync.run_retention().await.unwrap();
     assert!(storage
-        .list(&ObjectPrefix::device_logs())
+        .list(&ObjectPrefix::device_logs(store(1)))
         .await
         .unwrap()
         .is_empty());
@@ -75,7 +75,7 @@ async fn every_active_device_must_post_before_covered_logs_are_deleted() {
     a.sync.run_retention().await.unwrap();
     assert_eq!(
         storage
-            .list(&ObjectPrefix::device_logs())
+            .list(&ObjectPrefix::device_logs(store(1)))
             .await
             .unwrap()
             .len(),
@@ -86,7 +86,7 @@ async fn every_active_device_must_post_before_covered_logs_are_deleted() {
     b.sync.run_retention().await.unwrap();
     assert_eq!(
         storage
-            .list(&ObjectPrefix::device_logs())
+            .list(&ObjectPrefix::device_logs(store(1)))
             .await
             .unwrap()
             .len(),
@@ -94,7 +94,7 @@ async fn every_active_device_must_post_before_covered_logs_are_deleted() {
     );
     a.sync.run_retention().await.unwrap();
     assert!(storage
-        .list(&ObjectPrefix::device_logs())
+        .list(&ObjectPrefix::device_logs(store(1)))
         .await
         .unwrap()
         .is_empty());
@@ -121,7 +121,7 @@ async fn a_removed_devices_member_can_delete_its_covered_logs() {
     post(&b, &storage).await;
     b.sync.run_retention().await.unwrap();
     assert!(storage
-        .list(&ObjectPrefix::device_logs())
+        .list(&ObjectPrefix::device_logs(store(1)))
         .await
         .unwrap()
         .is_empty());
@@ -174,7 +174,7 @@ async fn removed_member_logs_belong_to_the_store_owner_and_stay_on_google_drive(
         c.sync.run_retention().await.unwrap();
         assert_eq!(
             storage
-                .list(&ObjectPrefix::device_logs())
+                .list(&ObjectPrefix::device_logs(store(1)))
                 .await
                 .unwrap()
                 .len(),
@@ -183,7 +183,7 @@ async fn removed_member_logs_belong_to_the_store_owner_and_stay_on_google_drive(
         a.sync.run_retention().await.unwrap();
         assert_eq!(
             storage
-                .list(&ObjectPrefix::device_logs())
+                .list(&ObjectPrefix::device_logs(store(1)))
                 .await
                 .unwrap()
                 .len(),
@@ -244,7 +244,7 @@ async fn a_file_named_only_by_a_retained_log_write_stays_until_that_log_goes() {
             .uploaded()
             .unwrap()
             .unwrap();
-    let path = ObjectPath::file(uploaded.device, uploaded.id);
+    let path = ObjectPath::file(store(1), uploaded.device, uploaded.id);
     a.db.write(|sql| {
         sql.execute("DELETE FROM files", [])?;
         Ok(())
@@ -253,7 +253,10 @@ async fn a_file_named_only_by_a_retained_log_write_stays_until_that_log_goes() {
     .unwrap();
     upload(&a, &storage).await;
     assert!(a.db.retained_files().await.unwrap().references.is_empty());
-    let objects = storage.list(&ObjectPrefix::device_logs()).await.unwrap();
+    let objects = storage
+        .list(&ObjectPrefix::device_logs(store(1)))
+        .await
+        .unwrap();
     let start = storage.reads().await.len();
     a.sync.run_retention().await.unwrap();
     let reads = storage.reads().await;
@@ -272,12 +275,12 @@ async fn a_file_named_only_by_a_retained_log_write_stays_until_that_log_goes() {
     a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
     a.sync.write_snapshot(Audience::Store).await.unwrap();
     assert!(storage
-        .list(&ObjectPrefix::device_logs())
+        .list(&ObjectPrefix::device_logs(store(1)))
         .await
         .unwrap()
         .is_empty());
     assert!(storage
-        .list(&ObjectPrefix::files())
+        .list(&ObjectPrefix::files(store(1)))
         .await
         .unwrap()
         .is_empty());

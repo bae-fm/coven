@@ -217,10 +217,11 @@ async fn concurrent_raises_choose_the_earlier_timestamp_even_when_it_arrives_las
     devices[0].sync.sync_store_log().await.unwrap();
     let first =
         devices[0].db.store_log().await.unwrap().replay.state.schema[&Audience::Store].clone();
-    let path = crate::store_log_object::path(first.entry);
+    let path = crate::store_log_object::path(STORE_ID, first.entry);
     let bytes = storage.read(&path).await.unwrap();
     storage.delete(&path).await.unwrap();
     let snapshot_path = coven_storage::ObjectPath::snapshot(
+        STORE_ID,
         first.snapshot.audience.clone(),
         first.snapshot.device,
         first.snapshot.number.try_into().unwrap(),
@@ -278,6 +279,7 @@ async fn a_raise_resumes_after_reopening_at_every_publication_step() {
         let fixed = device.db.local_store_log().await.unwrap().upload;
         let expected = fixed.as_ref().map(|upload| {
             crate::store_log_object::seal_upload(
+                STORE_ID,
                 upload,
                 device.custody.read().unwrap().as_ref(),
                 &device.identity.read().unwrap().unwrap(),
@@ -292,7 +294,10 @@ async fn a_raise_resumes_after_reopening_at_every_publication_step() {
         if let Some(fixed) = fixed {
             assert_eq!(
                 storage
-                    .read(&crate::store_log_object::path(fixed.entry.position))
+                    .read(&crate::store_log_object::path(
+                        STORE_ID,
+                        fixed.entry.position
+                    ))
                     .await
                     .unwrap(),
                 expected.unwrap()
@@ -348,10 +353,11 @@ async fn a_losing_migrations_derived_value_disappears_without_a_loss() {
     devices[1].sync.sync_store_log().await.unwrap();
     let loser =
         devices[1].db.store_log().await.unwrap().replay.state.schema[&Audience::Store].clone();
-    let path = crate::store_log_object::path(loser.entry);
+    let path = crate::store_log_object::path(STORE_ID, loser.entry);
     let entry = storage.read(&path).await.unwrap();
     storage.delete(&path).await.unwrap();
     let snapshot_path = ObjectPath::snapshot(
+        STORE_ID,
         loser.snapshot.audience.clone(),
         loser.snapshot.device,
         loser.snapshot.number.try_into().unwrap(),
@@ -619,7 +625,12 @@ async fn a_newer_snapshot_format_stays_pending_until_the_required_update() {
         .write_snapshot(Audience::Store)
         .await
         .unwrap();
-    let path = ObjectPath::snapshot(id.audience, id.device, id.number.try_into().unwrap());
+    let path = ObjectPath::snapshot(
+        STORE_ID,
+        id.audience,
+        id.device,
+        id.number.try_into().unwrap(),
+    );
     let original = storage.read(&path).await.unwrap();
     let mut future = original.clone();
     future[1..3].copy_from_slice(&(coven_format::FORMAT_VERSION + 1).to_be_bytes());

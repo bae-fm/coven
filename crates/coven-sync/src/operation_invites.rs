@@ -192,7 +192,7 @@ impl StoreLogSync {
                     .operation_condition(
                         record,
                         PendingReason::Missing {
-                            path: ObjectPath::join_request(value.id),
+                            path: ObjectPath::join_request(self.directory.id(), value.id),
                         },
                     )
                     .await?;
@@ -202,7 +202,7 @@ impl StoreLogSync {
                 Ok(Progress::Reply(Ok(Output::Invite(value))))
             }
             InviteState::Waiting { .. } => {
-                let path = ObjectPath::join_request(work.id);
+                let path = ObjectPath::join_request(self.directory.id(), work.id);
                 let Some(bytes) = self.read(&path).await? else {
                     return Ok(Progress::Waiting(PendingReason::Missing { path }));
                 };
@@ -256,7 +256,7 @@ impl StoreLogSync {
                     .storage
                     .as_deref()
                     .ok_or(SyncError::NoStorage)?
-                    .delete(&ObjectPath::join_request(work.id))
+                    .delete(&ObjectPath::join_request(self.directory.id(), work.id))
                     .await
                 {
                     Ok(()) => (),
@@ -320,7 +320,7 @@ impl StoreLogSync {
         let SingleChunkObject::JoinRequest { signature, .. } = &envelope else {
             return Err(SyncError::InvitationChanged);
         };
-        let path = ObjectPath::join_request(work.id);
+        let path = ObjectPath::join_request(self.directory.id(), work.id);
         let plain = self
             .invite_secret(work)?
             .join_request_key()

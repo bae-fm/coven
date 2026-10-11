@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_utils::STORE_ID;
 
 #[tokio::test]
 async fn revocation_removes_direct_access_and_reports_inherited_and_broad_grants() {
@@ -170,10 +171,16 @@ async fn conformance_and_account_sharing() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = Arc::new(provider(&server.url));
-    crate::test_utils::Conformance::new(storage.clone())
+    crate::test_utils::Conformance::new(storage.clone(), STORE_ID)
         .run()
         .await
         .unwrap();
+    state.lock().unwrap().files.insert("unrelated".into(), (json!({"id":"unrelated","name":"vacation","mimeType":"application/vnd.google-apps.folder","parents":["folder"]}), Vec::new()));
+    crate::test_utils::Conformance::new(storage.clone(), STORE_ID)
+        .shared_location(coven_foundation::id_source::StoreId(
+            uuid::Uuid::from_bytes([0x20; 16]),
+        ))
+        .await;
     storage.grant_access("member").await.unwrap();
     storage
         .revoke_access(&MemberAccess::ProviderAccount("member".into()))
@@ -188,7 +195,7 @@ async fn sharing_requires_the_store_owners_account() {
     let storage = provider(&server.url);
     storage.grant_access("kept@example.test").await.unwrap();
     state.lock().unwrap().non_owner = true;
-    crate::test_utils::Conformance::new(Arc::new(storage))
+    crate::test_utils::Conformance::new(Arc::new(storage), STORE_ID)
         .owner_only_sharing()
         .await;
     assert_eq!(
@@ -206,7 +213,7 @@ async fn sharing_requires_the_store_owners_account() {
 #[tokio::test]
 async fn deleting_a_path_removes_its_copies_and_preserves_unlinked_bytes() {
     let state = Arc::new(Mutex::new(Remote::default()));
-    let path = ObjectPath::store_log(DeviceId(31), std::num::NonZeroU64::MIN);
+    let path = ObjectPath::store_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
     {
         let mut remote = state.lock().unwrap();
         duplicate(&mut remote, &path, "first", "2026-10-06T00:00:00Z", 31);
@@ -228,7 +235,11 @@ async fn deleting_a_path_removes_its_copies_and_preserves_unlinked_bytes() {
         StorageFailure::Network
     );
     storage.delete(&path).await.unwrap();
-    assert!(storage.list(&ObjectPrefix::all()).await.unwrap().is_empty());
+    assert!(storage
+        .list(&ObjectPrefix::all(STORE_ID))
+        .await
+        .unwrap()
+        .is_empty());
     storage.delete(&path).await.unwrap();
     let remote = state.lock().unwrap();
     assert_eq!(remote.files.len(), 1);
@@ -240,7 +251,7 @@ async fn deleting_a_path_removes_its_copies_and_preserves_unlinked_bytes() {
 async fn deletion_refusal_does_not_unlink_an_owned_object() {
     for owned in [true, false] {
         let state = Arc::new(Mutex::new(Remote::default()));
-        let path = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
+        let path = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
         {
             let mut remote = state.lock().unwrap();
             duplicate(&mut remote, &path, "object", "2026-10-06T00:00:00Z", 31);
@@ -287,7 +298,7 @@ async fn deletion_uses_ownership_without_capability_guesses() {
         ),
     ] {
         let state = Arc::new(Mutex::new(Remote::default()));
-        let path = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
+        let path = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
         {
             let mut remote = state.lock().unwrap();
             duplicate(&mut remote, &path, "object", "2026-10-06T00:00:00Z", 31);

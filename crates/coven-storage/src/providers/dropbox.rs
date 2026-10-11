@@ -280,10 +280,26 @@ impl ProviderOps for DropboxStorage {
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
         let prefix = listing.prefix().clone();
         let mut method = "files/list_folder";
-        let mut request = json!({"path":"","recursive":true,"include_deleted":false,"limit":2000});
+        let mut request = json!({"path":format!("/{}", prefix.store()),"recursive":true,"include_deleted":false,"limit":2000});
         let mut seen = Pagination::new();
         loop {
-            let value = self.rpc(method, request).await?;
+            let value = match self.rpc(method, request).await {
+                Ok(value) => value,
+                Err(error)
+                    if method == "files/list_folder"
+                        && error.failure() == StorageFailure::NotFound =>
+                {
+                    // An absent store folder is empty only while its configured namespace exists.
+                    self.rpc(
+                        "sharing/get_folder_metadata",
+                        json!({"shared_folder_id":self.namespace}),
+                    )
+                    .await
+                    .map_err(http::container_error)?;
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            };
             for entry in http::array(&value, "entries")? {
                 match http::string(entry, ".tag")? {
                     "folder" => {

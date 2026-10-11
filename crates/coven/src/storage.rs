@@ -37,6 +37,7 @@ pub(crate) struct StorageConnections {
     oauth: Option<OAuthFlow>,
     authentication: tokio::sync::Mutex<Option<crate::authentication::Authentication>>,
     sync: coven_sync::SyncLoop,
+    store: StoreId,
     device: DeviceId,
     ids: IdSourceRef,
     clock: ClockRef,
@@ -52,6 +53,7 @@ impl StorageConnections {
         oauth: Option<OAuthFlow>,
         authentication: Option<crate::authentication::Authentication>,
         sync: coven_sync::SyncLoop,
+        store: StoreId,
         device: DeviceId,
         ids: IdSourceRef,
         clock: ClockRef,
@@ -64,6 +66,7 @@ impl StorageConnections {
             oauth,
             authentication: tokio::sync::Mutex::new(authentication),
             sync,
+            store,
             device,
             ids,
             clock,
@@ -170,6 +173,7 @@ impl StorageConnections {
             ) {
                 return Err(OAuthError::Unavailable(provider).into());
             }
+            owner.check_location(&storage).await?;
             let mut held = owner.authentication.lock().await;
             let credentials = match held.as_mut() {
                 Some(authentication) => {
@@ -227,11 +231,25 @@ impl StorageConnections {
     ) -> Result<ConnectedStorage, StorageSetupError> {
         let device_name = device_name.to_owned();
         self.call(move |owner| async move {
+            owner.check_location(&config).await?;
             owner
                 .setup_connection(config, &device_name, credentials)
                 .await
         })
         .await
+    }
+
+    async fn check_location(&self, config: &StorageConfig) -> Result<(), StorageSetupError> {
+        if self
+            .codes
+            .location()
+            .await
+            .map_err(setup_error)?
+            .is_some_and(|recorded| &recorded != config)
+        {
+            return Err(StorageSetupError::LocationChangeUnsupported);
+        }
+        Ok(())
     }
 
     async fn setup_connection(
@@ -244,7 +262,7 @@ impl StorageConnections {
             .connector
             .connect(config.clone(), credentials.clone(), self.device)
             .await?;
-        let path = ObjectPath::file(self.device, FileId(self.ids.new_id()));
+        let path = ObjectPath::file(self.store, self.device, FileId(self.ids.new_id()));
         let plaintext = b"coven storage check";
         let header = coven_format::file::FileHeader::new(plaintext.len() as u64);
         let key = coven_crypto::FileKey::generate()

@@ -1,5 +1,6 @@
 use super::*;
 use crate::providers::tests::{json as reply, query, read, response, session, TestServer};
+use crate::test_utils::STORE_ID;
 use axum::{
     body::{Body, Bytes},
     extract::State,
@@ -303,6 +304,7 @@ async fn lost_completion_requires_byte_verification() {
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     let path = ObjectPath::file(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(31),
         coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xff; 16])),
     );
@@ -347,7 +349,7 @@ async fn missing_session_and_destination_is_expired() {
     let state = remote();
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let error = crate::test_utils::Conformance::new(Arc::new(storage))
+    let error = crate::test_utils::Conformance::new(Arc::new(storage), STORE_ID)
         .expired_session(async {
             state.lock().unwrap().uploads.clear();
         })
@@ -359,7 +361,7 @@ async fn conformance_hierarchy_pagination_and_sharing() {
     let state = remote();
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = Arc::new(provider(&server.url));
-    crate::test_utils::Conformance::new(storage.clone())
+    crate::test_utils::Conformance::new(storage.clone(), STORE_ID)
         .run()
         .await
         .unwrap();
@@ -375,7 +377,7 @@ async fn resume_uses_provider_progress_and_keeps_bearer_off_transfer_urls() {
     let state = remote();
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    crate::test_utils::Conformance::new(Arc::new(storage))
+    crate::test_utils::Conformance::new(Arc::new(storage), STORE_ID)
         .lost_part_reply(24 * 320 * 1024, async {
             state.lock().unwrap().fail_reply = true;
         })
@@ -388,6 +390,7 @@ async fn resume_accepts_bounded_and_multiple_missing_ranges() {
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     let path = ObjectPath::store_log(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(1),
         std::num::NonZeroU64::MIN,
     );
@@ -406,6 +409,7 @@ async fn malformed_missing_ranges_keep_the_response_and_recorded_progress() {
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     let path = ObjectPath::store_log(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(1),
         std::num::NonZeroU64::MIN,
     );
@@ -453,6 +457,7 @@ async fn abort_retries_after_cancellation_and_preserves_published_objects() {
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     let path = ObjectPath::device_log(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
     );
@@ -479,6 +484,7 @@ async fn create_switches_to_a_session_above_the_content_limit() {
         .unwrap()
         .single_request_limit = 4;
     let path = ObjectPath::device_log(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
     );
@@ -501,7 +507,7 @@ async fn sharing_requires_the_store_owners_account() {
     let storage = provider(&server.url);
     storage.grant_access("kept@example.test").await.unwrap();
     state.lock().unwrap().non_owner = true;
-    crate::test_utils::Conformance::new(Arc::new(storage))
+    crate::test_utils::Conformance::new(Arc::new(storage), STORE_ID)
         .owner_only_sharing()
         .await;
     assert_eq!(
@@ -517,7 +523,7 @@ async fn sharing_requires_the_store_owners_account() {
 }
 
 #[tokio::test]
-async fn setup_refuses_an_unrelated_empty_folder() {
+async fn shared_location_ignores_unrelated_folders() {
     let state = remote();
     state
         .lock()
@@ -526,15 +532,17 @@ async fn setup_refuses_an_unrelated_empty_folder() {
         .insert("unrelated".into(), "vacation".into());
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let first = ObjectPath::store_log(
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
-    assert!(matches!(
-        storage.setup(&first, b"first").await.unwrap_err(),
-        StorageSetupError::LocationOccupied
-    ));
-    assert!(state.lock().unwrap().files.is_empty());
+    assert!(storage
+        .list(&ObjectPrefix::all(STORE_ID))
+        .await
+        .unwrap()
+        .is_empty());
+    crate::test_utils::Conformance::new(Arc::new(storage), STORE_ID)
+        .shared_location(coven_foundation::id_source::StoreId(
+            uuid::Uuid::from_bytes([0x20; 16]),
+        ))
+        .await;
+    assert_eq!(state.lock().unwrap().dirs["unrelated"], "vacation");
 }
 
 #[tokio::test]
@@ -547,7 +555,7 @@ async fn listing_retains_server_time_and_size_across_pages_and_retries() {
         "time",
     )
     .unwrap();
-    crate::test_utils::Conformance::new(Arc::new(storage))
+    crate::test_utils::Conformance::new(Arc::new(storage), STORE_ID)
         .listing_times(time, async {})
         .await;
 }
@@ -558,6 +566,7 @@ async fn recipient_join_redeems_only_the_invited_destination_and_keeps_native_re
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let owner = provider(&server.url);
     let path = ObjectPath::store_log(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(1),
         std::num::NonZeroU64::MIN,
     );
@@ -581,17 +590,21 @@ async fn recipient_join_redeems_only_the_invited_destination_and_keeps_native_re
     );
     state.lock().unwrap().wrong_share_destination = true;
     assert!(matches!(
-        recipient.join(&invitation).await,
+        recipient.join(STORE_ID, &invitation).await,
         Err(error) if error.failure() == StorageFailure::InvitationMismatch
     ));
     assert!(state.lock().unwrap().redeemed.is_empty());
     state.lock().unwrap().wrong_share_destination = false;
     state.lock().unwrap().lose_redeem_reply = true;
     assert_eq!(
-        recipient.join(&invitation).await.unwrap_err().failure(),
+        recipient
+            .join(STORE_ID, &invitation)
+            .await
+            .unwrap_err()
+            .failure(),
         StorageFailure::Network
     );
-    recipient.join(&invitation).await.unwrap();
+    recipient.join(STORE_ID, &invitation).await.unwrap();
     assert_eq!(recipient.read(&path).await.unwrap(), b"first");
     assert_eq!(
         state.lock().unwrap().redeem_requests,
@@ -611,7 +624,7 @@ async fn recipient_join_redeems_only_the_invited_destination_and_keeps_native_re
         recipient.read(&path).await.unwrap_err().failure(),
         StorageFailure::PermissionDenied
     );
-    let error = recipient.join(&invitation).await.unwrap_err();
+    let error = recipient.join(STORE_ID, &invitation).await.unwrap_err();
     assert_eq!(error.failure(), StorageFailure::PermissionDenied);
     let StorageError::Provider { source, .. } = error else {
         panic!()
@@ -640,11 +653,16 @@ async fn missing_container_is_not_an_empty_store_or_a_missing_object() {
         .await;
         let storage = provider(&server.url);
         let path = ObjectPath::store_log(
+            STORE_ID,
             coven_foundation::id_source::DeviceId(31),
             std::num::NonZeroU64::MIN,
         );
         for error in [
-            storage.list(&ObjectPrefix::all()).await.err().unwrap(),
+            storage
+                .list(&ObjectPrefix::all(STORE_ID))
+                .await
+                .err()
+                .unwrap(),
             storage.read(&path).await.err().unwrap(),
             storage.delete(&path).await.err().unwrap(),
             storage.create(&path, b"first").await.err().unwrap(),
@@ -665,6 +683,7 @@ async fn missing_container_is_not_an_empty_store_or_a_missing_object() {
     .await;
     let storage = provider(&server.url);
     let path = ObjectPath::store_log(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
     );
@@ -695,7 +714,7 @@ async fn permission_failures_reach_every_object_and_upload_caller() {
         },
     ))
     .await;
-    let errors = crate::test_utils::Conformance::new(Arc::new(provider(&server.url)))
+    let errors = crate::test_utils::Conformance::new(Arc::new(provider(&server.url)), STORE_ID)
         .permission_failures(async {
             denied.store(true, Ordering::SeqCst);
         })
@@ -709,7 +728,7 @@ async fn permission_failures_reach_every_object_and_upload_caller() {
 async fn listing_refuses_hostile_links_repeated_pages_and_folder_cycles() {
     for variant in 0..5 {
         let server=TestServer::new(Router::new().fallback(move |uri:Uri,headers:HeaderMap| async move {
-            if uri.path().ends_with("/root") {return reply(json!({"id":"root","folder":{}}));}
+            if uri.path().ends_with("/root") || uri.path().ends_with(':') {return reply(json!({"id":"root","folder":{}}));}
             let page=match variant {
                 0=>json!({"value":[],"@odata.nextLink":"https://another-account.invalid/list"}),
                 1=>json!({"value":[],"@odata.nextLink":format!("http://{}/graph/drives/drive/items/root/children",headers["host"].to_str().unwrap())}),
@@ -721,7 +740,7 @@ async fn listing_refuses_hostile_links_repeated_pages_and_folder_cycles() {
         })).await;
         assert_eq!(
             provider(&server.url)
-                .list(&ObjectPrefix::all())
+                .list(&ObjectPrefix::all(STORE_ID))
                 .await
                 .unwrap_err()
                 .failure(),
@@ -731,24 +750,17 @@ async fn listing_refuses_hostile_links_repeated_pages_and_folder_cycles() {
 }
 
 #[tokio::test]
-async fn setup_refuses_native_items_that_are_not_object_files() {
+async fn listing_refuses_native_items_that_are_not_object_files() {
     let server = TestServer::new(Router::new().fallback(|uri: Uri| async move {
-        if uri.path().ends_with("/root") {
+        if uri.path().ends_with("/root") || uri.path().ends_with(':') {
             reply(json!({"id":"root","folder":{}}))
         } else {
             reply(json!({"value":[{"id":"native","name":"notebook","package":{"type":"oneNote"}}]}))
         }
     }))
     .await;
-    let path = ObjectPath::store_log(
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
+    assert!(
+        matches!(provider(&server.url).list(&ObjectPrefix::all(STORE_ID)).await,
+        Err(error) if error.failure() == StorageFailure::InvalidPath)
     );
-    assert!(matches!(
-        provider(&server.url)
-            .setup(&path, b"first")
-            .await
-            .unwrap_err(),
-        StorageSetupError::LocationOccupied
-    ));
 }

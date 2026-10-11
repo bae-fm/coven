@@ -1,4 +1,5 @@
 use super::*;
+use crate::device_log_sync::tests::STORE_ID;
 use crate::device_log_sync::tests::{group, storage};
 use crate::store_log_sync::tests::Device;
 use coven_format::pending::{PendingReason, PendingReport, PendingSubject, RefusalCode};
@@ -7,7 +8,7 @@ use coven_foundation::id_source::KeyId;
 use uuid::Uuid;
 
 pub(crate) fn signed_positions(device: &Device, positions: PostedPositions) -> Vec<u8> {
-    let path = ObjectPath::positions(positions.device);
+    let path = ObjectPath::positions(STORE_ID, positions.device);
     let key = KeyId(Uuid::from_u128(1));
     let prefix = SingleChunkPrefix::PostedPositions(key);
     let ring = device.custody.read().unwrap().unwrap();
@@ -51,7 +52,7 @@ async fn authenticated_key_copy_reports_are_limited_to_the_posters_member() {
         "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
             .parse()
             .unwrap();
-    let path = ObjectPath::positions(positions.device);
+    let path = ObjectPath::positions(STORE_ID, positions.device);
     let ring = devices[1].custody.read().unwrap().unwrap();
     let log = devices[1].db.store_log().await.unwrap();
     for member in [own.clone(), other] {

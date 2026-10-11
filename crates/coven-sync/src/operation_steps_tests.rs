@@ -237,7 +237,7 @@ async fn late_access_survives_restart_and_cannot_revive_confirmed_keys() {
             .make_and_upload_entry(replacement.clone())
             .await
             .unwrap();
-        let path = object::path(entry);
+        let path = object::path(store(1), entry);
         let bytes = storage.read(&path).await.unwrap();
         storage.delete(&path).await.unwrap();
         finish(observer, removal).await;
@@ -341,12 +341,12 @@ async fn removal_revokes_accounts_in_dropped_additions_and_access_updates() {
         "addition@example.com",
     ] {
         let recipient = MemoryStorage::for_recipient(&storage, account).unwrap();
-        assert!(matches!(recipient.list(&ObjectPrefix::all()).await,
+        assert!(matches!(recipient.list(&ObjectPrefix::all(store(1))).await,
             Err(error) if error.failure() == StorageFailure::PermissionDenied));
     }
     assert!(MemoryStorage::for_recipient(&storage, "cat@example.com")
         .unwrap()
-        .list(&ObjectPrefix::all())
+        .list(&ObjectPrefix::all(store(1)))
         .await
         .is_ok());
 }
@@ -385,7 +385,7 @@ async fn a_retained_grant_on_old_access_blocks_removal_until_explicit_retry() {
     assert!(
         matches!(MemoryStorage::for_recipient(&storage, "replacement@example.com")
             .unwrap()
-            .list(&ObjectPrefix::all())
+            .list(&ObjectPrefix::all(store(1)))
             .await, Err(error) if error.failure() == StorageFailure::PermissionDenied)
     );
     let conditions = pending(&operations, &a.db).await;
@@ -403,7 +403,7 @@ async fn a_retained_grant_on_old_access_blocks_removal_until_explicit_retry() {
     assert!(
         matches!(MemoryStorage::for_recipient(&storage, "ben@example.com")
         .unwrap()
-        .list(&ObjectPrefix::all())
+        .list(&ObjectPrefix::all(store(1)))
         .await, Err(error) if error.failure() == StorageFailure::PermissionDenied)
     );
     operations.close().await.unwrap();

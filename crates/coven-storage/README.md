@@ -3,13 +3,14 @@
 Encrypted object storage for S3, Google Drive, Dropbox, OneDrive and the app's
 CloudKit calls. This crate owns provider requests, transfer sessions, account
 sharing and recipient acceptance. Sync owns writers, member/invite accounting,
-retention eligibility, setup-collision detection and adjacent-chunk grouping.
+retention eligibility and adjacent-chunk grouping.
 Credentials and session recordings are supplied by owners; this crate does not
 commit key custody or database state.
 
 ## Object and transfer contract
 
-Every path has one writer. `create` refuses an occupied path; `create_once`
+Every path and listing prefix begins with the canonical store UUID. Stores can
+share a provider location without sharing object names. Every path has one writer. `create` refuses an occupied path; `create_once`
 accepts an identical retry after comparing the stored bytes. Only posted
 positions can be replaced. Files use foundation `FileId` UUIDs. Prefixes include
 all device logs and all store-log entries. A range is half-open and must fit
@@ -49,13 +50,13 @@ most 1 GB (§6), below S3's 5 GiB single-request limit, so their retention age
 does not depend on multipart completion time.
 [AWS metadata documentation](https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingMetadata.html).
 
-Setup reconnects using the known first-entry path and
-bytes even after other objects have arrived. A different store or unrelated
-content yields `LocationOccupied`. Provider folders must be ancestors in
-coven's layout; empty layout folders left by interrupted uploads contain no
-stored objects. Two initially empty setups can both succeed;
-sync detects their first entries later. The setup check cleans up even after an
-unconfirmed create and retains both operation and cleanup failures.
+Setup reconnects using the store's known creation-entry path and authenticates
+its contents before committing the connection. Other stores and unrelated root
+content are outside the store's namespace. Provider folders inside that namespace
+must be ancestors in coven's layout; empty layout folders left by interrupted
+uploads contain no stored objects. The provider check removes its test object
+even after an unconfirmed create and retains both operation and cleanup failures.
+Changing an established store's location returns `LocationChangeUnsupported`.
 Storage exposes `delete`, not a deletion-rights query: sync chooses the deleting
 device under §15. Drive deletes objects owned by the account and otherwise
 removes them from the store's folder. A refusal retains its native cause.
@@ -65,7 +66,8 @@ removes them from the store's folder. A refusal retains its native cause.
 Each provider has a sibling `_tests.rs` suite using local HTTP, except CloudKit,
 whose injected app calls are stubbed. The shared conformance suite exercises
 creation and identical retries, immutable replacement refusal, positions,
-whole and range reads, prefix listing, repeated deletion, and the setup check.
+whole and range reads, prefix listing, repeated deletion, and independent stores
+using the same device and entry numbers in one location.
 Provider-specific suites exercise recorded sessions, lost replies, expiry,
 sharing authority and error causes. Passing a stub does not prove a provider's
 server-side guarantee.

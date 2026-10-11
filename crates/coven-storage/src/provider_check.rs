@@ -53,7 +53,7 @@ pub async fn check_provider(
         }
         check = StorageCheck::List;
         if !storage
-            .list(&ObjectPrefix::all())
+            .list(&ObjectPrefix::all(path.store()))
             .await?
             .iter()
             .any(|object| &object.path == path && object.size == encrypted_bytes.len() as u64)
@@ -80,11 +80,6 @@ pub async fn check_provider(
         (Ok(()), Err(error)) => {
             check = StorageCheck::Delete;
             error
-        }
-        (Err(error), Ok(()))
-            if check == StorageCheck::List && error.failure() == StorageFailure::InvalidPath =>
-        {
-            return Err(StorageSetupError::LocationOccupied);
         }
         (Err(error), Ok(())) => error,
         (Err(operation), Err(cleanup)) => StorageError::Cleanup {

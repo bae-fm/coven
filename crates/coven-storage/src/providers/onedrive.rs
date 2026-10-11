@@ -353,7 +353,18 @@ impl ProviderOps for OneDriveStorage {
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
         let prefix = listing.prefix().clone();
         self.check_folder().await?;
-        let mut folders = vec![(self.folder.clone(), Vec::new())];
+        let store = prefix.store().to_string();
+        let url = format!("{}:/{store}:", self.item(&self.folder, &[])?);
+        let folder =
+            match http::json(PROVIDER, self.send(Method::GET, &url, Body::Empty).await?).await {
+                Ok(folder) => folder,
+                Err(error) if error.failure() == StorageFailure::NotFound => return Ok(()),
+                Err(error) => return Err(error),
+            };
+        if !folder["folder"].is_object() || folder["file"].is_object() {
+            return Err(StorageFailure::InvalidPath.into());
+        }
+        let mut folders = vec![(http::string(&folder, "id")?.to_owned(), vec![store])];
         let mut visited = BTreeSet::new();
         while let Some((folder, names)) = folders.pop() {
             if !visited.insert(folder.clone()) {

@@ -1,5 +1,9 @@
 //! Deterministic examples for consumer tests, built from the production owners' types.
 
+/// The store shared by the deterministic storage and format fixtures.
+pub const STORE_ID: coven_foundation::id_source::StoreId =
+    coven_foundation::id_source::StoreId(uuid::Uuid::from_bytes([0x10; 16]));
+
 use crate::codes::{InviteCode, RestoreCode};
 use crate::key::encode_key;
 use crate::objects::*;

@@ -45,7 +45,7 @@ impl StoreLogSync {
             .storage
             .as_deref()
             .ok_or(SyncError::NoStorage)?
-            .list(&ObjectPrefix::device_logs())
+            .list(&ObjectPrefix::device_logs(self.directory.id()))
             .await?
             .into_iter()
             .filter_map(|object| object.path.write_id())
@@ -360,7 +360,7 @@ impl StoreLogSync {
                 .try_into()
                 .map_err(|_| coven_database::DbError::DamagedDatabase)?,
         };
-        let path = snapshot_path(&id)?;
+        let path = snapshot_path(self.directory.id(), &id)?;
         if let SnapshotTrigger::Raise { version, ref entry } = trigger {
             if entry.is_none()
                 && super::schema_sync::schema_in_place(&local.log.replay.state, &audience, version)
@@ -460,7 +460,7 @@ impl StoreLogSync {
             .storage
             .as_deref()
             .ok_or(SyncError::NoStorage)?
-            .list(&ObjectPrefix::device_logs())
+            .list(&ObjectPrefix::device_logs(self.directory.id()))
             .await?
         {
             let write = object
@@ -516,7 +516,10 @@ impl StoreLogSync {
         let input = io::SnapshotInput::open(&self.directory, name)?;
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         if storage
-            .list(&ObjectPrefix::audience_snapshots(&audience))
+            .list(&ObjectPrefix::audience_snapshots(
+                self.directory.id(),
+                &audience,
+            ))
             .await?
             .iter()
             .any(|o| &o.path == path)
@@ -646,8 +649,12 @@ pub(super) fn audiences_for_member(
     Ok(audiences)
 }
 
-pub(super) fn snapshot_path(id: &SnapshotId) -> Result<ObjectPath, SyncError> {
+pub(super) fn snapshot_path(
+    store: coven_foundation::id_source::StoreId,
+    id: &SnapshotId,
+) -> Result<ObjectPath, SyncError> {
     Ok(ObjectPath::snapshot(
+        store,
         id.audience.clone(),
         id.device,
         NonZeroU64::new(id.number).ok_or(coven_database::DbError::DamagedDatabase)?,

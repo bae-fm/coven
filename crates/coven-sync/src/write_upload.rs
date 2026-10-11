@@ -11,13 +11,14 @@ use tokio::sync::mpsc;
 impl DeviceLogSync {
     pub(super) async fn send_write(
         &self,
+        store: coven_foundation::id_source::StoreId,
         write: WriteId,
         ring: coven_crypto::StoreKeyring,
         member: coven_crypto::MemberKeys,
     ) -> Result<(), SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let database = &self.database;
-        let path = crate::write_seal::path(write);
+        let path = crate::write_seal::path(store, write);
         let total = database
             .read_oldest_upload(|upload| {
                 coven_format::sealed_write::sealed_length(
@@ -77,7 +78,7 @@ impl DeviceLogSync {
             if upload.header.header.position != write {
                 return Err(DbError::UploadNotOldest { write }.into());
             }
-            crate::write_seal::seal(upload, &ring, &member, &mut |piece| {
+            crate::write_seal::seal(store, upload, &ring, &member, &mut |piece| {
                 let skipped = skip.min(piece.len() as u64) as usize;
                 skip -= skipped as u64;
                 if skipped < piece.len() {

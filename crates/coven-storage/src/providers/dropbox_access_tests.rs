@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_utils::STORE_ID;
 
 #[tokio::test]
 async fn account_removal_preserves_parent_and_group_access() {
@@ -146,7 +147,7 @@ async fn sharing_requires_the_store_owners_account() {
     let storage = provider(&server.url);
     storage.grant_access("kept@example.test").await.unwrap();
     state.lock().unwrap().non_owner = true;
-    crate::test_utils::Conformance::new(Arc::new(storage))
+    crate::test_utils::Conformance::new(Arc::new(storage), STORE_ID)
         .owner_only_sharing()
         .await;
     assert_eq!(

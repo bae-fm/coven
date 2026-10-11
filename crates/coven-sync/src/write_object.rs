@@ -132,7 +132,7 @@ pub(crate) async fn open(
             )
         })?;
     let header = checked(&object.path, WriteHeaderFrame::decode(&plain))?;
-    if crate::write_seal::path(header.header.position) != object.path {
+    if crate::write_seal::path(object.path.store(), header.header.position) != object.path {
         return Err(damaged(
             &object.path,
             Refusal::WrongIdentity { cause: None },

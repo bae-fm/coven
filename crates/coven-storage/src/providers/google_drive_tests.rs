@@ -1,5 +1,6 @@
 use super::*;
 use crate::providers::tests::{json as reply, query, read, response, session, TestServer};
+use crate::test_utils::STORE_ID;
 use axum::{
     body::{Body, Bytes},
     extract::State,
@@ -284,12 +285,17 @@ fn respond(
             .split("name = '")
             .nth(1)
             .map(|s| s.split('\'').next().unwrap());
+        let prefix = q["q"]
+            .split("name contains '")
+            .nth(1)
+            .map(|s| s.split('\'').next().unwrap());
         let files: Vec<_> = state
             .files
             .values()
             .filter(|(v, _)| {
                 v["parents"].as_array().unwrap().contains(&json!("folder"))
                     && filter.is_none_or(|name| v["name"] == name)
+                    && prefix.is_none_or(|prefix| v["name"].as_str().unwrap().starts_with(prefix))
             })
             .map(|(v, _)| v.clone())
             .collect();
@@ -337,7 +343,7 @@ async fn missing_session_and_destination_is_expired() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let error = crate::test_utils::Conformance::new(Arc::new(storage))
+    let error = crate::test_utils::Conformance::new(Arc::new(storage), STORE_ID)
         .expired_session(async {
             state.lock().unwrap().uploads.clear();
         })
@@ -364,12 +370,12 @@ async fn session_reopens_and_only_uploader_deletes() {
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     let storage = Arc::new(storage);
-    crate::test_utils::Conformance::new(storage.clone())
+    crate::test_utils::Conformance::new(storage.clone(), STORE_ID)
         .lost_part_reply(8 * 1024 * 1024, async {
             state.lock().unwrap().fail_reply = true;
         })
         .await;
-    let path = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
+    let path = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
     let mut upload = storage.begin_upload(&path, 1).await.unwrap();
     let before_final = upload.encode().unwrap();
     storage.upload_part(&mut upload, b"z").await.unwrap();
@@ -379,7 +385,11 @@ async fn session_reopens_and_only_uploader_deletes() {
     let id = state.lock().unwrap().files.keys().next().unwrap().clone();
     state.lock().unwrap().files.get_mut(&id).unwrap().0["ownedByMe"] = json!(false);
     storage.delete(&path).await.unwrap();
-    assert!(storage.list(&ObjectPrefix::all()).await.unwrap().is_empty());
+    assert!(storage
+        .list(&ObjectPrefix::all(STORE_ID))
+        .await
+        .unwrap()
+        .is_empty());
     assert_eq!(state.lock().unwrap().files[&id].1.len(), 1);
 }
 #[tokio::test]
@@ -389,6 +399,7 @@ async fn two_uploads_cannot_publish_different_bytes_at_one_path() {
     let first = provider(&server.url);
     let second = provider(&server.url);
     let path = ObjectPath::file(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(31),
         coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xdd; 16])),
     );
@@ -405,6 +416,7 @@ async fn interrupted_part_continues_at_the_confirmed_byte() {
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     let path = ObjectPath::file(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(31),
         coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xee; 16])),
     );
@@ -455,7 +467,7 @@ fn duplicate(state: &mut Remote, path: &ObjectPath, id: &str, created: &str, dev
 #[tokio::test]
 async fn retry_keeps_earliest_own_copy_and_leaves_other_devices_copies() {
     let state = Arc::new(Mutex::new(Remote::default()));
-    let path = ObjectPath::store_log(DeviceId(31), std::num::NonZeroU64::MIN);
+    let path = ObjectPath::store_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
     {
         let mut state = state.lock().unwrap();
         duplicate(&mut state, &path, "z-first", "2026-10-06T00:00:00Z", 31);
@@ -488,7 +500,7 @@ async fn retry_keeps_earliest_own_copy_and_leaves_other_devices_copies() {
 #[tokio::test]
 async fn duplicate_time_ties_use_ids_after_normalizing_timezones() {
     let state = Arc::new(Mutex::new(Remote::default()));
-    let path = ObjectPath::store_log(DeviceId(31), std::num::NonZeroU64::MIN);
+    let path = ObjectPath::store_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
     {
         let mut state = state.lock().unwrap();
         duplicate(
@@ -519,7 +531,7 @@ async fn duplicate_time_ties_use_ids_after_normalizing_timezones() {
 #[tokio::test]
 async fn duplicate_cleanup_failure_is_reported_and_the_retry_finishes() {
     let state = Arc::new(Mutex::new(Remote::default()));
-    let path = ObjectPath::store_log(DeviceId(31), std::num::NonZeroU64::MIN);
+    let path = ObjectPath::store_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
     {
         let mut state = state.lock().unwrap();
         duplicate(&mut state, &path, "z-first", "2026-10-06T00:00:00Z", 31);
@@ -556,7 +568,7 @@ async fn first_positions_write_uses_one_content_request() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::positions(DeviceId(31));
+    let path = ObjectPath::positions(STORE_ID, DeviceId(31));
     let data = b"encrypted\0\xff\r\n--coven-upload-0\r\n--coven-upload-1\r\n";
     storage.replace(&path, data).await.unwrap();
     assert_eq!(state.lock().unwrap().single_uploads, 1);
@@ -573,6 +585,7 @@ async fn abort_retries_after_cancellation_and_preserves_published_objects() {
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     let path = ObjectPath::device_log(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
     );
@@ -596,6 +609,7 @@ async fn create_switches_to_a_session_above_the_multipart_request_limit() {
     let storage = provider(&server.url);
     assert_eq!(storage.single_request_limit(), 5_000_000);
     let path = ObjectPath::device_log(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
     );
@@ -610,22 +624,14 @@ async fn create_switches_to_a_session_above_the_multipart_request_limit() {
 }
 
 #[tokio::test]
-async fn setup_refuses_a_folder_even_when_its_name_is_an_object_path() {
+async fn listing_refuses_a_folder_even_when_its_name_is_an_object_path() {
     let state = Arc::new(Mutex::new(Remote::default()));
-    state.lock().unwrap().files.insert("directory".into(), (metadata(json!({"id":"directory","name":"devices/31/1","mimeType":"application/vnd.google-apps.folder","parents":["folder"]}), 0), Vec::new()));
+    state.lock().unwrap().files.insert("directory".into(), (metadata(json!({"id":"directory","name":"10101010-1010-1010-1010-101010101010/devices/31/1","mimeType":"application/vnd.google-apps.folder","parents":["folder"]}), 0), Vec::new()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let first = ObjectPath::store_log(
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
-    assert!(matches!(
-        storage.setup(&first, b"first").await.unwrap_err(),
-        StorageSetupError::LocationOccupied
-    ));
     assert_eq!(state.lock().unwrap().files.len(), 1);
     assert!(matches!(
-        storage.list(&ObjectPrefix::all()).await,
+        storage.list(&ObjectPrefix::all(STORE_ID)).await,
         Err(error) if error.failure() == StorageFailure::InvalidPath
     ));
 }
@@ -640,7 +646,7 @@ async fn listing_retains_server_time_and_size_across_pages_and_retries() {
         "time",
     )
     .unwrap();
-    crate::test_utils::Conformance::new(Arc::new(storage))
+    crate::test_utils::Conformance::new(Arc::new(storage), STORE_ID)
         .listing_times(time, async {})
         .await;
 }
@@ -648,7 +654,7 @@ async fn listing_retains_server_time_and_size_across_pages_and_retries() {
 #[tokio::test]
 async fn listing_uses_the_same_copy_as_reads_and_refuses_missing_metadata() {
     let state = Arc::new(Mutex::new(Remote::default()));
-    let path = ObjectPath::store_log(DeviceId(31), std::num::NonZeroU64::MIN);
+    let path = ObjectPath::store_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
     {
         let mut remote = state.lock().unwrap();
         duplicate(&mut remote, &path, "z-first", "2026-10-06T00:00:00Z", 31);
@@ -657,10 +663,16 @@ async fn listing_uses_the_same_copy_as_reads_and_refuses_missing_metadata() {
     }
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    assert_eq!(storage.list(&ObjectPrefix::all()).await.unwrap()[0].size, 4);
+    assert_eq!(
+        storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap()[0].size,
+        4
+    );
     state.lock().unwrap().files.get_mut("a-later").unwrap().0["createdTime"] =
         json!("2026-10-06T00:00:00Z");
-    assert_eq!(storage.list(&ObjectPrefix::all()).await.unwrap()[0].size, 9);
+    assert_eq!(
+        storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap()[0].size,
+        9
+    );
     for (field, invalid, failure) in [
         ("size", json!(null), StorageFailure::Protocol),
         ("size", json!("-1"), StorageFailure::Protocol),
@@ -671,7 +683,7 @@ async fn listing_uses_the_same_copy_as_reads_and_refuses_missing_metadata() {
         state.lock().unwrap().files.get_mut("a-later").unwrap().0[field] = invalid;
         assert_eq!(
             storage
-                .list(&ObjectPrefix::all())
+                .list(&ObjectPrefix::all(STORE_ID))
                 .await
                 .unwrap_err()
                 .failure(),
@@ -702,11 +714,16 @@ async fn missing_container_is_not_an_empty_store_or_a_missing_object() {
         .await;
         let storage = provider(&server.url);
         let path = ObjectPath::store_log(
+            STORE_ID,
             coven_foundation::id_source::DeviceId(31),
             std::num::NonZeroU64::MIN,
         );
         for error in [
-            storage.list(&ObjectPrefix::all()).await.err().unwrap(),
+            storage
+                .list(&ObjectPrefix::all(STORE_ID))
+                .await
+                .err()
+                .unwrap(),
             storage.read(&path).await.err().unwrap(),
             storage.delete(&path).await.err().unwrap(),
             storage.create(&path, b"first").await.err().unwrap(),
@@ -729,6 +746,7 @@ async fn missing_container_is_not_an_empty_store_or_a_missing_object() {
     .await;
     let storage = provider(&server.url);
     let path = ObjectPath::store_log(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
     );
@@ -759,7 +777,7 @@ async fn permission_failures_reach_every_object_and_upload_caller() {
         },
     ))
     .await;
-    let errors = crate::test_utils::Conformance::new(Arc::new(provider(&server.url)))
+    let errors = crate::test_utils::Conformance::new(Arc::new(provider(&server.url)), STORE_ID)
         .permission_failures(async {
             denied.store(true, Ordering::SeqCst);
         })
@@ -790,7 +808,7 @@ async fn incomplete_search_and_invalid_pages_never_describe_an_empty_store() {
         .await;
         assert_eq!(
             provider(&server.url)
-                .list(&ObjectPrefix::all())
+                .list(&ObjectPrefix::all(STORE_ID))
                 .await
                 .unwrap_err()
                 .failure(),
@@ -800,25 +818,17 @@ async fn incomplete_search_and_invalid_pages_never_describe_an_empty_store() {
 }
 
 #[tokio::test]
-async fn setup_refuses_native_documents_and_shortcuts_named_like_objects() {
+async fn listing_refuses_native_documents_and_shortcuts_named_like_objects() {
     for kind in [
         "application/vnd.google-apps.document",
         "application/vnd.google-apps.shortcut",
     ] {
         let state = Arc::new(Mutex::new(Remote::default()));
-        state.lock().unwrap().files.insert("native".into(),(metadata(json!({"id":"native","name":"devices/31/1","mimeType":kind,"parents":["folder"]}),0),Vec::new()));
+        state.lock().unwrap().files.insert("native".into(),(metadata(json!({"id":"native","name":"10101010-1010-1010-1010-101010101010/devices/31/1","mimeType":kind,"parents":["folder"]}),0),Vec::new()));
         let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
         assert!(matches!(
-            provider(&server.url).list(&ObjectPrefix::all()).await,
+            provider(&server.url).list(&ObjectPrefix::all(STORE_ID)).await,
             Err(error) if error.failure() == StorageFailure::InvalidPath
-        ));
-        let first = ObjectPath::store_log(DeviceId(31), std::num::NonZeroU64::MIN);
-        assert!(matches!(
-            provider(&server.url)
-                .setup(&first, b"first")
-                .await
-                .unwrap_err(),
-            StorageSetupError::LocationOccupied
         ));
     }
 }
@@ -862,7 +872,7 @@ async fn upload_start_refuses_empty_ids_and_cross_origin_session_urls() {
                 }
             }))
             .await;
-        let path = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
+        let path = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
         assert_eq!(
             provider(&server.url)
                 .begin_upload(&path, 4)

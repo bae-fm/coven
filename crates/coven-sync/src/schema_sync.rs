@@ -147,7 +147,10 @@ impl StoreLogSync {
             .await?;
         if let Some(upload) = &local.upload {
             return Ok(Progress::Waiting(PendingReason::Waits(
-                Prerequisite::Object(crate::store_log_object::path(upload.entry.position)),
+                Prerequisite::Object(crate::store_log_object::path(
+                    self.directory.id(),
+                    upload.entry.position,
+                )),
             )));
         }
         if let Some(damaged) = damages.into_iter().next() {
@@ -164,7 +167,13 @@ impl StoreLogSync {
                 member.member_id(),
                 StoreChange::RaiseSchema { version, snapshot },
                 move |log, entry| {
-                    let sealed = crate::store_log_keys::seal(log, entry, ring.as_ref(), &member)?;
+                    let sealed = crate::store_log_keys::seal(
+                        local.store,
+                        log,
+                        entry,
+                        ring.as_ref(),
+                        &member,
+                    )?;
                     data.set_entry(Some(entry.clone()))?;
                     Ok::<_, SyncError>((sealed, data.update(&record, data.entry_step_number(1))?))
                 },

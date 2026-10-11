@@ -314,13 +314,13 @@ async fn new_uploads_wait_for_a_current_members_replacement_circle_key() {
         matches!(devices[1].writes.upload_writes().await, Err(SyncError::KeyUnavailable(key)) if key == KeyId(Uuid::from_u128(11)))
     );
     assert!(storage
-        .list(&ObjectPrefix::device_logs())
+        .list(&ObjectPrefix::device_logs(STORE_ID))
         .await
         .unwrap()
         .is_empty());
     devices[1].sync.sync_store_log().await.unwrap();
     devices[1].writes.upload_writes().await.unwrap();
-    let path = ObjectPath::device_log(DeviceId(2), 1.try_into().unwrap());
+    let path = ObjectPath::device_log(STORE_ID, DeviceId(2), 1.try_into().unwrap());
     let bytes = storage.read(&path).await.unwrap();
     let length = coven_format::sealed_write::WriteObjectPrefix::length(&bytes).unwrap();
     assert_eq!(
@@ -461,7 +461,8 @@ async fn reversed_removal_parts(
         .await
         .unwrap();
     let rotation_key = KeyId(Uuid::from_u128(2));
-    let copy = crate::store_log_keys::path(&audience, rotation_key, &identity(4).member_id());
+    let copy =
+        crate::store_log_keys::path(STORE_ID, &audience, rotation_key, &identity(4).member_id());
     assert!(matches!(
         storage.read(&copy).await,
         Err(error) if error.failure() == coven_storage::StorageFailure::NotFound
@@ -505,7 +506,7 @@ async fn reversed_removal_parts(
         if store_rotation {
             assert!(matches!(post, Err(SyncError::KeyUnavailable(key)) if key == rotation_key));
             assert!(matches!(
-                storage.read(&ObjectPath::positions(DeviceId(2))).await,
+                storage.read(&ObjectPath::positions(STORE_ID, DeviceId(2))).await,
                 Err(error) if error.failure() == coven_storage::StorageFailure::NotFound
             ));
         } else {
@@ -572,6 +573,7 @@ async fn retention_waits_for_key_copies_without_failing() {
             )))
             .unwrap();
         let unused = ObjectPath::file(
+            STORE_ID,
             DeviceId(reader as u64 + 1),
             coven_foundation::id_source::FileId(Uuid::from_u128(99)),
         );
@@ -632,7 +634,10 @@ async fn retries_keep_each_parts_keys_across_store_and_circle_rotations() {
     assert_eq!(writes::resealed(ana).await.1, first);
     assert_eq!(ana.writes.upload_writes().await.unwrap().len(), 2);
     assert_eq!(
-        storage.read(&crate::write_seal::path(write)).await.unwrap(),
+        storage
+            .read(&crate::write_seal::path(STORE_ID, write))
+            .await
+            .unwrap(),
         first
     );
     let prefix = |bytes: &[u8]| {
@@ -645,7 +650,11 @@ async fn retries_keep_each_parts_keys_across_store_and_circle_rotations() {
         [KeyId(Uuid::from_u128(1)), KeyId(Uuid::from_u128(10))]
     );
     let second = storage
-        .read(&ObjectPath::device_log(write.device, 2.try_into().unwrap()))
+        .read(&ObjectPath::device_log(
+            STORE_ID,
+            write.device,
+            2.try_into().unwrap(),
+        ))
         .await
         .unwrap();
     assert_eq!(prefix(&second).store_key, KeyId(Uuid::from_u128(20)));

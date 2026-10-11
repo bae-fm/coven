@@ -52,28 +52,28 @@ fn a_join_request_is_bound_to_its_invite_and_path() {
     let invite = InviteSecret::generate().unwrap();
     let key = invite.join_request_key();
     let sealed = key
-        .seal_object_chunk("join-requests/42", b"cleartext prefix", 0, 0, b"Carol")
+        .seal_object_chunk("10101010-1010-1010-1010-101010101010/join-requests/42424242-4242-4242-4242-424242424242", b"cleartext prefix", 0, 0, b"Carol")
         .unwrap();
     assert_eq!(
-        key.open_object_chunk("join-requests/42", b"cleartext prefix", 0, 0, &sealed)
+        key.open_object_chunk("10101010-1010-1010-1010-101010101010/join-requests/42424242-4242-4242-4242-424242424242", b"cleartext prefix", 0, 0, &sealed)
             .unwrap(),
         b"Carol"
     );
     assert!(matches!(
-        key.open_object_chunk("join-requests/43", b"cleartext prefix", 0, 0, &sealed),
+        key.open_object_chunk("10101010-1010-1010-1010-101010101010/join-requests/43434343-4343-4343-4343-434343434343", b"cleartext prefix", 0, 0, &sealed),
         Err(CryptoError::Authentication)
     ));
     assert!(matches!(
         InviteSecret::generate()
             .unwrap()
             .join_request_key()
-            .open_object_chunk("join-requests/42", b"cleartext prefix", 0, 0, &sealed),
+            .open_object_chunk("10101010-1010-1010-1010-101010101010/join-requests/42424242-4242-4242-4242-424242424242", b"cleartext prefix", 0, 0, &sealed),
         Err(CryptoError::Authentication)
     ));
     let same = InviteSecret::from_bytes(invite.to_secret_bytes().as_bytes().try_into().unwrap());
     assert_eq!(
         same.join_request_key()
-            .open_object_chunk("join-requests/42", b"cleartext prefix", 0, 0, &sealed)
+            .open_object_chunk("10101010-1010-1010-1010-101010101010/join-requests/42424242-4242-4242-4242-424242424242", b"cleartext prefix", 0, 0, &sealed)
             .unwrap(),
         b"Carol"
     );
@@ -82,12 +82,12 @@ fn a_join_request_is_bound_to_its_invite_and_path() {
 #[test]
 fn retry_nonces_are_pinned_and_separate_keys_paths_sections_and_chunks() {
     let key = DerivedKeys::new(&[17; 32]);
-    let path = "devices/1/3";
+    let path = "10101010-1010-1010-1010-101010101010/devices/1/3";
     let sealed = key.reseal_object_chunk(path, b"prefix", 1, 2, b"payload");
     // Independently calculated with Python's hashlib/hmac and D11's encoding.
     assert_eq!(
         hex::encode(&sealed[..24]),
-        "384981a444444a653c9ae5752659daf9613bf9c415916342"
+        "beb724c5788fe7d64e72564554dbed771e0e6ec5dacdaea6"
     );
     assert_eq!(
         sealed,
@@ -99,8 +99,27 @@ fn retry_nonces_are_pinned_and_separate_keys_paths_sections_and_chunks() {
         b"payload"
     );
     for other in [
-        key.reseal_object_chunk("devices/1/4", b"prefix", 1, 2, b"payload"),
-        key.reseal_object_chunk("store-log/1/3", b"prefix", 1, 2, b"payload"),
+        key.reseal_object_chunk(
+            "20202020-2020-2020-2020-202020202020/devices/1/3",
+            b"prefix",
+            1,
+            2,
+            b"payload",
+        ),
+        key.reseal_object_chunk(
+            "10101010-1010-1010-1010-101010101010/devices/1/4",
+            b"prefix",
+            1,
+            2,
+            b"payload",
+        ),
+        key.reseal_object_chunk(
+            "10101010-1010-1010-1010-101010101010/store-log/1/3",
+            b"prefix",
+            1,
+            2,
+            b"payload",
+        ),
         key.reseal_object_chunk(path, b"prefix", 2, 2, b"payload"),
         key.reseal_object_chunk(path, b"prefix", 1, 3, b"payload"),
         DerivedKeys::new(&[18; 32]).reseal_object_chunk(path, b"prefix", 1, 2, b"payload"),

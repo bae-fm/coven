@@ -443,7 +443,7 @@ impl OpeningStore {
             .await
             .map_err(SyncError::from)?;
         storage
-            .list(&ObjectPrefix::all())
+            .list(&ObjectPrefix::all(owners.directory.id()))
             .await
             .map_err(SyncError::from)?;
         owners.storage = Some(storage);
@@ -551,6 +551,7 @@ impl OpeningOwners {
             self.oauth,
             self.authentication,
             sync.clone(),
+            self.directory.id(),
             self.device,
             self.ids,
             self.clock,

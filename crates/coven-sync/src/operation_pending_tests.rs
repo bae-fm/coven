@@ -195,7 +195,7 @@ async fn a_reload_call_receives_its_native_failure_and_automatic_retry_replaces_
     .unwrap();
     operations.reset_store().await.unwrap();
     let snapshot = storage
-        .list(&ObjectPrefix::snapshots())
+        .list(&ObjectPrefix::snapshots(store(1)))
         .await
         .unwrap()
         .remove(0)
@@ -352,7 +352,7 @@ async fn pending_queries_round_trip_every_subject_and_reason() {
         device: own,
         number: 2,
     };
-    let path = crate::store_log_object::path(entry);
+    let path = crate::store_log_object::path(store(1), entry);
     let subjects = vec![
         PendingSubject::Write(coven_merge::WriteId {
             device: own,

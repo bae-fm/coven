@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 /// Reproduce an entry using the key fixed with its plaintext queue record.
 pub(crate) fn seal_upload(
+    store: StoreId,
     upload: &StoreLogUpload,
     ring: Option<&StoreKeyring>,
     member: &MemberKeys,
@@ -27,7 +28,7 @@ pub(crate) fn seal_upload(
     let creation;
     let key = if let StoreChange::CreateStore { key_hash, .. } = &upload.entry.change {
         // Creation precedes custody: its queued sealed copy holds the key.
-        let path = ObjectPath::store_key(id, &upload.entry.author);
+        let path = ObjectPath::store_key(store, id, &upload.entry.author);
         let copy = upload
             .sealing
             .keys
@@ -43,11 +44,12 @@ pub(crate) fn seal_upload(
     } else {
         ring.ok_or(SyncError::KeyUnavailable(id))?.store_key(id)?
     };
-    seal(&upload.entry, upload.format, key, member)
+    seal(store, &upload.entry, upload.format, key, member)
 }
 
 /// Publish the sealed copies before the entry that introduces or shares them.
 pub(crate) async fn upload(
+    store: StoreId,
     storage: Option<&dyn Storage>,
     upload: &StoreLogUpload,
     bytes: &[u8],
@@ -55,7 +57,7 @@ pub(crate) async fn upload(
     upload_keys(storage, &upload.sealing.keys).await?;
     storage
         .ok_or(SyncError::NoStorage)?
-        .create_once(&path(upload.entry.position), bytes)
+        .create_once(&path(store, upload.entry.position), bytes)
         .await?;
     Ok(())
 }
@@ -78,13 +80,14 @@ pub(crate) async fn upload_keys(
 }
 
 pub(crate) fn seal(
+    store: StoreId,
     entry: &StoreLogEntry,
     format: coven_format::FormatVersion,
     key: &StoreKey,
     member: &MemberKeys,
 ) -> Result<Vec<u8>, SyncError> {
     let coven_format::FormatVersion::V1 = format;
-    let path = path(entry.position);
+    let path = path(store, entry.position);
     let prefix = SingleChunkPrefix::StoreLog { key: key.id() };
     let plain = Object::StoreLog(entry.clone()).encode_in(format)?;
     let chunk =
@@ -97,8 +100,9 @@ pub(crate) fn seal(
     Ok(bytes)
 }
 
-pub(crate) fn path(id: EntryId) -> ObjectPath {
+pub(crate) fn path(store: StoreId, id: EntryId) -> ObjectPath {
     ObjectPath::store_log(
+        store,
         id.device,
         id.number.try_into().expect("positive checked entry number"),
     )
@@ -138,7 +142,10 @@ pub(crate) fn open(
         .map_err(|error| Refusal::Signature {
             cause: Some(Arc::new(error)),
         })?;
-    if *path != self::path(entry.position) {
+    if *path != self::path(path.store(), entry.position) {
+        return Err(Refusal::WrongIdentity { cause: None });
+    }
+    if matches!(entry.change, StoreChange::CreateStore { store, .. } if store != path.store()) {
         return Err(Refusal::WrongIdentity { cause: None });
     }
     Ok(entry)

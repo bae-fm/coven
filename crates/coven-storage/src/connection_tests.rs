@@ -1,5 +1,6 @@
 use super::*;
 use crate::test_utils::MemoryStorage;
+use crate::test_utils::STORE_ID;
 use coven_foundation::id_source::DeviceId;
 
 #[tokio::test]
@@ -43,7 +44,7 @@ async fn wrong_location_and_invalid_part_keep_the_provider_refusal_order() {
         ),
     ] {
         let storage = MemoryStorage::builder().location(config).build().unwrap();
-        let path = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
+        let path = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
         let mut session = storage.begin_upload(&path, 4).await.unwrap();
         session.location = StorageConfig::Dropbox {
             namespace_id: "another".into(),
@@ -67,8 +68,8 @@ async fn guards_and_completed_sessions_do_not_issue_provider_calls() {
         .provider(CloudProvider::Dropbox)
         .build()
         .unwrap();
-    let path = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
-    let positions = ObjectPath::positions(DeviceId(31));
+    let path = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
+    let positions = ObjectPath::positions(STORE_ID, DeviceId(31));
     let mut session = storage.begin_upload(&path, 4).await.unwrap();
     let before = storage.request_count();
     for (error, expected) in [

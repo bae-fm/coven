@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_utils::STORE_ID;
 use crate::test_utils::{Faults, MemoryStorage};
 use coven_foundation::id_source::{DeviceId, FileId};
 
@@ -14,7 +15,7 @@ async fn duplicate_upload_cleanup_failure_is_not_an_expected_refusal() {
             ..Faults::none()
         })
         .await;
-    let path = ObjectPath::file(DeviceId(1), FileId(uuid::Uuid::from_u128(1)));
+    let path = ObjectPath::file(STORE_ID, DeviceId(1), FileId(uuid::Uuid::from_u128(1)));
     let StorageSetupError::ProviderCheck {
         check: StorageCheck::CreateOnce,
         source: StorageError::Cleanup { operation, cleanup },
@@ -26,5 +27,9 @@ async fn duplicate_upload_cleanup_failure_is_not_an_expected_refusal() {
     };
     assert_eq!(operation.failure(), StorageFailure::AlreadyExists);
     assert_eq!(cleanup.failure(), StorageFailure::Network);
-    assert!(storage.list(&ObjectPrefix::all()).await.unwrap().is_empty());
+    assert!(storage
+        .list(&ObjectPrefix::all(STORE_ID))
+        .await
+        .unwrap()
+        .is_empty());
 }

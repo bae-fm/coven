@@ -390,7 +390,7 @@ async fn closing_waits_for_setup_after_its_caller_is_cancelled() {
         handle.initialize_identity().unwrap();
         let (entered, entering) = tokio::sync::oneshot::channel();
         let (resume, resumed) = tokio::sync::oneshot::channel();
-        storage.hold_next_listing(ObjectPrefix::all(), entered, resumed).await;
+        storage.hold_next_listing(ObjectPrefix::all(directory.id()), entered, resumed).await;
         {
             let setup = handle.setup_s3_storage(config.clone(), "Device", "member".into(), SecretText::new("secret".into()));
             tokio::pin!(setup);
@@ -407,8 +407,8 @@ async fn closing_waits_for_setup_after_its_caller_is_cancelled() {
         }
         resume.send(()).unwrap();
         close.await.unwrap();
-        assert_eq!(StorageSettings::new(directory).read().unwrap(), Some(config));
-        assert_eq!(storage.list(&ObjectPrefix::store_logs()).await.unwrap().len(), 1);
+        assert_eq!(StorageSettings::new(directory.clone()).read().unwrap(), Some(config));
+        assert_eq!(storage.list(&ObjectPrefix::store_logs(directory.id())).await.unwrap().len(), 1);
         assert!(matches!(handle.store_key_state(), Err(KeyError::StoreClosed)));
     }).await.expect("cancelled setup finishes before close");
 }

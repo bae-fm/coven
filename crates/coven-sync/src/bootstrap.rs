@@ -20,7 +20,7 @@ impl StoreLogSync {
     /// acceptance and publication use the same invitation and ciphertext.
     pub async fn accept_join(&mut self, invitation: &StorageInvitation) -> Result<(), SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
-        storage.join(invitation).await?;
+        storage.join(self.directory.id(), invitation).await?;
         Ok(())
     }
 

@@ -242,7 +242,7 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
     .unwrap();
     let bytes = owner
         .storage
-        .read(&ObjectPath::join_request(invite.id))
+        .read(&ObjectPath::join_request(owner.directory.id(), invite.id))
         .await
         .unwrap();
     drop(joining);
@@ -266,7 +266,7 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
         assert_eq!(
             owner
                 .storage
-                .read(&ObjectPath::join_request(invite.id))
+                .read(&ObjectPath::join_request(owner.directory.id(), invite.id))
                 .await
                 .unwrap(),
             bytes
@@ -578,7 +578,11 @@ async fn a_device_removed_during_loading_receives_the_provider_refusal() {
     let (resume, resumed) = tokio::sync::oneshot::channel();
     owner
         .storage
-        .hold_next_listing(ObjectPrefix::device_logs(), listed, resumed)
+        .hold_next_listing(
+            ObjectPrefix::device_logs(owner.directory.id()),
+            listed,
+            resumed,
+        )
         .await;
     let joining = install.run(
         &owner,
@@ -631,7 +635,11 @@ async fn approval_during_a_log_listing_is_not_mistaken_for_decline() {
     let (resume, resumed) = tokio::sync::oneshot::channel();
     owner
         .storage
-        .hold_next_listing(ObjectPrefix::store_logs(), listed, resumed)
+        .hold_next_listing(
+            ObjectPrefix::store_logs(owner.directory.id()),
+            listed,
+            resumed,
+        )
         .await;
     let joining = install.run(
         &owner,
@@ -681,7 +689,11 @@ async fn removal_lists_every_recorded_key_including_a_dropped_replacement() {
             let (resume, resumed) = tokio::sync::oneshot::channel();
             owner
                 .storage
-                .hold_next_listing(ObjectPrefix::store_logs(), listed, resumed)
+                .hold_next_listing(
+                    ObjectPrefix::store_logs(owner.directory.id()),
+                    listed,
+                    resumed,
+                )
                 .await;
             let replacement = async {
                 listing.await.unwrap();
@@ -746,7 +758,7 @@ async fn failed_access_publication_retains_credentials_and_retry_finishes_once()
     let before = handle.restore_code().await.unwrap();
     let entries_before = owner
         .storage
-        .list(&ObjectPrefix::store_logs())
+        .list(&ObjectPrefix::store_logs(owner.directory.id()))
         .await
         .unwrap()
         .len();
@@ -796,7 +808,7 @@ async fn failed_access_publication_retains_credentials_and_retry_finishes_once()
     assert_eq!(
         owner
             .storage
-            .list(&ObjectPrefix::store_logs())
+            .list(&ObjectPrefix::store_logs(owner.directory.id()))
             .await
             .unwrap()
             .len(),

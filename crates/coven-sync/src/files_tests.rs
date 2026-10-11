@@ -33,7 +33,7 @@ impl Fixture {
         }));
         let layout = StoreLayout::new(root.path().to_owned());
         let directory = layout
-            .create_store_dir(StoreId(ids.new_id()), "files", ids.as_ref())
+            .create_store_dir(StoreId(uuid::Uuid::from_u128(1)), "files", ids.as_ref())
             .unwrap();
         let declarations = vec![
             SyncedTable::new("files", RowIdentity::SharedKey)
@@ -209,7 +209,7 @@ async fn ranges_authenticate_cache_batch_and_fail_offline() {
     );
     f.storage.set_online(true);
     let uploaded = file.uploaded().unwrap().unwrap();
-    let path = coven_storage::ObjectPath::file(uploaded.device, uploaded.id);
+    let path = coven_storage::ObjectPath::file(f.directory.id(), uploaded.device, uploaded.id);
     f.storage
         .corrupt_byte(&path, 11 + CHUNK + 16 + 1)
         .await
@@ -604,7 +604,7 @@ async fn a_file_from_a_newer_format_requests_an_update() {
     let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     let file = f.uploaded("future", vec![91; CHUNK]).await;
     let uploaded = file.uploaded().unwrap().unwrap();
-    let path = coven_storage::ObjectPath::file(uploaded.device, uploaded.id);
+    let path = coven_storage::ObjectPath::file(f.directory.id(), uploaded.device, uploaded.id);
     let mut bytes = f.storage.read(&path).await.unwrap();
     bytes[1..3].copy_from_slice(&(coven_format::FORMAT_VERSION + 1).to_be_bytes());
     f.storage.delete(&path).await.unwrap();

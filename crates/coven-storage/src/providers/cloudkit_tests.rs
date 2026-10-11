@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_utils::STORE_ID;
 use crate::test_utils::{Conformance, Faults, MemoryStorage};
 use coven_crypto::SecretText;
 use std::{
@@ -303,8 +304,16 @@ async fn bridge_conforms_and_retains_parts_across_adapter_restart() {
         MemoryStorage::builder().location(config()).build().unwrap(),
     ));
     let storage = Arc::new(provider(config(), bridge.clone()).unwrap());
-    Conformance::new(storage.clone()).run().await.unwrap();
-    Conformance::new(storage.clone())
+    Conformance::new(storage.clone(), STORE_ID)
+        .run()
+        .await
+        .unwrap();
+    Conformance::new(storage.clone(), STORE_ID)
+        .shared_location(coven_foundation::id_source::StoreId(
+            uuid::Uuid::from_bytes([0x20; 16]),
+        ))
+        .await;
+    Conformance::new(storage.clone(), STORE_ID)
         .lost_part_reply(4, async {
             bridge
                 .memory
@@ -319,7 +328,7 @@ async fn bridge_conforms_and_retains_parts_across_adapter_restart() {
         storage.config().provider().sign_out(),
         ProviderSignOut::RemoveFromAppleAccount
     );
-    let errors = Conformance::new(storage)
+    let errors = Conformance::new(storage, STORE_ID)
         .permission_failures(async {
             bridge.denied.store(true, Ordering::SeqCst);
         })
@@ -335,7 +344,7 @@ async fn expired_bridge_session_restarts_from_retained_bytes() {
         MemoryStorage::builder().location(config()).build().unwrap(),
     ));
     let storage = Arc::new(provider(config(), bridge.clone()).unwrap());
-    Conformance::new(storage)
+    Conformance::new(storage, STORE_ID)
         .expired_session(async {
             bridge
                 .memory
@@ -355,6 +364,7 @@ async fn abort_accepts_a_forgotten_session_and_keeps_published_objects() {
     ));
     let storage = provider(config(), bridge.clone()).unwrap();
     let path = ObjectPath::device_log(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
     );
@@ -380,6 +390,7 @@ async fn create_respects_the_bridges_single_request_limit() {
     let storage = provider(config(), bridge.clone()).unwrap();
     assert_eq!(storage.single_request_limit(), 16);
     let path = ObjectPath::device_log(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
     );
@@ -405,6 +416,7 @@ async fn automatic_upload_keeps_both_transfer_and_abort_failures() {
     let bridge = Arc::new(bridge);
     let storage = provider(config(), bridge.clone()).unwrap();
     let path = ObjectPath::device_log(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
     );
@@ -414,7 +426,11 @@ async fn automatic_upload_keeps_both_transfer_and_abort_failures() {
     };
     assert_eq!(operation.failure(), StorageFailure::Network);
     assert_eq!(cleanup.failure(), StorageFailure::PermissionDenied);
-    assert!(storage.list(&ObjectPrefix::all()).await.unwrap().is_empty());
+    assert!(storage
+        .list(&ObjectPrefix::all(STORE_ID))
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -422,7 +438,7 @@ async fn sharing_requires_the_store_owners_account() {
     let mut bridge = Bridge::new(MemoryStorage::builder().location(config()).build().unwrap());
     bridge.non_owner = true;
     let storage = provider(config(), Arc::new(bridge)).unwrap();
-    Conformance::new(Arc::new(storage))
+    Conformance::new(Arc::new(storage), STORE_ID)
         .owner_only_sharing()
         .await;
 }
@@ -433,7 +449,7 @@ async fn listing_keeps_the_native_publication_metadata() {
         MemoryStorage::builder().location(config()).build().unwrap(),
     ));
     let storage = provider(config(), bridge.clone()).unwrap();
-    Conformance::new(Arc::new(storage))
+    Conformance::new(Arc::new(storage), STORE_ID)
         .listing_times(std::time::SystemTime::UNIX_EPOCH, async {})
         .await;
 }
@@ -441,6 +457,7 @@ async fn listing_keeps_the_native_publication_metadata() {
 #[tokio::test]
 async fn listing_refuses_duplicate_paths_and_objects_outside_the_requested_prefix() {
     let path = ObjectPath::device_log(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
     );
@@ -454,9 +471,9 @@ async fn listing_refuses_duplicate_paths_and_objects_outside_the_requested_prefi
         bridge.listed = Some(listed.clone());
         let storage = provider(config(), Arc::new(bridge)).unwrap();
         let prefix = if listed.len() == 1 {
-            ObjectPrefix::positions()
+            ObjectPrefix::positions(STORE_ID)
         } else {
-            ObjectPrefix::all()
+            ObjectPrefix::all(STORE_ID)
         };
         assert_eq!(
             storage.list(&prefix).await.unwrap_err().failure(),
@@ -483,6 +500,7 @@ async fn recipient_join_accepts_the_native_share_before_reading_the_zone() {
     ));
     let owner = provider(config(), bridge.clone()).unwrap();
     let path = ObjectPath::store_log(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(1),
         std::num::NonZeroU64::MIN,
     );
@@ -504,16 +522,20 @@ async fn recipient_join_accepts_the_native_share_before_reading_the_zone() {
     )
     .unwrap();
     assert!(matches!(
-        recipient.join(&wrong).await,
+        recipient.join(STORE_ID, &wrong).await,
         Err(error) if error.failure() == StorageFailure::InvitationMismatch
     ));
     assert_eq!(bridge.shares.lock().await.accept_calls, 0);
     bridge.shares.lock().await.lose_reply = true;
     assert_eq!(
-        recipient.join(&invitation).await.unwrap_err().failure(),
+        recipient
+            .join(STORE_ID, &invitation)
+            .await
+            .unwrap_err()
+            .failure(),
         StorageFailure::Network
     );
-    recipient.join(&invitation).await.unwrap();
+    recipient.join(STORE_ID, &invitation).await.unwrap();
     assert_eq!(recipient.read(&path).await.unwrap(), b"first");
     owner
         .revoke_access(&MemberAccess::ProviderAccount("member".into()))
@@ -523,7 +545,7 @@ async fn recipient_join_accepts_the_native_share_before_reading_the_zone() {
         recipient.read(&path).await.unwrap_err().failure(),
         StorageFailure::PermissionDenied
     );
-    let error = recipient.join(&invitation).await.unwrap_err();
+    let error = recipient.join(STORE_ID, &invitation).await.unwrap_err();
     assert_eq!(error.failure(), StorageFailure::PermissionDenied);
     let StorageError::Provider { source, .. } = error else {
         panic!()
@@ -562,6 +584,7 @@ async fn forgotten_native_sessions_cannot_abort_their_replacements() {
     ));
     let storage = provider(config(), bridge.clone()).unwrap();
     let path = ObjectPath::device_log(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
     );

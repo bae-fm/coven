@@ -213,7 +213,13 @@ impl Device {
     }
 
     fn reseal(&self, upload: &coven_database::StoreLogUpload) -> Vec<u8> {
-        object::seal_upload(upload, self.custody.read().unwrap().as_ref(), &self.member).unwrap()
+        object::seal_upload(
+            self.directory.id(),
+            upload,
+            self.custody.read().unwrap().as_ref(),
+            &self.member,
+        )
+        .unwrap()
     }
 
     fn writes(&self) -> crate::DeviceLogSync {
@@ -335,7 +341,7 @@ async fn far_future_entry_waits_for_its_missing_causal_entry_then_applies() {
         })
         .await
         .unwrap();
-    let missing_path = object::path(second);
+    let missing_path = object::path(store(1), second);
     let bytes = storage.read(&missing_path).await.unwrap();
     storage.delete(&missing_path).await.unwrap();
     let mut c = device(storage.clone(), 3, member(1), store(1)).await;
@@ -386,7 +392,7 @@ async fn fixed_bytes_survive_restart_and_lost_create_reply() {
         if lost_reply {
             assert_eq!(
                 storage
-                    .read(&object::path(fixed.entry.position))
+                    .read(&object::path(store(1), fixed.entry.position))
                     .await
                     .unwrap(),
                 expected
@@ -399,7 +405,7 @@ async fn fixed_bytes_survive_restart_and_lost_create_reply() {
         a.sync().await;
         assert_eq!(
             storage
-                .read(&object::path(fixed.entry.position))
+                .read(&object::path(store(1), fixed.entry.position))
                 .await
                 .unwrap(),
             expected
@@ -469,7 +475,7 @@ async fn removal_then_rotations_share_keys_only_with_remaining_members() {
     ] {
         assert_eq!(
             storage
-                .read(&keys::path(&audience, key, &b.member.member_id()))
+                .read(&keys::path(store(1), &audience, key, &b.member.member_id()))
                 .await
                 .unwrap_err()
                 .failure(),
@@ -511,7 +517,7 @@ async fn far_future_entry_waits_for_missing_or_damaged_sealed_keys() {
     let mut a = device(storage.clone(), 1, member(1), store(1)).await;
     a.clock.set(UNIX_EPOCH + Duration::from_secs(365 * 86400));
     a.create(key(1)).await;
-    let path = ObjectPath::store_key(key(1), &a.member.member_id());
+    let path = ObjectPath::store_key(store(1), key(1), &a.member.member_id());
     let original = storage.read(&path).await.unwrap();
     storage.delete(&path).await.unwrap();
     let mut b = device(storage.clone(), 2, member(1), store(1)).await;
@@ -638,14 +644,14 @@ async fn key_objects_are_fixed_and_published_before_the_entry() {
     let pending = a.db.local_store_log().await.unwrap().upload.unwrap();
     assert_eq!(pending.format, coven_format::FormatVersion::V1);
     assert!(storage
-        .list(&ObjectPrefix::store_logs())
+        .list(&ObjectPrefix::store_logs(store(1)))
         .await
         .unwrap()
         .is_empty());
     assert!(a.custody.read().unwrap().is_none());
     let expected = a.reseal(&pending);
     assert!(matches!(
-        object::seal_upload(&pending, None, &member(2)),
+        object::seal_upload(store(1), &pending, None, &member(2)),
         Err(SyncError::Rejected(coven_database::DropReason::NotAllowed))
     ));
     let sealed_key = &pending.sealing.keys[0];
@@ -663,7 +669,7 @@ async fn key_objects_are_fixed_and_published_before_the_entry() {
     a.sync().await;
     assert_eq!(
         storage
-            .read(&object::path(pending.entry.position))
+            .read(&object::path(store(1), pending.entry.position))
             .await
             .unwrap(),
         expected
@@ -764,9 +770,9 @@ async fn only_newer_envelopes_require_an_update() {
             let mut a = device(storage.clone(), 1, member(1), store(1)).await;
             let first = a.create(key(1)).await;
             let path = if sealed_key {
-                ObjectPath::store_key(key(1), &a.member.member_id())
+                ObjectPath::store_key(store(1), key(1), &a.member.member_id())
             } else {
-                object::path(first)
+                object::path(store(1), first)
             };
             let original = storage.read(&path).await.unwrap();
             let mut bytes = original.clone();
@@ -792,7 +798,7 @@ async fn only_newer_envelopes_require_an_update() {
             assert!(b.log().await.entries.is_empty());
             assert!(b.db.operations().await.unwrap().is_empty());
             assert!(storage
-                .list(&ObjectPrefix::snapshots())
+                .list(&ObjectPrefix::snapshots(store(1)))
                 .await
                 .unwrap()
                 .is_empty());
@@ -833,7 +839,7 @@ async fn changing_custody_cannot_change_a_devices_author() {
     assert!(a.db.local_store_log().await.unwrap().upload.is_none());
     assert_eq!(
         storage
-            .list(&ObjectPrefix::store_logs())
+            .list(&ObjectPrefix::store_logs(store(1)))
             .await
             .unwrap()
             .len(),
@@ -879,7 +885,7 @@ async fn a_waiting_entry_reseals_with_its_recorded_key_after_rotation() {
         .await
         .is_err());
     let pending = a.db.local_store_log().await.unwrap().upload.unwrap();
-    let path = object::path(pending.entry.position);
+    let path = object::path(store(1), pending.entry.position);
     let first = storage.read(&path).await.unwrap();
     b.sync.test_rotate(Audience::Store, key(2)).await;
     // Apply the downloaded rotation while the local entry is still queued.

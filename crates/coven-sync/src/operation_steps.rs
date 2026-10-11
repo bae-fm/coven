@@ -179,7 +179,13 @@ impl StoreLogSync {
             let record = record.clone();
             self.database
                 .prepare_operation_entry(member.member_id(), change, move |log, entry| {
-                    let sealed = crate::store_log_keys::seal(log, entry, ring.as_ref(), &member)?;
+                    let sealed = crate::store_log_keys::seal(
+                        local.store,
+                        log,
+                        entry,
+                        ring.as_ref(),
+                        &member,
+                    )?;
                     data.set_entry(Some(entry.clone()))?;
                     Ok::<_, SyncError>((sealed, data.update(&record, data.entry_step_number(1))?))
                 })
@@ -210,6 +216,7 @@ impl StoreLogSync {
                 }
                 n if n == data.entry_step_number(2) => {
                     let bytes = crate::store_log_object::seal_upload(
+                        self.directory.id(),
                         upload,
                         self.store_keys.read()?.as_ref(),
                         &member,
@@ -217,7 +224,10 @@ impl StoreLogSync {
                     self.storage
                         .as_deref()
                         .ok_or(SyncError::NoStorage)?
-                        .create_once(&crate::store_log_object::path(entry.position), &bytes)
+                        .create_once(
+                            &crate::store_log_object::path(self.directory.id(), entry.position),
+                            &bytes,
+                        )
                         .await?;
                     self.database
                         .advance_operation(data.update(record, data.entry_step_number(3))?)

@@ -75,10 +75,10 @@ impl StoreLogSync {
         }
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let objects = storage
-            .list(&coven_storage::ObjectPrefix::snapshots())
+            .list(&coven_storage::ObjectPrefix::snapshots(self.directory.id()))
             .await?;
         for (entry, id) in boundaries {
-            let path = snapshot_path(id)?;
+            let path = snapshot_path(self.directory.id(), id)?;
             let object = objects
                 .iter()
                 .find(|object| object.path == path)

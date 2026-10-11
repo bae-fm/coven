@@ -226,7 +226,8 @@ async fn assert_uploaded(
     let ring = f.keys.unlock().unwrap().unwrap();
     for record in queued {
         let id = record.header.position;
-        let path = ObjectPath::device_log(id.device, id.number.try_into().unwrap());
+        let path =
+            ObjectPath::device_log(f.directory.id(), id.device, id.number.try_into().unwrap());
         let bytes = f.storage.read(&path).await.unwrap();
         assert_eq!(
             open_write(&bytes, &path, &ring, &f.member.member_id()),
@@ -383,7 +384,11 @@ async fn app_reads_and_writes_finish_while_a_sync_pass_is_held() {
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (release, released) = tokio::sync::oneshot::channel();
     f.storage
-        .hold_next_listing(ObjectPrefix::device_logs(), entered, released)
+        .hold_next_listing(
+            ObjectPrefix::device_logs(f.directory.id()),
+            entered,
+            released,
+        )
         .await;
     handle.start_sync().await.unwrap();
     entering.await.unwrap();
@@ -436,7 +441,11 @@ async fn identical_app_files_have_distinct_stored_ciphertext() {
             break;
         }
     }
-    let objects = f.storage.list(&ObjectPrefix::files()).await.unwrap();
+    let objects = f
+        .storage
+        .list(&ObjectPrefix::files(f.directory.id()))
+        .await
+        .unwrap();
     assert_eq!(objects.len(), 2);
     let a = f.storage.read(&objects[0].path).await.unwrap();
     let b = f.storage.read(&objects[1].path).await.unwrap();
@@ -463,7 +472,11 @@ async fn identical_app_files_have_distinct_stored_ciphertext() {
 #[tokio::test]
 async fn newer_snapshots_delete_covered_logs_and_older_own_snapshots() {
     async fn grow_and_retain(f: &Fixture, handle: &CovenHandle, body: String) {
-        let logs = f.storage.list(&ObjectPrefix::device_logs()).await.unwrap();
+        let logs = f
+            .storage
+            .list(&ObjectPrefix::device_logs(f.directory.id()))
+            .await
+            .unwrap();
         assert_eq!(logs.len(), 1);
         note(handle, body).await;
         f.sync(handle).await;
@@ -471,7 +484,7 @@ async fn newer_snapshots_delete_covered_logs_and_older_own_snapshots() {
         f.sync(handle).await;
         assert!(f
             .storage
-            .list(&ObjectPrefix::device_logs())
+            .list(&ObjectPrefix::device_logs(f.directory.id()))
             .await
             .unwrap()
             .is_empty());
@@ -484,7 +497,11 @@ async fn newer_snapshots_delete_covered_logs_and_older_own_snapshots() {
     note(&handle, "before snapshot".into()).await;
     f.sync(&handle).await;
     grow_and_retain(&f, &handle, "x".repeat(1024 * 1024 + 1)).await;
-    let old = f.storage.list(&ObjectPrefix::snapshots()).await.unwrap();
+    let old = f
+        .storage
+        .list(&ObjectPrefix::snapshots(f.directory.id()))
+        .await
+        .unwrap();
     assert_eq!(old.len(), 1);
     let prefix = |bytes: &[u8]| {
         SnapshotObjectPrefix::decode(&bytes[..SnapshotObjectPrefix::length(bytes).unwrap()])
@@ -504,7 +521,11 @@ async fn newer_snapshots_delete_covered_logs_and_older_own_snapshots() {
         .unwrap();
     f.sync(&handle).await;
     grow_and_retain(&f, &handle, "y".repeat(2 * 1024 * 1024 + 1)).await;
-    let new = f.storage.list(&ObjectPrefix::snapshots()).await.unwrap();
+    let new = f
+        .storage
+        .list(&ObjectPrefix::snapshots(f.directory.id()))
+        .await
+        .unwrap();
     assert_eq!(new.len(), 1);
     assert_ne!(new[0].path, old[0].path);
     assert_eq!(new[0].path.device(), old[0].path.device());
@@ -535,7 +556,7 @@ async fn admit_member(f: &Fixture, handle: &CovenHandle, keys: &MemberKeys) {
         .await
         .unwrap();
     let code = coven_format::codes::InviteCode::from_text(&invite.code).unwrap();
-    let path = ObjectPath::join_request(invite.id);
+    let path = ObjectPath::join_request(f.directory.id(), invite.id);
     let request = Object::JoinRequest(coven_format::objects::JoinRequest {
         invite: invite.id,
         keys: coven_format::store_log::MemberPublicKeys {
@@ -607,7 +628,12 @@ async fn removal_preserves_key_material_and_publishes_only_the_member_target() {
     let ring = f.keys.unlock().unwrap().unwrap();
     assert_eq!(ring.to_secret_bytes().as_bytes(), before.as_bytes());
     let mut removals = 0;
-    for object in f.storage.list(&ObjectPrefix::store_logs()).await.unwrap() {
+    for object in f
+        .storage
+        .list(&ObjectPrefix::store_logs(f.directory.id()))
+        .await
+        .unwrap()
+    {
         let bytes = f.storage.read(&object.path).await.unwrap();
         let envelope = coven_format::sealed_single::SingleChunkObject::decode(&bytes).unwrap();
         let coven_format::sealed_single::SingleChunkObject::StoreLog { key, .. } = &envelope else {

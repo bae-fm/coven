@@ -141,7 +141,7 @@ async fn far_future_threshold_snapshot_and_later_writes_reload_on_a_new_device()
     upload(&a, &storage).await;
     a.sync.write_snapshots().await.unwrap();
     assert!(storage
-        .list(&ObjectPrefix::snapshots())
+        .list(&ObjectPrefix::snapshots(store(1)))
         .await
         .unwrap()
         .is_empty());
@@ -150,7 +150,7 @@ async fn far_future_threshold_snapshot_and_later_writes_reload_on_a_new_device()
     a.sync.write_snapshots().await.unwrap();
     assert_eq!(
         storage
-            .list(&ObjectPrefix::snapshots())
+            .list(&ObjectPrefix::snapshots(store(1)))
             .await
             .unwrap()
             .len(),
@@ -228,7 +228,10 @@ async fn writing_resumes_after_each_recorded_step_with_identical_ciphertext() {
         a.reopen(storage.clone(), notes_tables(), notes_migrations())
             .await;
         a.sync.write_snapshots().await.unwrap();
-        let objects = storage.list(&ObjectPrefix::snapshots()).await.unwrap();
+        let objects = storage
+            .list(&ObjectPrefix::snapshots(store(1)))
+            .await
+            .unwrap();
         assert_eq!(objects.len(), 1);
         if let Some(bytes) = fixed {
             assert_eq!(storage.read(&objects[0].path).await.unwrap(), bytes);
@@ -251,7 +254,7 @@ async fn uncovered_logs_survive_thirty_days_and_never_posting_devices_hold_cover
     a.sync.run_retention().await.unwrap();
     assert_eq!(
         storage
-            .list(&ObjectPrefix::device_logs())
+            .list(&ObjectPrefix::device_logs(store(1)))
             .await
             .unwrap()
             .len(),
@@ -261,7 +264,7 @@ async fn uncovered_logs_survive_thirty_days_and_never_posting_devices_hold_cover
     a.sync.write_snapshots().await.unwrap();
     assert_eq!(
         storage
-            .list(&ObjectPrefix::device_logs())
+            .list(&ObjectPrefix::device_logs(store(1)))
             .await
             .unwrap()
             .len(),
@@ -270,7 +273,7 @@ async fn uncovered_logs_survive_thirty_days_and_never_posting_devices_hold_cover
     a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
     a.sync.run_retention().await.unwrap();
     assert!(storage
-        .list(&ObjectPrefix::device_logs())
+        .list(&ObjectPrefix::device_logs(store(1)))
         .await
         .unwrap()
         .is_empty());
@@ -306,13 +309,14 @@ async fn concurrent_snapshots_covering_different_pasts_converge_from_either_one(
     assert_eq!(fingerprint(&a).await, fingerprint(&b).await);
     assert_eq!(fingerprint(&a).await, fingerprint(&c).await);
     let path = ObjectPath::snapshot(
+        store(1),
         a_snapshot.audience,
         a_snapshot.device,
         NonZeroU64::new(a_snapshot.number).unwrap(),
     );
     storage.delete(&path).await.unwrap();
     assert!(storage
-        .list(&ObjectPrefix::snapshots())
+        .list(&ObjectPrefix::snapshots(store(1)))
         .await
         .unwrap()
         .iter()
@@ -405,7 +409,7 @@ async fn deleted_history_reload_preserves_waiting_numbers_and_late_writes_conver
     a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
     a.sync.write_snapshot(Audience::Store).await.unwrap();
     assert!(storage
-        .list(&ObjectPrefix::device_logs())
+        .list(&ObjectPrefix::device_logs(store(1)))
         .await
         .unwrap()
         .is_empty());
@@ -427,7 +431,7 @@ async fn waiting_parts_alone_can_trigger_a_snapshot() {
     a.sync.write_snapshots().await.unwrap();
     assert_eq!(
         storage
-            .list(&ObjectPrefix::snapshots())
+            .list(&ObjectPrefix::snapshots(store(1)))
             .await
             .unwrap()
             .len(),
@@ -486,7 +490,12 @@ async fn selection_orders_coverage_then_path_and_passes_over_damaged_objects() {
     let a_id = a.sync.write_snapshot(Audience::Store).await.unwrap();
     let b_id = b.sync.write_snapshot(Audience::Store).await.unwrap();
     let path = |s: coven_format::store_log::SnapshotId| {
-        ObjectPath::snapshot(s.audience, s.device, NonZeroU64::new(s.number).unwrap())
+        ObjectPath::snapshot(
+            store(1),
+            s.audience,
+            s.device,
+            NonZeroU64::new(s.number).unwrap(),
+        )
     };
     let mut c = notes_device(storage.clone(), 3).await;
     add_device(&mut c).await;
@@ -499,7 +508,7 @@ async fn selection_orders_coverage_then_path_and_passes_over_damaged_objects() {
     let newer = path(a.sync.write_snapshot(Audience::Store).await.unwrap());
     assert_eq!(selected_snapshot(&mut c).await, newer);
     let size = storage
-        .list(&ObjectPrefix::snapshots())
+        .list(&ObjectPrefix::snapshots(store(1)))
         .await
         .unwrap()
         .into_iter()
@@ -516,6 +525,7 @@ async fn selection_orders_coverage_then_path_and_passes_over_damaged_objects() {
     assert_eq!(tables(&a).await, tables(&c).await);
     // A malformed clear prefix is also passed over without reading a body.
     let malformed = ObjectPath::snapshot(
+        store(1),
         Audience::Store,
         a.device().await,
         NonZeroU64::new(999).unwrap(),
@@ -582,7 +592,11 @@ async fn a_snapshot_keeps_its_key_when_a_removal_is_dropped() {
     write_rows(&b, 1, 1, 17, Audience::Store).await;
     let write = b.db.test_queued_writes().await.unwrap()[0].header.position;
     upload(&b, &storage).await;
-    let path = ObjectPath::device_log(write.device, NonZeroU64::new(write.number).unwrap());
+    let path = ObjectPath::device_log(
+        store(1),
+        write.device,
+        NonZeroU64::new(write.number).unwrap(),
+    );
     storage.delete(&path).await.unwrap();
     b.clock.set(UNIX_EPOCH + Duration::from_secs(3));
     b.sync
@@ -635,7 +649,7 @@ async fn replay_reload_is_journaled_and_keeps_its_boundary_snapshot() {
     a.sync.write_snapshot(Audience::Store).await.unwrap();
     a.sync.run_retention().await.unwrap();
     assert!(storage
-        .list(&ObjectPrefix::snapshots())
+        .list(&ObjectPrefix::snapshots(store(1)))
         .await
         .unwrap()
         .iter()
@@ -654,7 +668,10 @@ async fn a_snapshot_exceeding_the_transfer_memory_budget_streams_in_bounded_requ
         write_rows(&a, batch * 32, 32, 32768, Audience::Store).await;
     }
     a.sync.write_snapshots().await.unwrap();
-    let snapshots = storage.list(&ObjectPrefix::snapshots()).await.unwrap();
+    let snapshots = storage
+        .list(&ObjectPrefix::snapshots(store(1)))
+        .await
+        .unwrap();
     assert!(snapshots[0].size > MEMORY_BUDGET);
     let mut b = notes_device(storage.clone(), 2).await;
     add_device(&mut b).await;
@@ -751,7 +768,11 @@ async fn idle_pass_reads_only_snapshot_prefixes_and_log_headers() {
         device.sync.write_snapshot(Audience::Store).await.unwrap();
     }
     let mut bounds = std::collections::BTreeMap::new();
-    for object in storage.list(&ObjectPrefix::snapshots()).await.unwrap() {
+    for object in storage
+        .list(&ObjectPrefix::snapshots(store(1)))
+        .await
+        .unwrap()
+    {
         let bytes = storage.read(&object.path).await.unwrap();
         bounds.insert(
             object.path,
@@ -759,7 +780,11 @@ async fn idle_pass_reads_only_snapshot_prefixes_and_log_headers() {
                 as u64,
         );
     }
-    for object in storage.list(&ObjectPrefix::device_logs()).await.unwrap() {
+    for object in storage
+        .list(&ObjectPrefix::device_logs(store(1)))
+        .await
+        .unwrap()
+    {
         let bytes = storage.read(&object.path).await.unwrap();
         let prefix = coven_format::sealed_write::WriteObjectPrefix::length(&bytes).unwrap();
         let header =
@@ -824,16 +849,16 @@ async fn a_pass_reuses_loaded_snapshot_and_write_references() {
             b.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
             b.sync.write_snapshot(Audience::Store).await.unwrap();
             assert!(storage
-                .list(&ObjectPrefix::device_logs())
+                .list(&ObjectPrefix::device_logs(store(1)))
                 .await
                 .unwrap()
                 .is_empty());
         }
         let objects = storage
             .list(&if deleted_history {
-                ObjectPrefix::snapshots()
+                ObjectPrefix::snapshots(store(1))
             } else {
-                ObjectPrefix::device_logs()
+                ObjectPrefix::device_logs(store(1))
             })
             .await
             .unwrap();
@@ -841,6 +866,7 @@ async fn a_pass_reuses_loaded_snapshot_and_write_references() {
         // This device owns an unreferenced upload, so retention must prove
         // absence across the object the pass is about to load.
         let orphan = ObjectPath::file(
+            store(1),
             a.device().await,
             coven_foundation::id_source::FileId(uuid::Uuid::from_u128(999)),
         );
@@ -874,7 +900,7 @@ async fn a_pass_reuses_loaded_snapshot_and_write_references() {
             "each object is read once, including its prefix/header"
         );
         assert!(storage
-            .list(&ObjectPrefix::files())
+            .list(&ObjectPrefix::files(store(1)))
             .await
             .unwrap()
             .is_empty());

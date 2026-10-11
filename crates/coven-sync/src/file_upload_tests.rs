@@ -173,7 +173,11 @@ async fn a_single_request_reports_uploading_while_storage_is_pending() {
     let (started, receiving) = tokio::sync::oneshot::channel();
     let (release, resume) = tokio::sync::oneshot::channel();
     f.storage
-        .hold_next_creation(coven_storage::ObjectPrefix::files(), started, resume)
+        .hold_next_creation(
+            coven_storage::ObjectPrefix::files(f.directory.id()),
+            started,
+            resume,
+        )
         .await;
     f.files.inner.state.lock().unwrap().paused = false;
     let files = f.files.clone();
@@ -224,7 +228,7 @@ async fn bounded_uploads_from_originals_and_owned_copies_publish_after_storage()
         );
         assert!(f
             .storage
-            .list(&coven_storage::ObjectPrefix::files())
+            .list(&coven_storage::ObjectPrefix::files(f.directory.id()))
             .await
             .unwrap()
             .is_empty());
@@ -337,7 +341,11 @@ async fn recorded_sessions_continue_or_restart_with_the_same_encrypted_bytes() {
         );
         let encrypted = f
             .storage
-            .read(&ObjectPath::file(upload_device(&item).unwrap(), id))
+            .read(&ObjectPath::file(
+                f.directory.id(),
+                upload_device(&item).unwrap(),
+                id,
+            ))
             .await
             .unwrap();
         assert_eq!(encrypted.len() as u64, expected_size);
@@ -369,7 +377,7 @@ async fn lost_completion_reply_resumes_the_published_object() {
     assert_eq!(f.database.file_ref("files", "one").await.unwrap(), file);
     assert_eq!(
         f.storage
-            .list(&coven_storage::ObjectPrefix::files())
+            .list(&coven_storage::ObjectPrefix::files(f.directory.id()))
             .await
             .unwrap()
             .len(),
@@ -396,7 +404,11 @@ pub(super) async fn unused_upload(f: &Fixture) {
     let (started, receiving) = tokio::sync::oneshot::channel();
     let (release, resume) = tokio::sync::oneshot::channel();
     f.storage
-        .hold_next_creation(coven_storage::ObjectPrefix::files(), started, resume)
+        .hold_next_creation(
+            coven_storage::ObjectPrefix::files(f.directory.id()),
+            started,
+            resume,
+        )
         .await;
     let guard = f.files.inner.drain.lock().await;
     f.files.inner.state.lock().unwrap().paused = false;
@@ -427,7 +439,7 @@ async fn replaced_rows_leave_a_stored_unused_copy_and_no_uploaded_write() {
     unused_upload(&f).await;
     assert_eq!(
         f.storage
-            .list(&coven_storage::ObjectPrefix::files())
+            .list(&coven_storage::ObjectPrefix::files(f.directory.id()))
             .await
             .unwrap()
             .len(),

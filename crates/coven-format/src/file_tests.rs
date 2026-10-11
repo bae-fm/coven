@@ -1,6 +1,8 @@
 use super::*;
+use crate::test_utils::STORE_ID;
 
-const PATH: &str = "files/1/11111111-1111-1111-1111-111111111111";
+const PATH: &str =
+    "10101010-1010-1010-1010-101010101010/files/1/11111111-1111-1111-1111-111111111111";
 
 fn example(size: usize) -> (FileKey, Vec<u8>, Vec<u8>) {
     let key = FileKey::from_bytes([0x77; 32]);
@@ -137,7 +139,7 @@ fn range_reads_fetch_and_open_only_the_covering_chunks() {
     assert!(object
         .read_range(
             &key,
-            "files/1/22222222-2222-2222-2222-222222222222",
+            "10101010-1010-1010-1010-101010101010/files/1/22222222-2222-2222-2222-222222222222",
             65_537..131_071
         )
         .is_err());
@@ -179,7 +181,7 @@ fn file_fixture_opens_reencodes_and_decodes_every_mutation() {
     assert_eq!(reference.next().unwrap(), PATH);
     let reference =
         crate::file_reference::FileReference::decode(reference.next().unwrap()).unwrap();
-    let path = crate::path::ObjectPath::file(reference.device, reference.id);
+    let path = crate::path::ObjectPath::file(STORE_ID, reference.device, reference.id);
     assert_eq!(path.as_str(), PATH);
     let key = reference.key;
     let file = FileObject::decode(&bytes).unwrap();
@@ -189,8 +191,8 @@ fn file_fixture_opens_reencodes_and_decodes_every_mutation() {
     let plain: Vec<_> = (0..65_565).map(|i| (i % 251) as u8).collect();
     assert_eq!(file.read_range(&key, PATH, 0..65_565).unwrap(), plain);
     for wrong_path in [
-        "files/2/11111111-1111-1111-1111-111111111111",
-        "files/11111111-1111-1111-1111-111111111111",
+        "10101010-1010-1010-1010-101010101010/files/2/11111111-1111-1111-1111-111111111111",
+        "10101010-1010-1010-1010-101010101010/files/11111111-1111-1111-1111-111111111111",
     ] {
         assert!(file.read_range(&key, wrong_path, 0..65_565).is_err());
     }

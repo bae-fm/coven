@@ -244,7 +244,11 @@ impl ProviderOps for S3Storage {
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
         let prefix = listing.prefix().clone();
         let full = prefix.under(&self.prefix);
-        let root = ObjectPrefix::all().under(&self.prefix);
+        let root = if self.prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", self.prefix)
+        };
         let mut marker = None;
         let mut seen = Pagination::new();
         loop {

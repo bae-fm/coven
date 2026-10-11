@@ -52,9 +52,9 @@ async fn sync(f: &Fixture) -> (StoreLogSync, MemberKeys, crate::DeviceLogSync) {
     (sync, member, writes)
 }
 
-fn path(file: &FileRef) -> ObjectPath {
+fn path(f: &Fixture, file: &FileRef) -> ObjectPath {
     let uploaded = file.uploaded().unwrap().unwrap();
-    ObjectPath::file(uploaded.device, uploaded.id)
+    ObjectPath::file(f.directory.id(), uploaded.device, uploaded.id)
 }
 
 #[tokio::test]
@@ -73,7 +73,7 @@ async fn an_excluded_snapshot_prevents_proving_file_absence() {
     writes.upload_writes().await.unwrap();
     let object = f
         .storage
-        .list(&ObjectPrefix::snapshots())
+        .list(&ObjectPrefix::snapshots(f.directory.id()))
         .await
         .unwrap()
         .remove(0);
@@ -89,7 +89,7 @@ async fn an_excluded_snapshot_prevents_proving_file_absence() {
     f.storage.delete(&object.path).await.unwrap();
     f.storage.create(&object.path, &bytes).await.unwrap();
     sync.run_retention().await.unwrap();
-    assert!(f.storage.read(&path(&file)).await.is_ok());
+    assert!(f.storage.read(&path(&f, &file)).await.is_ok());
     f.close().await;
 }
 
@@ -108,17 +108,21 @@ async fn file_references_survive_in_waiting_writes_and_kept_snapshots() {
         .await
         .unwrap();
     sync.run_retention().await.unwrap();
-    assert!(f.storage.read(&path(&old)).await.is_ok());
-    assert!(f.storage.read(&path(&kept)).await.is_ok());
+    assert!(f.storage.read(&path(&f, &old)).await.is_ok());
+    assert!(f.storage.read(&path(&f, &kept)).await.is_ok());
     writes.upload_writes().await.unwrap();
     assert!(writes.post_positions().await.unwrap());
     sync.run_retention().await.unwrap();
-    assert!(f.storage.read(&path(&old)).await.is_ok());
+    assert!(f.storage.read(&path(&f, &old)).await.is_ok());
     sync.write_snapshot(Audience::Store).await.unwrap();
     sync.run_retention().await.unwrap();
-    let objects = f.storage.list(&ObjectPrefix::files()).await.unwrap();
+    let objects = f
+        .storage
+        .list(&ObjectPrefix::files(f.directory.id()))
+        .await
+        .unwrap();
     assert_eq!(objects.len(), 1);
-    assert_eq!(objects[0].path, path(&kept));
+    assert_eq!(objects[0].path, path(&f, &kept));
     f.close().await;
 }
 
@@ -130,7 +134,7 @@ async fn deleting_an_unused_publication_retires_its_queue() {
     sync.run_retention().await.unwrap();
     assert!(f
         .storage
-        .list(&ObjectPrefix::files())
+        .list(&ObjectPrefix::files(f.directory.id()))
         .await
         .unwrap()
         .is_empty());
@@ -152,7 +156,7 @@ async fn locally_protected_files_need_only_snapshot_prefixes() {
     sync.write_snapshot(Audience::Store).await.unwrap();
     let object = f
         .storage
-        .list(&ObjectPrefix::snapshots())
+        .list(&ObjectPrefix::snapshots(f.directory.id()))
         .await
         .unwrap()
         .remove(0);
@@ -179,13 +183,14 @@ async fn a_damaged_snapshot_cannot_prove_file_absence() {
     let kept = f.uploaded("kept", vec![32; CHUNK]).await;
     sync.write_snapshot(Audience::Store).await.unwrap();
     let orphan = ObjectPath::file(
+        f.directory.id(),
         kept.uploaded().unwrap().unwrap().device,
         coven_foundation::id_source::FileId(uuid::Uuid::from_u128(999)),
     );
     f.storage.create(&orphan, b"orphan").await.unwrap();
     let snapshot = f
         .storage
-        .list(&ObjectPrefix::snapshots())
+        .list(&ObjectPrefix::snapshots(f.directory.id()))
         .await
         .unwrap()
         .remove(0);

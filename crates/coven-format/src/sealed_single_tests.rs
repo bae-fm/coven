@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_utils::STORE_ID;
 use crate::{test_utils, Object};
 use coven_crypto::{ObjectHasher, StoreKey};
 
@@ -10,17 +11,18 @@ fn each_single_frame_envelope_authenticates_its_routing_and_signature() {
             Object::StoreLog(entry) => (
                 SingleChunkPrefix::StoreLog { key: key.id() },
                 crate::path::ObjectPath::store_log(
+                    STORE_ID,
                     entry.position.device,
                     entry.position.number.try_into().unwrap(),
                 ),
             ),
             Object::PostedPositions(positions) => (
                 SingleChunkPrefix::PostedPositions(key.id()),
-                crate::path::ObjectPath::positions(positions.device),
+                crate::path::ObjectPath::positions(STORE_ID, positions.device),
             ),
             Object::JoinRequest(request) => (
                 SingleChunkPrefix::JoinRequest,
-                crate::path::ObjectPath::join_request(request.invite),
+                crate::path::ObjectPath::join_request(STORE_ID, request.invite),
             ),
         };
         let path = path.as_str();
@@ -38,7 +40,7 @@ fn each_single_frame_envelope_authenticates_its_routing_and_signature() {
                 .seal_object_chunk(path, &aad, 0, 0, plain),
             _ => key.derive().seal_object_chunk(path, &aad, 0, 0, plain),
         };
-        let open = |aad: &[u8], chunk: &[u8]| match &prefix {
+        let open = |path: &str, aad: &[u8], chunk: &[u8]| match &prefix {
             SingleChunkPrefix::JoinRequest => test_utils::invite()
                 .secret
                 .join_request_key()
@@ -72,7 +74,7 @@ fn each_single_frame_envelope_authenticates_its_routing_and_signature() {
         assert_eq!(decoded.encode().unwrap(), bytes);
         assert_eq!(decoded.prefix(), prefix);
         assert_eq!(decoded.signed_bytes().unwrap(), before_signature);
-        assert_eq!(open(&aad, decoded.chunk()).unwrap(), plain);
+        assert_eq!(open(path, &aad, decoded.chunk()).unwrap(), plain);
         assert!(matches!(
             (&prefix, Object::decode(&plain).unwrap()),
             (SingleChunkPrefix::StoreLog { .. }, Object::StoreLog(_))
@@ -86,9 +88,19 @@ fn each_single_frame_envelope_authenticates_its_routing_and_signature() {
             .signing
             .verify_object(path, &digest, decoded.signature())
             .unwrap();
+        let other_store = path.replacen(
+            &STORE_ID.to_string(),
+            "20202020-2020-2020-2020-202020202020",
+            1,
+        );
+        assert!(open(&other_store, &aad, decoded.chunk()).is_err());
+        assert!(test_utils::member()
+            .signing
+            .verify_object(&other_store, &digest, decoded.signature())
+            .is_err());
         let mut changed_prefix = aad.clone();
         changed_prefix[0] ^= 1;
-        assert!(open(&changed_prefix, decoded.chunk()).is_err());
+        assert!(open(path, &changed_prefix, decoded.chunk()).is_err());
         for end in 0..bytes.len() {
             assert!(SingleChunkObject::decode(&bytes[..end]).is_err());
         }

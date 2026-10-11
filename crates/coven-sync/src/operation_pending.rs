@@ -137,13 +137,17 @@ impl StoreLogSync {
             }
             SyncError::Failed { failure, .. } => PendingReason::Failed(*failure),
             SyncError::Database(coven_database::DbError::Snapshot(error)) => match error {
-                coven_database::SnapshotError::MissingWrites { missing } => {
-                    write_wait(&coven_database::WriteWait::Writes(missing.clone()))?
+                coven_database::SnapshotError::MissingWrites { missing } => write_wait(
+                    self.directory.id(),
+                    &coven_database::WriteWait::Writes(missing.clone()),
+                )?,
+                coven_database::SnapshotError::StoreLog { missing } => write_wait(
+                    self.directory.id(),
+                    &coven_database::WriteWait::StoreLog(missing.clone()),
+                )?,
+                coven_database::SnapshotError::WriteWaiting(wait) => {
+                    write_wait(self.directory.id(), wait)?
                 }
-                coven_database::SnapshotError::StoreLog { missing } => {
-                    write_wait(&coven_database::WriteWait::StoreLog(missing.clone()))?
-                }
-                coven_database::SnapshotError::WriteWaiting(wait) => write_wait(wait)?,
                 coven_database::SnapshotError::Schema { snapshot, database }
                     if snapshot > database =>
                 {
@@ -184,10 +188,14 @@ fn reload_audience(data: &Data) -> Result<Audience, SyncError> {
     }
 }
 
-fn write_wait(wait: &coven_database::WriteWait) -> Result<PendingReason, SyncError> {
+fn write_wait(
+    store: coven_foundation::id_source::StoreId,
+    wait: &coven_database::WriteWait,
+) -> Result<PendingReason, SyncError> {
     Ok(match wait {
         coven_database::WriteWait::Writes(missing) => {
             PendingReason::Waits(Prerequisite::Object(crate::write_seal::path(
+                store,
                 *missing
                     .first()
                     .ok_or(coven_database::DbError::DamagedDatabase)?,
@@ -195,6 +203,7 @@ fn write_wait(wait: &coven_database::WriteWait) -> Result<PendingReason, SyncErr
         }
         coven_database::WriteWait::StoreLog(missing) => {
             PendingReason::Waits(Prerequisite::Object(crate::store_log_object::path(
+                store,
                 *missing
                     .first()
                     .ok_or(coven_database::DbError::DamagedDatabase)?,

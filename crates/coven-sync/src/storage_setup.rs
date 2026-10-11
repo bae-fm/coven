@@ -8,7 +8,7 @@ use coven_format::{
     sealed_single::SingleChunkObject,
     store_log::{MemberPublicKeys, StoreChange, StoreLogEntry},
 };
-use coven_storage::{ObjectPath, ObjectPrefix, Storage, StorageSetupError};
+use coven_storage::{ObjectPath, Storage, StorageSetupError};
 use std::sync::Arc;
 
 impl StoreLogSync {
@@ -58,71 +58,17 @@ impl StoreLogSync {
             .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
         let previous = self.store_keys.read()?;
         let mut local = self.database.local_store_log().await?;
-        let objects = match storage.list(&ObjectPrefix::all()).await {
-            Ok(objects) => objects,
-            Err(error) if error.failure() == coven_storage::StorageFailure::InvalidPath => {
-                return Err(occupied())
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let mut creation = None;
-        for stored in &objects {
-            if stored.path.is_first_store_entry() {
-                let (entry, key) =
-                    read_setup_entry(storage.as_ref(), &stored.path, &member).await?;
-                if let StoreChange::CreateStore { store, .. } = entry.change {
-                    if store != local.store {
-                        return Err(occupied());
-                    }
-                    if creation.replace((entry, key)).is_some() {
-                        return Err(occupied());
-                    }
-                } else {
-                    tracing::debug!(
-                        path = stored.path.as_str(),
-                        "setup entry is not store creation"
-                    );
-                }
-            }
-        }
-        let relocating = local.log.replay.state.store.is_some()
-            && self
-                .storage
-                .as_ref()
-                .is_some_and(|source| source.config() != storage.config());
-        if relocating {
-            self.copy_storage(&storage, &local.log, &objects).await?;
-            if creation.is_none() {
-                let recorded = local
-                    .log
-                    .entries
-                    .iter()
-                    .find(|entry| matches!(entry.entry.change, StoreChange::CreateStore { .. }))
-                    .ok_or(coven_database::DbError::DamagedDatabase)?;
-                let path = object::path(recorded.entry.position);
-                creation = Some(read_setup_entry(storage.as_ref(), &path, &member).await?);
-            }
-        }
-        if !objects.is_empty() && creation.is_none() {
-            // A retry may find only this attempt's prerequisite sealed key.
-            let own_attempt = local.upload.as_ref().is_some_and(|upload| {
-                matches!(upload.entry.change, StoreChange::CreateStore { .. })
-                    && objects.iter().all(|object| {
-                        upload
-                            .sealing
-                            .keys
-                            .iter()
-                            .any(|key| key.path == object.path.as_str())
-                    })
-            });
-            if !own_attempt {
-                return Err(occupied());
-            }
-        }
-        if creation.is_none() {
-            if local.log.replay.state.store.is_some() {
-                return Err(SyncError::NoStorage);
-            }
+        let store_id = local.store;
+        let (entry, key) = if local.log.replay.state.store.is_some() {
+            let recorded = local
+                .log
+                .entries
+                .iter()
+                .find(|entry| matches!(entry.entry.change, StoreChange::CreateStore { .. }))
+                .ok_or(coven_database::DbError::DamagedDatabase)?;
+            let path = object::path(store_id, recorded.entry.position);
+            read_setup_entry(storage.as_ref(), &path, &member).await?
+        } else {
             if local.upload.is_none() {
                 let settings = self.directory.settings().map_err(|error| {
                     SyncError::Setup(Box::new(StorageSetupError::Internal(Box::new(error))))
@@ -146,7 +92,7 @@ impl StoreLogSync {
                 let ring = StoreKeyring::new(key);
                 self.database
                     .prepare_store_log(member.member_id(), change, move |log, entry| {
-                        keys::seal(log, entry, Some(&ring), &author)
+                        keys::seal(store_id, log, entry, Some(&ring), &author)
                     })
                     .await?;
                 local = self.database.local_store_log().await?;
@@ -167,15 +113,17 @@ impl StoreLogSync {
                         .into())
                 }
             }
-            let bytes = object::seal_upload(upload, previous.as_ref(), &member)?;
-            object::upload(Some(storage.as_ref()), upload, &bytes).await?;
+            let bytes = object::seal_upload(store_id, upload, previous.as_ref(), &member)?;
+            object::upload(store_id, Some(storage.as_ref()), upload, &bytes).await?;
             // Read what storage actually retained, including a lost-reply retry.
-            let path = object::path(upload.entry.position);
-            creation = Some(read_setup_entry(storage.as_ref(), &path, &member).await?);
-        }
-        let (entry, key) = creation.expect("read or published creation");
+            let path = object::path(store_id, upload.entry.position);
+            read_setup_entry(storage.as_ref(), &path, &member).await?
+        };
         if !matches!(entry.change, StoreChange::CreateStore { store, .. } if store == local.store) {
-            return Err(occupied());
+            return Err(crate::write_object::damaged(
+                &object::path(store_id, entry.position),
+                crate::Refusal::WrongIdentity { cause: None },
+            ));
         }
         if local.log.replay.state.store.is_none()
             && !matches!(&entry.change, StoreChange::CreateStore { access: recorded, device_name: name, .. } if recorded == &access && name == &device_name)
@@ -194,11 +142,14 @@ impl StoreLogSync {
         };
         let mut creation = Some(entry);
         if let Some(store) = &local.log.replay.state.store {
-            let key_path = ObjectPath::store_key(store.key, &member.member_id());
+            let key_path = ObjectPath::store_key(store_id, store.key, &member.member_id());
             let opened = SealedKey::decode(&storage.read(&key_path).await?)?
                 .open_store_key(&member, key_path.as_str())?;
             if opened.id() != store.key {
-                return Err(occupied());
+                return Err(crate::write_object::damaged(
+                    &key_path,
+                    crate::Refusal::WrongIdentity { cause: None },
+                ));
             }
             ring.insert_store_key(opened)?;
             let current = local
@@ -227,18 +178,21 @@ impl StoreLogSync {
                         let keys = ring.clone();
                         self.database
                             .prepare_store_log(member.member_id(), change, move |log, entry| {
-                                keys::seal(log, entry, Some(&keys), &author)
+                                keys::seal(store_id, log, entry, Some(&keys), &author)
                             })
                             .await?;
                         local = self.database.local_store_log().await?;
                     }
                 }
                 let upload = local.upload.as_ref().expect("reserved access entry");
-                let path = object::path(upload.entry.position);
-                let bytes = object::seal_upload(upload, Some(&ring), &member)?;
+                let path = object::path(store_id, upload.entry.position);
+                let bytes = object::seal_upload(store_id, upload, Some(&ring), &member)?;
                 storage.create_once(&path, &bytes).await?;
                 if storage.read(&path).await? != bytes {
-                    return Err(occupied());
+                    return Err(crate::write_object::damaged(
+                        &path,
+                        crate::Refusal::WrongIdentity { cause: None },
+                    ));
                 }
                 creation = Some(upload.entry.clone());
             }
@@ -274,9 +228,12 @@ async fn read_setup_entry(
     let bytes = storage.read(path).await?;
     let envelope = SingleChunkObject::decode(&bytes)?;
     let SingleChunkObject::StoreLog { key, .. } = &envelope else {
-        return Err(occupied());
+        return Err(crate::write_object::damaged(
+            path,
+            crate::write_object::invalid("expected a store-log envelope"),
+        ));
     };
-    let key_path = ObjectPath::store_key(*key, &member.member_id());
+    let key_path = ObjectPath::store_key(path.store(), *key, &member.member_id());
     let key = SealedKey::decode(&storage.read(&key_path).await?)?
         .open_store_key(member, key_path.as_str())?;
     let entry = object::open(&envelope, path, &key).map_err(|failure| crate::DamagedObject {
@@ -284,10 +241,6 @@ async fn read_setup_entry(
         failure,
     })?;
     Ok((entry, key))
-}
-
-fn occupied() -> SyncError {
-    SyncError::Setup(Box::new(StorageSetupError::LocationOccupied))
 }
 
 fn compensate(operation: SyncError, rollback: Result<(), SyncError>) -> SyncError {

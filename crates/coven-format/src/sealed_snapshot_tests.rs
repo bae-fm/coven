@@ -27,7 +27,13 @@ fn listed_snapshot_size_recovers_plaintext_at_chunk_boundaries() {
         let mut stored = clear.len() + 128;
         for chunk in vec![7; size].chunks(CHUNK_SIZE) {
             let bytes = key
-                .seal_object_chunk("snapshots/store/1/1", &clear, 0, layout.index(), chunk)
+                .seal_object_chunk(
+                    "10101010-1010-1010-1010-101010101010/snapshots/store/1/1",
+                    &clear,
+                    0,
+                    layout.index(),
+                    chunk,
+                )
                 .unwrap();
             stored += layout.encode_chunk(&bytes).unwrap().len();
         }
@@ -121,7 +127,7 @@ fn a_snapshot_is_sealed_opened_and_applied_a_chunk_at_a_time() {
         let plain = plain.unwrap();
         let sealed = keys
             .seal_object_chunk(
-                "snapshots/store/1/1",
+                "10101010-1010-1010-1010-101010101010/snapshots/store/1/1",
                 &prefix.encode().unwrap(),
                 0,
                 writer.index(),
@@ -134,7 +140,7 @@ fn a_snapshot_is_sealed_opened_and_applied_a_chunk_at_a_time() {
         let sealed = reader.decode_chunk(&piece).unwrap();
         let opened = keys
             .open_object_chunk(
-                "snapshots/store/1/1",
+                "10101010-1010-1010-1010-101010101010/snapshots/store/1/1",
                 &prefix.encode().unwrap(),
                 0,
                 index,
@@ -189,7 +195,13 @@ fn prefix_and_chunk_lengths_are_bounded_and_have_no_aliases() {
         .unwrap()
         .derive();
     let sealed = key
-        .seal_object_chunk("snapshots/store/1/1", b"prefix", 0, 0, b"bytes")
+        .seal_object_chunk(
+            "10101010-1010-1010-1010-101010101010/snapshots/store/1/1",
+            b"prefix",
+            0,
+            0,
+            b"bytes",
+        )
         .unwrap();
     let mut piece = sealed::encode_chunk(&sealed).unwrap();
     for end in 0..piece.len() {

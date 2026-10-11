@@ -48,7 +48,13 @@ fn object() -> Vec<Vec<u8>> {
     let mut pieces = vec![prefix.clone()];
     let sealed = key(1)
         .derive()
-        .seal_object_chunk("devices/1/3", &prefix, 0, 0, encoder.header_frame())
+        .seal_object_chunk(
+            "10101010-1010-1010-1010-101010101010/devices/1/3",
+            &prefix,
+            0,
+            0,
+            encoder.header_frame(),
+        )
         .unwrap();
     pieces.push(layout.encode_chunk(&sealed).unwrap());
     for part in 0..record.parts.len() {
@@ -57,7 +63,7 @@ fn object() -> Vec<Vec<u8>> {
             let sealed = key(part as u8 + 1)
                 .derive()
                 .seal_object_chunk(
-                    "devices/1/3",
+                    "10101010-1010-1010-1010-101010101010/devices/1/3",
                     &prefix,
                     coordinate.section,
                     coordinate.index,
@@ -71,7 +77,10 @@ fn object() -> Vec<Vec<u8>> {
     for piece in &pieces {
         hash.update(piece);
     }
-    let signature = test_utils::member_keys().sign_object("devices/1/3", &hash.finish());
+    let signature = test_utils::member_keys().sign_object(
+        "10101010-1010-1010-1010-101010101010/devices/1/3",
+        &hash.finish(),
+    );
     pieces.push(layout.signature(&signature).unwrap().to_vec());
     layout.finish(&[]).unwrap();
     assert_eq!(
@@ -103,7 +112,7 @@ fn read(pieces: &[Vec<u8>]) -> Result<(), Box<dyn std::error::Error>> {
         pieces[1].len()
     );
     let header = key(1).derive().open_object_chunk(
-        "devices/1/3",
+        "10101010-1010-1010-1010-101010101010/devices/1/3",
         &pieces[0],
         0,
         0,
@@ -127,7 +136,7 @@ fn read(pieces: &[Vec<u8>]) -> Result<(), Box<dyn std::error::Error>> {
         let (coordinate, sealed) = layout.decode_chunk(piece)?;
         if coordinate.key == key(1).id() {
             let plain = key(1).derive().open_object_chunk(
-                "devices/1/3",
+                "10101010-1010-1010-1010-101010101010/devices/1/3",
                 &pieces[0],
                 coordinate.section,
                 coordinate.index,
@@ -149,9 +158,11 @@ fn read(pieces: &[Vec<u8>]) -> Result<(), Box<dyn std::error::Error>> {
     );
     let signature = layout.read_signature(pieces.last().unwrap())?;
     layout.finish(&[])?;
-    test_utils::member()
-        .signing
-        .verify_object("devices/1/3", &hash.finish(), &signature)?;
+    test_utils::member().signing.verify_object(
+        "10101010-1010-1010-1010-101010101010/devices/1/3",
+        &hash.finish(),
+        &signature,
+    )?;
     Ok(())
 }
 
@@ -274,7 +285,13 @@ fn migration_object_authenticates_a_header_followed_directly_by_its_signature() 
     assert_eq!(WriteObjectPrefix::length(&prefix).unwrap(), 23);
     let sealed = key(1)
         .derive()
-        .seal_object_chunk("devices/1/3", &prefix, 0, 0, encoder.header_frame())
+        .seal_object_chunk(
+            "10101010-1010-1010-1010-101010101010/devices/1/3",
+            &prefix,
+            0,
+            0,
+            encoder.header_frame(),
+        )
         .unwrap();
     let chunk = layout.encode_chunk(&sealed).unwrap();
     assert!(layout.next_chunk().is_none());
@@ -282,7 +299,8 @@ fn migration_object_authenticates_a_header_followed_directly_by_its_signature() 
     hash.update(&prefix);
     hash.update(&chunk);
     let digest = hash.finish();
-    let signature = test_utils::member_keys().sign_object("devices/1/3", &digest);
+    let signature = test_utils::member_keys()
+        .sign_object("10101010-1010-1010-1010-101010101010/devices/1/3", &digest);
     let signature = layout.signature(&signature).unwrap();
     layout.finish(&[]).unwrap();
     assert_eq!(
@@ -292,7 +310,7 @@ fn migration_object_authenticates_a_header_followed_directly_by_its_signature() 
     let opened = key(1)
         .derive()
         .open_object_chunk(
-            "devices/1/3",
+            "10101010-1010-1010-1010-101010101010/devices/1/3",
             &prefix,
             0,
             0,
@@ -316,7 +334,11 @@ fn migration_object_authenticates_a_header_followed_directly_by_its_signature() 
     let signature = reader.read_signature(&signature).unwrap();
     test_utils::member()
         .signing
-        .verify_object("devices/1/3", &digest, &signature)
+        .verify_object(
+            "10101010-1010-1010-1010-101010101010/devices/1/3",
+            &digest,
+            &signature,
+        )
         .unwrap();
     reader.finish(&[]).unwrap();
     assert!(reader.finish(&[0]).is_err());

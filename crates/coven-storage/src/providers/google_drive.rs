@@ -448,7 +448,11 @@ impl ProviderOps for GoogleDriveStorage {
     }
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
         let prefix = listing.prefix().clone();
-        let query = format!("'{}' in parents and trashed = false", escape(&self.folder));
+        let query = format!(
+            "'{}' in parents and trashed = false and name contains '{}'",
+            escape(&self.folder),
+            escape(prefix.as_str())
+        );
         let mut paths = BTreeMap::new();
         for item in self.pages(&query).await? {
             if item["mimeType"]

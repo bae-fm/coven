@@ -48,7 +48,7 @@ impl Owner {
         if snapshot {
             assert_eq!(
                 storage
-                    .list(&ObjectPrefix::snapshots())
+                    .list(&ObjectPrefix::snapshots(directory.id()))
                     .await
                     .unwrap()
                     .len(),

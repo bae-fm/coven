@@ -143,7 +143,7 @@ impl StoreLogSync {
         let id = self
             .database
             .prepare_store_log(member.member_id(), change, move |log, entry| {
-                keys::seal(log, entry, ring.as_ref(), &author)
+                keys::seal(local.store, log, entry, ring.as_ref(), &author)
             })
             .await?;
         // Re-read the committed queue, so the first attempt uses the same path as
@@ -176,7 +176,7 @@ impl StoreLogSync {
             .storage
             .as_deref()
             .ok_or(SyncError::NoStorage)?
-            .list(&ObjectPrefix::store_logs())
+            .list(&ObjectPrefix::store_logs(self.directory.id()))
             .await?;
         let mut entries = BTreeMap::new();
         for stored in paths {
@@ -347,7 +347,7 @@ impl StoreLogSync {
             // Download that past before publishing or replaying the entry.
             if !object::ready(&local.log, &upload.entry, local.store).map_err(|failure| {
                 SyncError::Damaged(DamagedObject {
-                    path: object::path(upload.entry.position).into(),
+                    path: object::path(self.directory.id(), upload.entry.position).into(),
                     failure,
                 })
             })? {
@@ -379,8 +379,14 @@ impl StoreLogSync {
         damages: &mut Vec<DamagedObject>,
     ) -> Result<(), SyncError> {
         if let Some(upload) = local.upload.take() {
-            let bytes = object::seal_upload(&upload, ring.as_ref(), member)?;
-            object::upload(self.storage.as_deref(), &upload, &bytes).await?;
+            let bytes = object::seal_upload(self.directory.id(), &upload, ring.as_ref(), member)?;
+            object::upload(
+                self.directory.id(),
+                self.storage.as_deref(),
+                &upload,
+                &bytes,
+            )
+            .await?;
             self.apply(local, upload.entry, member, ring, damages)
                 .await?;
         }
@@ -495,7 +501,8 @@ impl StoreLogSync {
             }
             let ring = ring.as_ref().expect("held key has a keyring");
             for (member, recipient) in keys::recipients(log, audience) {
-                let path = keys::path(audience, key, member);
+                let store = self.directory.id();
+                let path = keys::path(store, audience, key, member);
                 if self.read(&path).await?.is_none() {
                     let recipient = *recipient;
                     let member = member.clone();
@@ -505,7 +512,7 @@ impl StoreLogSync {
                             self.database
                                 .prepare_key_upload(path.as_str().into(), move || {
                                     Ok::<_, SyncError>(
-                                        keys::store_copy(&key, &member, &recipient)?.bytes,
+                                        keys::store_copy(store, &key, &member, &recipient)?.bytes,
                                     )
                                 })
                                 .await?
@@ -515,7 +522,7 @@ impl StoreLogSync {
                             self.database
                                 .prepare_key_upload(path.as_str().into(), move || {
                                     Ok::<_, SyncError>(
-                                        keys::circle_copy(&key, &member, &recipient)?.bytes,
+                                        keys::circle_copy(store, &key, &member, &recipient)?.bytes,
                                     )
                                 })
                                 .await?
@@ -563,7 +570,7 @@ impl StoreLogSync {
         if keys::holds(ring.as_ref(), audience, key) {
             return Ok(true);
         }
-        let path = keys::path(audience, key, &member.member_id());
+        let path = keys::path(self.directory.id(), audience, key, &member.member_id());
         if damages.iter().any(|damage| damage.path == path.as_str()) {
             return Ok(false);
         }
@@ -697,8 +704,6 @@ mod snapshots;
 
 #[path = "bootstrap.rs"]
 mod bootstrap;
-#[path = "storage_copy.rs"]
-mod storage_copy;
 #[path = "storage_setup.rs"]
 mod storage_setup;
 

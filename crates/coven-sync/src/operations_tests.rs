@@ -222,7 +222,10 @@ async fn another_admin_cannot_share_and_owner_applies_their_revocation() {
         Output::Removal(MemberRemoval::PendingOwner)
     ));
     let recipient = MemoryStorage::for_recipient(&storage, "cat@example.com").unwrap();
-    assert!(recipient.list(&ObjectPrefix::store_logs()).await.is_ok());
+    assert!(recipient
+        .list(&ObjectPrefix::store_logs(store(1)))
+        .await
+        .is_ok());
     a.sync().await;
     let records = a.db.operations().await.unwrap();
     assert_eq!(records.len(), 1);
@@ -231,7 +234,7 @@ async fn another_admin_cannot_share_and_owner_applies_their_revocation() {
         Output::Removal(MemberRemoval::Revoked)
     ));
     assert!(
-        matches!(recipient.list(&ObjectPrefix::store_logs()).await, Err(error) if error.failure() == StorageFailure::PermissionDenied)
+        matches!(recipient.list(&ObjectPrefix::store_logs(store(1))).await, Err(error) if error.failure() == StorageFailure::PermissionDenied)
     );
 }
 
@@ -266,7 +269,9 @@ async fn restart_after_each_step_uses_the_committed_entry_and_keys() {
                     );
                 }
             }
-            let stored = storage.read(&object::path(upload.entry.position)).await;
+            let stored = storage
+                .read(&object::path(store(1), upload.entry.position))
+                .await;
             if record.last_step >= 3 {
                 assert_eq!(stored.unwrap(), *expected.as_ref().unwrap());
             } else {
@@ -286,7 +291,7 @@ async fn restart_after_each_step_uses_the_committed_entry_and_keys() {
         if let Some(before) = before {
             assert_eq!(
                 storage
-                    .read(&object::path(before.entry.position))
+                    .read(&object::path(store(1), before.entry.position))
                     .await
                     .unwrap(),
                 expected.unwrap()
@@ -508,7 +513,7 @@ async fn permanent_storage_failure_preserves_fixed_bytes_for_retry_and_discard()
             }
         ));
         assert!(matches!(
-            storage.read(&object::path(fixed.entry.position)).await,
+            storage.read(&object::path(store(1), fixed.entry.position)).await,
             Err(error) if error.failure() == StorageFailure::NotFound
         ));
         operations.set_storage(Some(storage.clone())).await.unwrap();
@@ -523,7 +528,7 @@ async fn permanent_storage_failure_preserves_fixed_bytes_for_retry_and_discard()
         assert!(a.db.operations().await.unwrap().is_empty());
         assert_eq!(
             storage
-                .read(&object::path(fixed.entry.position))
+                .read(&object::path(store(1), fixed.entry.position))
                 .await
                 .unwrap(),
             expected
@@ -579,7 +584,7 @@ async fn retained_provider_grants_block_both_requested_and_remote_revocations() 
         );
         assert!(MemoryStorage::for_recipient(&storage, "cat@example.com")
             .unwrap()
-            .list(&ObjectPrefix::all())
+            .list(&ObjectPrefix::all(store(1)))
             .await
             .is_ok());
         storage
@@ -590,7 +595,7 @@ async fn retained_provider_grants_block_both_requested_and_remote_revocations() 
         assert!(
             matches!(MemoryStorage::for_recipient(&storage, "cat@example.com")
             .unwrap()
-            .list(&ObjectPrefix::all())
+            .list(&ObjectPrefix::all(store(1)))
             .await, Err(error) if error.failure() == StorageFailure::PermissionDenied)
         );
         operations.close().await.unwrap();
@@ -668,7 +673,7 @@ async fn plain_device_removal_preserves_member_keys_and_returns_provider_sign_ou
     ));
     assert!(MemoryStorage::for_recipient(&storage, "ben@example.com")
         .unwrap()
-        .list(&ObjectPrefix::all())
+        .list(&ObjectPrefix::all(store(1)))
         .await
         .is_ok());
     let c_id = c.device().await;
@@ -764,7 +769,7 @@ async fn resumed_removal_uses_the_targets_current_storage_account() {
     assert!(
         matches!(MemoryStorage::for_recipient(&storage, "ben-new@example.com")
             .unwrap()
-            .list(&ObjectPrefix::all())
+            .list(&ObjectPrefix::all(store(1)))
             .await, Err(error) if error.failure() == StorageFailure::PermissionDenied)
     );
 }

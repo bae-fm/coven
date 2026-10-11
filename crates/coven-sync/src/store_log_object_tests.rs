@@ -147,6 +147,7 @@ async fn another_member_cannot_claim_an_empty_registered_store_log_folder() {
         };
         let ring = a.custody.read().unwrap().unwrap();
         let bytes = object::seal(
+            store(1),
             &entry,
             coven_format::FormatVersion::CURRENT,
             ring.store_key(key(1)).unwrap(),
@@ -154,7 +155,7 @@ async fn another_member_cannot_claim_an_empty_registered_store_log_folder() {
         )
         .unwrap();
         storage
-            .create(&object::path(entry.position), &bytes)
+            .create(&object::path(store(1), entry.position), &bytes)
             .await
             .unwrap();
         a.sync().await;
@@ -289,17 +290,20 @@ async fn queued_creation_rejects_a_copy_with_the_right_identity_and_wrong_materi
         Err(SyncError::Storage(_))
     ));
     let mut upload = a.db.local_store_log().await.unwrap().upload.unwrap();
-    object::seal_upload(&upload, None, &a.member).unwrap();
+    object::seal_upload(store(1), &upload, None, &a.member).unwrap();
     let wrong = StoreKey::from_bytes(key(1), [0x91; 32]);
     assert_ne!(wrong.hash(), key_hash);
     upload.sealing.keys[0] = keys::store_copy(
+        store(1),
         &wrong,
         &a.member.member_id(),
         &a.member.sealing_public_key(),
     )
     .unwrap();
-    assert!(matches!(object::seal_upload(&upload, None, &a.member),
-        Err(SyncError::Key(coven_crypto::MaterialError::StoreKeyConflict(id))) if id == key(1)));
+    assert!(
+        matches!(object::seal_upload(store(1), &upload, None, &a.member),
+        Err(SyncError::Key(coven_crypto::MaterialError::StoreKeyConflict(id))) if id == key(1))
+    );
 }
 
 #[tokio::test]
@@ -312,16 +316,23 @@ async fn creation_and_later_entries_use_the_same_authenticated_envelope() {
     let key = ring.store_key(key(1)).unwrap();
     for applied in a.log().await.entries {
         let entry = applied.entry;
-        let path = object::path(entry.position);
+        let path = object::path(store(1), entry.position);
         let bytes = storage.read(&path).await.unwrap();
         let envelope = SingleChunkObject::decode(&bytes).unwrap();
         assert_eq!(envelope.prefix().encode().unwrap().len(), 19);
         assert_eq!(object::open(&envelope, &path, key).unwrap(), entry);
         assert_eq!(
-            object::seal(&entry, coven_format::FormatVersion::CURRENT, key, &a.member).unwrap(),
+            object::seal(
+                store(1),
+                &entry,
+                coven_format::FormatVersion::CURRENT,
+                key,
+                &a.member
+            )
+            .unwrap(),
             bytes
         );
-        let other_path = ObjectPath::store_log(DeviceId(99), 1.try_into().unwrap());
+        let other_path = ObjectPath::store_log(store(1), DeviceId(99), 1.try_into().unwrap());
         assert!(matches!(
             object::open(&envelope, &other_path, key),
             Err(Refusal::Decryption { .. })
@@ -332,6 +343,7 @@ async fn creation_and_later_entries_use_the_same_authenticated_envelope() {
             Err(Refusal::Decryption { .. })
         ));
         let forged = object::seal(
+            store(1),
             &entry,
             coven_format::FormatVersion::CURRENT,
             key,
@@ -356,23 +368,33 @@ async fn creation_and_later_entries_use_the_same_authenticated_envelope() {
 }
 
 #[tokio::test]
-async fn creation_for_another_store_is_refused_after_decryption() {
+async fn stores_with_the_same_member_and_device_create_concurrently_without_colliding() {
     let storage = storage();
     let mut a = device(storage.clone(), 1, member(1), store(1)).await;
-    let first = a.create(key(1)).await;
-    let mut b = device(storage, 2, member(1), store(2)).await;
+    let mut b = device(storage.clone(), 1, member(1), store(2)).await;
+    let (first, second) = tokio::join!(a.create(key(1)), b.create(key(1)));
+    assert_eq!(first, second);
+    let a_log = a.log().await;
+    let b_log = b.log().await;
+    assert_ne!(a_log, b_log);
+    a.sync().await;
     b.sync().await;
-    assert!(b.log().await.entries.is_empty());
-    assert_eq!(
-        b.db.pending::<crate::PendingRecord>().await.unwrap(),
-        vec![crate::PendingRecord::log_refusal(
-            LogRefusal {
-                object: LogObject::Entry(first),
-                failure: RefusalCode::WrongIdentity,
-            },
-            b.device().await,
-        )]
-    );
+    assert_eq!(a.log().await, a_log);
+    assert_eq!(b.log().await, b_log);
+    for d in [&a, &b] {
+        assert!(d
+            .db
+            .pending::<crate::PendingRecord>()
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(storage
+            .list(&ObjectPrefix::all(d.directory.id()))
+            .await
+            .unwrap()
+            .iter()
+            .all(|object| object.path.store() == d.directory.id()));
+    }
 }
 
 #[tokio::test]
@@ -385,11 +407,18 @@ async fn creation_identity_is_checked_in_the_authenticated_plaintext() {
     let entry = a.log().await.entries.remove(0).entry;
     let ring = a.custody.read().unwrap().unwrap();
     let key = ring.store_key(key(1)).unwrap();
-    let path = object::path(entry.position);
-    let bytes = object::seal(&entry, coven_format::FormatVersion::CURRENT, key, &a.member).unwrap();
+    let path = object::path(store(1), entry.position);
+    let bytes = object::seal(
+        store(1),
+        &entry,
+        coven_format::FormatVersion::CURRENT,
+        key,
+        &a.member,
+    )
+    .unwrap();
     let envelope = SingleChunkObject::decode(&bytes).unwrap();
     let prefix = envelope.prefix();
-    for defect in ["number", "timestamp", "admin", "path"] {
+    for defect in ["number", "timestamp", "admin", "path", "store"] {
         let mut plain = Object::StoreLog(entry.clone()).encode().unwrap();
         let mut stored_path = path.clone();
         match defect {
@@ -397,7 +426,10 @@ async fn creation_identity_is_checked_in_the_authenticated_plaintext() {
             "timestamp" => plain[31..39].copy_from_slice(&2u64.to_be_bytes()),
             // The frame has its author's key once before its create-store payload.
             "admin" => plain[39..71].copy_from_slice(&member(2).member_id().to_bytes()),
-            "path" => stored_path = ObjectPath::store_log(DeviceId(2), 1.try_into().unwrap()),
+            "path" => {
+                stored_path = ObjectPath::store_log(store(1), DeviceId(2), 1.try_into().unwrap())
+            }
+            "store" => stored_path = object::path(store(2), entry.position),
             _ => unreachable!(),
         }
         let chunk = key
@@ -423,7 +455,7 @@ async fn creation_identity_is_checked_in_the_authenticated_plaintext() {
             &stored_path,
             key,
         );
-        if matches!(defect, "path" | "timestamp") {
+        if matches!(defect, "path" | "timestamp" | "store") {
             assert!(matches!(opened, Err(Refusal::WrongIdentity { .. })));
         } else {
             assert!(
@@ -435,7 +467,7 @@ async fn creation_identity_is_checked_in_the_authenticated_plaintext() {
 }
 
 #[tokio::test]
-async fn setup_finds_creation_among_first_entries_and_checks_it_before_committing() {
+async fn setup_checks_its_known_creation_before_committing() {
     let storage = storage();
     let mut a = device(storage.clone(), 1, member(1), store(1)).await;
     let first = a.create(key(1)).await;
@@ -464,7 +496,7 @@ async fn setup_finds_creation_among_first_entries_and_checks_it_before_committin
         .await
         .unwrap();
     assert_eq!(a.log().await, before);
-    let path = object::path(first);
+    let path = object::path(store(1), first);
     let size = storage.read(&path).await.unwrap().len();
     storage.corrupt_byte(&path, size - 1).await.unwrap();
     let failure = a
@@ -538,7 +570,7 @@ async fn damaged_entries_block_only_their_device_and_retain_each_cause() {
             })
             .await
             .unwrap();
-        let path = object::path(broken);
+        let path = object::path(store(1), broken);
         let original = storage.read(&path).await.unwrap();
         let mut bytes = original.clone();
         match damage {
@@ -547,7 +579,7 @@ async fn damaged_entries_block_only_their_device_and_retain_each_cause() {
                 let last = bytes.len() - 1;
                 bytes[last] ^= 1;
             }
-            "moved" => bytes = storage.read(&object::path(later)).await.unwrap(),
+            "moved" => bytes = storage.read(&object::path(store(1), later)).await.unwrap(),
             "parse" => {
                 use coven_format::sealed_single::SingleChunkPrefix;
                 let prefix = SingleChunkPrefix::StoreLog { key: key(1) };
@@ -699,10 +731,16 @@ async fn invalid_causal_past_and_timestamps_are_damaged() {
         } else {
             a.member.clone()
         };
-        let path = object::path(bad.position);
+        let path = object::path(store(1), bad.position);
         let key = ring.store_key(key(1)).unwrap();
-        let mut bytes =
-            object::seal(&bad, coven_format::FormatVersion::CURRENT, key, &signer).unwrap();
+        let mut bytes = object::seal(
+            store(1),
+            &bad,
+            coven_format::FormatVersion::CURRENT,
+            key,
+            &signer,
+        )
+        .unwrap();
         if defect == "own position" {
             let sealed = SingleChunkObject::decode(&bytes).unwrap();
             let prefix = sealed.prefix();
@@ -751,7 +789,7 @@ async fn bootstrap_reports_a_stuck_entry_instead_of_waiting_for_membership_forev
     let storage = storage();
     let mut a = device(storage.clone(), 1, member(1), store(1)).await;
     let first = a.create(key(1)).await;
-    let path = object::path(first);
+    let path = object::path(store(1), first);
     let size = storage.read(&path).await.unwrap().len();
     storage.corrupt_byte(&path, size - 1).await.unwrap();
     let mut b = device(storage.clone(), 2, member(1), store(1)).await;
@@ -783,12 +821,12 @@ async fn an_entry_that_cannot_be_read_after_listing_is_not_a_permanent_judgment(
             })
             .await
             .unwrap();
-        let path = object::path(entry);
+        let path = object::path(store(1), entry);
         let bytes = storage.read(&path).await.unwrap();
         let (listed, waiting) = tokio::sync::oneshot::channel();
         let (resume, held) = tokio::sync::oneshot::channel();
         storage
-            .hold_next_listing(ObjectPrefix::store_logs(), listed, held)
+            .hold_next_listing(ObjectPrefix::store_logs(store(1)), listed, held)
             .await;
         let interrupt = async {
             waiting.await.unwrap();

@@ -11,6 +11,8 @@ use uuid::Uuid;
 use crate::posted_positions::tests::signed_positions;
 use crate::store_log_sync::tests::Device;
 
+pub(crate) const STORE_ID: StoreId = StoreId(Uuid::from_u128(1));
+
 fn member() -> MemberKeys {
     let mut bytes = b"CVMK\x01".to_vec();
     bytes.extend([3; 64]);
@@ -33,7 +35,7 @@ async fn device(storage: Arc<MemoryStorage>, number: u64) -> Device {
         storage,
         number,
         member(),
-        StoreId(Uuid::from_u128(1)),
+        STORE_ID,
         vec![SyncedTable::new("notes", RowIdentity::SharedKey)],
         vec![schema::initial()],
         ids,
@@ -59,7 +61,7 @@ pub(crate) async fn group(storage: Arc<MemoryStorage>, count: u64) -> Vec<Device
     devices[0]
         .sync
         .make_and_upload_entry(StoreChange::CreateStore {
-            store: StoreId(Uuid::from_u128(1)),
+            store: STORE_ID,
             name: "Store".into(),
             admin: MemberPublicKeys {
                 signing: member().member_id(),
@@ -152,7 +154,7 @@ async fn causal_wait_applies_when_the_missing_write_arrives() {
     devices[1].writes.download_writes().await.unwrap();
     sql(&devices[1].db, "UPDATE notes SET title='second'").await;
     devices[1].writes.upload_writes().await.unwrap();
-    let path = ObjectPath::device_log(DeviceId(1), 1.try_into().unwrap());
+    let path = ObjectPath::device_log(STORE_ID, DeviceId(1), 1.try_into().unwrap());
     let bytes = storage.read(&path).await.unwrap();
     storage.delete(&path).await.unwrap();
     devices[2].writes.download_writes().await.unwrap();
@@ -167,7 +169,7 @@ async fn causal_wait_applies_when_the_missing_write_arrives() {
 }
 
 async fn posted(storage: &MemoryStorage, device: &Device, number: u64) -> PostedPositions {
-    let path = ObjectPath::positions(DeviceId(number));
+    let path = ObjectPath::positions(STORE_ID, DeviceId(number));
     let bytes = storage.read(&path).await.unwrap();
     let sealed = coven_format::sealed_single::SingleChunkObject::decode(&bytes).unwrap();
     let SingleChunkPrefix::PostedPositions(key_id) = sealed.prefix() else {
@@ -192,7 +194,7 @@ async fn positions_never_include_an_unpublished_local_write() {
     let storage = storage();
     let mut devices = group(storage.clone(), 2).await;
     assert!(devices[0].writes.post_positions().await.unwrap());
-    let path = ObjectPath::positions(DeviceId(1));
+    let path = ObjectPath::positions(STORE_ID, DeviceId(1));
     let before = storage.read(&path).await.unwrap();
     sql(
         &devices[0].db,
@@ -271,7 +273,7 @@ async fn fixed_bytes_survive_restart_and_a_lost_completion_reply() {
     faults.lose_completion_reply = true;
     storage.set_faults(faults).await;
     assert!(device.writes.upload_writes().await.is_err());
-    let path = ObjectPath::device_log(DeviceId(1), 1.try_into().unwrap());
+    let path = ObjectPath::device_log(STORE_ID, DeviceId(1), 1.try_into().unwrap());
     assert_eq!(storage.read(&path).await.unwrap(), expected);
     assert_eq!(device.writes.upload_writes().await.unwrap().len(), 1);
     assert_eq!(storage.read(&path).await.unwrap(), expected);
@@ -322,7 +324,7 @@ mod writes {
             .read_oldest_upload(move |upload| {
                 let write = upload.header.header.position;
                 let mut bytes = Vec::new();
-                crate::write_seal::seal(upload, &ring, &member, &mut |piece| {
+                crate::write_seal::seal(STORE_ID, upload, &ring, &member, &mut |piece| {
                     bytes.extend_from_slice(piece);
                     Ok(())
                 })?;
@@ -391,7 +393,7 @@ mod writes {
     }
 
     pub(super) async fn publish(storage: &MemoryStorage, record: &WriteRecord) {
-        let path = crate::write_seal::path(record.header.position);
+        let path = crate::write_seal::path(STORE_ID, record.header.position);
         storage
             .create(&path, &seal(record, &path, |_, _| {}))
             .await
@@ -505,7 +507,8 @@ async fn groceries_example_converges_in_every_arrival_order() {
         devices[2].writes.upload_writes().await.unwrap();
         let mut objects = Vec::new();
         for (device, number) in [(1, 2), (2, 1), (3, 1)] {
-            let path = ObjectPath::device_log(DeviceId(device), number.try_into().unwrap());
+            let path =
+                ObjectPath::device_log(STORE_ID, DeviceId(device), number.try_into().unwrap());
             objects.push((path.clone(), storage.read(&path).await.unwrap()));
             storage.delete(&path).await.unwrap();
         }
@@ -572,7 +575,7 @@ mod stuck {
         record.parts[0].rows[0].change.generation = 1;
         devices[0].writes.upload_writes().await.unwrap();
         storage
-            .delete(&crate::write_seal::path(record.header.position))
+            .delete(&crate::write_seal::path(STORE_ID, record.header.position))
             .await
             .unwrap();
         publish(storage, &record).await;
@@ -633,12 +636,12 @@ mod stuck {
         devices[0].writes.post_positions().await.unwrap();
         assert!(posted(&storage, &devices[0], 1).await.pending.is_empty());
         // A damaged report has no authority; a device that stops posting is not inferred stuck.
-        let path = ObjectPath::positions(DeviceId(2));
+        let path = ObjectPath::positions(STORE_ID, DeviceId(2));
         let mut bytes = storage.read(&path).await.unwrap();
         *bytes.last_mut().unwrap() ^= 1;
         storage.replace(&path, &bytes).await.unwrap();
         storage
-            .delete(&ObjectPath::positions(DeviceId(3)))
+            .delete(&ObjectPath::positions(STORE_ID, DeviceId(3)))
             .await
             .unwrap();
         devices[0].writes.download_writes().await.unwrap();
@@ -738,6 +741,7 @@ mod stuck {
         let mut devices = group(storage.clone(), 2).await;
         refuse(&storage, &mut devices, false).await;
         let unused = ObjectPath::file(
+            STORE_ID,
             DeviceId(2),
             coven_foundation::id_source::FileId(Uuid::from_u128(99)),
         );
@@ -759,12 +763,12 @@ mod stuck {
             )
             .await;
             devices[0].writes.upload_writes().await.unwrap();
-            let path = ObjectPath::device_log(DeviceId(1), 1.try_into().unwrap());
+            let path = ObjectPath::device_log(STORE_ID, DeviceId(1), 1.try_into().unwrap());
             let original = storage.read(&path).await.unwrap();
             let (listed, waiting) = tokio::sync::oneshot::channel();
             let (resume, held) = tokio::sync::oneshot::channel();
             storage
-                .hold_next_listing(ObjectPrefix::device_logs(), listed, held)
+                .hold_next_listing(ObjectPrefix::device_logs(STORE_ID), listed, held)
                 .await;
             let download = devices[1].writes.download_writes();
             let interrupt = async {
@@ -841,7 +845,7 @@ mod stuck {
         let expected = rows(&devices[1].db).await;
         let queued = queued(&devices[1].db).await;
         let object = storage
-            .list(&ObjectPrefix::device_logs())
+            .list(&ObjectPrefix::device_logs(STORE_ID))
             .await
             .unwrap()
             .pop()
@@ -911,7 +915,7 @@ async fn multiple_reported_subjects_in_one_log_retain_each_condition() {
         .unwrap()
         .unwrap();
     positions.pending = vec![first.into(), second.into()];
-    let path = ObjectPath::positions(positions.device);
+    let path = ObjectPath::positions(STORE_ID, positions.device);
     storage
         .replace(&path, &signed_positions(&devices[1], positions))
         .await
@@ -949,7 +953,7 @@ async fn oversized_reports_fail_publication_without_replacing_or_truncating_the_
     let mut devices = group(storage.clone(), 1).await;
     let device = &mut devices[0];
     device.writes.post_positions().await.unwrap();
-    let path = ObjectPath::positions(DeviceId(1));
+    let path = ObjectPath::positions(STORE_ID, DeviceId(1));
     let previous = storage.read(&path).await.unwrap();
     for writer in 2..66 {
         device

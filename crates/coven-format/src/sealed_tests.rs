@@ -11,8 +11,8 @@ use coven_crypto::{CircleKey, ObjectHasher, Signature, StoreKey};
 use coven_foundation::id_source::{CircleId, KeyId};
 use uuid::Uuid;
 
-const WRITE_PATH: &str = "devices/1/3";
-const SNAPSHOT_PATH: &str = "snapshots/store/1/1";
+const WRITE_PATH: &str = "10101010-1010-1010-1010-101010101010/devices/1/3";
+const SNAPSHOT_PATH: &str = "10101010-1010-1010-1010-101010101010/snapshots/store/1/1";
 
 fn store_key() -> StoreKey {
     StoreKey::from_bytes(KeyId(Uuid::from_bytes([1; 16])), [17; 32])
@@ -167,7 +167,13 @@ fn sealed_write_fixture_opens_both_parts_and_reencodes_all_random_bytes() {
         .unwrap();
     assert!(store_key()
         .derive()
-        .open_object_chunk("devices/1/4", prefix_bytes, 0, 0, sealed_header)
+        .open_object_chunk(
+            "10101010-1010-1010-1010-101010101010/devices/1/4",
+            prefix_bytes,
+            0,
+            0,
+            sealed_header
+        )
         .is_err());
     mutations(&bytes, |changed| {
         let _decoded = walk_write(changed, &header_bytes, &lengths, |_, _| {});
@@ -237,17 +243,17 @@ fn single_chunk_fixtures_open_with_their_own_keys_and_authors() {
     for (text, path, kind) in [
         (
             include_str!("../fixtures/sealed-store-log.hex"),
-            "store-log/1/1",
+            "10101010-1010-1010-1010-101010101010/store-log/1/1",
             33,
         ),
         (
             include_str!("../fixtures/sealed-positions.hex"),
-            "positions/1",
+            "10101010-1010-1010-1010-101010101010/positions/1",
             35,
         ),
         (
             include_str!("../fixtures/sealed-join-request.hex"),
-            "join-requests/55555555-5555-5555-5555-555555555555",
+            "10101010-1010-1010-1010-101010101010/join-requests/55555555-5555-5555-5555-555555555555",
             36,
         ),
     ] {
@@ -329,7 +335,11 @@ fn snapshot_fixture_signatures_reject_truncation_and_every_changed_bit() {
     }
     let (_, prefix_signature, signature) = walk_snapshot(&bytes, |_, _| {}).unwrap();
     assert!(author
-        .verify_prefix("snapshots/store/2/1", &bytes[..length], &prefix_signature)
+        .verify_prefix(
+            "10101010-1010-1010-1010-101010101010/snapshots/store/2/1",
+            &bytes[..length],
+            &prefix_signature
+        )
         .is_err());
     let mut hash = ObjectHasher::new();
     hash.update(&bytes[..bytes.len() - 64]);
@@ -368,7 +378,11 @@ fn positions_fixture_rejects_every_truncation_and_bit_change() {
         let object = SingleChunkObject::decode(bytes)?;
         let mut hash = ObjectHasher::new();
         hash.update(&object.signed_bytes()?);
-        author.verify_object("positions/1", &hash.finish(), object.signature())?;
+        author.verify_object(
+            "10101010-1010-1010-1010-101010101010/positions/1",
+            &hash.finish(),
+            object.signature(),
+        )?;
         Ok(())
     };
     verify(&bytes).unwrap();
@@ -377,7 +391,11 @@ fn positions_fixture_rejects_every_truncation_and_bit_change() {
     let mut hash = ObjectHasher::new();
     hash.update(&object.signed_bytes().unwrap());
     assert!(author
-        .verify_object("positions/2", &hash.finish(), object.signature())
+        .verify_object(
+            "10101010-1010-1010-1010-101010101010/positions/2",
+            &hash.finish(),
+            object.signature()
+        )
         .is_err());
 }
 

@@ -42,7 +42,10 @@ impl StoreLogSync {
             .flat_map(|entry| crate::store_log_keys::introduced(&entry.entry.change))
             .collect();
         let objects = storage
-            .list(&ObjectPrefix::audience_snapshots(audience))
+            .list(&ObjectPrefix::audience_snapshots(
+                self.directory.id(),
+                audience,
+            ))
             .await?;
         let listed = objects.len();
         let mut candidates = Vec::new();

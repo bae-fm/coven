@@ -5,7 +5,7 @@
 //! `parse`, `as_str` and `is_replaceable` (Appendix E1).
 
 use coven_crypto::MemberId;
-use coven_foundation::id_source::{CircleId, DeviceId, FileId, InviteId, KeyId};
+use coven_foundation::id_source::{CircleId, DeviceId, FileId, InviteId, KeyId, StoreId};
 use coven_merge::Audience;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
@@ -17,12 +17,12 @@ pub struct ObjectPath(String);
 
 impl ObjectPath {
     /// A device's create-once write record (§6).
-    pub fn device_log(device: DeviceId, number: NonZeroU64) -> Self {
-        Self(format!("devices/{}/{number}", device.0))
+    pub fn device_log(store: StoreId, device: DeviceId, number: NonZeroU64) -> Self {
+        Self(format!("{store}/devices/{}/{number}", device.0))
     }
     /// The device and positive write number of a device-log path.
     pub fn write_position(&self) -> Option<(DeviceId, NonZeroU64)> {
-        let rest = self.0.strip_prefix("devices/")?;
+        let rest = self.relative().strip_prefix("devices/")?;
         let (device, number) = rest.split_once('/').expect("validated device-log path");
         Some((
             DeviceId(device.parse().expect("validated device")),
@@ -39,7 +39,7 @@ impl ObjectPath {
     }
     /// The identity carried by a snapshot path.
     pub fn snapshot_id(&self) -> Option<crate::store_log::SnapshotId> {
-        let rest = self.0.strip_prefix("snapshots/")?;
+        let rest = self.relative().strip_prefix("snapshots/")?;
         let (audience, rest) = rest.split_once('/').expect("validated snapshot path");
         let (device, number) = rest.split_once('/').expect("validated snapshot path");
         let audience = if audience == "store" {
@@ -54,12 +54,12 @@ impl ObjectPath {
         })
     }
     /// A device's create-once store log entry (§9).
-    pub fn store_log(device: DeviceId, number: NonZeroU64) -> Self {
-        Self(format!("store-log/{}/{number}", device.0))
+    pub fn store_log(store: StoreId, device: DeviceId, number: NonZeroU64) -> Self {
+        Self(format!("{store}/store-log/{}/{number}", device.0))
     }
     /// The device and positive entry number of a store-log path.
     pub fn store_log_position(&self) -> Option<(DeviceId, NonZeroU64)> {
-        let rest = self.0.strip_prefix("store-log/")?;
+        let rest = self.relative().strip_prefix("store-log/")?;
         let (device, number) = rest.split_once('/').expect("validated store-log path");
         Some((
             DeviceId(device.parse().expect("validated device")),
@@ -67,36 +67,51 @@ impl ObjectPath {
         ))
     }
     /// A snapshot written by a device (§15).
-    pub fn snapshot(audience: Audience, device: DeviceId, number: NonZeroU64) -> Self {
+    pub fn snapshot(
+        store: StoreId,
+        audience: Audience,
+        device: DeviceId,
+        number: NonZeroU64,
+    ) -> Self {
         let audience = match audience {
             Audience::Store => "store".to_owned(),
             Audience::Circle(circle) => circle.to_string(),
         };
-        Self(format!("snapshots/{audience}/{}/{number}", device.0))
+        Self(format!(
+            "{store}/snapshots/{audience}/{}/{number}",
+            device.0
+        ))
     }
     /// The positions posted by one device (§6).
-    pub fn positions(device: DeviceId) -> Self {
-        Self(format!("positions/{}", device.0))
+    pub fn positions(store: StoreId, device: DeviceId) -> Self {
+        Self(format!("{store}/positions/{}", device.0))
     }
     /// A sealed store key for a member's lowercase hexadecimal public key (§11).
-    pub fn store_key(key: KeyId, member: &MemberId) -> Self {
-        Self(format!("keys/store/{key}/{member}"))
+    pub fn store_key(store: StoreId, key: KeyId, member: &MemberId) -> Self {
+        Self(format!("{store}/keys/store/{key}/{member}"))
     }
     /// A sealed circle key for a member (§14.3).
-    pub fn circle_key(circle: CircleId, key: KeyId, member: &MemberId) -> Self {
-        Self(format!("keys/circles/{circle}/{key}/{member}"))
+    pub fn circle_key(store: StoreId, circle: CircleId, key: KeyId, member: &MemberId) -> Self {
+        Self(format!("{store}/keys/circles/{circle}/{key}/{member}"))
     }
     /// Encrypted file bytes named by a random UUID (§16.2).
-    pub fn file(device: DeviceId, name: FileId) -> Self {
-        Self(format!("files/{}/{name}", device.0))
+    pub fn file(store: StoreId, device: DeviceId, name: FileId) -> Self {
+        Self(format!("{store}/files/{}/{name}", device.0))
     }
     /// An encrypted join request under its invite id (§12.2).
-    pub fn join_request(invite: InviteId) -> Self {
-        Self(format!("join-requests/{invite}"))
+    pub fn join_request(store: StoreId, invite: InviteId) -> Self {
+        Self(format!("{store}/join-requests/{invite}"))
     }
     /// Parse a listed or recorded path without permitting traversal or other layouts.
     pub fn parse(value: &str) -> Result<Self, PathError> {
         value.to_owned().try_into()
+    }
+    /// The store whose objects this path names.
+    pub fn store(&self) -> StoreId {
+        store_id(&self.0)
+    }
+    fn relative(&self) -> &str {
+        self.0.split_once('/').expect("validated store path").1
     }
     /// The path bound into the object's encryption by the caller.
     pub fn as_str(&self) -> &str {
@@ -104,15 +119,11 @@ impl ObjectPath {
     }
     /// Only posted positions are replaced; logs, keys, files and snapshots are create-once.
     pub fn is_replaceable(&self) -> bool {
-        self.0.starts_with("positions/")
-    }
-    /// Whether this is a device’s first store-log entry.
-    pub fn is_first_store_entry(&self) -> bool {
-        self.0.starts_with("store-log/") && self.0.ends_with("/1")
+        self.relative().starts_with("positions/")
     }
     /// The device named by log, snapshot, file or position paths.
     pub fn device(&self) -> Option<DeviceId> {
-        let parts: Vec<_> = self.0.split('/').collect();
+        let parts: Vec<_> = self.relative().split('/').collect();
         match parts.as_slice() {
             ["devices" | "store-log" | "files", device, _]
             | ["positions", device]
@@ -153,7 +164,11 @@ impl ObjectPath {
 impl TryFrom<String> for ObjectPath {
     type Error = PathError;
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        let parts: Vec<_> = value.split('/').collect();
+        let (store, relative) = value.split_once('/').ok_or(PathError)?;
+        if !canonical_uuid(store) {
+            return Err(PathError);
+        }
+        let parts: Vec<_> = relative.split('/').collect();
         let valid = match parts.as_slice() {
             ["devices" | "store-log", device, n] => decimal(device, false) && decimal(n, true),
             ["snapshots", audience, device, n] => {
@@ -188,53 +203,57 @@ impl From<ObjectPath> for String {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObjectPrefix(String);
 impl ObjectPrefix {
-    /// All objects in this store's location.
-    pub fn all() -> Self {
-        Self(String::new())
+    /// All objects belonging to this store.
+    pub fn all(store: StoreId) -> Self {
+        Self(format!("{store}/"))
     }
     /// Every device's write log.
-    pub fn device_logs() -> Self {
-        Self("devices/".into())
+    pub fn device_logs(store: StoreId) -> Self {
+        Self(format!("{store}/devices/"))
     }
     /// Every device's store log.
-    pub fn store_logs() -> Self {
-        Self("store-log/".into())
+    pub fn store_logs(store: StoreId) -> Self {
+        Self(format!("{store}/store-log/"))
     }
     /// All writes of a device.
-    pub fn device_log(device: DeviceId) -> Self {
-        Self(format!("devices/{}/", device.0))
+    pub fn device_log(store: StoreId, device: DeviceId) -> Self {
+        Self(format!("{store}/devices/{}/", device.0))
     }
     /// All entries of a device's store log.
-    pub fn store_log(device: DeviceId) -> Self {
-        Self(format!("store-log/{}/", device.0))
+    pub fn store_log(store: StoreId, device: DeviceId) -> Self {
+        Self(format!("{store}/store-log/{}/", device.0))
     }
     /// Every snapshot.
-    pub fn snapshots() -> Self {
-        Self("snapshots/".into())
+    pub fn snapshots(store: StoreId) -> Self {
+        Self(format!("{store}/snapshots/"))
     }
     /// Snapshots of one audience, across all devices.
-    pub fn audience_snapshots(audience: &Audience) -> Self {
+    pub fn audience_snapshots(store: StoreId, audience: &Audience) -> Self {
         let audience = match audience {
             Audience::Store => "store".to_owned(),
             Audience::Circle(id) => id.to_string(),
         };
-        Self(format!("snapshots/{audience}/"))
+        Self(format!("{store}/snapshots/{audience}/"))
     }
     /// Every stored file.
-    pub fn files() -> Self {
-        Self("files/".into())
+    pub fn files(store: StoreId) -> Self {
+        Self(format!("{store}/files/"))
     }
     /// Every waiting join request.
-    pub fn join_requests() -> Self {
-        Self("join-requests/".into())
+    pub fn join_requests(store: StoreId) -> Self {
+        Self(format!("{store}/join-requests/"))
     }
     /// Every sealed key.
-    pub fn keys() -> Self {
-        Self("keys/".into())
+    pub fn keys(store: StoreId) -> Self {
+        Self(format!("{store}/keys/"))
     }
     /// Every device's posted positions.
-    pub fn positions() -> Self {
-        Self("positions/".into())
+    pub fn positions(store: StoreId) -> Self {
+        Self(format!("{store}/positions/"))
+    }
+    /// The store whose objects this prefix selects.
+    pub fn store(&self) -> StoreId {
+        store_id(&self.0)
     }
     /// The prefix supplied to the provider.
     pub fn as_str(&self) -> &str {
@@ -253,8 +272,13 @@ impl ObjectPrefix {
 /// Validate a provider folder as a strict ancestor of an object in the
 /// layout. Empty folders left by interrupted uploads remain recognizable.
 pub fn validate_directory(value: &str) -> Result<(), PathError> {
-    let parts: Vec<_> = value.split('/').collect();
+    let mut parts = value.split('/');
+    if !parts.next().is_some_and(canonical_uuid) {
+        return Err(PathError);
+    }
+    let parts: Vec<_> = parts.collect();
     let valid = match parts.as_slice() {
+        [] => true,
         ["devices" | "store-log" | "positions" | "snapshots" | "keys" | "files"
         | "join-requests"] => true,
         ["devices" | "store-log" | "files", device] => decimal(device, false),
@@ -272,6 +296,16 @@ pub fn validate_directory(value: &str) -> Result<(), PathError> {
         return Err(PathError);
     }
     Ok(())
+}
+
+fn store_id(path: &str) -> StoreId {
+    StoreId(
+        path.split_once('/')
+            .expect("validated store path")
+            .0
+            .parse()
+            .expect("validated store id"),
+    )
 }
 
 fn decimal(part: &str, nonzero: bool) -> bool {

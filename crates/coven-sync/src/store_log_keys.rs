@@ -10,7 +10,7 @@ use coven_format::{
     sealed_key::KeyCopyPrefix,
     store_log::{StoreChange, StoreLogEntry},
 };
-use coven_foundation::id_source::KeyId;
+use coven_foundation::id_source::{KeyId, StoreId};
 use coven_merge::Audience;
 use coven_storage::ObjectPath;
 use std::collections::BTreeSet;
@@ -55,10 +55,15 @@ pub(crate) fn recipients<'a>(
         })
 }
 
-pub(crate) fn path(audience: &Audience, key: KeyId, member: &MemberId) -> ObjectPath {
+pub(crate) fn path(
+    store: StoreId,
+    audience: &Audience,
+    key: KeyId,
+    member: &MemberId,
+) -> ObjectPath {
     match audience {
-        Audience::Store => ObjectPath::store_key(key, member),
-        Audience::Circle(circle) => ObjectPath::circle_key(*circle, key, member),
+        Audience::Store => ObjectPath::store_key(store, key, member),
+        Audience::Circle(circle) => ObjectPath::circle_key(store, *circle, key, member),
     }
 }
 
@@ -89,11 +94,12 @@ pub(crate) fn check_shared_keys(
 }
 
 pub(crate) fn store_copy(
+    store: StoreId,
     key: &StoreKey,
     member: &MemberId,
     recipient: &SealingPublicKey,
 ) -> Result<StoreLogKeyUpload, SyncError> {
-    let path = ObjectPath::store_key(key.id(), member);
+    let path = ObjectPath::store_key(store, key.id(), member);
     let prefix = KeyCopyPrefix {
         audience: Audience::Store,
         key: key.id(),
@@ -107,11 +113,12 @@ pub(crate) fn store_copy(
 }
 
 pub(crate) fn circle_copy(
+    store: StoreId,
     key: &CircleKey,
     member: &MemberId,
     recipient: &SealingPublicKey,
 ) -> Result<StoreLogKeyUpload, SyncError> {
-    let path = ObjectPath::circle_key(key.circle(), key.id(), member);
+    let path = ObjectPath::circle_key(store, key.circle(), key.id(), member);
     let prefix = KeyCopyPrefix {
         audience: Audience::Circle(key.circle()),
         key: key.id(),
@@ -125,6 +132,7 @@ pub(crate) fn circle_copy(
 }
 
 pub(crate) fn seal(
+    store: StoreId,
     log: &StoreLog,
     entry: &StoreLogEntry,
     ring: Option<&StoreKeyring>,
@@ -171,6 +179,7 @@ pub(crate) fn seal(
         } => {
             for id in ring.store_key_ids() {
                 keys.push(store_copy(
+                    store,
                     ring.store_key(id)?,
                     &recipient.signing,
                     &recipient.sealing,
@@ -185,7 +194,7 @@ pub(crate) fn seal(
         } => {
             let material = ring.store_key(*key)?;
             material.check_hash(key_hash)?;
-            keys.push(store_copy(material, &admin.signing, &admin.sealing)?);
+            keys.push(store_copy(store, material, &admin.signing, &admin.sealing)?);
         }
         StoreChange::CreateCircle {
             circle,
@@ -196,6 +205,7 @@ pub(crate) fn seal(
             let material = ring.circle_key(*circle, *key)?;
             material.check_hash(key_hash)?;
             keys.push(circle_copy(
+                store,
                 material,
                 &entry.author,
                 &member.sealing_public_key(),
@@ -210,14 +220,14 @@ pub(crate) fn seal(
                 let material = ring.store_key(*key)?;
                 material.check_hash(key_hash)?;
                 for (id, recipient) in recipients(log, audience) {
-                    keys.push(store_copy(material, id, recipient)?);
+                    keys.push(store_copy(store, material, id, recipient)?);
                 }
             }
             Audience::Circle(circle) => {
                 let material = ring.circle_key(*circle, *key)?;
                 material.check_hash(key_hash)?;
                 for (id, recipient) in recipients(log, audience) {
-                    keys.push(circle_copy(material, id, recipient)?);
+                    keys.push(circle_copy(store, material, id, recipient)?);
                 }
             }
         },
@@ -227,6 +237,7 @@ pub(crate) fn seal(
         } => {
             for id in ring.circle_key_ids(*circle) {
                 keys.push(circle_copy(
+                    store,
                     ring.circle_key(*circle, id)?,
                     recipient,
                     &state.members[recipient].sealing,

@@ -183,11 +183,15 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
             self.observed(result)
         }
     }
-    async fn join(&self, invitation: &StorageInvitation) -> Result<(), StorageError> {
+    async fn join(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+        invitation: &StorageInvitation,
+    ) -> Result<(), StorageError> {
         let result = async {
             invitation.check(&self.config())?;
             self.provider.join(invitation).await?;
-            self.list_checked(&ObjectPrefix::all()).await?;
+            self.list_checked(&ObjectPrefix::all(store)).await?;
             Ok(())
         }
         .await;

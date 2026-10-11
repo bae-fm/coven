@@ -26,7 +26,7 @@ async fn invite(d: &mut Device, account: &str) -> (OperationId, Invite) {
 }
 async fn request(storage: &dyn Storage, invite: &Invite, keys: &MemberKeys, name: &str) {
     let code = InviteCode::from_text(&invite.code).unwrap();
-    let path = ObjectPath::join_request(invite.id);
+    let path = ObjectPath::join_request(code.store, invite.id);
     let plain = Object::JoinRequest(WireRequest {
         invite: invite.id,
         keys: public(keys),
@@ -81,11 +81,11 @@ async fn approve_seals_store_history_and_removes_the_request() {
     assert!(matches!(finish(&mut a, operation).await, Output::Unit));
     assert!(a.sync.current_join_requests().await.unwrap().is_empty());
     assert!(matches!(
-        storage.read(&ObjectPath::join_request(invite.id)).await,
+        storage.read(&ObjectPath::join_request(store(1), invite.id)).await,
         Err(error) if error.failure() == StorageFailure::NotFound
     ));
     for key in expected {
-        let path = ObjectPath::store_key(key, &keys.member_id());
+        let path = ObjectPath::store_key(store(1), key, &keys.member_id());
         assert_eq!(
             coven_format::sealed_key::SealedKey::decode(&joining.read(&path).await.unwrap())
                 .unwrap()
@@ -110,7 +110,10 @@ async fn decline_cancel_and_expiry_take_access_back() {
         let [mut a, _b, _c] = accounts(storage.clone()).await;
         let (operation, invite) = invite(&mut a, "join@example.com").await;
         let joining = MemoryStorage::for_recipient(&storage, "join@example.com").unwrap();
-        assert!(joining.list(&ObjectPrefix::store_logs()).await.is_ok());
+        assert!(joining
+            .list(&ObjectPrefix::store_logs(store(1)))
+            .await
+            .is_ok());
         request(&joining, &invite, &member(9), "New phone").await;
         step(&mut a, operation).await.unwrap();
         match settle {
@@ -132,10 +135,10 @@ async fn decline_cancel_and_expiry_take_access_back() {
         }
         finish(&mut a, operation).await;
         assert!(
-            matches!(joining.list(&ObjectPrefix::store_logs()).await, Err(error) if error.failure() == StorageFailure::PermissionDenied)
+            matches!(joining.list(&ObjectPrefix::store_logs(store(1))).await, Err(error) if error.failure() == StorageFailure::PermissionDenied)
         );
         assert!(matches!(
-            storage.read(&ObjectPath::join_request(invite.id)).await,
+            storage.read(&ObjectPath::join_request(store(1), invite.id)).await,
             Err(error) if error.failure() == StorageFailure::NotFound
         ));
         assert!(!a
@@ -157,18 +160,21 @@ async fn another_open_invite_or_member_preserves_shared_account_access() {
     begin(&mut a, Command::Cancel(invite1.id)).await;
     finish(&mut a, first).await;
     let joining = MemoryStorage::for_recipient(&storage, "join@example.com").unwrap();
-    assert!(joining.list(&ObjectPrefix::store_logs()).await.is_ok());
+    assert!(joining
+        .list(&ObjectPrefix::store_logs(store(1)))
+        .await
+        .is_ok());
     begin(&mut a, Command::Cancel(invite2.id)).await;
     finish(&mut a, second).await;
     assert!(
-        matches!(joining.list(&ObjectPrefix::store_logs()).await, Err(error) if error.failure() == StorageFailure::PermissionDenied)
+        matches!(joining.list(&ObjectPrefix::store_logs(store(1))).await, Err(error) if error.failure() == StorageFailure::PermissionDenied)
     );
     let (operation, invite) = invite(&mut a, "ben@example.com").await;
     begin(&mut a, Command::Cancel(invite.id)).await;
     finish(&mut a, operation).await;
     assert!(MemoryStorage::for_recipient(&storage, "ben@example.com")
         .unwrap()
-        .list(&ObjectPrefix::store_logs())
+        .list(&ObjectPrefix::store_logs(store(1)))
         .await
         .is_ok());
 }
@@ -221,7 +227,7 @@ async fn replacement_request_cannot_be_approved_from_a_stale_prompt() {
     step(&mut a, operation).await.unwrap();
     let previous = a.sync.current_join_requests().await.unwrap().remove(0);
     storage
-        .delete(&ObjectPath::join_request(invite.id))
+        .delete(&ObjectPath::join_request(store(1), invite.id))
         .await
         .unwrap();
     request(&joining, &invite, &member(8), "Phone").await;
@@ -300,21 +306,21 @@ async fn failed_join_request_still_expires_and_live_requests_are_delivered() {
         .unwrap();
     assert_eq!(joins.borrow()[0].member, member(9).member_id());
     storage
-        .delete(&ObjectPath::join_request(invite.id))
+        .delete(&ObjectPath::join_request(store(1), invite.id))
         .await
         .unwrap();
     storage
-        .create(&ObjectPath::join_request(invite.id), &[0])
+        .create(&ObjectPath::join_request(store(1), invite.id), &[0])
         .await
         .unwrap();
     assert_eq!(pending(&operations, &a.db).await.len(), 1);
     a.clock.set(invite.expires_at);
     assert!(pending(&operations, &a.db).await.is_empty());
     assert!(
-        matches!(joining.list(&ObjectPrefix::store_logs()).await, Err(error) if error.failure() == StorageFailure::PermissionDenied)
+        matches!(joining.list(&ObjectPrefix::store_logs(store(1))).await, Err(error) if error.failure() == StorageFailure::PermissionDenied)
     );
     assert!(matches!(
-        storage.read(&ObjectPath::join_request(invite.id)).await,
+        storage.read(&ObjectPath::join_request(store(1), invite.id)).await,
         Err(error) if error.failure() == StorageFailure::NotFound
     ));
     operations.close().await.unwrap();

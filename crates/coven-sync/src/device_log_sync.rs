@@ -128,7 +128,7 @@ impl DeviceLogSync {
             let Some(write) = next else {
                 break;
             };
-            self.send_write(write, ring, member).await?;
+            self.send_write(local.store, write, ring, member).await?;
             self.database.upload_succeeded(write).await?;
             uploaded.push(write);
         }
@@ -164,7 +164,7 @@ impl DeviceLogSync {
             .storage
             .as_deref()
             .ok_or(SyncError::NoStorage)?
-            .list(&ObjectPrefix::device_logs())
+            .list(&ObjectPrefix::device_logs(local.store))
             .await?
         {
             let (device, number) = object.path.write_position().expect("device-log prefix");
@@ -247,7 +247,8 @@ impl DeviceLogSync {
             .member_keys
             .read()?
             .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
-        let Some(positions) = self.positions_for(&member).await? else {
+        let local = self.database.local_store_log().await?;
+        let Some(positions) = self.positions_for(&member, &local).await? else {
             return Ok(false);
         };
         let key = positions
@@ -260,7 +261,7 @@ impl DeviceLogSync {
             .store_keys
             .read()?
             .ok_or(SyncError::KeyUnavailable(key))?;
-        let path = ObjectPath::positions(positions.device);
+        let path = ObjectPath::positions(local.store, positions.device);
         let prefix = SingleChunkPrefix::PostedPositions(key);
         let sealed = ring.store_key(key)?.derive().seal_object_chunk(
             path.as_str(),
@@ -296,7 +297,7 @@ impl DeviceLogSync {
             .storage
             .as_deref()
             .ok_or(SyncError::NoStorage)?
-            .list(&ObjectPrefix::positions())
+            .list(&ObjectPrefix::positions(local.store))
             .await?
         {
             if object.path.device() == Some(local.device) {
@@ -387,14 +388,15 @@ impl DeviceLogSync {
             .member_keys
             .read()?
             .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
-        self.positions_for(&member).await
+        let local = self.database.local_store_log().await?;
+        self.positions_for(&member, &local).await
     }
 
     async fn positions_for(
         &self,
         member: &coven_crypto::MemberKeys,
+        local: &coven_database::LocalStoreLog,
     ) -> Result<Option<PostedPositions>, SyncError> {
-        let local = self.database.local_store_log().await?;
         let store = local
             .log
             .replay

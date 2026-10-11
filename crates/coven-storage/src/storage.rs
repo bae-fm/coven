@@ -1,6 +1,6 @@
 use crate::{
     CloudProvider, ObjectPath, ObjectPrefix, StorageConfig, StorageError, StorageFailure,
-    StorageSetupError, UploadSession,
+    UploadSession,
 };
 use async_trait::async_trait;
 
@@ -219,7 +219,11 @@ pub trait Storage: Send + Sync {
     /// Native acceptance material comes from the encrypted [`crate::StorageInvitation`],
     /// not a revocation grant id. Removal during joining returns the provider's
     /// permission failure; an admin can invite again.
-    async fn join(&self, invitation: &crate::StorageInvitation) -> Result<(), StorageError> {
+    async fn join(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+        invitation: &crate::StorageInvitation,
+    ) -> Result<(), StorageError> {
         invitation.check(&self.config())?;
         if !matches!(
             invitation.acceptance,
@@ -229,7 +233,7 @@ pub trait Storage: Send + Sync {
                 StorageFailure::InvalidConfiguration.with_source("provider acceptance required")
             );
         }
-        self.list(&ObjectPrefix::all()).await?;
+        self.list(&ObjectPrefix::all(store)).await?;
         Ok(())
     }
     /// Unshare through the owner's account, or tell an S3 admin which key to delete.
@@ -288,40 +292,5 @@ pub trait Storage: Send + Sync {
             Err(error) if error.failure() == crate::StorageFailure::AlreadyExists => Ok(()),
             result => result,
         }
-    }
-
-    /// Create the store's first encrypted store-log entry at an empty location.
-    /// Reconnect when the location contains that same entry, including when later
-    /// objects have been uploaded. The facade commits settings and credentials
-    /// only after this call succeeds (E5).
-    /// Another store or unrelated content returns [`StorageSetupError::LocationOccupied`].
-    /// Provider folders must be ancestors in coven's layout; empty layout folders
-    /// left by interrupted uploads contain no stored objects. Two setups observing
-    /// an empty location may both succeed; sync detects their listed first entries.
-    async fn setup(
-        &self,
-        first_entry: &ObjectPath,
-        encrypted_entry: &[u8],
-    ) -> Result<StorageConfig, StorageSetupError> {
-        if !first_entry.is_first_store_entry() {
-            return Err(StorageError::Failure(StorageFailure::InvalidPath).into());
-        }
-        let objects = match self.list(&ObjectPrefix::all()).await {
-            Ok(objects) => objects,
-            Err(error) if error.failure() == StorageFailure::InvalidPath => {
-                return Err(StorageSetupError::LocationOccupied)
-            }
-            Err(error) => return Err(error.into()),
-        };
-        if !objects.is_empty() {
-            if !objects.iter().any(|object| &object.path == first_entry)
-                || self.read(first_entry).await? != encrypted_entry
-            {
-                return Err(StorageSetupError::LocationOccupied);
-            }
-        } else {
-            self.create_once(first_entry, encrypted_entry).await?;
-        }
-        Ok(self.config())
     }
 }

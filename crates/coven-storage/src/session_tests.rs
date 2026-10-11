@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_utils::STORE_ID;
 use coven_crypto::SecretText;
 
 #[test]
@@ -8,6 +9,7 @@ fn upload_sessions_encode_without_capacity_growth() {
             namespace_id: "namespace".into(),
         },
         path: ObjectPath::store_log(
+            STORE_ID,
             coven_foundation::id_source::DeviceId(1),
             std::num::NonZeroU64::MIN,
         ),
@@ -40,7 +42,7 @@ fn recorded_upload_refuses_positions_even_when_complete() {
             location: StorageConfig::Dropbox {
                 namespace_id: "namespace".into(),
             },
-            path: ObjectPath::positions(coven_foundation::id_source::DeviceId(1)),
+            path: ObjectPath::positions(STORE_ID, coven_foundation::id_source::DeviceId(1)),
             total: 1,
             confirmed: 1,
             part_size: 8 * 1024 * 1024,
@@ -58,6 +60,7 @@ fn recording(location: StorageConfig, state: SessionState, part_size: usize) -> 
     UploadSession {
         location,
         path: ObjectPath::device_log(
+            STORE_ID,
             coven_foundation::id_source::DeviceId(31),
             std::num::NonZeroU64::MIN,
         ),
@@ -103,7 +106,7 @@ fn assert_invalid_recording(session: &UploadSession) {
 #[test]
 fn direct_deserialization_cannot_bypass_session_validation() {
     let mut session = s3_recording();
-    session.path = ObjectPath::positions(coven_foundation::id_source::DeviceId(31));
+    session.path = ObjectPath::positions(STORE_ID, coven_foundation::id_source::DeviceId(31));
     let bytes = serde_json::to_vec(&session).unwrap();
     assert!(serde_json::from_slice::<UploadSession>(&bytes).is_err());
 }

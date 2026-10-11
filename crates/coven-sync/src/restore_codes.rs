@@ -29,6 +29,13 @@ struct RestoreCodesInner {
 }
 
 impl RestoreCodes {
+    /// The recorded location survives disconnecting its credentials.
+    pub async fn location(&self) -> Result<Option<coven_storage::StorageConfig>, SyncError> {
+        let owner = self.inner.lock().await;
+        let owner = owner.as_ref().ok_or(coven_database::DbError::StoreClosed)?;
+        Ok(owner.settings.read()?)
+    }
+
     /// Compose at the facade's opening boundary. The settings and credentials
     /// are also the narrow persisted connection contract used by storage setup.
     pub fn new(

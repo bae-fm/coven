@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_utils::STORE_ID;
 use coven_foundation::clock::FixedClock;
 fn config() -> StorageConfig {
     StorageConfig::S3 {
@@ -21,8 +22,13 @@ async fn memory_conforms() {
                 .build()
                 .unwrap(),
         );
-        let suite = Conformance::new(storage.clone());
+        let suite = Conformance::new(storage.clone(), STORE_ID);
         suite.run().await.unwrap();
+        suite
+            .shared_location(coven_foundation::id_source::StoreId(
+                uuid::Uuid::from_bytes([0x20; 16]),
+            ))
+            .await;
         suite
             .listing_times(std::time::UNIX_EPOCH, async {
                 clock.set(std::time::UNIX_EPOCH + Duration::from_secs(10));
@@ -65,6 +71,7 @@ async fn memory_conforms() {
 async fn crash_after_accepted_part_and_dropped_part_resumes() {
     let provider = MemoryStorage::builder().location(config()).build().unwrap();
     let path = ObjectPath::file(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(31),
         coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xaa; 16])),
     );
@@ -105,26 +112,6 @@ async fn crash_after_accepted_part_and_dropped_part_resumes() {
     assert_eq!(reopened.read(&path).await.unwrap(), b"abcdefghij");
 }
 #[tokio::test]
-async fn setup_refuses_other_store_and_retries_its_own_entry() {
-    let provider = MemoryStorage::builder().location(config()).build().unwrap();
-    let path = ObjectPath::store_log(
-        coven_foundation::id_source::DeviceId(1),
-        std::num::NonZeroU64::MIN,
-    );
-    provider
-        .setup(&path, b"encrypted first entry")
-        .await
-        .unwrap();
-    provider
-        .setup(&path, b"encrypted first entry")
-        .await
-        .unwrap();
-    assert!(matches!(
-        provider.setup(&path, b"other store").await.unwrap_err(),
-        StorageSetupError::LocationOccupied
-    ));
-}
-#[tokio::test]
 async fn faults_are_counted_and_delay_is_awaited() {
     use std::{future::Future, task::Poll, time::SystemTime};
     let clock = Arc::new(coven_foundation::clock::FixedClock::new(
@@ -143,7 +130,7 @@ async fn faults_are_counted_and_delay_is_awaited() {
             ..Faults::none()
         })
         .await;
-    let prefix = ObjectPrefix::all();
+    let prefix = ObjectPrefix::all(STORE_ID);
     for attempt in 0..3 {
         let mut request = Box::pin(provider.list(&prefix));
         std::future::poll_fn(|cx| {
@@ -183,6 +170,7 @@ async fn failed_automatic_upload_is_aborted_without_publishing() {
         })
         .await;
     let path = ObjectPath::device_log(
+        STORE_ID,
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
     );
@@ -194,7 +182,11 @@ async fn failed_automatic_upload_is_aborted_without_publishing() {
         !storage.reached(),
         "inner upload calls must not mask its network failure"
     );
-    assert!(storage.list(&ObjectPrefix::all()).await.unwrap().is_empty());
+    assert!(storage
+        .list(&ObjectPrefix::all(STORE_ID))
+        .await
+        .unwrap()
+        .is_empty());
     assert!(storage.provider.state.lock().await.uploads.is_empty());
     assert!(storage.reached());
     storage.reset_reachability();
@@ -210,7 +202,7 @@ async fn sharing_authority_belongs_to_the_adapters_account() {
         let owner = MemoryStorage::builder().location(config).build().unwrap();
         owner.grant_access("kept@example.test").await.unwrap();
         let recipient = MemoryStorage::for_recipient(&owner, "kept@example.test").unwrap();
-        Conformance::new(Arc::new(recipient))
+        Conformance::new(Arc::new(recipient), STORE_ID)
             .owner_only_sharing()
             .await;
         assert_eq!(
@@ -247,32 +239,6 @@ async fn sharing_authority_belongs_to_the_adapters_account() {
 }
 
 #[tokio::test]
-async fn reconnect_accepts_its_first_entry_after_the_store_has_uploaded_more() {
-    use coven_foundation::id_source::DeviceId;
-    let storage = MemoryStorage::builder().location(config()).build().unwrap();
-    let first = ObjectPath::store_log(DeviceId(31), std::num::NonZeroU64::MIN);
-    storage.setup(&first, b"first").await.unwrap();
-    let later = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
-    storage.create(&later, b"later").await.unwrap();
-    storage
-        .replace(&ObjectPath::positions(DeviceId(32)), b"positions")
-        .await
-        .unwrap();
-    assert_eq!(storage.setup(&first, b"first").await.unwrap(), config());
-    assert!(matches!(
-        storage.setup(&first, b"different").await.unwrap_err(),
-        StorageSetupError::LocationOccupied
-    ));
-    let other = ObjectPath::store_log(DeviceId(32), std::num::NonZeroU64::MIN);
-    assert!(matches!(
-        storage.setup(&other, b"other").await.unwrap_err(),
-        StorageSetupError::LocationOccupied
-    ));
-    assert_eq!(storage.read(&first).await.unwrap(), b"first");
-    assert_eq!(storage.read(&later).await.unwrap(), b"later");
-}
-
-#[tokio::test]
 async fn listing_records_publication_time_and_keeps_it_on_retry() {
     use coven_foundation::id_source::DeviceId;
     use std::time::{Duration, SystemTime};
@@ -284,27 +250,34 @@ async fn listing_records_publication_time_and_keeps_it_on_retry() {
         .clock(clock.clone())
         .build()
         .unwrap();
-    let path = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
+    let path = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
     let mut upload = storage.begin_upload(&path, 4).await.unwrap();
     storage.upload_part(&mut upload, b"data").await.unwrap();
-    assert!(storage.list(&ObjectPrefix::all()).await.unwrap().is_empty());
+    assert!(storage
+        .list(&ObjectPrefix::all(STORE_ID))
+        .await
+        .unwrap()
+        .is_empty());
     clock.set(published);
     storage.finish_upload(&mut upload).await.unwrap();
     clock.set(published + Duration::from_secs(30));
     storage.create_once(&path, b"data").await.unwrap();
     assert_eq!(
-        storage.list(&ObjectPrefix::all()).await.unwrap(),
+        storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap(),
         [StoredObject {
             path,
             size: 4,
             stored_at: published
         }]
     );
-    let positions = ObjectPath::positions(DeviceId(31));
+    let positions = ObjectPath::positions(STORE_ID, DeviceId(31));
     storage.replace(&positions, b"old").await.unwrap();
     clock.set(published + Duration::from_secs(40));
     storage.replace(&positions, b"new position").await.unwrap();
-    let listed = storage.list(&ObjectPrefix::positions()).await.unwrap();
+    let listed = storage
+        .list(&ObjectPrefix::positions(STORE_ID))
+        .await
+        .unwrap();
     assert_eq!(listed[0].stored_at, published + Duration::from_secs(40));
     assert_eq!(listed[0].size, 12);
 }
@@ -313,11 +286,11 @@ async fn listing_records_publication_time_and_keeps_it_on_retry() {
 async fn recorded_sessions_cannot_redirect_or_regress_provider_state() {
     use coven_foundation::id_source::DeviceId;
     let storage = MemoryStorage::builder().location(config()).build().unwrap();
-    let path = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
+    let path = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
     let mut upload = storage.begin_upload(&path, 8).await.unwrap();
     storage.upload_part(&mut upload, b"data").await.unwrap();
     let mut wrong_path = upload.clone();
-    wrong_path.path = ObjectPath::device_log(DeviceId(32), std::num::NonZeroU64::MIN);
+    wrong_path.path = ObjectPath::device_log(STORE_ID, DeviceId(32), std::num::NonZeroU64::MIN);
     let mut wrong_size = upload.clone();
     wrong_size.total = 12;
     for mut invalid in [wrong_path, wrong_size] {
@@ -366,7 +339,7 @@ async fn recorded_sessions_cannot_redirect_or_regress_provider_state() {
 async fn publication_removes_pending_parts_and_verifies_the_exact_session() {
     use coven_foundation::id_source::DeviceId;
     let storage = MemoryStorage::builder().location(config()).build().unwrap();
-    let path = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
+    let path = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
     let mut first = storage.begin_upload(&path, 4).await.unwrap();
     let mut other = storage.begin_upload(&path, 4).await.unwrap();
     storage.upload_part(&mut first, b"data").await.unwrap();
@@ -423,7 +396,7 @@ async fn the_same_fake_uses_committed_replacement_tokens() {
         )))
         .build()
         .unwrap();
-    let path = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
+    let path = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
     storage.create(&path, b"data").await.unwrap();
     storage
         .set_oauth_tokens(OAuthTokens {
@@ -452,7 +425,7 @@ async fn the_same_fake_uses_committed_replacement_tokens() {
 async fn lost_publication_replies_and_expired_parts_are_distinct() {
     use coven_foundation::id_source::DeviceId;
     let storage = MemoryStorage::builder().location(config()).build().unwrap();
-    let path = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
+    let path = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
     let mut upload = storage.begin_upload(&path, 4).await.unwrap();
     storage.upload_part(&mut upload, b"data").await.unwrap();
     storage
@@ -515,6 +488,7 @@ async fn recipient_access_follows_account_grants_and_acceptance() {
     for config in sharing_configs() {
         let owner = MemoryStorage::builder().location(config).build().unwrap();
         let path = ObjectPath::store_log(
+            STORE_ID,
             coven_foundation::id_source::DeviceId(1),
             std::num::NonZeroU64::MIN,
         );
@@ -535,13 +509,19 @@ async fn recipient_access_follows_account_grants_and_acceptance() {
             );
         }
         member
-            .join(&StorageInvitation::decode(invitation.encode().unwrap().as_bytes()).unwrap())
+            .join(
+                STORE_ID,
+                &StorageInvitation::decode(invitation.encode().unwrap().as_bytes()).unwrap(),
+            )
             .await
             .unwrap();
-        member.join(&invitation).await.unwrap();
+        member.join(STORE_ID, &invitation).await.unwrap();
         if owner.config().provider() == CloudProvider::OneDrive {
             member
-                .join(&StorageInvitation::for_account(owner.config()).unwrap())
+                .join(
+                    STORE_ID,
+                    &StorageInvitation::for_account(owner.config()).unwrap(),
+                )
                 .await
                 .unwrap();
         }
@@ -553,8 +533,9 @@ async fn recipient_access_follows_account_grants_and_acceptance() {
         else {
             panic!()
         };
-        kept.join(&kept_invite).await.unwrap();
+        kept.join(STORE_ID, &kept_invite).await.unwrap();
         let upload_path = ObjectPath::device_log(
+            STORE_ID,
             coven_foundation::id_source::DeviceId(2),
             std::num::NonZeroU64::MIN,
         );
@@ -565,12 +546,12 @@ async fn recipient_access_follows_account_grants_and_acceptance() {
             .unwrap();
         for error in [
             member.read(&path).await.unwrap_err(),
-            member.list(&ObjectPrefix::all()).await.unwrap_err(),
+            member.list(&ObjectPrefix::all(STORE_ID)).await.unwrap_err(),
             member.create(&upload_path, b"data").await.unwrap_err(),
             member.delete(&path).await.unwrap_err(),
             member.upload_part(&mut upload, b"data").await.unwrap_err(),
             member.abort_upload(&upload).await.unwrap_err(),
-            member.join(&invitation).await.unwrap_err(),
+            member.join(STORE_ID, &invitation).await.unwrap_err(),
         ] {
             assert_eq!(error.failure(), StorageFailure::PermissionDenied);
         }
@@ -580,7 +561,7 @@ async fn recipient_access_follows_account_grants_and_acceptance() {
         else {
             panic!()
         };
-        member.join(&invitation).await.unwrap();
+        member.join(STORE_ID, &invitation).await.unwrap();
         member.upload_part(&mut upload, b"data").await.unwrap();
         member.finish_upload(&mut upload).await.unwrap();
         assert_eq!(owner.read(&upload_path).await.unwrap(), b"data");
@@ -597,7 +578,7 @@ async fn recipients_keep_their_own_tokens_while_clones_share_the_same_sign_in() 
         panic!()
     };
     let member = MemoryStorage::for_recipient(&owner, "member").unwrap();
-    member.join(&invitation).await.unwrap();
+    member.join(STORE_ID, &invitation).await.unwrap();
     let cloned = member.clone();
     let another_sign_in = MemoryStorage::for_recipient(&owner, "member").unwrap();
     member
@@ -610,14 +591,17 @@ async fn recipients_keep_their_own_tokens_while_clones_share_the_same_sign_in() 
         .unwrap();
     assert_eq!(
         cloned
-            .list(&ObjectPrefix::all())
+            .list(&ObjectPrefix::all(STORE_ID))
             .await
             .unwrap_err()
             .failure(),
         StorageFailure::Authentication
     );
-    owner.list(&ObjectPrefix::all()).await.unwrap();
-    another_sign_in.list(&ObjectPrefix::all()).await.unwrap();
+    owner.list(&ObjectPrefix::all(STORE_ID)).await.unwrap();
+    another_sign_in
+        .list(&ObjectPrefix::all(STORE_ID))
+        .await
+        .unwrap();
     member
         .set_oauth_tokens(OAuthTokens {
             access_token: coven_crypto::SecretText::new("refreshed".into()),
@@ -626,7 +610,7 @@ async fn recipients_keep_their_own_tokens_while_clones_share_the_same_sign_in() 
         })
         .await
         .unwrap();
-    cloned.list(&ObjectPrefix::all()).await.unwrap();
+    cloned.list(&ObjectPrefix::all(STORE_ID)).await.unwrap();
 }
 
 #[tokio::test]
@@ -673,11 +657,11 @@ async fn a_candidate_connection_does_not_replace_the_active_connections_tokens()
         .unwrap();
     assert_eq!(
         candidate
-            .list(&ObjectPrefix::all())
+            .list(&ObjectPrefix::all(STORE_ID))
             .await
             .unwrap_err()
             .failure(),
         StorageFailure::Authentication
     );
-    active.list(&ObjectPrefix::all()).await.unwrap();
+    active.list(&ObjectPrefix::all(STORE_ID)).await.unwrap();
 }

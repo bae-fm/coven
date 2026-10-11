@@ -197,8 +197,8 @@ async fn a_missing_or_damaged_holder_copy_waits_and_a_later_copy_enables_sharing
         let storage = storage();
         let [mut ana, mut ben, _dan, erin] = household(&storage).await;
         let rotation = ben.sync.test_rotate(Audience::Store, key(3)).await;
-        let holder = ObjectPath::store_key(key(3), &ana.member.member_id());
-        let recipient = ObjectPath::store_key(key(3), &erin.member.member_id());
+        let holder = ObjectPath::store_key(store(1), key(3), &ana.member.member_id());
+        let recipient = ObjectPath::store_key(store(1), key(3), &erin.member.member_id());
         storage.delete(&recipient).await.unwrap();
         let original = storage.read(&holder).await.unwrap();
         storage.delete(&holder).await.unwrap();
@@ -238,7 +238,7 @@ async fn occupied_recipient_path_is_preserved_and_damage_is_reported_by_its_reci
     let storage = storage();
     let [mut ana, mut ben, _dan, erin] = household(&storage).await;
     ben.sync.test_rotate(Audience::Store, key(3)).await;
-    let path = ObjectPath::store_key(key(3), &erin.member.member_id());
+    let path = ObjectPath::store_key(store(1), key(3), &erin.member.member_id());
     storage.delete(&path).await.unwrap();
     storage.create(&path, b"damaged").await.unwrap();
     ana.sync().await;
@@ -253,7 +253,7 @@ async fn two_holders_race_to_store_the_same_key_for_one_member() {
     let storage = storage();
     let [mut ana, mut ben, _dan, mut erin] = household(&storage).await;
     ben.sync.test_rotate(Audience::Store, key(3)).await;
-    let path = ObjectPath::store_key(key(3), &erin.member.member_id());
+    let path = ObjectPath::store_key(store(1), key(3), &erin.member.member_id());
     ana.sync().await;
     storage.delete(&path).await.unwrap();
     let racing = Arc::new(CopyStorage {
@@ -318,7 +318,7 @@ async fn interrupted_copy_reuses_fixed_bytes_after_restart_and_lost_reply_counts
         let storage = storage();
         let [mut ana, mut ben, _dan, mut erin] = household(&storage).await;
         let rotation = ben.sync.test_rotate(Audience::Store, key(3)).await;
-        let path = ObjectPath::store_key(key(3), &erin.member.member_id());
+        let path = ObjectPath::store_key(store(1), key(3), &erin.member.member_id());
         ana.sync().await;
         storage.delete(&path).await.unwrap();
         let fault = Arc::new(CopyStorage {
@@ -414,7 +414,7 @@ async fn circle_rotations_share_only_with_current_circle_members() {
         .sync
         .test_rotate(Audience::Circle(circle(1)), key(11))
         .await;
-    let missing = ObjectPath::circle_key(circle(1), key(11), &erin.member.member_id());
+    let missing = ObjectPath::circle_key(store(1), circle(1), key(11), &erin.member.member_id());
     storage.delete(&missing).await.unwrap();
     ana.sync().await;
     erin.sync().await;
@@ -435,7 +435,7 @@ async fn circle_rotations_share_only_with_current_circle_members() {
         EntryOutcome::Kept
     );
     assert!(
-        matches!(storage.read(&ObjectPath::circle_key(circle(1), key(11), &dan.member.member_id())).await,
+        matches!(storage.read(&ObjectPath::circle_key(store(1), circle(1), key(11), &dan.member.member_id())).await,
         Err(error) if error.failure() == StorageFailure::NotFound)
     );
     ana.sync

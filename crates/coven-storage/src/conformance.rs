@@ -1,22 +1,47 @@
 use crate::*;
-use coven_foundation::id_source::DeviceId;
+use coven_foundation::id_source::{DeviceId, StoreId};
 use std::sync::Arc;
 
 /// Run identical object, range, prefix and immutable-create checks on any provider.
 /// The caller supplies the capability at construction, like production composition.
 pub struct Conformance {
     storage: Arc<dyn Storage>,
+    store: StoreId,
 }
 impl Conformance {
-    /// The provider under test, at an otherwise empty location.
-    pub fn new(storage: Arc<dyn Storage>) -> Self {
-        Self { storage }
+    /// The provider under test, with an unused store ID.
+    pub fn new(storage: Arc<dyn Storage>, store: StoreId) -> Self {
+        Self { storage, store }
+    }
+    /// Two stores may publish the same device and number in one provider location.
+    pub async fn shared_location(&self, other: StoreId) {
+        assert_ne!(self.store, other);
+        let first = ObjectPath::store_log(self.store, DeviceId(31), std::num::NonZeroU64::MIN);
+        let second = ObjectPath::store_log(other, DeviceId(31), std::num::NonZeroU64::MIN);
+        let (left, right) = tokio::join!(
+            self.storage.create(&first, b"first"),
+            self.storage.create(&second, b"second")
+        );
+        left.unwrap();
+        right.unwrap();
+        for (store, path, bytes) in [
+            (self.store, &first, b"first".as_slice()),
+            (other, &second, b"second".as_slice()),
+        ] {
+            assert_eq!(self.storage.read(path).await.unwrap(), bytes);
+            let listed = self.storage.list(&ObjectPrefix::all(store)).await.unwrap();
+            assert_eq!(listed.len(), 1);
+            assert_eq!(&listed[0].path, path);
+        }
+        self.storage.delete(&first).await.unwrap();
+        assert_eq!(self.storage.read(&second).await.unwrap(), b"second");
+        self.storage.delete(&second).await.unwrap();
     }
     /// Exercise the real provider operations, returning the first violated contract.
     pub async fn run(&self) -> Result<(), StorageError> {
         use coven_foundation::id_source::DeviceId;
-        let path = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
-        let other = ObjectPath::device_log(DeviceId(32), std::num::NonZeroU64::MIN);
+        let path = ObjectPath::device_log(self.store, DeviceId(31), std::num::NonZeroU64::MIN);
+        let other = ObjectPath::device_log(self.store, DeviceId(32), std::num::NonZeroU64::MIN);
         let data = b"encrypted bytes";
         self.storage.create(&path, data).await?;
         self.storage.create(&other, b"other").await?;
@@ -48,7 +73,7 @@ impl Conformance {
         self.storage.create_once(&path, data).await?;
         if self
             .storage
-            .list(&ObjectPrefix::device_log(DeviceId(31)))
+            .list(&ObjectPrefix::device_log(self.store, DeviceId(31)))
             .await?
             .into_iter()
             .map(|object| (object.path, object.size))
@@ -65,7 +90,7 @@ impl Conformance {
         {
             return Err(StorageFailure::Protocol.with_source("deleted object read"));
         }
-        let positions = ObjectPath::positions(DeviceId(31));
+        let positions = ObjectPath::positions(self.store, DeviceId(31));
         if !matches!(
             self.storage.begin_upload(&positions, 1).await,
             Err(error) if error.failure() == StorageFailure::InvalidPath
@@ -124,20 +149,6 @@ impl Conformance {
             );
         }
         self.storage.delete(&path).await?;
-        let first = ObjectPath::store_log(DeviceId(31), std::num::NonZeroU64::MIN);
-        self.storage
-            .setup(&first, data)
-            .await
-            .map_err(|error| match error {
-                StorageSetupError::Storage(error) => error,
-                error => StorageFailure::Protocol.with_source(error),
-            })?;
-        if self.storage.read(&first).await? != data {
-            return Err(
-                StorageFailure::Protocol.with_source("setup did not create the first entry")
-            );
-        }
-        self.storage.delete(&first).await?;
         Ok(())
     }
 }
@@ -151,8 +162,8 @@ impl Conformance {
         advance: impl std::future::Future<Output = ()>,
     ) {
         let storage = &self.storage;
-        let first = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
-        let second = ObjectPath::device_log(DeviceId(32), std::num::NonZeroU64::MIN);
+        let first = ObjectPath::device_log(self.store, DeviceId(31), std::num::NonZeroU64::MIN);
+        let second = ObjectPath::device_log(self.store, DeviceId(32), std::num::NonZeroU64::MIN);
         storage.create_once(&first, b"first").await.unwrap();
         storage.create_once(&second, b"second").await.unwrap();
         let expected = vec![
@@ -168,12 +179,18 @@ impl Conformance {
             },
         ];
         assert_eq!(
-            storage.list(&ObjectPrefix::device_logs()).await.unwrap(),
+            storage
+                .list(&ObjectPrefix::device_logs(self.store))
+                .await
+                .unwrap(),
             expected
         );
         advance.await;
         storage.create_once(&first, b"first").await.unwrap();
-        assert_eq!(storage.list(&ObjectPrefix::all()).await.unwrap(), expected);
+        assert_eq!(
+            storage.list(&ObjectPrefix::all(self.store)).await.unwrap(),
+            expected
+        );
         storage.delete(&first).await.unwrap();
         storage.delete(&second).await.unwrap();
     }
@@ -185,7 +202,7 @@ impl Conformance {
         expire: impl std::future::Future<Output = ()>,
     ) -> StorageError {
         let storage = &self.storage;
-        let path = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
+        let path = ObjectPath::device_log(self.store, DeviceId(31), std::num::NonZeroU64::MIN);
         let mut upload = storage.begin_upload(&path, 4).await.unwrap();
         expire.await;
         let error = storage.resume_upload(&mut upload).await.unwrap_err();
@@ -238,7 +255,7 @@ impl Conformance {
         lose: impl std::future::Future<Output = ()>,
     ) {
         let storage = &self.storage;
-        let path = ObjectPath::device_log(DeviceId(31), std::num::NonZeroU64::MIN);
+        let path = ObjectPath::device_log(self.store, DeviceId(31), std::num::NonZeroU64::MIN);
         let mut upload = storage
             .begin_upload(&path, part_size as u64 + 1)
             .await
@@ -275,10 +292,12 @@ impl Conformance {
     ) -> Vec<StorageError> {
         let storage = &self.storage;
         let path = ObjectPath::device_log(
+            self.store,
             coven_foundation::id_source::DeviceId(31),
             std::num::NonZeroU64::MIN,
         );
-        let positions = ObjectPath::positions(coven_foundation::id_source::DeviceId(31));
+        let positions =
+            ObjectPath::positions(self.store, coven_foundation::id_source::DeviceId(31));
         let mut pending = storage.begin_upload(&path, 4).await.unwrap();
         let mut ready = storage.begin_upload(&path, 4).await.unwrap();
         storage.upload_part(&mut ready, b"data").await.unwrap();
@@ -297,7 +316,11 @@ impl Conformance {
                 .await
                 .err()
                 .unwrap(),
-            storage.list(&ObjectPrefix::all()).await.err().unwrap(),
+            storage
+                .list(&ObjectPrefix::all(self.store))
+                .await
+                .err()
+                .unwrap(),
             storage.delete(&path).await.err().unwrap(),
             storage.begin_upload(&path, 4).await.err().unwrap(),
             storage.resume_upload(&mut pending).await.err().unwrap(),
