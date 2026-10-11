@@ -349,3 +349,101 @@ require the [other models' hypotheses](../coven.md#3-guarantees).
   transactions, snapshot contents, and eventual provider success are boundary
   conditions. Storage deletion and retention safety, full membership replay,
   row merge, and Rust correspondence are not proved here.
+
+## Signed roots and row authorship
+
+`RowAuthorship` is a proposal for the owner-table decision, without normative
+spec or format edits. It models one audience part of a contributing write:
+a nonempty tree of its original row changes, verification of that part's root
+in the signed header, and a snapshot multiproof. The decided header lists one
+keyed Merkle root per part. `Hashing` is supplied for a fixed audience-key
+context; `Signatures.verifies` abstracts header verification and selection of
+that part's authenticated root. Each readable part instantiates the argument.
+A leaf is domain-separated from a branch, and
+left/right order is authenticated. A hidden subtree opens no row leaf; the
+model makes no confidentiality claim about its hash. Tree shape and canonical
+serialization are format obligations;
+no concrete byte layout or cryptographic implementation is introduced.
+
+**Authenticity is proved under two explicit assumptions.**
+`Hashing.collisionFree` says equal abstract hashes have equal tagged inputs.
+`Signatures.unforgeable` says verification for a claimed member, write identity
+and root implies the member is that identity's admitted author and actually
+signed a body with that root. `signed` records the actual signing history;
+it is not a snapshot publisher's choice. The identity includes the store and
+device context; replay supplies admitted member keys. An author can sign
+several bodies for one identity. `signature_security_allows_two_bodies`
+checks this case under the same signature-security contract. Selecting one
+body per admitted write remains a merge-admission obligation; the authorship
+proof does not assume that selection or that authors avoid signing conflicts.
+These are parameters, not Lean axioms. Literal collision-free hashing is an
+idealization, not a claim that a finite SHA-256 digest is mathematically
+injective on all byte strings.
+
+`revealed_authentic` proves every opened leaf belongs to the original tree,
+including against altered tree shapes. `snapshot_authorship` combines that
+result with signature verification. `owned_row_true_author` requires an
+opened creation leaf for the claimed row identity, rather than trusting a
+creator field or an opaque hash. It proves the claimed member is that
+creating write's author. `cell_true_author` checks a surviving cell against
+its original writer's opened change and exact column/value projection.
+The caller must apply these checks to every owned row and required setter.
+Selecting the canonical creation for competing insertions of one logical key
+uses the merge admission rule described in B18; authenticating
+one creation does not prove it was the first or winning creation.
+
+**Completeness and hash minimality are proved for original leaves.**
+`prune` reveals requested original changes and replaces each maximal absent
+subtree with one hash. `prune_root` reconstructs the exact signed root.
+`multiproof_complete` gives exactly the requested leaves;
+`all_present_checkable` verifies all of them with one shared proof and the
+original signature. “Present” here means that original change is available
+for opening, which can include retained creator or old-setter evidence as
+well as displayed cells.
+
+`multiproof_minimal` proves no proof in the same fixed-tree format, revealing
+exactly that set of leaves, uses fewer hashes. `hashes_le_absent` bounds it by
+one hash per absent original row change. `untouched_no_hashes` gives zero
+when every original leaf is available. `absent_subtree_one_hash` compresses a
+whole missing subtree to one digest. Checked examples distinguish two
+adjacent leaves forming a subtree (one hash) from two adjacent leaves crossing
+the root's split (two hashes). Thus not every contiguous range takes one hash.
+The bound excludes signatures, identities, tree positions, framing and
+retained original payloads; it is not an information-theoretic lower bound
+against other encodings. A write contributing no needed leaf can be omitted
+from this snapshot rather than represented by a root-only proof.
+
+**Final merged rows plus hashes only for absent rows are insufficient.**
+The checked `merged_cells_need_original` history has one row: a creation
+writes cells `(7, 8)`, then an edit changes the second cell, leaving `(7, 9)`.
+The first cell still needs the creation's authorship, but the final row is not
+that creation's leaf. There are zero absent rows of the creating write, so
+the advertised absent-row hashes add nothing. Hashing the final row fails
+verification. `one_row_proof_required` proves this for every changed original
+payload; an unchanged original verifies by `prune_root`. The literal Lean
+example checks the changed pair. A hash hiding the entire original leaf also
+cannot prove the creator-to-row association: it opens no row at all.
+
+The corrected reading used for the positive proofs retains complete original
+changes needed for creator/cell proofs, or requires a further authenticated
+cell-level proof format. The model implements the former as revealed leaves.
+It does not prove the latter format, nor a zero-extra-payload claim for the
+former. Creator evidence may be needed even after every creation value has
+been overwritten; changes contributing only losses or provenance can also
+need openings. This evidence is independent of dismissible loss records.
+
+**Format boundaries remain explicit.** D5/D7 must define original-change
+retention, creation and setter identity, proof positions and malformed-proof
+rejection. D9/D11 must bind metadata and the ordered part-root list without
+weakening ciphertext/path authentication. The decided format stores 32 bytes
+per part, keys each root with its audience key to prevent outsiders testing
+row guesses, and permits signature verification without opening unreadable
+parts. Header parsing, root selection, key separation and that confidentiality
+claim remain outside this fixed-part authenticity argument. The model does
+not prove the existing encrypted
+chunk format permits a streaming row-root signature with zero additional
+bytes. Historical key selection, schema conversion, original-byte encoding,
+complete snapshots, latest-write selection, Merkle construction memory use,
+retention and Rust correspondence are outside these proofs. A publisher
+cannot alter a checked opening, but can still omit history; authentication
+alone is not a completeness or freshness proof. B18 lists the spec/API edits.

@@ -108,3 +108,19 @@ import CovenStorage
 #print axioms CovenStorage.ReplacementRead.Examples.restored_copy_can_send
 #print axioms CovenStorage.ReplacementRead.Examples.unsent_loss
 #print axioms CovenStorage.ReplacementRead.Examples.colliding_copies_lose_one_value
+
+#print axioms CovenStorage.RowAuthorship.revealed_authentic
+#print axioms CovenStorage.RowAuthorship.snapshot_authorship
+#print axioms CovenStorage.RowAuthorship.prune_root
+#print axioms CovenStorage.RowAuthorship.multiproof_complete
+#print axioms CovenStorage.RowAuthorship.prune_covers
+#print axioms CovenStorage.RowAuthorship.multiproof_minimal
+#print axioms CovenStorage.RowAuthorship.hashes_le_absent
+#print axioms CovenStorage.RowAuthorship.untouched_no_hashes
+#print axioms CovenStorage.RowAuthorship.absent_subtree_one_hash
+#print axioms CovenStorage.RowAuthorship.owned_row_true_author
+#print axioms CovenStorage.RowAuthorship.cell_true_author
+#print axioms CovenStorage.RowAuthorship.all_present_checkable
+#print axioms CovenStorage.RowAuthorship.Examples.merged_cells_need_original
+#print axioms CovenStorage.RowAuthorship.Examples.one_row_proof_required
+#print axioms CovenStorage.RowAuthorship.Examples.signature_security_allows_two_bodies
