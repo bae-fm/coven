@@ -3021,6 +3021,17 @@ Carol's tablet:
     the part lengths recorded when writes were authored or applied; neither
     decision rereads unchanged headers or decrypts snapshot rows
     ([One sync pass](sync-pass.md#what-survives-a-pass)).
+- Retention runs every pass: for each final write that passes the reader
+  positions or 30-day age gate below, request a fresh snapshot in this pass
+  or the next for every readable part audience whose current newest
+  counting snapshot does not cover it, including an audience with no
+  snapshot at all
+  ([`RetentionDeadline.refreshDue`](proofs/io/CovenIO/RetentionDeadline.lean),
+  [`AudienceRetention.first_witness`](proofs/io/CovenIO/AudienceRetention.lean)).
+  - E.g. Ana's only write is final and 30 storage days old, but below the
+    1 MiB growth threshold and never snapshotted: retention requests its
+    first snapshot, then waits for that snapshot's one-day age
+    ([`first_snapshot_deleted`](proofs/io/CovenIO/CommonReloadExamples.lean)).
 - Snapshot growth uses the latest checked local snapshot facts. Only when
   growth would request a new snapshot, a reload needs one, or a retention
   candidate becomes due, refresh the relevant audience's snapshot listing
@@ -3147,11 +3158,32 @@ Carol's tablet:
 - Each device advances its posted positions only over fully realized work.
   It can post new pending records without advancing them (§6).
 - Deleting a log object requires all of the following:
-  - snapshots cover every part of it;
+  - for each part audience, a counting snapshot covering the write landed
+    strictly more than one day ago, and that audience's current newest
+    counting snapshot also covers it
+    ([`Eligible`](proofs/io/CovenIO/Retention.lean),
+    [`SnapshotHistory.deleted_stays_covered`](proofs/io/CovenIO/Reload.lean));
   - every store-log entry that makes this coverage usable, or makes the
-    object unnecessary, is final (§9);
+    object unnecessary, is final (§9;
+    [`Eligible`](proofs/io/CovenIO/Retention.lean));
   - every device's posted write position has passed it, or storage has
-    held it for 30 days.
+    held it for 30 days
+    ([`recent_write_protected`](proofs/io/CovenIO/Retention.lean)).
+  - Each audience can have a different historical covering snapshot, and
+    its current snapshot need not itself be a day old; replacing a snapshot
+    does not restart the historical covering snapshot's age
+    ([`maturity_survives_new_snapshots`, `eligible_after_day`](proofs/io/CovenIO/Retention.lean)).
+  - Retain the checked prefix and landing time that establish historical
+    coverage while a retained write relies on them, even after the snapshot
+    body is removed; without that evidence, wait for a known covering
+    snapshot to mature (the historical-evidence premise of
+    [`bounded_witnessed_storage`](proofs/io/CovenIO/RetentionDeadline.lean);
+    durable preservation is an implementation obligation).
+  - E.g. Ana's store snapshot covering write 9 landed at noon Monday and
+    its replacement landed Tuesday morning: with current coverage of every
+    part and the other gates satisfied, deletion may run after noon Tuesday,
+    but not at noon itself
+    ([`eligible_after_day`](proofs/io/CovenIO/Retention.lean)).
   - Age compares storage times only: use the observed storage time T from
     §9 and the object's first stored time. A quiet store's due observation
     uses the per-device clock object in §9; unchanged positions are

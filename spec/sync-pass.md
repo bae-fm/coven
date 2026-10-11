@@ -38,8 +38,12 @@ These local records survive reopening and have no pass-end expiry:
   admit counting snapshots only through `T_c + one day`
   ([`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean)). Keep them while
   the snapshot or a boundary names them. Selection, identity and coverage
-  share them; a verified prefix
-  is never a claim that the body passed its checks.
+  share them; a verified prefix is never a claim that the body passed its
+  checks. Retain checked historical covering prefixes and landing times
+  while undeleted writes rely on their age, even if their snapshot bodies
+  have been removed (the historical-evidence premise of
+  [`bounded_witnessed_storage`](proofs/io/CovenIO/RetentionDeadline.lean);
+  durable preservation is an implementation obligation).
 - **Peer positions:** the last checked object identity and decoded positions,
   fingerprints and relevant reports, including invalid-position verdicts.
   Keep them until a completed observation replaces or removes that object.
@@ -151,8 +155,10 @@ still proceed; finality and age-based deletion wait for qualifying evidence.
 From saved entry times and covered-log times, compute the next instant at
 which §9 finality or §15's age tests could change. Include snapshot upload
 expiry at `T_c + one day`
-([`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean)). Include the last
-late entry's window and the strict boundary for finality; equality at 30 days
+([`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean)), and the first
+storage observation strictly after each covering snapshot's landing plus
+one day ([`eligible_after_day`](proofs/io/CovenIO/Retention.lean)). Include
+the last late entry's window and the strict boundary for finality; equality at 30 days
 does not establish it, and the finality endpoint is T′, not T. Include
 §6's drain deadline, strictly more than one day and five minutes after the
 saved qualifying storage time F. Include §15's return interval: a new device
@@ -440,7 +446,16 @@ writer across disk reading or cryptography.
 ### 8. Write snapshots and retain history
 
 Use cached signed prefixes and recorded write-part lengths to check
-growth. When growth would request a snapshot or a retention candidate is
+growth. Evaluate retention's indexed candidates every pass; for any final
+write satisfying the reader-positions or 30-day gate, request a snapshot in
+this pass or the next for each readable part audience whose current newest
+counting snapshot lacks coverage, even if no snapshot has ever covered it
+([`RetentionDeadline.refreshDue`](proofs/io/CovenIO/RetentionDeadline.lean),
+[`AudienceRetention.first_witness`](proofs/io/CovenIO/AudienceRetention.lean)).
+For example, one final 30-day-old write below the growth threshold still
+requests its first snapshot
+([`first_snapshot_deleted`](proofs/io/CovenIO/CommonReloadExamples.lean)).
+When growth would request a snapshot or a retention candidate is
 due, list only its relevant snapshot audience folders, sharing any discovery
 already performed for a reload. Read unchecked signed prefixes by range,
 then re-evaluate growth or coverage. A wait with unchanged prerequisites
@@ -469,6 +484,13 @@ noon Tuesday cannot become usable by landing later
 
 From the same write, snapshot and positions catalogs, delete only objects
 whose coverage, finality, age/reader positions and ownership satisfy §15.
+For every part audience require both current newest counting coverage and
+historical counting coverage whose landing was strictly more than one day
+ago; a replacement does not restart that historical age
+([`Eligible`, `maturity_survives_new_snapshots`](proofs/io/CovenIO/Retention.lean)).
+For example, replacing Monday noon's covering snapshot on Tuesday morning
+still permits deletion after Tuesday noon if all other gates hold
+([`eligible_after_day`](proofs/io/CovenIO/Retention.lean)).
 A header missing from the local facts requires one authenticated read,
 retained across passes; existing facts require no remote reads. Each
 successful deletion updates the local catalog and reference index. Retention
