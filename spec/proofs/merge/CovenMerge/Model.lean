@@ -71,7 +71,8 @@ structure Valid : Prop where
   parity : ∀ w r ch, M.chg w r = some ch → (ch.kind = .ins ↔ ch.gen % 2 = 0)
 
 /-- A set of writes is causally closed when it holds everything its writes
-had read. Every device's applied set is, by §7.1. -/
+had read. Ordinary receive preserves this property (§7.1). After exclusions,
+closure refers to the retained inputs defined in `Snapshot.lean`. -/
 def Closed (S : W → Prop) : Prop :=
   ∀ x, S x → ∀ a, M.past x a = true → S a
 

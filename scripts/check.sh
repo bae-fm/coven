@@ -130,6 +130,18 @@ proofs() {
         runner="$runner.exe"
     fi
     COVEN_CLOCK_LEAN="$runner" cargo test -p coven-database --all-features lean_differential_clocks -- --ignored
+
+    step "Rust / Lean differential causal receive test"
+    runner="$(cd spec/proofs/merge && pwd)/.lake/build/bin/receiveRunner"
+    if [ -f "$runner.exe" ]; then
+        runner="$runner.exe"
+    fi
+    if ! cargo test -p coven-database --all-features lean_differential_receive -- --list |
+        grep -x 'download::tests::lean_differential_receive: test' > /dev/null; then
+        echo "the Rust test binary is missing the causal receive differential" >&2
+        exit 1
+    fi
+    COVEN_RECEIVE_LEAN="$runner" cargo test -p coven-database --all-features lean_differential_receive -- --ignored
 }
 
 if [ "$part" != proofs ]; then

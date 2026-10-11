@@ -253,3 +253,84 @@ pub(crate) fn contents(
             .collect()
     })
 }
+
+/// Seed an independent authored log, with no reads of other devices.
+pub(crate) fn applied(database: &crate::Database, stamp: coven_merge::Timestamp, number: u64) {
+    use coven_format::{merge_fields, value::WritePositions};
+    database.inspect_writer(|db| {
+        db.internal_execute(
+            "INSERT INTO _coven_writes(timestamp,number,had_read) VALUES(?1,?2,?3)",
+            crate::params![
+                merge_fields::encode_timestamp(&stamp).unwrap(),
+                number.to_be_bytes().as_slice(),
+                merge_fields::encode_write_positions(&WritePositions(vec![])).unwrap(),
+            ],
+        )
+        .unwrap();
+        db.internal_execute("INSERT INTO _coven_positions(device,number) VALUES(?1,?2) ON CONFLICT(device) DO UPDATE SET number=excluded.number",crate::params![stamp.device().0.to_be_bytes().as_slice(),number.to_be_bytes().as_slice()]).unwrap();
+    });
+}
+
+pub(crate) fn lean_model(runner: &std::ffi::OsStr, input: serde_json::Value) -> serde_json::Value {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(runner)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+pub(crate) fn write_positions(numbers: [u64; 3]) -> coven_format::value::WritePositions {
+    use coven_format::value::WritePositions;
+    use coven_foundation::id_source::DeviceId;
+    use coven_merge::WriteId;
+    WritePositions(
+        numbers
+            .into_iter()
+            .enumerate()
+            .filter(|(_, number)| *number > 0)
+            .map(|(device, number)| WriteId {
+                device: DeviceId(device as u64 + 1),
+                number,
+            })
+            .collect(),
+    )
+}
+
+/// Replace consumed-log metadata with independent logs through the given positions.
+pub(crate) fn independent_logs(
+    database: &crate::Database,
+    passed: &coven_format::value::WritePositions,
+) {
+    database.inspect_writer(|db| {
+        db.internal_execute("DELETE FROM _coven_positions", [])
+            .unwrap();
+        db.internal_execute("DELETE FROM _coven_writes", [])
+            .unwrap();
+    });
+    // Seed only consumed writes from three independent authored logs.
+    for p in &passed.0 {
+        for number in 1..=p.number {
+            applied(
+                database,
+                coven_merge::Timestamp::new(number, 0, p.device).unwrap(),
+                number,
+            );
+        }
+    }
+}

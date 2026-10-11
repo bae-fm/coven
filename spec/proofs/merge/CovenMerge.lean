@@ -18,3 +18,7 @@ import CovenMerge.Accounting
 import CovenMerge.Boundary
 import CovenMerge.IntegrityExamples
 import CovenMerge.EntryCounterexample
+import CovenMerge.Receive
+import CovenMerge.ReceivePositions
+import CovenMerge.ReceiveMerge
+import CovenMerge.ReceiveExamples

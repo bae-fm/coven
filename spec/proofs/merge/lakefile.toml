@@ -1,5 +1,5 @@
 name = "covenMerge"
-defaultTargets = ["CovenMerge", "mergeRunner"]
+defaultTargets = ["CovenMerge", "mergeRunner", "receiveRunner"]
 
 [leanOptions]
 linter.unusedSectionVars = false
@@ -14,3 +14,7 @@ name = "CovenMerge"
 [[lean_exe]]
 name = "mergeRunner"
 root = "MergeRunner"
+
+[[lean_exe]]
+name = "receiveRunner"
+root = "ReceiveRunner"

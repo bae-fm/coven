@@ -1,13 +1,7 @@
-use std::io::Write;
-use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
-use coven_format::{
-    merge_fields,
-    value::{EntryPositions, WritePositions},
-    write::WriteRecord,
-};
+use coven_format::{value::EntryPositions, write::WriteRecord};
 use coven_foundation::{
     clock::FixedClock,
     id_source::{DeviceId, SequentialIds},
@@ -16,24 +10,9 @@ use coven_merge::{Audience, Timestamp, WriteId};
 use serde_json::{json, Value};
 
 use crate::snapshot_write::tests::{frames, stream};
-use crate::tests::{contents, TestStore};
+use crate::tests::{applied, contents, lean_model, TestStore};
 use crate::write::tests::{count, notes, records, sql, NOTES};
 use crate::{ApplyOutcome, Database, DbError, Migration, SnapshotError, SnapshotReload, WriteWait};
-
-fn applied(database: &crate::Database, stamp: Timestamp, number: u64) {
-    database.inspect_writer(|db| {
-        db.internal_execute(
-            "INSERT INTO _coven_writes(timestamp,number,had_read) VALUES(?1,?2,?3)",
-            crate::params![
-                merge_fields::encode_timestamp(&stamp).unwrap(),
-                number.to_be_bytes().as_slice(),
-                merge_fields::encode_write_positions(&WritePositions(vec![])).unwrap(),
-            ],
-        )
-        .unwrap();
-        db.internal_execute("INSERT INTO _coven_positions(device,number) VALUES(?1,?2) ON CONFLICT(device) DO UPDATE SET number=excluded.number",crate::params![stamp.device().0.to_be_bytes().as_slice(),number.to_be_bytes().as_slice()]).unwrap();
-    });
-}
 
 #[tokio::test]
 async fn bens_clock_behind_anas_write_raises_the_counter_and_records_every_applied_log() {
@@ -399,28 +378,6 @@ fn timestamp_json(timestamp: Timestamp) -> Value {
     ])
 }
 
-fn model(runner: &std::ffi::OsStr, input: Value) -> Value {
-    let mut child = Command::new(runner)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.to_string().as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout).unwrap()
-}
-
 fn latest(db: &Database) -> Timestamp {
     db.inspect_writer(|db| {
         crate::write_encoding::latest_timestamp(db)
@@ -465,7 +422,7 @@ async fn lean_differential_clocks() {
                     UNIX_EPOCH + Duration::from_millis(wall as u64)
                 });
                 let expected = if mode == 2 {
-                    let expected = model(
+                    let expected = lean_model(
                         &runner,
                         json!({
                             "wall": wall, "device": device.0, "latest": timestamp_json(latest(&db)),
@@ -484,7 +441,7 @@ async fn lean_differential_clocks() {
                 } else {
                     let mut expected = Value::Null;
                     for (index, causes) in [(1, false), (0, true), (1, true)] {
-                        expected = model(
+                        expected = lean_model(
                             &runner,
                             json!({
                                 "wall": wall, "device": device.0, "latest": timestamp_json(latest(&db)),

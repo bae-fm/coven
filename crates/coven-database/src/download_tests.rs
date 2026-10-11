@@ -919,3 +919,77 @@ async fn migration_download_advances_position_without_rows_or_losses() {
 
 #[path = "download_stream_tests.rs"]
 mod streams;
+
+fn pairs(positions: &WritePositions) -> Vec<[u64; 2]> {
+    positions.0.iter().map(|p| [p.device.0, p.number]).collect()
+}
+
+#[tokio::test]
+#[ignore = "requires the Lean executable; scripts/check.sh supplies COVEN_RECEIVE_LEAN"]
+async fn lean_differential_receive() {
+    let runner = std::env::var_os("COVEN_RECEIVE_LEAN")
+        .expect("COVEN_RECEIVE_LEAN must name the built Lean runner");
+    let store = TestStore::new();
+    let database = store.builder(vec![], vec![]).open().await.unwrap();
+    let mut cases = Vec::new();
+    let mut actual = Vec::new();
+    for a in 0..=2 {
+        for b in 0..=2 {
+            for c in 0..=2 {
+                let passed = crate::tests::write_positions([a, b, c]);
+                crate::tests::independent_logs(&database, &passed);
+                for device in 1..=3 {
+                    for number in 1..=3 {
+                        let write = WriteId {
+                            device: DeviceId(device),
+                            number,
+                        };
+                        if passed.covers(write) {
+                            continue; // Duplicate detection precedes prerequisite in production.
+                        }
+                        for x in 0..=2 {
+                            for y in 0..=2 {
+                                let mut reads = [0; 3];
+                                let mut others = (0..3).filter(|d| *d != device as usize - 1);
+                                reads[others.next().unwrap()] = x;
+                                reads[others.next().unwrap()] = y;
+                                let past = crate::tests::write_positions(reads);
+                                let header = WriteHeader {
+                                    position: write,
+                                    timestamp: Timestamp::new(100, 0, write.device).unwrap(),
+                                    had_read: past.clone(),
+                                    store_log_read: coven_format::value::EntryPositions(vec![]),
+                                    schema_version: 0,
+                                    disposition: WriteDisposition::Apply,
+                                };
+                                // Exercise the actual hold-until-ready function, including
+                                // its implicit preceding-own-write and metadata checks.
+                                let ready = database.inspect_writer(|db| {
+                                    match prerequisite(db, &header).unwrap() {
+                                        None => true,
+                                        Some(WriteWait::Writes(_)) => false,
+                                        other => panic!("unexpected prerequisite: {other:?}"),
+                                    }
+                                });
+                                cases.push(serde_json::json!({
+                                    "write": [device, number],
+                                    "past": pairs(&past),
+                                    "passed": pairs(&passed),
+                                }));
+                                actual.push(ready);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    database.close().await.unwrap();
+    let expected: Vec<bool> =
+        serde_json::from_value(crate::tests::lean_model(&runner, serde_json::json!(&cases)))
+            .unwrap();
+    assert_eq!(expected.len(), cases.len());
+    for ((case, rust), lean) in cases.iter().zip(actual).zip(expected) {
+        assert_eq!(rust, lean, "receive decision differs: {case}");
+    }
+}
