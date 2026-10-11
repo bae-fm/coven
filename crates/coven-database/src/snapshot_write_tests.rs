@@ -300,6 +300,12 @@ async fn circle_snapshot_has_only_its_rows_and_reference_metadata() {
         SyncedTable::new("roots", RowIdentity::SharedKey),
         SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience"),
     ], "CREATE TABLE roots(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,root TEXT REFERENCES roots(id)); CREATE INDEX note_root ON notes(root)").await.unwrap();
+    for circle in [
+        "00000000-0000-4000-8000-00000000000a",
+        "00000000-0000-4000-8000-00000000000b",
+    ] {
+        store.join_circle(&database, CircleId(uuid::Uuid::parse_str(circle).unwrap()));
+    }
     sql(&database, "INSERT INTO roots VALUES('root'); INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-00000000000a','root'),('00000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-00000000000b','root')").await.unwrap();
     let circle = Audience::Circle(CircleId(
         uuid::Uuid::parse_str("00000000-0000-4000-8000-00000000000a").unwrap(),

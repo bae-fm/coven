@@ -211,6 +211,7 @@ async fn deletion_and_reversal_commit_marks_and_visible_rows_together() {
             .await
             .unwrap();
     }
+    store.join_circle(&db, circle);
     db.write(move |sql| {
         sql.execute(
             "INSERT INTO notes VALUES(?1,?2,'gift')",
@@ -302,6 +303,7 @@ async fn deletion_and_reversal_commit_marks_and_visible_rows_together() {
     let db = open(&store).await;
     assert_eq!(db.store_log().await.unwrap(), committed);
     assert_eq!(count(&db, "notes"), 1);
+    store.join_circle(&db, circle);
     sql(&db, "UPDATE notes SET title='restored'").await.unwrap();
     db.close().await.unwrap();
 }
@@ -333,6 +335,7 @@ async fn circle_deletion_commits_file_removal_with_the_entry_and_rolls_both_back
             .await
             .unwrap();
     }
+    store.join_circle(&db, circle);
     db.write_with_files::<_, _, _, crate::DbError>(
         |batch| {
             batch.put_file("files", NOTE, b"original".to_vec());

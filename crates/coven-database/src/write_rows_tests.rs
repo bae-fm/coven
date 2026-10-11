@@ -31,6 +31,7 @@ const SCHEMA: &str = "
 async fn moving_note_42_moves_its_prewrite_descendants_and_readds_when_moved_back() {
     let store = TestStore::new();
     let database = store.schema(tables(), SCHEMA).await.unwrap();
+    store.join_circle(&database, CircleId(uuid::Uuid::parse_str(ANA).unwrap()));
     database
         .write(|context| {
             context.execute("INSERT INTO notes VALUES(?1,'Groceries','store')", [NOTE])?;
@@ -101,6 +102,7 @@ async fn repointing_a_descendant_moves_its_entire_subtree() {
         SyncedTable::new("todos", RowIdentity::IndependentUuid).audience_from("list_id"),
         SyncedTable::new("todo_labels", RowIdentity::SharedKey).key_columns(["todo_id", "label"]).audience_from("todo_id"),
     ], "CREATE TABLE lists(id TEXT NOT NULL PRIMARY KEY, audience TEXT NOT NULL); CREATE TABLE todos(id TEXT NOT NULL PRIMARY KEY, list_id TEXT NOT NULL REFERENCES lists(id)); CREATE TABLE todo_labels(todo_id TEXT NOT NULL REFERENCES todos(id),label TEXT NOT NULL,PRIMARY KEY(todo_id,label));").await.unwrap();
+    store.join_circle(&database, CircleId(uuid::Uuid::parse_str(ANA).unwrap()));
     database
         .write(|context| {
             context.execute("INSERT INTO lists VALUES(?1, 'store')", [ANA])?;
@@ -140,6 +142,7 @@ async fn circle_pins_can_read_store_notes_but_store_and_other_circles_cannot_rea
         SyncedTable::new("pins", RowIdentity::IndependentUuid).audience_column("audience"),
         SyncedTable::new("links", RowIdentity::SharedKey),
     ], "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE pins(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,note TEXT REFERENCES notes(id),pin TEXT REFERENCES pins(id)); CREATE TABLE links(id TEXT NOT NULL PRIMARY KEY,pin TEXT REFERENCES pins(id));").await.unwrap();
+    store.join_circle(&database, CircleId(uuid::Uuid::parse_str(ANA).unwrap()));
     database
         .write(|context| {
             context.execute("INSERT INTO notes VALUES('42')", [])?;

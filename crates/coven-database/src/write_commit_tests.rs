@@ -6,6 +6,273 @@ use crate::tests::{contents, TestStore};
 use crate::write::tests::{count, notes, records, sql, NOTES};
 use crate::{Database, Migration, SyncedTable};
 
+const CIRCLE: &str = "00000000-0000-4000-8000-00000000000a";
+const ROOT: &str = "00000000-0000-4000-8000-000000000001";
+const CIRCLE_SCHEMA: &str = "
+    CREATE TABLE roots(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,body TEXT);
+    CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,root TEXT NOT NULL REFERENCES roots(id) ON DELETE CASCADE,body TEXT);
+    CREATE TABLE events(id TEXT NOT NULL PRIMARY KEY,circle TEXT NOT NULL);
+    CREATE TABLE local_rows(id TEXT PRIMARY KEY);
+    CREATE TRIGGER event_root AFTER INSERT ON events WHEN NOT coven_applying()
+    BEGIN INSERT INTO roots VALUES(new.id,new.circle,'trigger'); END;
+";
+
+fn circle() -> coven_foundation::id_source::CircleId {
+    coven_foundation::id_source::CircleId(uuid::Uuid::parse_str(CIRCLE).unwrap())
+}
+
+fn circle_tables() -> Vec<SyncedTable> {
+    vec![
+        SyncedTable::new("roots", crate::RowIdentity::IndependentUuid).audience_column("audience"),
+        SyncedTable::new("children", crate::RowIdentity::IndependentUuid).audience_from("root"),
+        SyncedTable::new("events", crate::RowIdentity::SharedKey).shared_trigger("event_root"),
+    ]
+}
+
+fn leave_circle(db: &Database) {
+    let other = crate::store_log::tests::keys(2);
+    db.inspect_writer(|db| {
+        db.transaction(|db| {
+            db.internal_execute(
+                "INSERT INTO _coven_members(member,sealing,role,removed,access)
+                 VALUES(?1,?2,'member',0,?3)",
+                (
+                    other.signing.to_bytes(),
+                    other.sealing.as_bytes(),
+                    serde_json::to_vec(&coven_format::MemberAccess::S3AccessKey {
+                        access_key_id: "other-access-key".into(),
+                    })
+                    .unwrap(),
+                ),
+            )?;
+            db.internal_execute(
+                "UPDATE _coven_circle_members SET member=?1 WHERE circle=?2",
+                (other.signing.to_bytes(), CIRCLE),
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    });
+}
+
+#[tokio::test]
+async fn membership_refuses_sql_triggers_and_both_sides_of_moves_atomically() {
+    let store = TestStore::new();
+    let db = store.schema(circle_tables(), CIRCLE_SCHEMA).await.unwrap();
+    store.join_circle(&db, circle());
+    sql(&db, "
+        INSERT INTO roots VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-00000000000a','circle'),
+                                ('00000000-0000-4000-8000-000000000002','store','store');
+        INSERT INTO children VALUES('00000000-0000-4000-8000-000000000003','00000000-0000-4000-8000-000000000001','circle'),
+                                   ('00000000-0000-4000-8000-000000000004','00000000-0000-4000-8000-000000000002','store');
+    ").await.unwrap();
+    leave_circle(&db);
+    db.close().await.unwrap();
+    let db = store.schema(circle_tables(), CIRCLE_SCHEMA).await.unwrap();
+    let before = contents(&db);
+    for statement in [
+        "INSERT INTO roots VALUES('00000000-0000-4000-8000-000000000005','00000000-0000-4000-8000-00000000000a','new')",
+        "UPDATE roots SET body='changed' WHERE audience<>'store'",
+        "DELETE FROM roots WHERE audience<>'store'",
+        "INSERT INTO children VALUES('00000000-0000-4000-8000-000000000005','00000000-0000-4000-8000-000000000001','new')",
+        "UPDATE children SET body='changed' WHERE id='00000000-0000-4000-8000-000000000003'",
+        "DELETE FROM children WHERE id='00000000-0000-4000-8000-000000000003'",
+        "UPDATE roots SET audience='00000000-0000-4000-8000-00000000000a' WHERE audience='store'",
+        "UPDATE roots SET audience='store' WHERE audience<>'store'",
+        "UPDATE children SET root='00000000-0000-4000-8000-000000000001' WHERE id='00000000-0000-4000-8000-000000000004'",
+        "UPDATE children SET root='00000000-0000-4000-8000-000000000002' WHERE id='00000000-0000-4000-8000-000000000003'",
+        "INSERT INTO events VALUES('00000000-0000-4000-8000-000000000005','00000000-0000-4000-8000-00000000000a')",
+    ] {
+        let error = db.write(move |sql| {
+            sql.execute("INSERT INTO local_rows VALUES('local')", [])?;
+            sql.execute("UPDATE roots SET body='allowed' WHERE audience='store'", [])?;
+            sql.execute_batch(statement)?;
+            Ok(())
+        }).await.unwrap_err();
+        assert!(matches!(error, crate::DbError::NotInCircle(id) if id == circle()), "{statement}: {error:?}");
+        assert_eq!(contents(&db), before, "{statement}");
+    }
+    // Losing membership does not invalidate already committed work or store writes.
+    sql(
+        &db,
+        "UPDATE roots SET body='allowed' WHERE audience='store'",
+    )
+    .await
+    .unwrap();
+    assert_eq!(records(&db).len(), 2);
+    assert_eq!(records(&db)[1].header.position.number, 2);
+    store.join_circle(&db, circle());
+    sql(
+        &db,
+        "UPDATE roots SET body='joined' WHERE audience<>'store'",
+    )
+    .await
+    .unwrap();
+    assert_eq!(records(&db)[2].header.position.number, 3);
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn membership_is_rechecked_after_file_staging_and_refusal_discards_bytes() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let store = TestStore::new();
+    let tables = vec![
+        SyncedTable::new("files", crate::RowIdentity::IndependentUuid)
+            .audience_column("audience")
+            .carries_files(crate::FileDecl::new(
+                "files",
+                crate::Provenance::AppProvided,
+                crate::CacheFill::CacheLazy,
+            )),
+    ];
+    let db = store.schema(tables, "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT,audience TEXT NOT NULL); CREATE TABLE local_rows(id TEXT PRIMARY KEY)").await.unwrap();
+    store.join_circle(&db, circle());
+    let (mut producer, reader) = tokio::io::duplex(1);
+    let writing = tokio::spawn({
+        let db = db.clone();
+        async move {
+            db.write_with_files::<_, _, _, crate::DbError>(
+                move |batch| {
+                    batch.put_file(
+                        "files",
+                        ROOT,
+                        crate::FileSource::Stream(Box::pin(reader.take(8))),
+                    );
+                    Ok(())
+                },
+                |sql| {
+                    sql.execute("INSERT INTO local_rows VALUES('file')", [])?;
+                    sql.execute(
+                        "INSERT INTO files(id,audience) VALUES(?1,?2)",
+                        (ROOT, CIRCLE),
+                    )?;
+                    Ok(())
+                },
+            )
+            .await
+        }
+    });
+    // A one-byte pipe cannot accept both bytes until staging starts consuming it.
+    tokio::time::timeout(std::time::Duration::from_secs(5), producer.write_all(b"or"))
+        .await
+        .unwrap()
+        .unwrap();
+    leave_circle(&db);
+    let mut before = contents(&db);
+    before.get_mut("_coven_file_removals").unwrap().clear();
+    producer.write_all(b"iginal").await.unwrap();
+    producer.shutdown().await.unwrap();
+    let error = tokio::time::timeout(std::time::Duration::from_secs(5), writing)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(error, crate::DbError::NotInCircle(id) if id == circle()));
+    assert_eq!(contents(&db), before);
+    assert!(crate::file_write::tests::owned_paths(&store).is_empty());
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn refused_user_file_attachment_keeps_the_original_and_rolls_back_its_registration() {
+    let store = TestStore::new();
+    let db = store.schema(vec![SyncedTable::new("files", crate::RowIdentity::IndependentUuid)
+        .audience_column("audience")
+        .carries_files(crate::FileDecl::new("files", crate::Provenance::UserProvided, crate::CacheFill::CacheLazy))],
+        "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT,audience TEXT NOT NULL)").await.unwrap();
+    let original = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(original.path(), b"original").unwrap();
+    let prepared = crate::prepare_user_file(original.path(), |_| {})
+        .await
+        .unwrap();
+    let before = contents(&db);
+    let error = db
+        .write(move |sql| {
+            sql.insert_user_file(
+                "files",
+                ROOT,
+                prepared,
+                "INSERT INTO files(id,size,audience) VALUES(:id,8,:circle)",
+                &[(":id", &ROOT), (":circle", &CIRCLE)],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, crate::DbError::NotInCircle(id) if id == circle()));
+    assert_eq!(contents(&db), before);
+    assert_eq!(std::fs::read(original.path()).unwrap(), b"original");
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn attaching_unchanged_bytes_still_requires_current_circle_membership() {
+    for provenance in [
+        crate::Provenance::AppProvided,
+        crate::Provenance::UserProvided,
+    ] {
+        let store = TestStore::new();
+        let db = store.schema(vec![SyncedTable::new("files", crate::RowIdentity::IndependentUuid)
+            .audience_column("audience")
+            .carries_files(crate::FileDecl::new("files", provenance.clone(), crate::CacheFill::CacheLazy))],
+            "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT,audience TEXT NOT NULL)").await.unwrap();
+        store.join_circle(&db, circle());
+        let original = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(original.path(), b"original").unwrap();
+        for allowed in [true, false] {
+            let before = contents(&db);
+            let paths = crate::file_write::tests::owned_paths(&store);
+            let result = match provenance {
+                crate::Provenance::AppProvided => {
+                    db.write_with_files::<_, _, _, crate::DbError>(
+                        |batch| {
+                            batch.put_file("files", ROOT, b"original".to_vec());
+                            Ok(())
+                        },
+                        move |sql| {
+                            if allowed {
+                                sql.execute(
+                                    "INSERT INTO files(id,audience) VALUES(?1,?2)",
+                                    (ROOT, CIRCLE),
+                                )?;
+                            }
+                            Ok(())
+                        },
+                    )
+                    .await
+                }
+                crate::Provenance::UserProvided => {
+                    let prepared = crate::prepare_user_file(original.path(), |_| {})
+                        .await
+                        .unwrap();
+                    db.write(move |sql| {
+                        if allowed {
+                            sql.execute(
+                                "INSERT INTO files(id,size,audience) VALUES(?1,8,?2)",
+                                (ROOT, CIRCLE),
+                            )?;
+                        }
+                        sql.register_user_file("files", ROOT, prepared)?;
+                        Ok(())
+                    })
+                    .await
+                }
+            };
+            if allowed {
+                result.unwrap();
+                leave_circle(&db);
+            } else {
+                let error = result.unwrap_err();
+                assert!(matches!(error, crate::DbError::NotInCircle(id) if id == circle()));
+                assert_eq!(contents(&db), before);
+                assert_eq!(crate::file_write::tests::owned_paths(&store), paths);
+                assert_eq!(std::fs::read(original.path()).unwrap(), b"original");
+            }
+        }
+        db.close().await.unwrap();
+    }
+}
+
 const STEPS: &[(&str, &str)] = &[
     ("notes", "UPDATE"),
     ("_coven_writes", "INSERT"),

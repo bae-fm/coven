@@ -305,6 +305,7 @@ async fn snapshots_with_the_same_key_in_different_audiences_recompute_together()
     let b = b_store.schema(tables(), SCHEMA).await.unwrap();
     let c = c_store.schema(tables(), SCHEMA).await.unwrap();
     let circle = Audience::Circle(CircleId(uuid::Uuid::from_u128(10)));
+    b_store.join_circle(&b, CircleId(uuid::Uuid::from_u128(10)));
     sql(
         &a,
         "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','store','store')",

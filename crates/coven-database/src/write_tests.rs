@@ -43,6 +43,42 @@ pub(crate) fn notes() -> Vec<SyncedTable> {
 }
 
 #[tokio::test]
+async fn an_unknown_circle_refuses_the_whole_local_write() {
+    let store = TestStore::new();
+    let db = store.schema(
+        vec![SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience")],
+        "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL); CREATE TABLE local_rows(id TEXT PRIMARY KEY)",
+    ).await.unwrap();
+    let before = crate::tests::contents(&db);
+    let circle = coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(10));
+    let error = db
+        .write(move |sql| {
+            sql.execute("INSERT INTO local_rows VALUES('local')", [])?;
+            sql.execute(
+                "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','store')",
+                [],
+            )?;
+            sql.execute(
+                "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000002',?1)",
+                [circle.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, DbError::NotInCircle(id) if id == circle));
+    assert_eq!(crate::tests::contents(&db), before);
+    sql(
+        &db,
+        "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','store')",
+    )
+    .await
+    .unwrap();
+    assert_eq!(records(&db)[0].header.position.number, 1);
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn grocery_title_and_errands_tag_are_one_unsigned_write() {
     let store = TestStore::new();
     let database = store.schema(vec![
@@ -578,6 +614,12 @@ async fn writes_visit_only_indexed_rows_in_a_ten_thousand_row_store() {
         CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY,task TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,body TEXT);
         CREATE INDEX tasks_note ON tasks(note); CREATE INDEX items_task ON items(task);
         CREATE TABLE selection(note TEXT REFERENCES notes(id) ON DELETE CASCADE); CREATE INDEX selection_note ON selection(note);").await.unwrap();
+    store.join_circle(
+        &db,
+        coven_foundation::id_source::CircleId(
+            uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap(),
+        ),
+    );
     db.write(|context| {
         for n in 0..2000 {
             let note = format!("00000000-0000-4000-8000-{n:012x}");
@@ -676,6 +718,7 @@ async fn deleted_circles_remove_rows_and_remain_refused_after_reopening() {
         uuid::Uuid::parse_str("00000000-0000-4000-8000-00000000000a").unwrap(),
     );
     let db = store.schema(tables(), SCHEMA).await.unwrap();
+    store.join_circle(&db, circle);
     sql(&db,"INSERT INTO roots VALUES('r','before'),('other','unrelated'); INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-00000000000a','r')").await.unwrap();
     crate::store_log::tests::delete_circle(&db, circle)
         .await

@@ -5,6 +5,40 @@ use coven_foundation::{
 };
 
 #[tokio::test]
+async fn recovery_retains_committed_circle_writes_without_requiring_membership_again() {
+    use crate::{tests::TestStore, write::tests::records};
+    let source_store = TestStore::new();
+    let target_store = TestStore::new();
+    let tables = || {
+        vec![SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience")]
+    };
+    const SCHEMA: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL)";
+    let source = source_store.schema(tables(), SCHEMA).await.unwrap();
+    let target = target_store.schema(tables(), SCHEMA).await.unwrap();
+    let circle = coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(10));
+    source_store.join_circle(&source, circle);
+    source
+        .write(move |sql| {
+            sql.execute(
+                "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001',?1)",
+                [circle.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    source.inspect_writer(|source| {
+        source
+            .internal_execute("DELETE FROM _coven_circle_members", [])
+            .unwrap();
+        target.inspect_writer(|target| super::salvage(source, target).unwrap());
+    });
+    assert_eq!(records(&target), records(&source));
+    target.close().await.unwrap();
+    source.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn rebuilding_schema_does_not_author_seed_rows_or_migration_writes() {
     let root = tempfile::tempdir().unwrap();
     let store = StoreLayout::new(root.path().into())

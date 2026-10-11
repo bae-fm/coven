@@ -34,6 +34,50 @@ impl TestStore {
         self.directory.database_path()
     }
 
+    /// Supply committed membership for tests of local writes, without replaying a log.
+    pub(crate) fn join_circle(
+        &self,
+        database: &crate::Database,
+        circle: coven_foundation::id_source::CircleId,
+    ) {
+        let device = self.directory.settings().unwrap().device_id;
+        let keys = crate::store_log::tests::keys(1);
+        database.inspect_writer(|db| {
+            db.transaction(|db| {
+                db.internal_execute(
+                    "INSERT INTO _coven_members(member,sealing,role,removed,access)
+                     VALUES(?1,?2,'admin',0,?3) ON CONFLICT(member) DO NOTHING",
+                    (
+                        keys.signing.to_bytes(),
+                        keys.sealing.as_bytes(),
+                        serde_json::to_vec(&coven_format::MemberAccess::S3AccessKey {
+                            access_key_id: "fixture-access-key".into(),
+                        })
+                        .unwrap(),
+                    ),
+                )?;
+                db.internal_execute(
+                    "INSERT INTO _coven_devices(device,member,name,removed)
+                     VALUES(?1,?2,'Local device',0) ON CONFLICT(device) DO NOTHING",
+                    (device.0.to_be_bytes(), keys.signing.to_bytes()),
+                )?;
+                db.internal_execute(
+                    "INSERT INTO _coven_circles(circle,name,key,deleted)
+                     VALUES(?1,'Circle',?2,0) ON CONFLICT(circle) DO NOTHING",
+                    (circle.to_string(), circle.0.as_bytes()),
+                )?;
+                db.internal_execute(
+                    "INSERT INTO _coven_circle_members(circle,member)
+                     SELECT ?1,member FROM _coven_devices WHERE device=?2
+                     ON CONFLICT(circle,member) DO NOTHING",
+                    (circle.to_string(), device.0.to_be_bytes()),
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        });
+    }
+
     pub(crate) fn assert_writer_locked(&self) {
         assert!(matches!(
             self.directory.lock_exclusive(),

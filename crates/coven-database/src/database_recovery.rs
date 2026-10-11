@@ -27,7 +27,7 @@ pub(crate) fn salvage(
                 timestamp: record.header.timestamp,
                 had_read: record.header.had_read.clone(),
             })?;
-            crate::write_commit::queue(db, &record)?;
+            crate::write_commit::retain_queue(db, &record)?;
             let write = record.header.position;
             let args = (write.device.0.to_be_bytes(), write.number.to_be_bytes());
             if let Some(keys) = row.get::<_, Option<Vec<u8>>>(1)? {

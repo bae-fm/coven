@@ -519,6 +519,8 @@ async fn fingerprints_ignore_other_audience_removal_and_its_descendants() {
     let reverse = circle_db(&reverse_store).await;
     let ca = CircleId(uuid::Uuid::from_u128(10));
     let cb = CircleId(uuid::Uuid::from_u128(11));
+    a_store.join_circle(&a, ca);
+    b_store.join_circle(&b, cb);
     circle_note(&a, ca, "00000000-0000-4000-8000-000000000002").await;
     circle_note(&b, cb, "00000000-0000-4000-8000-000000000003").await;
     let ra = records(&a).remove(0);
@@ -575,6 +577,7 @@ async fn deleted_circle_takes_out_late_downloads_and_deletion_rolls_back_on_trig
     crate::store_log::tests::delete_circle(&receiver, circle)
         .await
         .unwrap();
+    source_store.join_circle(&source, circle);
     circle_note(&source, circle, "00000000-0000-4000-8000-000000000002").await;
     assert_eq!(
         receiver
@@ -657,6 +660,7 @@ async fn reset_exclusion_is_audience_scoped_and_counts_implicit_own_reads() {
     let source_store = TestStore::with_ids(&ids);
     let source = circle_db(&source_store).await;
     let circle = CircleId(uuid::Uuid::from_u128(10));
+    source_store.join_circle(&source, circle);
     circle_note(&source, circle, "00000000-0000-4000-8000-000000000002").await;
     sql(&source, "UPDATE notes SET title='late'").await.unwrap();
     let writes = records(&source);

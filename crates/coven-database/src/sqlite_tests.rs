@@ -357,6 +357,7 @@ async fn reference_cycle(store: &TestStore, reference: &str) -> crate::Database 
         .open()
         .await
         .unwrap();
+    store.join_circle(&db, CircleId(uuid::Uuid::parse_str(CYCLE_CIRCLE).unwrap()));
     db.write(|context| {
         context.execute(
             "INSERT INTO nodes VALUES(?1,?3,'first',?2),(?2,?3,'second',?1)",
@@ -670,6 +671,7 @@ async fn observation_and_local_write_sessions_cover_app_and_materialized_changes
     assert!(next(&mut audit).await.is_empty());
     assert!(next(&mut lost).await.is_empty());
     let circle = CircleId(uuid::Uuid::from_u128(7));
+    store.join_circle(&db, circle);
     db.write(move |sql| {
         sql.execute("INSERT INTO roots VALUES('root','before')", [])?;
         sql.execute(

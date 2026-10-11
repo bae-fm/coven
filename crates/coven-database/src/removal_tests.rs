@@ -392,6 +392,12 @@ async fn a_trigger_cannot_silently_ignore_a_required_restoration() {
 async fn moving_note_42_also_moves_its_removed_attachments() {
     let store = TestStore::new();
     let db = store.schema(vec![SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience"), SyncedTable::new("attachments", RowIdentity::IndependentUuid).audience_from("note_id")], "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL); CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,note_id TEXT REFERENCES notes(id),start INT,end INT,CONSTRAINT ordered CHECK(start<=end))").await.unwrap();
+    store.join_circle(
+        &db,
+        coven_foundation::id_source::CircleId(
+            uuid::Uuid::parse_str("00000000-0000-4000-8000-00000000000a").unwrap(),
+        ),
+    );
     sql(
         &db,
         "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000042','store'); INSERT INTO attachments VALUES('00000000-0000-4000-8000-000000000008','00000000-0000-4000-8000-000000000042',5,12)",
@@ -442,6 +448,12 @@ async fn store_wins_one_key_and_circles_use_their_generation_start() {
     for other in ["store", BEN] {
         let store = TestStore::new();
         let db = store.schema(vec![SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience")], "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,title TEXT)").await.unwrap();
+        store.join_circle(
+            &db,
+            coven_foundation::id_source::CircleId(
+                uuid::Uuid::parse_str("00000000-0000-4000-8000-00000000000a").unwrap(),
+            ),
+        );
         db.write(|context| {
             context.execute(
                 "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001',?1,'Circle')",

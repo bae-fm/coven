@@ -629,6 +629,12 @@ async fn a_move_preserves_the_owned_copy_and_a_panicking_write_removes_new_bytes
         ));
     let schema = "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT,audience TEXT NOT NULL)";
     let db = store.schema(vec![declaration], schema).await.unwrap();
+    store.join_circle(
+        &db,
+        coven_foundation::id_source::CircleId(
+            uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000002").unwrap(),
+        ),
+    );
     const ID: &str = "00000000-0000-4000-8000-000000000001";
     db.write_with_files::<_, _, _, crate::DbError>(
         |batch| {

@@ -145,6 +145,9 @@ pub enum DbError {
     /// A write targets a circle whose deletion has been applied (§14.7).
     #[error("circle {0} has been deleted")]
     DeletedCircle(coven_foundation::id_source::CircleId),
+    /// A local write targets a circle this member is not in or the store does not have (§14).
+    #[error("not a member of circle {0}")]
+    NotInCircle(coven_foundation::id_source::CircleId),
     /// An inserted row's independent key holds no UUID (§8.5).
     #[error("independent key {key:?} of {table} does not contain a canonical lowercase UUIDv4 or UUIDv7")]
     KeyNotUuid {

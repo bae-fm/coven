@@ -15,6 +15,12 @@ async fn changing_one_row_changes_only_one_leaf_and_its_audience_sum() {
         )
         .await
         .unwrap();
+    store.join_circle(
+        &db,
+        coven_foundation::id_source::CircleId(
+            uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000004").unwrap(),
+        ),
+    );
     sql(
         &db,
         "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','first','store')",

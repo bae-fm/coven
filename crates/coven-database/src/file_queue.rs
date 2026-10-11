@@ -66,6 +66,7 @@ pub(crate) fn attached(
     db: &DatabaseConnection,
     schema: &WriteSchema,
     keys: impl Iterator<Item = crate::write_rows::AppKey>,
+    device: coven_foundation::id_source::DeviceId,
     now: SystemTime,
 ) -> Result<(), DbError> {
     for (table, key) in keys {
@@ -75,7 +76,12 @@ pub(crate) fn attached(
             &table,
             &crate::file_row::key(&(table.clone(), key))?,
         ) {
-            Ok(reference) => enqueue(db, schema, &reference, now)?,
+            Ok(reference) => {
+                // Reattaching identical bytes can change only local file records,
+                // leaving no row-write part on which to check membership.
+                crate::write_commit::check_membership(db, device, &reference.audience())?;
+                enqueue(db, schema, &reference, now)?;
+            }
             Err(DbError::FileAbsent { .. }) => {}
             Err(error) => return Err(error),
         }

@@ -454,6 +454,7 @@ impl<'a> FileWrite<'a> {
             self.database,
             self.schema,
             self.attached.borrow().keys().cloned(),
+            self.device,
             now,
         )
     }

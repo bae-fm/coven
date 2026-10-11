@@ -29,6 +29,8 @@ async fn store_at_40_and_circle_at_38_replay_only_the_circles_missing_parts() {
     let b_store = TestStore::with_ids(&ids);
     let a = a_store.schema(tables(), SCHEMA).await.unwrap();
     let b = b_store.schema(tables(), SCHEMA).await.unwrap();
+    a_store.join_circle(&a, CircleId(uuid::Uuid::from_u128(10)));
+    b_store.join_circle(&b, CircleId(uuid::Uuid::from_u128(10)));
     let circle = Audience::Circle(CircleId(uuid::Uuid::from_u128(10)));
     sql(&a,"INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','store',1),('00000000-0000-4000-8000-000000000002','00000000-0000-0000-0000-00000000000a',1)").await.unwrap();
     for _ in 2..=38 {
@@ -305,6 +307,7 @@ async fn loading_a_parent_snapshot_recomputes_other_audiences_without_rewriting_
             .await
             .unwrap();
         let before = frames(&c, Audience::Store).await;
+        b_store.join_circle(&b, CircleId(uuid::Uuid::from_u128(10)));
         sql(&b,"INSERT INTO children VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','PaReNt')").await.unwrap();
         let history = |db: &Database| {
             db.inspect_writer(|db|db.query("SELECT generation,write_id FROM _coven_rows WHERE table_name='children' ORDER BY generation",[],|r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,i64>(1)?))).unwrap())
@@ -601,6 +604,7 @@ async fn an_empty_loaded_audience_still_limits_later_snapshot_reloads() {
     let b_store = TestStore::with_ids(&ids);
     let a = a_store.schema(tables(), SCHEMA).await.unwrap();
     let b = b_store.schema(tables(), SCHEMA).await.unwrap();
+    a_store.join_circle(&a, CircleId(uuid::Uuid::from_u128(10)));
     let circle = Audience::Circle(CircleId(uuid::Uuid::from_u128(10)));
     sql(
         &a,

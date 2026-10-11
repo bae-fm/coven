@@ -5,7 +5,8 @@ use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{audience_text, encoded};
 use crate::DbError;
 use coven_format::{merge_fields, value::Value, write::WriteRecord, write_stream::WriteEncoder};
-use coven_merge::{LostChange, RowId, RowUpdate, WriteId};
+use coven_foundation::id_source::DeviceId;
+use coven_merge::{Audience, LostChange, RowId, RowUpdate, WriteId};
 use rusqlite::params;
 use std::collections::BTreeMap;
 
@@ -152,10 +153,50 @@ pub(crate) fn persist(
     Ok(())
 }
 
-/// Keep the header followed directly by its parts' plaintext frame streams in
-/// `_coven_uploads`. Queue readers use format's header and part decoders; sync
-/// records sealing keys before the first upload attempt.
+/// Queue a new write only after authorizing every circle part.
+/// The caller's write transaction holds the writer lock through this check and
+/// commit, so a membership change cannot race the authorization.
 pub(crate) fn queue(database: &DatabaseConnection, record: &WriteRecord) -> Result<(), DbError> {
+    for part in &record.parts {
+        check_membership(database, record.header.position.device, &part.audience)?;
+    }
+    retain_queue(database, record)
+}
+
+/// Check row writes and file attachments against the same committed membership.
+/// The caller must keep its write transaction open until the authorized work commits.
+pub(crate) fn check_membership(
+    database: &DatabaseConnection,
+    device: DeviceId,
+    audience: &Audience,
+) -> Result<(), DbError> {
+    if let Audience::Circle(circle) = audience {
+        let member: bool = database.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM _coven_circle_members cm
+                JOIN _coven_circles c ON c.circle=cm.circle
+                JOIN _coven_devices d ON d.member=cm.member
+                JOIN _coven_members m ON m.member=d.member
+                WHERE cm.circle=?1 AND d.device=?2
+                  AND c.deleted=0 AND d.removed=0 AND m.removed=0
+            )",
+            params![circle.to_string(), device.0.to_be_bytes()],
+            |row| row.get(0),
+        )?;
+        if !member {
+            return Err(DbError::NotInCircle(*circle));
+        }
+    }
+    Ok(())
+}
+
+/// Retain already committed work even after its author leaves a circle (§14.6).
+/// The header is followed by its parts' plaintext frame streams; sync records
+/// sealing keys before the first upload attempt.
+pub(crate) fn retain_queue(
+    database: &DatabaseConnection,
+    record: &WriteRecord,
+) -> Result<(), DbError> {
     let encoder = encoded(WriteEncoder::new(record))?;
     let bytes = plaintext(database, encoder)?;
     database.internal_execute(
