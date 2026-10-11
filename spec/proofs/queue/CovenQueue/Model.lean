@@ -1,3 +1,4 @@
+import CovenMerge.Boundary
 import Std
 
 /-! Queue identities and audience verdicts: coven §6, §7, §17.1, §19.3;
@@ -25,12 +26,37 @@ inductive Disposition where
   | migration
   deriving DecidableEq, Repr
 
+/-- Row identity, generation and data sources retain their authored meaning
+through conversion. Values are abstract plaintext scalars in the old shape
+when frozen. A lost delete may have no scalar at all. -/
+inductive ChangeContent where
+  | values (written : List Nat)
+  | frozen (cause : CovenMerge.LossCause Nat) (written : List Nat)
+  deriving DecidableEq, Repr
+
+structure RowChange where
+  row : Nat
+  generation : Nat
+  operation : CovenMerge.Kind
+  provenance : CovenMerge.DataDependency.Provenance Nat Nat
+  content : ChangeContent
+  deriving DecidableEq, Repr
+
+def RowChange.values (ch : RowChange) : List Nat :=
+  match ch.content with
+  | .values xs | .frozen _ xs => xs
+
+def RowChange.frozen (ch : RowChange) : Bool :=
+  match ch.content with
+  | .values _ => false
+  | .frozen _ _ => true
+
 structure Record where
   identity : Identity
   version : Nat
   disposition : Disposition
-  /-- Abstract canonical plaintext row records, including their audiences. -/
-  body : List Nat
+  /-- A row includes its table, key and audience. Each appears at most once. -/
+  body : List RowChange
   deriving DecidableEq, Repr
 
 /-- Own earlier numbers are read even though D5 omits them from `had_read`. -/
@@ -51,21 +77,18 @@ structure Raise extends Boundary where
   version : Nat
   deriving DecidableEq, Repr
 
-/-- Effects discarded when this boundary was adopted. These are retained
-verdicts reconstructed from the author's store-log past and boundary inputs,
-not extra fields in D5 and not dismissible loss values (§17.1). -/
-structure Adoption where
-  entry : Nat
-  discarded : List WriteId
-  deriving DecidableEq, Repr
-
 /-- One audience's selected boundaries. Selection and store-log finality are
 inputs; replay may replace this view and rebuild from retained records (§9). -/
 structure View where
   raise : Option Raise
   reset : Option Boundary
-  adoptions : List Adoption
+  /-- Per-change verdicts retained with the selected snapshot, separate from
+  dismissible losses. Keys use the history's fixed write enumeration. -/
+  drops : List (Nat × Nat × CovenMerge.LossCause Nat)
   deriving DecidableEq, Repr
+
+def snapshotLoss (v : View) (w r : Nat) : Option (CovenMerge.LossCause Nat) :=
+  ((v.drops.find? fun x => x.1 == w && x.2.1 == r).map fun x => x.2.2)
 
 inductive Refusal where
   | notAuthorized
@@ -74,7 +97,7 @@ inductive Refusal where
 
 inductive Verdict where
   | applied
-  | excluded (entry : Nat)
+  | excluded (entry version : Nat)
   | ignored (entry : Nat)
   | refused (reason : Refusal)
   deriving DecidableEq, Repr
@@ -93,24 +116,10 @@ def outsideRaise (b : Raise) (w : Record) : Bool :=
   !(w.identity.id ∈ b.covers) && (w.version < b.version ||
     match w.disposition with | .lost _ => true | _ => false)
 
-/-- A passed discarded position is not a state input after adoption (§7.1,
-§17.1, §19.3). This is per audience: other parts have their own view. -/
-def usesDiscarded (w : Record) : Verdict → Bool
-  | .excluded e | .ignored e => !(e ∈ w.identity.storeRead)
-  | _ => false
-
-def discardedBefore (view : View) (w a : Identity) : Bool :=
-  view.adoptions.any fun b => b.entry ∈ w.storeRead && a.id ∈ b.discarded
-
-def excludedInput (w : Record) (causes : List Verdict) : Option Nat :=
-  causes.findSome? fun v => match v with
-    | .excluded e => if e ∈ w.identity.storeRead then none else some e
-    | _ => none
-
-/-- Complete causal inputs are supplied by the receiver. A refused cause
-stops the log before this function is called (§19.1). Resets take precedence
-over schema loss in their audience (§17.1). -/
-def classify (view : View) (w : CheckedWrite) (causes : List Verdict) : Verdict :=
+/-- Whole-write admission examines only this write's own authority, selected
+reset and schema version/coverage. Data loss is decided per row change by
+`DataDependency`, after this decision. Recorded write reads never exclude it. -/
+def classify (view : View) (w : CheckedWrite) : Verdict :=
   match w.refusal with
   | some r => .refused r
   | none =>
@@ -120,11 +129,11 @@ def classify (view : View) (w : CheckedWrite) (causes : List Verdict) : Verdict 
 where
   schema :=
     match view.raise with
-    | some b => if outsideRaise b w.record then .excluded b.entry else inherited
-    | none => inherited
-  inherited :=
-    match excludedInput w.record causes with
-    | some e => .excluded e
+    | some b => if outsideRaise b w.record then .excluded b.entry b.version else .applied
     | none => .applied
+
+theorem recorded_reads_do_not_exclude (v : View) (w : CheckedWrite) (frontier : List WriteId) :
+    classify v { w with record := { w.record with
+      identity := { w.record.identity with read := frontier } } } = classify v w := rfl
 
 end CovenQueue

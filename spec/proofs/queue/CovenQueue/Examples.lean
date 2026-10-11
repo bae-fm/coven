@@ -7,12 +7,13 @@ namespace CovenQueue.Examples
 
 def record (device number version : Nat) (read : List WriteId := [])
     (storeRead : List Nat := []) (body : List Nat := [42]) : Record :=
-  ⟨⟨⟨device, number⟩, number, read, storeRead⟩, version, .ordinary, body⟩
+  ⟨⟨⟨device, number⟩, number, read, storeRead⟩, version, .ordinary,
+    [⟨0, 0, .ins, ⟨none, []⟩, .values body⟩]⟩
 
 def raised : View := ⟨some ⟨⟨10, []⟩, 2⟩, none, []⟩
 
-/-- Ben's old 1 is outside S; new-schema 2 still read its excluded effects.
-After atomic adoption, 3 reads passed positions without discarded values. -/
+/-- Implicit own reads do not inherit exclusion. These row changes carry no
+source from the excluded old-schema write. -/
 def writes (n : Nat) : CheckedWrite :=
   ⟨record 0 (n + 1) (if n = 0 then 1 else 2) [] (if 2 ≤ n then [10] else []), none⟩
 
@@ -21,44 +22,26 @@ theorem own_history_causal : Causal writes := by
   simp [reads, writes, record] at hr
   omega
 
-theorem exclusion_chain_and_new_write :
-    evaluate writes raised 0 = .excluded 10 ∧
-    evaluate writes raised 1 = .excluded 10 ∧
-    evaluate writes raised 2 = .applied := by
-  simp [evaluate_eq, List.range_succ, causes, writes, record, raised, classify, classify.schema,
-    classify.inherited, outsideRaise, excludedInput, reads, discardedBefore]
+theorem independent_own_tail :
+    evaluate writes raised 0 = .excluded 10 2 ∧
+    evaluate writes raised 1 = .applied ∧
+    evaluate writes raised 2 = .applied := by decide
 
-def raisedAgain : View := ⟨some ⟨⟨11, []⟩, 3⟩, none,
-  [adoptionFrom writes raised 10 2]⟩
-
+def raisedAgain : View := ⟨some ⟨⟨11, []⟩, 3⟩, none, []⟩
 def convertedAgain (n : Nat) : CheckedWrite :=
-  if n < 2 then writes n else
-    ⟨{ (writes n).record with version := 3 }, none⟩
+  if n < 2 then writes n else ⟨{ (writes n).record with version := 3 }, none⟩
 
-/-- The old attempted write is excluded at each raise. A new write made
-after adopting the first raise never used its discarded values, even after
-conversion for the second raise. -/
-theorem repeated_raise_preserves_discarded_inputs :
-    (adoptionFrom writes raised 10 2).discarded = [⟨0, 1⟩, ⟨0, 2⟩] ∧
-    evaluate convertedAgain raisedAgain 2 = .applied := by
-  simp [adoptionFrom, evaluate_eq, List.range_succ, causes, convertedAgain,
-    writes, record, raised, raisedAgain, classify, classify.schema,
-    classify.inherited, outsideRaise, excludedInput, reads, discardedBefore]
+theorem repeated_raise_independent : evaluate convertedAgain raisedAgain 2 = .applied := by decide
 
 example : Judged writes raised 2 .applied := by
   have h := every_write_judged writes raised (fun _ => rfl) 2
-  exact exclusion_chain_and_new_write.2.2 ▸ h
+  exact independent_own_tail.2.2 ▸ h
 
 def retained : View := ⟨some ⟨⟨10, [⟨0, 1⟩]⟩, 2⟩, none, []⟩
-
 def peerWrites (n : Nat) : CheckedWrite :=
-  if n = 0 then ⟨record 0 1 1, none⟩
-  else ⟨record 1 n 2 [⟨0, 1⟩], none⟩
+  if n = 0 then ⟨record 0 1 1, none⟩ else ⟨record 1 n 2 [⟨0, 1⟩], none⟩
 
-example : evaluate peerWrites retained 0 = .applied ∧
-    evaluate peerWrites retained 1 = .applied := by
-  simp [evaluate_eq, List.range_succ, causes, peerWrites, record, retained, classify, classify.schema,
-    classify.inherited, outsideRaise, excludedInput, reads, discardedBefore]
+example : evaluate peerWrites retained 0 = .applied ∧ evaluate peerWrites retained 1 = .applied := by decide
 
 def resetView : View := ⟨none, some ⟨20, []⟩, []⟩
 def resetWrites (n : Nat) : CheckedWrite :=
@@ -67,19 +50,12 @@ def resetWrites (n : Nat) : CheckedWrite :=
 theorem reset_history :
     evaluate resetWrites resetView 0 = .ignored 20 ∧
     evaluate resetWrites resetView 1 = .ignored 20 ∧
-    evaluate resetWrites resetView 2 = .applied := by
-  simp [evaluate_eq, List.range_succ, causes, resetWrites, record, resetView, classify, classify.schema,
-    classify.inherited, beforeReset, excludedInput, reads, discardedBefore]
+    evaluate resetWrites resetView 2 = .applied := by decide
 
-/-- One write can be ignored in the reset circle and applied in the store.
-An unrestricted whole-write verdict is therefore not the spec's statement. -/
 example : evaluate resetWrites resetView 0 = .ignored 20 ∧
-    evaluate resetWrites ⟨none, none, []⟩ 0 = .applied := by
-  simp [evaluate_eq, causes, resetWrites, record, resetView, classify, classify.schema,
-    classify.inherited, beforeReset, excludedInput]
+    evaluate resetWrites ⟨none, none, []⟩ 0 = .applied := by decide
 
-example : classify raised ⟨record 0 1 2, some .notAuthorized⟩ [] =
-    .refused .notAuthorized := by decide
+example : classify raised ⟨record 0 1 2, some .notAuthorized⟩ = .refused .notAuthorized := by decide
 
 example : (Materialized.load [0]).consume 0 .applied = Materialized.load [0] ∧
     ((Materialized.load []).consume 0 .applied).consume 0 .applied =
@@ -102,29 +78,50 @@ def untriedHistory (n : Nat) : Pending × Option Refusal :=
 def attemptedHistory (n : Nat) : Pending × Option Refusal :=
   if n = 0 then ⟨.tried attempt, none⟩ else untriedHistory n
 
-/-- Attempt status cannot change receive conversion. Both queued records
-retain the old schema; their interpreted records use the supplied conversion. -/
+theorem untried_valid : DataValid (checkedHistory untriedHistory) where
+  uniqueRows w := by simp [checkedHistory, untriedHistory, record, Pending.record]
+  earlier w r a ha := by
+    by_cases row : 0 = r <;>
+      simp [provenance, rowChange, checkedHistory, untriedHistory, Pending.record,
+        record, row, CovenMerge.DataDependency.Provenance.sources] at ha
+  sourcePresent w r a ha := by
+    by_cases row : 0 = r <;>
+      simp [provenance, rowChange, checkedHistory, untriedHistory, Pending.record,
+        record, row, CovenMerge.DataDependency.Provenance.sources] at ha
+
+theorem attempted_same : checkedHistory attemptedHistory = checkedHistory untriedHistory := by
+  funext w
+  by_cases zero : w = 0 <;>
+    simp [checkedHistory, attemptedHistory, untriedHistory, zero, attempt, firstRecord, Pending.record]
+
+theorem attempted_valid : DataValid (checkedHistory attemptedHistory) := attempted_same ▸ untried_valid
+
+/-- Attempt status cannot change receive conversion or rewrite upload originals. -/
 theorem conversion_uses_actual_predecessor :
-    (receive rename raised (checkedHistory untriedHistory) 1).2 = .applied ∧
-    (receive rename raised (checkedHistory attemptedHistory) 1).2 = .applied ∧
-    (receive rename raised (checkedHistory attemptedHistory) 1).1.body = [99, 42] := by
-  have hu : (receive rename raised (checkedHistory untriedHistory) 0).2 = .applied := by
-    rw [receive_eq]; decide
-  have ht : (receive rename raised (checkedHistory attemptedHistory) 0).2 = .applied := by
-    rw [receive_eq]; decide
-  simp only [rename, raised] at hu ht
-  rw [receive_eq rename raised (checkedHistory untriedHistory) 1,
-    receive_eq rename raised (checkedHistory attemptedHistory) 1]
-  simp [checkedHistory, causes, List.range_succ, untriedHistory,
-    attemptedHistory, rename, raised, record, attempt, firstRecord, reads,
-    discardedBefore, resetIgnores, interpret, convertRecord, Pending.record, classify,
-    classify.schema, classify.inherited, outsideRaise, excludedInput, hu, ht]
+    (receive rename raised (checkedHistory untriedHistory) untried_valid 1).2 = .applied ∧
+    (receive rename raised (checkedHistory attemptedHistory) attempted_valid 1).2 = .applied ∧
+    (receive rename raised (checkedHistory attemptedHistory) attempted_valid 1).1.body =
+      [⟨0, 0, .ins, ⟨none, []⟩, .values [99, 42]⟩] := by
+  simp only [attempted_same]
+  have kept : CovenMerge.DataDependency.retained
+      (preparedState rename raised (checkedHistory untriedHistory) untried_valid) 1 0 = true := by
+    rw [CovenMerge.DataDependency.retained_eq]
+    rfl
+  have loss : conversionLosses rename raised (checkedHistory untriedHistory) untried_valid 1 0 = none := by
+    change (if CovenMerge.DataDependency.retained
+      (preparedState rename raised (checkedHistory untriedHistory) untried_valid) 1 0 then none else some _) = none
+    rw [kept]; rfl
+  refine ⟨by decide, by decide, ?_⟩
+  change [convertChange (fun xs => 99 :: xs)
+    (conversionLosses rename raised (checkedHistory untriedHistory) untried_valid 1)
+      ⟨0, 0, .ins, ⟨none, []⟩, .values [42]⟩] = _
+  simp [convertChange, loss]
 
 /-- An injective concrete encoding is unnecessary for the byte equality
 theorems. This example includes body, version, format and key choices. -/
 def encode (a : Attempt) : Bytes :=
   [a.record.identity.id.device, a.record.identity.id.number,
-   a.record.version, a.format] ++ a.keys ++ a.record.body
+   a.record.version, a.format] ++ a.keys ++ a.record.body.flatMap RowChange.values
 
 def committed : World := { World.empty 0 with queue := (World.empty 0).queue.commit firstRecord }
 def prepared : World := { committed with queue := committed.queue.prepare 2 [7] }
@@ -197,7 +194,7 @@ theorem crash_retry_settles : Reachable encode 0
 /-- A locally captured snapshot can cover an unuploaded head. Publication
 must wait: captured coverage alone cannot settle the upload. -/
 theorem coverage_is_not_storage :
-    classify retained ⟨firstRecord, none⟩ [] = .applied ∧
+    classify retained ⟨firstRecord, none⟩ = .applied ∧
     prepared.queue.head = some attempt ∧ prepared.stored 1 = none ∧
     prepared.queue.settled = 0 := by decide
 
@@ -209,10 +206,11 @@ example : (committed.queue.commit (record 0 9 1)).waiting.map
       (fun p => p.record.identity.id.number) = [1, 2] ∧
     (committed.queue.commit (record 0 9 1)).reserved = 2 := by decide
 
-example : convertRecord rename false firstRecord =
-      { firstRecord with version := 2, body := [99, 42] } ∧
-    convertRecord rename true firstRecord = { firstRecord with disposition := .lost 2 } ∧
-    (rebuild rename raised ⟨attemptedHistory, checkedHistory attemptedHistory⟩).uploads 0 =
+example : convertRecord rename (fun _ => none) firstRecord =
+      { firstRecord with version := 2, body := [⟨0, 0, .ins, ⟨none, []⟩, .values [99, 42]⟩] } ∧
+    convertRecord rename (fun _ => some (.dependency 1 [0])) firstRecord =
+      { firstRecord with version := 2, body := [⟨0, 0, .ins, ⟨none, []⟩, .frozen (.dependency 1 [0]) [42]⟩] } ∧
+    (rebuild rename raised ⟨attemptedHistory, checkedHistory attemptedHistory, attempted_valid⟩).uploads 0 =
       (.tried attempt, none) := by decide
 
 example : checkIdentity 0 ⟨5, 0, 0⟩ (some ⟨some 0, false, ⟨7, 0, 0⟩⟩) = .storageAhead ∧

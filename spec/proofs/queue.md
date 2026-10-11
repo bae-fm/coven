@@ -7,8 +7,12 @@ the queue rules in [§6](../coven.md#6-syncing-writes),
 [§17.1](../coven.md#171-host-application), [§18](../coven.md#18-operations),
 and [§19.3](../coven.md#193-resetting-a-store).
 The Lean source is in [queue/](queue/), using Lean 4.34.1 without Mathlib.
-The upload-before-raise rule below is the chosen proposal for §17.1 and §15;
-this package does not edit the spec or Rust.
+
+The schema-exclusion and conversion model is a proposal implementing the
+data-dependency principle together with upload before a schema raise. It
+supersedes §17.1's inherited exclusion through recorded reads and conversion
+of untried upload records; the normative spec and Rust are unchanged. The edit
+checklist below identifies the required changes.
 
 There are checked limits to the requested claims. Storage accepting retries
 does not help a write that never reaches its first attempt. And §6 and §14.6
@@ -19,11 +23,18 @@ from replay restarts, and visible storage objects from atomic application.
 ## The model
 
 A committed record has a device, number, timestamp, recorded reads, schema
-version, disposition and plaintext body. Commit assigns the next number.
+version, disposition and plaintext row changes. Each change retains its row
+identity, generation, operation, generation-source write and replaced cell
+setters. Its content is either ordinary values or a frozen original change
+with a loss cause. Commit assigns the next number.
 Only the head can be attempted or acknowledged. The first attempt fixes the
 format and all sealing key ids. Migration preserves every queued record,
 including untried plaintext, in its original schema. Receive conversion produces
 a separate interpretation; it changes neither the upload record nor its attempt.
+Only uncovered late ordinary writes use the winning raise's converter. The
+raising device's captured old writes upload first and enter the snapshot;
+other devices' late writes are interpreted on receipt. After a competing raise,
+the original author uses that same receive path when rebuilding its data.
 
 The queue retains plaintext and key choices, not ciphertext. An arbitrary
 deterministic encoding function produces the bytes. Sending, storage accepting
@@ -52,43 +63,98 @@ data afterward only as evidence about the execution, not as another table.
 
 Each audience has its own selected raise and reset. The received history
 supplies checked author authority and immutable-object validation results.
-The evaluator computes applied, excluded, reset-ignored or refused. Its
-dependency list includes implicit earlier writes by the same device.
+`classify` decides the write's own admission: applied, schema-excluded,
+reset-ignored or refused. Reads still determine receive readiness, including
+implicit earlier writes by the same device. They do not propagate exclusion.
+`recorded_reads_do_not_exclude` checks that changing a recorded write frontier
+cannot change this admission decision.
 
-Adoption also retains which effects were discarded. `adoptionFrom` derives
-that list from the earlier view's checked verdicts. It is separate from loss
-values, so dismissing a loss cannot erase it. Later raises still respect those
-earlier cuts in state inputs. Nothing new is added to the wire format:
-§17.1 requires reconstructing these facts from the author's recorded store-log
-past and retained boundary inputs.
+`classifyChange` uses the shared
+[`DataDependency.dependsOnDropped` definition](merge.md#b17-receive-order-progress-and-dropping-by-data),
+through its `retained` decision. A change loses if its generation source or a
+cell setter it replaced has a dropped change at that row. It never uses the
+source write's other rows to decide. Recursion carries losses through later
+changes without dropping an unrelated change in the same write. One D5 row
+change is the unit, including all its columns; a delete retains an identity
+even with no scalar values.
+
+The adoption-exclusion list and read-based conversion refusal are removed.
+No read-adoption marker is needed for data dependency. The selected raise/reset,
+snapshot coverage and `store_log_read` remain for their own boundary rules.
+Authentic provenance and admission facts remain retained merge evidence,
+separate from dismissible loss display records. Loss dismissal cannot change
+them. This requires retained evidence beyond today's compact D5/D7 records;
+it is not a claim that the current wire bytes provide previous setter ids.
+`View.drops` carries the selected snapshot's per-change loss verdicts;
+`captureDrops` derives them from actual classified changes. A consumed position
+covered by a later snapshot cannot redeem a previously excluded source.
+`snapshot_drop_stays_dropped` and `snapshot_loss_preserves_cause` prove that
+retaining this evidence preserves the drop and its original cause. This is
+per-change evidence, not an adoption marker or a list searched by a frontier.
+`captured_loss_original` traces every captured verdict to its original change;
+`capture_loss_lookup` preserves its exact cause. `captured_losses_converge`
+proves that receipt order and duplicate receipt identities cannot change any
+lookup result in the captured evidence.
 
 ## What is proved
 
-**Devices agree on verdicts.** `verdict_agreement` compares two independent
-evaluations through the dependency graph. Given the same checked records,
-selected boundaries and retained adoption facts, they have the same answer for
-each write they can judge. `every_write_judged` constructs an answer for every
-write in an available history without permanent refusals. The proof covers
-the author's waiting writes and incoming writes through the same classifier.
-It does not assume devices receive the same information at the same instant.
+**Devices agree on whole-write and per-change decisions.** `verdict_agreement`
+compares judgments with the same checked history and selected boundaries.
+`every_write_judged` constructs an answer when prerequisites are available and
+not refused. `changes_converge` includes the complete original changes and
+their frozen causes, for any receipt lists containing the same writes.
+`applied_has_no_dropped_source` checks that every applied change's data sources
+survived. An excluded old-version write freezes its own changes; an eligible
+write freezes only its dependent changes. Existing frozen causes and original
+values are preserved.
 
-`receive` converts late old-schema records in causal order. A converted
-predecessor can support its successor; an excluded predecessor prevents its
-conversion. `receive_matches_evaluation` joins the interpreted history to the
-existing verdict proof. `reload_matches_receiver` uses that same receive path
-for the author after a competing raise. Attempt status never changes a verdict.
-`receive_agreement` and `receive_losses_converge` compare independent causal
-receivers, deriving equality of interpreted records, verdicts and original-value
-losses without assuming an already converted history. `every_write_received`
-constructs their receipt certificates. `converted_verdicts_converge` also joins
-those results to the existing classifier's agreement theorem.
-`lost_never_reconverted` prevents a later callback from reviving a previously
-excluded interpretation.
+**Rows and losses converge together.** `mergeInput` in `RowMerge.lean` feeds precisely
+`classifyChange`'s applied changes to the existing row merge. `change_applied_iff`
+and `mergeInput_effective` connect that classifier to the shared data rule.
+`mergeInput_valid` derives generation validity after filtering from valid
+original writes and authentic author provenance. It needs no retained-witness
+hypothesis. `rows_and_losses_converge` proves equality of all merge fields and
+the original-change loss records for causal receipt orders of the same set,
+including replay after a correct snapshot with closed consumed coverage.
+
+`row_value_accounted` quantifies over original setters. Each has one of the
+ordinary merge outcomes (shown, knowingly replaced, lost cell, removed-row
+loss) or its entire original change is frozen. `change_value_accounted` also
+covers deletes without scalars and direct schema-excluded changes. Reset-ignored
+parts remain the explicit no-loss exception; permanent refusals block receipt.
+
+**Conversion agrees with receipt per change.** `receive` first determines
+candidate schema admission without changing values. It follows the original
+data sources to determine losses, then invokes the converter only on surviving
+changes in eligible received records. `dependent_change_not_converted` preserves
+original loss values; `independent_change_converted` converts unrelated changes
+in that same write. `convertChange_metadata` preserves row identity, generation,
+operation and source identities. Missing converters mark the interpretation
+lost without changing its body (`missing_converter_preserves_values`).
+Covered records, refused records, reset-ignored records, migration markers and
+records for a different selected conversion never invoke the callback.
+
+`conversion_retention_agrees` proves that recording those losses cannot alter
+any retention decision, including a chain through a partially lost write.
+`converted_change_matches_receiver` proves each converted/frozen row gets the
+same verdict as the data decision preceding conversion. `receive_matches_evaluation`
+connects the received record's admission to the shared classifier.
+`receive_agreement` and `receive_losses_converge` compare independent receipt
+certificates from the same original history and selected view, without assuming
+a preconverted history. Read prerequisites gate readiness; their verdicts are
+never passed to the converter. `every_write_received` constructs a certificate
+when the checked history has no permanent refusals. `converted_verdicts_converge`
+connects these results to the classifier's agreement theorem.
 
 `rebuild` installs interpreted data while retaining the upload history.
 Across successive migrations, `conversions_preserve_uploads`,
 `conversions_preserve_attempt` and `conversions_preserve_untried` preserve every
 upload record, including its schema, body, disposition and attempt choices.
+`reload_matches_receiver` checks the author's interpretation against its peer's,
+independently of local attempt status. `conversions_preserve_frozen` fixes every
+already-frozen change, including its original values, generation and cause.
+`lost_never_reconverted` prevents a later callback from reviving a previously
+excluded interpretation.
 
 **Old writes upload before the raise.** `RaiseUpload.migrate` appends the
 migration's empty log marker after the existing queue, preserving all earlier
@@ -125,28 +191,19 @@ confirmation; snapshot upload may not. No empty-queue requirement is used.
 **A competing raise uses the same receive rule.** If another device wins before
 Ana's old writes land, Ana still sends their original records. After loading
 the winning snapshot, all devices convert eligible late ordinary writes with
-the same supplied callback. Without a callback, or with an excluded input, they
-pass the number and retain the original values as losses. Reset-ignored parts
+the same supplied callback. Without a callback they pass the number and retain the original values as
+losses. With a callback, only changes whose generation or replaced-setter
+sources were dropped become losses; unrelated changes still convert.
+Reset-ignored parts
 and losing migration markers produce no schema loss. The local derived values
 of Ana's losing migration are replaced, not promoted to shared losses.
 `competing_raise_converges` constructs a legal evaluation for Ana while leaving
 her upload history unchanged; `receive_losses_converge` compares it to peers.
 `concurrent_raise_old_write` checks both callback outcomes after the other
 raise is kept, while the upload record stays in its old schema.
-This is agreement of interpreted records, verdicts and losses; the row merge's
-convergence and store-log winner selection are separate model obligations.
-
-**Applied writes do not use discarded inputs.**
-`no_applied_discarded_input` combines exclusion inheritance and the reset rule.
-`no_applied_discarded_read` covers every recorded read in a causal history:
-its effects were discarded at an earlier adoption, or it carries no excluded
-or ignored input into the applied write.
-Without adopting the responsible boundary, a write cannot apply after reading
-an excluded input. After adoption, the passed number does not carry the old
-value into new writes. `own_cause` checks that earlier own writes participate.
-The reset proof requires the chosen snapshot's consumed history to be causally
-closed, as §6 and §15 require. `retained_verdicts_justified` checks the earlier
-verdicts used by `adoptionFrom`.
+This agrees on interpreted records, verdicts and losses. `rows_and_losses_converge`
+then applies to their row merge under its authored-data and generation premises;
+store-log winner selection remains outside this package.
 
 **No write is applied twice in the resulting audience.**
 `nothing_applied_twice` covers arbitrary receipt lists, including duplicates.
@@ -294,17 +351,27 @@ key readiness gate attempts, not `Step.commit`.
 
 ## Checked histories and limits
 
-`Examples` and `RaiseExamples` check conversion independent of attempt status;
-eligible conversion with retained peer inputs; post-adoption writes;
+`DataExamples` checks both forms of an excluded received record: one creates
+the missing generation, the other replaces a cell in a surviving generation.
+Its exclusion comes from a missing converter, with original upload bytes
+unchanged. A later callback cannot redeem that lost interpretation.
+The next late write changes two rows. Its retained row converts and applies;
+its dependent row freezes unchanged, with the exact failed sources. A later
+write based on those two rows keeps the same distinction. A dependent delete
+with no scalars still gets a recorded loss. The implicit own-device read does
+not exclude the write. A second raise covers the excluded source's position
+but preserves its original schema cause and both outcomes in the mixed write.
+`Examples` also checks independent own successors and
 two successive raises; pre-reset writes and a later post-reset write;
 snapshot-covered duplicate delivery; failed reload; stale custody, counters
 and replacement; an upload that seems to fail and lands later; failed and
-unequal comparison reads; and a locally captured write whose storage slot is still empty.
-`raise_publishes_with_new_tail` has old write 1, migration marker 2 and app
-write 3. It publishes the raise after confirming 1 and 2, leaving 3 queued.
-Ben's writes 9 and 10 both become losses without a callback; his post-adoption
-11 applies. With a callback, both 9 and 10 convert on receive, including when
-9 was attempted. A separately checked excluded-input case blocks conversion.
+unequal comparison reads; and a locally captured write whose storage slot is
+still empty. `RaiseExamples` retains the upload-before-raise histories:
+`raise_publishes_with_new_tail` confirms old write 1 and empty marker 2 before
+publishing, leaving new-schema write 3 queued. Ben's 9 and 10 lose without a
+callback and convert with one, independently of upload attempts; his
+post-adoption 11 applies. `DataExamples` supplies the generation/setter-dependent
+case, including an unrelated row that still converts in the same write.
 The late-landing history is also proved reachable by the queue events.
 `crash_late_accept_and_lost_reply` checks acceptance after a crash and a
 second crash between reply receipt and acknowledgement. `crash_retry_settles`
@@ -385,24 +452,37 @@ with eventual provider success stated separately in the progress hypotheses.
   It does not claim storage hides an unfinished publication's complete objects.
 - Verdict agreement is per audience. One write may be ignored in a reset
   circle and applied in the store; an example checks both answers.
-- Local captured coverage alone does not establish storage acceptance.
-  Publishing the raise requires confirmation of its covered own prefix.
-  Only confirmation of the original bytes settles each upload slot.
+- A valid boundary supplies consumed coverage and separate per-change
+  verdicts. Local captured coverage does not establish storage acceptance.
+  Publishing the raise requires confirmation of its covered own prefix and
+  publication evidence for every remote position. Only confirmation of the
+  original bytes settles an upload slot.
 - Reset ignoring takes precedence over schema loss in that audience. Covered
-  history is supplied by the snapshot, and adopted discarded positions do not
-  become state inputs again. Retained adoption facts are rebuilt from the
-  author's earlier view, not guessed from the newest raise alone.
+  history is supplied by the snapshot. Consumed positions remain separate
+  from retained data sources. An otherwise eligible change built on an ignored
+  source becomes a data loss; reading its position alone has no effect.
 - Conversion functions and removal-cause calculation are inputs. The model
-  proves which received records may be converted and that every original
-  queue record and tried bytes survive; it does not execute arbitrary application
-  migration SQL or
-  validate its output. The generation theorem assumes conversion preserves
-  the row's generation, as D5 and E13 require.
+  proves which row changes may be converted and that identity, provenance,
+  generations, frozen originals and every upload record survive. It does not
+  execute
+  arbitrary application migration SQL or validate its output. Successful
+  callbacks change values only in this model; renaming columns and retaining
+  parent-reference generations remain implementation obligations.
 - The checked affected-audience list and current sync-pass key and identity
   evidence are inputs to queue events. Extracting those facts from row bytes,
   custody and storage is outside this package. Marking the first attempt fixes
   its choices before the request is sent, as §6 requires.
-- Agreement assumes the same checked history and selected boundaries.
+- History indices are a fixed chronological enumeration, separate from wire
+  device/number identities. Columns are positions in the abstract scalar list;
+  rows stand for table, key and audience. `DataValid` checks unique row changes,
+  earlier sources and source presence. Row-merge theorems additionally require
+  the original `Valid` and `Authored` contracts from the merge package, with
+  exactly the queue's provenance. Extracting complete, authentic generation
+  and replaced-setter sources from author state is not proved here. Existing
+  read frontiers, scalar equality and canonical generation winners cannot
+  supply that missing evidence. No premise assumes dropped sources survived.
+- Agreement assumes the same checked history, selected boundaries and retained
+  snapshot drop evidence.
   Store-log replay, boundary selection, finality, retention, full multi-audience
   snapshot alignment, cryptography, byte parsing, SQLite and Rust behavior
   are outside this package. It retains all inputs and deletes no stored objects.
@@ -417,43 +497,74 @@ with eventual provider success stated separately in the progress hypotheses.
   and deliberate discard of unsent work are outside the progress theorem.
   Two live copies racing after a successful check remain the race §10 names.
 
-## Spec edits required by this proposal
+## Spec edit checklist and Rust obligations
 
-No spec files are changed here. The spec run needs these replacements:
+No normative spec, API, format or Rust file is changed by this proposal.
 
-- In §17.1 replace “its writes wait, and are converted when it updates” with
-  retention and eventual upload in their original schema. Local migration
-  does not rewrite an untried queue record.
-- Replace the untried-only conversion and “upload ... marked lost” sentences
-  with receive-side conversion of uncovered ordinary old-schema writes, in
-  version and causal order, independently of attempt status. Conversion uses
-  the winning boundary and only eligible inputs. No callback or an excluded
-  input records the original values as losses locally; it changes no log bytes.
-- Qualify “An old-version write outside S is excluded” by that receive
-  conversion rule. Keep reset precedence and adopted-discarded-input rules.
-- Replace the Ben 9/10 example: without conversion both retain losses and
-  upload original bytes; with conversion eligible 9 and then 10 can apply,
-  even if 9 was already attempted. Post-adoption 11 still uses the winning state.
-- Remove the two sentences allowing unuploaded writes in a published raise
-  snapshot and forbidding an upload wait. Distinguish local capture from
-  publication: capture the old prefix plus migration marker; confirm that
-  prefix before uploading the snapshot, then publish the raise entry.
-- Explicitly permit the empty migration marker to upload before the raise.
-  Its changes exist only in the snapshot. Ordinary writes made after migration
-  stay in the new schema and wait for a kept raise, whether this device's or
-  another device's. Do not require an empty queue.
-- In §15 apply the confirmed-own-prefix publication gate to every snapshot,
-  ordinary or raise. Remote covered positions require retained publication
-  evidence from checked logs or previously valid snapshots. The IO write-up
-  states the resulting loader guarantee.
-- Align §18.1's breaking-change order and reload conversion sentence with the
-  same rules; its existing untried-queue conversion instruction conflicts.
-- Replace §6's “Migrations convert only untried writes” and §19.2's instruction
-  to convert eligible untried writes during recovery. Both paths preserve the
-  upload records; conversion and losses belong to their received interpretation.
+- **§10:** keep each retired device write's own inclusive publication window
+  and the hard post-retirement-read refusal. Drop an outside-window write
+  without rescue by later readers. Record per-change data losses in otherwise
+  eligible dependents. State finality with the retiring entry and send gate;
+  [merge B17](merge.md#b17-receive-order-progress-and-dropping-by-data) proves it.
+- **§17.1:** remove inherited exclusion, the whole queued-tail rule and the
+  redefinition of recorded reads as applied inputs. Preserve every upload in
+  its original schema, including untried records. Qualify exclusion of an
+  uncovered old-version write by receive conversion: convert eligible changes,
+  freeze only changes with dropped generation/setter sources. Without a callback,
+  exclude the interpretation with its original values. Rewrite Ben's 9/10
+  example with both a dependent row and an unrelated retained row. Keep
+  reset precedence and atomic reload; preserve source verdicts separately
+  from dismissible losses. No callback changes log bytes.
+- **§15/§17.1:** distinguish capture from publication. Capture the old prefix
+  plus its empty migration marker; confirm every covered own upload before
+  uploading the snapshot, then publish the raise entry. Remote positions need
+  retained publication evidence from checked logs or valid snapshots. Apply
+  that publication gate to ordinary snapshots too; the IO write-up proves the
+  resulting loader guarantee. Remove permission to publish unuploaded writes.
+- **§6/§18.1/§19.2:** replace untried-queue conversion with receive-side
+  interpretation of late records, independent of attempt status. Explicitly
+  permit the empty migration marker to upload before the raise; its row effects
+  travel only in the snapshot. Ordinary new-schema writes remain behind it
+  and wait for a kept raise, whether this device's or a competing device's.
+  Do not require an empty queue before publication.
+- **E13:** change conversion eligibility and the `Migration::writes` callback
+  wording from eligible writes to eligible changes. Specify that one received
+  interpretation can
+  contain converted changes and frozen original changes; a callback never
+  receives a dependent change. Preserve write identity, row generation,
+  operation, provenance, old names/values and parent-reference identity as
+  appropriate to each outcome. A failed callback aborts the transaction.
+- **D5:** remove header lost-disposition inheritance through `had_read`.
+  Specify authentic generation-source and replaced-setter evidence and a
+  per-change frozen representation alongside applying changes in received data
+  and snapshots. Whole-write lost disposition records a direct no-converter
+  outcome in the interpretation; the original log record is never rewritten.
+  A frozen delete must retain its original write/row identity even without scalars.
+  Decide the concrete encoding; current D5 has no old-setter ids. D7, snapshot
+  fingerprints and the loss API must preserve the corresponding evidence and
+  original dependency cause. §3's open retirement question must be replaced
+  with the proved original-value accounting rule.
 
-The migration-marker exception and the independence from attempt status are
-explicit readings needed to make the chosen rule both live and convergent.
+For the queue implementation, capture and validate sources at authoring and
+retain them through snapshots, conversion and replay. Use a shared data
+classifier for waiting and incoming changes, with retirement/schema/theft
+supplying only their own base admission policies. Keep consumed read positions
+for readiness, never for deciding data loss. Run callbacks only after resolving
+source changes, and preserve all upload records byte for byte. Atomically commit
+received interpretations, frozen originals, merged rows, source verdicts and
+consumed positions; failure must leave the prior state available to its initiator.
+
+Exercise generation loss, setter-only loss, unrelated peer reads, implicit own
+reads, mixed changes, chains through mixed writes, no-converter cases, repeated
+raises, empty-valued deletes, snapshot reload, loss dismissal, replay changes
+and both receive orders. Compare the new classifier with the proved row merge,
+not with a reconstruction in tests. The existing Rust differential deliberately
+keeps its prior boundary path; it does not check this proposed data policy.
+
+The empty-marker exception makes upload before the raise possible. Conversion
+is relative to the winning raise, so its original author also receives a late
+write after a competing raise. These readings preserve the same interpretation
+on every device without converting the raising device's own upload queue.
 
 `CovenQueue/Axioms.lean` audits the main results. `scripts/check.sh` rebuilds
 the package, rejects unfinished proofs and foreign axioms, and continues to

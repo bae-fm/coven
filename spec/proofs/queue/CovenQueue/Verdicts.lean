@@ -4,254 +4,281 @@ namespace CovenQueue
 
 abbrev History := Nat → CheckedWrite
 
-/-- All earlier timestamp indices actually read by this write, including its
-own earlier numbers. Valid metadata has no read at a later index (§7). -/
-def causes (h : History) (v : View) (w : Nat) : List Nat :=
-  (List.range w).filter fun a => reads (h w).record.identity (h a).record.identity &&
-    !discardedBefore v (h w).record.identity (h a).record.identity
+/-- Receive readiness includes every recorded read and implicit own number.
+Passing a position is not evidence of using its row data. -/
+def prerequisites (h : History) (w : Nat) : List Nat :=
+  (List.range w).filter fun a => reads (h w).record.identity (h a).record.identity
 
 def Causal (h : History) : Prop :=
   ∀ w a, reads (h w).record.identity (h a).record.identity = true → a < w
 
-theorem cause_earlier {h : History} {v : View} {w a : Nat} (ha : a ∈ causes h v w) : a < w := by
-  exact List.mem_range.mp (List.mem_filter.mp ha).1
+theorem prerequisite_earlier {h : History} {w a : Nat} (ha : a ∈ prerequisites h w) : a < w :=
+  List.mem_range.mp (List.mem_filter.mp ha).1
 
-theorem own_cause (h : History) (v : View) (valid : Causal h) (w a : Nat)
+theorem own_prerequisite (h : History) (valid : Causal h) (w a : Nat)
     (hd : (h w).record.identity.id.device = (h a).record.identity.id.device)
-    (hn : (h a).record.identity.id.number < (h w).record.identity.id.number)
-    (kept : discardedBefore v (h w).record.identity (h a).record.identity = false) :
-    a ∈ causes h v w := by
+    (hn : (h a).record.identity.id.number < (h w).record.identity.id.number) :
+    a ∈ prerequisites h w := by
   have hr := own_earlier_read _ _ hd hn
-  exact List.mem_filter.mpr ⟨List.mem_range.mpr (valid _ _ hr), by simp [hr, kept]⟩
+  exact List.mem_filter.mpr ⟨List.mem_range.mpr (valid _ _ hr), hr⟩
 
-/-- A complete device evaluation, in any causal arrival order. Missing or
-refused causes leave a write waiting, so they cannot produce this certificate.
-The actual verdict is computed by `classify`, not supplied by a guard. -/
 inductive Judged (h : History) (v : View) : Nat → Verdict → Prop where
   | receive (w : Nat) (answers : Nat → Verdict) :
-      (∀ a ∈ causes h v w, Judged h v a (answers a)) →
-      (∀ a ∈ causes h v w, ∀ r, answers a ≠ .refused r) →
-      Judged h v w (classify v (h w) ((causes h v w).map answers))
+      (∀ a ∈ prerequisites h w, Judged h v a (answers a)) →
+      (∀ a ∈ prerequisites h w, ∀ r, answers a ≠ .refused r) →
+      Judged h v w (classify v (h w))
 
-/-- Two devices can process independent causes in different orders. Their
-checked answers still agree, by induction through the actual dependency graph. -/
 theorem verdict_agreement {h : History} {v : View} {w : Nat} {x y : Verdict}
     (hx : Judged h v w x) (hy : Judged h v w y) : x = y := by
-  induction hx generalizing y with
-  | receive w answers deps _ ih =>
-    cases hy with
-    | receive _ other deps' _ =>
-      congr 1
-      apply List.map_congr_left
-      intro a ha
-      exact ih a ha (deps' a ha)
+  cases hx; cases hy; rfl
 
-theorem applied_has_no_excluded_input (v : View) (w : CheckedWrite) (cs : List Verdict)
-    (ha : classify v w cs = .applied) : excludedInput w.record cs = none := by
-  unfold classify classify.schema classify.inherited at ha
-  split at ha
-  · contradiction
-  · split at ha
-    · split at ha
-      · contradiction
-      · split at ha
-        · split at ha
-          · contradiction
-          · split at ha <;> simp_all
-        · split at ha <;> simp_all
-    · split at ha
-      · split at ha
-        · contradiction
-        · split at ha <;> simp_all
-      · split at ha <;> simp_all
+def evaluate (h : History) (v : View) (w : Nat) : Verdict := classify v (h w)
 
-theorem excluded_cause_adopted (v : View) (w : CheckedWrite) (cs : List Verdict)
-    (ha : classify v w cs = .applied) (he : Verdict.excluded e ∈ cs) :
-    e ∈ w.record.identity.storeRead := by
-  have hn := applied_has_no_excluded_input v w cs ha
-  have := (List.findSome?_eq_none_iff.mp hn) (.excluded e) he
-  by_cases hm : e ∈ w.record.identity.storeRead
-  · exact hm
-  · simp [hm] at this
-
-/-- An applied write cannot still use an excluded value. Adoption passes the
-number while replacing its state inputs, rather than inheriting the loss. -/
-theorem no_applied_excluded_dependency {h : History} {v : View} {w a e : Nat}
-    (hw : Judged h v w .applied) (ha : a ∈ causes h v w)
-    (he : Judged h v a (.excluded e)) :
-    e ∈ (h w).record.identity.storeRead := by
-  generalize hv : Verdict.applied = result at hw
-  cases hw with
-  | receive _ answers deps _ =>
-    have eq := verdict_agreement (deps a ha) he
-    apply excluded_cause_adopted v (h w) _ hv.symm
-    exact List.mem_map.mpr ⟨a, ha, eq⟩
-
-/-- Reset adoption is needed only outside S: S itself supplies its own state.
-An old write covered by S is not reconstructed from discarded outside inputs. -/
-theorem applied_outside_reset_adopted (v : View) (w : CheckedWrite) (cs : List Verdict)
-    (b : Boundary) (hb : v.reset = some b) (hc : w.record.identity.id ∉ b.covers)
-    (ha : classify v w cs = .applied) : b.entry ∈ w.record.identity.storeRead := by
-  unfold classify at ha
-  split at ha
-  · contradiction
-  · rw [hb] at ha
-    by_cases hn : b.entry ∈ w.record.identity.storeRead
-    · exact hn
-    · simp [beforeReset, hc, hn] at ha
-
-theorem schema_not_ignored (v : View) (w : CheckedWrite) (cs : List Verdict) (e : Nat) :
-    classify.schema v w cs ≠ .ignored e := by
-  unfold classify.schema classify.inherited
-  split
-  · split
-    · simp
-    · split <;> simp
-  · split <;> simp
-
-theorem ignored_origin (v : View) (w : CheckedWrite) (cs : List Verdict) (e : Nat)
-    (he : classify v w cs = .ignored e) :
-    ∃ b, v.reset = some b ∧ b.entry = e ∧ w.record.identity.id ∉ b.covers := by
-  unfold classify at he
-  split at he
-  · contradiction
-  · split at he
-    · rename_i b hb
-      split at he
-      · rename_i hi
-        cases he
-        exact ⟨b, hb, rfl, by
-          simp only [beforeReset, Bool.and_eq_true] at hi
-          simpa using hi.1⟩
-      · exact False.elim (schema_not_ignored v w cs e he)
-    · exact False.elim (schema_not_ignored v w cs e he)
-
-/-- A chosen snapshot's consumed history is causally closed (§6, §15).
-This is a condition on authenticated snapshot inputs, not an upload receipt. -/
-def SnapshotClosed (h : History) (v : View) (b : Boundary) : Prop :=
-  ∀ w a, (h w).record.identity.id ∈ b.covers → a ∈ causes h v w →
-    (h a).record.identity.id ∈ b.covers
-
-theorem no_applied_ignored_dependency {h : History} {v : View} {w a e : Nat}
-    (closed : ∀ b, v.reset = some b → SnapshotClosed h v b)
-    (hw : Judged h v w .applied) (ha : a ∈ causes h v w)
-    (he : Judged h v a (.ignored e)) :
-    e ∈ (h w).record.identity.storeRead := by
-  generalize hv : Verdict.ignored e = ignored at he
-  cases he with
-  | receive _ answers _ _ =>
-    obtain ⟨b, hb, be, absent⟩ := ignored_origin v (h a) _ e hv.symm
-    have outside : (h w).record.identity.id ∉ b.covers := by
-      intro inside
-      exact absent (closed b hb w a inside ha)
-    generalize happ : Verdict.applied = result at hw
-    cases hw with
-    | receive _ answers' _ _ =>
-      rw [← be]
-      exact applied_outside_reset_adopted v (h w) _ b hb outside happ.symm
-
-theorem no_applied_discarded_input {h : History} {v : View} {w a : Nat} {answer : Verdict}
-    (closed : ∀ b, v.reset = some b → SnapshotClosed h v b)
-    (hw : Judged h v w .applied) (ha : a ∈ causes h v w)
-    (dep : Judged h v a answer) : usesDiscarded (h w).record answer = false := by
-  cases answer with
-  | applied | refused _ => rfl
-  | excluded e =>
-    simp [usesDiscarded, no_applied_excluded_dependency hw ha dep]
-  | ignored e =>
-    simp [usesDiscarded, no_applied_ignored_dependency closed hw ha dep]
-
-/-- Every recorded read, including an implicit own predecessor, either had
-already lost its effects at adoption or cannot carry a discarded input now. -/
-theorem no_applied_discarded_read {h : History} {v : View} {w a : Nat} {answer : Verdict}
-    (valid : Causal h) (closed : ∀ b, v.reset = some b → SnapshotClosed h v b)
-    (hw : Judged h v w .applied)
-    (read : reads (h w).record.identity (h a).record.identity = true)
-    (dep : Judged h v a answer) :
-    discardedBefore v (h w).record.identity (h a).record.identity = true ∨
-      usesDiscarded (h w).record answer = false := by
-  by_cases cut : discardedBefore v (h w).record.identity (h a).record.identity = true
-  · exact Or.inl cut
-  · apply Or.inr
-    apply no_applied_discarded_input closed hw _ dep
-    exact List.mem_filter.mpr ⟨List.mem_range.mpr (valid w a read), by simp [read, cut]⟩
-
-theorem adopted_discard_not_input (h : History) (v : View) (w a : Nat)
-    (b : Adoption) (hb : b ∈ v.adoptions) (read : b.entry ∈ (h w).record.identity.storeRead)
-    (discarded : (h a).record.identity.id ∈ b.discarded) : a ∉ causes h v w := by
-  intro ha
-  have found : discardedBefore v (h w).record.identity (h a).record.identity = true := by
-    apply List.any_eq_true.mpr
-    exact ⟨b, hb, by simp [read, discarded]⟩
-  have hm := (List.mem_filter.mp ha).2
-  simp [found] at hm
-
-/-- Executable evaluation used by the checked histories. Its recursion follows
-strictly earlier timestamps, not a guessed fuel bound. -/
-def evaluate (h : History) (v : View) (w : Nat) : Verdict :=
-  classify v (h w) ((causes h v w).attach.map fun a => evaluate h v a.val)
-termination_by w
-decreasing_by exact cause_earlier a.property
-
-theorem evaluate_eq (h : History) (v : View) (w : Nat) :
-    evaluate h v w = classify v (h w) ((causes h v w).map (evaluate h v)) := by
-  rw [evaluate]
-  simp
-
-theorem classify_not_refused (v : View) (w : CheckedWrite) (cs : List Verdict)
-    (hw : w.refusal = none) (r : Refusal) : classify v w cs ≠ .refused r := by
-  simp only [classify, hw, classify.schema, classify.inherited]
+theorem classify_not_refused (v : View) (w : CheckedWrite)
+    (hw : w.refusal = none) (r : Refusal) : classify v w ≠ .refused r := by
+  simp only [classify, hw, classify.schema]
   split
   · split
     · simp
     · split
-      · split
-        · simp
-        · split <;> simp
       · split <;> simp
-  · split
-    · split
       · simp
-      · split <;> simp
+  · split
     · split <;> simp
+    · simp
 
-/-- Once an unrefused causal history is available, every write has an answer.
-This constructs the certificates used by the agreement theorem. -/
 theorem every_write_judged (h : History) (v : View)
-    (good : ∀ w, (h w).refusal = none) (w : Nat) :
-    Judged h v w (evaluate h v w) := by
+    (good : ∀ w, (h w).refusal = none) (w : Nat) : Judged h v w (evaluate h v w) := by
   induction w using Nat.strongRecOn with
   | ind w ih =>
-    rw [evaluate_eq]
     apply Judged.receive
-    · intro a ha
-      exact ih a (cause_earlier ha)
-    · intro a _ r
-      rw [evaluate_eq]
-      exact classify_not_refused v (h a) _ (good a) r
+    · intro a ha; exact ih a (prerequisite_earlier ha)
+    · intro a _ r; exact classify_not_refused v (h a) (good a) r
 
-/-- Build retained verdicts by evaluating the earlier adopted view. The list
-is independent of whether the app later dismisses any frozen loss values. -/
-def adoptionFrom (h : History) (v : View) (entry limit : Nat) : Adoption :=
-  ⟨entry, (List.range limit).filterMap fun w => match evaluate h v w with
-    | .excluded _ | .ignored _ => some (h w).record.identity.id
-    | _ => none⟩
+/-- Looking up the original row change, independently of its current verdict.
+Absent rows are not changes; a source naming an absent row fails `DataValid`. -/
+def rowChange (h : History) (w r : Nat) : Option RowChange :=
+  (h w).record.body.find? (fun ch => ch.row == r)
 
-theorem retained_verdicts_justified (h : History) (v : View) (entry limit : Nat)
-    (good : ∀ w, (h w).refusal = none) (id : WriteId)
-    (hi : id ∈ (adoptionFrom h v entry limit).discarded) :
-    ∃ w e, (h w).record.identity.id = id ∧
-      (Judged h v w (.excluded e) ∨ Judged h v w (.ignored e)) := by
-  obtain ⟨w, _, hw⟩ := List.mem_filterMap.mp hi
-  have judged := every_write_judged h v good w
-  cases he : evaluate h v w with
-  | applied | refused _ => simp [he] at hw
-  | excluded e =>
-    simp only [he, Option.some.injEq] at hw
-    exact ⟨w, e, hw, Or.inl (he ▸ judged)⟩
-  | ignored e =>
-    simp only [he, Option.some.injEq] at hw
-    exact ⟨w, e, hw, Or.inr (he ▸ judged)⟩
+def provenance (h : History) (w r : Nat) : CovenMerge.DataDependency.Provenance Nat Nat :=
+  match rowChange h w r with
+  | none => ⟨none, []⟩
+  | some ch => ch.provenance
+
+structure DataValid (h : History) : Prop where
+  uniqueRows : ∀ w, ((h w).record.body.map RowChange.row).Nodup
+  earlier : ∀ w r a, a ∈ (provenance h w r).sources → a < w
+  sourcePresent : ∀ w r a, a ∈ (provenance h w r).sources → (rowChange h a r).isSome = true
+
+theorem rowChange_of_member (h : History) (valid : DataValid h) (w : Nat)
+    (ch : RowChange) (mem : ch ∈ (h w).record.body) : rowChange h w ch.row = some ch := by
+  have find (xs : List RowChange) (unique : (xs.map RowChange.row).Nodup)
+      (member : ch ∈ xs) : xs.find? (fun other => other.row == ch.row) = some ch := by
+    induction xs with
+    | nil => simp at member
+    | cons other xs ih =>
+      simp only [List.map_cons, List.nodup_cons] at unique
+      rcases List.mem_cons.mp member with rfl | member
+      · simp
+      · have different : other.row ≠ ch.row := by
+          intro same
+          exact unique.1 (List.mem_map.mpr ⟨ch, member, same.symm⟩)
+        have notSame : (other.row == ch.row) = false := beq_eq_false_iff_ne.mpr different
+        simp [List.find?, notSame, ih unique.2 member]
+  exact find _ (valid.uniqueRows w) mem
+
+/-- All direct admission and preserved frozen-change facts, before computing
+new dependent losses. There is no adoption-exclusion marker. -/
+def dataState (h : History) (valid : DataValid h) (v : View) :
+    CovenMerge.DataDependency.State Nat Nat Nat where
+  rank := id
+  present w r := (rowChange h w r).isSome
+  base w r := decide (evaluate h v w = .applied) &&
+    (snapshotLoss v w r).isNone &&
+    (rowChange h w r).any (fun ch => !ch.frozen)
+  provenance := provenance h
+  earlier := valid.earlier
+
+inductive ChangeVerdict where
+  | applied
+  | frozen (cause : CovenMerge.LossCause Nat)
+  | ignored (entry : Nat)
+  | refused (reason : Refusal)
+  deriving DecidableEq, Repr
+
+def preserveFrozen (ch : RowChange) (otherwise : ChangeVerdict) : ChangeVerdict :=
+  match ch.content with
+  | .frozen cause _ => .frozen cause
+  | .values _ => otherwise
+
+def freshLoss (h : History) (valid : DataValid h) (v : View) (w r : Nat) :
+    Option (CovenMerge.LossCause Nat) :=
+  match evaluate h v w with
+  | .excluded _ version => (snapshotLoss v w r).orElse (fun _ => some (.schemaChange version w))
+  | .applied => (snapshotLoss v w r).orElse fun _ =>
+      if CovenMerge.DataDependency.retained (dataState h valid v) w r then none
+      else some (.dependency w (CovenMerge.DataDependency.droppedSources (dataState h valid v) w r))
+  | .ignored _ | .refused _ => none
+
+def classifyChange (h : History) (valid : DataValid h) (v : View)
+    (w : Nat) (ch : RowChange) : ChangeVerdict :=
+  match evaluate h v w with
+  | .refused r => .refused r
+  | .ignored e => .ignored e
+  | .applied | .excluded _ _ =>
+      preserveFrozen ch ((freshLoss h valid v w ch.row).elim .applied .frozen)
+
+def changeResults (h : History) (valid : DataValid h) (v : View) (w : Nat) :
+    List (RowChange × ChangeVerdict) :=
+  (h w).record.body.map fun ch => (ch, classifyChange h valid v w ch)
+
+/-- Snapshot evidence is derived from actual per-change decisions, never
+from the reads of later writes. Dismissing displayed values does not edit it. -/
+def captureDrops (h : History) (valid : DataValid h) (v : View) (received : List Nat) :
+    List (Nat × Nat × CovenMerge.LossCause Nat) :=
+  received.flatMap fun w => (changeResults h valid v w).filterMap fun (ch, answer) =>
+    match answer with
+    | .frozen cause => some (w, ch.row, cause)
+    | _ => none
+
+theorem capture_records_loss (h : History) (valid : DataValid h) (v : View)
+    (received : List Nat) (w : Nat) (ch : RowChange) (cause : CovenMerge.LossCause Nat)
+    (mem : w ∈ received) (change : ch ∈ (h w).record.body)
+    (frozen : classifyChange h valid v w ch = .frozen cause) :
+    (w, ch.row, cause) ∈ captureDrops h valid v received := by
+  apply List.mem_flatMap.mpr
+  refine ⟨w, mem, ?_⟩
+  apply List.mem_filterMap.mpr
+  exact ⟨(ch, .frozen cause), List.mem_map.mpr ⟨ch, change, by simp [frozen]⟩, rfl⟩
+
+theorem captured_loss_original (h : History) (valid : DataValid h) (v : View)
+    (received : List Nat) (w r : Nat) (cause : CovenMerge.LossCause Nat)
+    (mem : (w, r, cause) ∈ captureDrops h valid v received) :
+    w ∈ received ∧ ∃ ch, rowChange h w r = some ch ∧
+      classifyChange h valid v w ch = .frozen cause := by
+  obtain ⟨a, receivedA, changes⟩ := List.mem_flatMap.mp mem
+  obtain ⟨pair, member, equal⟩ := List.mem_filterMap.mp changes
+  obtain ⟨ch, body, rfl⟩ := List.mem_map.mp member
+  cases answer : classifyChange h valid v a ch <;> simp [answer] at equal
+  rcases equal with ⟨writeEq, row, reasonEq⟩
+  subst a
+  exact ⟨receivedA, ch, by rw [← row]; exact rowChange_of_member h valid w ch body,
+    by simpa only [reasonEq] using answer⟩
+
+theorem capture_loss_lookup (h : History) (valid : DataValid h) (v : View)
+    (received : List Nat) (w r : Nat) (ch : RowChange) (cause : CovenMerge.LossCause Nat)
+    (mem : w ∈ received) (found : rowChange h w r = some ch)
+    (frozen : classifyChange h valid v w ch = .frozen cause) :
+    snapshotLoss { v with drops := captureDrops h valid v received } w r = some cause := by
+  have row : ch.row = r := by simpa using List.find?_some found
+  have captured := capture_records_loss h valid v received w ch cause mem
+    (List.mem_of_find?_eq_some found) frozen
+  rw [row] at captured
+  unfold snapshotLoss
+  dsimp only
+  cases result : (captureDrops h valid v received).find? (fun x => x.1 == w && x.2.1 == r) with
+  | none =>
+    have absent := List.find?_eq_none.mp result (w, r, cause) captured
+    simp at absent
+  | some x =>
+    have key := List.find?_some result
+    rcases x with ⟨a, rowId, reason⟩
+    simp only [Bool.and_eq_true, beq_iff_eq] at key
+    rcases key with ⟨writeEq, rowEq⟩
+    subst a
+    subst rowId
+    obtain ⟨_, other, otherFound, otherFrozen⟩ := captured_loss_original h valid v received w r reason
+      (List.mem_of_find?_eq_some result)
+    rw [found] at otherFound
+    cases Option.some.inj otherFound
+    rw [frozen] at otherFrozen
+    cases ChangeVerdict.frozen.inj otherFrozen
+    rfl
+
+/-- Snapshot lists may have different orders or repeated receipt identities;
+their per-change lookup results still agree. -/
+theorem captured_losses_converge (h : History) (valid : DataValid h) (v : View)
+    (a b : List Nat) (same : ∀ w, w ∈ a ↔ w ∈ b) :
+    snapshotLoss { v with drops := captureDrops h valid v a } =
+      snapshotLoss { v with drops := captureDrops h valid v b } := by
+  have transfer (xs ys : List Nat) (subset : ∀ w, w ∈ xs → w ∈ ys)
+      (w r : Nat) (cause : CovenMerge.LossCause Nat)
+      (lookup : snapshotLoss { v with drops := captureDrops h valid v xs } w r = some cause) :
+      snapshotLoss { v with drops := captureDrops h valid v ys } w r = some cause := by
+    obtain ⟨x, found, reason⟩ := Option.map_eq_some_iff.mp lookup
+    have key := List.find?_some found
+    rcases x with ⟨source, rowId, saved⟩
+    simp only [Bool.and_eq_true, beq_iff_eq] at key
+    rcases key with ⟨writeEq, rowEq⟩
+    subst source
+    subst rowId
+    obtain ⟨member, ch, change, frozen⟩ := captured_loss_original h valid v xs w r saved
+      (List.mem_of_find?_eq_some found)
+    exact reason ▸ capture_loss_lookup h valid v ys w r ch saved (subset w member) change frozen
+  funext w r
+  cases left : snapshotLoss { v with drops := captureDrops h valid v a } w r with
+  | some cause => exact (transfer a b (fun w => (same w).mp) w r cause left).symm
+  | none =>
+    cases right : snapshotLoss { v with drops := captureDrops h valid v b } w r with
+    | none => rfl
+    | some cause =>
+      have impossible := transfer b a (fun w => (same w).mpr) w r cause right
+      simp [left] at impossible
+
+/-- A covered position does not revive a source whose row change was lost.
+This evidence persists even when its displayed loss has been dismissed. -/
+theorem snapshot_drop_stays_dropped (h : History) (valid : DataValid h) (v : View)
+    (w r : Nat) (cause : CovenMerge.LossCause Nat) (saved : snapshotLoss v w r = some cause) :
+    CovenMerge.DataDependency.retained (dataState h valid v) w r = false :=
+  CovenMerge.DataDependency.dropped_stays_dropped _ _ _ (by simp [dataState, saved])
+
+theorem snapshot_loss_preserves_cause (h : History) (valid : DataValid h) (v : View)
+    (w : Nat) (ch : RowChange) (cause : CovenMerge.LossCause Nat) (values : List Nat)
+    (saved : snapshotLoss v w ch.row = some cause) (original : ch.content = .values values)
+    (ordinary : evaluate h v w = .applied ∨ ∃ e version, evaluate h v w = .excluded e version) :
+    classifyChange h valid v w ch = .frozen cause := by
+  rcases ordinary with applied | ⟨e, version, excluded⟩ <;>
+    simp [classifyChange, preserveFrozen, freshLoss, *]
+
+/-- The loss retains the original row change, not a converted substitute. -/
+theorem change_value_accounted (h : History) (valid : DataValid h) (v : View)
+    (w : Nat) (ch : RowChange) (mem : ch ∈ (h w).record.body)
+    (ordinary : evaluate h v w = .applied ∨ ∃ e version, evaluate h v w = .excluded e version) :
+    (ch, .applied) ∈ changeResults h valid v w ∨
+      ∃ cause, (ch, .frozen cause) ∈ changeResults h valid v w := by
+  have member : (ch, classifyChange h valid v w ch) ∈ changeResults h valid v w :=
+    List.mem_map.mpr ⟨ch, mem, rfl⟩
+  have answer : classifyChange h valid v w ch = .applied ∨
+      ∃ cause, classifyChange h valid v w ch = .frozen cause := by
+    rcases ordinary with applied | ⟨e, version, excluded⟩ <;>
+      cases content : ch.content <;>
+      cases saved : snapshotLoss v w ch.row <;>
+      cases kept : CovenMerge.DataDependency.retained (dataState h valid v) w ch.row <;>
+      simp [classifyChange, preserveFrozen, freshLoss, *, Option.orElse]
+  rcases answer with applied | ⟨cause, frozen⟩
+  · exact Or.inl (by simpa [applied] using member)
+  · exact Or.inr ⟨cause, by simpa [frozen] using member⟩
+
+theorem applied_has_no_dropped_source (h : History) (valid : DataValid h) (v : View)
+    (w : Nat) (ch : RowChange) (applied : classifyChange h valid v w ch = .applied) :
+    CovenMerge.DataDependency.dependsOnDropped (dataState h valid v) w ch.row = false := by
+  cases verdict : evaluate h v w <;> cases content : ch.content <;>
+    cases saved : snapshotLoss v w ch.row <;>
+    simp [classifyChange, freshLoss, preserveFrozen, verdict, content, saved] at applied
+  cases kept : CovenMerge.DataDependency.retained (dataState h valid v) w ch.row
+  · simp [kept] at applied
+  · exact CovenMerge.DataDependency.retained_not_dependent _ _ _ kept
+
+/-- Classification is insensitive to arrival order, including distinct orders
+of unrelated writes. The map includes frozen losses with all original values. -/
+def materializeChanges (h : History) (valid : DataValid h) (v : View) (received : List Nat) :
+    Nat → List (RowChange × ChangeVerdict) :=
+  fun w => if w ∈ received then changeResults h valid v w else []
+
+theorem changes_converge (h : History) (valid : DataValid h) (v : View) (a b : List Nat)
+    (same : ∀ w, w ∈ a ↔ w ∈ b) : materializeChanges h valid v a = materializeChanges h valid v b := by
+  funext w
+  simp only [materializeChanges, same w]
 
 /-- A materialized audience after reload. Snapshot identities begin passed;
 eligible waiting and arriving writes are consumed by the same function. -/
@@ -290,7 +317,7 @@ theorem consume_valid (s : Materialized) (w : Nat) (v : Verdict) (h : s.Valid) :
         rcases List.mem_cons.mp ha with rfl | ha
         · exact List.mem_cons_self
         · exact List.mem_cons_of_mem _ (h.2 a ha)
-    | excluded e | ignored e =>
+    | excluded e _ | ignored e =>
       exact ⟨h.1, fun a ha => List.mem_cons_of_mem _ (h.2 a ha)⟩
 
 theorem consume_idempotent (s : Materialized) (w : Nat) (v : Verdict) :
