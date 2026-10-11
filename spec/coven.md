@@ -250,19 +250,79 @@ are those of [§2](#2-threat-model); the write-ups state their additional limits
     it exposes no new circle data to him. Ana, still a member, selects the
     replacement key for her first attempts
     ([checked histories: `departed_member_counterexample`, `remaining_member_rotates`](proofs/queue.md#checked-histories-and-limits)).
-- **Bounded storage:** device logs and superseded snapshots are deleted once
-  snapshots cover them and the store-log decisions they depend on are final
-  (§9, §15). An absent device does not hold finality back.
-  - A store whose admins keep racing settles once more than 30 storage days
-    have passed since its last late entry (§9), given complete storage-time
-    observations ([store-log finality](proofs/storelog.md#one-horizon-for-current-9)).
-  - The store log, sealed keys and still-required boundary snapshots remain.
-  [Store-log/data retention](proofs/storelog-data.md#results-and-their-assumptions)
-  proves a bound relative to required inputs given coverage, finality and complete
-  dependencies. Successful cleanup and provider behavior are assumed; the
-  [IO model](proofs/io.md#discovery-obligations) proves a deletion deadline under
-  explicit coverage, scheduling and completion bounds, not an unconditional
-  deadline or snapshot-suffix availability.
+- **Bounded storage:** §15 bounds coverage separately for each audience;
+  deleting a write object requires every one of its part audiences, because
+  its parts are stored together
+  ([`audience_deadline`, `bounded_storage`](proofs/io/CovenIO/AudienceRetention.lean)).
+  - Let `G` be a storage time from which the write is final and passes the
+    reader-positions or 30-day age gate, `W` its first stored time, and `O_a`
+    the time a reader of audience `a` can supply the successful services
+    below ([`AudienceRetention.ready`](proofs/io/CovenIO/AudienceRetention.lean)).
+  - Retention evaluates candidates every pass and requests missing coverage
+    in that pass or the next; let `P` bound pass spacing, `U` bound complete
+    successful counting publication, and `D` bound successful deletion by
+    an authorized owner
+    ([`bounded_storage`](proofs/io/CovenIO/AudienceRetention.lean)).
+  - `U` includes catch-up, preparation, failed or abandoned attempts and
+    confirmation, not merely one upload request: a busy log's eventual
+    terminal miss is a completion hypothesis, not a consequence of the
+    publication rule
+    ([`first_witness`](proofs/io/CovenIO/AudienceRetention.lean)).
+  - For each part audience, put `H_a = max(G, O_a, W + 1)` and
+    `B_a = H_a + 2P + U`: a counting covering snapshot lands by `B_a`, even
+    if that audience began with no snapshot
+    ([`first_witness`](proofs/io/CovenIO/AudienceRetention.lean)).
+  - Put `R_a = B_a + one day + 1`: by `R_a + 2P + U`, that audience has
+    both mature historical coverage and current newest counting coverage,
+    assuming the same bounded service refreshes missing current coverage
+    ([`audience_deadline`](proofs/io/CovenIO/AudienceRetention.lean)).
+  - For physical deletion, take `B = max_a B_a` over all part audiences and
+    `R = max(G, B + one day + 1)`; the write is deleted by
+    `R + 3P + U + D`, with successful coverage services for every part,
+    retention scheduled within `P` after coverage, and deletion completing
+    within `D`
+    ([`bounded_storage`](proofs/io/CovenIO/AudienceRetention.lean)).
+  - These are the model's integer-second deadlines: `W + 1` makes the
+    write strictly older than catch-up, and `B + one day + 1` makes its
+    witness strictly more than a day old; compare actual provider times
+    with the strict inequalities, preserving their precision (D2)
+    ([`first_witness`, `audience_deadline`](proofs/io/CovenIO/AudienceRetention.lean)).
+  - The bounds assume at least one part, sound publication and deletion
+    histories, normalized positions over the known writer inventory, retained historical
+    evidence, and service durations on the same storage-time scale; they
+    concern write objects, not snapshot objects, files or a total byte
+    bound at an unbounded write rate
+    ([`bounded_storage`](proofs/io/CovenIO/AudienceRetention.lean);
+    provider execution and durable evidence are implementation obligations).
+  - If covering witnesses already landed by `B`, the same
+    `R + 3P + U + D` bound applies without waiting for first publication;
+    if current coverage already holds when mature and gated at `R`, the
+    bound is `R + P + D`
+    ([`bounded_witnessed_storage`](proofs/io/CovenIO/RetentionDeadline.lean),
+    [`scheduled_deletion_bound`](proofs/io/CovenIO/Reload.lean)).
+  - E.g. the checked initially unsnapshotted write becomes gated and has a
+    reader on day 30, with one-second pass spacing and immediate successful
+    publication and deletion: the theorem bounds deletion by day 31 plus
+    six seconds
+    ([`first_snapshot_deadline`](proofs/io/CovenIO/CommonReloadExamples.lean)).
+  - An audience with missing coverage and no available reader has no such
+    bound, nor does a write object shared with that audience; eventual
+    return supplies a deadline relative to `O_a`, not one fixed from `G`
+    ([`offline_reachable`](proofs/io/CovenIO/CommonReloadExamples.lean),
+    [`first_witness`](proofs/io/CovenIO/AudienceRetention.lean)).
+  - E.g. Ana uploads one write with store and Gifts parts, then goes
+    offline; Ben can snapshot the store but cannot read Gifts, so every
+    deadline can pass without permitting deletion of that shared object
+    ([`offlinePart`](proofs/io/CovenIO/CommonReloadExamples.lean)).
+  - Already mature current coverage can permit deletion while its readers
+    are offline, provided the authorized deletion owner runs
+    ([`scheduled_deletion_bound`](proofs/io/CovenIO/Reload.lean)).
+  - Superseded snapshots follow §15's separate deletion rules; the store
+    log, sealed keys and still-required boundary snapshots remain.
+  - An absent device does not hold finality back: racing admin decisions
+    settle once more than 30 storage days have passed since the last late
+    entry, given complete storage-time observations (§9;
+    [store-log finality](proofs/storelog.md#one-horizon-for-current-9)).
 - **Nothing waits silently:** whatever coven cannot apply or deliver is in
   the pending list, with its subject and typed reason (§19.1).
   [Store-log/data pending proofs](proofs/storelog-data.md#results-and-their-assumptions)
