@@ -2083,8 +2083,12 @@ loop {
   retains its progress across network failures.
 - A tried entry still publishes its fixed bytes. If it lands too late, its
   `Entry` subject reports `Dropped(LandedTooLate)`; publication settles but
-  the action has not succeeded. Starting the operation over catches up again
-  and uses a new entry. Its old entry's pending record remains (§18, §19.1).
+  the action has not succeeded. When replay drops an attempt's entry and
+  work remains, starting over catches up and validates again, then resumes
+  at the first step with a new entry number and, for a rotation, a fresh key.
+  The old copies and entry stay in storage, and a late entry's pending
+  record remains (§18, §19.1;
+  [checked history: `restart_changes_key`](proofs/queue.md#checked-histories-and-limits)).
 - Every unfinished operation is a row in `_coven_operations`
   ([§18](coven.md#18-operations)).
 - A failed step returns its typed error to a waiting caller and records its
@@ -2136,9 +2140,11 @@ impl CovenHandle {
     /// after its last completed one. A cause that still stands fails again.
     pub async fn retry_pending_operation(&self, operation: OperationId) -> Result<(), OperationError>;
 
-    /// Abandons a failed operation and deletes its row. Steps already done
-    /// stay done; each kind's steps are ordered so other devices never see a
-    /// half-done operation (§18).
+    /// Abandons a failed operation and deletes its row. Completed steps stay
+    /// completed; reserved entries and sealed copies still publish (§6, §18).
+    /// Other devices may already see stored copies or a complete snapshot;
+    /// §18's publication order and reader checks still apply (queue proof:
+    /// copies_visible_before_finish, snapshot_visible_before_finish).
     pub async fn discard_pending_operation(&self, operation: OperationId) -> Result<(), OperationError>;
 
     /// Reloads this device from the latest snapshot, keeping its waiting

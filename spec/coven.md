@@ -118,37 +118,56 @@
 - **Authorization:** only admins ([§9](#9-members-and-roles)) change
   membership, and every device enforces it.
 - **Atomicity:** another device applies a write in one transaction, so a
-  write is never half visible.
+  write is never half visible
+  ([queue proof: `AtomicReceive.never_half_visible`](proofs/queue.md#what-is-proved)).
 - **Convergence:** every device ends up with the same data:
   - a write made after seeing another wins over it on every device;
   - no device sees a write before the writes its author had seen;
   - when a concurrent write replaces or deletes a value, that value is
     recorded, not silently dropped. Values computed by a breaking migration
     that lost to a concurrent one are replaced by the winner's (§17.1).
-- **Durability:** a crash loses nothing:
-  - every committed write is still uploaded while this device's database
-    and identity remain usable;
+- **Durability:** committed writes and recorded operation progress survive
+  a crash while this device's database and identity remain usable
+  ([queue proof: `crash_keeps_committed`, `Operations.crash_preserves_operation`](proofs/queue.md#what-is-proved)):
+  - every committed write is eventually uploaded if syncing continues,
+    prerequisites and fair progress let each waiting head reach its first
+    attempt, and storage acceptance and local acknowledgement eventually succeed
+    ([queue proof: `every_queued_write_settles`](proofs/queue.md#what-is-proved));
   - a damaged local database or restored stale copy starts again from
     storage. Edits it had not uploaded are lost, and the app is told
     (§10, §19.2);
-  - every operation with several steps resumes and finishes, for example:
-    - publishing sealed key copies, then the rotation entry naming their key;
-    - writing and verifying a snapshot ([§15](#15-snapshots)).
+  - a recorded rotation or snapshot publication resumes with the same data
+    within one attempt, and finishes under §18's prerequisites and fair
+    progress assumptions
+    ([queue proof: `rotation_resumes_and_finishes`, `snapshot_resumes_and_finishes`](proofs/queue.md#what-is-proved)).
     Retention separately deletes the history that snapshots safely cover.
+  - if replay drops the attempt's entry and work remains, §18 starts over
+    from the first step with a new entry number and, for a rotation, a fresh
+    key. Old copies and the entry remain in storage
+    ([checked history: `restart_changes_key`](proofs/queue.md#checked-histories-and-limits)).
+    Finishing does not promise recovery from permanent rejection without
+    the applicable update or app action (§19.1).
 - **Revocation:** before sending a write for the first time, a device
   catches up on membership changes and new sealed key copies at sync-pass
   start, then seals with the newest usable key. Every send also requires
   that completed catch-up to have started less than five minutes ago (§10).
-  An ex-member cannot read other members' writes first sent by devices that already knew they had
-  left, provided no copy of the sealing key is made for them after that
-  pass's copy observation (§11).
-  - A tried write retains its first attempt's key and bytes on every retry.
+  For an audience the sending member still belongs to, selection excludes
+  keys known to have reached an excluded member
+  ([queue proof: `first_key_excludes_known_recipient`](proofs/queue.md#what-is-proved)).
+  An excluded member cannot read writes first sent by a remaining audience
+  member's device that already knew of their exclusion, provided no copy of
+  the sealing key is made for them after that pass's copy observation (§11;
+  [queue proof: `first_key_never_delivered`](proofs/queue.md#what-is-proved)).
+  - A tried write retains its first attempt's key and bytes on every retry
+    ([queue proof: `Run.retries_identical`](proofs/queue.md#what-is-proved)).
     Nothing is dropped or rewritten for revocation; storage access is cut
     off separately (§13).
   - The removed member's own pre-removal circle writes are outside this
     promise (§14.6). E.g. Ben queues a Gifts edit, then learns Ana removed
     him. He may still first-send that edit with the old key he already has;
-    Ana's first attempts follow the revocation rule above.
+    it exposes no new circle data to him. Ana, still a member, selects the
+    replacement key for her first attempts
+    ([checked histories: `departed_member_counterexample`, `remaining_member_rotates`](proofs/queue.md#checked-histories-and-limits)).
 - **Bounded storage:** device logs and superseded snapshots are deleted once
   snapshots cover them and the store-log decisions they depend on are final
   (§9, §15). An absent device does not hold finality back.
@@ -534,8 +553,13 @@ File uploads run in their own worker (§16.5); a pass does not wait for them.
 - A device uploads its writes in number order; a write never goes up
   before an earlier one.
 - The first attempt records the header's and each part's sealing key ids
-  in `_coven_uploads`, in the transaction marking the attempt, choosing the
-  newest usable key under §11. Pre-removal circle writes follow §14.6.
+  in `_coven_uploads`, in the transaction marking the attempt. For an audience
+  the member still belongs to, it chooses the newest usable key under §11,
+  excluding keys known to have reached an excluded member
+  ([queue proof: `first_key_excludes_known_recipient`](proofs/queue.md#what-is-proved)).
+  A removed circle member's pre-removal parts may instead use a key they
+  already received (§14.6;
+  [checked history: `departed_member_counterexample`](proofs/queue.md#checked-histories-and-limits)).
   Every attempt re-seals the plaintext with those keys and signs with the
   device's member key. Each chunk's nonce is derived from its encryption
   key, path, cleartext prefix, section, index and the SHA-256 of that
@@ -543,7 +567,9 @@ File uploads run in their own worker (§16.5); a pass does not wait for them.
   Ed25519 signatures are deterministic, so retries produce identical bytes.
   The queue keeps no ciphertext.
   - The plaintext, format and key choices never change after the first
-    attempt. Migrations convert only untried writes (§17.1).
+    attempt, including after a crash
+    ([queue proof: `Run.attempt_persists`](proofs/queue.md#what-is-proved)).
+    Migrations convert only untried writes (§17.1).
   - E.g. Ana encrypts write 6, then restores a backup that forgot the
     attempt. A different edit at write 6 has different nonce inputs even
     if her custody id survives. The same holds for two live copies.
@@ -553,7 +579,10 @@ File uploads run in their own worker (§16.5); a pass does not wait for them.
     Gifts key she held, and counts like any write made before she read
     her removal ([§14.6](#146-leaving-a-circle)).
 - Store log entries likewise keep only their plaintext and sealing key id,
-  fixed before the first attempt, and re-seal identically on every retry.
+  fixed for that recorded entry before the first attempt, and re-seal
+  identically on every retry. An operation's replay restart reserves a new
+  entry; it does not rewrite the old entry or copies (§18;
+  [checked history: `restart_changes_key`](proofs/queue.md#checked-histories-and-limits)).
   Sealed keys keep their fixed bytes because sealing uses a fresh ephemeral
   key pair; snapshots keep theirs because the database they describe changes
   ([§18](#18-operations)).
@@ -2718,8 +2747,10 @@ Carol's tablet:
   - The removal entry names Ben and the circle. Ana's device then rotates
     the exposed circle key, sealing its replacement to Ana alone.
   - Ben keeps the rows he already had. Remaining members' devices use a
-    fresh key for first attempts once they know he has left. Earlier
-    attempted writes keep their original keys (§11).
+    fresh key for first attempts once they know he has left (§11;
+    [checked history: `remaining_member_rotates`](proofs/queue.md#checked-histories-and-limits)).
+    Earlier attempted writes keep their original keys
+    ([queue proof: `Run.retries_identical`](proofs/queue.md#what-is-proved)).
 - Removing a circle's last member in the author's view deletes the circle
   ([§14.7](#147-deleting-a-circle)).
 - Concurrent removals can also leave no members after the full replay,
@@ -2736,8 +2767,10 @@ Carol's tablet:
 - A write Ben made to the circle before he had read his removal still
   counts, as with any concurrent entry ([§9](#9-members-and-roles)).
   - Ben is still in the store, so storage access doesn't stop him sending
-    his own pre-removal edits with the old circle key (§6). He has no new
-    circle data to reveal and cannot make new writes into it.
+    his own pre-removal edits, including their first attempts, with the old
+    circle key he already received (§6). This exposes no new circle data
+    to him; he cannot make new writes into it
+    ([checked history: `departed_member_counterexample`](proofs/queue.md#checked-histories-and-limits)).
   - Only trust keeps him from claiming he hadn't read his removal, and
     members are trusted not to be hostile ([§2](#2-threat-model)).
 - Once Ben's device reads his removal, it keeps the circle's rows it has,
@@ -3667,9 +3700,11 @@ Carol's tablet:
   - The migration can never be done while the row says it isn't, which
     would run it twice.
 - A step that changes storage is safe to run twice.
-  - Writing an object writes the same path with the same bytes: writes and
-    entries regenerate them from fixed plaintext and key ids; sealed keys
-    and snapshots retain fixed bytes ([§6](#6-syncing-writes)).
+  - Within one recorded attempt, writing an object writes the same path
+    with the same bytes, including after a crash: writes and entries
+    regenerate them from fixed plaintext and key ids; sealed keys and
+    snapshots retain fixed bytes ([§6](#6-syncing-writes);
+    [queue proof: `Operations.fixed_data`, `publication_retries_identical`](proofs/queue.md#what-is-proved)).
   - Deleting an object that is already gone succeeds.
 - A store log entry takes its number when its plaintext and key id commit.
   It is always uploaded, even if the operation is abandoned, and the replay
@@ -3683,6 +3718,10 @@ Carol's tablet:
     applies after “landed too late”: the old entry remains dropped and
     reported, and any replacement has a new number and recorded past.
     A failed validation reaches the caller and blocks the operation.
+  - A rotation starting over makes a fresh key and copies with a new entry
+    number. The old copies and entry remain in storage; the guarantee about
+    fixed data applies separately to each recorded attempt
+    ([checked history: `restart_changes_key`](proofs/queue.md#checked-histories-and-limits)).
 - A device runs one operation that writes store log entries at a time, and
   none while it reloads from a snapshot.
 - An app call first satisfies the online checks of §9. Once its operation
@@ -3690,11 +3729,29 @@ Carol's tablet:
   action. Dropping the call does not stop the recorded operation.
 - Work already recorded can wait for storage to return. This does not
   allow an offline call to start a new administrative action.
-- Steps are ordered so other devices never see a half-done operation.
-- Anything another device reads, such as a store log entry, is uploaded
-  last, after everything it refers to.
+- A recorded rotation or snapshot publication attempt finishes when its
+  prerequisites hold and progress is fair: local persistence and checks,
+  journal transactions, storage acceptance, confirmation, and final
+  verification or kept-entry completion eventually succeed
+  ([queue proof: `Operations.Fair`, `rotation_resumes_and_finishes`, `snapshot_resumes_and_finishes`](proofs/queue.md#what-is-proved)).
+  Storage accepting every object does not suffice if replay drops the entry
+  ([checked history: `publication_without_kept_entry`](proofs/queue.md#checked-histories-and-limits));
+  permanent rejection still needs the applicable update or app action (§19.1).
+- Other devices can see stored key copies before their introducing entry,
+  and a complete snapshot before its publisher records verification
+  ([checked histories: `copies_visible_before_finish`, `snapshot_visible_before_finish`](proofs/queue.md#checked-histories-and-limits)).
+  The guarantees are:
+  - an entry is uploaded after everything it refers to; in particular, a
+    key introduction is stored only after all its required sealed copies
+    ([queue proof: `rotation_entry_after_copies`, `visible_rotation_has_copies`](proofs/queue.md#what-is-proved));
+  - a snapshot counts only when complete and passing the reader's checks
+    (§15; [queue proof: `snapshot_stored_checked`](proofs/queue.md#what-is-proved));
+  - a received write's changes and consumed position become visible in one
+    transaction (§6;
+    [queue proof: `AtomicReceive.never_half_visible`](proofs/queue.md#what-is-proved)).
 - When the app starts, coven resumes every unfinished operation from the
-  step after its last completed one.
+  step after its last completed one in the recorded attempt. Replay drops
+  follow the restart rule above.
   - Thereafter it wakes for commands, changed prerequisites or due retry
     timers, following [the pass's waiting rules](sync-pass.md#waiting-without-repeated-work).
     It does not scan and replay the store log every second while waiting.
@@ -3798,8 +3855,12 @@ retry rule.
   ```
 
 - The copies cannot authorize K2 for sending until its introduction is read.
-- On restart Carol resumes at step 3 with the same key, hash and sealed bytes.
-  Generating another key would disagree with the copies already published.
+- After this crash Carol resumes the same attempt at step 3 with the same
+  key, hash and sealed bytes
+  ([queue proof: `Operations.fixed_data`](proofs/queue.md#what-is-proved)).
+  A replay drop instead follows §18's restart rule, making a fresh key and
+  entry while keeping the old objects in storage
+  ([checked history: `restart_changes_key`](proofs/queue.md#checked-histories-and-limits)).
 ## 19. Recovery
 
 - Recovery is for any state coven's rules didn't produce: a write that
