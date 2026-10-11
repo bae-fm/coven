@@ -7,3 +7,7 @@ import CovenQueue.Conversion
 import CovenQueue.Progress
 import CovenQueue.Migration
 import CovenQueue.Examples
+import CovenQueue.Operations
+import CovenQueue.OperationProgress
+import CovenQueue.OperationExamples
+import CovenQueue.AtomicReceive

@@ -1,15 +1,18 @@
-# Device upload queues
+# Device upload queues and resumable operations
 
-This package checks the queue rules in [§6](../coven.md#6-syncing-writes),
+This package checks durability and atomicity in [§3](../coven.md#3-guarantees),
+the queue rules in [§6](../coven.md#6-syncing-writes),
 [§7](../coven.md#7-order), [§10](../coven.md#10-device-identity),
-[§11](../coven.md#11-keys), [§17.1](../coven.md#171-host-application),
+[§11](../coven.md#11-keys), [§15](../coven.md#15-snapshots),
+[§17.1](../coven.md#171-host-application), [§18](../coven.md#18-operations),
 and [§19.3](../coven.md#193-resetting-a-store).
 The Lean source is in [queue/](queue/), using Lean 4.34.1 without Mathlib.
 
-There are two checked limits to the requested claims. Storage accepting retries
+There are checked limits to the requested claims. Storage accepting retries
 does not help a write that never reaches its first attempt. And §6 and §14.6
 allow a departed circle member to first-send an old edit with the old key.
-Both have Lean examples below. The proofs keep these cases visible.
+Both have Lean examples below. Further examples distinguish crash retries
+from replay restarts, and visible storage objects from atomic application.
 
 ## The model
 
@@ -29,6 +32,20 @@ The process also has an uncommitted write and a received reply in memory.
 Requests already handed to the provider can land before or after the crash;
 they need not land at all. Receiving an equal-byte reply and committing the
 acknowledgement are separate steps. A lost reply requires another comparison.
+
+An operation has an `_coven_operations` row with an id, kind-specific data
+and `last_step`. Rotation data fixes its key, hash, sealed copies, entry
+plaintext and sealing key. Snapshot data fixes the captured database state,
+key and sealed bytes. Copy checkpoints refine the grouped copy step in §18.1;
+the snapshot upload and final verification are separate checkpoints.
+
+A local draft, its durable file or custody value, and the journal transaction
+are separate. The artifact must survive a crash before the transaction can
+advance `last_step`. A crash after storing it but before that transaction
+leaves the earlier checkpoint and the fixed artifact available for retry.
+Remote creates, their replies, checkpoint transactions and final verification
+are also separate. Finishing deletes the row. The model retains its id and
+data afterward only as evidence about the execution, not as another table.
 
 Each audience has its own selected raise and reset. The received history
 supplies checked author authority and immutable-object validation results.
@@ -105,6 +122,49 @@ These are theorem parameters, not declared axioms. Settlement means removal
 from the upload queue after storage confirmation. It does not mean an excluded
 or reset-ignored write changes any rows, or that every peer has downloaded it.
 
+**Operations resume with their recorded data.**
+`Operations.fixed_data` and `publication_retries_identical` prove that crashes
+and retries preserve the key, hash, paths and bytes. `rotation_entry_after_copies`
+proves every required copy is stored before the entry can appear, even before
+the publisher receives its reply. `visible_rotation_has_copies` reads the
+entry independently of the publisher's journal and recovers the fixed
+audience, key id and hash, with all prerequisite copies already stored.
+
+`snapshot_stored_checked` proves that any published snapshot has the recorded
+bytes and opens to the captured state under its recorded key.
+`failed_snapshot_check_blocks_publication` rules out uploading a snapshot
+that fails that local check. `snapshot_crash_needs_new_verification` proves
+that losing the final verification reply requires another check before the
+row can be deleted. Verification uses §15's complete-byte comparison option;
+no checksum collision assumption is needed.
+
+**A fair publication attempt finishes exactly once.**
+`rotation_resumes_and_finishes` and `snapshot_resumes_and_finishes` prove
+that the row is eventually deleted once, retaining the fixed local artifact
+and all fixed published bytes. `finishes_at_most_once` needs no fairness.
+`Operations.Fair` applies only after a supplied time, which may follow the
+last crash. It requires successful local persistence/checks and journal
+transactions, storage acceptance, confirmation/checkpoint transactions, and
+final verification or kept-entry completion. These are explicit assumptions
+about each remaining step, not an assumption that the whole operation
+finishes. The proof advances through the finite recorded sequence.
+
+For rotation this is one publication attempt whose entry can be kept.
+`finished_rotation_requires_kept` makes that condition explicit. §18's replay
+restart replaces the attempt and can block on fresh validation; it is not a
+crash retry of the same entry. The checked restart below is why the theorem
+does not claim one fixed key across arbitrary replay restarts. Exactly once
+means one completion transaction, not one network request or one callback.
+
+**A received write is never half visible.**
+`AtomicReceive.never_half_visible` covers a receiver executing individual
+row changes inside an uncommitted transaction, with crashes between any two.
+Its visible rows and consumed position are always either the old database
+or the entire new database. A crash discards the transaction; commit exposes
+all its changes and position together. Repeated receipt cannot begin an
+already consumed write. The checked two-row history crashes after changing
+only its first row inside the transaction, then verifies whole-write commit.
+
 **A converted edit cannot revive a migration-retired row.**
 `migrateHiddenRows` creates ordinary deletes and captures whole frozen rows
 as one migration result. `hidden_row_retired_and_frozen` proves the delete
@@ -177,8 +237,55 @@ selected key and an excluded member who received it. This exception exposes
 no new circle data to Ben; it still contradicts the unrestricted claim.
 The adjacent remaining-member example selects the replacement key instead.
 
+**A fixed key across replay restarts fails.**
+`Operations.Examples.restart_changes_key` has copies for two members and
+their rotation entry stored, followed by a supplied replay drop. One recipient
+is now excluded. `restart_still_needs_key` calls the queue's key selector and
+proves the old key is ineligible even if its introduction remains authorized;
+so there is still a reason to rotate. §18 restarts
+at the first step, choosing a fresh key and a new entry number.
+The old copies and entry remain in storage. A Lean `example` includes both the
+reachable publication history and this restart, and proves that the journal's
+data changes. Crash retries within either attempt still preserve its bytes.
+`publication_without_kept_entry` separately checks that accepting every object
+does not make a dropped entry complete the operation. §3's finish wording
+needs the successful prerequisites described by §18 and the fairness premises;
+it does not guarantee recovery from permanent rejection without app action.
+
+**Invisibility until publisher completion fails literally.**
+`copies_visible_before_finish` witnesses §18.2's stored copy before its entry.
+`snapshot_visible_before_finish` has one locally checked snapshot stored while
+its publisher still has an unfinished journal row. Another device can open
+that complete snapshot before the publisher commits its verification result.
+Both have reachable Lean `example` histories. Thus §18's wording about never
+seeing a half-done operation cannot mean hiding all physical objects until
+row deletion. The proved reading is that introductions follow their copies,
+complete snapshots pass their reader checks, and writes apply atomically.
+
+`OperationExamples` also checks crashes before a local artifact's persistence,
+between that persistence and the journal update, after sending a copy but
+before storage accepts it, after copy confirmation, after entry storage,
+and after snapshot verification but before its completion transaction.
+
 ## Readings and boundaries of the proof
 
+- Operation proofs concern one writer and one recorded publication attempt.
+  Membership, authorization, reserved paths, valid sealed-copy construction,
+  retained keys and replay verdicts are supplied inputs. The storage state
+  includes only this attempt's reserved paths. An input assumption says that
+  encoding and reading an entry preserve its audience, key id and hash;
+  the cryptography is not proved. The snapshot reader includes signature, parsing and captured
+  state checks as a supplied function. Replay replacement is modeled for the
+  checked restart; stabilization of repeated replacements is not proved here.
+- A successful local persistence event means the file or custody value is
+  durable before its journal checkpoint. The model does not implement file
+  flushing, keychain calls, SQLite transactions, operation-id allocation,
+  multipart providers, retention or Rust execution. Crash safety relies on
+  those persistence boundaries; a damaged database or lost identity is outside.
+- Receiver atomicity starts with a completely checked write whose
+  prerequisites are available.
+  It models row changes and their position, not SQL execution or object parsing.
+  It does not claim storage hides an unfinished publication's complete objects.
 - Verdict agreement is per audience. One write may be ignored in a reset
   circle and applied in the store; an example checks both answers.
 - A valid boundary's coverage determines represented effects; it never
