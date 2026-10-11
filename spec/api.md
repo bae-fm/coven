@@ -155,7 +155,7 @@ pub struct CovenReadHandle { /* private fields */ }
 /// A table's name, key, audience, file and shared-trigger declarations (E2).
 pub struct SyncedTable { /* private fields */ }
 
-/// A numbered database migration and its optional waiting-write conversion (§17.1).
+/// A numbered database migration and its optional received-write conversion (§17.1).
 pub struct Migration { /* private fields */ }
 
 /// A passphrase owned by custody and erased when dropped (E1).
@@ -366,7 +366,7 @@ pub enum DbError {
     /// A downloaded write fails the merge's checks, such as a timestamp no
     /// later than a write it had read; it is never applied (§19.1).
     InvalidWrite { write: WriteId, error: MergeError },
-    /// A waiting record or its conversion violates the write format (E13).
+    /// A received record or its conversion violates the write format (E13).
     WriteFormat(coven_format::Error),
     /// A conversion changed or introduced a reference whose generation it cannot know (E13).
     MigrationReference { table: String, column: String },
@@ -384,10 +384,8 @@ pub enum DbError {
     MigrationTableMissing { table: String },
     /// Distinct original references became the same converted reference.
     MigrationReferenceCollision { table: String, reference: coven_merge::ForeignKey },
-    /// A waiting write is not older than the migration converting it.
+    /// A received write is not older than the migration converting it.
     MigrationWriteVersion { write: coven_merge::WriteId, schema_version: u32, migration_version: u32 },
-    /// A waiting upload disappeared while its conversion was being recorded.
-    MigrationUploadMissing { write: coven_merge::WriteId },
     /// A write changes a file declared write-once (E2).
     FileWriteOnce { table: String, key: RowKey },
     /// A file reference no longer names the row's file (§16.3).
@@ -3123,26 +3121,37 @@ pub struct CircleMemberInfo {
 - The app's schema is a list of migrations numbered from 1 with no gaps.
 - Opening runs every migration above the database's version in one
   transaction, so a failure leaves the schema as it was.
-- A migration has two parts ([§17.1](coven.md#171-host-application)): the first
-  changes the database, and the optional second changes writes made in the
-  older version that still wait in `_coven_uploads`.
-  - Each breaking migration converts them in version order, keeping the
-    device, write number, timestamp and causal positions. Tried uploads keep
-    plaintext, format and key ids that reproduce their original bytes; each
-    is settled by resending, never by snapshot coverage. Additions run no conversion.
-  - A write that read an excluded write is excluded too. After an uncovered
-    attempted write, every later queued write is marked lost (§17.1).
-    Conversion cannot rescue a write whose input was discarded.
-  - Conversion changes only eligible untried records. Reloading the kept
-    snapshot applies the same verdict locally. New writes after adopting
-    that boundary do not read the discarded queued effects (§17.1).
+- A migration has two parts (§17.1): the first changes the database; the
+  optional second interprets received late ordinary writes across a kept
+  breaking change, in version and causal order, using only surviving inputs
+  ([`receive_matches_evaluation`](proofs/queue/CovenQueue/Conversion.lean)).
+  - Local migration preserves every queued original record, including
+    untried writes; tried uploads also retain their format and sealing keys
+    ([`conversions_preserve_uploads`, `conversions_preserve_attempt`](proofs/queue/CovenQueue/Conversion.lean)).
+  - Conversion is independent of attempt status and preserves identity,
+    timestamps, causal positions and row generations; no callback or an
+    excluded input means a local original-value loss and a passed position,
+    never a rewritten upload
+    ([`conversion_preserves_identity`, `excluded_input_not_converted`, `excluded_records_loss`](proofs/queue/CovenQueue/Conversion.lean);
+    row-generation preservation is a callback validation obligation).
+  - The author reloading after a competing raise uses the same receive
+    rule as peers; after adopting the boundary, new writes do not use
+    discarded effects merely because their positions have passed
+    ([`reload_matches_receiver`](proofs/queue/CovenQueue/Conversion.lean),
+    [`no_applied_discarded_read`](proofs/queue/CovenQueue/Verdicts.lean)).
+  - E.g. Ben's attempted write 9 and untried 10 both upload in their old
+    schema: eligible callbacks can interpret both on receipt, or without a
+    callback both retain losses; his post-adoption write 11 uses the new state
+    ([`receive_losses_converge`](proofs/queue/CovenQueue/Conversion.lean),
+    [`no_applied_discarded_read`](proofs/queue/CovenQueue/Verdicts.lean)).
 - Coven decides whether a migration is an addition or a breaking change by
   comparing the schema before and after it. Statements that change rows of
   synced tables also make it breaking (§17.1).
 - A converted change keeps the references its columns carried, renamed
   with them. Changing a reference's value, or adding a column that is a
-  reference, fails the migration: the device can't know which generation
-  of the parent the old write meant.
+  reference, fails conversion and leaves application pending without a
+  partial commit: the device can't know which generation of the parent the
+  old write meant.
 
 ```rust
 impl Migration {
@@ -3155,9 +3164,10 @@ impl Migration {
     where
         F: Fn(&MigrationContext<'_>) -> Result<(), DbError> + Send + Sync + 'static;
 
-    /// Its second part: changes each row change of a waiting write to fit the
-    /// new schema. It runs only on untried writes whose inputs survive.
-    /// Without it, or when an input was excluded, they upload marked lost.
+    /// Its second part: interprets eligible received old-schema row changes
+    /// in the new schema, independently of upload attempt status (§17.1).
+    /// Without it, or with an excluded input, retain original-value losses.
+    /// It never rewrites the original upload record.
     pub fn writes<F>(self, f: F) -> Self
     where
         F: Fn(&mut RowChange) -> Result<(), DbError> + Send + Sync + 'static;

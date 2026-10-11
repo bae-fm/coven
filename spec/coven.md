@@ -725,7 +725,9 @@ File uploads run in their own worker (§16.5); a pass does not wait for them.
   - The plaintext, format and key choices never change after the first
     attempt, including after a crash
     ([queue proof: `Run.attempt_persists`](proofs/queue.md#what-is-proved)).
-    Migrations convert only untried writes (§17.1).
+    Migration also preserves every untried upload's original schema,
+    disposition and plaintext; conversion belongs to received interpretation
+    (§17.1; [`conversions_preserve_uploads`](proofs/queue/CovenQueue/Conversion.lean)).
   - E.g. Ana encrypts write 6, then restores a backup that forgot the
     attempt. A different edit at write 6 has different nonce inputs even
     if her custody id survives. The same holds for two live copies.
@@ -3136,6 +3138,21 @@ Carol's tablet:
     snapshot covering the current selection: a landing at noon Tuesday
     counts, while a landing one second later is ignored
     ([`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean)).
+- Before sending any snapshot, including a raise snapshot, confirm every
+  own write through its captured position; remote positions must come from
+  checked published log prefixes or previously published snapshots subject
+  to the same gate
+  ([`snapshot_covers_published`, `inherited_position_published`](proofs/io/CovenIO/SnapshotWrites.lean)).
+  - Local capture may precede own-upload confirmation, but neither capture
+    nor coverage settles a queue slot; confirmation requires the original
+    bytes at its path, and later app writes do not extend the captured cut
+    ([`publication_after_confirmation`](proofs/queue/CovenQueue/RaiseUpload.lean),
+    [`confirmation_requires_equal`](proofs/queue/CovenQueue/Upload.lean)).
+  - E.g. Ana captures her two-part write 1 in a store snapshot while its
+    log path is absent: she must upload and confirm write 1 before sending
+    the snapshot, so a Gifts loader cannot mistake an unpublished part
+    for deleted history
+    ([`pending_run`, `two_audience_raise_keeps_circle_part`](proofs/io/CovenIO/SnapshotWriteExamples.lean)).
 - Before uploading a snapshot, its writer opens the sealed temporary file
   through the snapshot reader: decrypt, verify both signatures, and parse
   and check every record.
@@ -3793,11 +3810,16 @@ Carol's tablet:
     members to update writes the circle's snapshot in the new version,
     with an entry raising the circle to it; the circle's other devices
     reload from that one.
-  - A device that has migrated holds its new-version writes back until
-    the store log has the entry raising the store to that version, its
-    own or another device's.
-  - A device whose app is older than the store stops uploading; its
-    writes wait, and are converted when it updates.
+  - A device that has migrated queues ordinary new-version writes behind
+    its migration marker and sends them only after replay keeps a raise
+    to their version, its own or another device's
+    ([`post_migration_behind_marker`](proofs/queue/CovenQueue/RaiseUpload.lean),
+    [`new_schema_send_requires_kept`](proofs/queue/CovenQueue/RaiseProgress.lean)).
+  - A device whose app is older than the store stops uploading; after
+    updating, it sends its waiting old-schema records unchanged, including
+    records never attempted before migration
+    ([`old_schema_head_enabled`](proofs/queue/CovenQueue/RaiseUpload.lean),
+    [`conversions_preserve_untried`](proofs/queue/CovenQueue/Conversion.lean)).
   - Raises to different versions don't conflict: both apply, the store is
     at the higher one, and devices reload from its snapshot.
 - What a breaking migration changes in the synced tables is one write by
@@ -3866,58 +3888,86 @@ Carol's tablet:
   - E.g. Ana's migration drops `notes.color` while Ben's losing value “blue”
     is still pending. Every device keeps that loss under `notes.color`;
     opening the new schema does not silently discard it.
-- Waiting writes keep their device ids, numbers, timestamps and causal
-  positions. A breaking change never renumbers or redoes them.
-- Settle every attempted upload by resending its original bytes (§6).
-  - Re-seal the retained plaintext with its first attempt's format and key
-    ids. A positive upload result, or equal bytes already at its path,
-    settles it as stored.
-  - Snapshot coverage does not prove that the log object was stored.
-    Even a write covered by the raise snapshot must finish its upload.
-  - Until settlement, keep its queue record and record the pending reason (§19.1).
-- Let S be the snapshot of the kept breaking-change entry for an audience.
-  A device judges waiting and incoming writes by the same rules:
-  - S already determines the effects of writes it covers.
-  - An old-version write outside S is excluded: keep its values as frozen
-    losses, and pass its position without applying its changes.
-  - A write that read an excluded write is excluded too. Its own earlier
-    writes count as read, so every later queued write behind an uncovered
-    attempted write is excluded with it.
-  - An untried queued write is converted only if none of the inputs it read
-    was excluded. Run the migration's second part in version order.
-  - With no conversion, or with an excluded input, upload the untried write
-    marked lost, naming the breaking version. Do not convert its values
-    into a claim that can apply.
-- “Read” here means input to the state on which the write was made.
-  Positions passed as excluded after loading the kept boundary are not
-  inputs to new writes. The write's `store_log_read` records whether its
-  author had adopted that boundary.
-  - After the atomic reload, new writes use S and the eligible writes after
-    it. They do not inherit discarded queued effects merely because the
-    device's log numbers passed them.
-  - Keep exclusion verdicts separately from dismissible loss values while
-    an entry can change. Loading reconstructs required verdicts from the
-    retained boundary and log inputs (§9, §15); dismissing a loss cannot
-    make its write eligible or release these inputs early.
-  - Reset-ignored history follows §19.3 and does not create a schema loss.
-- E.g. Ana raises the store from S, which covers Ben's phone through write 8.
-  Ben's attempted write 9 is unsettled; queued write 10 read it.
-  - Ben resends 9's original bytes until storage confirms them. S does not
-    cover 9, so every device records it lost.
-  - Write 10 is untried but cannot apply: it read 9. Ben uploads it marked
-    lost, and every device reaches the same result.
-  - Ben reloads S under those same rules. His next write, made after that
-    reload and naming the kept raise in `store_log_read`, uses the new
-    state and can apply.
-- If Ben's untried write 9 instead read only inputs S retains, a supplied
-  conversion can turn its old `title` edit into a `name` edit. It then
-  applies on every device that reads that audience.
-- Snapshots may include the author's unuploaded writes. Making the raise
-  snapshot never waits for an empty upload queue; doing so could wait on
-  the very raise needed to upload that queue.
-- Loading the winning snapshot replaces values a losing migration computed.
-  Only its device had those values; recording them as shared losses would
-  make devices disagree. Ordinary excluded writes still keep their losses.
+- Migration preserves all queued original records, tried or untried:
+  device, number, timestamp, causal positions, schema, disposition and
+  plaintext remain unchanged; a tried record also keeps its format and
+  sealing keys
+  ([`conversions_preserve_uploads`, `conversions_preserve_attempt`, `conversions_preserve_untried`](proofs/queue/CovenQueue/Conversion.lean)).
+- Upload those old-schema records in number order, even while the updated
+  app's schema is ahead of the kept store version, with the ordinary key,
+  identity and access gates still required
+  ([`old_schema_head_enabled`](proofs/queue/CovenQueue/RaiseUpload.lean),
+  [`prefix_uploads`](proofs/queue/CovenQueue/RaiseProgress.lean)).
+  - A positive upload result or complete equal-byte comparison settles
+    the original record; keep its queue record and pending reason until
+    confirmation, regardless of local snapshot capture
+    ([`confirmation_requires_equal`](proofs/queue/CovenQueue/Upload.lean)).
+- The migration appends its empty log marker after the existing queue and
+  captures the raise snapshot through that marker, excluding subsequent
+  app writes
+  ([`migration_preserves_waiting`, `post_migration_behind_marker`](proofs/queue/CovenQueue/RaiseUpload.lean)).
+  - The marker is the only new-schema record allowed to upload before a
+    kept raise; its row changes travel only in the snapshot
+    ([`migration_marker_enabled`](proofs/queue/CovenQueue/RaiseUpload.lean),
+    [`old_prefix_and_marker_enabled`](proofs/queue/CovenQueue/RaiseProgress.lean)).
+  - Confirm the captured own prefix, including the marker, before sending
+    the snapshot under §15's publication gates, then publish the raise
+    entry after that snapshot is stored; every covered remote position
+    also requires retained publication evidence
+    ([`publication_after_confirmation`, `published_raise_covers_published`, `entry_has_snapshot`](proofs/queue/CovenQueue/RaiseUpload.lean),
+    [`inherited_position_published`](proofs/io/CovenIO/SnapshotWrites.lean)).
+  - No empty upload queue is required: later app writes wait behind the
+    raise without delaying that captured prefix's publication
+    ([`no_raise_deadlock`](proofs/queue/CovenQueue/RaiseProgress.lean)).
+  - E.g. Ana queues old-schema write 1, migrates with marker 2, then makes
+    new-schema write 3: confirm 1 and 2, publish the snapshot and raise,
+    and send 3 once a raise is kept
+    ([`raise_publishes_with_new_tail`](proofs/queue/CovenQueue/RaiseExamples.lean)).
+- Conversion is for received late old-schema writes from other devices,
+  not for rewriting one's own upload queue; after a competing raise wins,
+  its author uses that same receive rule to rebuild local state from the
+  unchanged original records
+  ([`reload_matches_receiver`, `conversions_preserve_uploads`](proofs/queue/CovenQueue/Conversion.lean)).
+  - Let S be the kept breaking-change snapshot for the audience: S supplies
+    covered effects, while eligible uncovered ordinary old-schema writes
+    use the supplied conversions in version and causal order, independently
+    of whether their upload was tried
+    ([`receive_matches_evaluation`, `receive_agreement`](proofs/queue/CovenQueue/Conversion.lean)).
+  - Convert only when the inputs survive; without a callback, or with an
+    excluded input, pass the number without applying it and retain its
+    original values as frozen losses locally, leaving every upload byte
+    unchanged
+    ([`excluded_input_not_converted`, `excluded_records_loss`, `conversions_preserve_uploads`](proofs/queue/CovenQueue/Conversion.lean)).
+  - Earlier own writes are implicit inputs too, so an excluded predecessor
+    excludes its successors until they adopt the responsible boundary;
+    later conversions cannot revive the excluded interpretation
+    ([`no_applied_discarded_input`](proofs/queue/CovenQueue/Verdicts.lean),
+    [`lost_never_reconverted`](proofs/queue/CovenQueue/Conversion.lean)).
+  - “Read” means input to the state on which the write was made: a new write
+    after adopting the boundary does not use effects discarded at that
+    adoption, even though its log position passed them, and its
+    `store_log_read` records the adoption
+    ([`no_applied_discarded_read`](proofs/queue/CovenQueue/Verdicts.lean)).
+  - Keep those adoption and exclusion facts separately from dismissible
+    loss values, reconstructing them from retained boundary and log inputs
+    while replay can change; reset-ignored parts and migration markers
+    create no schema loss
+    ([`retained_verdicts_justified`](proofs/queue/CovenQueue/Verdicts.lean),
+    [`receivedLoss`](proofs/queue/CovenQueue/Conversion.lean)).
+  - E.g. Ana's kept snapshot covers Ben through 8; Ben's attempted 9 and
+    untried 10, which read 9, both upload unchanged: without conversion
+    both become losses, but an eligible conversion can interpret 9 and
+    then 10 on every device, including Ben's reload
+    ([`concurrent_raise_old_write`](proofs/queue/CovenQueue/RaiseExamples.lean),
+    [`receive_losses_converge`](proofs/queue/CovenQueue/Conversion.lean)).
+  - Ben's write 11 after adopting that snapshot uses the winning state and
+    can apply even when 9 and 10 were excluded
+    ([`no_applied_discarded_read`](proofs/queue/CovenQueue/Verdicts.lean)).
+- Loading a winning snapshot replaces the local values computed by a losing
+  migration; those values become no shared losses, while ordinary excluded
+  writes retain their original-value losses
+  ([`competing_raise_converges`](proofs/queue/CovenQueue/RaiseExamples.lean),
+  [`receive_losses_converge`](proofs/queue/CovenQueue/Conversion.lean)).
 - If two devices make the same breaking change at once, the one with the
   smaller timestamp counts; the other's entry is dropped, with its snapshot
   ([§9](#9-members-and-roles)).
@@ -4083,9 +4133,19 @@ Carol's tablet:
   2. upload fixed sealed copies to the current audience members;
   3. upload the rotation entry with the audience, key id and key hash.
 - A breaking schema change ([§17](#17-schema-changes)):
-  1. migrate the database, with its migration write, in one transaction;
-  2. upload a snapshot in the new version;
-  3. upload the store log entry raising the version.
+  1. migrate the database and append its empty migration marker in one
+     transaction, preserving all earlier upload records, and capture through
+     the marker before subsequent app writes
+     ([`migration_preserves_waiting`, `post_migration_behind_marker`](proofs/queue/CovenQueue/RaiseUpload.lean));
+  2. upload and confirm that old prefix and marker with their original
+     records, then send the captured new-version snapshot only when §15's
+     catch-up, coverage and publication gates hold
+     ([`prefix_uploads`](proofs/queue/CovenQueue/RaiseProgress.lean),
+     [`snapshot_covers_published`](proofs/io/CovenIO/SnapshotWrites.lean));
+  3. publish the raise entry after its snapshot is stored; ordinary
+     new-schema writes wait for a kept raise, without extending the capture
+     ([`entry_has_snapshot`](proofs/queue/CovenQueue/RaiseUpload.lean),
+     [`new_schema_send_requires_kept`, `no_raise_deadlock`](proofs/queue/CovenQueue/RaiseProgress.lean)).
 - Reloading from a snapshot ([§15](#15-snapshots)):
   1. settle attempted uploads under §17.1, freeze the required positions,
      and stage all readable audiences through §15's common target,
@@ -4095,8 +4155,10 @@ Carol's tablet:
      ([`committed_safe`](proofs/io/CovenIO/CommonReload.lean));
   2. replace the synced tables and coven's merge tables
      ([§8](#8-merge)) with the snapshots, apply those writes, and re-apply
-     eligible waiting writes, in one transaction. Convert eligible untried
-     writes and record exclusions under §17.1;
+     eligible waiting writes, in one transaction. Interpret late original
+     records and their losses under §17.1's receive rule without changing
+     any upload record
+     ([`reload_matches_receiver`, `conversions_preserve_uploads`](proofs/queue/CovenQueue/Conversion.lean));
      reset-ignored writes follow §19.3. Positions advance only with this
      realized state.
 - Writing a snapshot ([§15](#15-snapshots)):
@@ -4321,7 +4383,9 @@ holds failures and rejected entries, without making either wait look completed.
 - A usable database that disagrees with another device reloads in place
   from snapshots and logs (§15). It keeps its device id and waiting writes.
   - Settle attempted writes by sending their original bytes. Convert
-    eligible untried writes or record their losses under §17.1.
+    eligible received old-schema records or record their original-value
+    losses under §17.1, leaving upload records unchanged
+    ([`reload_matches_receiver`, `conversions_preserve_uploads`](proofs/queue/CovenQueue/Conversion.lean)).
   - Reset boundaries still decide which parts apply (§19.3).
 - A damaged database fails to open with `DbError::DamagedDatabase`.
   The app calls `CovenBuilder::reset_device` (E1).

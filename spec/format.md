@@ -131,15 +131,20 @@
   had_read        WritePositions     other devices' logs
   store_log_read  EntryPositions     the store log, own entries included
   schema_version  u32
-  disposition     u8                 0 apply · 1 lost, then u32 version · 2 migration
+  disposition     u8                 0 apply · 2 migration
   parts           [audience:Audience | rows:u64 | length:u64]
   ```
 
-  - Schema version zero is representable. A lost disposition's version is
-    positive and names the breaking version reached by the store.
-    It also marks an untried write whose input was excluded. An attempted
-    write keeps its original disposition and bytes; readers derive its
-    exclusion from the kept boundary and what it read (§17.1).
+  - Schema version zero is representable. Schema exclusion is a received
+    interpretation, never a transmitted disposition: tried and untried
+    uploads keep their original schema, disposition and plaintext, and
+    readers derive conversion or loss from the kept boundary and the
+    write's inputs (§17.1;
+    [`conversions_preserve_uploads`, `receive_losses_converge`](proofs/queue/CovenQueue/Conversion.lean)).
+  - E.g. Ben's untried old-schema `title` edit uploads unchanged after he
+    migrates; the receiving callback can interpret it as a `name` edit
+    without rewriting that object
+    ([`conversions_preserve_untried`, `receive_agreement`](proofs/queue/CovenQueue/Conversion.lean)).
   - Parts are in increasing audience order, each with at least one record.
     `rows` counts both row changes and dismissals. Own earlier writes are
     implicit in `had_read`; an explicit own-device position is refused.

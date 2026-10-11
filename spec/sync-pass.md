@@ -26,10 +26,11 @@ These local records survive reopening and have no pass-end expiry:
 
 - **Write headers:** each part's audience and encoded plaintext length,
   plus the positions and schema facts consumers need. Record them when a
-  write is applied, or with the local write that authored them. A conversion
-  of an untried write changes these facts in that same transaction. Once
-  attempted, both are fixed. Header-only retention keeps its authenticated
-  header separately from a complete-signature verdict; it grants no author
+  write is applied, or with the local write that authored them. Migration
+  preserves the authored record and its facts even before a first attempt;
+  received conversion keeps its interpretation separate
+  ([`conversions_preserve_uploads`](proofs/queue/CovenQueue/Conversion.lean)).
+  Header-only retention keeps its authenticated header separately from a complete-signature verdict; it grants no author
   authority. Keep the facts while the object or a reversible effect needs
   them. Snapshot growth is an indexed sum of these lengths; coverage is a
   join with checked snapshot positions.
@@ -354,7 +355,13 @@ entry prerequisites are published by the ordered work in step 5.
 Only due operations whose prerequisites changed or whose retry delay
 elapsed run. All their catalog reads use steps 2–4. They issue their
 remaining requests in §18.1 order: prerequisite sealed-key creates or
-snapshot uploads, then the referencing entry create. Applying an entry records any access change; the owner's serialized access
+snapshot uploads, then the referencing entry create. A raise waits for
+step 6 to confirm the captured own prefix, including the empty migration
+marker, before its snapshot request; ordinary new-schema writes behind the
+marker wait for a kept raise
+([`publication_after_confirmation`](proofs/queue/CovenQueue/RaiseUpload.lean),
+[`new_schema_send_requires_kept`](proofs/queue/CovenQueue/RaiseProgress.lean)).
+Applying an entry records any access change; the owner's serialized access
 work performs it.
 If a local entry changes membership, re-evaluate key eligibility before
 continuing to data first attempts, using this pass's copy observations and
@@ -423,7 +430,15 @@ of §6. Settle a tried write with its original bytes. An untried write uses
 the newest usable key under the received store log. Each success retires
 its queue row atomically; it also updates this pass's catalog. Resume any
 operation whose own-upload prerequisite this satisfies, using step 5's
-request order, without beginning a second full pass.
+request order, without beginning a second full pass. An updated app uploads
+its original old-schema records and its empty migration marker before the
+raise; it never converts untried upload records, and ordinary new-schema
+records require a kept raise even on retry
+([`old_prefix_and_marker_enabled`, `new_schema_send_requires_kept`](proofs/queue/CovenQueue/RaiseProgress.lean),
+[`conversions_preserve_untried`](proofs/queue/CovenQueue/Conversion.lean)).
+For example, old write 1 and marker 2 confirm before the snapshot and raise
+publish, while new-schema write 3 remains queued
+([`raise_publishes_with_new_tail`](proofs/queue/CovenQueue/RaiseExamples.lean)).
 
 For downloads, GET each undrained device's next write number, reusing this
 device's identity read. At each use of a miss, including a cached or parallel
@@ -498,8 +513,13 @@ snapshot at preparation (§15;
 [`SnapshotRefresh.refresh_outranks`](proofs/io/CovenIO/SnapshotRefresh.lean)).
 If this pass cannot supply that catch-up, leave publication pending
 ([`SnapshotPublication.act`](proofs/io/CovenIO/Retention.lean)).
-Capture it, verify its sealed bytes locally as §15 requires, upload, and
-check the stored checksum, or fetch the stored bytes once if the provider
+Capture it and verify its sealed bytes locally as §15 requires; before
+sending, confirm every own write through its position, with remote positions
+supported by checked published logs or previously published snapshots under
+the same gate ([`snapshot_covers_published`, `inherited_position_published`](proofs/io/CovenIO/SnapshotWrites.lean)).
+Later app commits do not extend that captured cut
+([`publication_after_confirmation`](proofs/queue/CovenQueue/RaiseUpload.lean)).
+Upload and check the stored checksum, or fetch the stored bytes once if the provider
 has no complete-object checksum. That confirmation is shared with any
 occupied-path comparison. No snapshot task is created and deleted merely
 to record an idle check.
