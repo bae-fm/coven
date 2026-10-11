@@ -440,8 +440,8 @@ at.
 Lean checks the theorems named in this appendix. `CovenMerge/Axioms.lean`
 prints their axioms; only Lean's `propext`, `Classical.choice` and
 `Quot.sound` are allowed. `scripts/check.sh` rebuilds the package, audits
-these axioms, and runs the Boolean differential and the fixed Rust/Lean
-counterexamples in B16. Strict comparisons that find a discrepancy stay
+these axioms, and runs the Boolean and schema differentials and the fixed
+Rust/Lean counterexamples in B16. Strict comparisons that find a discrepancy stay
 out of the check script.
 
 Values are identified by their setters and cells. A column can be its old
@@ -480,8 +480,9 @@ model a partially installed database. Rust's merge functions use Boolean
 circle causes. The Boolean differential passes; the entry-aware differential
 exposes the missing deletion-entry identity in B16. The reset differential
 calls the database snapshot reload and exposes a separate eligibility
-discrepancy there. Schema-boundary and migration comparisons are not covered
-by the reset test.
+discrepancy there. The schema-boundary differential passes on its generated
+histories; version/conversion verdicts are supplied as described below.
+Migration row selection is separate from these reload comparisons.
 The Boolean inputs and existing merge functions also remain available to
 the separate store-log/data package.
 
@@ -714,6 +715,39 @@ comparison remains ignored and outside the script. Run it explicitly with:
 ```sh
 COVEN_MERGE_LEAN="$PWD/spec/proofs/merge/.lake/build/bin/mergeRunner" \
   cargo test -p coven-database reset_differential_histories -- --ignored --nocapture
+```
+
+The schema mode calls `boundaryDevice`, including `receivedLoss` and the
+selected snapshot's frozen records. `schema_differential_histories` also
+calls `load_snapshots`, with a schema-raise boundary and no reset. It compares
+the same merge records and frozen whole-row records: row, generation, column
+and setter identities, breaking version and excluded-write identity. Values
+have the model's setter-and-cell meaning; scalar conversion is not tested.
+
+All 128 seeds pass, each in three causal arrival orders at both a full history
+and a random prefix (768 comparisons). The histories include covered ordinary
+writes, covered frozen losses, uncovered old-version writes, admitted
+new-version writes, explicitly lost writes, deletes without old values, and
+migration log records with no row changes. Frozen rows also carry an old
+column absent from the current SQL schema. Covered excluded positions do not
+become snapshot merge inputs. The reducer preserves these distinctions while
+removing writes, changes, values, coverage and the schema raise; it can also
+remove an explicit lost mark.
+
+The reading is [§17.1](../coven.md#171-host-application): “S already determines
+the effects of writes it covers” and “An old-version write outside S is
+excluded: keep its values as frozen losses, and pass its position without
+applying its changes.” The adapter supplies the eligibility verdict from the
+write's version or explicit disposition, and tests the boundary's use of it.
+Conversion callbacks, deriving exclusions from excluded inputs, and competing
+store-log selection remain outside this comparison. Schema tests use no reset,
+so the known reset discrepancy cannot stop this family first.
+
+`scripts/check.sh` runs the strict schema comparison. Run it separately with:
+
+```sh
+COVEN_MERGE_LEAN="$PWD/spec/proofs/merge/.lake/build/bin/mergeRunner" \
+  cargo test -p coven-database schema_differential_histories -- --ignored --nocapture
 ```
 
 ### B17 Receive order, progress, and the retirement gap

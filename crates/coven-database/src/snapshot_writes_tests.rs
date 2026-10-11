@@ -466,3 +466,303 @@ async fn supplied_dismissals_apply_before_waiting_changes_and_validate_their_pas
         db.close().await.unwrap();
     }
 }
+
+mod differential {
+    use crate::snapshot_write::tests::{frames, stream};
+    use crate::test_utils::tests::*;
+    use crate::tests::TestStore;
+    use crate::{Database, SnapshotReload, WriteBoundary};
+    use coven_format::value::{Value as Scalar, WritePositions};
+    use coven_format::write::{WriteDisposition, WriteRecord};
+    use coven_foundation::id_source::{DeviceId, SequentialIds};
+    use coven_merge::{Audience, Change, ColumnValue, History, Operation};
+    use serde_json::{json, Value};
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::ffi::OsStr;
+
+    #[derive(Clone)]
+    struct SchemaHistory {
+        reload: ReloadHistory,
+        raised: bool,
+    }
+    impl SchemaHistory {
+        fn generate(rng: &mut Generator) -> Self {
+            let mut reload = ReloadHistory::generate(rng);
+            reload.reset = false;
+            for w in &mut reload.writes {
+                // Conversion/version processing supplies the model's verdict.
+                // A new-schema author has reloaded the boundary; its consumed
+                // excluded positions do not contribute row generations.
+                w.header.schema_version = if w.header.store_log_read.covers(RESET) {
+                    2
+                } else {
+                    1
+                };
+                w.header.store_log_read.0.clear();
+            }
+            let mut frozen = insert(400, 400);
+            frozen.header.schema_version = 2;
+            frozen.header.disposition = WriteDisposition::Lost(2);
+            let Operation::Insert(columns) = &mut frozen.parts[0].rows[0].change.operation else {
+                unreachable!()
+            };
+            columns.insert(
+                "retired".into(),
+                ColumnValue {
+                    value: Scalar::Text("snapshot old column".into()),
+                    parents: BTreeMap::new(),
+                },
+            );
+            reload.covered.insert(frozen.header.position);
+            reload.writes.push(frozen);
+            // Empty-valued deletions still have an identity in a frozen loss.
+            let mut deletion = insert(401, 0);
+            deletion.header.disposition = WriteDisposition::Lost(2);
+            deletion.header.had_read = WritePositions(vec![
+                reload
+                    .writes
+                    .iter()
+                    .find(|w| w.header.position.device == DeviceId(100))
+                    .unwrap()
+                    .header
+                    .position,
+            ]);
+            deletion.parts[0].rows[0].change = Change {
+                generation: 1,
+                operation: Operation::Delete,
+            };
+            if rng.pick(2) == 0 {
+                deletion.parts[0].rows[0]
+                    .old
+                    .insert("retired".into(), Scalar::Text("deleted old column".into()));
+            }
+            reload.writes.push(deletion);
+            let mut migration = insert(402, 402);
+            migration.header.schema_version = 2;
+            migration.header.disposition = WriteDisposition::Migration;
+            migration.parts.clear();
+            reload.writes.push(migration);
+            reload.writes = rng.order(&reload.writes);
+            Self {
+                reload,
+                raised: true,
+            }
+        }
+        fn admitted(&self, w: &WriteRecord) -> bool {
+            w.header.disposition == WriteDisposition::Apply
+                && (self.reload.covered.contains(&w.header.position)
+                    || !self.raised
+                    || w.header.schema_version >= 2)
+        }
+        fn valid(&self) -> bool {
+            self.reload.valid()
+                && self.reload.writes.iter().all(|w| {
+                    !self.admitted(w)
+                        || w.parts
+                            .iter()
+                            .flat_map(|p| &p.rows)
+                            .all(|r| match &r.change.operation {
+                                Operation::Insert(cols) | Operation::Update(cols) => {
+                                    !cols.contains_key("retired")
+                                }
+                                Operation::Delete => true,
+                            })
+                })
+                && History::new(self.reload.writes.iter().map(|w| {
+                    let mut merged = merge_write(w);
+                    if !self.admitted(w) {
+                        merged.changes.clear();
+                    }
+                    merged
+                }))
+                .is_ok()
+        }
+        fn input(&self) -> Value {
+            let mut input = self.reload.input();
+            let rows = self.reload.rows();
+            let mut schema = Vec::new();
+            let mut values = Vec::new();
+            let mut frozen = Vec::new();
+            let mut snapshot = Vec::new();
+            for w in &self.reload.writes {
+                let id = write_id(w.header.position);
+                let verdict = match w.header.disposition {
+                    WriteDisposition::Migration => json!({"id": id, "kind": 2}),
+                    WriteDisposition::Lost(version) => {
+                        json!({"id": id, "kind": 1, "version": version})
+                    }
+                    WriteDisposition::Apply if self.raised && w.header.schema_version < 2 => {
+                        json!({"id": id, "kind": 1, "version": 2})
+                    }
+                    WriteDisposition::Apply => json!({"id": id, "kind": 0}),
+                };
+                schema.push(verdict);
+                if self.reload.covered.contains(&w.header.position)
+                    && w.header.disposition == WriteDisposition::Apply
+                {
+                    snapshot.push(id);
+                }
+                for change in w.parts.iter().flat_map(|p| &p.rows) {
+                    let row = rows.iter().position(|r| *r == change.row).unwrap();
+                    let columns: Vec<_> = match &change.change.operation {
+                        Operation::Insert(cols) | Operation::Update(cols) => {
+                            cols.keys().map(|c| column_id(c)).collect()
+                        }
+                        Operation::Delete => change.old.keys().map(|c| column_id(c)).collect(),
+                    };
+                    values.push(json!({"write": id, "row": row, "cols": columns}));
+                    if self.reload.covered.contains(&w.header.position) {
+                        if let WriteDisposition::Lost(version) = w.header.disposition {
+                            frozen.push(json!({"row": row, "gen": change.change.generation, "version": version, "write": id}));
+                        }
+                    }
+                }
+            }
+            input["mode"] = json!("schema");
+            input["schema"] = json!(schema);
+            input["values"] = json!(values);
+            input["snapshot"] = json!(snapshot);
+            input["snapshotFrozen"] = json!(frozen);
+            input
+        }
+    }
+
+    async fn schema_database(store: &TestStore) -> Database {
+        store
+            .builder(
+                tables(),
+                vec![
+                    crate::Migration::sql(1, "rows", SCHEMA),
+                    crate::Migration::sql(
+                        2,
+                        "local table",
+                        "CREATE TABLE local_rows(id TEXT PRIMARY KEY)",
+                    ),
+                ],
+            )
+            .open()
+            .await
+            .unwrap()
+    }
+    async fn schema_result(history: &SchemaHistory) -> Value {
+        assert!(history.valid(), "invalid schema differential history");
+        let ids = SequentialIds::new();
+        let source_store = TestStore::with_ids(&ids);
+        let target_store = TestStore::with_ids(&ids);
+        let source = schema_database(&source_store).await;
+        let target = schema_database(&target_store).await;
+        for w in history
+            .reload
+            .writes
+            .iter()
+            .filter(|w| history.reload.covered.contains(&w.header.position))
+        {
+            assert_eq!(
+                source.apply_downloaded(w.clone().into()).await.unwrap(),
+                crate::ApplyOutcome::Applied
+            );
+        }
+        let snapshot = frames(&source, Audience::Store).await;
+        let boundary = WriteBoundary::SchemaChange {
+            version: 2,
+            audience: Audience::Store,
+            included: snapshot.prefix.writes.clone(),
+        };
+        let mut reload = SnapshotReload::new(
+            vec![snapshot.input()],
+            history.reload.writes.iter().map(stream).collect(),
+        );
+        reload.boundaries = Some(if history.raised {
+            vec![boundary]
+        } else {
+            Vec::new()
+        });
+        target.load_snapshots(reload).await.unwrap();
+        let result = result_json(&target, &history.reload.rows());
+        let positions = target.sync_state(Vec::new()).await.unwrap().positions;
+        assert!(history
+            .reload
+            .writes
+            .iter()
+            .all(|w| positions.covers(w.header.position)));
+        source.close().await.unwrap();
+        target.close().await.unwrap();
+        result
+    }
+    async fn mismatch(runner: &OsStr, history: &SchemaHistory) -> bool {
+        schema_result(history).await != run_lean(runner, &history.input())
+    }
+    async fn reduce(runner: &OsStr, mut history: SchemaHistory) -> SchemaHistory {
+        loop {
+            let mut candidates: Vec<_> = history
+                .reload
+                .reductions()
+                .into_iter()
+                .map(|reload| SchemaHistory {
+                    reload,
+                    raised: history.raised,
+                })
+                .collect();
+            if history.raised {
+                candidates.push(SchemaHistory {
+                    raised: false,
+                    ..history.clone()
+                });
+            }
+            for i in 0..history.reload.writes.len() {
+                if matches!(
+                    history.reload.writes[i].header.disposition,
+                    WriteDisposition::Lost(_)
+                ) {
+                    let mut candidate = history.clone();
+                    candidate.reload.writes[i].header.disposition = WriteDisposition::Apply;
+                    candidates.push(candidate);
+                }
+            }
+            let mut smaller = None;
+            for candidate in candidates {
+                if candidate.valid() && mismatch(runner, &candidate).await {
+                    smaller = Some(candidate);
+                    break;
+                }
+            }
+            match smaller {
+                Some(candidate) => history = candidate,
+                None => return history,
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires COVEN_MERGE_LEAN; scripts/check.sh supplies the runner"]
+    async fn schema_differential_histories() {
+        let runner = std::env::var_os("COVEN_MERGE_LEAN").expect("built mergeRunner");
+        for seed in 0..128 {
+            let mut rng = Generator::new(seed + 40_000);
+            let history = SchemaHistory::generate(&mut rng);
+            for prefix in [history.reload.writes.len(), 4 + rng.pick(20)] {
+                let mut case = history.clone();
+                case.reload.writes.truncate(prefix);
+                let present: BTreeSet<_> = case
+                    .reload
+                    .writes
+                    .iter()
+                    .map(|w| w.header.position)
+                    .collect();
+                case.reload.covered.retain(|id| present.contains(id));
+                for _ in 0..3 {
+                    case.reload.writes = rng.order(&case.reload.writes);
+                    if mismatch(&runner, &case).await {
+                        let reduced = reduce(&runner, case).await;
+                        panic!(
+                            "schema differential, seed {seed}\nreduced history: {}\nRust: {}\nLean: {}",
+                            reduced.input(),
+                            schema_result(&reduced).await,
+                            run_lean(&runner, &reduced.input())
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

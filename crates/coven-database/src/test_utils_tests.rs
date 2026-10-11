@@ -14,7 +14,7 @@ use std::io::Write as _;
 use std::process::{Command, Stdio};
 
 pub(crate) const SCHEMA: &str = "CREATE TABLE rows(id TEXT NOT NULL PRIMARY KEY,a TEXT,b TEXT)";
-const COLUMNS: [&str; 3] = ["id", "a", "b"];
+const COLUMNS: [&str; 4] = ["id", "a", "b", "retired"];
 pub(crate) const RESET: EntryId = EntryId {
     device: DeviceId(99),
     number: 1,
@@ -42,7 +42,14 @@ pub(crate) fn run_lean(runner: &OsStr, input: &Value) -> Value {
         "Lean input {input}: {}",
         String::from_utf8_lossy(&result.stderr)
     );
-    serde_json::from_slice(&result.stdout).expect("Lean JSON result")
+    let mut result: Value = serde_json::from_slice(&result.stdout).expect("Lean JSON result");
+    if let Some(frozen) = result.get_mut("frozen") {
+        frozen
+            .as_array_mut()
+            .expect("frozen records")
+            .sort_by_key(Value::to_string);
+    }
+    result
 }
 
 // Deterministic xorshift and causal-order sampling, as in the core differential,
@@ -77,7 +84,7 @@ impl Generator {
         order
     }
 }
-fn merge_write(record: &WriteRecord) -> Write<Scalar> {
+pub(crate) fn merge_write(record: &WriteRecord) -> Write<Scalar> {
     Write {
         id: record.header.position,
         timestamp: record.header.timestamp,
@@ -302,6 +309,50 @@ impl ReloadHistory {
         }
         self.covered.is_subset(&applied)
     }
+    pub(crate) fn reductions(&self) -> Vec<Self> {
+        let mut candidates = Vec::new();
+        for i in 0..self.writes.len() {
+            let mut candidate = self.clone();
+            let removed = candidate.writes.remove(i).header.position;
+            candidate.covered.remove(&removed);
+            for w in &mut candidate.writes {
+                w.header.had_read.0.retain(|id| *id != removed);
+            }
+            candidates.push(candidate);
+            for p in 0..self.writes[i].parts.len() {
+                for r in 0..self.writes[i].parts[p].rows.len() {
+                    let mut candidate = self.clone();
+                    candidate.writes[i].parts[p].rows.remove(r);
+                    candidates.push(candidate);
+                    for column in &COLUMNS[1..] {
+                        let mut candidate = self.clone();
+                        let change = &mut candidate.writes[i].parts[p].rows[r];
+                        match &mut change.change.operation {
+                            Operation::Insert(cols) | Operation::Update(cols) => {
+                                cols.remove(*column);
+                            }
+                            Operation::Delete => {}
+                        }
+                        change.old.remove(*column);
+                        if candidate.writes != self.writes {
+                            candidates.push(candidate);
+                        }
+                    }
+                }
+            }
+            if !self.writes[i].header.store_log_read.0.is_empty() {
+                let mut candidate = self.clone();
+                candidate.writes[i].header.store_log_read.0.clear();
+                candidates.push(candidate);
+            }
+            if self.covered.contains(&self.writes[i].header.position) {
+                let mut candidate = self.clone();
+                candidate.covered.remove(&self.writes[i].header.position);
+                candidates.push(candidate);
+            }
+        }
+        candidates
+    }
     pub(crate) fn rows(&self) -> Vec<RowId> {
         self.writes
             .iter()
@@ -341,13 +392,13 @@ impl ReloadHistory {
             "reset": self.reset.then_some(1), "rowIds": (0..rows.len()).collect::<Vec<_>>(), "columns": COLUMNS.len()})
     }
 }
-fn column_id(column: &str) -> usize {
+pub(crate) fn column_id(column: &str) -> usize {
     COLUMNS
         .iter()
         .position(|c| *c == column)
         .expect("fixture column")
 }
-fn write_id(id: WriteId) -> u64 {
+pub(crate) fn write_id(id: WriteId) -> u64 {
     assert_eq!(id.number, 1, "fixture uses one write per device");
     id.device.0
 }
@@ -391,6 +442,7 @@ pub(crate) fn result_json(db: &Database, rows: &[RowId]) -> Value {
                     assert_eq!(entry, RESET);
                     json!({"reset": 1, "write": write_id(write)})
                 }
+                LossCause::Excluded { write, cause: coven_format::snapshot_rows::LostWriteCause::SchemaChange(version) } => json!({"schema": version, "write": write_id(write)}),
                 cause => panic!("unexpected boundary cause {cause:?}"),
             };
             let mut values: Vec<_> = cells.iter().map(|(c, v)| [column_id(c) as u64, write_id(v.write)]).collect();

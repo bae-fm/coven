@@ -276,47 +276,7 @@ mod differential {
     }
     async fn reduce_reset(runner: &OsStr, mut history: ReloadHistory) -> ReloadHistory {
         loop {
-            let mut candidates = Vec::new();
-            for i in 0..history.writes.len() {
-                let mut candidate = history.clone();
-                let removed = candidate.writes.remove(i).header.position;
-                candidate.covered.remove(&removed);
-                for w in &mut candidate.writes {
-                    w.header.had_read.0.retain(|id| *id != removed);
-                }
-                candidates.push(candidate);
-                for p in 0..history.writes[i].parts.len() {
-                    for r in 0..history.writes[i].parts[p].rows.len() {
-                        let mut candidate = history.clone();
-                        candidate.writes[i].parts[p].rows.remove(r);
-                        candidates.push(candidate);
-                        for column in ["a", "b"] {
-                            let mut candidate = history.clone();
-                            let change = &mut candidate.writes[i].parts[p].rows[r];
-                            match &mut change.change.operation {
-                                Operation::Insert(cols) | Operation::Update(cols) => {
-                                    cols.remove(column);
-                                }
-                                Operation::Delete => {}
-                            }
-                            change.old.remove(column);
-                            if candidate.writes != history.writes {
-                                candidates.push(candidate);
-                            }
-                        }
-                    }
-                }
-                if !history.writes[i].header.store_log_read.0.is_empty() {
-                    let mut candidate = history.clone();
-                    candidate.writes[i].header.store_log_read.0.clear();
-                    candidates.push(candidate);
-                }
-                if history.covered.contains(&history.writes[i].header.position) {
-                    let mut candidate = history.clone();
-                    candidate.covered.remove(&history.writes[i].header.position);
-                    candidates.push(candidate);
-                }
-            }
+            let candidates = history.reductions();
             let mut smaller = None;
             for candidate in candidates {
                 if candidate.valid() && reset_mismatch(runner, &candidate).await {
