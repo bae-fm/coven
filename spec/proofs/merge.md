@@ -440,8 +440,9 @@ at.
 Lean checks the theorems named in this appendix. `CovenMerge/Axioms.lean`
 prints their axioms; only Lean's `propext`, `Classical.choice` and
 `Quot.sound` are allowed. `scripts/check.sh` rebuilds the package, audits
-these axioms, and runs the Boolean and entry-aware Rust differential tests.
-The entry-aware comparison fails on the checked discrepancy in B16.
+these axioms, and runs the Boolean differential and the fixed Rust/Lean
+counterexamples in B16. Strict comparisons that find a discrepancy stay
+out of the check script.
 
 Values are identified by their setters and cells. A column can be its old
 name, so a frozen record does not require that column in the new schema.
@@ -477,10 +478,10 @@ until finality, loss dismissal, fingerprint hashing and trigger execution are ou
 this model. The functions describe a completed atomic reload; they do not
 model a partially installed database. Rust's merge functions use Boolean
 circle causes. The Boolean differential passes; the entry-aware differential
-exposes the missing deletion-entry identity in B16. Boundary, reset and
-migration comparisons have not been added: widening stopped at that first
-disagreement. Those operations are implemented outside `coven-merge`, in the
-database and sync crates; their execution is not checked by this runner.
+exposes the missing deletion-entry identity in B16. The reset differential
+calls the database snapshot reload and exposes a separate eligibility
+discrepancy there. Schema-boundary and migration comparisons are not covered
+by the reset test.
 The Boolean inputs and existing merge functions also remain available to
 the separate store-log/data package.
 
@@ -636,7 +637,7 @@ The readings used are:
   that identity and the old column name; it never substitutes a current
   foreign-key value into a loss.
 
-### B16 Rust differential: missing circle-deletion identity
+### B16 Rust differentials and checked discrepancies
 
 `MergeRunner.lean` accepts Boolean removal inputs or `EntryInputs`. Both
 modes run the same core merge; the entry-aware mode returns each named
@@ -668,15 +669,51 @@ name the responsible entry; its identity is part of the cause.
 The Boolean differential passes. `scripts/check.sh` runs it and checks the
 fixed counterexample. The strict entry-aware comparison fails on this history
 and is not in `scripts/check.sh`; it joins the check when Rust names the
-deleting entry in its loss rule, and the fixed counterexample then fails. Boundary, reset and
-migration differential coverage was not attempted beyond source inspection
-after this discrepancy.
+deleting entry in its loss rule, and the fixed counterexample then fails.
 
 From the repository root, after building `mergeRunner`:
 
 ```sh
 COVEN_MERGE_LEAN="$PWD/spec/proofs/merge/.lake/build/bin/mergeRunner" \
   cargo test -p coven-merge --all-features entry_differential -- --ignored --nocapture
+```
+
+The reset mode calls `reloadReset` on the selected snapshot inputs and incoming
+writes. `reset_differential_histories` calls the real database
+`load_snapshots`, which installs the snapshot and replays writes through
+`snapshot_writes::apply`, `download::accepted` and `WriteBoundary::excludes`.
+It compares generations, generation setters, cell setters, cell losses and
+frozen losses, and checks that every supplied write position is consumed.
+Store-log selection is supplied to both sides; this is not a test of replay
+selection, encryption or partially installed state.
+
+The deterministic generator samples causal histories, arrival orders and
+prefixes, with inserts, updates and deletes. Authors obtain their row state
+from Rust's merge, retaining the selected snapshot inputs after observing the
+reset. The reducer removes writes, changes, non-key values, reset reads and
+snapshot coverage while preserving format validity, causal closure and the
+merge's generation witnesses.
+
+Seed 0 reduces to an empty reset snapshot and one key-only insert that did not
+read the reset. Rust applies it at generation 1; Lean leaves generation 0 and
+no cells. Neither produces a loss. `reset_differential_counterexample` fixes
+this history and checks that removing the write or reset, covering the write,
+or making it read the reset removes the difference. Lean's
+`ResetCounterexample` checks the specified results and write validity.
+
+Lean follows [§19.3](../coven.md#193-resetting-a-store): “A write outside the
+snapshot that had not read that entry is ignored for the reset audience, even
+if it read every write in the snapshot.” Rust's reset predicate instead asks
+whether the write read the snapshot's write frontier, and whether it read a
+write outside that frontier. An empty frontier passes that test. No sentence
+in the current spec licenses that substitution for `store_log_read`.
+
+`scripts/check.sh` checks the fixed reset counterexample; the strict reset
+comparison remains ignored and outside the script. Run it explicitly with:
+
+```sh
+COVEN_MERGE_LEAN="$PWD/spec/proofs/merge/.lake/build/bin/mergeRunner" \
+  cargo test -p coven-database reset_differential_histories -- --ignored --nocapture
 ```
 
 ### B17 Receive order, progress, and the retirement gap

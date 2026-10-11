@@ -152,3 +152,10 @@ open CovenMerge
 #print axioms Receive.Examples.retirement_value_unaccounted
 #print axioms Receive.Examples.retirement_loss_disagrees
 #print axioms Receive.Examples.receive_runs_disagree
+
+-- unread writes outside a reset snapshot
+#print axioms ResetCounterexample.writes_valid
+#print axioms ResetCounterexample.unread_insert_ignored
+#print axioms ResetCounterexample.read_reset_applies
+#print axioms ResetCounterexample.no_write_no_gap
+#print axioms ResetCounterexample.no_reset_applies

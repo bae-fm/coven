@@ -183,3 +183,213 @@ async fn repeated_boundaries_keep_their_original_coverage_and_application_order(
     }
     source.close().await.unwrap();
 }
+
+mod differential {
+    use crate::snapshot_write::tests::{frames, id as snapshot_id, stream};
+    use crate::test_utils::tests::*;
+    use crate::tests::TestStore;
+    use crate::{Database, SnapshotReload, WriteBoundary};
+    use coven_format::value::EntryPositions;
+    use coven_foundation::id_source::SequentialIds;
+    use coven_merge::{Audience, Operation, Timestamp};
+    use serde_json::{json, Value};
+    use std::collections::BTreeSet;
+    use std::ffi::OsStr;
+
+    async fn install_reset_entry(db: &Database) {
+        // Replay selection is an input to both models. The real store-log
+        // transaction supplies the incoming writes' store_log_read prerequisites.
+        let entry = coven_format::store_log::StoreLogEntry {
+            position: RESET,
+            timestamp: Timestamp::new(100, 0, RESET.device).unwrap(),
+            author: crate::store_log::tests::keys(1).signing,
+            had_read: EntryPositions(Vec::new()),
+            change: coven_format::store_log::StoreChange::Reset {
+                snapshot: snapshot_id(Audience::Store),
+            },
+        };
+        let mut replay = crate::StoreLogReplay::default();
+        replay.entries.insert(RESET, crate::EntryOutcome::Kept);
+        replay
+            .state
+            .resets
+            .insert(Audience::Store, snapshot_id(Audience::Store));
+        db.apply_store_log(
+            crate::ReplayEntry {
+                entry,
+                check: crate::StoreLogCheck::Allowed,
+            },
+            replay,
+        )
+        .await
+        .unwrap();
+    }
+    async fn reset_result(history: &ReloadHistory) -> Value {
+        assert!(history.valid(), "invalid differential history");
+        let ids = SequentialIds::new();
+        let source_store = TestStore::with_ids(&ids);
+        let target_store = TestStore::with_ids(&ids);
+        let source = source_store.schema(tables(), SCHEMA).await.unwrap();
+        let target = target_store.schema(tables(), SCHEMA).await.unwrap();
+        for write in history
+            .writes
+            .iter()
+            .filter(|w| history.covered.contains(&w.header.position))
+        {
+            assert_eq!(
+                source.apply_downloaded(write.clone().into()).await.unwrap(),
+                crate::ApplyOutcome::Applied
+            );
+        }
+        let snapshot = frames(&source, Audience::Store).await;
+        install_reset_entry(&target).await;
+        let boundary = WriteBoundary::Reset {
+            entry: RESET,
+            audience: Audience::Store,
+            included: snapshot.prefix.writes.clone(),
+        };
+        let mut reload = SnapshotReload::new(
+            vec![snapshot.input()],
+            history.writes.iter().map(stream).collect(),
+        );
+        reload.boundaries = Some(if history.reset {
+            vec![boundary]
+        } else {
+            Vec::new()
+        });
+        target.load_snapshots(reload).await.unwrap();
+        let result = result_json(&target, &history.rows());
+        let positions = target.sync_state(Vec::new()).await.unwrap().positions;
+        assert!(
+            history
+                .writes
+                .iter()
+                .all(|w| positions.covers(w.header.position)),
+            "ignored parts must still pass their log positions"
+        );
+        source.close().await.unwrap();
+        target.close().await.unwrap();
+        result
+    }
+    async fn reset_mismatch(runner: &OsStr, history: &ReloadHistory) -> bool {
+        reset_result(history).await != run_lean(runner, &history.input())
+    }
+    async fn reduce_reset(runner: &OsStr, mut history: ReloadHistory) -> ReloadHistory {
+        loop {
+            let mut candidates = Vec::new();
+            for i in 0..history.writes.len() {
+                let mut candidate = history.clone();
+                let removed = candidate.writes.remove(i).header.position;
+                candidate.covered.remove(&removed);
+                for w in &mut candidate.writes {
+                    w.header.had_read.0.retain(|id| *id != removed);
+                }
+                candidates.push(candidate);
+                for p in 0..history.writes[i].parts.len() {
+                    for r in 0..history.writes[i].parts[p].rows.len() {
+                        let mut candidate = history.clone();
+                        candidate.writes[i].parts[p].rows.remove(r);
+                        candidates.push(candidate);
+                        for column in ["a", "b"] {
+                            let mut candidate = history.clone();
+                            let change = &mut candidate.writes[i].parts[p].rows[r];
+                            match &mut change.change.operation {
+                                Operation::Insert(cols) | Operation::Update(cols) => {
+                                    cols.remove(column);
+                                }
+                                Operation::Delete => {}
+                            }
+                            change.old.remove(column);
+                            if candidate.writes != history.writes {
+                                candidates.push(candidate);
+                            }
+                        }
+                    }
+                }
+                if !history.writes[i].header.store_log_read.0.is_empty() {
+                    let mut candidate = history.clone();
+                    candidate.writes[i].header.store_log_read.0.clear();
+                    candidates.push(candidate);
+                }
+                if history.covered.contains(&history.writes[i].header.position) {
+                    let mut candidate = history.clone();
+                    candidate.covered.remove(&history.writes[i].header.position);
+                    candidates.push(candidate);
+                }
+            }
+            let mut smaller = None;
+            for candidate in candidates {
+                if candidate.valid() && reset_mismatch(runner, &candidate).await {
+                    smaller = Some(candidate);
+                    break;
+                }
+            }
+            match smaller {
+                Some(candidate) => history = candidate,
+                None => return history,
+            }
+        }
+    }
+    #[tokio::test]
+    #[ignore = "requires COVEN_MERGE_LEAN; stops at the first reset mismatch"]
+    async fn reset_differential_histories() {
+        let runner = std::env::var_os("COVEN_MERGE_LEAN").expect("built mergeRunner");
+        for seed in 0..128 {
+            let mut rng = Generator::new(seed + 30_000);
+            let history = ReloadHistory::generate(&mut rng);
+            for prefix in [history.writes.len(), 4 + rng.pick(20)] {
+                let mut case = history.clone();
+                case.writes.truncate(prefix);
+                let present: BTreeSet<_> = case.writes.iter().map(|w| w.header.position).collect();
+                case.covered.retain(|id| present.contains(id));
+                for _ in 0..3 {
+                    case.writes = rng.order(&case.writes);
+                    if reset_mismatch(&runner, &case).await {
+                        let reduced = reduce_reset(&runner, case).await;
+                        panic!(
+                            "reset differential, seed {seed}\nreduced history: {}\nRust: {}\nLean: {}",
+                            reduced.input(),
+                            reset_result(&reduced).await,
+                            run_lean(&runner, &reduced.input())
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires COVEN_MERGE_LEAN; scripts/check.sh checks the reset discrepancy"]
+    async fn reset_differential_counterexample() {
+        let runner = std::env::var_os("COVEN_MERGE_LEAN").expect("built mergeRunner");
+        let mut write = insert(0, 0);
+        let Operation::Insert(columns) = &mut write.parts[0].rows[0].change.operation else {
+            unreachable!()
+        };
+        columns.retain(|c, _| c == "id");
+        let history = ReloadHistory {
+            writes: vec![write],
+            covered: BTreeSet::new(),
+            reset: true,
+        };
+        let rust = json!({"rows":[{"id":0,"gen":1,"gw":[[1,100]],"cells":[[0,100]],"lost":[]}],"frozen":[]});
+        let lean = json!({"rows":[{"id":0,"gen":0,"gw":[],"cells":[],"lost":[]}],"frozen":[]});
+        assert_eq!(reset_result(&history).await, rust);
+        assert_eq!(run_lean(&runner, &history.input()), lean);
+        assert_ne!(rust, lean);
+        // No write, no reset, reading the reset, or inclusion in the snapshot each
+        // removes this mismatch. The key is required by the real write format.
+        let mut empty = history.clone();
+        empty.writes.clear();
+        assert!(!reset_mismatch(&runner, &empty).await);
+        let mut no_reset = history.clone();
+        no_reset.reset = false;
+        assert!(!reset_mismatch(&runner, &no_reset).await);
+        let mut read = history.clone();
+        read.writes[0].header.store_log_read = EntryPositions(vec![RESET]);
+        assert!(!reset_mismatch(&runner, &read).await);
+        let mut covered = history;
+        covered.covered.insert(covered.writes[0].header.position);
+        assert!(!reset_mismatch(&runner, &covered).await);
+    }
+}

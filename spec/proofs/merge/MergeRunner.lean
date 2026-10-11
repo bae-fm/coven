@@ -1,4 +1,4 @@
-import CovenMerge.Circles
+import CovenMerge.Reset
 import Lean
 
 /-! JSON adapter for differential tests. All merge and removal computation calls
@@ -83,11 +83,48 @@ private def namedRuleJson (rule : Rule) : Json :=
   | .deletedCircleEntry entry => Json.mkObj [("kind", toJson (2 : Nat)), ("entry", toJson entry)]
   | rule => Json.mkObj [("kind", toJson (ruleNumber rule))]
 
+private def mergedFields (st : St Nat Nat Nat) (writes : Array InputWrite)
+    (r cols : Nat) : List (String × Json) :=
+  let generation := st.gen r
+  let gw := (List.range (generation + 1)).filterMap fun g =>
+    (st.genWrite r g).map fun w => toJson [g, w]
+  let cells := (List.range cols).filterMap fun c =>
+    (st.cell r c).map fun w => toJson [c, w]
+  let lost := (List.range cols).flatMap fun c =>
+    (writes.toList.mergeSort (fun a b => a.id ≤ b.id)).filterMap fun w =>
+      (st.lost r c w.id).map fun (g, replacer) => toJson [c, w.id, g, replacer]
+  [("id", toJson r), ("gen", toJson generation),
+    ("gw", toJson gw), ("cells", toJson cells), ("lost", toJson lost)]
+
+private def mergedJson (st : St Nat Nat Nat) (writes : Array InputWrite)
+    (rows : Array Nat) (cols : Nat) : Json :=
+  toJson (rows.map fun r => Json.mkObj (mergedFields st writes r cols))
+
+private def runReset (j : Json) (M : Writes Nat Nat Nat)
+    (writes : Array InputWrite) (order : Array Nat) : Except String Json := do
+  let covered ← j.getObjValAs? (Array Nat) "covered"
+  let snapshotInputs ← j.getObjValAs? (Array Nat) "snapshot"
+  let read ← j.getObjValAs? (Array Nat) "read"
+  let reset ← j.getObjValAs? (Option Nat) "reset"
+  let rows ← j.getObjValAs? (Array Nat) "rowIds"
+  let cols ← natField j "columns"
+  for w in covered ++ snapshotInputs ++ read do
+    if !(writes.any (·.id == w)) then throw "boundary names an unknown write"
+  for w in snapshotInputs do
+    if !covered.contains w then throw "snapshot input is not covered"
+  let B : SnapshotBoundary Nat := {
+    covered := covered.contains
+    inputs := fun w => snapshotInputs.contains w && covered.contains w
+    inputs_covered := by intro w h; simp only [Bool.and_eq_true] at h; exact h.2 }
+  let snapshot := snapshotInputs.toList.foldl (step M) (St.init : St Nat Nat Nat)
+  let st := match reset with
+    | some entry => reloadReset M { B with entry } (fun w _ => read.contains w) snapshot order.toList
+    | none => reloadSnapshot M B (fun _ => true) snapshot order.toList
+  pure (Json.mkObj [("rows", mergedJson st writes rows cols), ("frozen", toJson ([] : List Json))])
+
 private def run (j : Json) : Except String Json := do
   let writes ← (← j.getObjValAs? (Array Json) "writes").mapM readWrite
   let order ← j.getObjValAs? (Array Nat) "order"
-  let rows ← (← j.getObjValAs? (Array Json) "rows").mapM readRow
-  let cols ← natField j "columns"
   for w in order do
     if !(writes.any (·.id == w)) then throw "order names an unknown write"
   let M : Writes Nat Nat Nat := {
@@ -101,6 +138,10 @@ private def run (j : Json) : Except String Json := do
       let x ← writes.find? (·.id == w)
       let c ← x.changes.find? (·.row == r)
       some c.change }
+  let mode ← j.getObjValAs? String "mode"
+  if mode == "reset" then return ← runReset j M writes order
+  let rows ← (← j.getObjValAs? (Array Json) "rows").mapM readRow
+  let cols ← natField j "columns"
   let st := order.toList.foldl (step M) (St.init : St Nat Nat Nat)
   let I : Inputs Nat Nat := {
     rows := rows.toList.map (·.id)
@@ -116,7 +157,6 @@ private def run (j : Json) : Except String Json := do
     rank := fun r => match rows.find? (·.id == r) with
       | some x => x.rank
       | none => 0 }
-  let mode ← j.getObjValAs? String "mode"
   let v ← match mode with
     | "boolean" => pure (view I)
     | "entries" => do
@@ -128,19 +168,10 @@ private def run (j : Json) : Except String Json := do
       pure (entryView named)
     | _ => throw "unknown merge runner mode"
   let output := rows.map fun r =>
-    let generation := st.gen r.id
-    let gw := (List.range (generation + 1)).filterMap fun g =>
-      (st.genWrite r.id g).map fun w => toJson [g, w]
-    let cells := (List.range cols).filterMap fun c =>
-      (st.cell r.id c).map fun w => toJson [c, w]
-    let lost := (List.range cols).flatMap fun c => writes.toList.filterMap fun w =>
-      (st.lost r.id c w.id).map fun (g, replacer) => toJson [c, w.id, g, replacer]
-    Json.mkObj [
-      ("id", toJson r.id), ("gen", toJson generation),
-      ("gw", toJson gw), ("cells", toJson cells), ("lost", toJson lost),
+    Json.mkObj (mergedFields st writes r.id cols ++ [
       ("removed", toJson (v.removed r.id)),
       ("rules", if mode == "entries" then toJson ((v.rules r.id).map namedRuleJson)
-        else toJson ((v.rules r.id).map ruleNumber))]
+        else toJson ((v.rules r.id).map ruleNumber))])
   pure (toJson output)
 
 def main : IO UInt32 := do
