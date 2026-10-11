@@ -4,7 +4,7 @@ The Lean package is [storelog-data](storelog-data/). It imports the merge and
 store-log packages. Its executable models distinguish database state, knowledge
 of keys, provider requests, physical storage, and what the app reads.
 
-The package uses the store-log package's `CurrentReplay.Action`, `Entry`
+The existing policy models use the store-log package's `CurrentReplay.Action`, `Entry`
 and `History` directly. Removals carry only their targets; creation and
 rotation carry `KeyCommitment`. `CurrentReplay` supplies received and
 recorded-past replay, and `ReplayPolicy` supplies admission and effects for
@@ -408,3 +408,95 @@ Rust/Lean equivalence remain outside the model. No Rust code or differential
 test changes are part of this package. `scripts/check.sh` rebuilds every module
 and checks `Axioms.lean`; the audit permits only Lean's own `propext`,
 `Classical.choice`, and `Quot.sound`.
+
+## Member-key replacement
+
+`MemberKeySelection`, `MemberKeyPhases` and `MemberKeyExamples` extend the
+existing `KeySelection` and `KeyPhases` results for the
+[stable-member proposal](storelog.md#c13-stable-members-and-replaceable-keys--checked-proposal).
+They use `CurrentReplay.Keyed` directly; the unkeyed interfaces and their
+Rust comparisons remain available. This section describes the checked
+proposal, not a change already made to `spec/coven.md` or `spec/format.md`.
+
+A recipient contains a stable member id and the exact sealing public key.
+An old copy and a new copy can address the same member while disclosing their
+keys to different credentials. `retired` derives exposed sealing keys from
+kept replacements and each replacement's recorded view. A member need not
+leave the store or a circle for their old credential to be exposed.
+`kept_replacement_retires` connects that evidence to actual replay; neither
+the stated reason for replacement nor a device's local memory enters it.
+
+`route_current` proves that routing uses the member's current sealing key and
+refuses a retired key. `no_new_old_copy` proves that every successful new
+historical-share reservation appends only such a recipient. It uses the
+existing sharing check for audience membership and custody. `replacement_sharing`
+derives both the current binding and the retired keys from the same replay
+inside `shareInReplay`; its new destination differs from the old sealing key.
+`historical_copy_retained` proves that new sharing preserves every old copy.
+This is a statement about newly sealed copies. Already reserved ciphertext
+still follows the existing fixed-byte retry rule and may publish later.
+
+The selector composes `KeySelection.select` with rejection of keys having an
+observed copy for a retired sealing key or a credential that is not current
+for its named member. A prerequisite copy for a losing replacement cannot
+borrow that member's continuing authority. It retains the existing custody,
+audience, received-introduction authority and newest-key ordering checks.
+`selection_avoids_old_key` proves that a selected key has no observed copy to
+any retired sealing key; `replacement_selection` obtains that retirement from
+a kept replacement in the actual replay. This holds for every audience, not
+only the store. A key that the old credential can open through the complete
+copy observation cannot be the selected replacement.
+`selection_uses_current_bindings` proves that every observed recipient of a
+selected key uses that member's current credential.
+
+`KeyPhases.MemberKeys.begin` requires completed membership and copy
+observations. A failure returns its pending reason, not a usable pass.
+`rotate` verifies the candidate in the caught-up replay, uses the current
+bindings for every audience member, and requires publication of the complete
+copy set followed by the entry. `rotation_copies_safe` proves that every
+constructed rotation copy avoids retired sealing keys;
+`rotation_requires_publication` proves that both receipts are required.
+`first_send_after_replacement` connects selection to the actual first-send
+path after the replacement has been received and kept.
+
+The checked example creates a store and Gifts for one member, replaces that
+member's keys, and keeps their membership. Both old audience keys become
+unusable for first sends (`replacement_retires_both_audiences`). Historical
+sharing targets the new sealing key, but the old copy still exposes the key
+(`historical_sharing_uses_new_binding`, `resharing_does_not_unexpose`). The
+member rotates both audiences; both rotations publish copies to the new
+credential and subsequent selection uses the new audience keys
+(`both_rotations_publish_current_copies`, `rotation_selection_avoids_old_keys`).
+Either publication failure blocks the result (`failed_rotation_cannot_send`).
+A later observed old-credential copy of even the new rotation retires it
+(`later_old_copy_exposes_rotation`). `checked_metadata` verifies the example's
+causal and online storage history.
+`unbound_copy_exposes_rotation` checks the rejection of a copy for a candidate
+credential that never became current, even though its named member is active.
+
+`OldWriteWithRotation` connects the old-write finality counterexample to
+first-send selection. Creation on day 0, replacement on day 1 and store-key
+rotation on day 2 leave the finality window [3, 33] empty. The old-key write
+lands late on day 32. On day 34 the current-key reader uses the new store key
+and makes the old write count. `reader_uses_fresh_rotation` checks publication
+and selection; `final_replacement_still_allows_rescue` checks the changed
+verdict with that same replay. Thus requiring rotation does not remove the
+counterexample; it adds one entry before the qualifying finality window.
+
+These secrecy statements require all relevant disclosed audience keys to have
+copy evidence in the completed observation. They do not prove cryptography,
+provider discovery, absence of copies published after the observation, private
+key destruction, or protection of already exposed plaintext. A received old
+copy can retire a key even if its ciphertext is forged, as in §11's existing
+conservative rule. The receipt model does not inspect ciphertext or prove its
+hash; it treats the recorded recipient sealing key as the box's routing fact.
+Historical reads and exact-byte retries retain their old keys.
+
+The general IO/freshness and horizon theorems for the unkeyed model have not
+been transferred to this proposal. In particular, no claim is made that
+replacement finality finalizes old-key **write** admission: the storelog
+package's checked two-write counterexample proves otherwise under the
+counting-reader exception. SQL rebuilds and physical retention must retain
+that distinction. The exact spec/format changes, including credential-bearing
+copy prefixes and reports, are listed in
+[the checklist](storelog.md#c14-spec-and-format-checklist-for-stable-members).

@@ -33,3 +33,6 @@ import CovenStorelogData.KeyPhases
 import CovenStorelogData.HistoricalKeys
 import CovenStorelogData.HistoricalExamples
 import CovenStorelogData.Revocation
+import CovenStorelogData.MemberKeySelection
+import CovenStorelogData.MemberKeyPhases
+import CovenStorelogData.MemberKeyExamples
