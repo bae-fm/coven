@@ -1741,12 +1741,8 @@ pub enum SyncError {
     StoreOwner,
     /// This call needs a newer app schema or coven format (§17).
     UpdateRequired(RequiredUpdate),
-    /// A restore code could not be decoded (E9).
-    Code(CodeError),
-    /// A create-store entry or credential update names another store (E9).
+    /// A create-store entry names another store (§4).
     WrongStore { expected: StoreId, actual: StoreId },
-    /// A credential update's code names another member (E9).
-    WrongMember { expected: MemberId, actual: MemberId },
     /// The requested journal row is not failed work eligible for this call:
     /// retry accepts provider work; discard accepts only app-owned work.
     NotPending(OperationId),
@@ -2474,25 +2470,29 @@ impl CovenHandle {
     pub fn subscribe_members(&self) -> LiveQuery<Vec<MemberInfo>>;
 
     /// On S3: switches this member to the access key they made in the
-    /// provider's console, records the new key's id in the store log (§9),
-    /// and returns their new restore code, for their other devices to scan
-    /// and for them to write down. They delete the old key in the console
-    /// (§13). Requires connected storage. If publication fails, the call
-    /// returns the failure and retains the new credentials: the remote entry
-    /// may already exist. Retry with the same key to finish publication.
+    /// provider's console and records the new key's id in the store log (§9).
+    /// The restore code does not change. They keep the key separately,
+    /// update their other devices with update_credentials, and delete the old
+    /// key in the console (§13). Requires connected storage. If publication
+    /// fails, the call returns the failure and retains the new credentials:
+    /// the remote entry may already exist. Retry with the same key to finish publication.
     /// Member removal lists every recorded key until confirmed deleted,
     /// including this key if replay drops its set-access entry (§13).
     pub async fn replace_access_key(
         &self,
         access_key_id: String,
         secret_access_key: SecretText,
-    ) -> Result<String, SyncError>;
+    ) -> Result<(), SyncError>;
 
-    /// On a device that already has the store open: takes the S3 key
-    /// from a new restore code of this member's, and keeps
-    /// everything else. A disconnected handle keeps them for its next
+    /// On a device that already has the store open: takes this member's S3
+    /// key directly. The member identity, location and restore code do not
+    /// change. A disconnected handle keeps the credentials for its next
     /// connection; a connected handle also replaces its provider's credentials.
-    pub async fn update_credentials(&self, code: &str) -> Result<(), SyncError>;
+    pub async fn update_credentials(
+        &self,
+        access_key_id: String,
+        secret_access_key: SecretText,
+    ) -> Result<(), SyncError>;
 
     /// Changes a member's role, as an admin (§9).
     pub async fn set_member_role(&self, member: &MemberId, role: MemberRole) -> Result<(), SyncError>;
@@ -2574,7 +2574,8 @@ pub enum ProviderSignOut {
     RemoveAppAccess { provider: CloudProvider },
     /// Remove the device from the Apple account.
     RemoveFromAppleAccount,
-    /// Enter a new S3 key, update retained devices and the written restore code, then delete the old key.
+    /// Keep a new S3 key separately, update retained devices, then delete the old key.
+    /// The written restore code does not change.
     ReplaceAccessKey,
 }
 ```
@@ -2584,11 +2585,20 @@ pub enum ProviderSignOut {
 - A person's new device opens the store from their restore code: scanned
   as a QR code, typed in, or read from iCloud Keychain
   ([§12.1](coven.md#121-a-persons-new-device)).
+- The restore code contains only the member key, store id and name, and
+  storage location. On S3, the person keeps their access key separately,
+  such as in a password manager, and supplies it on the new device. Google
+  Drive, Dropbox and OneDrive likewise require the person's provider sign-in.
+- A QR scan from one of the person's own devices may supply both the code
+  and the S3 key, because the person controls the showing device. The key
+  accompanies the code; it is never part of the restore-code encoding.
+  iCloud Keychain may also hold the S3 key separately alongside the code.
 - An admin adds a person with an invite, and approves their join request
   ([§12.2](coven.md#122-adding-a-person)).
 - Each call takes the app's layout-scoped `CovenBuilder`, plus its code,
   device name, status callback and cancellation receiver, and
-  returns the open `CovenHandle`. There is no second app-side open.
+  returns the open `CovenHandle`. Restore also accepts the separately
+  supplied S3 credentials. There is no second app-side open.
   - The builder supplies tables, migrations, custody, clock, id source,
     provider clients, sign-in presenter and file-transfer limits once. The app
     calls `builder.authenticate(provider)` first where `needs_oauth` is true;
@@ -2640,7 +2650,7 @@ pub struct CodeInfo {
 
 /// The two codes used to open a store on a new device (§12).
 pub enum CodeKind {
-    /// Holds the person's member keys, location and S3 key where needed.
+    /// Holds only the person's member keys, store id and name, and location.
     Restore,
     /// Holds an invite id, secret, initial key id, inviting writer and its
     /// key-copy number at invite time; approval is required (§12.2).
@@ -2723,8 +2733,9 @@ pub enum OAuthError {
 
 impl CovenHandle {
     /// This member's restore code: their member key, the store's id and
-    /// name, location and S3 key where needed. The app shows it as a QR code, blurred
-    /// until the person taps it, and asks them to write it down at setup.
+    /// name, and storage location only. It never carries storage credentials.
+    /// The app shows it as a QR code, blurred until the person taps it,
+    /// and asks them to write it down at setup.
     pub async fn restore_code(&self) -> Result<String, SyncError>;
 
     /// Starts adding a person, as an admin, and returns the invite to show as
@@ -2787,21 +2798,38 @@ pub enum BootstrapStatus {
     Pending(Vec<PendingRecord>),
 }
 
+/// The member's S3 access key, supplied separately from a restore code.
+pub struct S3Credentials {
+    pub access_key_id: String,
+    pub secret_access_key: SecretText,
+}
+
 /// Opens the store on a new device from the person's restore code, scanned
-/// or typed. The builder holds its own sign-in when `needs_oauth`.
+/// or typed. S3 requires Some(s3_credentials), entered separately or received
+/// alongside the code from one of the person's own devices. Other providers
+/// require None; the builder holds its own sign-in when `needs_oauth`.
+/// Missing S3 credentials or credentials for another provider fail before
+/// bootstrap with BootstrapError::Sync carrying
+/// StorageFailure::InvalidConfiguration.
 pub async fn restore_from_code(
     builder: CovenBuilder,
     code: &str,
+    s3_credentials: Option<S3Credentials>,
     device_name: &str,
     on_status: impl Fn(BootstrapStatus),
     cancel: &watch::Receiver<bool>,
 ) -> Result<CovenHandle, BootstrapError>;
 
-/// Opens the store on a new Apple device from the iCloud Keychain item,
-/// which holds what a restore code holds (§12.1). `None` when the keychain
-/// holds no store.
+/// Opens the store on a new Apple device from its iCloud Keychain restore
+/// code (§12.1). On S3, uses the supplied credentials when Some; None reads
+/// the S3 key held separately alongside the code. An absent key fails with
+/// BootstrapError::Sync carrying StorageFailure::InvalidConfiguration;
+/// a keychain read failure is returned. Other providers require None and
+/// their own sign-in.
+/// Returns None when the keychain holds no store.
 pub async fn restore_from_keychain(
     builder: CovenBuilder,
+    s3_credentials: Option<S3Credentials>,
     device_name: &str,
     on_status: impl Fn(BootstrapStatus),
     cancel: &watch::Receiver<bool>,
@@ -2843,8 +2871,8 @@ impl OAuthClients {
   transfers and sync use a token until the provider rejects it with HTTP 401.
 - A rejected request refreshes once, commits the replacement to custody,
   then retries once. A failed refresh or second rejection reaches the caller.
-- Refresh leaves synced restore codes untouched. Account-provider restore
-  codes carry the location, never OAuth tokens.
+- Refresh and S3 key replacement leave restore codes untouched. Restore
+  codes carry the storage location, never S3 keys or OAuth tokens.
 
 Example, adding Ana's laptop. On her phone:
 
@@ -2867,9 +2895,15 @@ let mut builder = Coven::builder(layout.clone())
 if info.needs_oauth {
     builder.authenticate(info.cloud_provider).await?;
 }
+let s3_credentials = if info.cloud_provider == CloudProvider::S3 {
+    Some(ask_for_s3_access_key().await?)
+} else {
+    None
+};
 let handle = restore_from_code(
     builder,
     &scanned,
+    s3_credentials,
     "Ana’s laptop",
     |step| show_step(step),
     &cancel_rx,

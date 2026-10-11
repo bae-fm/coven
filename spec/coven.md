@@ -2443,13 +2443,18 @@ Carol's tablet:
 - A person's new device needs their *restore code*, which holds:
   - their member key, which gets it the store key ([§11](#11-keys));
   - the store's id and name;
-  - the storage location and, on S3, the member's access key.
+  - the storage location only, never storage credentials.
+- On S3, the person keeps their access key separately, such as in a
+  password manager, and enters it on the new device. Google Drive, Dropbox
+  and OneDrive likewise need a sign-in to the person's provider account.
 - It gets the code in one of three ways:
   - by scanning it as a QR code on one of the person's devices that has
-    the store open;
-  - on Apple platforms, from iCloud Keychain, which holds the same
-    contents, so a new device on the same Apple account opens the store
-    with no step but a provider sign-in, where storage needs one;
+    the store open. This device-to-device transfer may also carry the S3
+    key alongside the code, because the person controls the showing device;
+  - on Apple platforms, from iCloud Keychain, which holds the code and may
+    hold the S3 key separately alongside it. A new device on the same Apple
+    account still needs a provider sign-in where required, or the separately
+    kept S3 key if Keychain does not hold it;
   - by the person typing it in.
 - The QR code is blurred until the person taps to show it.
 - Where storage needs a sign-in, such as Google Drive, the new device
@@ -2463,8 +2468,10 @@ Carol's tablet:
 - The person writes the code down when they create or join a store, as
   part of setup.
 - On Apple platforms, coven writes the code to iCloud Keychain whenever it
-  changes: when the person creates or joins a store, and when their S3
-  key changes ([E9](api.md#e9-members-and-devices)).
+  changes, including when the person creates or joins a store. Changing an
+  S3 key updates the separately held credentials; it does not change the
+  restore code or require the person to write it down again
+  ([E9](api.md#e9-members-and-devices)).
 
 ### 12.2 Adding a person
 
@@ -2575,9 +2582,9 @@ Carol's tablet:
     her provider account;
   - iCloud: she removes the phone from her Apple account;
   - S3: she makes a new access key in the provider's console and enters it
-    on one device, which changes her restore code; her other devices scan
-    the new code, she writes it down, and she deletes the old key in the
-    console.
+    on one device. She keeps the key separately and supplies it to her other
+    devices, directly or through a QR scan from one of her own devices, then
+    deletes the old key in the console. Her restore code does not change.
 - No keys change: the phone still holds Ana's key, but can't reach storage
   to read or write anything new.
 - Removing a member is a store-log entry naming that member. It removes

@@ -701,9 +701,10 @@
 - A restore code (kind 10): `store:uuid | name:name | member_keys:bytes |
   storage:bytes`.
   - `member_keys` is `CVMK 01 | signing seed:32 bytes | sealing secret:32
-    bytes`; `storage` is the provider location and, only for S3, the
-    member's access key, at most 16 KiB. OAuth tokens are device-only and
-    never appear in a restore code.
+    bytes`; `storage` is the provider location only, at most 16 KiB.
+    A restore code never carries storage credentials: neither an S3 access
+    key nor OAuth tokens. A device-to-device QR transfer or iCloud Keychain
+    may carry the S3 key alongside the code (§12.1), outside this frame.
 - An invite code (kind 11): `store:uuid | name:name | invite:uuid |
   secret:32 bytes | initial_key:uuid | inviting_writer:DeviceId |
   key_copy_number:u64 | storage:bytes`.
