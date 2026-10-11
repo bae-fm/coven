@@ -2,7 +2,7 @@ use super::*;
 use crate::*;
 use axum::{extract::State, Json, Router};
 use coven_crypto::custody::{Keychain, StoreKeychain};
-use coven_storage::{test_utils::MemoryStorage, RestoreStorage, Storage};
+use coven_storage::{test_utils::MemoryStorage, Storage};
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
@@ -173,15 +173,17 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
     let code = handle.restore_code().await.unwrap();
     let decoded = coven_sync::read_restore_code(&code).unwrap();
     assert!(matches!(
-        RestoreStorage::decode(decoded.storage.as_bytes()).unwrap(),
-        RestoreStorage::Account(_)
+        StorageConfig::decode(decoded.storage.as_bytes()).unwrap(),
+        StorageConfig::Dropbox { .. }
     ));
     assert!(matches!(
-        handle.update_credentials(&code).await,
+        handle.update_credentials("s3-id".into(), SecretText::new("s3-secret".into())).await,
         Err(SyncError::Storage(error)) if error.failure() == StorageFailure::InvalidConfiguration
     ));
     handle.close().await.unwrap();
     scoped.delete_synced_restore_code().unwrap();
+    let held_s3_key = SecretBytes::new(b"separately held key".to_vec());
+    scoped.set_synced_s3_credentials(&held_s3_key).unwrap();
     clock.set(clock.now() + std::time::Duration::from_secs(3600));
     let handle = builder(layout, keychain, clock, storage.clone(), &sign_in)
         .open(directory.id())
@@ -196,6 +198,10 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
     };
     assert_eq!(tokens.access_token.as_str(), "access-1");
     assert!(scoped.synced_restore_code().unwrap().is_none());
+    assert_eq!(
+        scoped.synced_s3_credentials().unwrap().unwrap().as_bytes(),
+        held_s3_key.as_bytes()
+    );
     assert_eq!(
         handle.restore_code().await.unwrap(),
         code,

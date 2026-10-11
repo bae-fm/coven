@@ -12,6 +12,43 @@ use std::num::NonZeroUsize;
 mod fixtures;
 use fixtures::*;
 
+#[tokio::test]
+async fn restore_code_api_never_discloses_storage_credentials() {
+    for provider in [
+        CloudProvider::S3,
+        CloudProvider::GoogleDrive,
+        CloudProvider::Dropbox,
+        CloudProvider::OneDrive,
+        CloudProvider::CloudKit,
+    ] {
+        let owner = Owner::new(provider, false).await;
+        let text = owner.handle.restore_code().await.unwrap();
+        let code = RestoreCode::from_text(&text).unwrap();
+        let bytes = code.to_bytes().unwrap();
+        for field in [
+            "access_key_id",
+            "secret_access_key",
+            "access_token",
+            "refresh_token",
+        ] {
+            assert!(
+                !bytes
+                    .windows(field.len())
+                    .any(|window| window == field.as_bytes()),
+                "{provider:?} restore code disclosed {field}"
+            );
+        }
+        assert_eq!(code.store, owner.directory.id());
+        assert_eq!(code.name, "Household");
+        assert_eq!(code.member_keys.member_id(), owner.member.member_id());
+        assert_eq!(
+            RestoreCode::from_bytes(&bytes).unwrap().storage.as_bytes(),
+            serde_json::to_vec(&owner.storage.config()).unwrap()
+        );
+        owner.close().await;
+    }
+}
+
 struct JoinClock {
     clock: crate::tests::PollingClock,
     sleeping: watch::Sender<bool>,
@@ -113,6 +150,15 @@ async fn join_accepts_provider_access_and_approval_then_loads_the_store() {
         })
         .await;
         let handle = result.unwrap().unwrap();
+        if provider == CloudProvider::S3 {
+            restore_credentials::assert_key(
+                &StoreKeychain::new(install.keychain.clone(), owner.directory.id()),
+                &S3Credentials {
+                    access_key_id: "invited-key".into(),
+                    secret_access_key: SecretText::new("invited-secret".into()),
+                },
+            );
+        }
         let restored =
             coven_sync::read_restore_code(&handle.restore_code().await.unwrap()).unwrap();
         assert_eq!(restored.member_keys.member_id(), member);
@@ -412,62 +458,46 @@ async fn storage_failure_retains_staging_for_retry_without_final_keys() {
 }
 
 #[tokio::test]
-async fn restore_codes_track_s3_keys_in_synced_custody() {
+async fn s3_credential_changes_preserve_the_code_location_and_member_across_reopen() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let install = Installation::new();
     let handle = install.restore(&owner).await;
     let directory = install.layout.store_dir(&owner.directory.id());
     let before = handle.restore_code().await.unwrap();
-    let info = decode_code_info(&before).unwrap();
-    assert_eq!(info.kind, CodeKind::Restore);
-    assert_eq!(info.store_id, directory.id());
-    assert_eq!(info.cloud_provider, CloudProvider::S3);
-    assert!(!info.needs_oauth);
-    let mut updated = coven_sync::read_restore_code(&before).unwrap();
-    let data = RestoreStorage::S3 {
-        location: owner.storage.config(),
-        credentials: S3Credentials {
-            access_key_id: "replacement".into(),
-            secret_access_key: SecretText::new("new-secret".into()),
-        },
+    let code = coven_sync::read_restore_code(&before).unwrap();
+    let scoped = StoreKeychain::new(install.keychain.clone(), directory.id());
+    let replacement = S3Credentials {
+        access_key_id: "replacement".into(),
+        secret_access_key: SecretText::new("new-secret".into()),
     };
-    updated.storage = data.encode().unwrap();
-    let after = updated.to_text().unwrap();
+    handle
+        .replace_access_key(
+            replacement.access_key_id.clone(),
+            replacement.secret_access_key.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(handle.restore_code().await.unwrap(), before);
     assert_eq!(
-        handle
-            .replace_access_key("replacement".into(), SecretText::new("new-secret".into()))
-            .await
-            .unwrap(),
-        after.as_str()
+        scoped.synced_restore_code().unwrap().unwrap().as_bytes(),
+        code.to_bytes().unwrap().as_slice()
     );
-    assert_ne!(before, after.as_str());
-    assert_eq!(handle.restore_code().await.unwrap(), after.as_str());
-    assert_eq!(
-        keychain_code(&install.keychain)
-            .unwrap()
-            .unwrap()
-            .to_text()
-            .unwrap()
-            .as_str(),
-        after.as_str()
+    restore_credentials::assert_key(&scoped, &replacement);
+    handle
+        .update_credentials(
+            "retained-device".into(),
+            SecretText::new("retained-secret".into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(handle.restore_code().await.unwrap(), before);
+    restore_credentials::assert_key(
+        &scoped,
+        &S3Credentials {
+            access_key_id: "retained-device".into(),
+            secret_access_key: SecretText::new("retained-secret".into()),
+        },
     );
-    let mut wrong_member = coven_sync::read_restore_code(&after).unwrap();
-    wrong_member.member_keys = MemberKeys::generate().unwrap();
-    assert!(matches!(
-        handle
-            .update_credentials(&wrong_member.to_text().unwrap())
-            .await,
-        Err(SyncError::WrongMember { .. })
-    ));
-    let mut wrong_store = coven_sync::read_restore_code(&after).unwrap();
-    wrong_store.store = StoreId(UuidIds.new_id());
-    assert!(matches!(
-        handle
-            .update_credentials(&wrong_store.to_text().unwrap())
-            .await,
-        Err(SyncError::WrongStore { .. })
-    ));
-    assert_eq!(handle.restore_code().await.unwrap(), after.as_str());
     handle.close().await.unwrap();
     let handle = Coven::builder(install.layout.clone())
         .with_keychain(install.keychain.clone())
@@ -477,9 +507,31 @@ async fn restore_codes_track_s3_keys_in_synced_custody() {
         .open(directory.id())
         .await
         .unwrap();
-    assert_eq!(handle.restore_code().await.unwrap(), after.as_str());
-    handle.update_credentials(&before).await.unwrap();
     assert_eq!(handle.restore_code().await.unwrap(), before);
+    let original = owner.s3_credentials().unwrap();
+    handle
+        .update_credentials(
+            original.access_key_id.clone(),
+            original.secret_access_key.clone(),
+        )
+        .await
+        .unwrap();
+    restore_credentials::assert_key(&scoped, &original);
+    assert_eq!(handle.restore_code().await.unwrap(), before);
+    assert_eq!(
+        coven_storage::StorageSettings::new(directory)
+            .read()
+            .unwrap(),
+        Some(owner.storage.config())
+    );
+    assert_eq!(
+        coven_sync::read_restore_code(&before)
+            .unwrap()
+            .member_keys
+            .to_secret_bytes()
+            .as_bytes(),
+        owner.member.to_secret_bytes().as_bytes()
+    );
     handle.close().await.unwrap();
     assert!(matches!(
         handle.restore_code().await,
@@ -633,7 +685,8 @@ async fn removal_lists_every_recorded_key_including_a_dropped_replacement() {
                 .await;
             let replacement = async {
                 listing.await.unwrap();
-                let code = replace().await.unwrap();
+                replace().await.unwrap();
+                let code = handle.restore_code().await.unwrap();
                 assert_eq!(
                     coven_sync::read_restore_code(&code)
                         .unwrap()
@@ -655,7 +708,8 @@ async fn removal_lists_every_recorded_key_including_a_dropped_replacement() {
                 }
             );
         } else {
-            let code = replace().await.unwrap();
+            replace().await.unwrap();
+            let code = handle.restore_code().await.unwrap();
             assert_eq!(
                 coven_sync::read_restore_code(&code)
                     .unwrap()
@@ -689,6 +743,7 @@ async fn failed_access_publication_retains_credentials_and_retry_finishes_once()
     let install = Installation::new();
     let handle = install.restore(&owner).await;
     let directory = install.layout.store_dir(&owner.directory.id());
+    let before = handle.restore_code().await.unwrap();
     let entries_before = owner
         .storage
         .list(&ObjectPrefix::store_logs())
@@ -709,6 +764,16 @@ async fn failed_access_publication_retains_credentials_and_retry_finishes_once()
         Err(SyncError::Storage(_))
     ));
     let retained = handle.restore_code().await.unwrap();
+    assert_eq!(retained, before);
+    let scoped = StoreKeychain::new(install.keychain.clone(), directory.id());
+    restore_credentials::assert_key(
+        &scoped,
+        &S3Credentials {
+            access_key_id: "replacement".into(),
+            secret_access_key: SecretText::new("secret".into()),
+        },
+    );
+
     assert_eq!(
         keychain_code(&install.keychain)
             .unwrap()
@@ -721,13 +786,11 @@ async fn failed_access_publication_retains_credentials_and_retry_finishes_once()
     handle.close().await.unwrap();
     let handle = install.handle(directory.clone(), &owner).await;
     for _ in 0..2 {
-        assert_eq!(
-            handle
-                .replace_access_key("replacement".into(), SecretText::new("secret".into()))
-                .await
-                .unwrap(),
-            retained
-        );
+        handle
+            .replace_access_key("replacement".into(), SecretText::new("secret".into()))
+            .await
+            .unwrap();
+        assert_eq!(handle.restore_code().await.unwrap(), retained);
     }
     owner.sync().await;
     assert_eq!(
@@ -786,7 +849,7 @@ async fn restores_return_session_keys_and_builder_choices_without_reopening() {
                         owner.code.to_bytes().unwrap().to_vec(),
                     ))
                     .unwrap();
-                restore_from_keychain(builder, "Laptop", |_| {}, &cancel)
+                restore_from_keychain(builder, owner.s3_credentials(), "Laptop", |_| {}, &cancel)
                     .await
                     .unwrap()
                     .unwrap()
@@ -794,6 +857,7 @@ async fn restores_return_session_keys_and_builder_choices_without_reopening() {
                 restore_from_code(
                     builder,
                     &owner.code.to_text().unwrap(),
+                    owner.s3_credentials(),
                     "Laptop",
                     |_| {},
                     &cancel,
@@ -888,6 +952,7 @@ async fn missing_keychain_code_returns_none_without_creating_a_store() {
     let (_, cancel) = watch::channel(false);
     let result = restore_from_keychain(
         Coven::builder(install.layout.clone()).with_keychain(install.keychain.clone()),
+        None,
         "Laptop",
         |_| {},
         &cancel,
@@ -901,3 +966,6 @@ async fn missing_keychain_code_returns_none_without_creating_a_store() {
 #[path = "bootstrap_authentication_tests.rs"]
 // Keep the authentication tests under the same private installation fixtures.
 mod authentication;
+
+#[path = "restore_credentials_tests.rs"]
+mod restore_credentials;

@@ -24,17 +24,6 @@ pub enum SyncError {
     /// Provider setup failed before replacing the active connection.
     #[error(transparent)]
     Setup(#[from] Box<coven_storage::StorageSetupError>),
-    /// A credential update does not contain a valid restore code.
-    #[error(transparent)]
-    Code(#[from] crate::CodeError),
-    /// A credential update names a different person.
-    #[error("restore code belongs to {actual}, expected {expected}")]
-    WrongMember {
-        /// The current member.
-        expected: coven_crypto::MemberId,
-        /// The member named by the code.
-        actual: coven_crypto::MemberId,
-    },
     /// Rollback failed too; neither failure is hidden.
     #[error("{operation}; rollback failed: {cleanup}")]
     Cleanup {

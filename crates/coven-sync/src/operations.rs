@@ -51,7 +51,7 @@ pub(crate) enum Command {
     Discard(OperationId),
     ConfirmKey(String),
     Credentials {
-        previous: coven_storage::ConnectionCredentials,
+        previous: Option<coven_storage::ConnectionCredentials>,
         next: coven_storage::ConnectionCredentials,
         require_connected: bool,
         commit: crate::StorageCommit,
@@ -165,7 +165,7 @@ impl Operations {
 
     pub(crate) async fn install_credentials(
         &self,
-        previous: coven_storage::ConnectionCredentials,
+        previous: Option<coven_storage::ConnectionCredentials>,
         next: coven_storage::ConnectionCredentials,
         require_connected: bool,
         commit: crate::StorageCommit,
@@ -232,8 +232,8 @@ impl Operations {
     ) -> Result<(), SyncError> {
         self.unit(Command::SetRole(member.clone(), role)).await
     }
-    /// Publish the current member's storage access before returning a replacement
-    /// restore code. A failed publication retains its fixed bytes for explicit retry.
+    /// Publish the current member's replacement storage access. A failed
+    /// publication retains its fixed bytes for explicit retry.
     pub(crate) async fn set_access(
         &self,
         access: coven_format::MemberAccess,

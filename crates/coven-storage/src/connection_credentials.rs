@@ -2,7 +2,7 @@
 
 use crate::{CloudProvider, StorageConfig, StorageCredentials, StorageError, StorageFailure};
 
-/// Connection data used between coven crates; OAuth tokens never enter restore codes.
+/// Connection data used between coven crates; credentials never enter restore codes.
 #[derive(Clone)]
 pub struct ConnectionCredentials {
     /// The shared store's location.
@@ -16,12 +16,7 @@ impl ConnectionCredentials {
     pub fn validate(&self) -> Result<(), StorageError> {
         self.location.validate()?;
         match (self.location.provider(), &self.credentials) {
-            (CloudProvider::S3, StorageCredentials::S3(keys))
-                if !keys.access_key_id.is_empty()
-                    && !keys.secret_access_key.as_str().is_empty() =>
-            {
-                Ok(())
-            }
+            (CloudProvider::S3, StorageCredentials::S3(keys)) => keys.validate(),
             (
                 CloudProvider::GoogleDrive | CloudProvider::Dropbox | CloudProvider::OneDrive,
                 StorageCredentials::OAuth(tokens),

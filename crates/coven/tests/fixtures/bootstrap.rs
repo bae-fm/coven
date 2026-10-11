@@ -123,6 +123,13 @@ impl Owner {
             .unwrap()
     }
 
+    pub(super) fn s3_credentials(&self) -> Option<S3Credentials> {
+        (self.storage.config().provider() == CloudProvider::S3).then(|| S3Credentials {
+            access_key_id: "owner-key".into(),
+            secret_access_key: SecretText::new("secret".into()),
+        })
+    }
+
     pub(super) fn recipient(&self) -> Arc<MemoryStorage> {
         if self.storage.config().provider() == CloudProvider::S3 {
             self.storage.clone()
@@ -204,6 +211,7 @@ impl Installation {
             self.authenticated_builder(owner, owner.storage.clone())
                 .await,
             &owner.code.to_text().unwrap(),
+            owner.s3_credentials(),
             "Ana’s laptop",
             |_| {},
             &cancel,
@@ -215,6 +223,12 @@ impl Installation {
     pub(super) fn restore_request(owner: &Owner) -> BootstrapRequest {
         BootstrapRequest::Restore {
             code: coven_sync::read_restore_code(&owner.code.to_text().unwrap()).unwrap(),
+            data: ConnectionCredentials {
+                location: owner.storage.config(),
+                credentials: StorageCredentials::S3(
+                    owner.s3_credentials().expect("S3 restore fixture"),
+                ),
+            },
             name: "Ana’s laptop".into(),
         }
     }
@@ -242,6 +256,7 @@ impl Installation {
         assert!(scoped.device_id().unwrap().is_none());
         assert!(scoped.storage_credentials().unwrap().is_none());
         assert!(scoped.synced_restore_code().unwrap().is_none());
+        assert!(scoped.synced_s3_credentials().unwrap().is_none());
     }
 
     pub(super) async fn handle(&self, directory: StoreDir, owner: &Owner) -> CovenHandle {

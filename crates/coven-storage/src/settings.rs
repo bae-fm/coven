@@ -1,4 +1,4 @@
-use crate::{StorageConfig, StorageError, StorageFailure};
+use crate::{StorageConfig, StorageError};
 use coven_foundation::files::{StoreDir, StoreFile};
 
 /// Storage settings owned by the store directory; credentials never enter this file.
@@ -19,20 +19,14 @@ impl StorageSettings {
         else {
             return Ok(None);
         };
-        let config: StorageConfig = serde_json::from_slice(&bytes)
-            .map_err(|error| StorageFailure::Encoding.with_source(error))?;
-        config.validate()?;
-        Ok(Some(config))
+        Ok(Some(StorageConfig::decode(&bytes)?))
     }
     /// Atomically commit the location after the facade has established the connection.
     pub fn commit(&self, config: &StorageConfig) -> Result<(), StorageError> {
-        config.validate()?;
+        let bytes = config.encode()?;
         self.directory
             .owned_file(StoreFile::StorageSettings)
-            .replace(
-                &serde_json::to_vec(config)
-                    .map_err(|error| StorageFailure::Encoding.with_source(error))?,
-            )?;
+            .replace(bytes.as_bytes())?;
         Ok(())
     }
     /// Remove settings after the facade successfully removes credentials.

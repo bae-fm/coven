@@ -32,7 +32,6 @@ pub use credentials::*;
 pub use error::*;
 pub use invitation::StorageInvitation;
 pub use path::*;
-pub use restore_storage::RestoreStorage;
 pub use session::UploadSession;
 pub use settings::StorageSettings;
 pub use storage::*;

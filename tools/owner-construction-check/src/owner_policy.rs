@@ -250,6 +250,16 @@ pub(crate) const POLICY: Policy = Policy {
         (
             "crates/coven-storage/src/test_utils.rs",
             "MemoryStorage",
+            "connect_device",
+        ),
+        (
+            "crates/coven-storage/src/test_utils.rs",
+            "MemoryStorage",
+            "shared_connection",
+        ),
+        (
+            "crates/coven-storage/src/test_utils.rs",
+            "MemoryStorage",
             "for_device",
         ),
         (

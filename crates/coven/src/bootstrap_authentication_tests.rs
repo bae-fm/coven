@@ -15,7 +15,7 @@ async fn restore_and_keychain_restore_use_builder_sign_in_without_returning_toke
             StoreKeychain::new(install.keychain.clone(), owner.directory.id())
                 .set_synced_restore_code(&SecretBytes::new(owner.code.to_bytes().unwrap().to_vec()))
                 .unwrap();
-            restore_from_keychain(builder, "Laptop", |_| {}, &cancel)
+            restore_from_keychain(builder, None, "Laptop", |_| {}, &cancel)
                 .await
                 .unwrap()
                 .unwrap()
@@ -23,6 +23,7 @@ async fn restore_and_keychain_restore_use_builder_sign_in_without_returning_toke
             restore_from_code(
                 builder,
                 &owner.code.to_text().unwrap(),
+                None,
                 "Laptop",
                 |_| {},
                 &cancel,
@@ -59,6 +60,7 @@ async fn bootstrap_requires_explicit_sign_in_and_never_presents_ui() {
         restore_from_code(
             builder,
             &owner.code.to_text().unwrap(),
+            None,
             "Laptop",
             |_| {},
             &cancel

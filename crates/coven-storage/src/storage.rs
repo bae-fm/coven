@@ -60,8 +60,8 @@ pub enum ProviderSignOut {
     },
     /// Remove the device from the Apple account.
     RemoveFromAppleAccount,
-    /// Make and enter a new S3 key, distribute and write down the new restore
-    /// code, then delete the old key in the provider console.
+    /// Keep a new S3 key separately, supply it to retained devices, then delete
+    /// the old key in the provider console. The restore code stays unchanged.
     ReplaceAccessKey,
 }
 

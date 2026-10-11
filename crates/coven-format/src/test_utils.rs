@@ -387,13 +387,16 @@ pub fn snapshot_frames() -> Vec<Vec<u8>> {
     frames.push(encoder.finish().unwrap());
     frames
 }
-/// Restore contents with test seeds and a test credential byte.
+/// Restore contents with test seeds and an S3 location without credentials.
 pub fn restore() -> RestoreCode {
     RestoreCode {
         store: StoreId(Uuid::from_bytes([0x10; 16])),
         name: "S".into(),
         member_keys: member_keys(),
-        storage: SecretBytes::new(vec![0x44]),
+        storage: SecretBytes::new(
+            br#"{"S3":{"bucket":"bucket","region":"region","endpoint":null,"prefix":"store"}}"#
+                .to_vec(),
+        ),
     }
 }
 /// Invite contents with a fixed test secret.

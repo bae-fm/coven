@@ -3,13 +3,13 @@ use crate::custody::KeychainError;
 
 pub(super) struct MemoryEntries {
     pub(super) entries: std::collections::BTreeMap<(EntryScope, String), SecretBytes>,
-    pub(super) fail_after: Option<usize>,
+    pub(super) fail_after: std::collections::VecDeque<usize>,
 }
 
 impl MemoryEntries {
     fn check(&mut self) -> Result<(), KeyError> {
-        if self.fail_after == Some(0) {
-            self.fail_after = None;
+        if self.fail_after.front() == Some(&0) {
+            self.fail_after.pop_front();
             return Err(
                 KeychainError::from(keyring_core::Error::NoStorageAccess(Box::new(
                     std::io::Error::new(
@@ -20,7 +20,7 @@ impl MemoryEntries {
                 .into(),
             );
         }
-        if let Some(remaining) = &mut self.fail_after {
+        if let Some(remaining) = self.fail_after.front_mut() {
             *remaining -= 1;
         }
         Ok(())
@@ -28,7 +28,7 @@ impl MemoryEntries {
 }
 
 impl KeychainBackend for Mutex<MemoryEntries> {
-    fn supports_synced_restore_codes(&self) -> bool {
+    fn supports_synced_entries(&self) -> bool {
         true
     }
 
@@ -102,7 +102,7 @@ impl Keychain {
             name,
             backend: Box::new(Mutex::new(MemoryEntries {
                 entries: std::collections::BTreeMap::new(),
-                fail_after: None,
+                fail_after: std::collections::VecDeque::new(),
             })),
             host_secrets: Mutex::new(()),
         }))
@@ -118,9 +118,16 @@ impl Keychain {
     /// Make the fake refuse the next read, write, delete or list before changing state.
     /// Panics if this is a native keychain.
     pub fn fail_next_operation(&self) {
+        self.fail_operations_after(&[0]);
+    }
+
+    /// Refuse successive operations after each given number of successful calls.
+    /// For example `[2, 0]` refuses the third call and its immediate rollback.
+    /// Replaces any existing failure schedule; requires an in-memory keychain.
+    pub fn fail_operations_after(&self, successes: &[usize]) {
         self.memory_backend()
             .lock()
             .expect("in-memory keychain entries lock is poisoned")
-            .fail_after = Some(0);
+            .fail_after = successes.iter().copied().collect();
     }
 }

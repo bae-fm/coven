@@ -65,5 +65,7 @@ mod codes;
 pub use codes::{
     decode_code_info, read_invite_code, read_restore_code, CodeError, CodeInfo, CodeKind,
 };
+mod credential_custody;
+pub use credential_custody::{commit_credentials, CredentialRollback};
 mod restore_codes;
-pub use restore_codes::{commit_credentials, read_connection, refreshed_credentials, RestoreCodes};
+pub use restore_codes::{read_connection, refreshed_credentials, RestoreCodes};

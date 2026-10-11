@@ -298,6 +298,22 @@ impl SyncRun {
         Ok(())
     }
 
+    async fn start(&mut self) -> Result<(), SyncError> {
+        // Credentials may have been entered after disconnect removed the old key.
+        if !self.configured {
+            self.configured = self.codes.connection().await?.is_some();
+        }
+        if self.configured && !self.started {
+            self.operations.check_sync_keys().await?;
+            if self.connection.is_none() {
+                self.connect().await?;
+            }
+            self.started = true;
+            self.status.send_replace(SyncStatus::Syncing);
+        }
+        Ok(())
+    }
+
     async fn run(mut self) {
         let mut delay = self.clock.sleep(Duration::from_secs(30));
         let mut pending = false;
@@ -335,20 +351,9 @@ impl SyncRun {
                             let _ = reply.send(result);
                         }
                         Some(SyncCommand::Start(reply)) => {
-                            let result = if self.configured && !self.started {
-                                let result = async {
-                                    self.operations.check_sync_keys().await?;
-                                    if self.connection.is_none() {
-                                        self.connect().await?;
-                                    }
-                                    Ok(())
-                                }.await;
-                                if result.is_ok() {
-                                    self.started = true; pending = true;
-                                    self.status.send_replace(SyncStatus::Syncing);
-                                }
-                                result
-                            } else { Ok(()) };
+                            let was_started = self.started;
+                            let result = self.start().await;
+                            pending |= result.is_ok() && self.started && !was_started;
                             let _ = reply.send(result);
                         }
                         Some(SyncCommand::Stop) => {

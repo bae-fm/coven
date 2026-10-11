@@ -63,7 +63,8 @@ pub use coven_storage::providers::{
     CloudKitOps, CloudKitUpload, CloudKitUploadStatus, OAuthClients, OAuthError, OAuthPresenter,
 };
 pub use coven_storage::{
-    ByteRange, CloudProvider, ObjectPath, ObjectPrefix, StorageConfig, StorageError, StorageFailure,
+    ByteRange, CloudProvider, ObjectPath, ObjectPrefix, S3Credentials, StorageConfig, StorageError,
+    StorageFailure,
 };
 
 #[cfg(any(test, feature = "test-utils"))]

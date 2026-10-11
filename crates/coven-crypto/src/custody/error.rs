@@ -47,8 +47,8 @@ pub enum KeyError {
     /// This target has no native credential store implementation.
     #[error("unsupported keyring platform")]
     UnsupportedKeyringPlatform,
-    /// Synced restore codes require an Apple keychain.
-    #[error("synced restore codes are unsupported on this platform")]
+    /// Synced entries require an Apple keychain.
+    #[error("synced entries are unsupported on this platform")]
     Unsupported,
     /// A synced restore-code account contains an invalid store id.
     #[error("invalid store id in synced restore-code entry")]

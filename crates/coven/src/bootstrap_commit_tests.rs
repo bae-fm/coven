@@ -7,14 +7,11 @@ fn code(store: StoreId) -> RestoreCode {
         store,
         name: "Household".into(),
         member_keys: MemberKeys::generate().unwrap(),
-        storage: RestoreStorage::S3 {
-            location: StorageConfig::S3 {
-                bucket: "bucket".into(),
-                region: "us-east-1".into(),
-                endpoint: None,
-                prefix: "store".into(),
-            },
-            credentials: s3_key(),
+        storage: StorageConfig::S3 {
+            bucket: "bucket".into(),
+            region: "us-east-1".into(),
+            endpoint: None,
+            prefix: "store".into(),
         }
         .encode()
         .unwrap(),
@@ -125,6 +122,7 @@ async fn custody_failure_restores_the_prior_keys_without_publishing() {
     assert!(scoped.device_id().unwrap().is_none());
     assert!(scoped.storage_credentials().unwrap().is_none());
     assert!(scoped.synced_restore_code().unwrap().is_none());
+    assert!(scoped.synced_s3_credentials().unwrap().is_none());
     assert!(StorageSettings::new(pending.directory())
         .read()
         .unwrap()
@@ -195,6 +193,12 @@ async fn publication_failure_rolls_back_settings_and_custody() {
     )
     .await;
     let settings = StorageSettings::new(pending.directory());
+    let old_credentials = SecretBytes::new(b"device credentials before restore".to_vec());
+    let old_s3_key = SecretBytes::new(b"synced S3 key before restore".to_vec());
+    let old_code = SecretBytes::new(b"code before restore".to_vec());
+    scoped.set_storage_credentials(&old_credentials).unwrap();
+    scoped.set_synced_s3_credentials(&old_s3_key).unwrap();
+    scoped.set_synced_restore_code(&old_code).unwrap();
     let old_location = StorageConfig::Dropbox {
         namespace_id: "previous-location".into(),
     };
@@ -230,10 +234,127 @@ async fn publication_failure_rolls_back_settings_and_custody() {
             .unwrap()
             .is_none()
     );
+    assert_eq!(
+        scoped.storage_credentials().unwrap().unwrap().as_bytes(),
+        old_credentials.as_bytes()
+    );
+    assert_eq!(
+        scoped.synced_restore_code().unwrap().unwrap().as_bytes(),
+        old_code.as_bytes()
+    );
+    assert_eq!(
+        scoped.synced_s3_credentials().unwrap().unwrap().as_bytes(),
+        old_s3_key.as_bytes()
+    );
+    assert!(scoped.device_id().unwrap().is_none());
+    assert_eq!(settings.read().unwrap(), Some(old_location));
+    assert!(layout.stores().await.unwrap().is_empty());
+    database.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn credential_publication_failures_restore_every_prior_custody_value() {
+    for after in 0..8 {
+        let root = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::new(root.path().into());
+        let id = StoreId(UuidIds.new_id());
+        let keychain = Keychain::in_memory("commit-test").unwrap();
+        let scoped = StoreKeychain::new(keychain.clone(), id);
+        let old_device = SecretBytes::new(b"old device credentials".to_vec());
+        let old_key = SecretBytes::new(b"old synced S3 key".to_vec());
+        let old_code = SecretBytes::new(b"old synced code".to_vec());
+        scoped.set_storage_credentials(&old_device).unwrap();
+        scoped.set_synced_s3_credentials(&old_key).unwrap();
+        scoped.set_synced_restore_code(&old_code).unwrap();
+        let (pending, owners, database) = prepared(
+            &layout,
+            id,
+            keychain.clone(),
+            KeyCustody::InMemory,
+            IdentityCustody::InMemory,
+        )
+        .await;
+        // Device id read/write, then all three credential reads and writes.
+        keychain.fail_operations_after(&[after]);
+        let ring = StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap());
+        let error = publish_bootstrap(
+            &pending,
+            code(id),
+            credentials(),
+            ring,
+            owners,
+            database.clone(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                BootstrapError::SecureStorage(_)
+                    | BootstrapError::Sync(SyncError::SecureStorage(_))
+            ),
+            "operation {after}: {error}"
+        );
+        assert_eq!(
+            scoped.storage_credentials().unwrap().unwrap().as_bytes(),
+            old_device.as_bytes()
+        );
+        assert_eq!(
+            scoped.synced_s3_credentials().unwrap().unwrap().as_bytes(),
+            old_key.as_bytes()
+        );
+        assert_eq!(
+            scoped.synced_restore_code().unwrap().unwrap().as_bytes(),
+            old_code.as_bytes()
+        );
+        assert!(scoped.device_id().unwrap().is_none());
+        assert!(StorageSettings::new(pending.directory())
+            .read()
+            .unwrap()
+            .is_none());
+        assert!(layout.stores().await.unwrap().is_empty());
+        database.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn bootstrap_reports_synced_key_rollback_failure_with_the_publication_failure() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = StoreLayout::new(root.path().into());
+    let id = StoreId(UuidIds.new_id());
+    let keychain = Keychain::in_memory("commit-test").unwrap();
+    let scoped = StoreKeychain::new(keychain.clone(), id);
+    let (pending, owners, database) = prepared(
+        &layout,
+        id,
+        keychain.clone(),
+        KeyCustody::InMemory,
+        IdentityCustody::InMemory,
+    )
+    .await;
+    // Refuse the code write, then refuse rolling back the separate S3 entry.
+    keychain.fail_operations_after(&[7, 1]);
+    let ring = StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap());
+    let error = publish_bootstrap(
+        &pending,
+        code(id),
+        credentials(),
+        ring,
+        owners,
+        database.clone(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, BootstrapError::Sync(SyncError::Cleanup { operation, cleanup })
+        if matches!(*operation, SyncError::SecureStorage(_)) && matches!(*cleanup, SyncError::SecureStorage(_)))
+    );
+    assert!(scoped.synced_s3_credentials().unwrap().is_some());
     assert!(scoped.storage_credentials().unwrap().is_none());
     assert!(scoped.synced_restore_code().unwrap().is_none());
     assert!(scoped.device_id().unwrap().is_none());
-    assert_eq!(settings.read().unwrap(), Some(old_location));
+    assert!(StorageSettings::new(pending.directory())
+        .read()
+        .unwrap()
+        .is_none());
     assert!(layout.stores().await.unwrap().is_empty());
     database.close().await.unwrap();
 }
@@ -261,10 +382,7 @@ async fn cleanup_failure_returns_the_open_handle_with_its_session_keys() {
         .join(id.to_string())
         .join("bootstrap.sealed");
     std::fs::create_dir(leftover).unwrap();
-    let location = RestoreStorage::decode(code.storage.as_bytes())
-        .unwrap()
-        .location()
-        .clone();
+    let location = StorageConfig::decode(code.storage.as_bytes()).unwrap();
     let error =
         publish_bootstrap(&pending, code, credentials(), ring, owners, database).unwrap_err();
     let BootstrapError::Published { handle, .. } = error else {

@@ -1,4 +1,4 @@
-//! Device-only custody and Apple's separate synced restore-code store.
+//! Device-only custody and Apple's synced restore-code and S3-key entries.
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 use super::keychain::restore_code_store;
@@ -58,7 +58,7 @@ impl NativeKeychain {
 }
 
 impl KeychainBackend for NativeKeychain {
-    fn supports_synced_restore_codes(&self) -> bool {
+    fn supports_synced_entries(&self) -> bool {
         cfg!(any(target_os = "macos", target_os = "ios"))
     }
 

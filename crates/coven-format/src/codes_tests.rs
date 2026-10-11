@@ -61,7 +61,7 @@ fn crc_uses_the_published_castagnoli_check_value() {
     assert_eq!(checksum(b""), 0);
 }
 #[test]
-fn pinned_text_restores_crypto_owned_keys_and_credentials() {
+fn pinned_text_restores_member_identity_and_location_and_invite_secrets() {
     let expected: Vec<_> = include_str!("../fixtures/codes.txt").lines().collect();
     let restore = test_utils::restore();
     let invite = test_utils::invite();

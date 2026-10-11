@@ -17,21 +17,20 @@ pub(super) fn publish_bootstrap(
     let old_keys = keys.read()?;
     let old_identity = identity.read()?;
     let old_device = keychain.device_id()?;
-    let old_credentials = keychain.storage_credentials()?;
-    let old_code = if keychain.supports_synced_restore_codes() {
-        keychain.synced_restore_code()?
-    } else {
-        None
-    };
-    let data = RestoreStorage::decode(code.storage.as_bytes()).map_err(SyncError::from)?;
+    let mut credential_rollback = None;
+    let location = StorageConfig::decode(code.storage.as_bytes()).map_err(SyncError::from)?;
     let settings = StorageSettings::new(directory.clone());
     let old_settings = settings.read().map_err(SyncError::from)?;
-    let commit = || -> Result<(), BootstrapError> {
-        settings.commit(data.location()).map_err(SyncError::from)?;
+    let mut commit = || -> Result<(), BootstrapError> {
+        settings.commit(&location).map_err(SyncError::from)?;
         keys.persist(&ring)?;
         identity.persist(&code.member_keys)?;
         keychain.set_device_id(owners.device)?;
-        coven_sync::commit_credentials(keychain, &credentials, Some(&code))?;
+        credential_rollback = Some(coven_sync::commit_credentials(
+            keychain,
+            &credentials,
+            Some(&code),
+        )?);
         Ok(pending.publish()?)
     };
     let publication_error = match commit() {
@@ -57,22 +56,14 @@ pub(super) fn publish_bootstrap(
                     Some(device) => keychain.set_device_id(device),
                     None => keychain.delete_device_id(),
                 },
-                match old_credentials {
-                    Some(bytes) => keychain.set_storage_credentials(&bytes),
-                    None => keychain.delete_storage_credentials(),
-                },
             ] {
                 if let Err(cleanup) = rollback {
                     error =
                         combine::<()>(Err(error), Err(cleanup.into())).expect_err("failed commit");
                 }
             }
-            if keychain.supports_synced_restore_codes() {
-                let rollback = match old_code {
-                    Some(bytes) => keychain.set_synced_restore_code(&bytes),
-                    None => keychain.delete_synced_restore_code(),
-                };
-                if let Err(cleanup) = rollback {
+            if let Some(previous) = credential_rollback {
+                if let Err(cleanup) = previous.restore(keychain) {
                     error =
                         combine::<()>(Err(error), Err(cleanup.into())).expect_err("failed commit");
                 }

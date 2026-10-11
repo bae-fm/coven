@@ -23,16 +23,18 @@ fn native_device_entries_do_not_sync_and_cannot_move_to_another_device() {
             AccessPolicy::WhenUnlockedThisDeviceOnly
         );
     }
-    let entry = native
-        .entry(EntryScope::Synced, "coven-test", "restore-code:1")
-        .unwrap();
-    assert!(
-        entry
-            .as_any()
-            .downcast_ref::<Cred>()
-            .unwrap()
-            .cloud_synchronize
-    );
+    for account in ["restore-code:1", "s3-credentials:1"] {
+        let entry = native
+            .entry(EntryScope::Synced, "coven-test", account)
+            .unwrap();
+        assert!(
+            entry
+                .as_any()
+                .downcast_ref::<Cred>()
+                .unwrap()
+                .cloud_synchronize
+        );
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -61,6 +63,9 @@ fn native_search_discovers_restore_codes_and_propagates_read_failures() {
     // An unrelated synced entry has no readable secret: filtering must happen
     // before get_secret, and a prefix match must include the separator.
     synced.build("app", "restore-code-other:1", None).unwrap();
+    synced
+        .build("app", &format!("s3-credentials:{id}"), None)
+        .unwrap();
     assert!(native.synced_restore_codes("app").unwrap().is_empty());
     let entry = synced.build("app", &account, None).unwrap();
     entry.set_secret(b"restore code").unwrap();

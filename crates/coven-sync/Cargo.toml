@@ -23,6 +23,7 @@ tracing.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+coven-crypto = { workspace = true, features = ["test-utils"] }
 coven-database = { workspace = true, features = ["test-utils"] }
 coven-storage = { workspace = true, features = ["test-utils"] }
 coven-foundation = { workspace = true, features = ["test-utils"] }

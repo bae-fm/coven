@@ -25,12 +25,7 @@ fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
         store: StoreId(uuid::Uuid::from_u128(1)),
         name: "Household".into(),
         member_keys: MemberKeys::generate().unwrap(),
-        storage: RestoreStorage::S3 {
-            location: location(),
-            credentials: credentials(),
-        }
-        .encode()
-        .unwrap(),
+        storage: location().encode().unwrap(),
     };
     let restore_text = restore.to_text().unwrap();
     let invite = InviteCode {
@@ -85,6 +80,11 @@ fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
     invalid.storage = SecretBytes::new(b"invalid payload".to_vec());
     assert!(matches!(
         decode_code_info(&invalid.to_text().unwrap()),
+        Err(CodeError::Invalid)
+    ));
+    invalid.storage = SecretBytes::new(br#"{"S3":{"location":{"S3":{"bucket":"bucket","region":"region","endpoint":null,"prefix":"store"}},"credentials":{"access_key_id":"access","secret_access_key":"secret"}}}"#.to_vec());
+    assert!(matches!(
+        read_restore_code(&invalid.to_text().unwrap()),
         Err(CodeError::Invalid)
     ));
     let mut invalid = invite;

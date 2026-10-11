@@ -42,6 +42,7 @@ impl Fixture {
             storage: storage.clone(),
             clients: std::sync::Mutex::new(Vec::new()),
             credentials: std::sync::Mutex::new(Vec::new()),
+            providers: std::sync::Mutex::new(Vec::new()),
             refuse: AtomicBool::new(false),
             held: tokio::sync::Mutex::new(None),
         });
@@ -86,6 +87,7 @@ struct TrackingConnector {
     storage: Arc<MemoryStorage>,
     clients: std::sync::Mutex<Vec<std::sync::Weak<StorageConnection>>>,
     credentials: std::sync::Mutex<Vec<StorageCredentials>>,
+    providers: std::sync::Mutex<Vec<MemoryStorage>>,
     refuse: AtomicBool,
     held: tokio::sync::Mutex<
         Option<(
@@ -101,7 +103,7 @@ impl StorageConnector for TrackingConnector {
         &self,
         config: StorageConfig,
         credentials: coven_storage::StorageCredentials,
-        device: DeviceId,
+        _device: DeviceId,
     ) -> Result<Arc<StorageConnection>, StorageError> {
         if let Some((entered, resume)) = self.held.lock().await.take() {
             entered.send(()).unwrap();
@@ -111,7 +113,9 @@ impl StorageConnector for TrackingConnector {
             return Err(StorageError::Failure(StorageFailure::Authentication));
         }
         self.credentials.lock().unwrap().push(credentials.clone());
-        let client = self.storage.connect(config, credentials, device).await?;
+        let provider = self.storage.connect_device(config, credentials).await?;
+        let client = provider.shared_connection();
+        self.providers.lock().unwrap().push(provider);
         self.clients.lock().unwrap().push(Arc::downgrade(&client));
         Ok(client)
     }
@@ -127,19 +131,15 @@ async fn stopping_releases_the_provider_and_start_rebuilds_it_once() {
     f.handle.stop_sync();
     status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     assert!(f.connector.clients.lock().unwrap()[0].upgrade().is_none());
-    let mut code = coven_sync::read_restore_code(&f.handle.restore_code().await.unwrap()).unwrap();
-    let data = coven_storage::RestoreStorage::S3 {
-        location: f.storage.config(),
-        credentials: S3Credentials {
-            access_key_id: "replacement".into(),
-            secret_access_key: SecretText::new("replacement secret".into()),
-        },
-    };
-    code.storage = data.encode().unwrap();
+    let code = f.handle.restore_code().await.unwrap();
     f.handle
-        .update_credentials(&code.to_text().unwrap())
+        .update_credentials(
+            "replacement".into(),
+            SecretText::new("replacement secret".into()),
+        )
         .await
         .unwrap();
+    assert_eq!(f.handle.restore_code().await.unwrap(), code);
     f.handle.start_sync().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
     f.handle.start_sync().await.unwrap();
@@ -246,10 +246,7 @@ async fn unconfigured_and_forgotten_storage_stay_disconnected_on_start() {
         SyncStatus::Disconnected
     ));
     assert!(f.connector.clients.lock().unwrap()[0].upgrade().is_none());
-    assert!(matches!(
-        f.handle.restore_code().await,
-        Err(SyncError::NoStorage)
-    ));
+    assert!(f.handle.restore_code().await.is_ok());
     f.handle.close().await.unwrap();
     let handle = builder(
         &f.app,
@@ -305,10 +302,7 @@ async fn disconnect_waits_for_the_active_pass_and_custody_failure_keeps_sync_run
         SyncStatus::Disconnected
     ));
     assert!(f.connector.clients.lock().unwrap()[0].upgrade().is_none());
-    assert!(matches!(
-        f.handle.restore_code().await,
-        Err(SyncError::NoStorage)
-    ));
+    assert!(f.handle.restore_code().await.is_ok());
     f.handle.close().await.unwrap();
 }
 
@@ -977,10 +971,7 @@ async fn reconnect_checks_the_provider_and_preserves_the_previous_connection() {
     assert!(
         matches!(f.setup().await.unwrap_err(), StorageSetupError::ProviderCheck { check: StorageCheck::CreateOnce, source } if source.failure() == StorageFailure::Protocol)
     );
-    assert!(matches!(
-        f.handle.restore_code().await,
-        Err(SyncError::NoStorage)
-    ));
+    assert_eq!(f.handle.restore_code().await.unwrap(), before);
     assert!(matches!(
         &*f.handle.subscribe_sync_status().borrow(),
         SyncStatus::Disconnected
@@ -990,3 +981,6 @@ async fn reconnect_checks_the_provider_and_preserves_the_previous_connection() {
     f.setup().await.unwrap();
     f.handle.close().await.unwrap();
 }
+
+#[path = "storage_credentials_tests.rs"]
+mod credential_changes;

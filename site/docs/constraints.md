@@ -114,17 +114,17 @@ consequences:
   unsatisfied, dropped. Design the schema so concurrent writers do not depend on a
   globally unique value being unique everywhere at once.
 
-## The key lives on the device and in the restore code
+## Member identity lives on the device and in the restore code
 
-There is no account to sign into and no server that can gate access to the data.
-The store key lives, by default, in the [operating system
-keyring](/docs/encryption#where-the-store-key-lives) — a host can choose a
-different [custody](/docs/keys) instead, but never an
-environment-variable or file fallback — and a
-[restore code](/docs/sharing#restore-codes) carries the store keyring and signing
-key so a new device of an existing member can reconnect. The restore code
-therefore *is* the key: anyone who holds it has full access to the store, so it is
-the most sensitive string coven produces.
+The store keys live in the selected [custody](/docs/keys). A
+[restore code](/docs/sharing#restore-codes) holds the member's signing and sealing
+keys, the store id and name, and storage location. It never holds an S3 key or
+OAuth tokens. A new device needs a separately kept S3 access key or the
+provider's account sign-in to reach the store and open its sealed keys.
+
+Anyone holding the code is that member to coven. Theft of the code is outside
+coven's threat model; coven offers no stolen-code recovery. Changing an S3 key
+changes storage access and leaves the written restore code valid.
 
 The flip side is that there is no reset. If another member remains, they can
 re-invite you and you rejoin under a new identity. But if you are the store's only

@@ -35,15 +35,21 @@ impl StoreLogSync {
                 if require_connected && self.storage.is_none() {
                     return Err(SyncError::NoStorage);
                 }
-                if self
-                    .storage
-                    .as_ref()
-                    .is_some_and(|storage| storage.config() != next.location)
-                {
-                    return Err(coven_storage::StorageFailure::InvitationMismatch.into());
-                }
+                let connected = match &self.storage {
+                    Some(storage) => {
+                        if storage.config() != next.location {
+                            return Err(coven_storage::StorageFailure::InvitationMismatch.into());
+                        }
+                        let previous = previous.ok_or_else(|| {
+                            coven_storage::StorageFailure::InvalidConfiguration
+                                .with_source("connected storage has no held credentials")
+                        })?;
+                        Some((storage, previous))
+                    }
+                    None => None,
+                };
                 let rollback = commit()?;
-                if let Some(storage) = &self.storage {
+                if let Some((storage, previous)) = connected {
                     if let Err(error) =
                         crate::restore_codes::install_session(storage.as_ref(), next.credentials)
                             .await

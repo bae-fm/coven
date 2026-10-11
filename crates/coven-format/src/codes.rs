@@ -12,7 +12,7 @@ const MAX_STORAGE: usize = 16 * 1024;
 const MAX_CODE_BYTES: usize = 18 * 1024;
 const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
-/// A person's keys and the store's identity and credentials (§12.1).
+/// A person's keys and the store's identity, name and location (§12.1).
 #[derive(Debug)]
 pub struct RestoreCode {
     /// The store's id.
@@ -21,7 +21,7 @@ pub struct RestoreCode {
     pub name: String,
     /// Crypto owns both member key pairs, their encoding and erasure.
     pub member_keys: MemberKeys,
-    /// Storage settings including credentials, interpreted by storage.
+    /// Storage location only, interpreted by storage; never credentials.
     pub storage: SecretBytes,
 }
 impl RestoreCode {

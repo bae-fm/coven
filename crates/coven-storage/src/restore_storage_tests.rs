@@ -1,35 +1,77 @@
 use super::*;
-use crate::OAuthTokens;
-use coven_crypto::SecretText;
 
 #[test]
-fn account_restore_codes_contain_location_without_device_tokens() {
-    for location in [
-        StorageConfig::GoogleDrive {
-            folder_id: "folder".into(),
-        },
-        StorageConfig::Dropbox {
-            namespace_id: "folder".into(),
-        },
-        StorageConfig::OneDrive {
-            drive_id: "drive".into(),
-            folder_id: "folder".into(),
-        },
+fn restore_storage_is_exactly_the_location_for_every_provider() {
+    for (location, expected) in [
+        (
+            StorageConfig::S3 {
+                bucket: "bucket".into(),
+                region: "region".into(),
+                endpoint: None,
+                prefix: "store".into(),
+            },
+            r#"{"S3":{"bucket":"bucket","region":"region","endpoint":null,"prefix":"store"}}"#,
+        ),
+        (
+            StorageConfig::GoogleDrive {
+                folder_id: "folder".into(),
+            },
+            r#"{"GoogleDrive":{"folder_id":"folder"}}"#,
+        ),
+        (
+            StorageConfig::Dropbox {
+                namespace_id: "folder".into(),
+            },
+            r#"{"Dropbox":{"namespace_id":"folder"}}"#,
+        ),
+        (
+            StorageConfig::OneDrive {
+                drive_id: "drive".into(),
+                folder_id: "folder".into(),
+            },
+            r#"{"OneDrive":{"drive_id":"drive","folder_id":"folder"}}"#,
+        ),
+        (
+            StorageConfig::CloudKit {
+                container: "container".into(),
+                owner: "owner".into(),
+                zone: "zone".into(),
+            },
+            r#"{"CloudKit":{"container":"container","owner":"owner","zone":"zone"}}"#,
+        ),
     ] {
-        let data = ConnectionCredentials {
-            location: location.clone(),
-            credentials: StorageCredentials::OAuth(OAuthTokens {
-                access_token: SecretText::new("private-access-token".into()),
-                refresh_token: Some(SecretText::new("private-refresh-token".into())),
-                expires_at: None,
-            }),
-        };
-        let bytes = RestoreStorage::from_connection(&data).encode().unwrap();
-        assert!(!std::str::from_utf8(bytes.as_bytes())
+        let bytes = location.encode().unwrap();
+        assert_eq!(bytes.as_bytes(), expected.as_bytes());
+        assert_eq!(StorageConfig::decode(bytes.as_bytes()).unwrap(), location);
+        let mut with_credentials: serde_json::Value = serde_json::from_str(expected).unwrap();
+        let payload = with_credentials
+            .as_object_mut()
             .unwrap()
-            .contains("token"));
-        let restored = RestoreStorage::decode(bytes.as_bytes()).unwrap();
-        assert_eq!(restored.location(), &location);
-        assert!(matches!(restored, RestoreStorage::Account(_)));
+            .values_mut()
+            .next()
+            .unwrap()
+            .as_object_mut()
+            .unwrap();
+        for field in [
+            "access_key_id",
+            "secret_access_key",
+            "access_token",
+            "refresh_token",
+        ] {
+            payload.insert(field.into(), serde_json::json!("secret"));
+        }
+        assert!(StorageConfig::decode(&serde_json::to_vec(&with_credentials).unwrap()).is_err());
+    }
+}
+
+#[test]
+fn credential_bearing_restore_payloads_are_refused_without_an_alternate_reader() {
+    for bytes in [
+        br#"{"S3":{"location":{"S3":{"bucket":"bucket","region":"region","endpoint":null,"prefix":"store"}},"credentials":{"access_key_id":"key","secret_access_key":"secret"}}}"#.as_slice(),
+        br#"{"Account":{"Dropbox":{"namespace_id":"folder"}}}"#,
+        br#"{"S3":{"bucket":"bucket","region":"region","endpoint":"https://key:secret@storage.example","prefix":"store"}}"#,
+        br#"{"S3":{"bucket":"","region":"region","endpoint":null,"prefix":"store"}}"#,
+    ] {
+        assert!(StorageConfig::decode(bytes).is_err());
     }
 }

@@ -199,6 +199,42 @@ impl MemoryStorage {
         device.peak_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         Self::from_provider(Arc::new(device))
     }
+    /// Construct a candidate device connection whose credentials can be inspected
+    /// independently from the source's credentials and durable provider objects.
+    pub async fn connect_device(
+        &self,
+        config: StorageConfig,
+        credentials: StorageCredentials,
+    ) -> Result<Self, StorageError> {
+        crate::ConnectionCredentials {
+            location: config.clone(),
+            credentials: credentials.clone(),
+        }
+        .validate()?;
+        if config != self.provider.config {
+            return Err(StorageFailure::InvalidConfiguration
+                .with_source("memory connector location mismatch"));
+        }
+        let mut connection = (*self.provider).clone();
+        // Candidate setup must not mutate the old adapter's sign-in. Network
+        // controls and request observations still belong to this test device.
+        connection.tokens = Arc::new(Mutex::new(None));
+        connection.s3_key = Arc::new(Mutex::new(None));
+        match credentials {
+            StorageCredentials::OAuth(tokens) => connection.set_oauth_tokens(tokens).await?,
+            StorageCredentials::S3(keys) => connection.set_s3_credentials(keys).await?,
+            StorageCredentials::CloudKit => {}
+        }
+        Ok(Self::from_provider(Arc::new(connection)))
+    }
+
+    /// Erase the provider type while retaining this exact connection's credentials.
+    pub fn shared_connection(&self) -> Arc<StorageConnection> {
+        Arc::new(StorageConnection::from_provider(
+            self.provider.clone() as Arc<dyn ProviderOps>
+        ))
+    }
+
     /// Set this connection's network availability without changing other devices.
     pub fn set_online(&self, online: bool) {
         self.provider
@@ -225,14 +261,13 @@ impl MemoryStorage {
     pub fn request_count(&self) -> u64 {
         *self.provider.requests.borrow()
     }
+    /// The key currently installed on this simulated provider connection.
+    pub async fn s3_credentials(&self) -> Option<S3Credentials> {
+        self.provider.s3_key.lock().await.clone()
+    }
     /// The most recently installed S3 access-key id, without exposing its secret.
     pub async fn s3_access_key_id(&self) -> Option<String> {
-        self.provider
-            .s3_key
-            .lock()
-            .await
-            .as_ref()
-            .map(|key| key.access_key_id.clone())
+        self.s3_credentials().await.map(|key| key.access_key_id)
     }
     /// Successful ranged requests, in order.
     pub async fn ranges(&self) -> Vec<ByteRange> {
@@ -780,28 +815,10 @@ impl crate::providers::StorageConnector for MemoryStorage {
         credentials: StorageCredentials,
         _device: coven_foundation::id_source::DeviceId,
     ) -> Result<Arc<StorageConnection>, StorageError> {
-        crate::ConnectionCredentials {
-            location: config.clone(),
-            credentials: credentials.clone(),
-        }
-        .validate()?;
-        if config != self.provider.config {
-            return Err(StorageFailure::InvalidConfiguration
-                .with_source("memory connector location mismatch"));
-        }
-        let mut connection = (*self.provider).clone();
-        // Candidate setup must not mutate the old adapter's sign-in. Network
-        // controls and request observations still belong to this test device.
-        connection.tokens = Arc::new(Mutex::new(None));
-        connection.s3_key = Arc::new(Mutex::new(None));
-        match credentials {
-            StorageCredentials::OAuth(tokens) => connection.set_oauth_tokens(tokens).await?,
-            StorageCredentials::S3(keys) => connection.set_s3_credentials(keys).await?,
-            StorageCredentials::CloudKit => {}
-        }
-        Ok(Arc::new(StorageConnection::from_provider(
-            Arc::new(connection) as Arc<dyn ProviderOps>,
-        )))
+        Ok(self
+            .connect_device(config, credentials)
+            .await?
+            .shared_connection())
     }
 }
 

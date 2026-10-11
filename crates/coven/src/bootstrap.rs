@@ -7,8 +7,7 @@ use coven_database::Database;
 use coven_format::codes::{InviteCode, RestoreCode};
 use coven_foundation::files::{BootstrapDirectoryError, BootstrapStore, StoreFile};
 use coven_storage::{
-    ConnectionCredentials, InviteStorage, RestoreStorage, StorageCredentials, StorageFailure,
-    StorageSettings,
+    ConnectionCredentials, InviteStorage, StorageCredentials, StorageFailure, StorageSettings,
 };
 use coven_sync::{JoiningIdentity, StoreLogSync};
 use std::{sync::Arc, time::Duration};
@@ -20,6 +19,10 @@ use authentication::{account_credentials, refresh_sign_in};
 
 #[path = "bootstrap_commit.rs"]
 mod commit;
+
+#[path = "restore_credentials.rs"]
+mod credentials;
+use credentials::restore_connection;
 
 /// Opening a new installation failed; unpublished work remains available for
 /// an explicit retry unless the call was cancelled or the invite was settled.
@@ -71,19 +74,26 @@ pub enum BootstrapError {
 }
 
 /// Restore this person's store on a new device, returning its open handle.
-/// The builder supplies all opening choices and holds this device's sign-in.
+/// S3 requires a key entered separately or transferred beside the code. Other
+/// providers require None and use the builder's own sign-in. Invalid key inputs
+/// fail before bootstrap begins.
 pub async fn restore_from_code(
-    builder: CovenBuilder,
+    mut builder: CovenBuilder,
     code: &str,
+    s3_credentials: Option<S3Credentials>,
     device_name: &str,
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<CovenHandle, BootstrapError> {
     check_cancel(cancel)?;
+    let code = coven_sync::read_restore_code(code)?;
+    let location = StorageConfig::decode(code.storage.as_bytes()).map_err(SyncError::from)?;
+    let data = restore_connection(&mut builder, location, s3_credentials, cancel).await?;
     bootstrap_device(
         builder,
         BootstrapRequest::Restore {
-            code: coven_sync::read_restore_code(code)?,
+            code,
+            data,
             name: device_name.into(),
         },
         on_status,
@@ -95,20 +105,35 @@ pub async fn restore_from_code(
 
 /// Restore from the one discoverable iCloud code. Multiple stores require the
 /// app to choose an explicit code; this call never selects one arbitrarily.
+/// S3 uses the explicit key when supplied, otherwise its separately synced key.
+/// Missing keys, wrong-provider keys and keychain failures precede bootstrap.
 pub async fn restore_from_keychain(
-    builder: CovenBuilder,
+    mut builder: CovenBuilder,
+    s3_credentials: Option<S3Credentials>,
     device_name: &str,
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Option<CovenHandle>, BootstrapError> {
     check_cancel(cancel)?;
-    let Some(code) = keychain_code(builder.keychain()?.as_ref())? else {
+    let keychain = builder.keychain()?;
+    let Some(code) = keychain_code(keychain.as_ref())? else {
         return Ok(None);
     };
+    let location = StorageConfig::decode(code.storage.as_bytes()).map_err(SyncError::from)?;
+    let s3_credentials = if location.provider() == CloudProvider::S3 && s3_credentials.is_none() {
+        StoreKeychain::new(keychain, code.store)
+            .synced_s3_credentials()?
+            .map(|bytes| S3Credentials::decode(bytes.as_bytes()).map_err(SyncError::from))
+            .transpose()?
+    } else {
+        s3_credentials
+    };
+    let data = restore_connection(&mut builder, location, s3_credentials, cancel).await?;
     bootstrap_device(
         builder,
         BootstrapRequest::Restore {
             code,
+            data,
             name: device_name.into(),
         },
         on_status,
@@ -155,13 +180,20 @@ fn keychain_code(keychain: &Keychain) -> Result<Option<RestoreCode>, BootstrapEr
     if code.store != id {
         return Err(CodeError::Invalid.into());
     }
-    RestoreStorage::decode(code.storage.as_bytes()).map_err(|_| CodeError::Invalid)?;
+    StorageConfig::decode(code.storage.as_bytes()).map_err(|_| CodeError::Invalid)?;
     Ok(Some(code))
 }
 
 enum BootstrapRequest {
-    Restore { code: RestoreCode, name: String },
-    Join { code: InviteCode, name: String },
+    Restore {
+        code: RestoreCode,
+        data: ConnectionCredentials,
+        name: String,
+    },
+    Join {
+        code: InviteCode,
+        name: String,
+    },
 }
 
 async fn bootstrap_device(
@@ -257,32 +289,12 @@ async fn prepare_and_load(
     let directory = pending.directory();
     let file = directory.owned_file(StoreFile::Bootstrap);
     let (member, mut data, device_name, mut admission) = match request {
-        BootstrapRequest::Restore { code, name } => {
-            let data =
-                match RestoreStorage::decode(code.storage.as_bytes()).map_err(SyncError::from)? {
-                    RestoreStorage::S3 {
-                        location,
-                        credentials,
-                    } => ConnectionCredentials {
-                        location,
-                        credentials: StorageCredentials::S3(credentials),
-                    },
-                    RestoreStorage::Account(location) => {
-                        let credentials =
-                            account_credentials(builder, location.provider(), cancel).await?;
-                        ConnectionCredentials {
-                            location,
-                            credentials,
-                        }
-                    }
-                };
-            (
-                code.member_keys.clone(),
-                data,
-                name.as_str(),
-                Admission::Restoring,
-            )
-        }
+        BootstrapRequest::Restore { code, data, name } => (
+            code.member_keys.clone(),
+            data.clone(),
+            name.as_str(),
+            Admission::Restoring,
+        ),
         BootstrapRequest::Join { code, name } => {
             let identity = JoiningIdentity::prepare(&file, code, name)?;
             let (invitation, credentials) =
@@ -393,9 +405,7 @@ async fn prepare_and_load(
                 store: settings.id,
                 name: settings.name,
                 member_keys: member,
-                storage: RestoreStorage::from_connection(&data)
-                    .encode()
-                    .map_err(SyncError::from)?,
+                storage: data.location.encode().map_err(SyncError::from)?,
             },
             data.credentials,
             ring,

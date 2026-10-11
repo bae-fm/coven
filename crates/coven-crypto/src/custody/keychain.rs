@@ -46,6 +46,7 @@ fn validate_service(name: &str) -> Result<(), KeyError> {
 }
 
 const RESTORE_CODE_ENTRY: &str = "restore-code";
+const S3_CREDENTIALS_ENTRY: &str = "s3-credentials";
 const DEVICE_ID_ENTRY: &str = "device-id";
 const CREDENTIALS_ENTRY: &str = "storage-credentials";
 const HOST_SECRET_NAMES_ENTRY: &str = "host-secret-names";
@@ -72,7 +73,7 @@ pub(crate) trait KeychainBackend: std::any::Any + Send + Sync {
     ) -> Result<(), KeyError>;
     fn delete(&self, scope: EntryScope, service: &str, account: &str) -> Result<(), KeyError>;
     fn synced_restore_codes(&self, service: &str) -> Result<Vec<(StoreId, SecretBytes)>, KeyError>;
-    fn supports_synced_restore_codes(&self) -> bool;
+    fn supports_synced_entries(&self) -> bool;
 }
 
 /// The OS keychain capability, constructed only at a composition root.
@@ -136,7 +137,8 @@ impl std::fmt::Debug for Keychain {
     }
 }
 
-/// One store's device-only keys and host secrets, and its synced restore code.
+/// One store's device-only keys and host secrets, and its separate synced
+/// restore code and S3 key.
 pub struct StoreKeychain {
     keychain: Arc<Keychain>,
     store: StoreId,
@@ -203,10 +205,10 @@ impl StoreKeychain {
         self.remove(CREDENTIALS_ENTRY)
     }
 
-    /// Whether this backend supports iCloud restore-code publication. The memory
+    /// Whether this backend supports iCloud code and S3-key publication. The memory
     /// backend models Apple keychains on every test platform.
-    pub fn supports_synced_restore_codes(&self) -> bool {
-        self.keychain.backend.supports_synced_restore_codes()
+    pub fn supports_synced_entries(&self) -> bool {
+        self.keychain.backend.supports_synced_entries()
     }
 
     /// Remove every coven entry, including all recorded host secrets, without
@@ -233,15 +235,16 @@ impl StoreKeychain {
         ] {
             self.remove(name)?;
         }
-        if self.supports_synced_restore_codes() {
+        if self.supports_synced_entries() {
             self.delete_synced_restore_code()?;
+            self.delete_synced_s3_credentials()?;
         }
         Ok(())
     }
 
     /// Keep exactly the restore-code bytes in iCloud Keychain (§12.1).
-    /// The caller supplies the encoded member keys, store identity and storage
-    /// credentials; the crypto crate does not define the restore-code format.
+    /// The caller supplies the encoded member keys, store identity and location;
+    /// the crypto crate does not define the restore-code format.
     /// Native non-Apple keychains return `KeyError::Unsupported`.
     pub fn set_synced_restore_code(&self, code: &SecretBytes) -> Result<(), KeyError> {
         self.keychain.write(
@@ -263,6 +266,29 @@ impl StoreKeychain {
     pub fn delete_synced_restore_code(&self) -> Result<(), KeyError> {
         self.keychain
             .delete(EntryScope::Synced, &self.account(RESTORE_CODE_ENTRY))
+    }
+
+    /// Keep a separately encoded S3 key alongside the code in iCloud Keychain.
+    /// Storage owns the encoding; this entry never contains the restore code.
+    /// Native non-Apple keychains return `KeyError::Unsupported`.
+    pub fn set_synced_s3_credentials(&self, credentials: &SecretBytes) -> Result<(), KeyError> {
+        self.keychain.write(
+            EntryScope::Synced,
+            &self.account(S3_CREDENTIALS_ENTRY),
+            credentials.as_bytes(),
+        )
+    }
+
+    /// Read the separately held S3 key, or `None` when the person must enter it.
+    pub fn synced_s3_credentials(&self) -> Result<Option<SecretBytes>, KeyError> {
+        self.keychain
+            .read(EntryScope::Synced, &self.account(S3_CREDENTIALS_ENTRY))
+    }
+
+    /// Remove the separately synced S3 key; absent entries succeed.
+    pub fn delete_synced_s3_credentials(&self) -> Result<(), KeyError> {
+        self.keychain
+            .delete(EntryScope::Synced, &self.account(S3_CREDENTIALS_ENTRY))
     }
 
     /// Records the name in a device-only keychain list before writing the value

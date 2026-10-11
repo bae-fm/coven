@@ -369,34 +369,33 @@ from replacing either identity.
 
 ## Restore codes
 
-A restore code recovers a store on a *new device of an existing member*,
-without another admission. A device invitation adds a new identity to the chain;
-a restore code re-establishes an identity that is already in it.
+A restore code opens the store on a new device of an existing member. It holds
+only that member's signing and sealing keys, the store id and name, and the
+storage location. `handle.restore_code()` returns `CVR1-` followed by the
+base32-encoded binary frame and its typing-error checksum.
 
-`handle.generate_restore_code()` encodes everything needed to reconnect into
-one `coven:`-prefixed base64url string: the store id, `store_root_hash`, store
-keyring, Ed25519 signing key, cloud provider, and that provider's connection
-details. The
-`RestoreCode` is plain
-JSON under that prefix.
+The code never contains an S3 key or OAuth tokens. The person keeps their S3
+access key separately, for example in a password manager, and enters it on the
+new device. Google Drive, Dropbox and OneDrive require their own provider
+sign-in. A QR scan from one of the person's own devices may transfer the code
+and S3 key as separate values; apps should blur the QR code until the person
+chooses to show it. iCloud Keychain also keeps the S3 key separately alongside the code.
 
-```text
-coven:eyJ2IjozLCJzaWQiOiI1NTBl…
-```
+`decode_code_info` validates a code and returns its kind, store id, name,
+provider and sign-in requirement. `restore_from_code` takes the builder, code,
+optional S3 credentials, device name, progress callback and cancellation
+receiver. S3 requires those credentials; other providers refuse them and use
+the builder's sign-in. `restore_from_keychain` uses an explicitly supplied S3
+key or reads the separately held key. Missing keys and keychain failures reach
+the caller before bootstrap begins.
 
-Restoring with the signing key keeps the same member identity. The recovered
-device must still establish its accepted device activation before publishing;
-the restored key alone does not accept a new device registration.
-That identity is scoped to the one store the code names — a restore code for
-store A carries no authority in any other store the same device belongs to.
-`decode_restore_code`
-parses the string back, and on garbled input returns a
-[`RestoreCodeError`](rustdoc:enum:coven::RestoreCodeError)
-(missing prefix, truncated base64, malformed JSON, or a version made by a newer
-build) whose `Display` text the host can show verbatim.
+The restored member keys open the store's sealed keys. The new device then
+registers itself and loads the store. Replacing an S3 access key updates the
+held credentials and its recorded access id; it leaves the restore code
+unchanged. Retained devices take the key directly through `update_credentials`.
+The written code remains valid.
 
-A restore code deliberately omits OAuth tokens, since those expire; on a
-consumer cloud the user re-authenticates during restore.
-Because the code contains the store keyring and any stored credentials, it is
-the most sensitive string coven produces; anyone holding it has full access to
-the store.
+Anyone holding the code is that member to coven and can open the store with
+storage access. Coven offers no recovery from a stolen code. Keep it private.
+Invites for another person have a different contract: an S3 invite carries the
+key made for its recipient, and the person still needs the admin's approval.

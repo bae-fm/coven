@@ -3,6 +3,9 @@
 #[path = "file.rs"]
 mod file;
 
+#[path = "storage_credentials.rs"]
+mod credentials;
+
 use crate::*;
 use coven_crypto::custody::StoreCustody;
 use coven_database::Database;
@@ -133,29 +136,6 @@ impl CovenHandle {
     /// Observe the same committed pending query.
     pub fn subscribe_pending(&self) -> LiveQuery<Vec<PendingRecord>> {
         self.database.subscribe_pending()
-    }
-
-    /// This member's current restore code, for their other devices (§12.1).
-    pub async fn restore_code(&self) -> Result<String, SyncError> {
-        self.codes.restore_code().await
-    }
-
-    /// Commit a replacement S3 key, publish its id and return the updated code (E9).
-    /// A publication failure retains the credentials; retry with the same key.
-    /// Removal lists this key for deletion even if replay drops its access entry.
-    pub async fn replace_access_key(
-        &self,
-        access_key_id: String,
-        secret_access_key: SecretText,
-    ) -> Result<String, SyncError> {
-        self.codes
-            .replace_access_key(access_key_id, secret_access_key)
-            .await
-    }
-
-    /// Take only the S3 key from this member's new restore code (E9).
-    pub async fn update_credentials(&self, code: &str) -> Result<(), SyncError> {
-        self.codes.update_credentials(code).await
     }
 
     /// Active members and their active devices from the local store log.

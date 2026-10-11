@@ -30,7 +30,7 @@ fn discovery_propagates_a_poisoned_entries_lock() {
 }
 
 #[test]
-fn only_restore_codes_sync_and_stores_can_be_discovered_without_ids() {
+fn restore_codes_and_s3_keys_sync_separately_and_only_codes_discover_stores() {
     let fake = Keychain::in_memory("restore").unwrap();
     let a_id = StoreId(Uuid::from_u128(1));
     let b_id = StoreId(Uuid::from_u128(2));
@@ -70,6 +70,17 @@ fn only_restore_codes_sync_and_stores_can_be_discovered_without_ids() {
     // Include non-UTF-8 bytes: custody keeps the complete opaque code unchanged.
     let first = SecretBytes::new(vec![0, 0xff, 42]);
     a.set_synced_restore_code(&first).unwrap();
+    a.set_synced_s3_credentials(&SecretBytes::new(b"separate S3 key".to_vec()))
+        .unwrap();
+    assert!(fake
+        .read(EntryScope::DeviceOnly, &a.account(S3_CREDENTIALS_ENTRY))
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        a.synced_s3_credentials().unwrap().unwrap().as_bytes(),
+        b"separate S3 key"
+    );
+    assert!(b.synced_s3_credentials().unwrap().is_none());
     assert!(fake
         .read(EntryScope::DeviceOnly, &a.account(RESTORE_CODE_ENTRY))
         .unwrap()
@@ -213,6 +224,7 @@ fn host_names_cannot_collide_with_coven_or_another_store() {
         STORE_KEYS_ENTRY,
         MEMBER_KEYS_ENTRY,
         RESTORE_CODE_ENTRY,
+        S3_CREDENTIALS_ENTRY,
         DEVICE_ID_ENTRY,
         CREDENTIALS_ENTRY,
         HOST_SECRET_NAMES_ENTRY,
@@ -333,6 +345,9 @@ fn deletion_discovers_only_this_stores_entries_from_custody() {
         store
             .set_synced_restore_code(&SecretBytes::new(b"restore".to_vec()))
             .unwrap();
+        store
+            .set_synced_s3_credentials(&SecretBytes::new(b"S3 key".to_vec()))
+            .unwrap();
     }
     // A new capability must discover everything from custody alone.
     let first = StoreKeychain::new(fake, first.store);
@@ -352,6 +367,8 @@ fn deletion_discovers_only_this_stores_entries_from_custody() {
     }
     assert!(first.synced_restore_code().unwrap().is_none());
     assert!(second.synced_restore_code().unwrap().is_some());
+    assert!(first.synced_s3_credentials().unwrap().is_none());
+    assert!(second.synced_s3_credentials().unwrap().is_some());
     assert_eq!(second.device_id().unwrap(), Some(DeviceId(42)));
     second.write(DEVICE_ID_ENTRY, &[1]).unwrap();
     assert!(matches!(
@@ -489,7 +506,7 @@ fn crash_between_host_updates_leaves_only_a_harmless_extra_name() {
 
 fn fail_operation(fake: &Keychain, after: usize) {
     let memory = fake.memory_backend();
-    memory.lock().unwrap().fail_after = Some(after);
+    memory.lock().unwrap().fail_after = [after].into();
 }
 
 fn recorded_names(store: &StoreKeychain) -> BTreeSet<String> {
@@ -614,8 +631,8 @@ fn concurrent_host_secret_updates_keep_every_name() {
 
 #[test]
 fn deletion_can_retry_after_each_keychain_failure() {
-    // Read names, remove two values, remove the list, four coven entries and restore code.
-    for after in 0..9 {
+    // Read names, remove two values, remove the list, four coven entries, restore code and separate S3 key.
+    for after in 0..10 {
         let fake = Keychain::in_memory("delete-failures").unwrap();
         let store = StoreKeychain::new(fake.clone(), StoreId(Uuid::from_u128(1)));
         store.set_host_secret("token", "secret").unwrap();
@@ -630,6 +647,9 @@ fn deletion_can_retry_after_each_keychain_failure() {
         }
         store
             .set_synced_restore_code(&SecretBytes::new(b"restore".to_vec()))
+            .unwrap();
+        store
+            .set_synced_s3_credentials(&SecretBytes::new(b"S3 key".to_vec()))
             .unwrap();
         fail_operation(&fake, after);
         assert!(matches!(

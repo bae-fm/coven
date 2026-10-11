@@ -1,13 +1,13 @@
-//! Checked code metadata shared by bootstrap and credential replacement (E10).
+//! Checked code metadata used by bootstrap (E10).
 
 use coven_format::codes::{InviteCode, RestoreCode};
 use coven_foundation::id_source::StoreId;
-use coven_storage::{CloudProvider, ConnectionCredentials, InviteStorage, RestoreStorage};
+use coven_storage::{CloudProvider, ConnectionCredentials, InviteStorage, StorageConfig};
 
 /// The two codes that can open a store on a new device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodeKind {
-    /// This person's identity, storage location and S3 key where needed.
+    /// This person's identity, store id and name, and storage location only.
     Restore,
     /// A one-time request requiring another member's approval.
     Invite,
@@ -63,7 +63,7 @@ pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError> {
     })
 }
 
-/// Decode a restore code for bootstrap or credential replacement, preserving a
+/// Decode a restore code for bootstrap, preserving a
 /// valid wrong-kind distinction. Provider payloads have already been validated.
 pub fn read_restore_code(code: &str) -> Result<RestoreCode, CodeError> {
     match decode(code)?.0 {
@@ -95,8 +95,8 @@ fn decode(text: &str) -> Result<(DecodedCode, CloudProvider), CodeError> {
     if text.starts_with("CVR1-") {
         let code = RestoreCode::from_text(text).map_err(|_| CodeError::Invalid)?;
         let storage =
-            RestoreStorage::decode(code.storage.as_bytes()).map_err(|_| CodeError::Invalid)?;
-        Ok((DecodedCode::Restore(code), storage.location().provider()))
+            StorageConfig::decode(code.storage.as_bytes()).map_err(|_| CodeError::Invalid)?;
+        Ok((DecodedCode::Restore(code), storage.provider()))
     } else if text.starts_with("CVI1-") {
         let code = InviteCode::from_text(text).map_err(|_| CodeError::Invalid)?;
         let storage =

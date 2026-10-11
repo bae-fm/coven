@@ -47,16 +47,18 @@ requirement no bundled store meets:
 `set_keyring_service` runs, coven keeps it instead of installing its own. That
 is the deliberate escape hatch, not the normal path.
 
-## Apple keys follow the user through iCloud Keychain
+## Apple syncs the restore code and a separate S3 key
 
-Every keyring item coven writes on Apple — the master key, cloud-home
-credentials, a store's signing identity, and any [host secret](#host-secrets)
-— is created in the protected data store with iCloud synchronization enabled.
-The OS keeps it unavailable while the device is locked and makes it available
-to the same app through the user's iCloud Keychain. This is the default, not an
-opt-in: creating, joining, or restoring a store on another device remains the
-authority-establishing operation, while the keyring supplies the keys that
-operation persisted.
+On Apple, coven keeps the [restore code](/docs/sharing#restore-codes) in iCloud
+Keychain and keeps an S3 key in a separate synced entry. Replacing the S3 key
+updates that entry without rewriting the code. OAuth refresh changes only this
+device's credentials.
+
+Store keys, member-key custody, installation identity, device credentials and
+[host secrets](#host-secrets) use device-only entries. Creating, joining or
+restoring a store commits the code and any separate S3 key alongside device
+custody. A failed operation reports its failure and any rollback failures.
+Deleting the store removes its synced code and separate S3 entry too.
 
 ## Custody is a choice, with working presets
 

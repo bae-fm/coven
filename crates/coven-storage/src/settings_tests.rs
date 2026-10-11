@@ -1,4 +1,5 @@
 use super::*;
+use crate::StorageFailure;
 use coven_foundation::{
     files::StoreLayout,
     id_source::{SequentialIds, StoreId},
