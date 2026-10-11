@@ -116,9 +116,37 @@ Proof links below cover the stated model results under their hypotheses, not
 the whole Rust implementation. Cryptographic and environmental assumptions
 are those of [§2](#2-threat-model); the write-ups state their additional limits.
 
-- **Availability:** the app reads and writes with no network; writes never
-  wait on sync. Assumed by the [queue model](proofs/queue.md#readings-and-boundaries-of-the-proof),
-  not proved as an application-level availability theorem.
+- **Availability:** the app reads local data and commits writes with no
+  network; a commit never waits for sync. This does not promise that every
+  write is accepted:
+  - A write into an audience reloading after a reset, a schema raise requiring
+    reload, or skipped history returns `DbError::AudienceReloading` until the
+    reload commits (§14.4, §15, §19.3). This refusal is an exception to write
+    availability, not a wait inside the write call. Other audiences remain
+    writable; an ordinary snapshot reload permits app writes throughout (§15).
+  - `NotInCircle` and `DeletedCircle` refuse writes using the locally applied
+    membership/deletion state; `ReferenceAudience` refuses a reference or move
+    across an unreadable audience, and `KeyNotUuid` refuses an invalid independent
+    row key (§8.5, §14.5–§14.7). None requests a network check at commit.
+  - Schema declarations and migration/version errors gate opening or migration
+    (§8, §14.1, §17). SQL constraints and trigger failures can reject a write;
+    `InternalTable`, `StatementForbidden`, `TriggerTarget` and `FileColumnWrite`
+    enforce local SQL access rules. These are local validity checks, not waits
+    for schema publication. A migrated app's writes can commit before the raise
+    is published; publication gates upload (§17.1).
+  - `ClockOutOfRange` and `TooLarge` enforce timestamp and representation limits
+    (§6, §7.2). File attachment checks can reject absent/changed sources, wrong
+    sizes or references, missing bytes, invalid file declarations/keys/columns,
+    reused or unreferenced staged files, or replacement of a write-once file
+    ([E3](api.md#e3-writing)). SQLite/disk failures, `TransactionEnded` and
+    rollback failures are local failures too; a closed or unusable installation
+    cannot accept writes (§10, [E1](api.md#e1-opening)). A post-commit file-cleanup
+    failure preserves and reports the committed outcome (§16.6).
+  Uncached file reads require storage (§16.3); administrative calls require
+  online catch-up (§9). The [queue model's `reloading_blocks_commit`](proofs/queue.md#availability-and-commit-refusals)
+  proves the reload gate. Commit has no network precondition in its transition
+  definition, but no separate availability theorem or proof of Rust's lack of
+  network waits is provided.
 - **Confidentiality:** members' data can't be read by those it isn't for:
   - the provider and outsiders can't read any of it — assumed cryptography,
     not proved in Lean;

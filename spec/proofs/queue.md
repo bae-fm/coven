@@ -199,7 +199,8 @@ delivery claim with its needed premise: this device knows every delivery of
 the candidate keys to that removed member. Encryption itself is not proved.
 
 **Reload and stale-copy gates hold.** New writes into a reloading audience
-return `AudienceReloading`; a failed reload leaves it unchanged. The queue's
+return `AudienceReloading`; this is §3's exception to write availability,
+not a wait inside the write call. A failed reload leaves it unchanged. The queue's
 commit event requires `AudiencesReady` for the affected audience list;
 `reloading_blocks_commit` rules out a reloading audience in that list. Only a
 successful replacement makes the target boundary available to new writes.
@@ -208,6 +209,28 @@ Every send in the queue's `Step` requires a successful identity check.
 and storage has not passed any local reservation. Observed counters include
 authenticated snapshot and posted positions, so deleted log objects can still
 prove a stale copy. A failed read leaves work pending; it is not evidence of empty storage.
+
+## Availability and commit refusals
+
+[§3](../coven.md#3-guarantees) promises that commit needs no network, while
+allowing a write to fail local checks. After a reset, a schema raise requiring
+reload, or skipped-history recovery, a write touching the reloading audience
+returns `AudienceReloading` until atomic replacement succeeds (§14.4, §15,
+§19.3). This is an availability exception, not a suspended call.
+[`reloading_blocks_commit` and `reloading_refused`](queue/CovenQueue/Verdicts.lean)
+prove the gate and its refusal result; `failed_reload_unchanged` preserves it
+when loading fails. Other audiences remain writable.
+
+[`Step.commit`](queue/CovenQueue/Upload.lean) requires only a staged transaction
+and `AudiencesReady` for the supplied affected audiences. It has no network,
+key, upload-progress or provider-success precondition. This is how the model
+defines commit, not a separate proved availability theorem; neither prompt
+return by Rust nor absence of network waits in its implementation is proved.
+`commit_valid` proves queue numbering, not availability. Membership, deletion,
+references, schema/SQL rules, file validation, timestamp/size limits and local
+persistence errors are the [other local refusal boundaries](../coven.md#3-guarantees);
+this model does not implement their full commit checks. Schema publication and
+key readiness gate attempts, not `Step.commit`.
 
 ## Checked histories and limits
 
