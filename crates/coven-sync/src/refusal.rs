@@ -2,7 +2,7 @@
 
 use coven_crypto::CryptoError;
 use coven_database::DbError;
-use coven_format::stuck::StuckFailure;
+use coven_format::pending::RefusalCode;
 use coven_merge::MergeError;
 use std::{error::Error, fmt, sync::Arc};
 
@@ -118,7 +118,7 @@ impl From<coven_format::Error> for Refusal {
 
 // The format crate cannot depend on DbError's owning crate. Its wire
 // value represents exactly the same variants without process-local causes.
-impl From<&Refusal> for StuckFailure {
+impl From<&Refusal> for RefusalCode {
     fn from(failure: &Refusal) -> Self {
         match failure {
             Refusal::Decryption { .. } => Self::Decryption,
@@ -133,17 +133,17 @@ impl From<&Refusal> for StuckFailure {
     }
 }
 
-impl From<StuckFailure> for Refusal {
-    fn from(failure: StuckFailure) -> Self {
+impl From<RefusalCode> for Refusal {
+    fn from(failure: RefusalCode) -> Self {
         match failure {
-            StuckFailure::Decryption => Self::Decryption { cause: None },
-            StuckFailure::Signature => Self::Signature { cause: None },
-            StuckFailure::Parse => Self::Parse { cause: None },
-            StuckFailure::InvalidWrite => Self::InvalidWrite { cause: None },
-            StuckFailure::NotAuthorized => Self::NotAuthorized,
-            StuckFailure::InvalidCausality => Self::InvalidCausality { cause: None },
-            StuckFailure::WrongIdentity => Self::WrongIdentity { cause: None },
-            StuckFailure::ContentHash => Self::ContentHash,
+            RefusalCode::Decryption => Self::Decryption { cause: None },
+            RefusalCode::Signature => Self::Signature { cause: None },
+            RefusalCode::Parse => Self::Parse { cause: None },
+            RefusalCode::InvalidWrite => Self::InvalidWrite { cause: None },
+            RefusalCode::NotAuthorized => Self::NotAuthorized,
+            RefusalCode::InvalidCausality => Self::InvalidCausality { cause: None },
+            RefusalCode::WrongIdentity => Self::WrongIdentity { cause: None },
+            RefusalCode::ContentHash => Self::ContentHash,
         }
     }
 }

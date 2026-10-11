@@ -29,6 +29,7 @@ mod internal_schema;
 mod key_scope;
 mod key_upload;
 mod live_query;
+mod log_refusal;
 mod loss_record;
 mod lost;
 mod merge_store;
@@ -99,6 +100,7 @@ pub use live_query::{
     LiveQuery, LiveQueryCause, LiveQueryClosed, LiveQueryRequests, LiveQueryRevision,
     ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent,
 };
+pub use log_refusal::{LogObject, LogRefusal};
 pub use lost::{Lost, LostCell, LostValue, RemovalRule, Replacement};
 pub use migration::{Migration, MigrationChange, MigrationContext, MigrationOutcome};
 pub use migration_change::{ChangeOp, ColumnChange, RowChange};

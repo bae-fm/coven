@@ -43,7 +43,7 @@ fn merge_causality_refusal_preserves_its_native_cause() {
         panic!("{error:?}")
     };
     assert_eq!(
-        u8::from(coven_format::stuck::StuckFailure::from(&object.failure)),
+        u8::from(coven_format::pending::RefusalCode::from(&object.failure)),
         5
     );
     assert_eq!(object.path, path.as_str());

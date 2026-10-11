@@ -494,20 +494,24 @@ pub fn objects() -> Vec<Object> {
             device_name: "D".into(),
         }),
         Object::PostedPositions(PostedPositions {
-            stuck: vec![
-                crate::stuck::StuckRecord {
-                    object: crate::stuck::LogObject::Write(WriteId {
+            pending: vec![
+                crate::pending::PendingReport {
+                    subject: crate::pending::PendingSubject::Write(WriteId {
                         device: DeviceId(2),
                         number: 4,
                     }),
-                    failure: crate::stuck::StuckFailure::InvalidWrite,
+                    reason: crate::pending::PendingReason::Refused(
+                        crate::pending::RefusalCode::InvalidWrite,
+                    ),
                 },
-                crate::stuck::StuckRecord {
-                    object: crate::stuck::LogObject::Entry(EntryId {
+                crate::pending::PendingReport {
+                    subject: crate::pending::PendingSubject::Entry(EntryId {
                         device: DeviceId(3),
                         number: 2,
                     }),
-                    failure: crate::stuck::StuckFailure::Signature,
+                    reason: crate::pending::PendingReason::Refused(
+                        crate::pending::RefusalCode::Signature,
+                    ),
                 },
             ],
             schema_version: 1,

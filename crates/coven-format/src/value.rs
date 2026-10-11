@@ -3,7 +3,7 @@
 use crate::error::{bound, require, Error, Rule};
 use crate::wire::{get_blob, put_blob, wire_struct, Decoder, Encoder, Wire};
 use coven_crypto::{Fingerprint, MemberId, SealingPublicKey};
-use coven_foundation::id_source::{CircleId, DeviceId, InviteId, KeyId, StoreId};
+use coven_foundation::id_source::{CircleId, DeviceId, FileId, InviteId, KeyId, StoreId};
 use coven_merge::{Audience, RowId, Timestamp, WriteId};
 use uuid::Uuid;
 
@@ -26,7 +26,7 @@ macro_rules! uuid_id {
         }
     )* };
 }
-uuid_id!(StoreId, CircleId, InviteId, KeyId);
+uuid_id!(StoreId, CircleId, InviteId, KeyId, FileId);
 
 impl Wire for MemberId {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {

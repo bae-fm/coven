@@ -66,5 +66,10 @@ pub(crate) fn open(
     if path.device() != Some(positions.device) {
         return Err(damaged(path, Refusal::WrongIdentity { cause: None }));
     }
+    checked(path, positions.validate_reporter(author))?;
     Ok(positions)
 }
+
+#[cfg(test)]
+#[path = "posted_positions_tests.rs"]
+pub(crate) mod tests;

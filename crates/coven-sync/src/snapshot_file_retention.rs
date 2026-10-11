@@ -133,7 +133,7 @@ impl StoreLogSync {
                 .ok_or(coven_database::DbError::DamagedDatabase)?;
             if stuck
                 .iter()
-                .any(|record| record.blocks(coven_format::stuck::LogObject::Write(id)))
+                .any(|record| record.blocks(coven_database::LogObject::Write(id)))
             {
                 tracing::debug!(?id, "stuck write prevents proving file absence");
                 return Ok(());

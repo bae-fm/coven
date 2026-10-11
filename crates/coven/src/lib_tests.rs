@@ -770,9 +770,9 @@ mod stuck_logs {
             .unwrap();
         reader.start_sync().await.unwrap();
         network.sync(1).await;
-        let record = StuckRecord {
+        let record = LogRefusal {
             object: LogObject::Write(object.path.write_id().unwrap()),
-            failure: StuckFailure::Signature,
+            failure: RefusalCode::Signature,
         };
         assert_eq!(
             received.next().await.unwrap(),

@@ -4,9 +4,30 @@ use coven_foundation::id_source::CircleId;
 use uuid::Uuid;
 
 #[test]
-fn posted_fingerprints_include_store_and_have_unique_ordered_audiences() {
+fn d8_pending_report_can_publish_without_fingerprints() {
+    // Device 1 reports write 2/4 refused as invalid, without claiming fingerprints.
+    let bytes = crate::tests::hex(concat!(
+        "0800010000002f",
+        "0000000000000001",
+        "00000000",
+        "00000000",
+        "00000001",
+        "00000000",
+        "00000001",
+        "00",
+        "0000000000000002",
+        "0000000000000004",
+        "00",
+        "03",
+    ));
+    let decoded = Object::decode(&bytes).unwrap();
+    assert_eq!(decoded.encode().unwrap(), bytes);
+}
+
+#[test]
+fn nonempty_fingerprints_include_store_and_have_unique_ordered_audiences() {
     let mut posted = PostedPositions {
-        stuck: Vec::new(),
+        pending: Vec::new(),
         schema_version: 1,
         device: DeviceId(1),
         writes: WritePositions(vec![test_utils::position()]),
@@ -25,82 +46,17 @@ fn posted_fingerprints_include_store_and_have_unique_ordered_audiences() {
     let object = Object::PostedPositions(posted.clone());
     assert_eq!(Object::decode(&object.encode().unwrap()).unwrap(), object);
     posted.fingerprints.reverse();
-    assert!(Object::decode(&encode_frame(8, &posted).unwrap()).is_err());
-    posted.fingerprints.clear();
-    assert!(Object::PostedPositions(posted).encode().is_err());
-}
-
-#[test]
-fn stuck_records_are_typed_and_unique_per_ordered_log() {
-    use crate::stuck::{LogObject, StuckFailure, StuckRecord};
-    let mut posted = crate::test_utils::objects()
-        .into_iter()
-        .find_map(|object| match object {
-            Object::PostedPositions(posted) => Some(posted),
-            _ => None,
-        })
-        .unwrap();
-    for failure in [
-        StuckFailure::Decryption,
-        StuckFailure::Signature,
-        StuckFailure::Parse,
-        StuckFailure::InvalidWrite,
-        StuckFailure::NotAuthorized,
-        StuckFailure::InvalidCausality,
-        StuckFailure::WrongIdentity,
-    ] {
-        posted.stuck[0].failure = failure;
-        let object = Object::PostedPositions(posted.clone());
-        assert_eq!(Object::decode(&object.encode().unwrap()).unwrap(), object);
-    }
-    let record = posted.stuck[0];
-    posted.stuck.insert(0, record);
-    assert!(Object::decode(&encode_frame(8, &posted).unwrap()).is_err());
-    posted.stuck.remove(0);
-    posted.stuck.reverse();
-    assert!(Object::decode(&encode_frame(8, &posted).unwrap()).is_err());
-    posted.stuck = vec![StuckRecord {
-        object: LogObject::Write(coven_merge::WriteId {
-            device: DeviceId(2),
-            number: 0,
-        }),
-        failure: StuckFailure::Parse,
-    }];
-    assert!(Object::decode(&encode_frame(8, &posted).unwrap()).is_err());
-}
-
-#[test]
-fn every_refusal_tag_round_trips_and_file_hashes_cannot_refuse_a_log() {
-    use crate::stuck::StuckFailure;
-    use crate::wire::{Decoder, Encoder, Wire};
-    let failures = [
-        StuckFailure::Decryption,
-        StuckFailure::Signature,
-        StuckFailure::Parse,
-        StuckFailure::InvalidWrite,
-        StuckFailure::NotAuthorized,
-        StuckFailure::InvalidCausality,
-        StuckFailure::WrongIdentity,
-        StuckFailure::ContentHash,
-    ];
-    for (tag, failure) in failures.into_iter().enumerate() {
-        let mut out = Encoder::new();
-        failure.put(&mut out).unwrap();
-        assert_eq!(out.bytes, [tag as u8]);
-        assert_eq!(
-            StuckFailure::get(&mut Decoder::new(&out.bytes).unwrap()).unwrap(),
-            failure
-        );
-    }
-    assert!(StuckFailure::try_from(8).is_err());
-    let mut posted = crate::test_utils::objects()
-        .into_iter()
-        .find_map(|object| match object {
-            Object::PostedPositions(posted) => Some(posted),
-            _ => None,
-        })
-        .unwrap();
-    posted.stuck[0].failure = StuckFailure::ContentHash;
     assert!(Object::PostedPositions(posted.clone()).encode().is_err());
     assert!(Object::decode(&encode_frame(8, &posted).unwrap()).is_err());
+    posted.fingerprints.reverse();
+    posted.fingerprints.push(posted.fingerprints[1].clone());
+    assert!(Object::PostedPositions(posted.clone()).encode().is_err());
+    assert!(Object::decode(&encode_frame(8, &posted).unwrap()).is_err());
+    posted.fingerprints.pop();
+    posted.fingerprints.remove(0);
+    assert!(Object::PostedPositions(posted.clone()).encode().is_err());
+    assert!(Object::decode(&encode_frame(8, &posted).unwrap()).is_err());
+    posted.fingerprints.clear();
+    let object = Object::PostedPositions(posted);
+    assert_eq!(Object::decode(&object.encode().unwrap()).unwrap(), object);
 }

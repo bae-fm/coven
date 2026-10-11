@@ -1,6 +1,7 @@
 //! Join requests and posted positions (§6, §11, §12, §16, §19).
 
 use crate::error::{require, Error, Rule};
+use crate::pending::{PendingReport, PendingSubject};
 use crate::store_log::MemberPublicKeys;
 use crate::value::{name, EntryPositions, WritePositions};
 use crate::wire::wire_struct;
@@ -36,7 +37,7 @@ pub struct Fingerprint {
 }
 wire_struct!(Fingerprint, audience, key, bytes);
 
-/// A device's posted positions and fingerprints, made after uploading its writes (§15).
+/// A device's posted positions, optional fingerprints and local pending reports (§15, §19).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PostedPositions {
     /// The device publishing this record.
@@ -47,10 +48,12 @@ pub struct PostedPositions {
     pub store_log: EntryPositions,
     /// The app schema under which these fingerprints were computed (D8).
     pub schema_version: u32,
-    /// One fingerprint per readable audience, in increasing audience order.
+    /// Empty unless fingerprints describe exactly this past; otherwise store first,
+    /// followed by the readable circles in increasing audience order.
     pub fingerprints: Vec<Fingerprint>,
-    /// Locally judged failures, ordered by log kind and device, one per log.
-    pub stuck: Vec<crate::stuck::StuckRecord>,
+    /// Local observations ordered by subject, with one first unmet condition per subject.
+    /// The enclosing device is the reporter; received reports must never be forwarded.
+    pub pending: Vec<PendingReport>,
 }
 wire_struct!(
     PostedPositions,
@@ -59,32 +62,26 @@ wire_struct!(
     store_log,
     schema_version,
     fingerprints,
-    stuck
+    pending
 );
 impl PostedPositions {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         self.writes.validate()?;
         self.store_log.validate()?;
-        for record in &self.stuck {
-            record.validate()?;
+        for record in &self.pending {
+            record.validate(self.device)?;
         }
         require(
-            self.stuck.windows(2).all(|pair| {
-                let log = |record: &crate::stuck::StuckRecord| {
-                    (
-                        matches!(record.object, crate::stuck::LogObject::Entry(_)),
-                        record.object.device(),
-                    )
-                };
-                log(&pair[0]) < log(&pair[1])
-            }),
-            "stuck logs",
+            self.pending
+                .windows(2)
+                .all(|pair| pair[0].subject < pair[1].subject),
+            "pending subjects",
             Rule::Order,
         )?;
         require(
             self.fingerprints
                 .first()
-                .is_some_and(|f| f.audience == Audience::Store),
+                .is_none_or(|f| f.audience == Audience::Store),
             "store fingerprint",
             Rule::Required,
         )?;
@@ -96,6 +93,21 @@ impl PostedPositions {
             Rule::Order,
         )?;
         Ok(())
+    }
+
+    /// Check key-copy recipients against the authenticated poster's member (D8).
+    /// The decoder checks syntax; the caller supplies membership after authentication.
+    pub fn validate_reporter(&self, member: &coven_crypto::MemberId) -> Result<(), Error> {
+        require(
+            self.pending.iter().all(|report| match &report.subject {
+                PendingSubject::KeyCopy {
+                    member: recipient, ..
+                } => recipient == member,
+                _ => true,
+            }),
+            "key copy reporter",
+            Rule::Kind,
+        )
     }
 }
 

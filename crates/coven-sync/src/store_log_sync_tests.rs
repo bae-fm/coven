@@ -718,7 +718,7 @@ async fn only_newer_envelopes_require_an_update() {
                     assert!(damage.is_empty());
                     assert_eq!(
                         b.db.stuck_logs().await.unwrap()[0].record.object,
-                        coven_format::stuck::LogObject::Entry(first)
+                        coven_database::LogObject::Entry(first)
                     );
                 }
             }

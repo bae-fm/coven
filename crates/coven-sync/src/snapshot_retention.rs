@@ -102,7 +102,7 @@ impl StoreLogSync {
             }
             if stuck
                 .iter()
-                .any(|record| record.blocks(coven_format::stuck::LogObject::Write(id)))
+                .any(|record| record.blocks(coven_database::LogObject::Write(id)))
             {
                 continue;
             }
@@ -111,8 +111,8 @@ impl StoreLogSync {
                 Err(error) if waiting(&object.path, &error) => return Ok(()),
                 Err(error) => {
                     if let SyncError::Damaged(damage) = &error {
-                        stuck.push(coven_format::stuck::StuckRecord {
-                            object: coven_format::stuck::LogObject::Write(id),
+                        stuck.push(coven_database::LogRefusal {
+                            object: coven_database::LogObject::Write(id),
                             failure: (&damage.failure).into(),
                         });
                     }

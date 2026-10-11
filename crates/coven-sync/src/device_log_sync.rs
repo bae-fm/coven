@@ -2,11 +2,10 @@
 
 use crate::{SyncError, SyncFailure};
 use coven_crypto::{custody::KeySession, MemberKeys, StoreKeyring};
-use coven_database::{ApplyOutcome, Database, DbError};
+use coven_database::{ApplyOutcome, Database, DbError, LogObject, LogRefusal};
 use coven_format::{
     objects::{Fingerprint, PostedPositions},
     sealed_single::SingleChunkPrefix,
-    stuck::LogObject,
     Object,
 };
 use coven_merge::{Audience, WriteId};
@@ -18,7 +17,7 @@ use std::sync::Arc;
 mod download;
 #[cfg(test)]
 #[path = "device_log_sync_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 #[path = "write_upload.rs"]
 mod upload;
 
@@ -338,8 +337,9 @@ impl DeviceLogSync {
                     Err(error) => return Err(error),
                 };
             reports.extend(
-                peer.stuck
+                peer.pending
                     .iter()
+                    .filter_map(LogRefusal::from_report)
                     .filter(|record| {
                         record.object.device() == local.device
                             && match record.object {
@@ -347,7 +347,7 @@ impl DeviceLogSync {
                                 LogObject::Entry(id) => state.store_log.covers(id),
                             }
                     })
-                    .map(|record| (peer.device, *record)),
+                    .map(|record| (peer.device, record)),
             );
             let Some(own) = &own else { continue };
             if own.writes != peer.writes
@@ -441,7 +441,7 @@ impl DeviceLogSync {
             })
             .collect();
         Ok(Some(PostedPositions {
-            stuck: state.stuck,
+            pending: state.stuck.into_iter().map(Into::into).collect(),
             device: state.device,
             writes: state.positions,
             store_log: state.store_log,

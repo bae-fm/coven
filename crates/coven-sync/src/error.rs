@@ -11,7 +11,7 @@ use std::sync::Arc;
 pub enum SyncError {
     /// An explicit recovery or join requires an object from a stopped log.
     #[error("operation requires a stuck log: {0:?}")]
-    StuckLog(coven_format::stuck::StuckRecord),
+    StuckLog(coven_database::LogRefusal),
     /// Provider setup failed before replacing the active connection.
     #[error(transparent)]
     Setup(#[from] Box<coven_storage::StorageSetupError>),

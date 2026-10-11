@@ -46,7 +46,8 @@ pub use coven_database::{
     ReconfigurableLiveQueryEvent, RemovalRule, Replacement, Row, RowChange, RowIdentity, RowKey,
     SchemaError, SqlContext, SqlReadContext, SyncedTable, ToSql, UserFile, WriteBatch, WriteId,
 };
-pub use coven_format::stuck::{LogObject, StuckFailure, StuckRecord};
+pub use coven_database::{LogObject, LogRefusal};
+pub use coven_format::pending::RefusalCode;
 pub use coven_format::value::EntryId;
 pub use coven_format::MemberAccess;
 pub use coven_foundation::clock::{Clock, ClockRef, SystemClock};

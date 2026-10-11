@@ -61,10 +61,10 @@ pub(crate) async fn record_damage(
     storage: &dyn coven_storage::Storage,
     object: &StoredObject,
     failure: &Refusal,
-) -> Result<coven_format::stuck::StuckRecord, SyncError> {
+) -> Result<coven_database::LogRefusal, SyncError> {
     read_complete(storage, object).await?;
-    let record = coven_format::stuck::StuckRecord {
-        object: coven_format::stuck::LogObject::Write(object.path.write_id().expect("write path")),
+    let record = coven_database::LogRefusal {
+        object: coven_database::LogObject::Write(object.path.write_id().expect("write path")),
         failure: failure.into(),
     };
     database.record_stuck_log(record).await?;

@@ -15,10 +15,7 @@ impl Database {
     }
 
     /// Record the first permanent refusal of a log, with this version and the injected clock.
-    pub async fn record_stuck_log(
-        &self,
-        record: coven_format::stuck::StuckRecord,
-    ) -> Result<(), DbError> {
+    pub async fn record_stuck_log(&self, record: crate::LogRefusal) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.with_writer(|writer| crate::stuck::record(writer, record, inner.clock.now()))
         })
@@ -29,10 +26,7 @@ impl Database {
     /// not stop local downloads and are never republished as this device's judgments.
     pub async fn replace_stuck_reports(
         &self,
-        reports: Vec<(
-            coven_foundation::id_source::DeviceId,
-            coven_format::stuck::StuckRecord,
-        )>,
+        reports: Vec<(coven_foundation::id_source::DeviceId, crate::LogRefusal)>,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.with_writer(|writer| {

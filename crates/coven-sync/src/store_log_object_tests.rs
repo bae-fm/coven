@@ -1,6 +1,7 @@
 use super::*;
 use coven_database::StuckLog;
-use coven_format::stuck::{LogObject, StuckFailure, StuckRecord};
+use coven_database::{LogObject, LogRefusal};
+use coven_format::pending::RefusalCode;
 
 #[tokio::test]
 async fn damaged_entries_block_only_their_device_and_retain_each_cause() {
@@ -90,12 +91,12 @@ async fn damaged_entries_block_only_their_device_and_retain_each_cause() {
         storage.delete(&path).await.unwrap();
         storage.create(&path, &bytes).await.unwrap();
         assert!(c.sync.step().await.unwrap().is_empty());
-        let record = StuckRecord {
+        let record = LogRefusal {
             object: LogObject::Entry(broken),
             failure: match damage {
-                "decryption" | "moved" => StuckFailure::Decryption,
-                "signature" => StuckFailure::Signature,
-                "parse" => StuckFailure::Parse,
+                "decryption" | "moved" => RefusalCode::Decryption,
+                "signature" => RefusalCode::Signature,
+                "parse" => RefusalCode::Parse,
                 _ => unreachable!(),
             },
         };

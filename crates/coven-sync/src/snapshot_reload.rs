@@ -139,7 +139,7 @@ impl StoreLogSync {
                         .ok_or_else(|| inconsistent("device listing has another path layout"))?;
                     if stuck
                         .iter()
-                        .any(|record| record.blocks(coven_format::stuck::LogObject::Write(id)))
+                        .any(|record| record.blocks(coven_database::LogObject::Write(id)))
                     {
                         continue;
                     }
@@ -170,7 +170,7 @@ impl StoreLogSync {
                         }
                         if let Some(record) = stuck
                             .iter()
-                            .find(|record| record.blocks(coven_format::stuck::LogObject::Write(id)))
+                            .find(|record| record.blocks(coven_database::LogObject::Write(id)))
                         {
                             return Err(SyncError::StuckLog(*record));
                         }
@@ -291,8 +291,8 @@ impl StoreLogSync {
                                 // Its complete authenticated bytes were staged before
                                 // the atomic reload refused this particular write.
                                 self.database
-                                    .record_stuck_log(coven_format::stuck::StuckRecord {
-                                        object: coven_format::stuck::LogObject::Write(write),
+                                    .record_stuck_log(coven_database::LogRefusal {
+                                        object: coven_database::LogObject::Write(write),
                                         failure: (&damage.failure).into(),
                                     })
                                     .await?;

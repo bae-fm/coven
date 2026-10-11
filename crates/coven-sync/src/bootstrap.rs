@@ -60,7 +60,7 @@ impl StoreLogSync {
             .await?
             .stuck
             .into_iter()
-            .find(|record| matches!(record.object, coven_format::stuck::LogObject::Entry(_)))
+            .find(|record| matches!(record.object, coven_database::LogObject::Entry(_)))
         {
             return Err(SyncError::StuckLog(record));
         }

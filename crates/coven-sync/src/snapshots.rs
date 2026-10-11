@@ -457,15 +457,15 @@ impl StoreLogSync {
                 || state
                     .stuck
                     .iter()
-                    .any(|record| record.blocks(coven_format::stuck::LogObject::Write(write)))
+                    .any(|record| record.blocks(coven_database::LogObject::Write(write)))
             {
                 continue;
             }
             let header = match self.open_write_header(&object).await {
                 Ok(header) => header,
                 Err(SyncError::Damaged(damage)) => {
-                    state.stuck.push(coven_format::stuck::StuckRecord {
-                        object: coven_format::stuck::LogObject::Write(write),
+                    state.stuck.push(coven_database::LogRefusal {
+                        object: coven_database::LogObject::Write(write),
                         failure: (&damage.failure).into(),
                     });
                     continue;

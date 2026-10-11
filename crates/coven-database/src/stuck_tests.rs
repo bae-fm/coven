@@ -1,19 +1,19 @@
 use super::*;
 use crate::tests::TestStore;
-use coven_format::stuck::StuckFailure;
+use coven_format::pending::RefusalCode;
 use coven_foundation::clock::FixedClock;
 use std::{
     sync::Arc,
     time::{Duration, UNIX_EPOCH},
 };
 
-fn refused() -> StuckRecord {
-    StuckRecord {
+fn refused() -> LogRefusal {
+    LogRefusal {
         object: LogObject::Write(coven_merge::WriteId {
             device: DeviceId(2),
             number: 1,
         }),
-        failure: StuckFailure::InvalidWrite,
+        failure: RefusalCode::InvalidWrite,
     }
 }
 
@@ -78,12 +78,12 @@ async fn peer_reports_are_replaced_atomically_and_never_published_as_local_judgm
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let own = db.sync_state(Vec::new()).await.unwrap().device;
-    let report = StuckRecord {
+    let report = LogRefusal {
         object: LogObject::Entry(crate::EntryId {
             device: own,
             number: 1,
         }),
-        failure: StuckFailure::Parse,
+        failure: RefusalCode::Parse,
     };
     db.record_stuck_log(refused()).await.unwrap();
     db.replace_stuck_reports(vec![(DeviceId(3), report)])
@@ -155,12 +155,12 @@ async fn a_reload_that_rewinds_a_log_can_record_an_earlier_refusal() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     for number in [3, 2, 4] {
-        db.record_stuck_log(StuckRecord {
+        db.record_stuck_log(LogRefusal {
             object: LogObject::Write(coven_merge::WriteId {
                 device: DeviceId(2),
                 number,
             }),
-            failure: StuckFailure::InvalidWrite,
+            failure: RefusalCode::InvalidWrite,
         })
         .await
         .unwrap();

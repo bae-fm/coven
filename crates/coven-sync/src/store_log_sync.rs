@@ -197,7 +197,7 @@ impl StoreLogSync {
         entries.retain(|id, _| {
             !stuck
                 .iter()
-                .any(|record| record.blocks(coven_format::stuck::LogObject::Entry(*id)))
+                .any(|record| record.blocks(coven_database::LogObject::Entry(*id)))
         });
         let mut pending_devices = BTreeSet::new();
         let mut cache = BTreeMap::new();
@@ -365,8 +365,8 @@ impl StoreLogSync {
             }
         }
         self.database
-            .record_stuck_log(coven_format::stuck::StuckRecord {
-                object: coven_format::stuck::LogObject::Entry(entry),
+            .record_stuck_log(coven_database::LogRefusal {
+                object: coven_database::LogObject::Entry(entry),
                 failure: (&failure).into(),
             })
             .await?;

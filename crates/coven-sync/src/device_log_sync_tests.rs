@@ -1,15 +1,14 @@
 use super::*;
 use coven_crypto::{MemberKeys, StoreKey, StoreKeyring};
-use coven_database::{Migration, RowIdentity, SyncedTable};
-use coven_format::{
-    store_log::{MemberPublicKeys, StoreChange},
-    stuck::StuckRecord,
-};
+use coven_database::{LogRefusal, Migration, RowIdentity, SyncedTable};
+use coven_format::pending::RefusalCode;
+use coven_format::store_log::{MemberPublicKeys, StoreChange};
 use coven_foundation::id_source::{DeviceId, IdSource, KeyId, SequentialIds, StoreId};
 use coven_storage::test_utils::{Faults, MemoryStorage};
 use std::time::{Duration, UNIX_EPOCH};
 use uuid::Uuid;
 
+use crate::posted_positions::tests::signed_positions;
 use crate::store_log_sync::tests::Device;
 
 fn member() -> MemberKeys {
@@ -17,7 +16,7 @@ fn member() -> MemberKeys {
     bytes.extend([3; 64]);
     MemberKeys::from_secret_bytes(&bytes).unwrap()
 }
-fn storage() -> Arc<MemoryStorage> {
+pub(crate) fn storage() -> Arc<MemoryStorage> {
     Arc::new(
         MemoryStorage::builder()
             .transfer_limits(1024 * 1024, 64 * 1024)
@@ -49,7 +48,7 @@ async fn device(storage: Arc<MemoryStorage>, number: u64) -> Device {
         .unwrap();
     device
 }
-async fn group(storage: Arc<MemoryStorage>, count: u64) -> Vec<Device> {
+pub(crate) async fn group(storage: Arc<MemoryStorage>, count: u64) -> Vec<Device> {
     let mut devices = Vec::new();
     for number in 1..=count {
         devices.push(device(storage.clone(), number).await);
@@ -547,9 +546,9 @@ mod stuck {
     use super::writes::{publish, queued};
     use super::*;
     use coven_database::StuckLog;
-    use coven_format::stuck::StuckFailure;
+    use coven_format::pending::RefusalCode;
 
-    async fn refuse(storage: &MemoryStorage, devices: &mut [Device], reload: bool) -> StuckRecord {
+    async fn refuse(storage: &MemoryStorage, devices: &mut [Device], reload: bool) -> LogRefusal {
         sql(
             &devices[0].db,
             "INSERT INTO notes VALUES('one','title','body')",
@@ -579,9 +578,9 @@ mod stuck {
             devices[1].writes.download_writes().await.unwrap();
         }
         assert!(rows(&devices[1].db).await.is_empty());
-        StuckRecord {
+        LogRefusal {
             object: LogObject::Write(record.header.position),
-            failure: StuckFailure::InvalidWrite,
+            failure: RefusalCode::InvalidWrite,
         }
     }
 
@@ -632,7 +631,7 @@ mod stuck {
         );
         devices[0].writes.upload_writes().await.unwrap();
         devices[0].writes.post_positions().await.unwrap();
-        assert!(posted(&storage, &devices[0], 1).await.stuck.is_empty());
+        assert!(posted(&storage, &devices[0], 1).await.pending.is_empty());
         // A damaged report has no authority; a device that stops posting is not inferred stuck.
         let path = ObjectPath::positions(DeviceId(2));
         let mut bytes = storage.read(&path).await.unwrap();
@@ -833,7 +832,7 @@ mod stuck {
                 devices[1].sync.reload_from_snapshots().await,
                 Err(SyncError::StuckLog(record))
                     if record.object == LogObject::Write(object.path.write_id().unwrap())
-                        && record.failure == StuckFailure::Signature
+                        && record.failure == RefusalCode::Signature
             ));
             if attempt == 1 {
                 assert_eq!(storage.reads().await, before);
@@ -842,4 +841,106 @@ mod stuck {
             assert_eq!(super::writes::queued(&devices[1].db).await, queued);
         }
     }
+}
+
+#[tokio::test]
+async fn multiple_reported_subjects_in_one_log_keep_its_first_refusal() {
+    let storage = storage();
+    let mut devices = group(storage.clone(), 2).await;
+    for title in ["first", "second"] {
+        devices[0]
+            .db
+            .write(move |sql| {
+                sql.execute("INSERT INTO notes VALUES(?1,?1,'body')", [title])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        devices[0].writes.upload_writes().await.unwrap();
+    }
+    let first = coven_database::LogRefusal {
+        object: LogObject::Write(WriteId {
+            device: DeviceId(1),
+            number: 1,
+        }),
+        failure: RefusalCode::Parse,
+    };
+    let second = coven_database::LogRefusal {
+        object: LogObject::Write(WriteId {
+            device: DeviceId(1),
+            number: 2,
+        }),
+        failure: RefusalCode::Signature,
+    };
+    let mut positions = devices[1]
+        .writes
+        .current_positions()
+        .await
+        .unwrap()
+        .unwrap();
+    positions.pending = vec![first.into(), second.into()];
+    let path = ObjectPath::positions(positions.device);
+    storage
+        .replace(&path, &signed_positions(&devices[1], positions))
+        .await
+        .unwrap();
+    devices[0].writes.compare_fingerprints().await.unwrap();
+    assert_eq!(
+        devices[0].db.stuck_logs().await.unwrap(),
+        vec![coven_database::StuckLog {
+            record: first,
+            reported_by: Some(DeviceId(2)),
+        }]
+    );
+    assert!(devices[0]
+        .writes
+        .current_positions()
+        .await
+        .unwrap()
+        .unwrap()
+        .pending
+        .is_empty());
+}
+
+#[tokio::test]
+async fn oversized_reports_fail_publication_without_replacing_or_truncating_the_post() {
+    let storage = Arc::new(
+        MemoryStorage::builder()
+            .transfer_limits(1024, 256)
+            .build()
+            .unwrap(),
+    );
+    let mut devices = group(storage.clone(), 1).await;
+    let device = &mut devices[0];
+    device.writes.post_positions().await.unwrap();
+    let path = ObjectPath::positions(DeviceId(1));
+    let previous = storage.read(&path).await.unwrap();
+    for writer in 2..66 {
+        device
+            .db
+            .record_stuck_log(coven_database::LogRefusal {
+                object: LogObject::Write(WriteId {
+                    device: DeviceId(writer),
+                    number: 1,
+                }),
+                failure: RefusalCode::Parse,
+            })
+            .await
+            .unwrap();
+    }
+    assert!(matches!(device.writes.post_positions().await,
+        Err(SyncError::Storage(error)) if matches!(error.failure(),
+            coven_storage::StorageFailure::SingleRequestTooLarge { limit: 1024, .. })));
+    assert_eq!(storage.read(&path).await.unwrap(), previous);
+    assert_eq!(
+        device
+            .writes
+            .current_positions()
+            .await
+            .unwrap()
+            .unwrap()
+            .pending
+            .len(),
+        64
+    );
 }

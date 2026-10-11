@@ -1,7 +1,8 @@
 //! Local judgments stop downloads; signed peer reports only inform their author.
 
 use crate::{sqlite::DatabaseConnection, DbError};
-use coven_format::stuck::{LogObject, StuckFailure, StuckRecord};
+use crate::{LogObject, LogRefusal};
+use coven_format::pending::RefusalCode;
 use coven_foundation::id_source::DeviceId;
 use std::time::SystemTime;
 
@@ -9,7 +10,7 @@ use std::time::SystemTime;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StuckLog {
     /// The object, its author and the failed check.
-    pub record: StuckRecord,
+    pub record: LogRefusal,
     /// None for a local judgment; otherwise the device whose signed positions report it.
     pub reported_by: Option<DeviceId>,
 }
@@ -42,7 +43,7 @@ pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<StuckLog>, DbError> {
             1 => LogObject::Entry(crate::EntryId { device, number }),
             _ => return Err(DbError::DamagedDatabase),
         };
-        let record = StuckRecord { object, failure: StuckFailure::try_from(failure).map_err(|_| DbError::DamagedDatabase)? };
+        let record = LogRefusal { object, failure: RefusalCode::try_from(failure).map_err(|_| DbError::DamagedDatabase)? };
         let reported_by = if reporter.is_empty() {
             None
         } else {
@@ -58,7 +59,7 @@ pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<StuckLog>, DbError> {
     .collect()
 }
 
-pub(crate) fn local(db: &DatabaseConnection) -> Result<Vec<StuckRecord>, DbError> {
+pub(crate) fn local(db: &DatabaseConnection) -> Result<Vec<LogRefusal>, DbError> {
     Ok(read(db)?
         .into_iter()
         .filter(|log| log.reported_by.is_none())
@@ -68,7 +69,7 @@ pub(crate) fn local(db: &DatabaseConnection) -> Result<Vec<StuckRecord>, DbError
 
 pub(crate) fn record(
     db: &DatabaseConnection,
-    record: StuckRecord,
+    record: LogRefusal,
     now: SystemTime,
 ) -> Result<(), DbError> {
     db.transaction(|db| {
@@ -95,7 +96,7 @@ pub(crate) fn version_changed(db: &DatabaseConnection) -> Result<(), DbError> {
 pub(crate) fn peer_reports(
     db: &DatabaseConnection,
     own: DeviceId,
-    reports: Vec<(DeviceId, StuckRecord)>,
+    reports: Vec<(DeviceId, LogRefusal)>,
 ) -> Result<(), DbError> {
     db.transaction(|db| {
         db.internal_execute("DELETE FROM _coven_stuck_logs WHERE length(reporter)=8", [])?;
@@ -104,7 +105,9 @@ pub(crate) fn peer_reports(
                 return Err(DbError::DamagedDatabase);
             }
             db.internal_execute(
-                "INSERT INTO _coven_stuck_logs(kind,device,reporter,number,failure) VALUES(?1,?2,?3,?4,?5)",
+                "INSERT INTO _coven_stuck_logs(kind,device,reporter,number,failure) VALUES(?1,?2,?3,?4,?5)
+                 ON CONFLICT(kind,device,reporter) DO UPDATE SET number=excluded.number,failure=excluded.failure
+                 WHERE excluded.number<_coven_stuck_logs.number",
                 (
                     kind(record.object),
                     own.0.to_be_bytes().as_slice(),

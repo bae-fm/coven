@@ -99,13 +99,13 @@ async fn damaged_objects_roll_back_and_block_only_their_device() {
             stuck[0].record.object,
             LogObject::Write(record.header.position)
         );
-        use coven_format::stuck::StuckFailure;
+        use coven_format::pending::RefusalCode;
         assert_eq!(
             stuck[0].record.failure,
             match failure {
-                "decryption" | "moved" => StuckFailure::Decryption,
-                "signature" => StuckFailure::Signature,
-                "parse" => StuckFailure::Parse,
+                "decryption" | "moved" => RefusalCode::Decryption,
+                "signature" => RefusalCode::Signature,
+                "parse" => RefusalCode::Parse,
                 _ => unreachable!(),
             }
         );
@@ -525,7 +525,7 @@ async fn authorization_causality_and_identity_refusals_keep_their_report_tags() 
             panic!("{error:?}")
         };
         assert_eq!(
-            u8::from(coven_format::stuck::StuckFailure::from(&damage.failure)),
+            u8::from(coven_format::pending::RefusalCode::from(&damage.failure)),
             tag,
             "{defect}"
         );
@@ -540,7 +540,7 @@ async fn authorization_causality_and_identity_refusals_keep_their_report_tags() 
         assert_eq!(u8::from(saved[0].record.failure), tag, "{defect}");
         devices[1].writes.post_positions().await.unwrap();
         let post = posted(&storage, &devices[1], 2).await;
-        assert_eq!(post.stuck[0], saved[0].record);
+        assert_eq!(post.pending[0], saved[0].record.into());
     }
 }
 
