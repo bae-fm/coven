@@ -1,6 +1,13 @@
 {"version": "1.2.0",
  "packagesDir": ".lake/packages",
- "packages": [],
+ "packages":
+ [{"type": "path",
+   "scope": "",
+   "name": "covenStorage",
+   "manifestFile": "lake-manifest.json",
+   "inherited": false,
+   "dir": "../storage",
+   "configFile": "lakefile.toml"}],
  "name": "covenMerge",
  "lakeDir": ".lake",
  "fixedToolchain": false}

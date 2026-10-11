@@ -3,6 +3,7 @@ import CovenMerge.Lemmas
 import CovenMerge.Step
 import CovenMerge.StepLost
 import CovenMerge.Converge
+import CovenMerge.Causality
 import CovenMerge.Rewriting
 import CovenMerge.ListLemmas
 import CovenMerge.Fixpoint

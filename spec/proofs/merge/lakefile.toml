@@ -4,6 +4,10 @@ defaultTargets = ["CovenMerge", "mergeRunner"]
 [leanOptions]
 linter.unusedSectionVars = false
 
+[[require]]
+name = "covenStorage"
+path = "../storage"
+
 [[lean_lib]]
 name = "CovenMerge"
 

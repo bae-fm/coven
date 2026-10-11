@@ -10,6 +10,17 @@ open CovenMerge
 #print axioms run_isSpec
 #print axioms isSpec_unique
 #print axioms causalOrder_of_ts_sorted
+-- a write made after seeing another wins (§3)
+#print axioms seen_replacer_not_lost
+#print axioms older_incarnation_not_current
+#print axioms cell_after_read_wins
+#print axioms cell_after_all_reads_wins
+#print axioms delete_after_read_wins
+#print axioms deleted_row_has_no_cells
+#print axioms reinsert_after_delete_wins
+#print axioms write_after_read_wins
+#print axioms packed_stamp_before
+#print axioms stamp_supplies_past_ts
 -- removal rules
 #print axioms newman
 #print axioms kill_unique_normal

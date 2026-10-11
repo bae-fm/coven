@@ -176,6 +176,27 @@ at.
 - **Timestamp order** is one causal order, by assumption 2, so every causal
   order gives the state applying the writes in timestamp order gives. Lean:
   `causalOrder_of_ts_sorted`.
+- **A write made after seeing another wins over it** ([§3](../coven.md#3-guarantees)):
+  `write_after_read_wins` quantifies over every causal application order.
+  When a write sets the same cell in the same incarnation, or deletes that
+  incarnation, having read the earlier setter, the earlier value is neither
+  current nor an unread loss. `cell_after_read_wins` and
+  `delete_after_read_wins` also apply directly to any `IsSpec` state,
+  including one reached from a snapshot. A third write may beat both;
+  `cell_after_all_reads_wins` gives the exact winner when it read every
+  competing setter in the current incarnation.
+- **Deletion and re-insertion**: `deleted_row_has_no_cells` proves all cells
+  absent at an even generation. `reinsert_after_delete_wins` proves that an
+  insert after seeing the delete starts the next incarnation, retains the
+  earlier delete's generation record, and excludes every old-incarnation
+  setter regardless of timestamp. `older_incarnation_not_current` states
+  that last fact for every later generation.
+- **The storage clock supplies the causal stamp inequality**:
+  `stamp_supplies_past_ts` invokes the storage package's
+  `CovenStorage.Clocks.stamp_after_every_read`. `packed_stamp_before` maps
+  its timestamp order to the merge model's natural numbers using D2's
+  64-bit device ids. A successful stamp after the greatest read timestamp
+  therefore satisfies assumption 2, including when the wall clock is behind.
 - E.g. Lean runs the step on the writes of [§8.1](../coven.md#81-example), [§8.2](../coven.md#82-concurrent-writes-to-one-row) and [§8.3](../coven.md#83-deletes), in the
   arrival orders they describe:
   - Ben's phone and Carol's tablet both end with "Shopping" and one
@@ -580,6 +601,11 @@ three passes avoid that result; this is not a counterexample to §8.
 
 The readings used are:
 
+- “Wins over” compares changes to the same cell and incarnation, or a delete
+  of that incarnation. It does not overwrite unrelated cells or promise that
+  no third write wins. Re-insertion advances the generation; old setters and
+  the old delete cannot affect its cells. This concerns retained merge inputs;
+  resets and schema exclusions use the separate boundary rules below.
 - “Any arrival order” permits transport arrival in any order; application
   still obeys causality. “Any rule order” stays within §8's three passes.
 - Migration judges independent causes by rerunning all three passes without
