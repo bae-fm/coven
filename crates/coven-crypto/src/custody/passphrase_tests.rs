@@ -243,10 +243,15 @@ fn failed_save_and_forget_preserve_held_keys_and_reuse_the_sealing_capability() 
     let first = StoreKeyring::new(StoreKey::generate(KeyId(Uuid::from_u128(1))).unwrap());
     session.persist(&first).unwrap();
     file.remove().unwrap();
-    let store_dir = temp.path().join("stores").join(id.to_string());
-    let moved = temp.path().join("held-store");
-    std::fs::rename(&store_dir, &moved).unwrap();
-    std::fs::write(&store_dir, b"not a directory").unwrap();
+    let target = temp
+        .path()
+        .join("stores")
+        .join(id.to_string())
+        .join("store-keys.sealed");
+    // A directory at the file itself rejects both replacement and removal on
+    // Unix and Windows. A file in a parent component instead reports NotFound
+    // on Windows, where forgetting an absent file correctly succeeds.
+    std::fs::create_dir(&target).unwrap();
     let second = StoreKeyring::new(StoreKey::generate(KeyId(Uuid::from_u128(2))).unwrap());
     assert!(matches!(session.persist(&second), Err(KeyError::File(_))));
     assert!(matches!(session.forget(), Err(KeyError::File(_))));
@@ -259,8 +264,7 @@ fn failed_save_and_forget_preserve_held_keys_and_reuse_the_sealing_capability() 
             .as_bytes(),
         first.to_secret_bytes().as_bytes()
     );
-    std::fs::remove_file(&store_dir).unwrap();
-    std::fs::rename(&moved, &store_dir).unwrap();
+    std::fs::remove_dir(&target).unwrap();
     session.persist(&second).unwrap();
     session.forget().unwrap();
     assert!(session.read().unwrap().is_none());
