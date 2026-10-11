@@ -1,34 +1,6 @@
 use super::*;
 use crate::authentication::SignIn;
 
-#[cfg(test)]
-struct JoinClock {
-    clock: crate::tests::PollingClock,
-    sleeping: watch::Sender<bool>,
-    resume: watch::Receiver<bool>,
-}
-
-impl Clock for JoinClock {
-    fn now(&self) -> std::time::SystemTime {
-        self.clock.now()
-    }
-
-    fn sleep(
-        &self,
-        duration: Duration,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        if duration == Duration::from_secs(1) && !*self.resume.borrow() {
-            self.sleeping.send(true).unwrap();
-            let mut resume = self.resume.clone();
-            Box::pin(async move {
-                resume.wait_for(|resumed| *resumed).await.unwrap();
-            })
-        } else {
-            self.clock.sleep(duration)
-        }
-    }
-}
-
 #[tokio::test]
 async fn restore_and_keychain_restore_use_builder_sign_in_without_returning_tokens() {
     for from_keychain in [false, true] {

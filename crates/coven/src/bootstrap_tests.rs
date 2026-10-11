@@ -12,6 +12,33 @@ use std::num::NonZeroUsize;
 mod fixtures;
 use fixtures::*;
 
+struct JoinClock {
+    clock: crate::tests::PollingClock,
+    sleeping: watch::Sender<bool>,
+    resume: watch::Receiver<bool>,
+}
+
+impl Clock for JoinClock {
+    fn now(&self) -> std::time::SystemTime {
+        self.clock.now()
+    }
+
+    fn sleep(
+        &self,
+        duration: Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        if duration == Duration::from_secs(1) && !*self.resume.borrow() {
+            self.sleeping.send(true).unwrap();
+            let mut resume = self.resume.clone();
+            Box::pin(async move {
+                resume.wait_for(|resumed| *resumed).await.unwrap();
+            })
+        } else {
+            self.clock.sleep(duration)
+        }
+    }
+}
+
 #[tokio::test]
 async fn restore_loads_snapshots_and_later_writes_with_identical_fingerprints() {
     let owner = Owner::new(CloudProvider::S3, true).await;
@@ -125,29 +152,52 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
     let invite = owner.invite().await;
     let install = Installation::new();
     let (_, cancel) = watch::channel(false);
-    let mut joining = Box::pin(install.run(
-        &owner,
-        Installation::join_request(&invite),
-        owner.recipient(),
-        &cancel,
+    let (sleeping, mut asleep) = watch::channel(false);
+    let (_resume, resumed) = watch::channel(false);
+    let clock = Arc::new(JoinClock {
+        clock: crate::tests::PollingClock(owner.clock.clone()),
+        sleeping,
+        resume: resumed,
+    });
+    let mut joining = Box::pin(join_with_invite(
+        install.builder(&owner, owner.recipient()).clock(clock),
+        &invite.code,
+        "New phone",
         |_| {},
+        &cancel,
     ));
     let request = tokio::time::timeout(Duration::from_secs(20), async {
-        tokio::select! { result = &mut joining => panic!("join returned before approval: {result:?}"), request = next_join_request(&owner.handle) => request }
-    }).await.unwrap();
+        let waiting = async {
+            // Receipt on the owner does not mean the joiner's database read
+            // has finished. Drop only once it is waiting on the approval timer.
+            let (request, sleeping) = tokio::join!(
+                next_join_request(&owner.handle),
+                asleep.wait_for(|sleeping| *sleeping),
+            );
+            sleeping.unwrap();
+            request
+        };
+        tokio::select! {
+            result = &mut joining => panic!("join returned before approval: {result:?}"),
+            request = waiting => request,
+        }
+    })
+    .await
+    .unwrap();
     let bytes = owner
         .storage
         .read(&ObjectPath::join_request(invite.id))
         .await
         .unwrap();
     drop(joining);
-    install.absent(owner.directory.id()).await;
     let pending = install
         .layout
         .begin_bootstrap(owner.directory.id(), "Household", &UuidIds)
         .unwrap();
+    drop(pending.directory().lock_exclusive().unwrap());
     let device = pending.directory().settings().unwrap().device_id;
     drop(pending);
+    install.absent(owner.directory.id()).await;
     let resumed = install.run(
         &owner,
         Installation::join_request(&invite),

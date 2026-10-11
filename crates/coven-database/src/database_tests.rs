@@ -204,6 +204,56 @@ async fn settings_failure_remains_distinct() {
 }
 
 #[test]
+fn dropped_bootstrap_releases_its_locks_when_the_active_read_finishes() {
+    let temp = tempfile::tempdir().unwrap();
+    let layout = coven_foundation::files::StoreLayout::new(temp.path().to_owned());
+    let id = coven_foundation::id_source::StoreId(uuid::Uuid::from_u128(1));
+    let pending = layout.begin_bootstrap(id, "Household", &UuidIds).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let database = runtime
+        .block_on(
+            DatabaseBuilder::new(pending.directory())
+                .synced_tables(vec![])
+                .migrations(vec![])
+                .open(),
+        )
+        .unwrap();
+    let (entered, entry) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let mut read = Box::pin(database.read(move |_| {
+        entered.send(()).unwrap();
+        released
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        Ok(())
+    }));
+    runtime.block_on(async {
+        tokio::select! {
+            result = &mut read => panic!("held read returned: {result:?}"),
+            result = entry => result.unwrap(),
+        }
+    });
+    drop(read);
+    drop(database);
+    drop(pending);
+    // Dropping the caller cannot release the directory underneath active IO.
+    assert!(matches!(
+        layout.begin_bootstrap(id, "Household", &UuidIds),
+        Err(coven_foundation::files::BootstrapDirectoryError::Lock(
+            StoreLockError::AlreadyOpen(_)
+        ))
+    ));
+    release.send(()).unwrap();
+    // Runtime shutdown joins the blocking work, without relying on a sleep.
+    runtime.shutdown_timeout(std::time::Duration::from_secs(10));
+    let resumed = layout.begin_bootstrap(id, "Household", &UuidIds).unwrap();
+    drop(resumed.directory().lock_exclusive().unwrap());
+    resumed.cancel().unwrap();
+}
+
+#[test]
 fn another_process_can_read_while_the_writer_is_open() {
     let store = TestStore::new();
     let runtime = tokio::runtime::Runtime::new().unwrap();
