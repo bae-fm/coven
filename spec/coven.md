@@ -391,6 +391,13 @@ the file's ranges under `F`.
   An immutable object's time is its first complete publication; retrying
   an occupied path does not change it. Replacing posted positions or a clock object gets
   the replacement's storage time. Publication times do not go backwards.
+  - Storage time advances no faster than real time, apart from at most one
+    day of forward drift over any interval of up to 30 real-time days.
+    With §15's sampling and sleep-inclusive monotonic elapsed time, current
+    storage time is therefore at most `T + monotonic elapsed + one day`
+    while the recent-return check holds. This is an environmental
+    assumption, alongside §10's request-duration bound and §13's storage
+    cut-off assumption; nondecreasing publication times alone do not imply it.
 - Device paths have one intended writer: the device they name. Retrying
   that writer uses fixed bytes. A copied identity can violate this;
   the checks in §10 detect it before sending or when a path is occupied.
@@ -2842,7 +2849,9 @@ Carol's tablet:
   reading paired with `T`, including sleep. Only while it holds does the
   recent-return rule let the miss mean nothing new. Check when using the
   result, including a cached or parallel read's miss, not just at pass start.
-  The one-day margin precedes the 30-day storage-age deletion threshold.
+  Under [§4](#4-storage-providers-and-access)'s storage-clock rate assumption,
+  this one-day margin keeps current storage time below `S + 30 days`, the
+  storage-age deletion threshold.
 
   At equality or later, use the away-device path: discover snapshots and
   complete any required reload before using further write misses. A snapshot

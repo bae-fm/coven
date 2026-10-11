@@ -137,8 +137,9 @@ The clock bound is not a consequence of §4's nondecreasing publication times.
 `clock_jump_defeats_recent_miss` checks checkpoint 0, a write and sample at
 second 1, elapsed 0, then a provider advance to day 30 plus one second.
 Deletion is permitted and the executable scan accepts its resulting miss.
-A physical relationship between provider time and the monotonic timer,
-including sample age and sleep, must establish the bound. Without it the
+The environmental clock-rate assumption in
+[§4](../coven.md#4-storage-providers-and-access), together with §15's sampling
+and sleep-inclusive elapsed time, establishes this bound. Without it the
 unconditional recent-return claim fails. `snapshot_next_number_wrong` and
 `away_write_miss` retain the independent reasons that old snapshots and writes
 cannot be discovered by next number after deletion.
