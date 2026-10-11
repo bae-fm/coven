@@ -278,6 +278,11 @@ async fn three_devices_publish_concurrent_changes_and_converge() {
     a.add(&c.member, MemberRole::Member).await;
     b.sync().await;
     c.sync().await;
+    b.sync.load_new_device("Ben").await.unwrap();
+    c.sync.load_new_device("Carol").await.unwrap();
+    for device in [&mut a, &mut b, &mut c] {
+        device.sync().await;
+    }
     for (device, id) in [(&mut a, 10), (&mut b, 11), (&mut c, 12)] {
         device
             .sync
@@ -321,6 +326,7 @@ async fn far_future_entry_waits_for_its_missing_causal_entry_then_applies() {
         .await
         .unwrap();
     b.sync().await;
+    b.sync.load_new_device("second").await.unwrap();
     let third = b
         .sync
         .make_and_upload_entry(StoreChange::RenameCircle {
@@ -690,6 +696,7 @@ async fn circle_member_rotates_after_outside_admin_removal_and_repeated_removal_
     a.add(&b.member, MemberRole::Member).await;
     a.add(&c.member, MemberRole::Member).await;
     b.sync().await;
+    b.sync.load_new_device("Ben").await.unwrap();
     b.sync
         .make_and_upload_entry(StoreChange::CreateCircle {
             circle: circle(1),
@@ -710,6 +717,8 @@ async fn circle_member_rotates_after_outside_admin_removal_and_repeated_removal_
         .unwrap();
     a.sync().await;
     c.sync().await;
+    c.sync.load_new_device("Carol").await.unwrap();
+    a.sync().await;
     a.sync
         .make_and_upload_entry(StoreChange::RemoveMember {
             member: b.member.member_id(),
@@ -860,6 +869,8 @@ async fn a_waiting_entry_reseals_with_its_recorded_key_after_rotation() {
     a.add(&member(2), MemberRole::Member).await;
     let mut b = device(storage.clone(), 2, member(1), store(1)).await;
     b.sync().await;
+    b.sync.load_new_device("second").await.unwrap();
+    a.sync().await;
     storage
         .set_faults(Faults {
             lose_completion_reply: true,

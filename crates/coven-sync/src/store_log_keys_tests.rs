@@ -183,6 +183,8 @@ async fn household(storage: &Arc<MemoryStorage>) -> [Device; 4] {
     ana.add(&dan.member, MemberRole::Member).await;
     ana.add(&erin.member, MemberRole::Member).await;
     ben.sync().await;
+    ben.sync.load_new_device("Ben").await.unwrap();
+    ana.sync().await;
     erin.sync().await;
     ana.clock.set(UNIX_EPOCH + Duration::from_secs(2));
     ben.clock.set(UNIX_EPOCH + Duration::from_secs(3));

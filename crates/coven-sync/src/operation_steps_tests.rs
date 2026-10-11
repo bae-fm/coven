@@ -188,6 +188,9 @@ async fn resumed_removal_lists_original_and_replaced_access() {
     a.add(&c.member, MemberRole::Admin).await;
     b.sync().await;
     c.sync().await;
+    b.sync.load_new_device("Ben").await.unwrap();
+    c.sync.load_new_device("Carol").await.unwrap();
+    a.sync().await;
     let waiting = begin(&mut a, Command::RemoveMember(b.member.member_id())).await;
     b.sync
         .make_and_upload_entry(StoreChange::SetAccess {
@@ -220,6 +223,8 @@ async fn late_access_survives_restart_and_cannot_revive_confirmed_keys() {
         a.create(key(1)).await;
         a.add(&b.member, MemberRole::Admin).await;
         b.sync().await;
+        b.sync.load_new_device("Ben").await.unwrap();
+        a.sync().await;
         let (target, observer) = if creator {
             (&mut a, &mut b)
         } else {

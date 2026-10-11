@@ -2,6 +2,265 @@ use super::*;
 use coven_database::{LogObject, LogRefusal};
 use coven_format::pending::RefusalCode;
 
+fn checked_log(entries: &[StoreLogEntry]) -> StoreLog {
+    let mut log = StoreLog::default();
+    for entry in entries {
+        let (checked, replay) = crate::replay_entry(&log, entry.clone());
+        log.entries.push(checked);
+        log.replay = replay;
+    }
+    log
+}
+
+#[test]
+fn folder_ownership_includes_implicit_own_registration_and_waits_for_it() {
+    use crate::replay::tests as history;
+    let mut h = history::History::new();
+    h.all(0, 0, history::add(1, MemberRole::Member));
+    h.all(1, 1, history::device(1));
+    h.all(0, 0, history::add(2, MemberRole::Member));
+    h.push(1, 1, &[0, 1], history::device(90));
+    let candidate = &h.entries[4];
+    let waiting = checked_log(&h.entries[..2]);
+    assert!(!object::ready(&waiting, candidate, store(1)).unwrap());
+    let log = checked_log(&h.entries[..4]);
+    assert!(object::ready(&log, candidate, store(1)).unwrap());
+}
+
+#[test]
+fn folder_ownership_waits_for_a_registration_in_the_recorded_past() {
+    use crate::replay::tests as history;
+    let mut h = history::History::new();
+    h.all(0, 0, history::device(70));
+    h.all(0, 70, history::device(90));
+    let candidate = &h.entries[2];
+    assert!(!object::ready(&checked_log(&h.entries[..1]), candidate, store(1)).unwrap());
+    assert!(object::ready(&checked_log(&h.entries[..2]), candidate, store(1)).unwrap());
+}
+
+#[test]
+fn a_dropped_registration_does_not_prevent_registering_again() {
+    use crate::replay::tests as history;
+    let mut h = history::History::new();
+    // This self-registration has a valid identity but the signer is not yet a member.
+    h.all(1, 1, history::device(1));
+    h.all(0, 0, history::add(1, MemberRole::Member));
+    let log = checked_log(&h.entries);
+    assert_eq!(
+        log.replay.entries[&h.entries[1].position],
+        EntryOutcome::Dropped(coven_database::DropReason::NotAllowed)
+    );
+    h.all(1, 1, history::device(1));
+    let candidate = h.entries.last().unwrap();
+    assert!(object::ready(&log, candidate, store(1)).unwrap());
+    let (_, replay) = crate::replay_entry(&log, candidate.clone());
+    assert_eq!(replay.entries[&candidate.position], EntryOutcome::Kept);
+    assert_eq!(replay.state.devices[&DeviceId(1)].member, candidate.author);
+}
+
+#[test]
+fn folder_ownership_uses_registration_in_the_recorded_view() {
+    use crate::replay::tests as history;
+    let mut h = history::History::new();
+    h.all(0, 0, history::add(1, MemberRole::Member));
+    h.all(1, 1, history::device(1));
+    h.all(1, 1, history::device(70));
+    h.all(1, 70, history::device(90));
+    h.all(
+        0,
+        0,
+        StoreChange::RemoveDevice {
+            device: DeviceId(70),
+        },
+    );
+    h.all(0, 0, history::device(70));
+    let log = checked_log(&h.entries);
+    assert_eq!(
+        log.replay.state.devices[&DeviceId(70)].member,
+        history::member(0)
+    );
+
+    h.push(1, 70, &[0, 1, 2, 3, 4], history::device(91));
+    let mut candidate = h.entries.last().unwrap().clone();
+    assert!(object::ready(&log, &candidate, store(1)).unwrap());
+    candidate.author = history::member(0);
+    assert!(matches!(
+        object::ready(&log, &candidate, store(1)),
+        Err(Refusal::WrongIdentity { .. })
+    ));
+
+    candidate.had_read = log.positions();
+    candidate
+        .had_read
+        .0
+        .retain(|id| id.device != candidate.position.device);
+    assert!(object::ready(&log, &candidate, store(1)).unwrap());
+    candidate.author = history::member(1);
+    assert!(matches!(
+        object::ready(&log, &candidate, store(1)),
+        Err(Refusal::WrongIdentity { .. })
+    ));
+}
+
+#[tokio::test]
+async fn another_member_cannot_claim_an_empty_registered_store_log_folder() {
+    for added_device in [DeviceId(70), DeviceId(90)] {
+        let storage = storage();
+        let mut a = device(storage.clone(), 1, member(1), store(1)).await;
+        let mut b = device(storage.clone(), 2, member(2), store(1)).await;
+        a.create(key(1)).await;
+        a.add(&b.member, MemberRole::Member).await;
+        b.sync().await;
+        for id in [DeviceId(2), DeviceId(70)] {
+            b.sync
+                .make_and_upload_entry(StoreChange::AddDevice {
+                    device: id,
+                    name: "registered".into(),
+                    replaces: None,
+                })
+                .await
+                .unwrap();
+        }
+        a.sync().await;
+        let log = a.log().await;
+        assert_eq!(
+            log.replay.state.devices[&DeviceId(70)].member,
+            b.member.member_id()
+        );
+        assert!(log
+            .entries
+            .iter()
+            .all(|e| e.entry.position.device != DeviceId(70)));
+        let entry = StoreLogEntry {
+            position: EntryId {
+                device: DeviceId(70),
+                number: 1,
+            },
+            timestamp: coven_merge::Timestamp::new(2000, 0, DeviceId(70)).unwrap(),
+            author: a.member.member_id(),
+            had_read: log.positions(),
+            change: StoreChange::AddDevice {
+                device: added_device,
+                name: "impostor".into(),
+                replaces: None,
+            },
+        };
+        let ring = a.custody.read().unwrap().unwrap();
+        let bytes = object::seal(
+            &entry,
+            coven_format::FormatVersion::CURRENT,
+            ring.store_key(key(1)).unwrap(),
+            &a.member,
+        )
+        .unwrap();
+        storage
+            .create(&object::path(entry.position), &bytes)
+            .await
+            .unwrap();
+        a.sync().await;
+        assert_eq!(
+            a.db.pending::<crate::PendingRecord>().await.unwrap(),
+            vec![crate::PendingRecord::log_refusal(
+                LogRefusal {
+                    object: LogObject::Entry(entry.position),
+                    failure: RefusalCode::WrongIdentity,
+                },
+                a.device().await,
+            )]
+        );
+        assert_eq!(a.log().await, log);
+    }
+}
+
+#[tokio::test]
+async fn a_new_device_registers_itself_before_publishing_other_entries() {
+    let storage = storage();
+    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
+    let mut b = device(storage.clone(), 2, member(1), store(1)).await;
+    a.create(key(1)).await;
+    assert!(b.sync.bootstrap_member().await.unwrap());
+    let unrelated = StoreChange::AddDevice {
+        device: DeviceId(90),
+        name: "another install".into(),
+        replaces: None,
+    };
+    assert!(matches!(
+        b.sync.make_and_upload_entry(unrelated.clone()).await,
+        Err(SyncError::Rejected(coven_database::DropReason::NotAllowed))
+    ));
+    assert!(b.db.local_store_log().await.unwrap().upload.is_none());
+    b.sync.load_new_device("new install").await.unwrap();
+    let first = EntryId {
+        device: DeviceId(2),
+        number: 1,
+    };
+    let log = b.log().await;
+    assert_eq!(log.replay.entries[&first], EntryOutcome::Kept);
+    assert_eq!(
+        log.replay.state.devices[&DeviceId(2)].member,
+        b.member.member_id()
+    );
+    let second = b.sync.make_and_upload_entry(unrelated).await.unwrap();
+    assert_eq!(second, EntryId { number: 2, ..first });
+    a.sync().await;
+    assert_eq!(a.log().await, b.log().await);
+    assert!(a
+        .db
+        .pending::<crate::PendingRecord>()
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn a_replacement_device_registers_itself_in_its_first_entry() {
+    let storage = storage();
+    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
+    let mut b = device(storage.clone(), 2, member(1), store(1)).await;
+    a.create(key(1)).await;
+    a.sync
+        .make_and_upload_entry(StoreChange::AddDevice {
+            device: DeviceId(70),
+            name: "old install".into(),
+            replaces: None,
+        })
+        .await
+        .unwrap();
+    assert!(b.sync.bootstrap_member().await.unwrap());
+    let registration = StoreChange::AddDevice {
+        device: DeviceId(2),
+        name: "replacement install".into(),
+        replaces: Some(DeviceId(70)),
+    };
+    let first = b
+        .sync
+        .make_and_upload_entry(registration.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        first,
+        EntryId {
+            device: DeviceId(2),
+            number: 1,
+        }
+    );
+    a.sync().await;
+    let log = a.log().await;
+    assert_eq!(log.replay.entries[&first], EntryOutcome::Kept);
+    assert_eq!(
+        log.replay.state.devices[&DeviceId(2)].member,
+        b.member.member_id()
+    );
+    assert_eq!(log.entries.last().unwrap().entry.change, registration);
+    assert_eq!(log, b.log().await);
+    assert!(a
+        .db
+        .pending::<crate::PendingRecord>()
+        .await
+        .unwrap()
+        .is_empty());
+}
+
 #[tokio::test]
 async fn queued_creation_rejects_a_copy_with_the_right_identity_and_wrong_material() {
     let storage = storage();
@@ -65,6 +324,8 @@ async fn damaged_entries_block_only_their_device_and_retain_each_cause() {
             .await
             .unwrap();
         b.sync().await;
+        b.sync.load_new_device("second").await.unwrap();
+        a.sync().await;
         let broken = a
             .sync
             .make_and_upload_entry(StoreChange::AddDevice {
@@ -185,6 +446,8 @@ async fn invalid_causal_past_and_timestamps_are_damaged() {
         let mut b = device(storage.clone(), 2, member(1), store(1)).await;
         let creation = a.create(key(1)).await;
         b.sync().await;
+        b.sync.load_new_device("second").await.unwrap();
+        a.sync().await;
         let prior = a
             .sync
             .make_and_upload_entry(StoreChange::AddDevice {
@@ -243,7 +506,8 @@ async fn invalid_causal_past_and_timestamps_are_damaged() {
                 };
                 bad.timestamp = coven_merge::Timestamp::new(2000, 0, prior.device).unwrap();
                 bad.author = member(2).member_id();
-                bad.had_read.0.clear();
+                bad.had_read = a.log().await.positions();
+                bad.had_read.0.retain(|id| id.device != bad.position.device);
             }
             _ => unreachable!(),
         }

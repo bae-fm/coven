@@ -185,10 +185,42 @@ pub(crate) fn open(
     Ok(entry)
 }
 
+/// Check the registered owner in the entry's complete, causally checked past.
 pub(crate) fn author_matches_device(log: &StoreLog, entry: &StoreLogEntry) -> bool {
-    log.entries.iter().all(|prior| {
-        prior.entry.position.device != entry.position.device || prior.entry.author == entry.author
-    })
+    let replay;
+    let view = if log
+        .entries
+        .iter()
+        .all(|prior| crate::replay::had_read(entry, &prior.entry))
+    {
+        &log.replay.state
+    } else {
+        let mut positions = entry.had_read.clone();
+        if entry.position.number > 1 {
+            let index = positions
+                .0
+                .partition_point(|id| id.device < entry.position.device);
+            positions.0.insert(
+                index,
+                EntryId {
+                    number: entry.position.number - 1,
+                    ..entry.position
+                },
+            );
+        }
+        replay = crate::replay::at(log, &positions);
+        &replay.state
+    };
+    match view.devices.get(&entry.position.device) {
+        Some(device) => device.member == entry.author,
+        // Creation and self-registration establish an absent binding. Replay
+        // separately checks authority, including a retry of a dropped registration.
+        None => match &entry.change {
+            StoreChange::CreateStore { .. } => true,
+            StoreChange::AddDevice { device, .. } => *device == entry.position.device,
+            _ => false,
+        },
+    }
 }
 
 /// An absent prerequisite waits; a present, inconsistent past is damaged.
@@ -197,9 +229,6 @@ pub(crate) fn ready(
     entry: &StoreLogEntry,
     store: StoreId,
 ) -> Result<bool, Refusal> {
-    if !author_matches_device(log, entry) {
-        return Err(Refusal::WrongIdentity { cause: None });
-    }
     let contains = |id: EntryId| log.replay.entries.contains_key(&id);
     if entry.position.number > 1
         && !contains(EntryId {
@@ -245,6 +274,9 @@ pub(crate) fn ready(
                 return Err(Refusal::InvalidCausality { cause: None });
             }
         }
+    }
+    if !author_matches_device(log, entry) {
+        return Err(Refusal::WrongIdentity { cause: None });
     }
     Ok(true)
 }
