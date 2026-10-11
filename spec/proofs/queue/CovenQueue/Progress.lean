@@ -39,7 +39,6 @@ theorem step_monotone {encode : Seal} {s t : World} (h : Step encode s t) :
   | prepare f requests keys =>
     obtain ⟨hs, hr⟩ := prepare_counters s.queue f (keys.map Key.id)
     simp only [hs, hr, Nat.le_refl, and_self]
-  | convert => simp [Queue.convert, Queue.reserved]
   | send => unfold World.send; split <;> exact ⟨Nat.le_refl _, Nat.le_refl _⟩
   | land => simp only [World.land]; split <;> exact ⟨Nat.le_refl _, Nat.le_refl _⟩
   | acknowledge =>
@@ -69,7 +68,6 @@ theorem step_stored_prefix {encode : Seal} {s t : World}
     intro n hn hp
     rw [(prepare_counters _ _ _).1] at hp
     exact hs n hn hp
-  | convert => exact hs
   | send => unfold World.send; split <;> exact hs
   | land a _ =>
     intro n hn hp
@@ -168,7 +166,6 @@ theorem step_preserves_attempt {encode : Seal} {s t : World} (h : Step encode s 
       | tried _ => simpa [Queue.head, World.commitWrite, Queue.commit, hp] using ha
   | prepare f requests keys app store r rest hp =>
     simp [Queue.head, hp] at ha
-  | convert => exact head_attempt_preserved _ _ _ _ ha
   | send => unfold World.send; split <;> exact ha
   | land => simp only [World.land]; split <;> exact ha
   | acknowledge a' ha' _ _ =>

@@ -11,7 +11,7 @@ def record (device number version : Nat) (read : List WriteId := [])
 
 def raised : View := ⟨some ⟨⟨10, []⟩, 2⟩, none, []⟩
 
-/-- Ben's attempted 1 is outside S; untried 2 was converted but still read 1.
+/-- Ben's old 1 is outside S; new-schema 2 still read its excluded effects.
 After atomic adoption, 3 reads passed positions without discarded values. -/
 def writes (n : Nat) : CheckedWrite :=
   ⟨record 0 (n + 1) (if n = 0 then 1 else 2) [] (if 2 ≤ n then [10] else []), none⟩
@@ -102,24 +102,23 @@ def untriedHistory (n : Nat) : Pending × Option Refusal :=
 def attemptedHistory (n : Nat) : Pending × Option Refusal :=
   if n = 0 then ⟨.tried attempt, none⟩ else untriedHistory n
 
-/-- Eligible untried predecessors convert first, so they do not falsely
-exclude their successors. An uncovered attempted predecessor does. -/
+/-- Attempt status cannot change receive conversion. Both queued records
+retain the old schema; their interpreted records use the supplied conversion. -/
 theorem conversion_uses_actual_predecessor :
-    (rebuild rename raised untriedHistory 1).2 = .applied ∧
-    (rebuild rename raised attemptedHistory 1).2 = .excluded 10 ∧
-    (rebuild rename raised attemptedHistory 1).1.record.disposition = .lost 2 := by
-  have hu : (rebuild rename raised untriedHistory 0).2 = .applied := by
-    rw [rebuild_eq]; decide
-  have ht : (rebuild rename raised attemptedHistory 0).2 = .excluded 10 := by
-    rw [rebuild_eq]; decide
+    (receive rename raised (checkedHistory untriedHistory) 1).2 = .applied ∧
+    (receive rename raised (checkedHistory attemptedHistory) 1).2 = .applied ∧
+    (receive rename raised (checkedHistory attemptedHistory) 1).1.body = [99, 42] := by
+  have hu : (receive rename raised (checkedHistory untriedHistory) 0).2 = .applied := by
+    rw [receive_eq]; decide
+  have ht : (receive rename raised (checkedHistory attemptedHistory) 0).2 = .applied := by
+    rw [receive_eq]; decide
   simp only [rename, raised] at hu ht
-  rw [rebuild_eq rename raised untriedHistory 1,
-    rebuild_eq rename raised attemptedHistory 1]
+  rw [receive_eq rename raised (checkedHistory untriedHistory) 1,
+    receive_eq rename raised (checkedHistory attemptedHistory) 1]
   simp [checkedHistory, causes, List.range_succ, untriedHistory,
     attemptedHistory, rename, raised, record, attempt, firstRecord, reads,
-    discardedBefore, resetIgnores, convertPending, Pending.record, classify,
+    discardedBefore, resetIgnores, interpret, convertRecord, Pending.record, classify,
     classify.schema, classify.inherited, outsideRaise, excludedInput, hu, ht]
-
 
 /-- An injective concrete encoding is unnecessary for the byte equality
 theorems. This example includes body, version, format and key choices. -/
@@ -130,8 +129,7 @@ def encode (a : Attempt) : Bytes :=
 def committed : World := { World.empty 0 with queue := (World.empty 0).queue.commit firstRecord }
 def prepared : World := { committed with queue := committed.queue.prepare 2 [7] }
 def sent : World := prepared.send
-def converted : World := { sent with queue := sent.queue.convert rename (fun _ => false) }
-def landed : World := converted.land encode attempt
+def landed : World := sent.land encode attempt
 def settled : World := { landed with queue := landed.queue.finish }
 
 theorem committed_reachable : Reachable encode 0 committed :=
@@ -142,25 +140,31 @@ theorem committed_reachable : Reachable encode 0 committed :=
 theorem prepared_reachable : Reachable encode 0 prepared := by
   exact .next committed_reachable
     (.prepare committed 2 [request] [key] 1 1 firstRecord []
-      (by decide) (by decide) (by decide) (by decide)
+      (by decide) (by decide) (Or.inl (by decide)) (by decide)
       ⟨request, [], rfl, rfl, rfl⟩)
 
 theorem sent_reachable : Reachable encode 0 sent := by
   exact .next prepared_reachable
     (.send prepared ⟨1, 0, 0⟩ (some ⟨some 0, false, ⟨0, 0, 0⟩⟩) 1 1
-      (by decide) (by decide) (by decide))
+      (by decide) (by decide) (by decide)
+      (by
+        intro a ha
+        have eq : a = attempt := by
+          have head : prepared.queue.head = some attempt := by decide
+          exact Option.some.inj (ha.symm.trans head)
+        subst a
+        exact Or.inl (by decide)))
 
-/-- Send seems to fail, a read still finds no object, migration runs, then
+/-- Send seems to fail and a read still finds no object; then
 the original request lands. Confirmation compares identical original bytes. -/
 theorem failed_then_landed :
-    sent.stored 1 = none ∧ converted.queue.head = some attempt ∧
+    sent.stored 1 = none ∧ sent.queue.head = some attempt ∧
     landed.stored 1 = some (encode attempt) ∧
     confirm encode attempt (some (landed.stored 1)) = .stored ∧
     settled.queue.settled = 1 ∧ settled.queue.waiting = [] := by decide
 
 theorem settled_reachable : Reachable encode 0 settled := by
-  have hc : Reachable encode 0 converted := .next sent_reachable (.convert _ _ _)
-  have hl : Reachable encode 0 landed := .next hc (.land _ attempt (by decide))
+  have hl : Reachable encode 0 landed := .next sent_reachable (.land _ attempt (by decide))
   exact .next (.next hl (.receive _ attempt (by decide) (by decide)))
     (.acknowledge _ attempt (by decide) rfl (by decide))
 
@@ -190,8 +194,8 @@ theorem crash_retry_settles : Reachable encode 0
     (.receive _ attempt (by decide) (by decide))
   exact .next hr (.acknowledge _ attempt (by decide) rfl (by decide))
 
-/-- A raise snapshot can cover the author's unuploaded head. It says nothing
-about the still-empty storage slot, and the queue remains attempted. -/
+/-- A locally captured snapshot can cover an unuploaded head. Publication
+must wait: captured coverage alone cannot settle the upload. -/
 theorem coverage_is_not_storage :
     classify retained ⟨firstRecord, none⟩ [] = .applied ∧
     prepared.queue.head = some attempt ∧ prepared.stored 1 = none ∧
@@ -205,11 +209,11 @@ example : (committed.queue.commit (record 0 9 1)).waiting.map
       (fun p => p.record.identity.id.number) = [1, 2] ∧
     (committed.queue.commit (record 0 9 1)).reserved = 2 := by decide
 
-example : convertPending rename false (.untried firstRecord) =
-      .untried { firstRecord with version := 2, body := [99, 42] } ∧
-    convertPending rename true (.untried firstRecord) =
-      .untried { firstRecord with disposition := .lost 2 } ∧
-    convertPending rename false (.tried attempt) = .tried attempt := by decide
+example : convertRecord rename false firstRecord =
+      { firstRecord with version := 2, body := [99, 42] } ∧
+    convertRecord rename true firstRecord = { firstRecord with disposition := .lost 2 } ∧
+    (rebuild rename raised ⟨attemptedHistory, checkedHistory attemptedHistory⟩).uploads 0 =
+      (.tried attempt, none) := by decide
 
 example : checkIdentity 0 ⟨5, 0, 0⟩ (some ⟨some 0, false, ⟨7, 0, 0⟩⟩) = .storageAhead ∧
     checkIdentity 0 ⟨7, 0, 0⟩ (some ⟨some 0, false, ⟨7, 0, 0⟩⟩) = .ready ∧

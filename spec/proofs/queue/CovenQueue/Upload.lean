@@ -24,47 +24,14 @@ def Pending.record : Pending → Record
   | .untried r => r
   | .tried a => a.record
 
-structure Conversion where
-  version : Nat
-  /-- An absent callback marks the record lost. Present callbacks model
-  successful, validated results; a failing migration never commits its reload. -/
-  convert : Option (List Nat → List Nat)
+/-- The kept store version gates app writes. The migration marker has no
+row changes: its effects travel only in the raise snapshot (§17.1). It must
+publish before that snapshot, whose positions include the marker itself. -/
+def Uploadable (keptVersion : Nat) (r : Record) : Prop :=
+  r.version ≤ keptVersion ∨ (r.disposition = .migration ∧ r.body = [])
 
-/-- No conversion is permitted after the first attempt, including one whose
-reply failed. Coverage is deliberately not a settlement argument. -/
-def convertPending (c : Conversion) (inputsExcluded : Bool) : Pending → Pending
-  | .tried a => .tried a
-  | .untried r =>
-    if r.version < c.version then
-      let converted := if inputsExcluded then none else
-        match r.disposition with
-        | .lost _ => none
-        | _ => c.convert.map (fun f => f r.body)
-      .untried (match converted with
-        | some body => { r with version := c.version, body := body }
-        | none => { r with disposition := .lost c.version })
-    else .untried r
-
-theorem conversion_preserves_identity (c : Conversion) (bad : Bool) (p : Pending) :
-    (convertPending c bad p).record.identity = p.record.identity := by
-  cases p with
-  | tried a => rfl
-  | untried r =>
-    by_cases hv : r.version < c.version
-    · simp only [convertPending, ite_eq_left hv]
-      generalize he : (if bad then none else
-        match r.disposition with | .lost _ => none | _ => c.convert.map (fun f => f r.body)) = result
-      cases result <;> rfl
-    · simp [convertPending, hv, Pending.record]
-
-theorem attempted_never_converted (c : Conversion) (bad : Bool) (a : Attempt) :
-    convertPending c bad (.tried a) = .tried a := rfl
-
-theorem excluded_input_not_converted (c : Conversion) (r : Record)
-    (h : r.version < c.version) :
-    convertPending c true (.untried r) =
-      .untried { r with disposition := .lost c.version } := by
-  simp [convertPending, h]
+instance (keptVersion : Nat) (r : Record) : Decidable (Uploadable keptVersion r) :=
+  inferInstanceAs (Decidable (_ ∨ _))
 
 structure Queue where
   device : Nat
@@ -82,9 +49,6 @@ def Queue.prepare (q : Queue) (format : Nat) (keys : List Nat) : Queue :=
   match q.waiting with
   | .untried r :: rest => { q with waiting := .tried ⟨r, format, keys⟩ :: rest }
   | _ => q
-
-def Queue.convert (q : Queue) (c : Conversion) (bad : Record → Bool) : Queue :=
-  { q with waiting := q.waiting.map fun p => convertPending c (bad p.record) p }
 
 def Queue.head (q : Queue) : Option Attempt :=
   match q.waiting with
@@ -132,19 +96,6 @@ theorem prepare_valid (q : Queue) (h : q.Valid) (f : Nat) (ks : List Nat) :
       | untried r =>
         cases h with
         | cons hi ht => exact .cons hi ht
-
-theorem numbered_convert (c : Conversion) (bad : Record → Bool)
-    {d n : Nat} {ps : List Pending} (h : Numbered d n ps) :
-    Numbered d n (ps.map fun p => convertPending c (bad p.record) p) := by
-  induction h with
-  | nil => exact .nil _
-  | cons hi ht ih =>
-    apply Numbered.cons
-    · rw [conversion_preserves_identity]; exact hi
-    · exact ih
-
-theorem convert_valid (q : Queue) (h : q.Valid) (c : Conversion) (bad : Record → Bool) :
-    (q.convert c bad).Valid := numbered_convert c bad h
 
 theorem finish_valid (q : Queue) (h : q.Valid) : (q.finish).Valid := by
   cases q with | mk d n ps =>
@@ -247,17 +198,14 @@ theorem occupied_never_replaced (encode : Seal) (s : World) (a : Attempt) (bytes
     (h : s.stored a.record.identity.id.number = some bytes) :
     (s.land encode a).stored = s.stored := by simp [World.land, h]
 
-theorem retries_identical (encode : Seal) (c : Conversion) (bad : Bool) (a : Attempt) :
-    (match convertPending c bad (.tried a) with
-      | .tried retried => encode retried
-      | .untried _ => []) = encode a := rfl
-
 /-- Local database transitions are transactions: a crash before one leaves
 its input state, and a crash after one keeps its whole result. An app write
 can be staged without committing. Reply receipt and its acknowledgement
 transaction are separate, so a crash between them requires a new read.
 Provider acceptance may occur before or after any crash, independently of
-reply receipt. A send requires a fresh supplied §10 identity check. -/
+reply receipt. The supplied store version is the version of a kept raise, not a local
+migration or an entry merely stored. A send requires a fresh supplied §10
+identity check and rechecks that version gate for its original attempt. -/
 inductive Step (encode : Seal) : World → World → Prop where
   | beginWrite (s r) : Step encode s (s.beginWrite r)
   | commit (s r) (audiences : List AudienceState) :
@@ -265,18 +213,19 @@ inductive Step (encode : Seal) : World → World → Prop where
       AudiencesReady audiences →
       Step encode s (s.commitWrite r)
   | prepare (s f) (requests : List KeyRequest) (keys : List Key)
-      (appVersion storeVersion : Nat) (r : Record) (rest : List Pending) :
+      (appVersion keptVersion : Nat) (r : Record) (rest : List Pending) :
       s.queue.waiting = .untried r :: rest →
-      storeVersion ≤ appVersion → r.version ≤ storeVersion →
+      keptVersion ≤ appVersion → Uploadable keptVersion r →
       chooseKeys requests = some keys →
       (∃ header parts, requests = header :: parts ∧
         header.audience = 0 ∧ header.currentMember = true) →
       Step encode s { s with queue := s.queue.prepare f (keys.map Key.id) }
-  | convert (s c bad) : Step encode s { s with queue := s.queue.convert c bad }
-  | send (s) (reserved : Counters) (e : Option Evidence) (appVersion storeVersion : Nat) :
+  | send (s) (reserved : Counters) (e : Option Evidence) (appVersion keptVersion : Nat) :
       reserved.writes = s.queue.reserved →
       checkIdentity s.queue.device reserved e = .ready →
-      storeVersion ≤ appVersion → Step encode s s.send
+      keptVersion ≤ appVersion →
+      (∀ a, s.queue.head = some a → Uploadable keptVersion a.record) →
+      Step encode s s.send
   | land (s a) : a ∈ s.sent → Step encode s (s.land encode a)
   | receive (s a) : s.queue.head = some a →
       s.stored a.record.identity.id.number = some (encode a) →
@@ -296,20 +245,18 @@ theorem step_queue_valid {encode : Seal} {s t : World}
   | beginWrite | receive | crash => exact hs
   | commit => exact commit_valid _ hs _
   | prepare => exact prepare_valid _ hs _ _
-  | convert c bad => exact convert_valid _ hs _ _
   | send => unfold World.send; split <;> exact hs
   | land a _ => simp only [World.land]; split <;> exact hs
   | acknowledge a _ _ _ => exact finish_valid _ hs
   | wait => exact hs
 
-theorem head_attempt_preserved (q : Queue) (c : Conversion) (bad : Record → Bool)
-    (a : Attempt) (h : q.head = some a) : (q.convert c bad).head = some a := by
-  cases q with | mk d n ps =>
-    cases ps with
-    | nil => simp [Queue.head] at h
-    | cons p rest =>
-      cases p with
-      | untried _ => simp [Queue.head] at h
-      | tried a' => simpa [Queue.head, Queue.convert, convertPending] using h
+theorem step_queue_device {encode : Seal} {s t : World} (h : Step encode s t) :
+    t.queue.device = s.queue.device := by
+  cases h with
+  | beginWrite | commit | receive | crash | wait => rfl
+  | prepare => unfold Queue.prepare; split <;> rfl
+  | acknowledge => unfold Queue.finish; split <;> rfl
+  | send => unfold World.send; split <;> rfl
+  | land => simp only [World.land]; split <;> rfl
 
 end CovenQueue
