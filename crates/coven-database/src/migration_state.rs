@@ -377,3 +377,7 @@ pub(crate) fn refresh(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "migration_state_tests.rs"]
+mod tests;

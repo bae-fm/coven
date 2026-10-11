@@ -23,3 +23,4 @@ import CovenMerge.ReceivePositions
 import CovenMerge.ReceiveMerge
 import CovenMerge.ReceiveExamples
 import CovenMerge.ResetCounterexample
+import CovenMerge.MigrationCounterexample

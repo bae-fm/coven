@@ -482,7 +482,8 @@ exposes the missing deletion-entry identity in B16. The reset differential
 calls the database snapshot reload and exposes a separate eligibility
 discrepancy there. The schema-boundary differential passes on its generated
 histories; version/conversion verdicts are supplied as described below.
-Migration row selection is separate from these reload comparisons.
+The migration differential exposes retirement caused solely by a non-final
+circle deletion; its comparison stops at row selection.
 The Boolean inputs and existing merge functions also remain available to
 the separate store-log/data package.
 
@@ -748,6 +749,51 @@ so the known reset discrepancy cannot stop this family first.
 ```sh
 COVEN_MERGE_LEAN="$PWD/spec/proofs/merge/.lake/build/bin/mergeRunner" \
   cargo test -p coven-database schema_differential_histories -- --ignored --nocapture
+```
+
+
+The migration mode calls `migrationRemoves`, which reruns all three removal
+passes through `independentInputs` and `entryView`. The Rust differential
+applies generated writes and the circle deletion to a real database, then
+opens it with a breaking index migration. This invokes `migration_run::run`
+and `migration_state::carry`; it does not reconstruct retirement in the test.
+References, CHECK results and unique claims come from `DatabaseRemovalView`
+and its SQL evaluators. The generator includes competing insertions, store
+and circle audiences, references, CHECK failures and unique rivals, sampled
+in causal orders and prefixes. Replay supplies the deleting entry and its
+finality; selecting or proving that finality remains outside this family.
+
+The comparison observes which rows the migration retires, by their changed
+generations. It does not equate Rust's erased generation records with the
+model's ordinary generation deletes or compare migration loss encoding.
+Those are different outputs from the row-selection function tested here.
+The reducer removes writes, optional values, references and the deletion,
+retaining valid causal histories and schema-required insert cells.
+
+Seed 0 reduces to one insert in a circle, its non-final deletion, and the
+breaking migration. Only the key, audience and null reference cell remain;
+there are no independent CHECK failures, references or competing claims.
+Rust retires the row; Lean leaves it out of the migration. The fixed
+`migration_differential_counterexample` checks those results and verifies
+agreement with the insert removed, the deletion removed, or the deletion
+made final. `MigrationCounterexample` checks the corresponding Lean results.
+
+Lean follows [§17.1](../coven.md#171-host-application): “A non-final circle
+deletion cannot decide that a migration loses a row” and “Judge independent
+causes with non-final deleted-circle causes absent; a child hidden solely
+through such a parent is left out too.” Rust selects every active rule loss,
+matching the hidden-row selection in “A breaking migration deletes rows
+already hidden by removal rules through the ordinary generation path,” but
+without that section's non-final exception. Its selection has no finality
+input and does not rerun the three passes. No sentence in the current spec
+permits dropping this exception.
+
+`scripts/check.sh` checks the fixed migration counterexample. The strict
+comparison stops at this first discrepancy and remains outside the script:
+
+```sh
+COVEN_MERGE_LEAN="$PWD/spec/proofs/merge/.lake/build/bin/mergeRunner" \
+  cargo test -p coven-database migration_differential_histories -- --ignored --nocapture
 ```
 
 ### B17 Receive order, progress, and the retirement gap

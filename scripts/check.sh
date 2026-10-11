@@ -123,6 +123,9 @@ proofs() {
     step "Rust / Lean schema-boundary differential"
     COVEN_MERGE_LEAN="$runner" cargo test -p coven-database --all-features schema_differential_histories -- --ignored
 
+    step "Rust / Lean migration-selection counterexample"
+    COVEN_MERGE_LEAN="$runner" cargo test -p coven-database --all-features migration_differential_counterexample -- --ignored
+
     step "Rust / Lean differential store-log test"
     runner="$(cd spec/proofs/storelog && pwd)/.lake/build/bin/storelogRunner"
     if [ -f "$runner.exe" ]; then

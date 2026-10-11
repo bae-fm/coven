@@ -159,3 +159,9 @@ open CovenMerge
 #print axioms ResetCounterexample.read_reset_applies
 #print axioms ResetCounterexample.no_write_no_gap
 #print axioms ResetCounterexample.no_reset_applies
+
+-- migration selection without non-final circle deletions
+#print axioms MigrationCounterexample.nonfinal_retained
+#print axioms MigrationCounterexample.no_row_no_selection
+#print axioms MigrationCounterexample.no_deletion_no_selection
+#print axioms MigrationCounterexample.final_selected

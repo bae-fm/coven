@@ -402,7 +402,7 @@ pub(crate) fn write_id(id: WriteId) -> u64 {
     assert_eq!(id.number, 1, "fixture uses one write per device");
     id.device.0
 }
-fn stamp(ts: Timestamp) -> u128 {
+pub(crate) fn stamp(ts: Timestamp) -> u128 {
     ((ts.milliseconds() as u128) << 80) | ((ts.counter() as u128) << 64) | ts.device().0 as u128
 }
 fn state_json(id: usize, state: &RowState<Scalar>) -> Value {

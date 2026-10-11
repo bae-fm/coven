@@ -179,7 +179,38 @@ private def runSchema (j : Json) (M : Writes Nat Nat Nat)
   pure (Json.mkObj [("rows", mergedJson result.current.merged writes rows cols),
     ("frozen", toJson ((result.snapshotFrozen ++ excluded).map (fun loss => frozenJson loss cols)))])
 
+private def readEntries (j : Json) (I : Inputs Nat Nat) : Except String (EntryInputs Nat Nat) := do
+  let entries ← j.getObjValAs? (Array (Nat × Nat)) "entries"
+  for (r, _) in entries do
+    if !I.rows.contains r then throw "entry names an unknown row"
+  pure { I with inDeletedCircle := fun r => (entries.find? (·.1 == r)).map (·.2) }
+
+private def readInputs (j : Json) : Except String (Array InputRow × Inputs Nat Nat) := do
+  let rows ← (← j.getObjValAs? (Array Json) "rows").mapM readRow
+  let I : Inputs Nat Nat := {
+    rows := rows.toList.map (·.id)
+    present := fun r => (rows.find? (·.id == r)).any (·.present)
+    refs := fun r => match rows.find? (·.id == r) with
+      | some x => x.refs
+      | none => []
+    checkFails := fun r => (rows.find? (·.id == r)).any (·.checkFails)
+    inDeletedCircle := fun r => (rows.find? (·.id == r)).any (·.deleted)
+    claims := fun r => match rows.find? (·.id == r) with
+      | some x => x.claims
+      | none => []
+    rank := fun r => match rows.find? (·.id == r) with
+      | some x => x.rank
+      | none => 0 }
+  pure (rows, I)
+
 private def run (j : Json) : Except String Json := do
+  let mode ← j.getObjValAs? String "mode"
+  if mode == "migration" then
+    let (rows, I) ← readInputs j
+    let named ← readEntries j I
+    let final ← j.getObjValAs? (Array Nat) "final"
+    let selected := migrationRemoves named final.contains
+    return toJson (rows.map fun r => Json.mkObj [("id", toJson r.id), ("selected", toJson (selected r.id))])
   let writes ← (← j.getObjValAs? (Array Json) "writes").mapM readWrite
   let order ← j.getObjValAs? (Array Nat) "order"
   for w in order do
@@ -195,35 +226,14 @@ private def run (j : Json) : Except String Json := do
       let x ← writes.find? (·.id == w)
       let c ← x.changes.find? (·.row == r)
       some c.change }
-  let mode ← j.getObjValAs? String "mode"
   if mode == "reset" then return ← runReset j M writes order
   if mode == "schema" then return ← runSchema j M writes order
-  let rows ← (← j.getObjValAs? (Array Json) "rows").mapM readRow
+  let (rows, I) ← readInputs j
   let cols ← natField j "columns"
   let st := order.toList.foldl (step M) (St.init : St Nat Nat Nat)
-  let I : Inputs Nat Nat := {
-    rows := rows.toList.map (·.id)
-    present := fun r => (rows.find? (·.id == r)).any (·.present)
-    refs := fun r => match rows.find? (·.id == r) with
-      | some x => x.refs
-      | none => []
-    checkFails := fun r => (rows.find? (·.id == r)).any (·.checkFails)
-    inDeletedCircle := fun r => (rows.find? (·.id == r)).any (·.deleted)
-    claims := fun r => match rows.find? (·.id == r) with
-      | some x => x.claims
-      | none => []
-    rank := fun r => match rows.find? (·.id == r) with
-      | some x => x.rank
-      | none => 0 }
   let v ← match mode with
     | "boolean" => pure (view I)
-    | "entries" => do
-      let entries ← j.getObjValAs? (Array (Nat × Nat)) "entries"
-      for (r, _) in entries do
-        if !(rows.any (·.id == r)) then throw "entry names an unknown row"
-      let named : EntryInputs Nat Nat :=
-        { I with inDeletedCircle := fun r => (entries.find? (·.1 == r)).map (·.2) }
-      pure (entryView named)
+    | "entries" => do pure (entryView (← readEntries j I))
     | _ => throw "unknown merge runner mode"
   let output := rows.map fun r =>
     Json.mkObj (mergedFields st writes r.id cols ++ [
