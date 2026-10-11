@@ -81,6 +81,11 @@ instance (current : Current) (w : Write) : Decidable (Covered current w) := by
 def catalogCurrent (order : SnapshotOrder) (snapshots : List Snapshot) : Current :=
   fun audience => newest order (snapshots.filter (fun s => s.audience == audience && s.counts))
 
+/-- A fresh, complete catalog is observed after the missing GET. Coverage
+through the missing number suffices; it need not extend beyond that number. -/
+def coveredMiss (snapshots : List Snapshot) (writer position : Nat) : Bool :=
+  snapshots.any fun s => s.counts && decide (position < s.position writer)
+
 /-- This is checked at preparation, never atomically at remote publication. -/
 def CanSnapshot (current : Current) (snap : Snapshot) : Prop :=
   ∀ old, current snap.audience = some old → Dominates snap old
@@ -273,9 +278,16 @@ def act (order : SnapshotOrder) (s : State) : Action → Option State
       let c ← s.catching.find? (fun c => c.snapshot.writer == writer)
       if !s.writers.contains logWriter then none else
       let position := c.snapshot.position logWriter
-      let next := match live s logWriter (position + 1) with
-        | none => { c with missed := logWriter :: c.missed, lastRead := s.time }
-        | some _ => { c with
+      let next ← match live s logWriter (position + 1) with
+        | none =>
+            if coveredMiss s.landed logWriter position then do
+              let loaded ← current order s c.snapshot.audience
+              -- A reload invalidates every earlier terminal miss.
+              pure { c with
+                snapshot := { c.snapshot with positions := loaded.positions }
+                missed := [], lastRead := s.time }
+            else pure { c with missed := logWriter :: c.missed, lastRead := s.time }
+        | some _ => pure { c with
             snapshot := { c.snapshot with positions :=
               (logWriter, position + 1) :: c.snapshot.positions.filter (fun p => p.1 != logWriter) }
             missed := c.missed.filter (· != logWriter), lastRead := s.time }

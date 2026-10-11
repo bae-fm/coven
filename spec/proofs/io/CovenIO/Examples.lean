@@ -254,6 +254,17 @@ def busyEvents (n : Nat) : List (Nat × Action) :=
    (n + 1, .read 0 0), (n + 1, .read 0 0),
    (n + 1, .prepare 0), (n + 1, .land 0 0 (n + 2))]
 
+theorem busy_no_covered_miss (n position : Nat) (beyond : n + 1 ≤ position) :
+    coveredMiss (busySnapshots n) 0 position = false := by
+  induction n with
+  | zero => simp [coveredMiss, busySnapshots, ana, Snapshot.position]; omega
+  | succ n ih =>
+      simp only [coveredMiss, busySnapshots, List.any_cons]
+      have tail := ih (by omega)
+      change (_ || coveredMiss (busySnapshots n) 0 position) = false
+      rw [tail]
+      simp [busySnapshot, Snapshot.counts, Snapshot.position, show ¬ position < n + 1 + 1 by omega]
+
 theorem busy_step (n : Nat) :
     execute .writes (busyState n) (busyEvents n) = some (busyState (n + 1)) := by
   have filterWrites : (busyWrites n).filter (fun w => w.writer == 0) = busyWrites n :=
@@ -271,6 +282,7 @@ theorem busy_step (n : Nat) :
   have absent := (busy_write_facts n).2.2 (n + 3) (by omega)
   simp [busyEvents, busyState, execute, step, act, live, current, catalogCurrent,
     filterWrites, (busy_write_facts n).1, catalog.1, catalog.2, samePath, unusedReverse,
+    busy_no_covered_miss n (n + 2) (by omega),
     Snapshot.position, busySnapshot, canPrepare, dominates, absent, busyWrites, busySnapshots, Nat.add_assoc]
 
 theorem busy_run (n : Nat) : Run .writes [0] (busyState n) := by
