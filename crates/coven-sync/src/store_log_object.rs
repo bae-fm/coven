@@ -5,7 +5,7 @@ use coven_crypto::{MemberKeys, ObjectHasher, StoreKey, StoreKeyring};
 use coven_database::{DbError, StoreLog, StoreLogKeyUpload, StoreLogUpload};
 use coven_format::{
     sealed_key::SealedKey,
-    sealed_single::{SingleChunkObject, SingleChunkPrefix, StoreOrigin},
+    sealed_single::{SingleChunkObject, SingleChunkPrefix},
     store_log::{StoreChange, StoreLogEntry},
     value::EntryId,
     Object,
@@ -13,17 +13,6 @@ use coven_format::{
 use coven_foundation::id_source::StoreId;
 use coven_storage::{ObjectPath, Storage};
 use std::sync::Arc;
-
-pub(crate) fn origin(entry: &StoreLogEntry) -> Option<StoreOrigin> {
-    match &entry.change {
-        StoreChange::CreateStore { store, .. } => Some(StoreOrigin {
-            store: *store,
-            timestamp: entry.timestamp,
-            author: entry.author.clone(),
-        }),
-        _ => None,
-    }
-}
 
 /// Reproduce an entry using the key fixed with its plaintext queue record.
 pub(crate) fn seal_upload(
@@ -96,10 +85,7 @@ pub(crate) fn seal(
 ) -> Result<Vec<u8>, SyncError> {
     let coven_format::FormatVersion::V1 = format;
     let path = path(entry.position);
-    let prefix = SingleChunkPrefix::StoreLog {
-        key: key.id(),
-        origin: origin(entry),
-    };
+    let prefix = SingleChunkPrefix::StoreLog { key: key.id() };
     let plain = Object::StoreLog(entry.clone()).encode_in(format)?;
     let chunk =
         key.derive()
@@ -118,38 +104,22 @@ pub(crate) fn path(id: EntryId) -> ObjectPath {
     )
 }
 
-pub(crate) fn check_origin(
-    object: &SingleChunkObject<'_>,
-    path: &ObjectPath,
-) -> Result<(), Refusal> {
-    let SingleChunkObject::StoreLog {
-        origin, signature, ..
-    } = object
-    else {
-        return Err(invalid("expected a store-log envelope"));
-    };
-    if let Some(origin) = origin {
-        let (device, number) = path.store_log_position().expect("listed store-log path");
-        if number.get() != 1 || origin.timestamp.device() != device {
-            return Err(Refusal::WrongIdentity { cause: None });
-        }
-        let mut hash = ObjectHasher::new();
-        hash.update(&object.signed_bytes().map_err(Refusal::from)?);
-        origin
-            .author
-            .verify_object(path.as_str(), &hash.finish(), signature)
-            .map_err(|error| Refusal::Signature {
-                cause: Some(Arc::new(error)),
-            })?;
-    }
-    Ok(())
-}
-
 pub(crate) fn open(
     object: &SingleChunkObject<'_>,
     path: &ObjectPath,
     key: &StoreKey,
 ) -> Result<StoreLogEntry, Refusal> {
+    let SingleChunkObject::StoreLog {
+        key: declared,
+        signature,
+        ..
+    } = object
+    else {
+        return Err(invalid("expected a store-log envelope"));
+    };
+    if *declared != key.id() {
+        return Err(Refusal::WrongIdentity { cause: None });
+    }
     let prefix = object.prefix().encode().map_err(Refusal::from)?;
     let plain = key
         .derive()
@@ -160,14 +130,6 @@ pub(crate) fn open(
     let Object::StoreLog(entry) = Object::decode(&plain).map_err(Refusal::from)? else {
         return Err(invalid("expected a store-log frame"));
     };
-    let SingleChunkObject::StoreLog {
-        origin: declared,
-        signature,
-        ..
-    } = object
-    else {
-        return Err(invalid("expected a store-log envelope"));
-    };
     let mut hash = ObjectHasher::new();
     hash.update(&object.signed_bytes().map_err(Refusal::from)?);
     entry
@@ -177,9 +139,6 @@ pub(crate) fn open(
             cause: Some(Arc::new(error)),
         })?;
     if *path != self::path(entry.position) {
-        return Err(Refusal::WrongIdentity { cause: None });
-    }
-    if *declared != origin(&entry) {
         return Err(Refusal::WrongIdentity { cause: None });
     }
     Ok(entry)

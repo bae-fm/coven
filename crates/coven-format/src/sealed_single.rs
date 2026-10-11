@@ -3,21 +3,8 @@
 use crate::error::{bound, require, Error, Rule};
 use crate::sealed;
 use crate::wire::{Decoder, Encoder, Wire, MAX_OBJECT};
-use coven_crypto::{MemberId, Signature, SEALED_OBJECT_CHUNK_OVERHEAD};
-use coven_foundation::id_source::{KeyId, StoreId};
-use coven_merge::Timestamp;
-
-/// Signed creation identity visible to another store racing for this location.
-/// The opener also requires an exact match with the encrypted create-store entry.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StoreOrigin {
-    /// The store whose creation this object records.
-    pub store: StoreId,
-    /// The creation entry's timestamp, including its device id.
-    pub timestamp: Timestamp,
-    /// The creator's signing key, used before either store shares any keys.
-    pub author: MemberId,
-}
+use coven_crypto::{Signature, SEALED_OBJECT_CHUNK_OVERHEAD};
+use coven_foundation::id_source::KeyId;
 
 /// Cleartext routing fields available before sealing the frame or signing it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,8 +13,6 @@ pub enum SingleChunkPrefix {
     StoreLog {
         /// The key sealing the entry.
         key: KeyId,
-        /// Present exactly for a create-store entry.
-        origin: Option<StoreOrigin>,
     },
     /// Kind 35 and the store key sealing its positions.
     PostedPositions(KeyId),
@@ -52,16 +37,7 @@ impl SingleChunkPrefix {
         kind.put(&mut out)?;
         format.number().put(&mut out)?;
         match self {
-            Self::StoreLog { key, origin } => {
-                key.put(&mut out)?;
-                u8::from(origin.is_some()).put(&mut out)?;
-                if let Some(origin) = origin {
-                    origin.store.put(&mut out)?;
-                    origin.timestamp.put(&mut out)?;
-                    origin.author.put(&mut out)?;
-                }
-            }
-            Self::PostedPositions(key) => key.put(&mut out)?,
+            Self::StoreLog { key } | Self::PostedPositions(key) => key.put(&mut out)?,
             Self::JoinRequest => (),
         }
         Ok(out.bytes)
@@ -93,8 +69,6 @@ pub enum SingleChunkObject<'a> {
     StoreLog {
         /// The store key sealing this entry.
         key: KeyId,
-        /// Signed creation identity, absent on all other entries.
-        origin: Option<StoreOrigin>,
         /// Stored nonce, ciphertext and tag, without the length field.
         chunk: &'a [u8],
         /// Signature over the prefix and entire encoded chunk.
@@ -124,17 +98,7 @@ impl<'a> SingleChunkObject<'a> {
         let kind = *bytes.first().ok_or(Error::Truncated)?;
         sealed::prefix(bytes, kind)?;
         let prefix_length = match kind {
-            33 => match bytes.get(19).ok_or(Error::Truncated)? {
-                0 => 20,
-                1 => 84,
-                tag => {
-                    return Err(Error::UnknownTag {
-                        field: "store origin",
-                        tag: *tag,
-                    })
-                }
-            },
-            35 => 19,
+            33 | 35 => 19,
             36 => 3,
             tag => {
                 return Err(Error::UnknownTag {
@@ -160,20 +124,10 @@ impl<'a> SingleChunkObject<'a> {
         }
         let mut input = Decoder::new(&bytes[3..prefix_length])?;
         let key = KeyId::get(&mut input)?;
-        let origin = if kind == 33 && u8::get(&mut input)? == 1 {
-            Some(StoreOrigin {
-                store: StoreId::get(&mut input)?,
-                timestamp: Timestamp::get(&mut input)?,
-                author: MemberId::get(&mut input)?,
-            })
-        } else {
-            None
-        };
         input.finish()?;
         Ok(if kind == 33 {
             Self::StoreLog {
                 key,
-                origin,
                 chunk,
                 signature,
             }
@@ -189,10 +143,7 @@ impl<'a> SingleChunkObject<'a> {
     /// The routing fields, whose encoding is bound into the chunk's authentication.
     pub fn prefix(&self) -> SingleChunkPrefix {
         match self {
-            Self::StoreLog { key, origin, .. } => SingleChunkPrefix::StoreLog {
-                key: *key,
-                origin: origin.clone(),
-            },
+            Self::StoreLog { key, .. } => SingleChunkPrefix::StoreLog { key: *key },
             Self::PostedPositions { key, .. } => SingleChunkPrefix::PostedPositions(*key),
             Self::JoinRequest { .. } => SingleChunkPrefix::JoinRequest,
         }

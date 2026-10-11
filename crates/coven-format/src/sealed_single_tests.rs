@@ -8,19 +8,7 @@ fn each_single_frame_envelope_authenticates_its_routing_and_signature() {
     for object in test_utils::objects() {
         let (prefix, path) = match &object {
             Object::StoreLog(entry) => (
-                SingleChunkPrefix::StoreLog {
-                    key: key.id(),
-                    origin: match &entry.change {
-                        crate::store_log::StoreChange::CreateStore { store, .. } => {
-                            Some(StoreOrigin {
-                                store: *store,
-                                timestamp: entry.timestamp,
-                                author: entry.author.clone(),
-                            })
-                        }
-                        _ => None,
-                    },
-                },
+                SingleChunkPrefix::StoreLog { key: key.id() },
                 crate::path::ObjectPath::store_log(
                     entry.position.device,
                     entry.position.number.try_into().unwrap(),
@@ -38,6 +26,11 @@ fn each_single_frame_envelope_authenticates_its_routing_and_signature() {
         let path = path.as_str();
         let plain = object.encode().unwrap();
         let aad = prefix.encode().unwrap();
+        if matches!(prefix, SingleChunkPrefix::StoreLog { .. }) {
+            assert_eq!(aad.len(), 19, "every store-log entry has the D9 prefix");
+            assert_eq!(&aad[..3], &[33, 0, 1]);
+            assert_eq!(&aad[3..], key.id().0.as_bytes());
+        }
         let seal = |plain: &[u8]| match &prefix {
             SingleChunkPrefix::JoinRequest => test_utils::invite()
                 .secret
@@ -59,9 +52,8 @@ fn each_single_frame_envelope_authenticates_its_routing_and_signature() {
         let digest = hash.finish();
         let signature = test_utils::member_keys().sign_object(path, &digest);
         let object = match &prefix {
-            SingleChunkPrefix::StoreLog { key, origin } => SingleChunkObject::StoreLog {
+            SingleChunkPrefix::StoreLog { key } => SingleChunkObject::StoreLog {
                 key: *key,
-                origin: origin.clone(),
                 chunk: &chunk,
                 signature,
             },

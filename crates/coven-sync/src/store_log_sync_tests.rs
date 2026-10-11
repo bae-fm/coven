@@ -487,18 +487,10 @@ async fn removal_then_rotations_share_keys_only_with_remaining_members() {
 }
 
 #[tokio::test]
-async fn own_device_removal_and_setup_race_stop_sync() {
+async fn own_device_removal_stops_sync() {
     let storage = storage();
     let mut a = device(storage.clone(), 1, member(1), store(1)).await;
-    let mut b = device(storage.clone(), 2, member(2), store(2)).await;
     a.create(key(1)).await;
-    b.clock.set(UNIX_EPOCH + Duration::from_secs(2));
-    b.create(key(2)).await;
-    assert!(matches!(
-        b.sync.sync_store_log().await,
-        Err(SyncFailure::LocationTaken)
-    ));
-    a.sync().await;
     let own = a.device().await;
     assert!(matches!(
         a.sync

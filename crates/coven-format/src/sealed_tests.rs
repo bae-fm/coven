@@ -276,6 +276,8 @@ fn single_chunk_fixtures_open_with_their_own_keys_and_authors() {
         let author = match frame {
             Object::StoreLog(entry) => {
                 assert_eq!(kind, 33);
+                assert_eq!(prefix.len(), 19);
+                assert_eq!(entry, test_utils::store_log());
                 entry.author
             }
             Object::JoinRequest(request) => {

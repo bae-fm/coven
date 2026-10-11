@@ -2,11 +2,11 @@
 
 use super::{keys, object, StoreLogSync};
 use crate::{StorageCommit, SyncError};
-use coven_crypto::StoreKeyring;
+use coven_crypto::{MemberKeys, StoreKey, StoreKeyring};
 use coven_format::{
     sealed_key::SealedKey,
     sealed_single::SingleChunkObject,
-    store_log::{MemberPublicKeys, StoreChange},
+    store_log::{MemberPublicKeys, StoreChange, StoreLogEntry},
 };
 use coven_storage::{ObjectPath, ObjectPrefix, Storage, StorageSetupError};
 use std::sync::Arc;
@@ -65,26 +65,23 @@ impl StoreLogSync {
             }
             Err(error) => return Err(error.into()),
         };
-        let mut origins = Vec::new();
+        let mut creation = None;
         for stored in &objects {
-            if stored
-                .path
-                .store_log_position()
-                .is_some_and(|(_, n)| n.get() == 1)
-            {
-                let bytes = storage.read(&stored.path).await?;
-                let envelope = SingleChunkObject::decode(&bytes).map_err(|_| occupied())?;
-                object::check_origin(&envelope, &stored.path).map_err(|_| occupied())?;
-                if let SingleChunkObject::StoreLog {
-                    origin: Some(origin),
-                    key,
-                    ..
-                } = envelope
-                {
-                    if origin.store != local.store {
+            if stored.path.is_first_store_entry() {
+                let (entry, key) =
+                    read_setup_entry(storage.as_ref(), &stored.path, &member).await?;
+                if let StoreChange::CreateStore { store, .. } = entry.change {
+                    if store != local.store {
                         return Err(occupied());
                     }
-                    origins.push((stored.path.clone(), bytes, key));
+                    if creation.replace((entry, key)).is_some() {
+                        return Err(occupied());
+                    }
+                } else {
+                    tracing::debug!(
+                        path = stored.path.as_str(),
+                        "setup entry is not store creation"
+                    );
                 }
             }
         }
@@ -95,23 +92,18 @@ impl StoreLogSync {
                 .is_some_and(|source| source.config() != storage.config());
         if relocating {
             self.copy_storage(&storage, &local.log, &objects).await?;
-            if origins.is_empty() {
-                let origin = local
+            if creation.is_none() {
+                let recorded = local
                     .log
                     .entries
                     .iter()
                     .find(|entry| matches!(entry.entry.change, StoreChange::CreateStore { .. }))
                     .ok_or(coven_database::DbError::DamagedDatabase)?;
-                let path = object::path(origin.entry.position);
-                let bytes = storage.read(&path).await?;
-                let SingleChunkObject::StoreLog { key, .. } = SingleChunkObject::decode(&bytes)?
-                else {
-                    return Err(occupied());
-                };
-                origins.push((path, bytes, key));
+                let path = object::path(recorded.entry.position);
+                creation = Some(read_setup_entry(storage.as_ref(), &path, &member).await?);
             }
         }
-        if !objects.is_empty() && origins.is_empty() {
+        if !objects.is_empty() && creation.is_none() {
             // A retry may find only this attempt's prerequisite sealed key.
             let own_attempt = local.upload.as_ref().is_some_and(|upload| {
                 matches!(upload.entry.change, StoreChange::CreateStore { .. })
@@ -127,7 +119,7 @@ impl StoreLogSync {
                 return Err(occupied());
             }
         }
-        if origins.is_empty() {
+        if creation.is_none() {
             if local.log.replay.state.store.is_some() {
                 return Err(SyncError::NoStorage);
             }
@@ -179,48 +171,28 @@ impl StoreLogSync {
             object::upload(Some(storage.as_ref()), upload, &bytes).await?;
             // Read what storage actually retained, including a lost-reply retry.
             let path = object::path(upload.entry.position);
-            let bytes = storage.read(&path).await?;
-            let SingleChunkObject::StoreLog { key, .. } = SingleChunkObject::decode(&bytes)? else {
-                return Err(occupied());
-            };
-            origins.push((path, bytes, key));
+            creation = Some(read_setup_entry(storage.as_ref(), &path, &member).await?);
         }
-        let mut ring = previous.clone();
-        let mut creation = None;
-        for (path, bytes, key) in origins {
-            let key_path = ObjectPath::store_key(key, &member.member_id());
-            let opened = SealedKey::decode(&storage.read(&key_path).await?)?
-                .open_store_key(&member, key_path.as_str())?;
-            if opened.id() != key {
-                return Err(occupied());
-            }
-            match &mut ring {
-                Some(ring) => ring.insert_store_key(opened)?,
-                None => ring = Some(StoreKeyring::new(opened)),
-            }
-            let envelope = SingleChunkObject::decode(&bytes)?;
-            let entry = object::open(
-                &envelope,
-                &path,
-                ring.as_ref().expect("opened store key").store_key(key)?,
-            )
-            .map_err(|failure| crate::DamagedObject {
-                path: path.into(),
-                failure,
-            })?;
-            if !matches!(entry.change, StoreChange::CreateStore { store, .. } if store == local.store)
-            {
-                return Err(occupied());
-            }
-            if local.log.replay.state.store.is_none()
-                && !matches!(&entry.change, StoreChange::CreateStore { access: recorded, device_name: name, .. } if recorded == &access && name == &device_name)
-            {
-                return Err(coven_storage::StorageFailure::InvalidConfiguration
-                    .with_source("setup retry must retain its original device name and access")
-                    .into());
-            }
-            creation = Some(entry);
+        let (entry, key) = creation.expect("read or published creation");
+        if !matches!(entry.change, StoreChange::CreateStore { store, .. } if store == local.store) {
+            return Err(occupied());
         }
+        if local.log.replay.state.store.is_none()
+            && !matches!(&entry.change, StoreChange::CreateStore { access: recorded, device_name: name, .. } if recorded == &access && name == &device_name)
+        {
+            return Err(coven_storage::StorageFailure::InvalidConfiguration
+                .with_source("setup retry must retain its original device name and access")
+                .into());
+        }
+        let mut ring = match &previous {
+            Some(ring) => {
+                let mut ring = ring.clone();
+                ring.insert_store_key(key)?;
+                ring
+            }
+            None => StoreKeyring::new(key),
+        };
+        let mut creation = Some(entry);
         if let Some(store) = &local.log.replay.state.store {
             let key_path = ObjectPath::store_key(store.key, &member.member_id());
             let opened = SealedKey::decode(&storage.read(&key_path).await?)?
@@ -228,9 +200,7 @@ impl StoreLogSync {
             if opened.id() != store.key {
                 return Err(occupied());
             }
-            ring.as_mut()
-                .expect("checked origin")
-                .insert_store_key(opened)?;
+            ring.insert_store_key(opened)?;
             let current = local
                 .log
                 .replay
@@ -257,7 +227,7 @@ impl StoreLogSync {
                         let keys = ring.clone();
                         self.database
                             .prepare_store_log(member.member_id(), change, move |log, entry| {
-                                keys::seal(log, entry, keys.as_ref(), &author)
+                                keys::seal(log, entry, Some(&keys), &author)
                             })
                             .await?;
                         local = self.database.local_store_log().await?;
@@ -265,7 +235,7 @@ impl StoreLogSync {
                 }
                 let upload = local.upload.as_ref().expect("reserved access entry");
                 let path = object::path(upload.entry.position);
-                let bytes = object::seal_upload(upload, ring.as_ref(), &member)?;
+                let bytes = object::seal_upload(upload, Some(&ring), &member)?;
                 storage.create_once(&path, &bytes).await?;
                 if storage.read(&path).await? != bytes {
                     return Err(occupied());
@@ -275,8 +245,7 @@ impl StoreLogSync {
         }
         let rollback = commit()?;
         let result = async {
-            self.store_keys
-                .persist(ring.as_ref().expect("checked origin and key"))?;
+            self.store_keys.persist(&ring)?;
             if let Some(creation) = creation {
                 let (entry, replay) = crate::replay_entry(&local.log, creation);
                 self.database.apply_store_log(entry, replay).await?;
@@ -295,6 +264,26 @@ impl StoreLogSync {
         self.storage = Some(storage);
         Ok(())
     }
+}
+
+async fn read_setup_entry(
+    storage: &dyn Storage,
+    path: &ObjectPath,
+    member: &MemberKeys,
+) -> Result<(StoreLogEntry, StoreKey), SyncError> {
+    let bytes = storage.read(path).await?;
+    let envelope = SingleChunkObject::decode(&bytes)?;
+    let SingleChunkObject::StoreLog { key, .. } = &envelope else {
+        return Err(occupied());
+    };
+    let key_path = ObjectPath::store_key(*key, &member.member_id());
+    let key = SealedKey::decode(&storage.read(&key_path).await?)?
+        .open_store_key(member, key_path.as_str())?;
+    let entry = object::open(&envelope, path, &key).map_err(|failure| crate::DamagedObject {
+        path: path.as_str().into(),
+        failure,
+    })?;
+    Ok((entry, key))
 }
 
 fn occupied() -> SyncError {

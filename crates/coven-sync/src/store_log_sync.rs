@@ -200,57 +200,6 @@ impl StoreLogSync {
         });
         let mut pending_devices = BTreeSet::new();
         let mut cache = BTreeMap::new();
-        let mut origins = Vec::new();
-        for (id, stored) in entries
-            .iter()
-            .filter(|(id, _)| id.number == 1 && !local.log.replay.entries.contains_key(id))
-        {
-            let path = &stored.path;
-            if pending_devices.contains(&id.device) {
-                continue;
-            }
-            let Some(bytes) = self.read_entry(stored).await? else {
-                continue;
-            };
-            match SingleChunkObject::decode(&bytes) {
-                Ok(object) => match object::check_origin(&object, path) {
-                    Ok(()) => {
-                        if let SingleChunkObject::StoreLog {
-                            origin: Some(origin),
-                            ..
-                        } = object
-                        {
-                            origins.push(origin);
-                        }
-                    }
-                    Err(failure) => {
-                        self.stuck_entry(*id, path, failure).await?;
-                        pending_devices.insert(id.device);
-                    }
-                },
-                Err(error) => {
-                    self.stuck_entry(*id, path, Refusal::from(error)).await?;
-                    pending_devices.insert(id.device);
-                }
-            }
-            cache.insert(*id, bytes);
-        }
-        let own = local
-            .log
-            .entries
-            .iter()
-            .find_map(|e| object::origin(&e.entry))
-            .or_else(|| origins.iter().find(|o| o.store == local.store).cloned());
-        if let Some(own) = own {
-            for origin in origins {
-                if origin.store != local.store {
-                    if origin.timestamp < own.timestamp {
-                        return Err(SyncFailure::LocationTaken.into());
-                    }
-                    pending_devices.insert(origin.timestamp.device());
-                }
-            }
-        }
         loop {
             let mut advanced = false;
             for (id, stored) in &entries {
@@ -282,21 +231,16 @@ impl StoreLogSync {
                         continue;
                     }
                 };
-                if let Err(failure) = object::check_origin(&envelope, path) {
-                    self.stuck_entry(*id, path, failure).await?;
+                let SingleChunkObject::StoreLog { key, .. } = &envelope else {
+                    self.stuck_entry(
+                        *id,
+                        path,
+                        crate::write_object::invalid("expected a store-log envelope"),
+                    )
+                    .await?;
                     pending_devices.insert(id.device);
                     continue;
-                }
-                let SingleChunkObject::StoreLog { key, origin, .. } = &envelope else {
-                    unreachable!("checked store-log envelope")
                 };
-                if origin
-                    .as_ref()
-                    .is_some_and(|origin| origin.store != local.store)
-                {
-                    pending_devices.insert(id.device);
-                    continue;
-                }
                 if !self
                     .acquire(&Audience::Store, *key, &member, &mut ring, &mut damages)
                     .await?

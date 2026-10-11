@@ -303,6 +303,191 @@ async fn queued_creation_rejects_a_copy_with_the_right_identity_and_wrong_materi
 }
 
 #[tokio::test]
+async fn creation_and_later_entries_use_the_same_authenticated_envelope() {
+    let storage = storage();
+    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
+    a.create(key(1)).await;
+    a.add(&member(2), MemberRole::Member).await;
+    let ring = a.custody.read().unwrap().unwrap();
+    let key = ring.store_key(key(1)).unwrap();
+    for applied in a.log().await.entries {
+        let entry = applied.entry;
+        let path = object::path(entry.position);
+        let bytes = storage.read(&path).await.unwrap();
+        let envelope = SingleChunkObject::decode(&bytes).unwrap();
+        assert_eq!(envelope.prefix().encode().unwrap().len(), 19);
+        assert_eq!(object::open(&envelope, &path, key).unwrap(), entry);
+        assert_eq!(
+            object::seal(&entry, coven_format::FormatVersion::CURRENT, key, &a.member).unwrap(),
+            bytes
+        );
+        let other_path = ObjectPath::store_log(DeviceId(99), 1.try_into().unwrap());
+        assert!(matches!(
+            object::open(&envelope, &other_path, key),
+            Err(Refusal::Decryption { .. })
+        ));
+        let wrong_key = StoreKey::generate(key.id()).unwrap();
+        assert!(matches!(
+            object::open(&envelope, &path, &wrong_key),
+            Err(Refusal::Decryption { .. })
+        ));
+        let forged = object::seal(
+            &entry,
+            coven_format::FormatVersion::CURRENT,
+            key,
+            &member(2),
+        )
+        .unwrap();
+        assert!(matches!(
+            object::open(&SingleChunkObject::decode(&forged).unwrap(), &path, key),
+            Err(Refusal::Signature { .. })
+        ));
+        let mut changed = bytes.clone();
+        changed[3] ^= 1;
+        assert!(object::open(&SingleChunkObject::decode(&changed).unwrap(), &path, key).is_err());
+        let last = changed.len() - 1;
+        changed = bytes;
+        changed[last] ^= 1;
+        assert!(matches!(
+            object::open(&SingleChunkObject::decode(&changed).unwrap(), &path, key),
+            Err(Refusal::Signature { .. })
+        ));
+    }
+}
+
+#[tokio::test]
+async fn creation_for_another_store_is_refused_after_decryption() {
+    let storage = storage();
+    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
+    let first = a.create(key(1)).await;
+    let mut b = device(storage, 2, member(1), store(2)).await;
+    b.sync().await;
+    assert!(b.log().await.entries.is_empty());
+    assert_eq!(
+        b.db.pending::<crate::PendingRecord>().await.unwrap(),
+        vec![crate::PendingRecord::log_refusal(
+            LogRefusal {
+                object: LogObject::Entry(first),
+                failure: RefusalCode::WrongIdentity,
+            },
+            b.device().await,
+        )]
+    );
+}
+
+#[tokio::test]
+async fn creation_identity_is_checked_in_the_authenticated_plaintext() {
+    use coven_format::Object;
+
+    let storage = storage();
+    let mut a = device(storage, 1, member(1), store(1)).await;
+    a.create(key(1)).await;
+    let entry = a.log().await.entries.remove(0).entry;
+    let ring = a.custody.read().unwrap().unwrap();
+    let key = ring.store_key(key(1)).unwrap();
+    let path = object::path(entry.position);
+    let bytes = object::seal(&entry, coven_format::FormatVersion::CURRENT, key, &a.member).unwrap();
+    let envelope = SingleChunkObject::decode(&bytes).unwrap();
+    let prefix = envelope.prefix();
+    for defect in ["number", "timestamp", "admin", "path"] {
+        let mut plain = Object::StoreLog(entry.clone()).encode().unwrap();
+        let mut stored_path = path.clone();
+        match defect {
+            "number" => plain[15..23].copy_from_slice(&2u64.to_be_bytes()),
+            "timestamp" => plain[31..39].copy_from_slice(&2u64.to_be_bytes()),
+            // The frame has its author's key once before its create-store payload.
+            "admin" => plain[39..71].copy_from_slice(&member(2).member_id().to_bytes()),
+            "path" => stored_path = ObjectPath::store_log(DeviceId(2), 1.try_into().unwrap()),
+            _ => unreachable!(),
+        }
+        let chunk = key
+            .derive()
+            .seal_object_chunk(
+                stored_path.as_str(),
+                &prefix.encode().unwrap(),
+                0,
+                0,
+                &plain,
+            )
+            .unwrap();
+        let mut bytes = prefix.encode_chunk(&chunk).unwrap();
+        let mut hash = coven_crypto::ObjectHasher::new();
+        hash.update(&bytes);
+        bytes.extend_from_slice(
+            a.member
+                .sign_object(stored_path.as_str(), &hash.finish())
+                .as_bytes(),
+        );
+        let opened = object::open(
+            &SingleChunkObject::decode(&bytes).unwrap(),
+            &stored_path,
+            key,
+        );
+        if matches!(defect, "path" | "timestamp") {
+            assert!(matches!(opened, Err(Refusal::WrongIdentity { .. })));
+        } else {
+            assert!(
+                matches!(opened, Err(Refusal::Parse { .. })),
+                "{defect}: {opened:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn setup_finds_creation_among_first_entries_and_checks_it_before_committing() {
+    let storage = storage();
+    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
+    let first = a.create(key(1)).await;
+    let mut b = device(storage.clone(), 2, member(1), store(1)).await;
+    b.sync().await;
+    b.sync
+        .make_and_upload_entry(StoreChange::AddDevice {
+            device: DeviceId(2),
+            name: "second".into(),
+            replaces: None,
+        })
+        .await
+        .unwrap();
+    a.sync().await;
+    let before = a.log().await;
+    let access = coven_format::MemberAccess::S3AccessKey {
+        access_key_id: "fixture-access-key".into(),
+    };
+    a.sync
+        .setup_storage(
+            storage.clone(),
+            access.clone(),
+            "first".into(),
+            Box::new(|| Ok(Box::new(|| Ok(())))),
+        )
+        .await
+        .unwrap();
+    assert_eq!(a.log().await, before);
+    let path = object::path(first);
+    let size = storage.read(&path).await.unwrap().len();
+    storage.corrupt_byte(&path, size - 1).await.unwrap();
+    let failure = a
+        .sync
+        .setup_storage(
+            storage,
+            access,
+            "first".into(),
+            Box::new(|| panic!("damaged creation must not commit connection state")),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        failure,
+        SyncError::Damaged(DamagedObject {
+            failure: Refusal::Signature { .. },
+            ..
+        })
+    ));
+    assert_eq!(a.log().await, before);
+}
+
+#[tokio::test]
 async fn damaged_entries_block_only_their_device_and_retain_each_cause() {
     for damage in ["decryption", "signature", "moved", "parse"] {
         let storage = Arc::new(
@@ -365,10 +550,7 @@ async fn damaged_entries_block_only_their_device_and_retain_each_cause() {
             "moved" => bytes = storage.read(&object::path(later)).await.unwrap(),
             "parse" => {
                 use coven_format::sealed_single::SingleChunkPrefix;
-                let prefix = SingleChunkPrefix::StoreLog {
-                    key: key(1),
-                    origin: None,
-                };
+                let prefix = SingleChunkPrefix::StoreLog { key: key(1) };
                 let ring = a.custody.read().unwrap().unwrap();
                 let chunk = ring
                     .store_key(key(1))

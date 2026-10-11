@@ -172,9 +172,6 @@ pub enum SyncFailure {
     /// This device or its member has been removed.
     #[error("this device or its member was removed")]
     Removed,
-    /// Another store's creation precedes this store's creation at this location.
-    #[error("another store took this storage location")]
-    LocationTaken,
     /// The provider refused or failed a request.
     #[error("storage failed: {0}")]
     Storage(#[source] Arc<StorageError>),

@@ -23,11 +23,6 @@ fn recorded_entry_format_encodes_both_its_frame_and_envelope() {
     );
     let prefix = SingleChunkPrefix::StoreLog {
         key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([1; 16])),
-        origin: Some(crate::sealed_single::StoreOrigin {
-            store: coven_foundation::id_source::StoreId(uuid::Uuid::from_bytes([0x10; 16])),
-            timestamp: entry.timestamp,
-            author: entry.author,
-        }),
     };
     let bytes = crate::tests::hex(include_str!("../fixtures/sealed-store-log.hex"));
     let encoded = prefix.encode_in(format).unwrap();
