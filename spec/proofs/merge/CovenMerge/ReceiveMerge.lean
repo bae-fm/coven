@@ -27,12 +27,10 @@ structure Policy (W : Type) where
   schema : W → SchemaDisposition
   retirements : List Retirement
   stored : W → Nat
-  snapshotWithinWindow : ∀ w, boundary.inputs w = true →
-    retirementAllows logs readEntry stored retirements w = true
 
 /-- Storage times are seconds; exactly thirty days counts (§10). Only kept
 retirements are supplied. The caller's gate must refuse writes made after
-reading their own removal. Snapshot inputs must satisfy the same window. -/
+reading their own removal. -/
 def withinWindow {W : Type} (P : Policy W) (w : W) : Bool :=
   retirementAllows P.logs P.readEntry P.stored P.retirements w
 
@@ -63,13 +61,13 @@ def effective (M : Writes W Row Col) (P : Policy W) : Writes W Row Col :=
 /-- An out-of-window write contributes neither changes nor input edges,
 including through the installed snapshot. -/
 theorem retired_no_effects (M : Writes W Row Col) (P : Policy W) (w : W)
+    (snapshotWithinWindow : ∀ a, P.boundary.inputs a = true → withinWindow P a = true)
     (outside : withinWindow P w = false) :
     (∀ r, (effective M P).chg w r = none) ∧ ∀ a, (effective M P).past a w = false := by
   have notInput : P.boundary.inputs w = false := by
     cases hi : P.boundary.inputs w
     · rfl
-    · have := P.snapshotWithinWindow w hi
-      change withinWindow P w = true at this
+    · have := snapshotWithinWindow w hi
       simp [outside] at this
   simp [effective, snapshotWrites, snapshotRetains, notInput, eligible, outside]
 

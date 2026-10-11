@@ -43,7 +43,6 @@ def policy : Policy Write where
   schema _ := .eligible
   retirements := [⟨0, 0, 0⟩]
   stored | .create => 30 * 86400 + 1 | _ => 30 * 86400 + 2
-  snapshotWithinWindow w h := by simp [noSnapshot] at h
 
 def past : Write → List Write
   | .create => []
@@ -185,8 +184,7 @@ def resetPolicy : Policy Write :=
   { policy with
     retirements := []
     reset := some 9
-    readEntry := fun w e => decide (w = .edit ∧ e = 9)
-    snapshotWithinWindow := fun w h => by simp [noSnapshot, policy] at h }
+    readEntry := fun w e => decide (w = .edit ∧ e = 9) }
 
 /-- The post-reset write authors a new generation-zero insert from the empty
 reset snapshot, rather than reusing the discarded creation's generation. -/
@@ -206,8 +204,7 @@ example : (merged resetHistory resetPolicy St.init (pass (pass received .create)
 def schemaPolicy : Policy Write :=
   { policy with
     retirements := []
-    schema := fun _ => .excluded 2
-    snapshotWithinWindow := fun w h => by simp [noSnapshot, policy] at h }
+    schema := fun _ => .excluded 2 }
 
 example : consumed noSnapshot (pass received .create) .create = true ∧
     applied schemaPolicy (pass received .create) = [] ∧
@@ -218,8 +215,7 @@ example : consumed noSnapshot (pass (pass received .create) .edit) .edit = true 
     applied schemaPolicy (pass (pass received .create) .edit) = [] := by decide
 
 example : withinWindow { policy with
-    stored := fun _ => 30 * 86400
-    snapshotWithinWindow := fun w h => by simp [noSnapshot, policy] at h } .create = true ∧
+    stored := fun _ => 30 * 86400 } .create = true ∧
     withinWindow policy .create = false := by decide
 
 /-- Complete data alone cannot imply progress: a scheduler may never attempt

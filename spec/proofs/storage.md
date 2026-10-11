@@ -74,6 +74,19 @@ from retained inputs. Entries instead keep §9's permanent rule against any
 unread entry, kept or dropped; they never revive after a time-based drop.
 These landing checks do not depend on the provider request-duration assumption.
 
+The proposed reader closure is proved separately in
+[the merge receive model](merge.md#b17-receive-order-progress-and-the-retirement-gap).
+It extends this window-only rule: a counting reader can retain a retired write
+outside the window. The recorded-read refusal above remains a hard condition
+at every step; `RetiredClosure.post_read_refused` proves no reader can override
+it. This proposal does not change `ReplacementRead` or `spec/coven.md`.
+Its counting set is deterministic for equal received writes, pasts, storage
+times and kept retirements. A verdict can reverse when its supporting reader
+stops counting, even if the target's own retirement stays kept. Consequently,
+retirement finality and draining the target's log do not alone establish that
+an excluded write can never return. The merge write-up states the proved
+permanence conditions and the Rust implementation obligation.
+
 **Stored bytes are preserved; receipt is conditional.** `stored_object_survives` combines
 create-once storage with receipt: later publications preserve the original
 bytes and time. Its receipt result assumes the other admission checks

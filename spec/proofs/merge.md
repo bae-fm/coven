@@ -36,7 +36,8 @@
   consumed positions distinguished from retained effects at a boundary.
 - *Closed set*: a set of writes that holds every write any of them had read.
   The ordinary applied set is closed. After exclusions, closure refers to
-  retained inputs; the retirement counterexample in B17 limits that claim.
+  retained inputs. B17 checks the window-only retirement failure and proves
+  the proposed closure that retains its retired causes.
 - *Incarnation*: one lifetime of a row. An insert made at generation `g`
   starts incarnation `g + 1`; an update or delete made at generation `g` acts
   on incarnation `g`.
@@ -440,7 +441,8 @@ at.
 **§3 coverage:** this model proves merge convergence, causal winners and value
 accounting for valid causal inputs and supplied boundary verdicts (B6, B8,
 B12–B14). B17 derives causal application from receive steps; its checked
-retirement counterexamples leave the rule for dependent writes undecided.
+retirement counterexamples concern the window-only rule. The proposed
+retirement closure retains the causes needed by its counting readers.
 Applying those results to stored objects assumes correct authentication
 and sealing; it proves neither confidentiality nor signature or cipher security.
 Atomic SQLite installation and §2's provider behavior are assumed, not proved.
@@ -500,7 +502,8 @@ the separate store-log/data package.
 B17 models a retained receive queue and checks Rust's causal prerequisite
 decision separately. It derives causal order rather than assuming it at the
 receive boundary. Retirement can remove the generation witnesses needed by
-merge; that case has checked counterexamples, not an unconditional theorem.
+merge under the window-only rule. B17 proves the proposed closure and states
+the remaining boundary and refusal conditions.
 
 ### B12 Circle entries, migration deletes and frozen losses
 
@@ -619,8 +622,9 @@ still shows and the circle row is hidden by the other-audience rule.
 
 ### B15 Checked counterexamples and readings
 
-The retirement histories in B17 expose a missing rule for writes that depend
-on a write excluded by its author's retirement deadline.
+The retirement histories in B17 fail under the window-only rule. The proposed
+reader closure makes those same histories converge and accounts for their
+values; it does not override a refusal or another boundary exclusion.
 `UniqueOnce.unique_with_others` remains a checked counterexample to running
 uniqueness in an unrestricted loop: a deleted folder with two notes sharing
 a title can leave one note or neither, depending on rule order. The spec's
@@ -831,9 +835,11 @@ The queue distinguishes passing a position from applying its values.
 It also checks every supplied kept retirement against the write's author,
 recorded entry reads, and first complete publication time. Exactly thirty
 storage days is allowed; one second later is excluded (`window_exact`). The
-policy requires snapshot inputs to satisfy this window too (`snapshotWithinWindow`);
-`retired_no_effects` proves an excluded write supplies neither changes nor input
-edges. The other-checks gate must refuse a write made after reading its own
+window-only theorem `retired_no_effects` assumes snapshot inputs satisfy
+this window too, and proves an excluded write supplies neither changes nor
+input edges. That assumption belongs to this theorem rather than `Policy`: a
+snapshot under the proposed closure can represent a rescued late write. The
+other-checks gate must refuse a write made after reading its own
 removal, rather than consume it merely because it fails the retirement test.
 
 `applied_causal` filters consumed positions into a causal sequence of retained
@@ -912,7 +918,141 @@ unsatisfied readiness test. Refusing the dependent write would also require
 an explicit verdict and would fall outside the progress theorem's successful
 validation hypothesis. Reset explicitly discards old dependencies, and schema
 exclusion explicitly propagates through old inputs; §10 specifies neither
-rule for this retirement case. No choice between them is asserted as a proof.
+rule for this retirement case. The proposal below changes retirement admission
+without changing either boundary rule.
+
+**Proposed rule: retain retired causes of counting readers.**
+`RetiredClosure.lean` models the decided extension to §10; `spec/coven.md`
+still describes the window-only rule. The original `Receive` functions and
+counterexamples remain available to distinguish the two policies. The new
+results below are in `Receive.RetiredClosure`.
+
+`Counts` starts with received writes that pass the window and the other
+admission conditions. It adds a received retired write when a counting write's
+recorded past includes it, and repeats. `counts_fixed` and `counts_least`
+prove this is the least fixed point. A group of excluded readers cannot keep
+itself counting without a seed (`counts_have_seed`). `counts_path` gives the
+exact condition: a finite path of permitted retired causes from a window-admitted
+root. The checked `repeated_closure` history requires two reader steps.
+
+The inputs are kept retirements, first complete storage times, immutable
+recorded entry reads and write pasts, and a finite received set. Equal entry
+sets and received sets suffice; duplicates and order do not matter
+(`counts_deterministic`). The other metadata and boundary decisions must
+agree too. Removal of a member, removal of a device and replacement all supply
+retirements of the affected device; the closure does not distinguish their
+causes. Recorded pasts mean the expanded frontiers, including implicit own
+previous writes, as in `ReceivePositions` and `exactPast`.
+
+“Counting” here means a merge input for the selected audience. Reset-ignored,
+schema-excluded and snapshot-covered non-input writes cannot seed or enter
+this closure. All additions still pass `beforeRemoval`: their recorded entry
+past contains no kept retirement of their own author. Thus a revived reader
+cannot authorize a post-read write (`post_read_refused`), including through
+any number of intermediate readers. `revived_reader_cannot_authorize_refused`
+checks a three-write chain whose middle write counts only through its reader
+and whose oldest cause remains refused. Authentication and the other ordinary
+admission checks are supplied at the receive boundary.
+
+**The four window-only failures are repaired.**
+`RetiredClosureExamples.lean` reuses the original authored history, storage
+times, retirement, and legal receive runs:
+
+- `retirement_generation_restored` proves `SnapshotGenerations` for the
+  creation and edit, although the creation still fails `withinWindow`.
+- `retirement_value_accounted` proves `ValueAccounted` for the edit, for any
+  app removal rules whose presence input agrees with the merged generation.
+- `retirement_loss_agrees` proves both edit/delete orders record the edit
+  against the delete, with the creation retained.
+- `receive_runs_agree` proves equality of every merge field in the two
+  original runs; `receive_loss_records_agree` includes the app's removed-row
+  and cell records for any common rule-input function. `triple_generations`
+  checks the three-write history's generation witnesses too.
+
+`generations` derives the retained generation witnesses; retirement no longer
+requires them as a hypothesis. `receive_converges` and
+`receive_value_accounted` apply this result to the receive machine. At a
+snapshot, reset or schema boundary, these general theorems still require:
+
+- valid authored timestamps, pasts and row generations;
+- generation witnesses surviving the snapshot/reset/schema rules *before*
+  applying retirement, and complete recorded pasts in the received set;
+- `safePast`: a received write that passes its own removal-read check has
+  no recorded cause that fails that check;
+- a correct, closed snapshot whose represented inputs agree with the closure;
+- equal effective inputs for convergence, and presence inputs matching the
+  merged row generations for value accounting.
+
+There is no assumed receive-side causal order. For receive without a
+snapshot, reset or schema exclusion, `receive_prefix_correct` proves complete
+pasts and `safePast` from the actual run: the refusal gate prevents consuming
+post-read writes, and causal readiness prevents passing their readers.
+`receive_prefix_converges` and `receive_prefix_value_accounted` therefore need
+no additional generation-witness or safe-past hypothesis. They require only
+`Valid`, exact recorded pasts, the refusal gate, and equal consumed sets
+(for convergence) or matching presence inputs (for accounting).
+`receive_prefix_runs_agree` applies this theorem to the original two runs,
+using each run's own consumed list as its closure input.
+
+The boundary safety condition cannot be inferred from `Valid` alone.
+`refused_witness_still_fails` gives a two-write counterexample: a creation
+made after reading its own removal, and an active edit claiming the creation's
+generation. The edit passes its own check; the creation must remain refused.
+`refused_witness_value_unaccounted` checks the missing edit value if such an
+input set is merged. This is not a successful run through the refusal gate;
+that run cannot consume the creation or its dependent edit. Boundary authoring
+and snapshot validation must not introduce the same invalid dependency.
+
+**When a verdict is permanent.** With fixed admission facts and recorded pasts,
+receiving more writes can change excluded to counting, but never counting to
+excluded (`counts_monotone`, `counting_permanent`). A late write alone is
+excluded and a later received active reader retains it
+(`later_reader_revives`). Thus the retired author's deadline, final retirement,
+or completed log drain alone cannot make a negative verdict permanent.
+
+Changing replay or boundary decisions can remove counting. In
+`dropped_reader_stops_counting`, the same two received writes initially retain
+the late creation. Keeping a retirement of its sole reader makes that reader
+late too; there is no seed and neither counts. The target's own retirement,
+both publication times and both pasts remain unchanged. Two writes suffice;
+`revival_needs_other_write` proves that rescue of an out-of-window write needs
+a distinct received root, so a one-write example cannot exhibit this reversal.
+
+`counts_path` states exactly what must survive for a positive verdict: at
+least one admitted root and a permitted reader path to the target. It need
+not be the same path after every replay. `counts_transfer` proves preservation
+when the relevant admission rules are preserved, including a retired cause
+becoming an ordinary window seed. A fixed policy and immutable retained
+receipts are one sufficient permanent case. For a permanent negative verdict,
+`exclusion_permanent` requires exclusion even in the closure over every
+possible future receipt. `exclusion_barrier` gives an alternative certificate:
+a set with no seed that contains every possible reader of its members.
+Establishing these future bounds from storage discovery and store-log finality
+is outside this package. Entry finality alone is not write-verdict finality.
+
+These functions describe one completed atomic rebuild. A newly admitted reader
+can restore a cause whose position was already passed; that cause must be
+included when rebuilding generations, cells and losses. A changed decision
+cannot be implemented solely by appending new merge steps or by leaving old
+losses until another sync pass. Compact snapshot encoding, retention of the
+bytes and pasts needed for another rebuild, and atomic SQL installation remain
+outside the proof. `counting` is a declarative Boolean view of `Counts`, not
+an executable closure runner.
+
+**Rust implementation obligation.** The inspected receive path calls
+`coven-sync::write_object::authority` with the write's recorded store-log view;
+that function does not take publication times or compute this closure.
+`coven-database::download::accepted` handles schema/reset boundaries, not
+retirement closure. The implementation queue needs admission over the retained
+write set: seeds from the storage-time window, backward reader expansion to
+its least fixed point, hard post-read refusal at every addition, and an atomic
+rebuild when a reader or replay changes the set. Keep original storage facts,
+recorded pasts and excluded inputs needed by that rebuild. Any queue retirement
+or compaction criterion must use the verdict's supporting readers as well as
+the retired author's finality. Rust and its runners are unchanged here. The
+closure differential belongs with the Rust implementation and must cover both
+receipt orders, repeated expansion, refusal, reader removal, restored values
+and equal loss records.
 
 **Rust comparison.** `ReceiveRunner.lean` calls the proved frontier readiness
 function. The ignored `lean_differential_receive` test calls the actual

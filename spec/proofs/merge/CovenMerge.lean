@@ -22,5 +22,7 @@ import CovenMerge.Receive
 import CovenMerge.ReceivePositions
 import CovenMerge.ReceiveMerge
 import CovenMerge.ReceiveExamples
+import CovenMerge.RetiredClosure
+import CovenMerge.RetiredClosureExamples
 import CovenMerge.ResetCounterexample
 import CovenMerge.MigrationCounterexample
