@@ -708,14 +708,19 @@ File uploads run in their own worker (§16.5); a pass does not wait for them.
   input already retained or covered by an applied snapshot.
   - A hit supplies the object itself. Fetch ahead in parallel up to the
     transfer limit, and stop scheduling beyond the first miss. Retain
-    completed reads and their check results; never advance over a miss,
-    failed read or input not durably retained. Requests already in flight
-    still count. Causal application keeps
-    its own positions and waits, independently of this download position.
+    completed reads and their check results; never advance over a failed
+    read or input not durably retained, or over a miss except for §15's
+    certified deleted-number handling
+    ([`committed_number`](proofs/io/CovenIO/CommonReload.lean)). Requests
+    already in flight still count. Causal application keeps its own
+    positions and waits, independently of this download position.
   - A miss means nothing new at that observation; only a completed retirement
     drain below makes it the last discovery probe.
-    A missing number required by known causal or snapshot evidence is a
-    pending prerequisite instead. Failures are never misses (§19.1).
+    A missing number required by known causal or snapshot evidence uses
+    §15's fresh-catalog rule; without certified deletion it remains a
+    pending prerequisite
+    ([`scan_spec`](proofs/io/CovenIO/FixedReload.lean)). Failures are never
+    misses (§19.1).
   - Store-log entries and key copies are never deleted, so their terminal
     miss is exact. Write misses use the return-from-absence rule in §15.
     Snapshots and files are not discovered by next number.
@@ -3003,8 +3008,9 @@ Carol's tablet:
   Earlier work was already consumed at the saved checkpoint, and a write
   published since that pass is protected while the check holds. Reader
   positions cannot release an unconsumed write either.
-  Missing history required by a known object remains a pending condition;
-  it never counts as a successful catch-up.
+  Required history not supplied by the reload rules below remains pending;
+  an unresolved gap never counts as a successful catch-up
+  ([`scan_spec`](proofs/io/CovenIO/FixedReload.lean)).
   - **Ben's pass crosses the deadline.** His checkpoint is day 0. A pass
     starts on day 29, but its read of Ana's day-1 write returns a miss on
     day 31, after retention deleted it. The start cannot certify that miss:
@@ -3097,8 +3103,6 @@ Carol's tablet:
   [`SnapshotHistory.deleted_stays_covered`](proofs/io/CovenIO/Reload.lean)).
 - Until an audience has a snapshot, a new device reads every log from the
   start; no log object is deleted before a snapshot covers it.
-- So loading a snapshot and the writes after it costs at most about twice
-  the snapshot.
 - Two devices can write one at the same time, and both are correct:
 
   ```
@@ -3106,39 +3110,96 @@ Carol's tablet:
   <store>/snapshots/store/ben-laptop/1    ana-phone up to 38, ben-laptop up to 25
   ```
 
-- A new device loads either, then fetches every write after its positions,
-  and ends up in the same place.
+- The larger write count selects Ben's snapshot; fetch the needed suffix
+  under the reload rules below, replacing a selection if deletion races
+  with those reads
+  ([`catalogCurrent`](proofs/io/CovenIO/Retention.lean),
+  [`committed_prefix`](proofs/io/CovenIO/CommonReload.lean)).
 - A device snapshots only what it can read.
   - Any device snapshots the store's rows.
   - A device of one of a circle's members snapshots that circle's rows,
     separately, sealed with the circle's key ([§14.3](#143-circles)).
-- A new device loads the store's latest snapshot and its member's circles',
-  then the writes after them.
-  - The snapshots can reach different points in each log, so the device
-    starts each log at the lowest point any of them reaches, and a write's
-    part that its own audience's snapshot already covers counts as applied
-    and is skipped.
-  - E.g. the store's snapshot reaches ana-phone 40 and Gifts' reaches 38:
-    the device applies ana-phone 39 and 40, but only their Gifts parts.
-  - It applies them in the same transaction that loads the snapshots,
-    downloaded first, so no write ever sees one audience at 40 and another
-    at 38: every audience reaches the highest point any snapshot reaches.
-  - Reloading a device that already has writes works the same way, and the
-    highest point also covers what its waiting writes had read. Eligible
-    waiting parts apply on top in that transaction; the reset rule (§19.3)
-    ignores pre-reset parts outside the chosen snapshot.
-  - These writes are all still in storage: a log object is deleted only
-    once snapshots cover every part of it.
-  - During an ordinary snapshot reload, the app can write throughout; a
-    write made while downloads run is one more waiting write.
+- At reload start, fix a required position for each writer: include the
+  remote past of waiting local writes, already uploaded own writes and
+  their past, and the positions of audiences whose existing state is kept,
+  including an audience with no rows
+  ([`committed_safe`](proofs/io/CovenIO/CommonReload.lean)).
+  - Choose a counting usable snapshot for each readable audience needing
+    replacement; for each writer, the common target is the maximum of the
+    frozen requirement and every selected snapshot's position
+    ([`target_ready`](proofs/io/CovenIO/CommonReload.lean)).
+  - Read each audience forward to that target, skipping parts already
+    supplied by its selected snapshot and retaining actual checked write
+    bytes for the rest; stop at the target, not a moving log tail
+    ([`scan_spec`, `committed_prefix`](proofs/io/CovenIO/CommonReload.lean)).
+  - After a successful missing GET inside the target, obtain a fresh,
+    complete snapshot catalog: counting coverage through that number in
+    any audience, including one the loader cannot decrypt, establishes
+    historical publication and, with the absence, a deleted number
+    ([`covered_miss_published`](proofs/io/CovenIO/SnapshotWrites.lean),
+    [`SnapshotHistory.deleted_miss_detected`](proofs/io/CovenIO/Reload.lean)).
+  - If the loaded audience's current newest counting snapshot reaches
+    that number, select and load it; otherwise skip the number for that
+    audience, since a deleted write outside its current coverage has no
+    part there
+    ([`scan_spec`, `skipped_has_no_part`](proofs/io/CovenIO/FixedReload.lean)).
+  - A failed request, incomplete catalog, missing key or permanent refusal
+    cannot supply this absence certificate; unresolved history remains
+    pending (the successful-source premises of
+    [`scan_spec`](proofs/io/CovenIO/FixedReload.lean)).
+  - E.g. Ben loads Gifts through Ana's write 8 and misses required write 9:
+    a fresh store snapshot through 9 proves publication, but Gifts' current
+    snapshot still stops at 8, so the deleted write has no Gifts part and
+    Ben skips it for Gifts
+    ([`skipped_has_no_part`](proofs/io/CovenIO/FixedReload.lean)).
+- Keep each selected snapshot fixed until a certified deleted number
+  forces that audience's replacement; new writes and unrelated snapshot
+  arrivals do not replace the selections
+  ([`retry_stale`](proofs/io/CovenIO/CommonReload.lean)).
+  - A replacement changes only that audience's selection; recompute the
+    common target and read all audiences to it before committing, even
+    when the replacement reaches beyond the original target
+    ([`committed_safe`](proofs/io/CovenIO/CommonReload.lean)).
+  - Reuse deletion evidence from a selection's catalog without another
+    missing GET, and keep the loaded snapshot bodies and the committing
+    round's checked write inputs throughout staging; this requires no
+    remote snapshot pin or publisher supplying all audiences together
+    ([`scan_spec`, `common_cut_commits`](proofs/io/CovenIO/CommonReload.lean)).
+  - E.g. a deleted write 1 makes the store reload through Ana's write 2,
+    while Gifts' selected snapshot stays through 1: fetch write 2's Gifts
+    part and stage both audiences through 2
+    ([`replacement_fills_other_audience`](proofs/io/CovenIO/CommonReloadExamples.lean)).
+- Commit all readable audiences at that common point in one transaction:
+  rows, merge records, losses, realized positions and eligible waiting
+  local writes applied in causal order on top, with the existing schema,
+  reset, key and validation checks still required
+  ([`committed_number`, `common_cut_commits`](proofs/io/CovenIO/CommonReload.lean);
+  row application and validation are implementation obligations).
+  - During staging, app reads see the old committed view and ordinary app
+    writes join the waiting queue; they read no staged rows, so their remote
+    past stays within the frozen requirement, and a failed reload leaves
+    the prior visible state and positions intact
+    ([`staging_keeps_visible`](proofs/io/CovenIO/AtomicReload.lean),
+    [`committed_safe`](proofs/io/CovenIO/CommonReload.lean)).
   - When a kept reset or breaking-schema entry is received, writes into
     its audience wait for the atomic reload with `DbError::AudienceReloading`.
     Other audiences stay writable. A write must not claim to have adopted
     the boundary while still using the state it discards.
-- A reload also covers the device's already uploaded own writes and their
-  past: its next write implicitly reads every earlier own write ([§7.1](#71-causality)).
-  An audience whose snapshot is not being replaced keeps its current positions
-  when computing the common point, including an audience with no rows.
+  - E.g. while the store is staged through 2 and Gifts through 1, Ben's app
+    still reads the preceding committed state; it sees both at 2 only after
+    Gifts' part and the eligible waiting writes commit together
+    ([`staging_keeps_visible`](proofs/io/CovenIO/AtomicReload.lean),
+    [`replacement_fills_other_audience`](proofs/io/CovenIO/CommonReloadExamples.lean)).
+- With a fixed writer inventory and finite successful catalog, snapshot
+  and required log reads, this reload terminates once deletions stop: from
+  the next round boundary, at most one replacement per readable audience
+  and one more finite round than replacements are needed, even if writes
+  and snapshots keep arriving
+  ([`terminates`, `eventually_terminates`](proofs/io/CovenIO/CommonReload.lean)).
+  - E.g. with the store and Gifts, after deletion stops there can be at
+    most two further replacements and three finite rounds; continued
+    deletion or unbounded read durations gives no elapsed-time bound
+    ([`terminates`](proofs/io/CovenIO/CommonReload.lean)).
 - These positions govern device-write logs. Before loading a snapshot, the
   device has applied at least the store-log positions it names; loading does
   not replace store-log entries or rewind their applied positions.
@@ -3239,8 +3300,9 @@ Carol's tablet:
     is removed.
 - A device that needs writes already deleted loads the latest snapshot
   instead, like a new device.
-  - A missing write that a snapshot covers counts as deleted, not late
-    ([§19.1](#191-noticing)).
+  - Use the fresh catalog and per-audience reload-or-skip rule above for
+    a missing required write; an older cached catalog alone cannot certify
+    its deletion ([`scan_retry_time`](proofs/io/CovenIO/FixedReload.lean)).
   - Its own writes still waiting in `_coven_uploads` keep their numbers, and
     it uploads them after.
   - Every device judges them under the schema and reset rules (§17.1,
@@ -3965,10 +4027,12 @@ Carol's tablet:
   2. upload a snapshot in the new version;
   3. upload the store log entry raising the version.
 - Reloading from a snapshot ([§15](#15-snapshots)):
-  1. settle attempted uploads under §17.1, then download the snapshots and
-     writes between the lowest and highest points they and the waiting
-     writes reach, into temporary files, retaining the inputs needed to
-     judge exclusions;
+  1. settle attempted uploads under §17.1, freeze the required positions,
+     and stage all readable audiences through §15's common target,
+     retaining the selected snapshots and checked write inputs; a certified
+     deleted number replaces only its affected audience and recomputes the
+     target for all audiences
+     ([`committed_safe`](proofs/io/CovenIO/CommonReload.lean));
   2. replace the synced tables and coven's merge tables
      ([§8](#8-merge)) with the snapshots, apply those writes, and re-apply
      eligible waiting writes, in one transaction. Convert eligible untried

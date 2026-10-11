@@ -375,12 +375,37 @@ request; decline or expiry deletes the request and settles access under
 §12.2. No open invite means no join-request scan.
 
 A required reload first settles attempted uploads as §18.1 requires, then
-reads its selected snapshots and necessary intervening writes. Use the
-catalog and cached inputs, fetching each needed uncached body once; stage
-validated data before the atomic reload. The records checked by the reader
-are the records applied; do not decrypt and parse the body again. No entry
-operation runs while a reload is active. Missing history covered by a
-usable snapshot uses this same reload path, not another discovery pass.
+freezes each writer's required position from waiting writes' remote past,
+already uploaded own writes and their past, and retained audiences' positions
+([`committed_safe`](proofs/io/CovenIO/CommonReload.lean)).
+Select counting usable snapshots and read each readable audience to the maximum
+of that requirement and all selected positions; retain the checked snapshot
+bodies and write inputs throughout staging
+([`committed_prefix`](proofs/io/CovenIO/CommonReload.lean)).
+After a missing required GET, refresh the complete catalog, including prefixes
+outside the loaded audience: counting coverage through that number proves
+publication, and absence then certifies deletion
+([`covered_miss_published`](proofs/io/CovenIO/SnapshotWrites.lean),
+[`SnapshotHistory.deleted_miss_detected`](proofs/io/CovenIO/Reload.lean)).
+If the loaded audience's current snapshot reaches it, replace that audience's
+selection and recompute the common target; otherwise skip the deleted number
+for that audience, since it has no part there
+([`scan_spec`, `skipped_has_no_part`](proofs/io/CovenIO/FixedReload.lean)).
+Selections otherwise stay fixed; deletion evidence in their catalogs needs no
+repeated GET, and a failed request or incomplete catalog is not such evidence
+([`scan_spec`](proofs/io/CovenIO/FixedReload.lean),
+[`retry_stale`](proofs/io/CovenIO/CommonReload.lean)).
+The app keeps reading the old committed state while ordinary new writes join
+the waiting queue; install all readable audiences at the common target and
+apply eligible waiting writes on top in one transaction
+([`staging_keeps_visible`](proofs/io/CovenIO/AtomicReload.lean),
+[`common_cut_commits`](proofs/io/CovenIO/CommonReload.lean)).
+For example, replacing the store snapshot through write 2 while Gifts remains
+through 1 requires fetching write 2's Gifts part before either state is visible
+([`replacement_fills_other_audience`](proofs/io/CovenIO/CommonReloadExamples.lean)).
+The records checked by the reader are the records applied; do not decrypt and
+parse the body again. No entry operation runs while a reload is active.
+Ordinary recent-return-protected sync adds no snapshot listing for this rule.
 
 Every create uses fixed attempted bytes and the collision rule of §10;
 sealed keys use distinct writer paths under §11. For a lost reply or occupied
@@ -408,7 +433,9 @@ At equality or later, take step 3's away-device snapshot discovery and
 complete any required reload before using further write misses. Discovery
 from before expiry is insufficient. A new device or one without usable time
 evidence takes that path too; failure leaves history pending.
-A known required missing write is a prerequisite, not a terminal idle miss.
+A known required missing write uses step 5's certified deletion rule; without
+that certificate it remains a prerequisite, not a terminal idle miss
+([`scan_spec`](proofs/io/CovenIO/FixedReload.lean)).
 On a hit, fetch ahead within the configured transfer limit and stop at the
 first miss. Retain completed reads; reception order never bypasses causal
 or per-log application gates. Use retained headers to order causes and
@@ -419,8 +446,10 @@ references. Skipped audiences, resets and schema exclusions keep their
 existing rules. Apply §10's retirement landing deadline from retained write
 and entry storage times and current replay; consume an excluded write's
 position while keeping inputs needed for reversal. Entries retain §9's
-permanent landing rule. A missing required uncovered path is a pending prerequisite;
-retry only when its shared backoff permits, reusing this pass's absence observation.
+permanent landing rule. A required path neither supplied by a snapshot nor
+safely skipped under step 5 remains pending
+([`scan_spec`](proofs/io/CovenIO/FixedReload.lean)); retry only when its shared
+backoff permits, reusing this pass's absence observation.
 
 For a retirement past §6's finality wait, combine the write-log miss with
 step 2's entry and copy misses to finish its drain. Use observations after
