@@ -39,7 +39,7 @@ pub(crate) fn realistic_history() -> History {
                     &past,
                     rename(u64::from(m), "Offline rename"),
                 );
-                h.push(0, 0, &past, remove(m, &[u64::from(m - 10)]));
+                h.push(0, 0, &past, remove(m));
             }
             _ if n.is_multiple_of(50) && n + 1 < 2_000 => {
                 let past: Vec<_> = (0..n).collect();

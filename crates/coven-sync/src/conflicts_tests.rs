@@ -18,7 +18,7 @@ fn two_circles() -> History {
 }
 
 #[test]
-fn circle_removals_conflict_only_when_they_replace_the_same_audiences_key() {
+fn circle_removals_in_different_audiences_both_apply() {
     for second_circle in [0, 1] {
         let mut h = two_circles();
         h.push(0, 0, &(0..11).collect::<Vec<_>>(), leave(0, 1));
@@ -29,7 +29,6 @@ fn circle_removals_conflict_only_when_they_replace_the_same_audiences_key() {
             StoreChange::RemoveCircleMember {
                 circle: circle(second_circle),
                 member: member(2),
-                key: key(99),
             },
         );
         h.every_order(|r| {
@@ -37,7 +36,7 @@ fn circle_removals_conflict_only_when_they_replace_the_same_audiences_key() {
                 r.state.circles[&circle(0)].members,
                 [member(0), member(2)].into()
             );
-            assert_eq!(r.state.circles[&circle(0)].key, key(20));
+            assert_eq!(r.state.circles[&circle(0)].key, key(10));
             if second_circle == 0 {
                 assert_eq!(h.drops(r), [12]);
                 assert_eq!(
@@ -49,7 +48,7 @@ fn circle_removals_conflict_only_when_they_replace_the_same_audiences_key() {
                     r.state.circles[&circle(1)].members,
                     [member(0), member(1)].into()
                 );
-                assert_eq!(r.state.circles[&circle(1)].key, key(99));
+                assert_eq!(r.state.circles[&circle(1)].key, key(11));
                 assert!(h.drops(r).is_empty());
             }
         });
@@ -57,18 +56,15 @@ fn circle_removals_conflict_only_when_they_replace_the_same_audiences_key() {
 }
 
 #[test]
-fn store_removal_beats_a_later_concurrent_circle_rotation() {
+fn store_removal_and_circle_removal_have_no_key_conflict() {
     let mut h = two_circles();
-    h.push(0, 0, &(0..11).collect::<Vec<_>>(), remove(2, &[0, 1]));
+    h.push(0, 0, &(0..11).collect::<Vec<_>>(), remove(2));
     h.push(2, 2, &(0..11).collect::<Vec<_>>(), leave(0, 1));
     h.every_order(|r| {
         assert!(r.state.members[&member(2)].removed);
-        assert_eq!(
-            r.state.circles[&circle(0)].members,
-            [member(0), member(1)].into()
-        );
-        assert_eq!(r.state.circles[&circle(0)].key, key(200));
-        assert_eq!(h.drops(r), [12]);
+        assert_eq!(r.state.circles[&circle(0)].members, [member(0)].into());
+        assert_eq!(r.state.circles[&circle(0)].key, key(10));
+        assert!(h.drops(r).is_empty());
     });
 }
 
@@ -76,55 +72,28 @@ fn store_removal_beats_a_later_concurrent_circle_rotation() {
 fn already_in_place_removals_bring_no_key_in() {
     for store in [false, true] {
         let mut h = two_circles();
-        let change = if store {
-            remove(1, &[0, 1])
-        } else {
-            leave(0, 1)
-        };
+        let change = if store { remove(1) } else { leave(0, 1) };
         h.push(0, 0, &(0..11).collect::<Vec<_>>(), change.clone());
-        let mut repeated = change;
-        match &mut repeated {
-            StoreChange::RemoveMember {
-                key: replacement,
-                circle_keys,
-                ..
-            } => {
-                *replacement = key(99);
-                for (index, replacement) in circle_keys.iter_mut().enumerate() {
-                    replacement.key = key(300 + index as u64);
-                }
-            }
-            StoreChange::RemoveCircleMember {
-                key: replacement, ..
-            } => *replacement = key(99),
-            _ => unreachable!(),
-        }
-        h.push(2, 2, &(0..11).collect::<Vec<_>>(), repeated);
+        h.push(2, 2, &(0..11).collect::<Vec<_>>(), change);
         h.every_order(|r| {
             assert!(h.drops(r).is_empty());
             for entry in &h.entries[11..] {
                 assert_eq!(r.entries[&entry.position], EntryOutcome::Kept);
             }
             if store {
-                assert_eq!(r.state.circles[&circle(1)].key, key(201));
+                assert_eq!(r.state.circles[&circle(1)].key, key(11));
             }
-            assert_eq!(
-                r.state.store.as_ref().unwrap().key,
-                key(if store { 101 } else { 1 })
-            );
-            assert_eq!(
-                r.state.circles[&circle(0)].key,
-                key(if store { 200 } else { 20 })
-            );
+            assert_eq!(r.state.store.as_ref().unwrap().key, key(1));
+            assert_eq!(r.state.circles[&circle(0)].key, key(10));
         });
     }
 }
 
 #[test]
-fn a_store_removal_does_not_replace_an_unlisted_circles_key() {
+fn a_store_removal_does_not_replace_a_circles_key() {
     let mut h = two_circles();
     h.all(0, 0, add(3, Admin));
-    h.push(0, 0, &(0..12).collect::<Vec<_>>(), remove(3, &[]));
+    h.push(0, 0, &(0..12).collect::<Vec<_>>(), remove(3));
     h.push(2, 2, &(0..12).collect::<Vec<_>>(), leave(0, 1));
     h.every_order(|r| {
         assert!(r.state.members[&member(3)].removed);
@@ -223,7 +192,7 @@ fn deleting_a_circle_defeats_its_concurrent_raise() {
             let remove = match deletion {
                 0 => (1, 4, delete(0)),
                 1 => (1, 4, leave(0, 1)),
-                2 => (0, 0, remove(1, &[])),
+                2 => (0, 0, remove(1)),
                 _ => unreachable!(),
             };
             let raising = (1, 1, raise(2, 30, audience.clone()));
@@ -257,7 +226,7 @@ fn concurrent_member_removal_defeats_access_replacement_in_every_arrival_order()
                 },
             },
         );
-        let removal = (0, 0, remove(1, &[]));
+        let removal = (0, 0, remove(1));
         for (author, device, change) in if removal_first {
             [removal, replacement]
         } else {

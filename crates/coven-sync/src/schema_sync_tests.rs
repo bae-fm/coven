@@ -685,6 +685,12 @@ async fn a_migration_waits_for_an_operation_that_already_reserved_the_entry_numb
                     circle: coven_foundation::id_source::CircleId(Uuid::from_u128(77)),
                     name: "waiting".into(),
                     key: KeyId(Uuid::from_u128(77)),
+                    key_hash: device.sync.test_key(
+                        coven_merge::Audience::Circle(coven_foundation::id_source::CircleId(
+                            Uuid::from_u128(77)
+                        )),
+                        KeyId(Uuid::from_u128(77))
+                    ),
                 })
                 .await
                 .is_err());

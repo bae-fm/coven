@@ -8,7 +8,7 @@ use crate::effects::tests::snapshot;
 use coven_crypto::MemberId;
 use coven_database::{DatabaseBuilder, DropReason, EntryOutcome, StoreLog, StoreLogReplay};
 use coven_format::{
-    store_log::{CircleKeyId, MemberPublicKeys, MemberRole, StoreChange, StoreLogEntry},
+    store_log::{MemberPublicKeys, MemberRole, StoreChange, StoreLogEntry},
     value::{EntryId, EntryPositions},
     Object,
 };
@@ -58,18 +58,8 @@ pub(crate) fn role(n: u8, role: MemberRole) -> StoreChange {
         role,
     }
 }
-pub(crate) fn remove(n: u8, circles: &[u64]) -> StoreChange {
-    StoreChange::RemoveMember {
-        member: member(n),
-        key: key(100 + u64::from(n)),
-        circle_keys: circles
-            .iter()
-            .map(|&n| CircleKeyId {
-                circle: circle(n),
-                key: key(200 + n),
-            })
-            .collect(),
-    }
+pub(crate) fn remove(n: u8) -> StoreChange {
+    StoreChange::RemoveMember { member: member(n) }
 }
 pub(crate) fn device(n: u64) -> StoreChange {
     StoreChange::AddDevice {
@@ -99,6 +89,7 @@ impl History {
                 admin: keys(0),
                 key: key(1),
                 device_name: "Ana’s phone".into(),
+                key_hash: [17; 32],
             },
         );
         history
@@ -274,7 +265,7 @@ fn ben_registers_his_phone_and_anas_concurrent_member_removal_defeats_it() {
         assert_eq!(r.state.devices[&DeviceId(4)].member, member(1));
         assert!(h.drops(r).is_empty());
     });
-    h.push(0, 0, &[0, 1, 2], remove(1, &[]));
+    h.push(0, 0, &[0, 1, 2], remove(1));
     h.every_order(|r| {
         assert!(r.state.members[&member(1)].removed);
         assert!(r.state.devices[&DeviceId(1)].removed);
@@ -297,8 +288,8 @@ fn member_wins_over_admin_grant() {
 #[test]
 fn earlier_mutual_removal_keeps_one_admin() {
     let mut h = household(Admin, Member).prefix(3);
-    h.push(0, 0, &[0, 1, 2], remove(1, &[]));
-    h.push(1, 1, &[0, 1, 2], remove(0, &[]));
+    h.push(0, 0, &[0, 1, 2], remove(1));
+    h.push(1, 1, &[0, 1, 2], remove(0));
     h.every_order(|r| {
         assert!(!r.state.members[&member(0)].removed);
         assert!(r.state.members[&member(1)].removed);
@@ -311,16 +302,16 @@ fn earlier_mutual_removal_keeps_one_admin() {
 }
 
 #[test]
-fn store_key_rotation_drops_carols_addition_and_her_device() {
+fn store_removal_drops_carols_addition_and_her_device() {
     let mut h = household(Admin, Member).prefix(3);
     h.all(0, 0, add(3, Member));
     h.push(0, 0, &[0, 1, 2, 3], add(2, Member));
-    h.push(1, 1, &[0, 1, 2, 3], remove(3, &[]));
+    h.push(1, 1, &[0, 1, 2, 3], remove(3));
     h.every_order(|r| {
         assert!(!r.state.members.contains_key(&member(2)));
         assert!(r.state.members[&member(3)].removed);
         assert_eq!(h.drops(r), [4]);
-        assert_eq!(r.state.store.as_ref().unwrap().key, key(103));
+        assert_eq!(r.state.store.as_ref().unwrap().key, key(1));
     });
     h.push(2, 2, &[0, 1, 2, 3, 4], device(2));
     h.every_order(|r| {
@@ -343,9 +334,9 @@ fn repeated_additions_keep_both_identities() {
 #[test]
 fn three_admins_removing_one_another_keep_only_the_earliest_removal() {
     let mut h = household(Admin, Admin);
-    h.push(0, 0, &[0, 1, 2, 3, 4], remove(1, &[]));
-    h.push(1, 1, &[0, 1, 2, 3, 4], remove(2, &[]));
-    h.push(2, 2, &[0, 1, 2, 3, 4], remove(0, &[]));
+    h.push(0, 0, &[0, 1, 2, 3, 4], remove(1));
+    h.push(1, 1, &[0, 1, 2, 3, 4], remove(2));
+    h.push(2, 2, &[0, 1, 2, 3, 4], remove(0));
     h.every_order(|r| {
         assert_eq!(
             r.state
@@ -363,7 +354,7 @@ fn three_admins_removing_one_another_keep_only_the_earliest_removal() {
                 EntryOutcome::Dropped(DropReason::BeatenBy(h.entries[5].position))
             );
         }
-        assert_eq!(r.state.store.as_ref().unwrap().key, key(101));
+        assert_eq!(r.state.store.as_ref().unwrap().key, key(1));
         assert_eq!(r.state.members[&member(1)].sealing, keys(1).sealing);
     });
 }
@@ -371,7 +362,7 @@ fn three_admins_removing_one_another_keep_only_the_earliest_removal() {
 #[test]
 fn removed_author_keeps_authority_for_a_concurrent_role_change() {
     let mut h = household(Admin, Admin);
-    h.push(0, 0, &[0, 1, 2, 3, 4], remove(1, &[]));
+    h.push(0, 0, &[0, 1, 2, 3, 4], remove(1));
     h.push(1, 1, &[0, 1, 2, 3, 4], role(2, Member));
     h.every_order(|r| {
         assert!(r.state.members[&member(1)].removed);
@@ -391,8 +382,8 @@ pub(crate) fn losing_removal() -> History {
 #[test]
 fn dropped_removal_does_not_block_the_phone() {
     let mut h = losing_removal();
-    h.push(1, 1, &[0, 1, 2, 3], remove(0, &[]));
-    h.push(0, 0, &[0, 1, 2, 3], remove(1, &[]));
+    h.push(1, 1, &[0, 1, 2, 3], remove(0));
+    h.push(0, 0, &[0, 1, 2, 3], remove(1));
     h.push(1, 4, &[0, 1, 2, 3], device(5));
     h.every_order(|r| {
         assert_eq!(r.state.devices[&DeviceId(5)].member, member(1));
@@ -405,7 +396,7 @@ fn a_drop_persists_after_its_winner_drops_on_restart() {
     let mut h = losing_removal();
     h.push(0, 0, &[0, 1, 2, 3], add(2, Admin));
     h.push(1, 1, &[0, 1, 2, 3], role(1, Member));
-    h.push(1, 4, &[0, 1, 2, 3], remove(0, &[]));
+    h.push(1, 4, &[0, 1, 2, 3], remove(0));
     h.every_order(|r| {
         assert!(!r.state.members.contains_key(&member(2)));
         assert_eq!(h.drops(r), [4, 6]);
@@ -471,6 +462,7 @@ pub(crate) fn make(c: u64, name: &str) -> StoreChange {
         circle: circle(c),
         name: name.into(),
         key: key(c + 10),
+        key_hash: [17; 32],
     }
 }
 pub(crate) fn join(c: u64, m: u8) -> StoreChange {
@@ -483,7 +475,6 @@ pub(crate) fn leave(c: u64, m: u8) -> StoreChange {
     StoreChange::RemoveCircleMember {
         circle: circle(c),
         member: member(m),
-        key: key(c + 20),
     }
 }
 pub(crate) fn rename(c: u64, name: &str) -> StoreChange {
@@ -545,14 +536,14 @@ fn circle_deletion_beats_rename_and_reset() {
 }
 
 #[test]
-fn circle_key_rotation_defeats_a_concurrent_addition() {
+fn circle_removal_defeats_a_concurrent_addition() {
     let mut h = gifts();
     h.all(0, 0, add(2, Member));
     h.push(0, 0, &[0, 1, 2, 3, 4, 5], join(0, 2));
     h.push(1, 1, &[0, 1, 2, 3, 4, 5], leave(0, 0));
     h.every_order(|r| {
         assert_eq!(r.state.circles[&circle(0)].members, [member(1)].into());
-        assert_eq!(r.state.circles[&circle(0)].key, key(20));
+        assert_eq!(r.state.circles[&circle(0)].key, key(10));
         assert_eq!(h.drops(r), [6]);
     });
 }
@@ -617,64 +608,55 @@ fn carols_circles() -> History {
 }
 
 #[test]
-fn removing_carol_rotates_shared_keys_and_deletes_her_private_circle() {
+fn removing_carol_preserves_shared_keys_and_deletes_her_private_circle() {
     let mut h = carols_circles();
-    h.all(0, 0, remove(2, &[0]));
+    h.all(0, 0, remove(2));
     h.every_order(|r| {
         assert!(r.state.members[&member(2)].removed);
         assert!(r.state.devices[&DeviceId(2)].removed);
         assert_eq!(r.state.circles[&circle(0)].members, [member(1)].into());
-        assert_eq!(r.state.circles[&circle(0)].key, key(200));
+        assert_eq!(r.state.circles[&circle(0)].key, key(10));
         assert!(r.state.circles[&circle(1)].deleted);
         assert!(h.drops(r).is_empty());
     });
 }
 
 #[test]
-fn removing_carol_defeats_bens_concurrent_gift_invitation_for_dan() {
+fn removing_carol_keeps_bens_concurrent_gift_invitation_for_dan() {
     let mut h = carols_circles().prefix(7);
     h.all(0, 0, add(3, Member));
     h.push(1, 1, &[0, 1, 2, 3, 4, 5, 6, 7], join(0, 3));
-    h.push(0, 0, &[0, 1, 2, 3, 4, 5, 6, 7], remove(2, &[0]));
-    h.every_order(|r| {
-        assert_eq!(r.state.circles[&circle(0)].members, [member(1)].into());
-        assert!(!r.state.members[&member(3)].removed);
-        assert_eq!(h.drops(r), [8]);
-    });
-}
-
-#[test]
-fn circle_key_lists_are_checked_in_the_author_view_including_noops() {
-    for circles in [vec![], vec![1], vec![0, 1], vec![0, 2]] {
-        let mut h = carols_circles();
-        h.all(0, 0, remove(2, &circles));
-        h.every_order(|r| {
-            assert_eq!(
-                r.entries[&h.entries[8].position],
-                EntryOutcome::Dropped(DropReason::WrongCircleKeys)
-            )
-        });
-    }
-    let mut h = carols_circles();
-    h.all(0, 0, remove(2, &[0]));
-    h.all(0, 0, remove(2, &[0]));
+    h.push(0, 0, &[0, 1, 2, 3, 4, 5, 6, 7], remove(2));
     h.every_order(|r| {
         assert_eq!(
-            r.entries[&h.entries[9].position],
-            EntryOutcome::Dropped(DropReason::WrongCircleKeys)
-        )
+            r.state.circles[&circle(0)].members,
+            [member(1), member(3)].into()
+        );
+        assert!(!r.state.members[&member(3)].removed);
+        assert!(h.drops(r).is_empty());
     });
 }
 
 #[test]
-fn gifts_key_list_does_not_grow_as_concurrent_additions_arrive() {
+fn repeated_member_removals_need_no_key_payload() {
+    let mut h = carols_circles();
+    h.all(0, 0, remove(2));
+    h.all(0, 0, remove(2));
+    h.every_order(|r| {
+        assert!(h.drops(r).is_empty());
+        assert!(r.state.circles[&circle(1)].deleted);
+    });
+}
+
+#[test]
+fn removal_uses_membership_when_concurrent_circle_additions_arrive() {
     let mut h = History::new();
     h.all(0, 0, add(1, Member));
     h.all(0, 0, add(2, Member));
     h.all(0, 0, make(0, "Gifts"));
     h.push(0, 4, &[0, 1, 2, 3], join(0, 1));
     h.push(0, 4, &[0, 1, 2, 3, 4], join(0, 2));
-    h.push(0, 0, &[0, 1, 2, 3], remove(1, &[]));
+    h.push(0, 0, &[0, 1, 2, 3], remove(1));
     h.every_order(|r| {
         assert_eq!(
             r.state.circles[&circle(0)].members,
@@ -686,19 +668,17 @@ fn gifts_key_list_does_not_grow_as_concurrent_additions_arrive() {
 }
 
 #[test]
-fn circle_and_store_removals_conflict_when_both_replace_gifts_key() {
+fn circle_and_store_removals_do_not_conflict_over_a_key() {
     let mut h = household(Admin, Member).prefix(3);
     h.all(0, 0, make(0, "Gifts"));
     h.all(0, 0, join(0, 1));
     h.push(0, 0, &[0, 1, 2, 3, 4], leave(0, 1));
-    h.push(0, 4, &[0, 1, 2, 3, 4], remove(0, &[0]));
+    h.push(0, 4, &[0, 1, 2, 3, 4], remove(0));
     h.every_order(|r| {
-        assert!(!r.state.members[&member(0)].removed);
-        assert_eq!(r.state.members[&member(1)].role, Admin);
-        assert!(!r.state.circles[&circle(0)].deleted);
-        assert_eq!(r.state.circles[&circle(0)].members, [member(0)].into());
-        assert_eq!(r.state.circles[&circle(0)].key, key(20));
-        assert_eq!(h.drops(r), [6]);
+        assert!(r.state.members[&member(0)].removed);
+        assert!(r.state.circles[&circle(0)].deleted);
+        assert_eq!(r.state.circles[&circle(0)].key, key(10));
+        assert!(h.drops(r).is_empty());
     });
 }
 
@@ -707,7 +687,7 @@ fn removing_a_circles_only_member_beats_their_concurrent_rename() {
     let mut h = household(Member, Member).prefix(3);
     h.all(1, 1, make(0, "Ben's notes"));
     h.push(1, 1, &[0, 1, 2, 3], rename(0, "Journal"));
-    h.push(0, 0, &[0, 1, 2, 3], remove(1, &[]));
+    h.push(0, 0, &[0, 1, 2, 3], remove(1));
     h.every_order(|r| {
         assert!(r.state.circles[&circle(0)].deleted);
         assert_eq!(h.drops(r), [4]);
@@ -736,7 +716,7 @@ fn winning_removal_drops_all_opponents_before_restarting() {
     let mut h = household(Admin, Member).prefix(3);
     h.push(0, 0, &[0, 1, 2], add(2, Member));
     h.push(0, 0, &[0, 1, 2, 3], add(3, Member));
-    h.push(1, 1, &[0, 1, 2], remove(1, &[]));
+    h.push(1, 1, &[0, 1, 2], remove(1));
     h.every_order(|r| {
         assert_eq!(h.drops(r), [3, 4]);
         assert!(!r.state.members.contains_key(&member(2)));
@@ -757,7 +737,7 @@ fn a_new_arrival_reconsiders_entries_dropped_by_the_previous_replay() {
         &[0, 1, 2, 3, 4],
         crate::replay::tests::role(1, Member),
     );
-    h.push(1, 4, &[0, 1, 2, 3, 4], remove(0, &[0]));
+    h.push(1, 4, &[0, 1, 2, 3, 4], remove(0));
     let arrived: Vec<_> = h
         .entries
         .iter()
@@ -784,7 +764,7 @@ fn a_new_arrival_reconsiders_entries_dropped_by_the_previous_replay() {
 }
 
 #[test]
-fn concurrent_store_removals_keep_the_earlier_keys_and_only_its_removed_devices() {
+fn concurrent_store_removals_preserve_keys() {
     let mut h = household(Admin, Member);
     h.all(0, 0, add(3, Member));
     h.all(3, 3, device(3));
@@ -794,24 +774,19 @@ fn concurrent_store_removals_keep_the_earlier_keys_and_only_its_removed_devices(
     h.all(0, 0, join(0, 3));
     h.all(0, 0, join(0, 4));
     let past: Vec<_> = (0..h.entries.len()).collect();
-    for (author, removed, replacement) in [(0, 3, u64::MAX), (1, 4, 0)] {
+    for (author, removed) in [(0, 3), (1, 4)] {
         h.push(
             author,
             u64::from(author),
             &past,
             StoreChange::RemoveMember {
                 member: member(removed),
-                key: key(replacement),
-                circle_keys: vec![coven_format::store_log::CircleKeyId {
-                    circle: circle(0),
-                    key: key(replacement),
-                }],
             },
         );
     }
     h.every_order(|r| {
-        assert_eq!(r.state.store.as_ref().unwrap().key, key(u64::MAX));
-        assert_eq!(r.state.circles[&circle(0)].key, key(u64::MAX));
+        assert_eq!(r.state.store.as_ref().unwrap().key, key(1));
+        assert_eq!(r.state.circles[&circle(0)].key, key(10));
         assert_eq!(
             r.state.circles[&circle(0)].members,
             [member(0), member(4)].into()
@@ -825,11 +800,11 @@ fn concurrent_store_removals_keep_the_earlier_keys_and_only_its_removed_devices(
         }
         assert_eq!(h.drops(r), [13]);
     });
-    // A later explicit entry can remove Erin after reading the winning rotation.
+    // A later explicit entry can remove Erin after reading the winning removal.
     h.all(1, 1, h.entries[13].change.clone());
     h.every_order(|r| {
-        assert_eq!(r.state.store.as_ref().unwrap().key, key(0));
-        assert_eq!(r.state.circles[&circle(0)].key, key(0));
+        assert_eq!(r.state.store.as_ref().unwrap().key, key(1));
+        assert_eq!(r.state.circles[&circle(0)].key, key(10));
         assert_eq!(r.state.circles[&circle(0)].members, [member(0)].into());
         assert!(r.state.members[&member(3)].removed);
         assert!(r.state.members[&member(4)].removed);

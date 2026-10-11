@@ -12,10 +12,7 @@ use coven_database::{
     EntryOutcome, LocalStoreLog, NewOperation, OperationRecord, ReplayEntry, StoreLog,
     StoreLogReplay,
 };
-use coven_format::{
-    store_log::{CircleKeyId, StoreChange},
-    MemberAccess,
-};
+use coven_format::{store_log::StoreChange, MemberAccess};
 use coven_foundation::id_source::KeyId;
 use coven_storage::MemberRemoval;
 
@@ -103,13 +100,21 @@ impl StoreLogSync {
         let member = self.operation_member()?;
         if data.entry()?.is_none() {
             // Fresh authoring always uses the latest available replay. No entry
-            // number or replacement key id survives a dropped attempt's restart.
+            // number or introduced key id survives a dropped attempt's restart.
             self.step().await?;
             if self.pending_reload().await?.is_some() {
                 return Ok(Progress::Waiting);
             }
             let local = self.database.local_store_log().await?;
-            let Some(change) = self.operation_change(&local, &member.member_id(), &mut data)?
+            let mut ring = self.store_keys.read()?;
+            let mut damages = Vec::new();
+            self.update_keys(&local.log, &member, &mut ring, &mut damages)
+                .await?;
+            if let Some(damaged) = damages.into_iter().next() {
+                return Err(damaged.into());
+            }
+            let Some(change) =
+                self.operation_change(&local, &member.member_id(), &mut data, &mut ring)?
             else {
                 self.database
                     .advance_operation(data.update(record, data.entry_step_number(5))?)
@@ -162,13 +167,6 @@ impl StoreLogSync {
                         return Ok(Progress::Waiting);
                     }
                 }
-            }
-            let mut ring = self.store_keys.read()?;
-            let mut damages = Vec::new();
-            self.update_keys(&local.log, &member, &mut ring, &mut damages)
-                .await?;
-            if let Some(damaged) = damages.into_iter().next() {
-                return Err(damaged.into());
             }
             crate::store_log_keys::check_shared_keys(&local.log, &change, &ring)?;
             let record = record.clone();
@@ -285,6 +283,7 @@ impl StoreLogSync {
         local: &LocalStoreLog,
         me: &MemberId,
         data: &mut Data,
+        ring: &mut Option<coven_crypto::StoreKeyring>,
     ) -> Result<Option<StoreChange>, SyncError> {
         let state = &local.log.replay.state;
         let key = || KeyId(self.ids.new_id());
@@ -326,32 +325,26 @@ impl StoreLogSync {
                     return Ok(None);
                 }
                 self.check_removal(local, me, &target)?;
-                StoreChange::RemoveMember {
-                    circle_keys: state
-                        .circles
-                        .iter()
-                        .filter(|(_, c)| {
-                            !c.deleted && c.members.contains(&target) && c.members.len() > 1
-                        })
-                        .map(|(circle, _)| CircleKeyId {
-                            circle: *circle,
-                            key: key(),
-                        })
-                        .collect(),
-                    member: target,
-                    key: key(),
-                }
+                StoreChange::RemoveMember { member: target }
             }
             Intent::CreateCircle { circle, name } => {
                 self.require_member(state, me)?;
                 if effects::circle(state, *circle).is_some() {
                     return Ok(None);
                 }
-                StoreChange::CreateCircle {
+                let material = coven_crypto::CircleKey::generate(*circle, key())?;
+                let change = StoreChange::CreateCircle {
                     circle: *circle,
                     name: name.clone(),
-                    key: key(),
-                }
+                    key: material.id(),
+                    key_hash: material.hash(),
+                };
+                ring.as_mut()
+                    .ok_or(SyncError::KeyUnavailable(
+                        state.store.as_ref().expect("member has a store").key,
+                    ))?
+                    .insert_circle_key(material)?;
+                change
             }
             Intent::AddCircleMember { circle, member } => {
                 let target = member.parse()?;
@@ -374,7 +367,6 @@ impl StoreLogSync {
                 StoreChange::RemoveCircleMember {
                     circle: *circle,
                     member: target,
-                    key: key(),
                 }
             }
             Intent::DeleteCircle { circle, .. } => {

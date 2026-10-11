@@ -208,14 +208,13 @@ fn parts(
     for (part, key) in opened.header.parts.iter().zip(&opened.prefix.part_keys) {
         let introduction = log.entries.iter().find(|e| {
             crate::store_log_keys::introduced(&e.entry.change)
-                .contains(&(part.audience.clone(), *key))
+                == Some((part.audience.clone(), *key))
         });
         let Some(introduction) = introduction else {
             return Err(SyncError::KeyUnavailable(*key));
         };
         let holds = crate::store_log_keys::holds(Some(ring), &part.audience, *key);
-        // Dropped removals share their keys with the latest audience (§11,
-        // §14.4). Its members wait for that copy before applying the part.
+        // Current audience members wait for historical keys before applying a part.
         if !holds
             && key_audience_contains(log, replays, &introduction.entry, &part.audience, member)
         {

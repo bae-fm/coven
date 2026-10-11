@@ -2,48 +2,23 @@ use super::*;
 use crate::{encode_frame, test_utils, Object};
 
 #[test]
-fn entries_preserve_every_key_id_byte_including_zero() {
-    for key in [
-        KeyId(uuid::Uuid::from_bytes([0; 16])),
-        KeyId(uuid::Uuid::from_bytes(std::array::from_fn(|i| i as u8))),
+fn removal_payloads_contain_only_their_targets() {
+    let member = test_utils::member().signing;
+    for (tag, target) in [
+        (2, member.to_bytes().to_vec()),
+        (
+            10,
+            [circle(1).0.as_bytes().as_slice(), &member.to_bytes()].concat(),
+        ),
     ] {
-        let changes = [
-            StoreChange::CreateStore {
-                access: crate::MemberAccess::S3AccessKey {
-                    access_key_id: "fixture-access-key".into(),
-                },
-                store: StoreId(uuid::Uuid::from_u128(1)),
-                name: "S".into(),
-                admin: test_utils::member(),
-                device_name: "D".into(),
-                key,
-            },
-            StoreChange::CreateCircle {
-                circle: circle(1),
-                name: "C".into(),
-                key,
-            },
-            StoreChange::RemoveMember {
-                member: test_utils::member().signing,
-                key,
-                circle_keys: vec![CircleKeyId {
-                    circle: circle(1),
-                    key,
-                }],
-            },
-            StoreChange::RemoveCircleMember {
-                circle: circle(1),
-                member: test_utils::member().signing,
-                key,
-            },
-        ];
-        for change in changes {
-            let object = Object::StoreLog(StoreLogEntry {
-                change,
-                ..test_utils::store_log()
-            });
-            assert_eq!(Object::decode(&object.encode().unwrap()).unwrap(), object);
-        }
+        let mut bytes = Object::StoreLog(test_utils::store_log()).encode().unwrap();
+        bytes.truncate(75);
+        bytes.push(tag);
+        bytes.extend(target);
+        let length = (bytes.len() - crate::FRAME_PREFIX_LEN) as u32;
+        bytes[3..7].copy_from_slice(&length.to_be_bytes());
+        let decoded = Object::decode(&bytes).expect("D6 removal has no key payload");
+        assert_eq!(decoded.encode().unwrap(), bytes);
     }
 }
 
@@ -51,55 +26,134 @@ fn circle(number: u128) -> CircleId {
     CircleId(uuid::Uuid::from_u128(number))
 }
 
-fn circle_key(circle_number: u128, key: u8) -> CircleKeyId {
-    CircleKeyId {
-        circle: circle(circle_number),
-        key: KeyId(uuid::Uuid::from_bytes([key; 16])),
-    }
+fn frame(change: StoreChange) -> Object {
+    Object::StoreLog(StoreLogEntry {
+        change,
+        ..test_utils::store_log()
+    })
+}
+
+fn set_length(bytes: &mut [u8]) {
+    let length = (bytes.len() - crate::FRAME_PREFIX_LEN) as u32;
+    bytes[3..7].copy_from_slice(&length.to_be_bytes());
 }
 
 #[test]
-fn member_removal_round_trips_replacement_keys() {
-    for circle_keys in [vec![], vec![circle_key(1, u8::MAX), circle_key(3, 1)]] {
-        let mut entry = test_utils::member_removal();
-        entry.change = StoreChange::RemoveMember {
-            member: test_utils::member().signing,
-            key: KeyId(uuid::Uuid::from_bytes([u8::MAX; 16])),
-            circle_keys,
-        };
-        let object = Object::StoreLog(entry);
-        assert_eq!(Object::decode(&object.encode().unwrap()).unwrap(), object);
-    }
-}
-
-#[test]
-fn member_removal_rejects_repeated_or_unordered_replacement_circles() {
-    for circle_keys in [
-        vec![circle_key(1, 2), circle_key(1, 3)],
-        vec![circle_key(3, 2), circle_key(1, 3)],
-    ] {
-        let mut entry = test_utils::member_removal();
-        entry.change = StoreChange::RemoveMember {
-            member: test_utils::member().signing,
-            key: KeyId(uuid::Uuid::from_bytes([1; 16])),
-            circle_keys,
-        };
-        for result in [
-            Object::StoreLog(entry.clone()).encode().map(|_| ()),
-            Object::decode(&encode_frame(4, &entry).unwrap()).map(|_| ()),
-        ] {
-            assert!(
-                matches!(
-                    result,
-                    Err(Error::Invalid {
-                        rule: Rule::Order,
-                        ..
-                    })
-                ),
-                "{result:?}"
-            );
+fn introduction_layouts_preserve_exact_key_ids_and_hashes() {
+    for key_bytes in [[0; 16], std::array::from_fn(|i| i as u8)] {
+        for key_hash in [[0; 32], std::array::from_fn(|i| i as u8), [255; 32]] {
+            let key = KeyId(uuid::Uuid::from_bytes(key_bytes));
+            let changes = [
+                StoreChange::CreateStore {
+                    store: StoreId(uuid::Uuid::from_bytes([0x10; 16])),
+                    name: "S".into(),
+                    admin: test_utils::member(),
+                    access: crate::MemberAccess::ProviderAccount("a".into()),
+                    device_name: "D".into(),
+                    key,
+                    key_hash,
+                },
+                StoreChange::CreateCircle {
+                    circle: circle(1),
+                    name: "C".into(),
+                    key,
+                    key_hash,
+                },
+                StoreChange::RotateKey {
+                    audience: Audience::Store,
+                    key,
+                    key_hash,
+                },
+                StoreChange::RotateKey {
+                    audience: Audience::Circle(circle(1)),
+                    key,
+                    key_hash,
+                },
+            ];
+            let admin = test_utils::member();
+            let creation = [
+                vec![0],
+                vec![0x10; 16],
+                b"\0\0\0\x01S".to_vec(),
+                admin.signing.to_bytes().to_vec(),
+                admin.sealing.as_bytes().to_vec(),
+                b"\0\0\0\0\x01a\0\0\0\x01D".to_vec(),
+            ]
+            .concat();
+            let prefixes = [
+                creation,
+                [
+                    vec![6],
+                    circle(1).0.as_bytes().to_vec(),
+                    b"\0\0\0\x01C".to_vec(),
+                ]
+                .concat(),
+                vec![15, 0],
+                [vec![15, 1], circle(1).0.as_bytes().to_vec()].concat(),
+            ];
+            for (change, prefix) in changes.into_iter().zip(prefixes) {
+                let object = frame(change);
+                let bytes = object.encode().unwrap();
+                let expected = [prefix, key_bytes.to_vec(), key_hash.to_vec()].concat();
+                assert_eq!(&bytes[75..], expected);
+                assert_eq!(Object::decode(&bytes).unwrap(), object);
+                for hash_length in 0..32 {
+                    let mut shortened = bytes[..bytes.len() - 32 + hash_length].to_vec();
+                    set_length(&mut shortened);
+                    assert_eq!(Object::decode(&shortened), Err(Error::Truncated));
+                }
+                let mut overlong = bytes.clone();
+                overlong.push(0);
+                set_length(&mut overlong);
+                assert_eq!(Object::decode(&overlong), Err(Error::TrailingBytes));
+            }
         }
     }
+}
+
+#[test]
+fn store_changes_keep_their_tags_and_reject_truncated_or_extended_payloads() {
+    let tags = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 15];
+    let changes = test_utils::store_changes();
+    assert_eq!(changes.len(), tags.len());
+    for (change, tag) in changes.into_iter().zip(tags) {
+        let bytes = frame(change).encode().unwrap();
+        assert_eq!(bytes[75], tag);
+        for end in 76..bytes.len() {
+            let mut truncated = bytes[..end].to_vec();
+            set_length(&mut truncated);
+            assert!(Object::decode(&truncated).is_err(), "tag {tag}, end {end}");
+        }
+        let mut extended = bytes.clone();
+        extended.push(0);
+        set_length(&mut extended);
+        assert_eq!(Object::decode(&extended), Err(Error::TrailingBytes));
+        if matches!(tag, 2 | 10) {
+            let mut key_payload = bytes;
+            key_payload.extend([0; 20]);
+            set_length(&mut key_payload);
+            assert_eq!(Object::decode(&key_payload), Err(Error::TrailingBytes));
+        }
+    }
+}
+
+#[test]
+fn rotation_rejects_unknown_audiences_and_removal_rejects_invalid_members() {
+    let mut rotation = frame(StoreChange::RotateKey {
+        audience: Audience::Store,
+        key: KeyId(uuid::Uuid::nil()),
+        key_hash: [0; 32],
+    })
+    .encode()
+    .unwrap();
+    rotation[76] = 2;
+    assert!(matches!(
+        Object::decode(&rotation),
+        Err(Error::UnknownTag { tag: 2, .. })
+    ));
+    let mut removal = frame(test_utils::member_removal().change).encode().unwrap();
+    removal[76..].fill(0);
+    assert!(Object::decode(&removal).is_err());
 }
 
 #[test]

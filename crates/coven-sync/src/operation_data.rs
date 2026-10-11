@@ -61,7 +61,7 @@ impl Intent {
 #[derive(Serialize, Deserialize)]
 pub(crate) struct EntryWork {
     pub(crate) intent: Intent,
-    // Present once preparation fixes the author view, replacement key ids and bytes.
+    // Present once preparation fixes the author view and entry bytes.
     pub(crate) entry: Option<Vec<u8>>,
     pub(crate) removal: Option<MemberRemoval>,
 }

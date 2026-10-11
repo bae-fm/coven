@@ -1,12 +1,11 @@
 //! Changes to the store itself, carrying causal positions and replay timestamps (§9).
 //!
 //! Decoding checks one frame's fields. Sync checks causal closure before replay;
-//! replay determines authority, conflicts, version effects and current keys from
-//! the entry set. A removal's exact replacement-circle list and deleted circles
-//! also depend on its author's view, so the frame decoder checks only list order.
+//! replay determines authority, conflicts, version effects and deleted circles
+//! from the entry set. Key commitments bind introductions to their key bytes.
 
 use crate::error::{require, Error, Rule};
-use crate::value::{name, ordered, positive, EntryId, EntryPositions};
+use crate::value::{name, positive, EntryId, EntryPositions};
 use crate::wire::{wire_struct, Decoder, Encoder, Wire};
 use coven_crypto::{MemberId, SealingPublicKey};
 use coven_foundation::id_source::{CircleId, DeviceId, KeyId, StoreId};
@@ -59,16 +58,6 @@ pub struct SnapshotId {
 }
 wire_struct!(SnapshotId, audience, device, number);
 
-/// A circle and the replacement key made for it by a member removal (§13).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CircleKeyId {
-    /// The circle whose key was replaced.
-    pub circle: CircleId,
-    /// The replacement circle key's random id.
-    pub key: KeyId,
-}
-wire_struct!(CircleKeyId, circle, key);
-
 /// Every kind of store-log change listed in §9, including the first entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoreChange {
@@ -84,6 +73,8 @@ pub enum StoreChange {
         access: crate::MemberAccess,
         /// The first store key, introduced by this entry.
         key: KeyId,
+        /// SHA-256 of the exact 32 store-key bytes.
+        key_hash: [u8; 32],
         /// The name of the device that wrote this entry, belonging to its author.
         device_name: String,
     },
@@ -101,15 +92,10 @@ pub enum StoreChange {
         /// The author's provider account or public S3 key id; no credentials.
         access: crate::MemberAccess,
     },
-    /// Remove a member, replace their audience keys and delete circles left empty (§13).
+    /// Remove a member and delete circles left empty (§13).
     RemoveMember {
         /// The removed member.
         member: MemberId,
-        /// The replacement store key's random id (§13).
-        key: KeyId,
-        /// Each remaining circle the member was in and its replacement key,
-        /// strictly increasing by circle.
-        circle_keys: Vec<CircleKeyId>,
     },
     /// Set a member's role.
     ChangeRole {
@@ -138,6 +124,8 @@ pub enum StoreChange {
         name: String,
         /// The first circle key, introduced by this entry.
         key: KeyId,
+        /// SHA-256 of the exact 32 circle-key bytes.
+        key_hash: [u8; 32],
     },
     /// Rename a circle without changing its members, keys or rows.
     RenameCircle {
@@ -158,14 +146,21 @@ pub enum StoreChange {
         /// The added member.
         member: MemberId,
     },
-    /// Remove a circle member and replace its key (§14.6).
+    /// Remove a circle member, deleting the circle if left empty (§14.6).
     RemoveCircleMember {
         /// The circle being left.
         circle: CircleId,
         /// The removed member.
         member: MemberId,
-        /// The replacement circle key's random id.
+    },
+    /// Introduce a key without changing audience membership (§11).
+    RotateKey {
+        /// The audience whose member authored the rotation.
+        audience: Audience,
+        /// The introduced key's random id.
         key: KeyId,
+        /// SHA-256 of the exact 32 key bytes.
+        key_hash: [u8; 32],
     },
     /// Raise an audience's app schema version with its replacement snapshot (§17.1).
     RaiseSchema {
@@ -195,15 +190,14 @@ impl StoreChange {
             Self::AddDevice { name: n, .. }
             | Self::CreateCircle { name: n, .. }
             | Self::RenameCircle { name: n, .. } => name(n),
-            Self::RemoveMember { circle_keys, .. } => {
-                ordered(circle_keys, |key| key.circle, "replacement circle keys")
-            }
             Self::RaiseSchema { version, snapshot } => {
                 require(*version > 0, "schema version", Rule::Required)?;
                 positive(snapshot.number)
             }
             Self::Reset { snapshot } => positive(snapshot.number),
-            Self::SetAccess { .. }
+            Self::RemoveMember { .. }
+            | Self::RotateKey { .. }
+            | Self::SetAccess { .. }
             | Self::AddMember { .. }
             | Self::ChangeRole { .. }
             | Self::RemoveDevice { .. }
@@ -233,20 +227,21 @@ macro_rules! store_changes {
     };
 }
 store_changes!(
-    0 => CreateStore { store, name => crate::wire::get_name, admin, access, device_name => crate::wire::get_name, key },
+    0 => CreateStore { store, name => crate::wire::get_name, admin, access, device_name => crate::wire::get_name, key, key_hash },
     1 => AddMember { keys, role, access },
-    2 => RemoveMember { member, key, circle_keys },
+    2 => RemoveMember { member },
     3 => ChangeRole { member, role },
     4 => AddDevice { device, name => crate::wire::get_name },
     5 => RemoveDevice { device },
-    6 => CreateCircle { circle, name => crate::wire::get_name, key },
+    6 => CreateCircle { circle, name => crate::wire::get_name, key, key_hash },
     7 => RenameCircle { circle, name => crate::wire::get_name },
     8 => DeleteCircle { circle },
     9 => AddCircleMember { circle, member },
-    10 => RemoveCircleMember { circle, member, key },
+    10 => RemoveCircleMember { circle, member },
     11 => RaiseSchema { version, snapshot },
     13 => Reset { snapshot },
     14 => SetAccess { access },
+    15 => RotateKey { audience, key, key_hash },
 );
 
 /// One store-log entry. Its eventual signature establishes who authored it (§9).

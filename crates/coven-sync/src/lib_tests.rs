@@ -10,7 +10,7 @@ use coven_crypto::MemberId;
 use coven_database::{
     DatabaseBuilder, EntryOutcome, StoreLog, StoreLogCheck, StoreLogReplay, StoreLogState,
 };
-use coven_format::store_log::{CircleKeyId, MemberRole, StoreChange};
+use coven_format::store_log::{MemberRole, StoreChange};
 use coven_foundation::{
     files::{StoreDir, StoreLayout},
     id_source::{CircleId, DeviceId, SequentialIds, StoreId},
@@ -102,10 +102,10 @@ impl Generator {
         };
         let audience = self.audience();
         match self.pick(12) {
-            0 => [remove(1, &[0, 1]), remove(2, &[0, 1])],
+            0 => [remove(1), remove(2)],
             1 => [leave(0, 1), leave(0, 2)],
-            2 => [remove(1, &[0, 1]), leave(0, 2)],
-            3 => [leave(0, 1), remove(2, &[0, 1])],
+            2 => [remove(1), leave(0, 2)],
+            3 => [leave(0, 1), remove(2)],
             4 => [
                 reset(audience.clone()),
                 raise(2, 30 + self.pick(2) as u64, audience),
@@ -129,23 +129,9 @@ impl Generator {
         } else {
             MemberRole::Member
         };
-        match self.pick(13) {
+        match self.pick(14) {
             0 => add(m, role),
-            1 => StoreChange::RemoveMember {
-                member: member(m),
-                key: key(self.0),
-                circle_keys: view
-                    .circles
-                    .iter()
-                    .filter_map(|(id, c)| {
-                        (!c.deleted && c.members.len() > 1 && c.members.contains(&member(m)))
-                            .then_some(CircleKeyId {
-                                circle: *id,
-                                key: key(self.0),
-                            })
-                    })
-                    .collect(),
-            },
+            1 => remove(m),
             2 => crate::replay::tests::role(m, role),
             3 => device(self.pick(9) as u64),
             4 => {
@@ -190,6 +176,11 @@ impl Generator {
                     },
                 },
             },
+            13 => StoreChange::RotateKey {
+                audience: self.audience(),
+                key: key(self.pick(100) as u64 + 1000),
+                key_hash: [0x91; 32],
+            },
             _ => unreachable!(),
         }
     }
@@ -222,7 +213,7 @@ fn input(h: &History) -> Value {
         let action = match &entry.change {
             StoreChange::CreateStore { access, .. } => json!({"kind":0,"access":serde_json::to_string(access).unwrap()}),
             StoreChange::AddMember { keys, role, access } => json!({"kind":1,"member":member_number(&keys.signing),"role":role_number(*role),"access":serde_json::to_string(access).unwrap()}),
-            StoreChange::RemoveMember { member, circle_keys, .. } => json!({"kind":2,"member":member_number(member),"circles":circle_keys.iter().map(|k| circle_number(k.circle)).collect::<Vec<_>>()}),
+            StoreChange::RemoveMember { member } => json!({"kind":2,"member":member_number(member),"circles":[]}),
             StoreChange::ChangeRole { member, role } => json!({"kind":3,"member":member_number(member),"role":role_number(*role)}),
             StoreChange::AddDevice { device, .. } => json!({"kind":4,"member":member_number(&entry.author),"device":device.0}),
             StoreChange::RemoveDevice { device } => {
@@ -238,6 +229,7 @@ fn input(h: &History) -> Value {
             StoreChange::RemoveCircleMember { circle, member, .. } => json!({"kind":10,"circle":circle_number(*circle),"member":member_number(member)}),
             StoreChange::RaiseSchema { version, snapshot } => json!({"kind":11,"version":version,"snapshot":{"audience":audience_number(&snapshot.audience),"number":snapshot.number}}),
             StoreChange::Reset { snapshot } => json!({"kind":13,"snapshot":{"audience":audience_number(&snapshot.audience),"number":snapshot.number}}),
+            StoreChange::RotateKey { audience, key, .. } => json!({"kind":15,"audience":audience_number(audience),"key":u64::try_from(key.0.as_u128()).unwrap()}),
             StoreChange::SetAccess { access } => json!({"kind":14,"member":member_number(&entry.author),"access":serde_json::to_string(access).unwrap()}),
         };
         json!({"author":member_number(&entry.author),"device":entry.position.device.0,"past":past,"action":action})
@@ -411,8 +403,7 @@ async fn every_author_view_check_is_durable_and_reused_after_reopening() {
         },
     );
     h.all(0, 0, rename(1, "Outside admin"));
-    h.all(0, 0, remove(1, &[]));
-    h.all(0, 0, remove(1, &[0]));
+    h.all(0, 0, remove(1));
     let temporary = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(temporary.path().to_owned());
     let directory = layout
@@ -440,9 +431,8 @@ async fn every_author_view_check_is_durable_and_reused_after_reopening() {
     }
     assert_eq!(log.entries[8].check, StoreLogCheck::DeviceOwner(member(1)));
     assert_eq!(log.entries[9].check, StoreLogCheck::NotAllowed);
-    assert_eq!(log.entries[10].check, StoreLogCheck::WrongCircleKeys);
     assert_eq!(
-        log.entries[11].check,
+        log.entries[10].check,
         StoreLogCheck::DeletedCircles([circle(1)].into())
     );
 }

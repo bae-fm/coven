@@ -26,8 +26,6 @@ pub enum StoreLogCheck {
     Allowed,
     /// The author's view did not allow the change.
     NotAllowed,
-    /// The removal's replacement keys differ from its author's shared circles.
-    WrongCircleKeys,
     /// An authorized device removal, with the owner its author observed.
     DeviceOwner(MemberId),
     /// An authorized store or circle member removal, with the circles it deletes
@@ -42,14 +40,13 @@ impl StoreLogCheck {
         match self {
             Self::Allowed => vec![0],
             Self::NotAllowed => vec![1],
-            Self::WrongCircleKeys => vec![2],
             Self::DeviceOwner(owner) => {
-                let mut bytes = vec![3];
+                let mut bytes = vec![2];
                 bytes.extend(owner.to_bytes());
                 bytes
             }
             Self::DeletedCircles(circles) => {
-                let mut bytes = vec![4];
+                let mut bytes = vec![3];
                 for circle in circles {
                     bytes.extend(circle.0.as_bytes());
                 }
@@ -62,12 +59,11 @@ impl StoreLogCheck {
         match bytes {
             [0] => Ok(Self::Allowed),
             [1] => Ok(Self::NotAllowed),
-            [2] => Ok(Self::WrongCircleKeys),
-            [3, owner @ ..] if owner.len() == 32 => Ok(Self::DeviceOwner(
+            [2, owner @ ..] if owner.len() == 32 => Ok(Self::DeviceOwner(
                 MemberId::from_bytes(owner.try_into().expect("checked owner length"))
                     .map_err(|_| DbError::DamagedDatabase)?,
             )),
-            [4, circles @ ..] if circles.len().is_multiple_of(16) => {
+            [3, circles @ ..] if circles.len().is_multiple_of(16) => {
                 let mut result = BTreeSet::new();
                 for bytes in circles.chunks_exact(16) {
                     let circle = CircleId(uuid::Uuid::from_bytes(

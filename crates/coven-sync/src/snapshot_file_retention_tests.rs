@@ -44,6 +44,7 @@ async fn sync(f: &Fixture) -> (StoreLogSync, MemberKeys, crate::DeviceLogSync) {
             sealing: member.sealing_public_key(),
         },
         key,
+        key_hash: sync.test_key(coven_merge::Audience::Store, key),
         device_name: "Uploader".into(),
     })
     .await

@@ -332,6 +332,9 @@ async fn store_and_gifts_snapshots_at_different_points_load_in_one_transaction()
             circle: gifts,
             name: "Gifts".into(),
             key: key(2),
+            key_hash: a
+                .sync
+                .test_key(coven_merge::Audience::Circle(gifts), key(2)),
         })
         .await
         .unwrap();
@@ -560,7 +563,7 @@ async fn newer_schema_snapshot_is_passed_over_for_an_older_supported_one() {
 }
 
 #[tokio::test]
-async fn a_snapshot_sealed_by_a_dropped_key_introduction_is_not_a_candidate() {
+async fn a_snapshot_keeps_its_key_when_a_removal_is_dropped() {
     let storage = snapshot_storage();
     let mut a = notes_device(storage.clone(), 1).await;
     a.create(key(1)).await;
@@ -574,42 +577,29 @@ async fn a_snapshot_sealed_by_a_dropped_key_introduction_is_not_a_candidate() {
     b.db.apply_downloaded(a.db.test_queued_writes().await.unwrap().remove(0).into())
         .await
         .unwrap();
-    let selected = a.sync.write_snapshot(Audience::Store).await.unwrap();
+    a.sync.write_snapshot(Audience::Store).await.unwrap();
     write_rows(&b, 1, 1, 17, Audience::Store).await;
     let write = b.db.test_queued_writes().await.unwrap()[0].header.position;
     upload(&b, &storage).await;
     let path = ObjectPath::device_log(write.device, NonZeroU64::new(write.number).unwrap());
-    let stored = storage.read(&path).await.unwrap();
     storage.delete(&path).await.unwrap();
     b.clock.set(UNIX_EPOCH + Duration::from_secs(3));
     b.sync
         .make_and_upload_entry(StoreChange::RemoveMember {
             member: a.member.member_id(),
-            key: key(2),
-            circle_keys: Vec::new(),
         })
         .await
         .unwrap();
-    b.sync.write_snapshot(Audience::Store).await.unwrap();
+    let selected = b.sync.write_snapshot(Audience::Store).await.unwrap();
     a.clock.set(UNIX_EPOCH + Duration::from_secs(2));
     a.sync
         .make_and_upload_entry(StoreChange::RemoveMember {
             member: b.member.member_id(),
-            key: key(3),
-            circle_keys: Vec::new(),
         })
         .await
         .unwrap();
     a.sync().await;
-    let before = tables(&a).await;
-    assert!(
-        matches!(a.sync.reload_from_snapshots().await, Err(SyncError::Database(
-        coven_database::DbError::Snapshot(coven_database::SnapshotError::MissingWrites { missing })
-    )) if missing == vec![write])
-    );
-    assert_eq!(tables(&a).await, before);
-    storage.create(&path, &stored).await.unwrap();
-    a.sync.sync_store_log().await.unwrap();
+    a.sync.reload_from_snapshots().await.unwrap();
     assert_eq!(
         selected_snapshot(&mut a).await.snapshot_id(),
         Some(selected)
@@ -715,6 +705,9 @@ async fn reload_reselects_after_store_log_changes_and_preserves_interleaved_app_
             circle: circle(1),
             name: "Gifts".into(),
             key: key(2),
+            key_hash: b
+                .sync
+                .test_key(coven_merge::Audience::Circle(circle(1)), key(2)),
         })
         .await
         .unwrap();

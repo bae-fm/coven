@@ -100,6 +100,10 @@ pub fn write() -> WriteRecord {
         }],
     }
 }
+/// The public fixture's store key, whose bytes are committed by creation.
+pub fn store_key() -> coven_crypto::StoreKey {
+    coven_crypto::StoreKey::from_bytes(KeyId(Uuid::from_bytes([1; 16])), [17; 32])
+}
 /// The first store-log entry.
 pub fn store_log() -> StoreLogEntry {
     StoreLogEntry {
@@ -118,11 +122,12 @@ pub fn store_log() -> StoreLogEntry {
             name: "S".into(),
             admin: member(),
             key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([1; 16])),
+            key_hash: store_key().hash(),
             device_name: "D".into(),
         },
     }
 }
-/// A member removal replacing store/circle keys and deleting circles left empty.
+/// A member removal deleting circles left empty in its author's view.
 pub fn member_removal() -> StoreLogEntry {
     StoreLogEntry {
         position: EntryId {
@@ -136,17 +141,6 @@ pub fn member_removal() -> StoreLogEntry {
             member: "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
                 .parse()
                 .unwrap(),
-            key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([2; 16])),
-            circle_keys: vec![
-                CircleKeyId {
-                    circle: CircleId(Uuid::from_u128(1)),
-                    key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([5; 16])),
-                },
-                CircleKeyId {
-                    circle: CircleId(Uuid::from_u128(3)),
-                    key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([2; 16])),
-                },
-            ],
         },
     }
 }
@@ -440,6 +434,7 @@ pub fn store_changes() -> Vec<StoreChange> {
             circle: c,
             name: "C".into(),
             key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([1; 16])),
+            key_hash: store_key().hash(),
         },
         StoreChange::RenameCircle {
             circle: c,
@@ -453,7 +448,6 @@ pub fn store_changes() -> Vec<StoreChange> {
         StoreChange::RemoveCircleMember {
             circle: c,
             member: m.clone(),
-            key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([2; 16])),
         },
         StoreChange::RaiseSchema {
             version: 2,
@@ -469,6 +463,16 @@ pub fn store_changes() -> Vec<StoreChange> {
             access: crate::MemberAccess::S3AccessKey {
                 access_key_id: "replacement-key".into(),
             },
+        },
+        StoreChange::RotateKey {
+            audience: Audience::Store,
+            key: KeyId(Uuid::from_bytes([3; 16])),
+            key_hash: [0x91; 32],
+        },
+        StoreChange::RotateKey {
+            audience: Audience::Circle(c),
+            key: KeyId(Uuid::from_bytes([4; 16])),
+            key_hash: [0xa2; 32],
         },
     ]
 }

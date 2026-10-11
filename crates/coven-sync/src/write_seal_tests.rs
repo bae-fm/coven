@@ -20,6 +20,9 @@ pub(super) async fn household(storage: Arc<MemoryStorage>) -> Vec<Device> {
     for number in 1..=3 {
         devices.push(circle_device(storage.clone(), number, number as u8 + 2).await);
     }
+    let key_hash = devices[0]
+        .sync
+        .test_key(coven_merge::Audience::Store, KeyId(Uuid::from_u128(1)));
     devices[0]
         .sync
         .make_and_upload_entry(StoreChange::CreateStore {
@@ -30,6 +33,7 @@ pub(super) async fn household(storage: Arc<MemoryStorage>) -> Vec<Device> {
                 sealing: member().sealing_public_key(),
             },
             key: KeyId(Uuid::from_u128(1)),
+            key_hash,
             device_name: "one".into(),
             access: coven_format::MemberAccess::S3AccessKey {
                 access_key_id: "owner-key".into(),
@@ -67,12 +71,17 @@ pub(super) async fn household(storage: Arc<MemoryStorage>) -> Vec<Device> {
     }
     devices[0].sync.sync_store_log().await.unwrap();
     let circle = CircleId(Uuid::from_u128(10));
+    let key_hash = devices[0].sync.test_key(
+        coven_merge::Audience::Circle(circle),
+        KeyId(Uuid::from_u128(10)),
+    );
     devices[0]
         .sync
         .make_and_upload_entry(StoreChange::CreateCircle {
             circle,
             name: "private".into(),
             key: KeyId(Uuid::from_u128(10)),
+            key_hash,
         })
         .await
         .unwrap();
@@ -157,10 +166,12 @@ async fn a_circle_restored_after_deletion_keeps_a_previously_skipped_part_missin
         .make_and_upload_entry(StoreChange::RemoveCircleMember {
             circle,
             member: identity(3).member_id(),
-            key: KeyId(Uuid::from_u128(11)),
         })
         .await
         .unwrap();
+    ben.sync
+        .test_rotate(Audience::Circle(circle), KeyId(Uuid::from_u128(11)))
+        .await;
     for device in [&mut *ana, &mut *carol] {
         device.sync.sync_store_log().await.unwrap();
     }
@@ -207,14 +218,13 @@ async fn a_circle_restored_after_deletion_keeps_a_previously_skipped_part_missin
     assert!(ana.db.store_log().await.unwrap().replay.state.circles[&circle].deleted);
 
     // Ana's tablet still has the common prefix. Its earlier removal beats
-    // both of Ben's entries; Carol can share the dropped circle key.
+    // Ben's removal and deletion; Carol can share the rotation's key.
     tablet.clock.set(UNIX_EPOCH + Duration::from_secs(2));
     tablet
         .sync
         .make_and_upload_entry(StoreChange::RemoveCircleMember {
             circle,
             member: identity(4).member_id(),
-            key: KeyId(Uuid::from_u128(20)),
         })
         .await
         .unwrap();
@@ -263,11 +273,17 @@ async fn new_uploads_wait_for_a_current_members_replacement_circle_key() {
         .make_and_upload_entry(StoreChange::RemoveCircleMember {
             circle: CircleId(Uuid::from_u128(10)),
             member: identity(3).member_id(),
-            key: KeyId(Uuid::from_u128(11)),
         })
         .await
         .unwrap();
     devices[1].sync.sync_store_log().await.unwrap();
+    devices[1]
+        .sync
+        .test_rotate(
+            Audience::Circle(CircleId(Uuid::from_u128(10))),
+            KeyId(Uuid::from_u128(11)),
+        )
+        .await;
     devices[1].custody.persist(&ring).unwrap();
     let log = devices[1].db.store_log().await.unwrap();
     assert!(!log.replay.state.circles[&CircleId(Uuid::from_u128(10))].deleted);
@@ -304,7 +320,6 @@ async fn a_former_circle_member_still_waits_for_its_missing_earlier_key() {
         .make_and_upload_entry(StoreChange::RemoveCircleMember {
             circle: CircleId(Uuid::from_u128(10)),
             member: identity(4).member_id(),
-            key: KeyId(Uuid::from_u128(11)),
         })
         .await
         .unwrap();
@@ -334,7 +349,6 @@ async fn posted_fingerprints_stop_when_a_member_leaves_the_circle() {
         .make_and_upload_entry(StoreChange::RemoveCircleMember {
             circle: CircleId(Uuid::from_u128(10)),
             member: identity(4).member_id(),
-            key: KeyId(Uuid::from_u128(11)),
         })
         .await
         .unwrap();
@@ -346,11 +360,11 @@ async fn posted_fingerprints_stop_when_a_member_leaves_the_circle() {
 }
 
 #[tokio::test]
-async fn dropped_removal_parts_wait_for_redistributed_keys_and_converge() {
+async fn reversed_removal_parts_wait_for_redistributed_keys_and_converge() {
     for store_removal in [false, true] {
         for carol_applies_before_drop in [false, true] {
             for ben_reads_before_copy in [false, true] {
-                dropped_removal_parts(
+                reversed_removal_parts(
                     store_removal,
                     carol_applies_before_drop,
                     ben_reads_before_copy,
@@ -361,7 +375,7 @@ async fn dropped_removal_parts_wait_for_redistributed_keys_and_converge() {
     }
 }
 
-async fn dropped_removal_parts(
+async fn reversed_removal_parts(
     store_removal: bool,
     carol_applies_before_drop: bool,
     ben_reads_before_copy: bool,
@@ -382,31 +396,27 @@ async fn dropped_removal_parts(
     for device in [&mut *ben, &mut *carol] {
         device.sync.sync_store_log().await.unwrap();
     }
-    let removal = |member, number| {
-        let key = KeyId(Uuid::from_u128(number));
+    let removal = |member| {
         if store_removal {
-            StoreChange::RemoveMember {
-                member,
-                key,
-                circle_keys: vec![coven_format::store_log::CircleKeyId {
-                    circle,
-                    key: KeyId(Uuid::from_u128(number + 10)),
-                }],
-            }
+            StoreChange::RemoveMember { member }
         } else {
-            StoreChange::RemoveCircleMember {
-                circle,
-                member,
-                key,
-            }
+            StoreChange::RemoveCircleMember { circle, member }
         }
     };
     ana.clock.set(UNIX_EPOCH + Duration::from_secs(3));
     let dropped = ana
         .sync
-        .make_and_upload_entry(removal(identity(4).member_id(), 2))
+        .make_and_upload_entry(removal(identity(4).member_id()))
         .await
         .unwrap();
+    let audience = if store_removal {
+        Audience::Store
+    } else {
+        Audience::Circle(circle)
+    };
+    ana.sync
+        .test_rotate(audience.clone(), KeyId(Uuid::from_u128(2)))
+        .await;
     sql(&ana.db, "INSERT INTO notes VALUES('one','public','body'); INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','private')").await;
     let writes = ana.writes.upload_writes().await.unwrap();
     assert_eq!(writes.len(), 1);
@@ -420,16 +430,11 @@ async fn dropped_removal_parts(
     ben.clock.set(UNIX_EPOCH + Duration::from_secs(2));
     let winner = ben
         .sync
-        .make_and_upload_entry(removal(identity(3).member_id(), 3))
+        .make_and_upload_entry(removal(identity(3).member_id()))
         .await
         .unwrap();
-    let audience = if store_removal {
-        Audience::Store
-    } else {
-        Audience::Circle(circle)
-    };
-    let dropped_key = KeyId(Uuid::from_u128(2));
-    let copy = crate::store_log_keys::path(&audience, dropped_key, &identity(4).member_id());
+    let rotation_key = KeyId(Uuid::from_u128(2));
+    let copy = crate::store_log_keys::path(&audience, rotation_key, &identity(4).member_id());
     assert!(matches!(
         storage.read(&copy).await,
         Err(error) if error.failure() == coven_storage::StorageFailure::NotFound
@@ -444,19 +449,43 @@ async fn dropped_removal_parts(
         assert!(!crate::store_log_keys::holds(
             Some(&ben.custody.read().unwrap().unwrap()),
             &audience,
-            dropped_key,
+            rotation_key,
         ));
-        ben.writes.download_writes().await.unwrap();
-        ben.clock.set(UNIX_EPOCH + Duration::from_secs(4));
-        ben.writes.download_writes().await.unwrap();
+        for time in [2, 4] {
+            ben.clock.set(UNIX_EPOCH + Duration::from_secs(time));
+            let download = ben.writes.download_writes().await;
+            if store_removal {
+                assert!(
+                    matches!(download, Err(SyncError::KeyUnavailable(key)) if key == rotation_key)
+                );
+            } else {
+                download.unwrap();
+            }
+        }
         assert!(rows(&ben.db).await.is_empty());
         assert_eq!(count(&ben.db).await, 0);
         assert!(matches!(
             ben.sync.reload_from_snapshots().await,
             Err(SyncError::KeyUnavailable(_))
         ));
-        assert!(ben.writes.post_positions().await.unwrap());
-        assert!(!posted(&storage, ben, 2).await.writes.covers(writes[0]));
+        assert!(!ben
+            .db
+            .sync_state(Vec::new())
+            .await
+            .unwrap()
+            .positions
+            .covers(writes[0]));
+        let post = ben.writes.post_positions().await;
+        if store_removal {
+            assert!(matches!(post, Err(SyncError::KeyUnavailable(key)) if key == rotation_key));
+            assert!(matches!(
+                storage.read(&ObjectPath::positions(DeviceId(2))).await,
+                Err(error) if error.failure() == coven_storage::StorageFailure::NotFound
+            ));
+        } else {
+            assert!(post.unwrap());
+            assert!(!posted(&storage, ben, 2).await.writes.covers(writes[0]));
+        }
     }
 
     // Carol owns K2 and shares it through StoreLogSync when she learns the drop.
@@ -475,7 +504,7 @@ async fn dropped_removal_parts(
     assert!(crate::store_log_keys::holds(
         Some(&ben.custody.read().unwrap().unwrap()),
         &audience,
-        dropped_key,
+        rotation_key,
     ));
     let expected = rows(&ana.db).await;
     for device in [&mut *ben, &mut *carol] {
@@ -562,21 +591,14 @@ async fn retries_keep_each_parts_keys_across_store_and_circle_rotations() {
     )
     .await;
     ben.sync
-        .make_and_upload_entry(StoreChange::RemoveMember {
-            member: identity(5).member_id(),
-            key: KeyId(Uuid::from_u128(20)),
-            circle_keys: vec![],
-        })
-        .await
-        .unwrap();
+        .test_rotate(Audience::Store, KeyId(Uuid::from_u128(20)))
+        .await;
     ben.sync
-        .make_and_upload_entry(StoreChange::RemoveCircleMember {
-            circle: CircleId(Uuid::from_u128(10)),
-            member: identity(4).member_id(),
-            key: KeyId(Uuid::from_u128(21)),
-        })
-        .await
-        .unwrap();
+        .test_rotate(
+            Audience::Circle(CircleId(Uuid::from_u128(10))),
+            KeyId(Uuid::from_u128(21)),
+        )
+        .await;
     ana.sync.sync_store_log().await.unwrap();
     assert_eq!(writes::resealed(ana).await.1, first);
     assert_eq!(ana.writes.upload_writes().await.unwrap().len(), 2);

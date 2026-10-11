@@ -59,7 +59,7 @@ pub(crate) fn current(
             if log.replay.entries[&applied.entry.position] != EntryOutcome::Kept {
                 continue;
             }
-            for (owner, key) in crate::store_log_keys::introduced(&applied.entry.change) {
+            if let Some((owner, key)) = crate::store_log_keys::introduced(&applied.entry.change) {
                 if &owner == audience && crate::store_log_keys::holds(Some(ring), audience, key) {
                     return Ok(key);
                 }

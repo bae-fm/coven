@@ -19,7 +19,7 @@ impl StoreLogSync {
         let source = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let mut shared = BTreeSet::new();
         for entry in &log.entries {
-            for (audience, key) in crate::store_log_keys::introduced(&entry.entry.change) {
+            if let Some((audience, key)) = crate::store_log_keys::introduced(&entry.entry.change) {
                 for member in log.replay.state.members.keys() {
                     shared.insert(crate::store_log_keys::path(&audience, key, member));
                 }

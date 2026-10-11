@@ -3,6 +3,28 @@ use crate::{ContentHasher, MemberKeys};
 use coven_foundation::id_source::{IdSource, KeyId};
 
 #[test]
+fn key_commitments_hash_only_the_exact_secret_bytes() {
+    let bytes = std::array::from_fn(|i| i as u8);
+    let expected = "630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd";
+    for n in [0, 1, u128::MAX] {
+        let id = KeyId(Uuid::from_u128(n));
+        let store = StoreKey::from_bytes(id, bytes);
+        let circle = CircleKey::from_bytes(CircleId(Uuid::from_u128(n)), id, bytes);
+        assert_eq!(hex::encode(store.hash()), expected);
+        assert_eq!(circle.hash(), store.hash());
+        for index in 0..32 {
+            let mut changed = bytes;
+            changed[index] ^= 1;
+            assert_ne!(StoreKey::from_bytes(id, changed).hash(), store.hash());
+            assert_ne!(
+                CircleKey::from_bytes(circle.circle(), id, changed).hash(),
+                circle.hash()
+            );
+        }
+    }
+}
+
+#[test]
 fn concurrent_rotations_keep_both_generated_keys() {
     let key_ids = coven_foundation::id_source::SequentialIds::new();
     let mut ring = StoreKeyring::new(StoreKey::generate(KeyId(key_ids.new_id())).unwrap());

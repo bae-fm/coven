@@ -1,7 +1,7 @@
 use super::*;
 use coven_crypto::{custody::InMemoryCustody, MemberKeys, StoreKey};
 use coven_database::{DatabaseBuilder, EntryOutcome, Migration, SyncedTable};
-use coven_format::store_log::{CircleKeyId, MemberPublicKeys, MemberRole};
+use coven_format::store_log::{MemberPublicKeys, MemberRole};
 use coven_foundation::{
     clock::FixedClock,
     files::{StoreDir, StoreLayout},
@@ -63,6 +63,45 @@ async fn device(storage: Arc<MemoryStorage>, n: u64, member: MemberKeys, store: 
         Arc::new(coven_foundation::id_source::UuidIds),
     )
     .await
+}
+
+impl StoreLogSync {
+    pub(crate) async fn test_rotate(&mut self, audience: Audience, key: KeyId) -> EntryId {
+        let key_hash = self.test_key(audience.clone(), key);
+        self.make_and_upload_entry(StoreChange::RotateKey {
+            audience,
+            key,
+            key_hash,
+        })
+        .await
+        .unwrap()
+    }
+
+    pub(crate) fn test_key(&self, audience: Audience, id: KeyId) -> [u8; 32] {
+        let mut ring = self.store_keys.read().unwrap();
+        let hash = match audience {
+            Audience::Store => {
+                if !keys::holds(ring.as_ref(), &audience, id) {
+                    let key = StoreKey::generate(id).unwrap();
+                    match &mut ring {
+                        Some(ring) => ring.insert_store_key(key).unwrap(),
+                        None => ring = Some(StoreKeyring::new(key)),
+                    }
+                }
+                ring.as_ref().unwrap().store_key(id).unwrap().hash()
+            }
+            Audience::Circle(circle) => {
+                let ring = ring.as_mut().unwrap();
+                if !ring.circle_key_ids(circle).any(|key| key == id) {
+                    ring.insert_circle_key(coven_crypto::CircleKey::generate(circle, id).unwrap())
+                        .unwrap();
+                }
+                ring.circle_key(circle, id).unwrap().hash()
+            }
+        };
+        self.store_keys.persist(ring.as_ref().unwrap()).unwrap();
+        hash
+    }
 }
 
 impl Device {
@@ -196,6 +235,7 @@ impl Device {
                 name: "Store".into(),
                 admin: public(&self.member),
                 key,
+                key_hash: self.sync.test_key(coven_merge::Audience::Store, key),
                 device_name: "first".into(),
             })
             .await
@@ -245,6 +285,9 @@ async fn three_devices_publish_concurrent_changes_and_converge() {
                 circle: circle(id),
                 name: id.to_string(),
                 key: key(id),
+                key_hash: device
+                    .sync
+                    .test_key(coven_merge::Audience::Circle(circle(id)), key(id)),
             })
             .await
             .unwrap();
@@ -271,6 +314,9 @@ async fn far_future_entry_waits_for_its_missing_causal_entry_then_applies() {
             circle: circle(1),
             name: "Circle".into(),
             key: key(2),
+            key_hash: a
+                .sync
+                .test_key(coven_merge::Audience::Circle(circle(1)), key(2)),
         })
         .await
         .unwrap();
@@ -357,7 +403,7 @@ async fn fixed_bytes_survive_restart_and_lost_create_reply() {
 }
 
 #[tokio::test]
-async fn removal_rotates_keys_for_remaining_members_and_stops_removed_devices() {
+async fn removal_then_rotations_share_keys_only_with_remaining_members() {
     let storage = storage();
     let mut a = device(storage.clone(), 1, member(1), store(1)).await;
     let mut b = device(storage.clone(), 2, member(2), store(1)).await;
@@ -370,6 +416,9 @@ async fn removal_rotates_keys_for_remaining_members_and_stops_removed_devices() 
             circle: circle(1),
             name: "Shared".into(),
             key: key(2),
+            key_hash: a
+                .sync
+                .test_key(coven_merge::Audience::Circle(circle(1)), key(2)),
         })
         .await
         .unwrap();
@@ -387,14 +436,15 @@ async fn removal_rotates_keys_for_remaining_members_and_stops_removed_devices() 
     a.sync
         .make_and_upload_entry(StoreChange::RemoveMember {
             member: b.member.member_id(),
-            key: key(3),
-            circle_keys: vec![CircleKeyId {
-                circle: circle(1),
-                key: key(4),
-            }],
         })
         .await
         .unwrap();
+    assert_eq!(a.log().await.replay.state.store.unwrap().key, key(1));
+    assert_eq!(a.log().await.replay.state.circles[&circle(1)].key, key(2));
+    a.sync.test_rotate(Audience::Store, key(3)).await;
+    a.sync
+        .test_rotate(Audience::Circle(circle(1)), key(4))
+        .await;
     c.sync().await;
     assert!(matches!(
         b.sync.sync_store_log().await,
@@ -566,12 +616,14 @@ async fn key_objects_are_fixed_and_published_before_the_entry() {
         name: "Store".into(),
         admin: public(&a.member),
         key: key(1),
+        key_hash: a.sync.test_key(coven_merge::Audience::Store, key(1)),
         device_name: "First".into(),
     };
     assert!(matches!(
         a.sync.make_and_upload_entry(change).await,
         Err(SyncError::Storage(_))
     ));
+    a.custody.forget().unwrap();
     let pending = a.db.local_store_log().await.unwrap().upload.unwrap();
     assert_eq!(pending.format, coven_format::FormatVersion::V1);
     assert!(storage
@@ -616,7 +668,7 @@ async fn key_objects_are_fixed_and_published_before_the_entry() {
 }
 
 #[tokio::test]
-async fn outside_admin_does_not_keep_circle_key_and_noop_keeps_named_store_key() {
+async fn circle_member_rotates_after_outside_admin_removal_and_repeated_removal_keeps_keys() {
     let storage = storage();
     let mut a = device(storage.clone(), 1, member(1), store(1)).await;
     let mut b = device(storage.clone(), 2, member(2), store(1)).await;
@@ -630,6 +682,9 @@ async fn outside_admin_does_not_keep_circle_key_and_noop_keeps_named_store_key()
             circle: circle(1),
             name: "Private".into(),
             key: key(2),
+            key_hash: b
+                .sync
+                .test_key(coven_merge::Audience::Circle(circle(1)), key(2)),
         })
         .await
         .unwrap();
@@ -645,15 +700,15 @@ async fn outside_admin_does_not_keep_circle_key_and_noop_keeps_named_store_key()
     a.sync
         .make_and_upload_entry(StoreChange::RemoveMember {
             member: b.member.member_id(),
-            key: key(3),
-            circle_keys: vec![CircleKeyId {
-                circle: circle(1),
-                key: key(4),
-            }],
         })
         .await
         .unwrap();
     c.sync().await;
+    a.sync.test_rotate(Audience::Store, key(3)).await;
+    c.sync().await;
+    c.sync
+        .test_rotate(Audience::Circle(circle(1)), key(4))
+        .await;
     assert!(a
         .custody
         .read()
@@ -671,8 +726,6 @@ async fn outside_admin_does_not_keep_circle_key_and_noop_keeps_named_store_key()
     a.sync
         .make_and_upload_entry(StoreChange::RemoveMember {
             member: b.member.member_id(),
-            key: key(5),
-            circle_keys: vec![],
         })
         .await
         .unwrap();
@@ -685,7 +738,7 @@ async fn outside_admin_does_not_keep_circle_key_and_noop_keeps_named_store_key()
             .unwrap()
             .unwrap()
             .store_key(key(5))
-            .is_ok());
+            .is_err());
     }
 }
 
@@ -810,14 +863,7 @@ async fn a_waiting_entry_reseals_with_its_recorded_key_after_rotation() {
     let pending = a.db.local_store_log().await.unwrap().upload.unwrap();
     let path = object::path(pending.entry.position);
     let first = storage.read(&path).await.unwrap();
-    b.sync
-        .make_and_upload_entry(StoreChange::RemoveMember {
-            member: member(2).member_id(),
-            key: key(2),
-            circle_keys: vec![],
-        })
-        .await
-        .unwrap();
+    b.sync.test_rotate(Audience::Store, key(2)).await;
     // Apply the downloaded rotation while the local entry is still queued.
     let rotation = b.log().await.entries.last().unwrap().entry.clone();
     let (entry, replay) = crate::replay_entry(&a.log().await, rotation);

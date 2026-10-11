@@ -161,8 +161,6 @@ pub enum DropReason {
     NoAdminLeft,
     /// Its author's view did not authorize the change, including an unseen device.
     NotAllowed,
-    /// A removal did not replace exactly the shared circle keys in its author's view.
-    WrongCircleKeys,
 }
 
 pub(crate) fn apply(

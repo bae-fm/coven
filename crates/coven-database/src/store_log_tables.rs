@@ -48,7 +48,6 @@ pub(crate) fn outcome(row: &Row<'_>, start: usize) -> rusqlite::Result<EntryOutc
         "target" => Ok(EntryOutcome::Dropped(DropReason::TargetGone)),
         "admin" => Ok(EntryOutcome::Dropped(DropReason::NoAdminLeft)),
         "authority" => Ok(EntryOutcome::Dropped(DropReason::NotAllowed)),
-        "keys" => Ok(EntryOutcome::Dropped(DropReason::WrongCircleKeys)),
         _ => Err(rusqlite::Error::InvalidQuery),
     }
 }
@@ -239,7 +238,6 @@ pub(crate) fn replace(
                 DropReason::TargetGone => ("target", None),
                 DropReason::NoAdminLeft => ("admin", None),
                 DropReason::NotAllowed => ("authority", None),
-                DropReason::WrongCircleKeys => ("keys", None),
             },
         };
         database.internal_execute(

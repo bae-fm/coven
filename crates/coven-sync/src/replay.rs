@@ -18,12 +18,10 @@ use crate::{conflicts, effects};
 /// and every entry's recorded past (including its device's own earlier entries)
 /// is present and causally closed. These are Appendix C's `Valid` assumptions.
 /// Checking downloaded entries and deciding when they are ready precedes this call.
-/// Authority, required targets and circle-key lists are checked by this replay;
-/// their failures produce dropped marks, not errors or partial state.
-/// Removal keys must name exactly the circles shared with others in the author's
-/// view; circles left empty are derived from that view. Replay also resolves
-/// conflicts and version effects and selects current keys. None of those facts
-/// can be established by decoding one store-log frame.
+/// Authority and required targets are checked by this replay; failures produce
+/// dropped marks, not errors or partial state. Circles left empty are derived
+/// from the author's view. None of those facts can be established by decoding
+/// one store-log frame.
 pub fn replay(entries: &[StoreLogEntry]) -> StoreLogReplay {
     let mut entries: Vec<_> = entries.iter().collect();
     entries.sort_by_key(|entry| entry.timestamp);
@@ -114,16 +112,9 @@ fn settle(
             if dropped.contains_key(&entry.position) {
                 continue;
             }
-            match &views[index] {
-                StoreLogCheck::NotAllowed => {
-                    dropped.insert(entry.position, DropReason::NotAllowed);
-                    continue;
-                }
-                StoreLogCheck::WrongCircleKeys => {
-                    dropped.insert(entry.position, DropReason::WrongCircleKeys);
-                    continue;
-                }
-                _ => {}
+            if views[index] == StoreLogCheck::NotAllowed {
+                dropped.insert(entry.position, DropReason::NotAllowed);
+                continue;
             }
             if effects::already_in_place(&state, entry) {
                 kept.push(index);

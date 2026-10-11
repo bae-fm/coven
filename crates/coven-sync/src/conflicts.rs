@@ -102,18 +102,7 @@ fn same_meaning(
         | (ChangeRole { member, role: s }, AddMember { keys, role: r, .. }) => {
             keys.signing == *member && r == s
         }
-        (
-            RemoveMember {
-                member: m,
-                circle_keys: c,
-                ..
-            },
-            RemoveMember {
-                member: n,
-                circle_keys: d,
-                ..
-            },
-        ) => m == n && c.iter().map(|k| k.circle).eq(d.iter().map(|k| k.circle)),
+        (RemoveMember { member: m }, RemoveMember { member: n }) => m == n,
         (ChangeRole { member: m, role: r }, ChangeRole { member: n, role: s }) => m == n && r == s,
         (AddDevice { device: d, .. }, AddDevice { device: e, .. }) => {
             d == e && a.author == b.author
@@ -170,12 +159,9 @@ fn same_meaning(
     }
 }
 
-fn replaces_key(change: &StoreChange, circle: CircleId) -> bool {
+fn removes_from_circle(change: &StoreChange, circle: CircleId) -> bool {
     match change {
         StoreChange::RemoveCircleMember { circle: id, .. } => *id == circle,
-        StoreChange::RemoveMember { circle_keys, .. } => {
-            circle_keys.iter().any(|key| key.circle == circle)
-        }
         _ => false,
     }
 }
@@ -194,13 +180,13 @@ fn deletes_circle(view: &StoreLogCheck, change: &StoreChange, circle: CircleId) 
 
 fn special(va: &StoreLogCheck, a: &StoreChange, vb: &StoreLogCheck, b: &StoreChange) -> bool {
     use StoreChange::*;
-    let keys_and_snapshots = match (a, b) {
+    let membership_and_snapshots = match (a, b) {
         (AddMember { .. }, RemoveMember { .. }) | (RemoveMember { .. }, AddMember { .. }) => true,
         (RemoveMember { .. }, RemoveMember { .. }) => true,
-        (AddCircleMember { circle, .. }, _) => replaces_key(b, *circle),
-        (_, AddCircleMember { circle, .. }) => replaces_key(a, *circle),
-        (RemoveCircleMember { circle, .. }, _) => replaces_key(b, *circle),
-        (_, RemoveCircleMember { circle, .. }) => replaces_key(a, *circle),
+        (AddCircleMember { circle, .. }, _) => removes_from_circle(b, *circle),
+        (_, AddCircleMember { circle, .. }) => removes_from_circle(a, *circle),
+        (RemoveCircleMember { circle, .. }, _) => removes_from_circle(b, *circle),
+        (_, RemoveCircleMember { circle, .. }) => removes_from_circle(a, *circle),
         (
             RaiseSchema {
                 version: v,
@@ -216,7 +202,7 @@ fn special(va: &StoreLogCheck, a: &StoreChange, vb: &StoreLogCheck, b: &StoreCha
         | (RaiseSchema { snapshot: t, .. }, Reset { snapshot: s }) => s.audience == t.audience,
         _ => false,
     };
-    keys_and_snapshots
+    membership_and_snapshots
         || circle_target(b).is_some_and(|circle| deletes_circle(va, a, circle))
         || circle_target(a).is_some_and(|circle| deletes_circle(vb, b, circle))
 }

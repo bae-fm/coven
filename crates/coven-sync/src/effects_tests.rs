@@ -215,7 +215,7 @@ fn access_updates_are_member_authored_and_causal_replacements_keep_the_latest() 
             access: coven_format::MemberAccess::ProviderAccount("outsider@example.com".into()),
         },
     );
-    h.all(0, 0, remove(1, &[]));
+    h.all(0, 0, remove(1));
     h.all(
         1,
         1,
@@ -235,5 +235,74 @@ fn access_updates_are_member_authored_and_causal_replacements_keep_the_latest() 
             }
         );
         assert_eq!(h.drops(r), [6, 8]);
+    });
+}
+
+fn rotation(audience: Audience, id: u64) -> StoreChange {
+    StoreChange::RotateKey {
+        audience,
+        key: key(id),
+        key_hash: [id as u8; 32],
+    }
+}
+
+#[test]
+fn rotations_preserve_membership_and_do_not_conflict_with_removals_or_each_other() {
+    for audience in [Audience::Store, Audience::Circle(circle(0))] {
+        let mut h = gifts();
+        let past: Vec<_> = (0..h.entries.len()).collect();
+        let removal = if audience == Audience::Store {
+            remove(1)
+        } else {
+            leave(0, 1)
+        };
+        h.push(0, 0, &past, removal);
+        let removed = crate::replay(&h.entries).state;
+        h.push(1, 1, &past, rotation(audience.clone(), 20));
+        h.push(0, 3, &past, rotation(audience.clone(), 21));
+        h.every_order(|r| {
+            assert!(h.drops(r).is_empty());
+            assert_eq!(r.state.members, removed.members);
+            assert_eq!(r.state.devices, removed.devices);
+            assert_eq!(
+                r.state.circles[&circle(0)].members,
+                removed.circles[&circle(0)].members
+            );
+            assert_eq!(r.state.schema, removed.schema);
+            assert_eq!(r.state.resets, removed.resets);
+        });
+    }
+}
+
+#[test]
+fn rotation_authority_comes_from_audience_membership_in_the_authors_past() {
+    let mut h = household(Member, Member);
+    h.all(1, 1, make(0, "Private"));
+    h.all(1, 1, rotation(Audience::Store, 20));
+    h.all(1, 1, rotation(Audience::Circle(circle(0)), 21));
+    h.all(0, 0, rotation(Audience::Circle(circle(0)), 22));
+    h.all(0, 0, remove(1));
+    h.all(1, 1, rotation(Audience::Store, 23));
+    h.every_order(|r| {
+        assert_eq!(h.drops(r), [8, 10]);
+        for index in [8, 10] {
+            assert_eq!(
+                r.entries[&h.entries[index].position],
+                coven_database::EntryOutcome::Dropped(coven_database::DropReason::NotAllowed)
+            );
+        }
+    });
+}
+
+#[test]
+fn concurrent_circle_deletion_does_not_drop_an_authorized_rotation() {
+    let mut h = gifts();
+    let past: Vec<_> = (0..h.entries.len()).collect();
+    h.push(0, 0, &past, delete(0));
+    h.push(1, 1, &past, rotation(Audience::Circle(circle(0)), 20));
+    h.every_order(|r| {
+        assert!(h.drops(r).is_empty());
+        assert!(r.state.circles[&circle(0)].deleted);
+        assert!(r.state.circles[&circle(0)].members.is_empty());
     });
 }

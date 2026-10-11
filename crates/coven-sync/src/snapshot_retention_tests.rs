@@ -162,8 +162,6 @@ async fn removed_member_logs_belong_to_the_store_owner_and_stay_on_google_drive(
         a.sync
             .make_and_upload_entry(StoreChange::RemoveMember {
                 member: b.member.member_id(),
-                key: key(2),
-                circle_keys: Vec::new(),
             })
             .await
             .unwrap();

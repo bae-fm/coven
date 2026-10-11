@@ -66,6 +66,7 @@ fn circle_history(circle: CircleId) -> Vec<(StoreLogEntry, StoreLogReplay)> {
             admin: ana.clone(),
             key: store.key,
             device_name: "Ana’s phone".into(),
+            key_hash: [17; 32],
         },
     );
     let mut replay = StoreLogReplay::default();
@@ -120,6 +121,7 @@ fn circle_history(circle: CircleId) -> Vec<(StoreLogEntry, StoreLogReplay)> {
             circle,
             name: "Gifts".into(),
             key: key(2),
+            key_hash: [17; 32],
         },
     );
     replay.state.circles.insert(
@@ -264,13 +266,11 @@ async fn deletion_and_reversal_commit_marks_and_visible_rows_together() {
         StoreChange::RemoveCircleMember {
             circle,
             member: keys(2).signing,
-            key: key(3),
         },
     );
     let mut restored = history[3].1.clone();
     let gifts = restored.state.circles.get_mut(&circle).unwrap();
     gifts.members = [keys(1).signing].into();
-    gifts.key = key(3);
     restored.entries.insert(remove.position, EntryOutcome::Kept);
     restored.entries.insert(
         delete.position,
@@ -484,7 +484,6 @@ async fn removed_identities_keys_versions_resets_and_every_drop_reason_round_tri
         DropReason::TargetGone,
         DropReason::NoAdminLeft,
         DropReason::NotAllowed,
-        DropReason::WrongCircleKeys,
         DropReason::BeatenBy(expected.entries[0].entry.position),
     ]
     .into_iter()
@@ -612,6 +611,7 @@ async fn audience_versions_round_trip_and_a_failed_raise_keeps_every_audience() 
             circle: notes,
             name: "Notes".into(),
             key: key(3),
+            key_hash: [17; 32],
         },
     );
     replay.state.circles.insert(

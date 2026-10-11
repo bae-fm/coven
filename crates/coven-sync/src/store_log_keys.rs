@@ -1,4 +1,4 @@
-//! Key introductions, author-view sharing and dropped removals' current audience.
+//! Key introductions and sharing with their current audiences.
 
 use crate::SyncError;
 use coven_crypto::{
@@ -12,54 +12,20 @@ use coven_merge::Audience;
 use coven_storage::ObjectPath;
 use std::collections::BTreeSet;
 
-pub(crate) fn introduced(change: &StoreChange) -> Vec<(Audience, KeyId)> {
+pub(crate) fn introduced(change: &StoreChange) -> Option<(Audience, KeyId)> {
     match change {
-        StoreChange::CreateStore { key, .. } => vec![(Audience::Store, *key)],
-        StoreChange::RemoveMember {
-            key, circle_keys, ..
-        } => std::iter::once((Audience::Store, *key))
-            .chain(
-                circle_keys
-                    .iter()
-                    .map(|k| (Audience::Circle(k.circle), k.key)),
-            )
-            .collect(),
-        StoreChange::CreateCircle { circle, key, .. }
-        | StoreChange::RemoveCircleMember { circle, key, .. } => {
-            vec![(Audience::Circle(*circle), *key)]
-        }
-        _ => Vec::new(),
+        StoreChange::CreateStore { key, .. } => Some((Audience::Store, *key)),
+        StoreChange::CreateCircle { circle, key, .. } => Some((Audience::Circle(*circle), *key)),
+        StoreChange::RotateKey { audience, key, .. } => Some((audience.clone(), *key)),
+        _ => None,
     }
 }
 
 pub(crate) fn needed(log: &StoreLog) -> BTreeSet<(Audience, KeyId)> {
     log.entries
         .iter()
-        .filter(|e| {
-            log.replay.entries[&e.entry.position] == EntryOutcome::Kept
-                || is_removal(&e.entry.change)
-        })
-        .flat_map(|e| introduced(&e.entry.change))
-        .collect()
-}
-
-fn is_removal(change: &StoreChange) -> bool {
-    matches!(
-        change,
-        StoreChange::RemoveMember { .. } | StoreChange::RemoveCircleMember { .. }
-    )
-}
-
-pub(crate) fn dropped_removal_keys(log: &StoreLog) -> BTreeSet<(Audience, KeyId)> {
-    log.entries
-        .iter()
-        .filter(|e| {
-            matches!(
-                log.replay.entries[&e.entry.position],
-                EntryOutcome::Dropped(_)
-            ) && is_removal(&e.entry.change)
-        })
-        .flat_map(|e| introduced(&e.entry.change))
+        .filter(|e| log.replay.entries[&e.entry.position] == EntryOutcome::Kept)
+        .filter_map(|e| introduced(&e.entry.change))
         .collect()
 }
 
@@ -100,7 +66,7 @@ pub(crate) fn holds(ring: Option<&StoreKeyring>, audience: &Audience, key: KeyId
     })
 }
 
-/// Sharing history requires every key, including introductions from dropped removals.
+/// Sharing history requires every key introduced by the kept entries.
 pub(crate) fn check_shared_keys(
     log: &StoreLog,
     change: &StoreChange,
@@ -162,26 +128,19 @@ pub(crate) fn seal(
         .iter()
         .flat_map(|e| introduced(&e.entry.change))
         .collect();
-    for (audience, key) in introduced(&entry.change) {
+    if let Some((audience, key)) = introduced(&entry.change) {
         if used.contains(&(audience, key)) {
             return Err(SyncError::KeyAlreadyUsed(key));
         }
     }
     let state = &log.replay.state;
     let mut keys = Vec::new();
-    let creation;
     let encryption = if let StoreChange::CreateStore { key, admin, .. } = &entry.change {
         if admin.signing != member.member_id() || admin.sealing != member.sealing_public_key() {
             return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed));
         }
-        creation = match ring {
-            Some(ring) if ring.store_key_ids().any(|id| id == *key) => {
-                ring.store_key(*key)?.clone()
-            }
-            _ => StoreKey::generate(*key)?,
-        };
-        keys.push(store_copy(&creation, &admin.signing, &admin.sealing)?);
-        &creation
+        ring.ok_or(SyncError::KeyUnavailable(*key))?
+            .store_key(*key)?
     } else {
         let id = state
             .store
@@ -190,11 +149,11 @@ pub(crate) fn seal(
             .key;
         ring.ok_or(SyncError::KeyUnavailable(id))?.store_key(id)?
     };
+    let ring = ring.expect("entry holds its encryption key");
     match &entry.change {
         StoreChange::AddMember {
             keys: recipient, ..
         } => {
-            let ring = ring.expect("non-creation entry holds its encryption key");
             for id in ring.store_key_ids() {
                 keys.push(store_copy(
                     ring.store_key(id)?,
@@ -203,57 +162,76 @@ pub(crate) fn seal(
                 )?);
             }
         }
-        StoreChange::RemoveMember {
-            member: removed,
+        StoreChange::CreateStore {
             key,
-            circle_keys,
+            key_hash,
+            admin,
+            ..
         } => {
-            let key = StoreKey::generate(*key)?;
-            for (id, recipient) in &state.members {
-                if !recipient.removed && id != removed {
-                    keys.push(store_copy(&key, id, &recipient.sealing)?);
-                }
+            let material = ring.store_key(*key)?;
+            if material.hash() != *key_hash {
+                return Err(coven_crypto::MaterialError::StoreKeyConflict(*key).into());
             }
-            for replacement in circle_keys {
-                let key = CircleKey::generate(replacement.circle, replacement.key)?;
-                for id in &state.circles[&replacement.circle].members {
-                    if id != removed {
-                        keys.push(circle_copy(&key, id, &state.members[id].sealing)?);
-                    }
-                }
-                // An admin outside this circle retains no plaintext copy.
-            }
+            keys.push(store_copy(material, &admin.signing, &admin.sealing)?);
         }
-        StoreChange::CreateCircle { circle, key, .. } => {
+        StoreChange::CreateCircle {
+            circle,
+            key,
+            key_hash,
+            ..
+        } => {
+            let material = ring.circle_key(*circle, *key)?;
+            if material.hash() != *key_hash {
+                return Err(coven_crypto::MaterialError::CircleKeyConflict {
+                    circle: *circle,
+                    key: *key,
+                }
+                .into());
+            }
             keys.push(circle_copy(
-                &CircleKey::generate(*circle, *key)?,
+                material,
                 &entry.author,
                 &member.sealing_public_key(),
             )?);
         }
+        StoreChange::RotateKey {
+            audience,
+            key,
+            key_hash,
+        } => match audience {
+            Audience::Store => {
+                let material = ring.store_key(*key)?;
+                if material.hash() != *key_hash {
+                    return Err(coven_crypto::MaterialError::StoreKeyConflict(*key).into());
+                }
+                for (id, recipient) in recipients(log, audience) {
+                    keys.push(store_copy(material, id, recipient)?);
+                }
+            }
+            Audience::Circle(circle) => {
+                let material = ring.circle_key(*circle, *key)?;
+                if material.hash() != *key_hash {
+                    return Err(coven_crypto::MaterialError::CircleKeyConflict {
+                        circle: *circle,
+                        key: *key,
+                    }
+                    .into());
+                }
+                for (id, recipient) in recipients(log, audience) {
+                    keys.push(circle_copy(material, id, recipient)?);
+                }
+            }
+        },
         StoreChange::AddCircleMember {
             circle,
             member: recipient,
         } => {
-            let ring = ring.expect("non-creation entry holds its encryption key");
             for id in ring.circle_key_ids(*circle) {
                 keys.push(circle_copy(
                     ring.circle_key(*circle, id)?,
                     recipient,
                     &state.members[recipient].sealing,
                 )?);
-            }
-        }
-        StoreChange::RemoveCircleMember {
-            circle,
-            member: removed,
-            key,
-        } => {
-            let key = CircleKey::generate(*circle, *key)?;
-            for id in &state.circles[circle].members {
-                if id != removed {
-                    keys.push(circle_copy(&key, id, &state.members[id].sealing)?);
-                }
             }
         }
         _ => (),

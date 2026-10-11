@@ -55,6 +55,7 @@ async fn accounts(storage: Arc<MemoryStorage>) -> [Device; 3] {
             admin: public(&a.member),
             access: coven_format::MemberAccess::ProviderAccount("owner@example.com".into()),
             key: key(1),
+            key_hash: a.sync.test_key(coven_merge::Audience::Store, key(1)),
             device_name: "owner".into(),
         })
         .await
@@ -111,7 +112,7 @@ async fn finish(d: &mut Device, id: OperationId) -> Output {
 }
 
 #[tokio::test]
-async fn owner_removal_rotates_keys_and_revokes_the_account() {
+async fn owner_removal_preserves_keys_and_revokes_the_account() {
     let storage = google();
     let [mut a, mut b, mut c] = accounts(storage.clone()).await;
     let circle = begin(&mut a, Command::CreateCircle("Household".into())).await;
@@ -132,24 +133,16 @@ async fn owner_removal_rotates_keys_and_revokes_the_account() {
     ));
     c.sync().await;
     let state = a.log().await.replay.state;
-    assert_ne!(state.store.as_ref().unwrap().key, old.store.unwrap().key);
-    assert_ne!(state.circles[&circle].key, old.circles[&circle].key);
+    assert_eq!(state.store.as_ref().unwrap().key, old.store.unwrap().key);
+    assert_eq!(state.circles[&circle].key, old.circles[&circle].key);
     assert!(state.members[&b.member.member_id()].removed);
     assert!(state.devices[&b.device().await].removed);
     let ring = c.custody.read().unwrap().unwrap();
     assert!(ring.store_key(state.store.as_ref().unwrap().key).is_ok());
     assert!(ring.circle_key(circle, state.circles[&circle].key).is_ok());
-    for (audience, key) in [
-        (Audience::Store, state.store.unwrap().key),
-        (Audience::Circle(circle), state.circles[&circle].key),
-    ] {
-        assert!(matches!(
-            storage
-                .read(&keys::path(&audience, key, &b.member.member_id()))
-                .await,
-            Err(error) if error.failure() == StorageFailure::NotFound
-        ));
-    }
+    let log = a.log().await;
+    let removal = &log.entries.last().unwrap().entry.change;
+    assert!(keys::introduced(removal).is_none());
     assert!(
         matches!(b.sync.sync_store_log().await, Err(SyncFailure::Storage(error)) if error.failure() == StorageFailure::PermissionDenied)
     );
@@ -157,7 +150,7 @@ async fn owner_removal_rotates_keys_and_revokes_the_account() {
 }
 
 #[tokio::test]
-async fn outside_admin_rotates_gifts_without_learning_its_key() {
+async fn outside_admin_removes_a_member_without_learning_the_circle_key() {
     let storage = google();
     let [mut a, mut b, mut c] = accounts(storage).await;
     let id = begin(&mut b, Command::CreateCircle("Gifts".into())).await;
@@ -373,15 +366,9 @@ async fn dropped_removal_restarts_against_the_new_member_list() {
     assert!(removal.had_read.0.contains(&winner));
     assert!(log.replay.state.members[&b.member.member_id()].removed);
     assert!(log.replay.state.members[&c.member.member_id()].removed);
-    let key = log.replay.state.store.unwrap().key;
-    for removed in [&b.member, &c.member] {
-        assert!(matches!(
-            storage
-                .read(&ObjectPath::store_key(key, &removed.member_id()))
-                .await,
-            Err(error) if error.failure() == StorageFailure::NotFound
-        ));
-    }
+    assert_eq!(log.replay.state.store.unwrap().key, key(1));
+    assert!(abandoned.sealing.keys.is_empty());
+    assert!(keys::introduced(&removal.change).is_none());
 }
 
 #[tokio::test]
@@ -406,6 +393,8 @@ async fn circle_membership_rotates_and_shares_history() {
     )
     .await;
     finish(&mut a, remove).await;
+    assert_eq!(a.log().await.replay.state.circles[&circle].key, old_key);
+    a.sync.test_rotate(Audience::Circle(circle), key(20)).await;
     b.sync().await;
     let new_key = a.log().await.replay.state.circles[&circle].key;
     assert_ne!(old_key, new_key);
@@ -444,8 +433,33 @@ async fn permanent_storage_failure_preserves_fixed_bytes_for_retry_and_discard()
         let storage = google();
         let [mut a, _b, _c] = accounts(storage.clone()).await;
         let id = begin(&mut a, Command::CreateCircle("Retained".into())).await;
+        let held = a.custody.read().unwrap().unwrap().to_secret_bytes();
         step(&mut a, id).await.unwrap();
+        assert_eq!(
+            a.custody
+                .read()
+                .unwrap()
+                .unwrap()
+                .to_secret_bytes()
+                .as_bytes(),
+            held.as_bytes()
+        );
         let fixed = a.db.local_store_log().await.unwrap().upload.unwrap();
+        let StoreChange::CreateCircle {
+            circle,
+            key,
+            key_hash,
+            ..
+        } = &fixed.entry.change
+        else {
+            panic!("circle creation")
+        };
+        let copy = &fixed.sealing.keys[0];
+        let material = a.member.open_circle_key(&copy.path, &copy.bytes).unwrap();
+        assert_eq!(
+            (material.circle(), material.id(), material.hash()),
+            (*circle, *key, *key_hash)
+        );
         let expected = a.reseal(&fixed);
         a.sync.storage = Some(Arc::new(
             MemoryStorage::for_recipient(&storage, "uninvited@example.com").unwrap(),
@@ -574,15 +588,13 @@ async fn removing_a_member_cuts_off_every_device_of_their_account() {
     assert!(
         matches!(phone.sync.sync_store_log().await, Err(SyncFailure::Storage(error)) if error.failure() == StorageFailure::PermissionDenied)
     );
-    assert!(matches!(
-        phone
-            .custody
-            .read()
-            .unwrap()
-            .unwrap()
-            .store_key(state.store.unwrap().key),
-        Err(coven_crypto::MaterialError::UnknownStoreKey(_))
-    ));
+    assert!(phone
+        .custody
+        .read()
+        .unwrap()
+        .unwrap()
+        .store_key(state.store.unwrap().key)
+        .is_ok());
 }
 
 #[tokio::test]

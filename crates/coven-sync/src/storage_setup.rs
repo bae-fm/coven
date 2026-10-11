@@ -134,6 +134,9 @@ impl StoreLogSync {
                 let settings = self.directory.settings().map_err(|error| {
                     SyncError::Setup(Box::new(StorageSetupError::Internal(Box::new(error))))
                 })?;
+                let key = coven_crypto::StoreKey::generate(coven_foundation::id_source::KeyId(
+                    self.ids.new_id(),
+                ))?;
                 let change = StoreChange::CreateStore {
                     store: local.store,
                     name: settings.name,
@@ -141,15 +144,16 @@ impl StoreLogSync {
                         signing: member.member_id(),
                         sealing: member.sealing_public_key(),
                     },
-                    key: coven_foundation::id_source::KeyId(self.ids.new_id()),
+                    key: key.id(),
+                    key_hash: key.hash(),
                     access: access.clone(),
                     device_name: device_name.clone(),
                 };
                 let author = member.clone();
-                let ring = previous.clone();
+                let ring = StoreKeyring::new(key);
                 self.database
                     .prepare_store_log(member.member_id(), change, move |log, entry| {
-                        keys::seal(log, entry, ring.as_ref(), &author)
+                        keys::seal(log, entry, Some(&ring), &author)
                     })
                     .await?;
                 local = self.database.local_store_log().await?;

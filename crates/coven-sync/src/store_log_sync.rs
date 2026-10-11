@@ -104,7 +104,7 @@ impl StoreLogSync {
     }
 
     /// Fix and publish a new entry. Existing queued entries go first. The change's
-    /// key ids are fresh names; this owner generates and seals their material.
+    /// key introductions name material already in custody and commit its hash.
     /// After a failed upload, call `sync_store_log` to retry that same entry.
     pub async fn make_and_upload_entry(
         &mut self,
@@ -524,26 +524,33 @@ impl StoreLogSync {
         for (audience, key) in keys::needed(log) {
             self.acquire(&audience, key, member, ring, damages).await?;
         }
-        self.share_dropped_keys(log, ring).await
+        self.share_rotation_keys(log, ring).await
     }
 
-    async fn share_dropped_keys(
+    async fn share_rotation_keys(
         &self,
         log: &StoreLog,
         ring: &Option<StoreKeyring>,
     ) -> Result<(), SyncError> {
-        for (audience, key) in keys::dropped_removal_keys(log) {
-            if !keys::holds(ring.as_ref(), &audience, key) {
-                tracing::debug!(?audience, ?key, "dropped removal's key has not arrived");
+        for applied in &log.entries {
+            if log.replay.entries[&applied.entry.position] != coven_database::EntryOutcome::Kept {
+                continue;
+            }
+            let StoreChange::RotateKey { audience, key, .. } = &applied.entry.change else {
+                continue;
+            };
+            let key = *key;
+            if !keys::holds(ring.as_ref(), audience, key) {
+                tracing::debug!(?audience, ?key, "historical key has not arrived");
                 continue;
             }
             let ring = ring.as_ref().expect("held key has a keyring");
-            for (member, recipient) in keys::recipients(log, &audience) {
-                let path = keys::path(&audience, key, member);
+            for (member, recipient) in keys::recipients(log, audience) {
+                let path = keys::path(audience, key, member);
                 if self.read(&path).await?.is_none() {
                     let recipient = *recipient;
                     let sealed_path = path.clone();
-                    let bytes = match audience {
+                    let bytes = match *audience {
                         Audience::Store => {
                             let key = ring.store_key(key)?.clone();
                             self.database

@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use coven_foundation::id_source::KeyId;
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -36,6 +37,11 @@ impl StoreKey {
     /// The random identity named by the entry introducing this key (§11).
     pub fn id(&self) -> KeyId {
         self.id
+    }
+
+    /// SHA-256 of the exact key bytes, committed inside its introducing entry (§11).
+    pub fn hash(&self) -> [u8; 32] {
+        Sha256::digest(self.bytes.as_ref()).into()
     }
 
     /// Derive separate encryption and fingerprint keys.
@@ -95,6 +101,11 @@ impl CircleKey {
     /// The random identity named by the entry introducing this key.
     pub fn id(&self) -> KeyId {
         self.key.id()
+    }
+
+    /// SHA-256 of the exact key bytes, committed inside its introducing entry (§11).
+    pub fn hash(&self) -> [u8; 32] {
+        self.key.hash()
     }
 
     /// Derive separate encryption and fingerprint keys.

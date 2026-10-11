@@ -53,6 +53,9 @@ pub(crate) async fn group(storage: Arc<MemoryStorage>, count: u64) -> Vec<Device
     for number in 1..=count {
         devices.push(device(storage.clone(), number).await);
     }
+    let key_hash = devices[0]
+        .sync
+        .test_key(coven_merge::Audience::Store, KeyId(Uuid::from_u128(1)));
     devices[0]
         .sync
         .make_and_upload_entry(StoreChange::CreateStore {
@@ -63,6 +66,7 @@ pub(crate) async fn group(storage: Arc<MemoryStorage>, count: u64) -> Vec<Device
                 sealing: member().sealing_public_key(),
             },
             key: KeyId(Uuid::from_u128(1)),
+            key_hash,
             device_name: "one".into(),
             access: coven_format::MemberAccess::S3AccessKey {
                 access_key_id: "owner-key".into(),

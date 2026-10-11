@@ -2,8 +2,7 @@ use crate::*;
 use coven_crypto::custody::{InMemoryCustody, KeyringCustody, StoreKeychain};
 use coven_database::test_utils::WriteCheckpoint;
 use coven_format::{
-    sealed_snapshot::{SnapshotObjectLayout, SnapshotObjectPrefix},
-    sealed_write::WriteObjectPrefix,
+    sealed_snapshot::SnapshotObjectPrefix, sealed_write::WriteObjectPrefix,
     write_stream::WriteHeaderFrame,
 };
 use coven_storage::{test_utils::MemoryStorage, Storage};
@@ -580,7 +579,7 @@ async fn admit_member(f: &Fixture, handle: &CovenHandle, keys: &MemberKeys) {
 }
 
 #[tokio::test]
-async fn removal_seals_the_next_write_and_snapshots_with_rotated_keys() {
+async fn removal_preserves_key_material_and_publishes_only_the_member_target() {
     let (f, handle) = Fixture::new().await;
     let removed = member(29);
     admit_member(&f, &handle, &removed).await;
@@ -590,23 +589,7 @@ async fn removal_seals_the_next_write_and_snapshots_with_rotated_keys() {
         .add_member(circle, &removed.member_id())
         .await
         .unwrap();
-    let ring = f.keys.unlock().unwrap().unwrap();
-    let old_store_id = ring.store_key_ids().next().unwrap();
-    let old_circle_id = ring.circle_key_ids(circle).next().unwrap();
-    let store_path = ObjectPath::store_key(old_store_id, &removed.member_id());
-    let old_store = removed
-        .open_store_key(
-            store_path.as_str(),
-            &f.storage.read(&store_path).await.unwrap(),
-        )
-        .unwrap();
-    let circle_path = ObjectPath::circle_key(circle, old_circle_id, &removed.member_id());
-    let old_circle = removed
-        .open_circle_key(
-            circle_path.as_str(),
-            &f.storage.read(&circle_path).await.unwrap(),
-        )
-        .unwrap();
+    let before = f.keys.unlock().unwrap().unwrap().to_secret_bytes();
     handle.remove_member(&removed.member_id()).await.unwrap();
     assert!(!handle
         .get_members()
@@ -614,146 +597,58 @@ async fn removal_seals_the_next_write_and_snapshots_with_rotated_keys() {
         .unwrap()
         .iter()
         .any(|m| m.id == removed.member_id()));
-    let circle_text = circle.to_string();
-    handle.write(move |sql| {
-        sql.execute("INSERT INTO notes VALUES('store','after removal','store'),('circle','after removal',?1)", [circle_text])?;
-        Ok(())
-    }).await.unwrap();
-    let queued = handle.test_queued_writes().await.unwrap();
-    assert_eq!(queued.len(), 1);
-    f.sync(&handle).await;
-    let logs = f.storage.list(&ObjectPrefix::device_logs()).await.unwrap();
-    assert_eq!(logs.len(), 1);
-    let path = &logs[0].path;
-    let bytes = f.storage.read(path).await.unwrap();
-    let prefix_len = WriteObjectPrefix::length(&bytes).unwrap();
-    let aad = &bytes[..prefix_len];
-    let prefix = WriteObjectPrefix::decode(aad).unwrap();
-    assert_ne!(prefix.store_key, old_store_id);
-    assert_eq!(prefix.part_keys.len(), 2);
-    let new_ring = f.keys.unlock().unwrap().unwrap();
-    assert_eq!(
-        open_write(&bytes, path, &new_ring, &f.member.member_id()),
-        queued[0]
-    );
-    let header_len = WriteObjectPrefix::header_chunk_length(&bytes[prefix_len..]).unwrap();
-    let chunk =
-        WriteObjectPrefix::header_chunk(&bytes[prefix_len..prefix_len + header_len]).unwrap();
-    assert!(matches!(
-        old_store
-            .derive()
-            .open_object_chunk(path.as_str(), aad, 0, 0, chunk),
-        Err(CryptoError::Authentication)
-    ));
-    let header_bytes = new_ring
-        .store_key(prefix.store_key)
-        .unwrap()
-        .derive()
-        .open_object_chunk(path.as_str(), aad, 0, 0, chunk)
-        .unwrap();
-    let header = WriteHeaderFrame::decode(&header_bytes).unwrap();
-    let mut layout = prefix
-        .clone()
-        .opened_header(
-            &header_bytes,
-            header.parts.iter().map(|p| p.plaintext_length).collect(),
-        )
-        .unwrap();
-    let mut offset = prefix_len + header_len;
-    while let Some(coordinate) = layout.next_chunk() {
-        let length = layout.chunk_length(&bytes[offset..]).unwrap();
-        let (_, chunk) = layout
-            .decode_chunk(&bytes[offset..offset + length])
-            .unwrap();
-        let old = match header.parts[coordinate.section as usize - 1].audience {
-            Audience::Store => {
-                assert_eq!(coordinate.key, prefix.store_key);
-                old_store.derive()
-            }
-            Audience::Circle(id) => {
-                assert_eq!(id, circle);
-                assert_ne!(coordinate.key, old_circle_id);
-                old_circle.derive()
-            }
-        };
-        assert!(matches!(
-            old.open_object_chunk(
-                path.as_str(),
-                aad,
-                coordinate.section,
-                coordinate.index,
-                chunk
-            ),
-            Err(CryptoError::Authentication)
-        ));
-        offset += length;
-    }
-    assert!(f
-        .storage
-        .list(&ObjectPrefix::snapshots())
+    assert!(!handle
+        .circles()
+        .members(circle)
         .await
         .unwrap()
-        .is_empty());
-    handle.reset_store().await.unwrap();
-    handle.circles().reset(circle).await.unwrap();
-    let snapshots = f.storage.list(&ObjectPrefix::snapshots()).await.unwrap();
-    assert_eq!(snapshots.len(), 2);
-    for object in snapshots {
+        .iter()
+        .any(|m| m.member == removed.member_id()));
+    let ring = f.keys.unlock().unwrap().unwrap();
+    assert_eq!(ring.to_secret_bytes().as_bytes(), before.as_bytes());
+    let mut removals = 0;
+    for object in f.storage.list(&ObjectPrefix::store_logs()).await.unwrap() {
         let bytes = f.storage.read(&object.path).await.unwrap();
-        let length = SnapshotObjectPrefix::length(&bytes).unwrap();
-        let (snapshot, signature) =
-            SnapshotObjectPrefix::decode_signed(&bytes[..length + 64]).unwrap();
-        f.member
-            .member_id()
-            .verify_prefix(object.path.as_str(), &bytes[..length], &signature)
-            .unwrap();
-        assert!(snapshot.writes.covers(queued[0].header.position));
-        let (new, old, key_path) = match snapshot.audience {
-            Audience::Store => {
-                assert_eq!(snapshot.key, prefix.store_key);
-                (
-                    new_ring.store_key(snapshot.key).unwrap().derive(),
-                    old_store.derive(),
-                    ObjectPath::store_key(snapshot.key, &removed.member_id()),
-                )
-            }
-            Audience::Circle(id) => {
-                assert_eq!(id, circle);
-                assert!(prefix.part_keys.contains(&snapshot.key));
-                (
-                    new_ring.circle_key(id, snapshot.key).unwrap().derive(),
-                    old_circle.derive(),
-                    ObjectPath::circle_key(id, snapshot.key, &removed.member_id()),
-                )
-            }
+        let envelope = coven_format::sealed_single::SingleChunkObject::decode(&bytes).unwrap();
+        let coven_format::sealed_single::SingleChunkObject::StoreLog { key, .. } = &envelope else {
+            panic!("store log")
         };
-        assert_eq!(
-            f.storage.read(&key_path).await.unwrap_err().failure(),
-            StorageFailure::NotFound
-        );
-        let mut layout = SnapshotObjectLayout::new();
-        let mut offset = length + 64;
-        while offset < bytes.len() - 64 {
-            let size = layout.chunk_length(&bytes[offset..]).unwrap();
-            let index = layout.index();
-            let chunk = layout.decode_chunk(&bytes[offset..offset + size]).unwrap();
-            assert!(!new
-                .open_object_chunk(object.path.as_str(), &bytes[..length], 0, index, chunk)
-                .unwrap()
-                .is_empty());
-            assert!(matches!(
-                old.open_object_chunk(object.path.as_str(), &bytes[..length], 0, index, chunk),
-                Err(CryptoError::Authentication)
-            ));
-            offset += size;
-        }
-        let signature = layout.read_signature(&bytes[offset..]).unwrap();
-        let mut hash = coven_crypto::ObjectHasher::new();
-        hash.update(&bytes[..offset]);
-        f.member
-            .member_id()
-            .verify_object(object.path.as_str(), &hash.finish(), &signature)
+        let plain = ring
+            .store_key(*key)
+            .unwrap()
+            .derive()
+            .open_object_chunk(
+                object.path.as_str(),
+                &envelope.prefix().encode().unwrap(),
+                0,
+                0,
+                envelope.chunk(),
+            )
             .unwrap();
+        let coven_format::Object::StoreLog(entry) = coven_format::Object::decode(&plain).unwrap()
+        else {
+            panic!("entry")
+        };
+        use coven_format::store_log::StoreChange;
+        match entry.change {
+            StoreChange::CreateStore { key, key_hash, .. } => {
+                assert_eq!(key_hash, ring.store_key(key).unwrap().hash());
+            }
+            StoreChange::CreateCircle {
+                circle,
+                key,
+                key_hash,
+                ..
+            } => {
+                assert_eq!(key_hash, ring.circle_key(circle, key).unwrap().hash());
+            }
+            StoreChange::RemoveMember { member } => {
+                assert_eq!(member, removed.member_id());
+                removals += 1;
+            }
+            _ => (),
+        }
     }
+    assert_eq!(removals, 1);
     handle.close().await.unwrap();
 }
