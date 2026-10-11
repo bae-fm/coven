@@ -351,6 +351,7 @@ async fn interrupted_copy_reuses_fixed_bytes_after_restart_and_lost_reply_counts
                 .make_and_upload_entry(StoreChange::AddDevice {
                     device: DeviceId(20),
                     name: "Ana's phone".into(),
+                    replaces: None,
                 })
                 .await
                 .unwrap();

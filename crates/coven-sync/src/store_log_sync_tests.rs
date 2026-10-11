@@ -368,6 +368,7 @@ async fn fixed_bytes_survive_restart_and_lost_create_reply() {
             .make_and_upload_entry(StoreChange::AddDevice {
                 device: DeviceId(20),
                 name: "Other".into(),
+                replaces: None,
             })
             .await;
         assert!(matches!(result, Err(SyncError::Storage(_))));
@@ -560,6 +561,7 @@ async fn far_future_entry_applies_and_a_restored_device_stamps_after_it() {
         .make_and_upload_entry(StoreChange::AddDevice {
             device: DeviceId(50),
             name: "future".into(),
+            replaces: None,
         })
         .await
         .unwrap();
@@ -573,6 +575,7 @@ async fn far_future_entry_applies_and_a_restored_device_stamps_after_it() {
         .make_and_upload_entry(StoreChange::AddDevice {
             device: id,
             name: "restored".into(),
+            replaces: None,
         })
         .await
         .unwrap();
@@ -809,6 +812,7 @@ async fn changing_custody_cannot_change_a_devices_author() {
         .make_and_upload_entry(StoreChange::AddDevice {
             device: DeviceId(90),
             name: "different author".into(),
+            replaces: None,
         })
         .await;
     assert!(matches!(
@@ -857,6 +861,7 @@ async fn a_waiting_entry_reseals_with_its_recorded_key_after_rotation() {
         .make_and_upload_entry(StoreChange::AddDevice {
             device: DeviceId(20),
             name: "waiting".into(),
+            replaces: None,
         })
         .await
         .is_err());

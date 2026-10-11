@@ -52,6 +52,7 @@ async fn add_device(device: &mut Device) {
         .make_and_upload_entry(StoreChange::AddDevice {
             device: id,
             name: id.0.to_string(),
+            replaces: None,
         })
         .await
         .unwrap();
@@ -695,7 +696,8 @@ async fn reload_reselects_after_store_log_changes_and_preserves_interleaved_app_
         a.sync
             .make_and_upload_entry(StoreChange::AddDevice {
                 device: DeviceId(77),
-                name: "pending".into()
+                name: "pending".into(),
+                replaces: None,
             })
             .await,
         Err(SyncError::ReloadPending(_))

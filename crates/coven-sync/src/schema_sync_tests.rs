@@ -894,6 +894,7 @@ mod recovery {
                             .make_and_upload_entry(StoreChange::AddDevice {
                                 device: DeviceId(999),
                                 name: "Recovered".into(),
+                                replaces: None,
                             })
                             .await
                             .unwrap();

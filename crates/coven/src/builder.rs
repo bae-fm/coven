@@ -463,6 +463,7 @@ impl OpeningStore {
             sync.make_and_upload_entry(coven_format::store_log::StoreChange::AddDevice {
                 device: local.device,
                 name: device_name.into(),
+                replaces: None,
             })
             .await?;
         }

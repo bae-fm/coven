@@ -115,6 +115,7 @@ impl StoreLogSync {
                 self.make_and_upload_entry(StoreChange::AddDevice {
                     device: local.device,
                     name: name.into(),
+                    replaces: None,
                 })
                 .await?;
             }

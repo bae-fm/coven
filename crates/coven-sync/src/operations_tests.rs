@@ -82,6 +82,7 @@ async fn accounts(storage: Arc<MemoryStorage>) -> [Device; 3] {
             .make_and_upload_entry(StoreChange::AddDevice {
                 device,
                 name: email.into(),
+                replaces: None,
             })
             .await
             .unwrap();
@@ -576,6 +577,7 @@ async fn removing_a_member_cuts_off_every_device_of_their_account() {
         .make_and_upload_entry(StoreChange::AddDevice {
             device: phone_id,
             name: "Second phone".into(),
+            replaces: None,
         })
         .await
         .unwrap();
@@ -701,6 +703,7 @@ async fn resumed_removal_uses_the_targets_current_storage_account() {
         .make_and_upload_entry(StoreChange::AddDevice {
             device: device_id,
             name: "Owner phone".into(),
+            replaces: None,
         })
         .await
         .unwrap();

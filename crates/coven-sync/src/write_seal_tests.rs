@@ -65,6 +65,7 @@ pub(super) async fn household(storage: Arc<MemoryStorage>) -> Vec<Device> {
             .make_and_upload_entry(StoreChange::AddDevice {
                 device: DeviceId(i as u64 + 1),
                 name: i.to_string(),
+                replaces: None,
             })
             .await
             .unwrap();
@@ -147,6 +148,7 @@ async fn a_circle_restored_after_deletion_keeps_a_previously_skipped_part_missin
         .make_and_upload_entry(StoreChange::AddDevice {
             device: DeviceId(4),
             name: "Ana tablet".into(),
+            replaces: None,
         })
         .await
         .unwrap();

@@ -102,6 +102,28 @@ macro_rules! integer {
 }
 integer!(u8, u16, u32, u64, i64);
 
+impl<T: Wire> Wire for Option<T> {
+    fn put(&self, out: &mut Encoder) -> Result<(), Error> {
+        match self {
+            None => 0u8.put(out),
+            Some(value) => {
+                1u8.put(out)?;
+                value.put(out)
+            }
+        }
+    }
+    fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
+        match u8::get(input)? {
+            0 => Ok(None),
+            1 => Ok(Some(T::get(input)?)),
+            tag => Err(Error::UnknownTag {
+                field: "option",
+                tag,
+            }),
+        }
+    }
+}
+
 impl<const N: usize> Wire for [u8; N] {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {
         out.bytes(self)

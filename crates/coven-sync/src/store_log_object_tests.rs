@@ -20,6 +20,7 @@ async fn damaged_entries_block_only_their_device_and_retain_each_cause() {
             .make_and_upload_entry(StoreChange::AddDevice {
                 device: DeviceId(3),
                 name: "receiver".into(),
+                replaces: None,
             })
             .await
             .unwrap();
@@ -29,6 +30,7 @@ async fn damaged_entries_block_only_their_device_and_retain_each_cause() {
             .make_and_upload_entry(StoreChange::AddDevice {
                 device: DeviceId(21),
                 name: "one".into(),
+                replaces: None,
             })
             .await
             .unwrap();
@@ -37,6 +39,7 @@ async fn damaged_entries_block_only_their_device_and_retain_each_cause() {
             .make_and_upload_entry(StoreChange::AddDevice {
                 device: DeviceId(22),
                 name: "two".into(),
+                replaces: None,
             })
             .await
             .unwrap();
@@ -45,6 +48,7 @@ async fn damaged_entries_block_only_their_device_and_retain_each_cause() {
             .make_and_upload_entry(StoreChange::AddDevice {
                 device: DeviceId(23),
                 name: "three".into(),
+                replaces: None,
             })
             .await
             .unwrap();
@@ -147,6 +151,7 @@ async fn invalid_causal_past_and_timestamps_are_damaged() {
             .make_and_upload_entry(StoreChange::AddDevice {
                 device: DeviceId(30),
                 name: "prior".into(),
+                replaces: None,
             })
             .await
             .unwrap();
@@ -156,6 +161,7 @@ async fn invalid_causal_past_and_timestamps_are_damaged() {
             .make_and_upload_entry(StoreChange::AddDevice {
                 device: DeviceId(31),
                 name: "indirect".into(),
+                replaces: None,
             })
             .await
             .unwrap();
@@ -170,6 +176,7 @@ async fn invalid_causal_past_and_timestamps_are_damaged() {
             change: StoreChange::AddDevice {
                 device: DeviceId(40),
                 name: "bad".into(),
+                replaces: None,
             },
         };
         match defect {
@@ -284,6 +291,7 @@ async fn an_entry_that_cannot_be_read_after_listing_is_not_a_permanent_judgment(
             .make_and_upload_entry(StoreChange::AddDevice {
                 device: DeviceId(3),
                 name: "third".into(),
+                replaces: None,
             })
             .await
             .unwrap();

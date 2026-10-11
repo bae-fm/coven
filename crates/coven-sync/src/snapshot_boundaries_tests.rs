@@ -186,6 +186,7 @@ async fn queued_entries_wait_for_reload_and_finishing_a_queued_reset_blocks_new_
     let change = StoreChange::AddDevice {
         device: DeviceId(77),
         name: "waiting".into(),
+        replaces: None,
     };
     assert!(matches!(
         a.sync.make_and_upload_entry(change.clone()).await,

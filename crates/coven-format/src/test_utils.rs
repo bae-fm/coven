@@ -426,6 +426,7 @@ pub fn store_changes() -> Vec<StoreChange> {
         StoreChange::AddDevice {
             device: DeviceId(2),
             name: "D".into(),
+            replaces: None,
         },
         StoreChange::RemoveDevice {
             device: DeviceId(2),
@@ -489,6 +490,14 @@ pub fn objects() -> Vec<Object> {
                     device: DeviceId(9),
                     number: 11,
                 },
+            },
+            ..store_log()
+        }),
+        Object::StoreLog(StoreLogEntry {
+            change: StoreChange::AddDevice {
+                device: DeviceId(2),
+                name: "D".into(),
+                replaces: Some(DeviceId(1)),
             },
             ..store_log()
         }),

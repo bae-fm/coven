@@ -65,6 +65,7 @@ pub(crate) fn device(n: u64) -> StoreChange {
     StoreChange::AddDevice {
         device: DeviceId(n),
         name: format!("Device {n}"),
+        replaces: None,
     }
 }
 

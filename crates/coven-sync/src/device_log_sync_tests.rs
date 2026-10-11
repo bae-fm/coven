@@ -80,6 +80,7 @@ pub(crate) async fn group(storage: Arc<MemoryStorage>, count: u64) -> Vec<Device
             .make_and_upload_entry(StoreChange::AddDevice {
                 device: DeviceId(number),
                 name: number.to_string(),
+                replaces: None,
             })
             .await
             .unwrap();

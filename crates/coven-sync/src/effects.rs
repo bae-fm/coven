@@ -274,7 +274,9 @@ pub(crate) fn apply_effect(next: &mut StoreLogState, entry: &StoreLogEntry) {
         ChangeRole { member: id, role } => {
             next.members.get_mut(id).expect("checked member").role = *role;
         }
-        AddDevice { device: id, name } => {
+        AddDevice {
+            device: id, name, ..
+        } => {
             next.devices.insert(
                 *id,
                 StoreDevice {

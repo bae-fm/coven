@@ -2,6 +2,125 @@ use super::*;
 use crate::{encode_frame, test_utils, Object};
 
 #[test]
+fn device_registration_decodes_optional_replacement() {
+    for (replaces, payload) in [None, Some(DeviceId(1))].into_iter().zip([
+        &b"\x04\0\0\0\0\0\0\0\x02\0\0\0\x01D\0"[..],
+        &b"\x04\0\0\0\0\0\0\0\x02\0\0\0\x01D\x01\0\0\0\0\0\0\0\x01"[..],
+    ]) {
+        let mut bytes = Object::StoreLog(test_utils::store_log()).encode().unwrap();
+        bytes.truncate(75);
+        bytes.extend_from_slice(payload);
+        set_length(&mut bytes);
+        let expected = frame(StoreChange::AddDevice {
+            device: DeviceId(2),
+            name: "D".into(),
+            replaces,
+        });
+        let decoded = Object::decode(&bytes).expect("D6 registration names an optional old id");
+        assert_eq!(decoded, expected);
+        assert_eq!(expected.encode().unwrap(), bytes);
+    }
+}
+
+#[test]
+fn device_registration_rejects_self_replacement() {
+    for device in [DeviceId(0), DeviceId(1), DeviceId(u64::MAX)] {
+        let entry = StoreLogEntry {
+            change: StoreChange::AddDevice {
+                device,
+                name: "Phone".into(),
+                replaces: Some(device),
+            },
+            ..test_utils::store_log()
+        };
+        for result in [
+            Object::StoreLog(entry.clone()).encode().map(|_| ()),
+            Object::decode(&encode_frame(4, &entry).unwrap()).map(|_| ()),
+        ] {
+            assert_eq!(
+                result,
+                Err(Error::Invalid {
+                    field: "replacement device",
+                    rule: Rule::DeviceReplacement,
+                })
+            );
+        }
+    }
+}
+
+#[test]
+fn device_registration_preserves_full_ids_and_checks_names() {
+    for device in [DeviceId(0), DeviceId(u64::MAX)] {
+        for replaces in [None, Some(DeviceId(!device.0))] {
+            for (name, valid) in [
+                ("Phone", true),
+                ("电话", true),
+                (&"x".repeat(1024), true),
+                ("", false),
+                ("bad\0name", false),
+                (&"x".repeat(1025), false),
+            ] {
+                let entry = StoreLogEntry {
+                    change: StoreChange::AddDevice {
+                        device,
+                        name: name.into(),
+                        replaces,
+                    },
+                    ..test_utils::store_log()
+                };
+                let object = Object::StoreLog(entry.clone());
+                let encoded = object.encode();
+                let decoded = Object::decode(&encode_frame(4, &entry).unwrap());
+                if valid {
+                    assert_eq!(decoded.unwrap(), object);
+                    assert_eq!(Object::decode(&encoded.unwrap()).unwrap(), object);
+                } else {
+                    assert!(encoded.is_err());
+                    assert!(decoded.is_err());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn device_registration_rejects_malformed_replacement_payloads() {
+    for replaces in [None, Some(DeviceId(1))] {
+        let bytes = frame(StoreChange::AddDevice {
+            device: DeviceId(2),
+            name: "D".into(),
+            replaces,
+        })
+        .encode()
+        .unwrap();
+        // Tag, device and length-prefixed name precede the D2 option tag.
+        let option = 75 + 1 + 8 + 4 + 1;
+        for tag in 2..=u8::MAX {
+            let mut malformed = bytes.clone();
+            malformed[option] = tag;
+            assert_eq!(
+                Object::decode(&malformed),
+                Err(Error::UnknownTag {
+                    field: "option",
+                    tag
+                })
+            );
+        }
+        for end in option..bytes.len() {
+            let mut truncated = bytes[..end].to_vec();
+            set_length(&mut truncated);
+            assert_eq!(Object::decode(&truncated), Err(Error::Truncated));
+        }
+        for extra in [1, 8, 16] {
+            let mut extended = bytes.clone();
+            extended.extend(vec![0; extra]);
+            set_length(&mut extended);
+            assert_eq!(Object::decode(&extended), Err(Error::TrailingBytes));
+        }
+    }
+}
+
+#[test]
 fn removal_payloads_contain_only_their_targets() {
     let member = test_utils::member().signing;
     for (tag, target) in [

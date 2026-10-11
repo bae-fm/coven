@@ -391,6 +391,7 @@ async fn missing_read_view_waits_then_replays_after_the_store_log_arrives() {
             .make_and_upload_entry(StoreChange::AddDevice {
                 device: DeviceId(3),
                 name: "third".into(),
+                replaces: None,
             })
             .await
             .unwrap();
@@ -461,6 +462,7 @@ async fn retention_waits_for_store_log_entries() {
             .make_and_upload_entry(StoreChange::AddDevice {
                 device: DeviceId(3),
                 name: "third".into(),
+                replaces: None,
             })
             .await
             .unwrap();

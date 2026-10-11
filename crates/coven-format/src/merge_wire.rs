@@ -7,32 +7,7 @@ use coven_merge::{Cell, ColumnValue, Parent, Rule};
 use std::collections::{BTreeMap, BTreeSet};
 
 wire_struct!(coven_merge::ForeignKey, columns, parent => crate::wire::get_name, parent_columns);
-impl Wire for coven_merge::UniqueConstraint {
-    fn put(&self, out: &mut Encoder) -> Result<(), Error> {
-        self.terms.put(out)?;
-        match &self.partial {
-            None => 0u8.put(out),
-            Some(partial) => {
-                1u8.put(out)?;
-                partial.put(out)
-            }
-        }
-    }
-    fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
-        let terms = Wire::get(input)?;
-        let partial = match u8::get(input)? {
-            0 => None,
-            1 => Some(Wire::get(input)?),
-            tag => {
-                return Err(Error::UnknownTag {
-                    field: "partial unique constraint",
-                    tag,
-                })
-            }
-        };
-        Ok(Self { terms, partial })
-    }
-}
+wire_struct!(coven_merge::UniqueConstraint, terms, partial);
 wire_struct!(Parent, row, generation);
 wire_struct!(ColumnValue<Value>, value, parents);
 wire_struct!(Cell<Value>, write, value);

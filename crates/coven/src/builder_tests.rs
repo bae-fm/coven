@@ -509,6 +509,7 @@ mod recovery {
                 sync.make_and_upload_entry(StoreChange::AddDevice {
                     device: DeviceId(77),
                     name: "Waiting entry".into(),
+                    replaces: None,
                 })
                 .await,
                 Err(SyncError::Storage(_))

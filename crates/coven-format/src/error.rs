@@ -17,6 +17,8 @@ pub enum Rule {
     TimestampDevice,
     /// A had-read set included an invalid position for its own device.
     OwnPosition,
+    /// A device registration replaces the same id it adds.
+    DeviceReplacement,
     /// A part, row or removal rule named an audience it cannot contain or describe.
     Audience,
     /// Old and new column values did not match the operation.
