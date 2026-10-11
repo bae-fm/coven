@@ -12,6 +12,8 @@ use coven_database::Database;
 use std::sync::{Arc, Mutex};
 
 /// A shared handle to the open store and its running work (§20.2).
+/// Administrative changes catch up with storage before starting and report
+/// replay rejection as `SyncError::Rejected`, including its typed target.
 #[derive(Clone)]
 pub struct CovenHandle {
     closing: Arc<coven_foundation::files::StoreClosingGuard>,
@@ -177,6 +179,8 @@ impl CovenHandle {
         self.operations.reset_store().await
     }
     /// Retry a permanently failed operation from its next unfinished step.
+    /// A new entry attempt catches up and validates against replay again;
+    /// an already reserved entry retains its original bytes.
     pub async fn retry_pending_operation(
         &self,
         operation: OperationId,

@@ -74,10 +74,17 @@ pub(crate) enum SourceFailure {
     Integrity,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(remote = "coven_database::EntryTarget")]
+pub(crate) enum Target {
+    Member(#[serde(with = "member")] coven_crypto::MemberId),
+    Device(coven_foundation::id_source::DeviceId),
+    Circle(coven_foundation::id_source::CircleId),
+}
+#[derive(Serialize, Deserialize)]
 #[serde(remote = "coven_database::DropReason")]
 pub(crate) enum Drop {
     BeatenBy(#[serde(with = "entry")] coven_format::value::EntryId),
-    TargetGone,
+    TargetGone(#[serde(with = "Target")] coven_database::EntryTarget),
     NoAdminLeft,
     NotAllowed,
 }

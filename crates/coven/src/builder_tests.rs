@@ -93,16 +93,30 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     let members = handle.get_members().await.unwrap();
     assert_eq!(members.len(), 1);
     assert!(members[0].is_self);
+    assert!(matches!(
+        handle.circles().create("Disconnected").await,
+        Err(SyncError::NoStorage)
+    ));
+    handle.unlock_store_key().await.unwrap();
+    let (started, observed) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    storage
+        .hold_next_creation(ObjectPrefix::keys(directory.id()), started, held)
+        .await;
     let circles = handle.circles();
-    let mut waiting = Box::pin(circles.create("While offline"));
+    let mut waiting = Box::pin(circles.create("Interrupted"));
     std::future::poll_fn(|cx| {
         assert!(waiting.as_mut().poll(cx).is_pending());
         Poll::Ready(())
     })
     .await;
-    handle.get_members().await.unwrap(); // The preceding call's intent has committed.
+    observed.await.unwrap();
+    storage.set_online(false);
+    resume.send(()).unwrap();
+    handle.get_members().await.unwrap();
     drop(waiting);
     handle.close().await.unwrap();
+    storage.set_online(true);
     let handle = open().open(directory.id()).await.unwrap();
     handle.unlock_store_key().await.unwrap();
     let mut uploads = handle.subscribe_uploads();
@@ -138,13 +152,13 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     ));
     handle.get_members().await.unwrap();
     let circle = handle.circles().list().await.unwrap().remove(0);
-    assert_eq!(circle.name, "While offline");
+    assert_eq!(circle.name, "Interrupted");
     handle.circles().rename(circle.id, "Family").await.unwrap();
     assert!(handle.circles().members(circle.id).await.unwrap()[0].is_self);
     let outsider = MemberKeys::generate().unwrap().member_id();
     assert!(matches!(
         handle.circles().add_member(circle.id, &outsider).await,
-        Err(SyncError::NotStoreMember(id)) if id == outsider
+        Err(SyncError::Rejected(coven_database::DropReason::TargetGone(coven_database::EntryTarget::Member(id)))) if id == outsider
     ));
     let invite = handle
         .create_invite(
@@ -167,7 +181,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         handle
             .set_member_role(&member.member_id(), MemberRole::Member)
             .await,
-        Err(SyncError::LastAdmin)
+        Err(SyncError::Rejected(coven_database::DropReason::NoAdminLeft))
     ));
     assert!(keys
         .unlock()
@@ -180,7 +194,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     assert!(handle.circles().list().await.unwrap().is_empty());
     assert!(matches!(
         handle.circles().members(circle.id).await,
-        Err(SyncError::CircleDeleted(id)) if id == circle.id
+        Err(SyncError::Rejected(coven_database::DropReason::TargetGone(coven_database::EntryTarget::Circle(id)))) if id == circle.id
     ));
     handle.close().await.unwrap();
     assert!(matches!(
@@ -504,6 +518,57 @@ mod recovery {
             );
             writes.upload_writes().await.unwrap();
             sync.write_snapshot(Audience::Store).await.unwrap();
+            db.write(|sql| {
+                sql.execute("INSERT INTO notes VALUES('waiting','offline')", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+            let files = coven_sync::Files::new(
+                coven_database::FileDatabase::new(db.clone()),
+                directory.clone(),
+                None,
+                clock.clone(),
+                ids.clone(),
+                coven_sync::TransferLimits::default(),
+            );
+            let operations = coven_sync::Operations::new(
+                StoreLogSync::new(
+                    storage.clone(),
+                    db.clone(),
+                    key_session.clone(),
+                    member_session.clone(),
+                    clock.clone(),
+                    ids.clone(),
+                    directory.clone(),
+                ),
+                files,
+                coven_sync::DeviceLogSync::disconnected(
+                    db.clone(),
+                    key_session.clone(),
+                    member_session.clone(),
+                ),
+                clock.clone(),
+            );
+            let (started, observed) = tokio::sync::oneshot::channel();
+            let (resume, held) = tokio::sync::oneshot::channel();
+            storage
+                .hold_next_listing(ObjectPrefix::store_logs(directory.id()), started, held)
+                .await;
+            let mut pending = Box::pin(operations.create_circle("Waiting operation"));
+            std::future::poll_fn(|cx| {
+                assert!(pending.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            observed.await.unwrap();
+            storage.set_online(false);
+            resume.send(()).unwrap();
+            operations.get_members().await.unwrap();
+            assert_eq!(db.operations().await.unwrap().len(), 1);
+            drop(pending);
+            operations.close().await.unwrap();
+            storage.set_online(true);
             storage
                 .set_faults(coven_storage::test_utils::Faults {
                     drop_part: true,
@@ -529,46 +594,7 @@ mod recovery {
                 storage.read(&path).await.unwrap_err().failure(),
                 StorageFailure::NotFound
             );
-            db.write(|sql| {
-                sql.execute("INSERT INTO notes VALUES('waiting','offline')", [])?;
-                Ok(())
-            })
-            .await
-            .unwrap();
-            let files = coven_sync::Files::new(
-                coven_database::FileDatabase::new(db.clone()),
-                directory.clone(),
-                None,
-                clock.clone(),
-                ids.clone(),
-                coven_sync::TransferLimits::default(),
-            );
-            let operations = coven_sync::Operations::new(
-                StoreLogSync::disconnected(
-                    db.clone(),
-                    key_session.clone(),
-                    member_session.clone(),
-                    clock.clone(),
-                    ids.clone(),
-                    directory.clone(),
-                ),
-                files,
-                coven_sync::DeviceLogSync::disconnected(
-                    db.clone(),
-                    key_session.clone(),
-                    member_session.clone(),
-                ),
-                clock.clone(),
-            );
-            let mut pending = Box::pin(operations.create_circle("Waiting operation"));
-            std::future::poll_fn(|cx| {
-                assert!(pending.as_mut().poll(cx).is_pending());
-                Poll::Ready(())
-            })
-            .await;
-            operations.get_members().await.unwrap();
-            drop(pending);
-            operations.close().await.unwrap();
+
             let old_device = directory.settings().unwrap().device_id;
             let scratch: i64 = db
                 .read(|sql| {

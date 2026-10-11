@@ -151,13 +151,24 @@ pub enum EntryOutcome {
     Dropped(DropReason),
 }
 
+/// The member, device or circle named by a rejected store-log change (§9, E5).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EntryTarget {
+    /// A store member or a member of a circle.
+    Member(MemberId),
+    /// A device identity.
+    Device(DeviceId),
+    /// A circle identity.
+    Circle(CircleId),
+}
+
 /// Why replay dropped an entry (§9, E5).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DropReason {
     /// A conflicting concurrent entry beat it, even if that entry later dropped.
     BeatenBy(EntryId),
     /// A member, device or circle needed at its place in replay did not exist.
-    TargetGone,
+    TargetGone(EntryTarget),
     /// Its effect would leave no admin.
     NoAdminLeft,
     /// Its author's view did not authorize the change, including an unseen device.
@@ -196,7 +207,7 @@ pub(crate) fn apply(
         }
         let outcomes: BTreeMap<_, _> = database
             .query(
-                "SELECT device,number,outcome,beaten_device,beaten_number FROM _coven_store_log",
+                "SELECT device,number,outcome,beaten_device,beaten_number,target FROM _coven_store_log",
                 [],
                 |row| {
                     Ok((

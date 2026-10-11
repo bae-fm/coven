@@ -33,7 +33,7 @@ impl StoreLogSync {
         role: MemberRole,
         access: InviteAccess,
     ) -> Result<Begun, SyncError> {
-        self.require_admin(&local.log.replay.state, me)?;
+        crate::effects::Authority::Admin.check(&local.log.replay.state, me)?;
         if !self.owns_storage(&local.log, me) {
             return Err(StorageFailure::NotStoreOwner.into());
         }
@@ -90,7 +90,7 @@ impl StoreLogSync {
         request: Option<JoinRequest>,
         approve: bool,
     ) -> Result<Begun, SyncError> {
-        self.require_admin(&local.log.replay.state, me)?;
+        crate::effects::Authority::Admin.check(&local.log.replay.state, me)?;
         if !self.owns_storage(&local.log, me) {
             return Err(StorageFailure::NotStoreOwner.into());
         }
@@ -120,6 +120,16 @@ impl StoreLogSync {
             }
             work.state = if approve {
                 let request = stored.ok_or(SyncError::InvitationChanged)?.clone();
+                let decoded = self.decode_request(&request)?;
+                self.validate_administration(
+                    local,
+                    me,
+                    &coven_format::store_log::StoreChange::AddMember {
+                        keys: decoded.keys,
+                        role: work.role,
+                        access: work.access.member_access(),
+                    },
+                )?;
                 InviteState::Approving {
                     request,
                     entry: None,
@@ -154,9 +164,10 @@ impl StoreLogSync {
         }
         match &mut work.state {
             InviteState::Grant => {
+                self.catch_up().await?;
                 let local = self.database.local_store_log().await?;
                 let me = self.operation_member()?.member_id();
-                self.require_admin(&local.log.replay.state, &me)?;
+                crate::effects::Authority::Admin.check(&local.log.replay.state, &me)?;
                 if !self.owns_storage(&local.log, &me) {
                     return Err(StorageFailure::NotStoreOwner.into());
                 }
@@ -299,7 +310,7 @@ impl StoreLogSync {
             .state
             .store
             .as_ref()
-            .ok_or(SyncError::PermissionDenied)?;
+            .ok_or(coven_database::DbError::DamagedDatabase)?;
         if store.id != local.store {
             return Err(SyncError::WrongStore {
                 expected: local.store,

@@ -106,7 +106,7 @@ impl StoreLogSync {
         if data.entry()?.is_none() {
             // Fresh authoring always uses the latest available replay. No entry
             // number or introduced key id survives a dropped attempt's restart.
-            self.step().await?;
+            self.catch_up().await?;
             if let Some(id) = self.pending_reload().await? {
                 return Ok(Progress::Waiting(self.reload_condition(id).await?));
             }
@@ -315,15 +315,19 @@ impl StoreLogSync {
         ring: &mut Option<coven_crypto::StoreKeyring>,
     ) -> Result<Option<StoreChange>, SyncError> {
         let state = &local.log.replay.state;
-        let key = || KeyId(self.ids.new_id());
         let intent = match data {
             Data::Entry(work) => &mut work.intent,
             Data::Invite(work) => {
-                self.require_admin(state, me)?;
                 let InviteState::Approving { request, .. } = &work.state else {
                     unreachable!()
                 };
                 let request = self.decode_request(request)?;
+                let change = StoreChange::AddMember {
+                    keys: request.keys.clone(),
+                    role: work.role,
+                    access: work.access.member_access(),
+                };
+                self.validate_administration(local, me, &change)?;
                 if let Some(existing) = effects::member(state, &request.keys.signing) {
                     if existing.sealing == request.keys.sealing
                         && existing.role == work.role
@@ -333,35 +337,21 @@ impl StoreLogSync {
                     }
                     return Err(SyncError::InvitationChanged);
                 }
-                return Ok(Some(StoreChange::AddMember {
-                    keys: request.keys,
-                    role: work.role,
-                    access: work.access.member_access(),
-                }));
+                return Ok(Some(change));
             }
             Data::Revoke { .. } | Data::Snapshots(_) | Data::PublishSchema { .. } => unreachable!(),
         };
-        Ok(Some(match intent {
-            Intent::Reset { snapshot } => {
-                self.require_reset(state, &snapshot.audience, me)?;
-                StoreChange::Reset {
-                    snapshot: snapshot.clone(),
-                }
-            }
-            Intent::RemoveMember { member } => {
-                let target = member.parse()?;
-                if effects::member(state, &target).is_none() {
-                    return Ok(None);
-                }
-                self.check_removal(local, me, &target)?;
-                StoreChange::RemoveMember { member: target }
-            }
+        let change = match intent {
+            Intent::Reset { snapshot } => StoreChange::Reset {
+                snapshot: snapshot.clone(),
+            },
+            Intent::RemoveMember { member } => StoreChange::RemoveMember {
+                member: member.parse()?,
+            },
             Intent::CreateCircle { circle, name } => {
-                self.require_member(state, me)?;
-                if effects::circle(state, *circle).is_some() {
-                    return Ok(None);
-                }
-                let material = coven_crypto::CircleKey::generate(*circle, key())?;
+                effects::Authority::Member.check(state, me)?;
+                let material =
+                    coven_crypto::CircleKey::generate(*circle, KeyId(self.ids.new_id()))?;
                 let change = StoreChange::CreateCircle {
                     circle: *circle,
                     name: name.clone(),
@@ -375,37 +365,25 @@ impl StoreLogSync {
                     .insert_circle_key(material)?;
                 change
             }
-            Intent::AddCircleMember { circle, member } => {
-                let target = member.parse()?;
-                self.require_circle(state, *circle, me)?;
-                self.require_member(state, &target)?;
-                if state.circles[circle].members.contains(&target) {
-                    return Ok(None);
-                }
-                StoreChange::AddCircleMember {
-                    circle: *circle,
-                    member: target,
-                }
-            }
-            Intent::RemoveCircleMember { circle, member } => {
-                let target = member.parse()?;
-                if !effects::circle(state, *circle).is_some_and(|c| c.members.contains(&target)) {
-                    return Ok(None);
-                }
-                self.require_circle(state, *circle, me)?;
-                StoreChange::RemoveCircleMember {
-                    circle: *circle,
-                    member: target,
-                }
-            }
-            Intent::DeleteCircle { circle, .. } => {
-                if effects::circle(state, *circle).is_none() {
-                    return Ok(None);
-                }
-                self.require_circle(state, *circle, me)?;
-                StoreChange::DeleteCircle { circle: *circle }
-            }
-        }))
+            Intent::AddCircleMember { circle, member } => StoreChange::AddCircleMember {
+                circle: *circle,
+                member: member.parse()?,
+            },
+            Intent::RemoveCircleMember { circle, member } => StoreChange::RemoveCircleMember {
+                circle: *circle,
+                member: member.parse()?,
+            },
+            Intent::DeleteCircle { circle, .. } => StoreChange::DeleteCircle { circle: *circle },
+        };
+        // A started operation finishes without another entry if its effect has
+        // already happened (§18), even if that effect removed its authority.
+        if effects::change_in_place(state, me, &change) {
+            tracing::debug!(?change, "operation change is already in place");
+            Ok(None)
+        } else {
+            self.validate_administration(local, me, &change)?;
+            Ok(Some(change))
+        }
     }
 
     pub(super) async fn save_access_result(

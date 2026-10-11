@@ -167,7 +167,7 @@ impl StoreLogSync {
                 .state
                 .members
                 .get(&member.member_id())
-                .ok_or(SyncError::PermissionDenied)?;
+                .ok_or(SyncError::Rejected(coven_database::DropReason::NotAllowed))?;
             if current.removed {
                 return Err(crate::SyncFailure::Removed.into());
             }

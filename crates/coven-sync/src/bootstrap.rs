@@ -97,7 +97,7 @@ impl StoreLogSync {
         let local = self.database.local_store_log().await?;
         self.check_stopped(&local, &member)?;
         if crate::effects::member(&local.log.replay.state, &member.member_id()).is_none() {
-            return Err(SyncError::NotStoreMember(member.member_id()));
+            return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed));
         }
         let damages = self.resume_snapshots().await?;
         if let Some(damage) = damages.into_iter().next() {
@@ -105,7 +105,7 @@ impl StoreLogSync {
         }
         match local.log.replay.state.devices.get(&local.device) {
             Some(device) if device.member != member.member_id() => {
-                return Err(SyncError::PermissionDenied)
+                return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed))
             }
             Some(_) => {}
             None => {

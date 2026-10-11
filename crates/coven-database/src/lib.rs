@@ -112,8 +112,8 @@ pub use snapshot_error::SnapshotError;
 pub use snapshot_reload::{SnapshotReload, SnapshotSource};
 pub use snapshot_write::SnapshotWriteError;
 pub use store_log::{
-    DropReason, EntryOutcome, StoreCircle, StoreDevice, StoreIdentity, StoreLog, StoreLogReplay,
-    StoreLogState, StoreMember, StoreVersion,
+    DropReason, EntryOutcome, EntryTarget, StoreCircle, StoreDevice, StoreIdentity, StoreLog,
+    StoreLogReplay, StoreLogState, StoreMember, StoreVersion,
 };
 pub use store_log_check::{CircleRemoval, ReplayEntry, StoreLogCheck};
 pub use store_log_upload::{LocalStoreLog, StoreLogSealing, StoreLogUpload};

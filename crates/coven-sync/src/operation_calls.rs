@@ -1,6 +1,7 @@
 //! Operation app calls, borrowing the store-log owner's capabilities.
 
 use super::StoreLogSync;
+use crate::effects::Authority;
 use crate::{
     effects,
     operation_data::{CircleRows, Data, EntryWork, Intent, InviteState},
@@ -8,7 +9,7 @@ use crate::{
     *,
 };
 use coven_crypto::{MemberId, MemberKeys};
-use coven_database::{LocalStoreLog, OperationRecord, StoreLog, StoreLogState};
+use coven_database::{LocalStoreLog, OperationRecord, StoreLog};
 use coven_format::store_log::{MemberRole, StoreChange};
 use coven_foundation::id_source::CircleId;
 
@@ -191,6 +192,13 @@ impl StoreLogSync {
             }
             _ => (),
         }
+        // Local reads and recovery do not start an administrative change.
+        if !matches!(
+            command,
+            Command::Members | Command::Circles | Command::CircleMembers(_) | Command::Reload
+        ) {
+            self.catch_up().await?;
+        }
         let local = self.database.local_store_log().await?;
         let member = self.operation_member()?;
         self.check_stopped(&local, &member)?;
@@ -198,7 +206,7 @@ impl StoreLogSync {
         let state = &local.log.replay.state;
         let intent = match command {
             Command::Reload => {
-                self.require_member(state, &me)?;
+                Authority::Member.check(state, &me)?;
                 let data = Data::Snapshots(crate::snapshot_data::SnapshotTask {
                     job: crate::snapshot_data::SnapshotJob::Reload {
                         scope: crate::snapshot_data::ReloadScope::All,
@@ -213,7 +221,7 @@ impl StoreLogSync {
                 ));
             }
             Command::Reset(audience) => {
-                self.require_reset(state, &audience, &me)?;
+                Authority::reset(&audience).check(state, &me)?;
                 let method = if audience == coven_merge::Audience::Store {
                     "reset_store"
                 } else {
@@ -270,9 +278,14 @@ impl StoreLogSync {
                 )))
             }
             Command::CircleMembers(circle) => {
-                self.require_circle(state, circle, &me)?;
+                let current = effects::circle(state, circle).ok_or(
+                    coven_database::DropReason::TargetGone(coven_database::EntryTarget::Circle(
+                        circle,
+                    )),
+                )?;
+                Authority::Circle(circle).check(state, &me)?;
                 return Ok(Begun::Value(Output::CircleMembers(
-                    state.circles[&circle]
+                    current
                         .members
                         .iter()
                         .filter(|id| effects::member(state, id).is_some())
@@ -284,26 +297,13 @@ impl StoreLogSync {
                 )));
             }
             Command::SetAccess(access) => {
-                // Publish a previously reserved attempt and read concurrent removals
-                // before deciding whether this key still needs a new entry.
-                let damages = self.step().await?;
-                if let Some(damaged) = damages.into_iter().next() {
-                    return Err(damaged.into());
-                }
-                let latest = self.database.local_store_log().await?;
-                self.require_member(&latest.log.replay.state, &me)?;
-                if latest.log.replay.state.members[&me].access != access {
-                    self.make_and_upload_entry(StoreChange::SetAccess { access })
-                        .await?;
+                let change = StoreChange::SetAccess { access };
+                if !effects::validate_change(state, &me, &change)? {
+                    self.make_and_upload_entry(change).await?;
                 }
                 return Ok(Begun::Value(Output::Unit));
             }
             Command::SetRole(target, role) => {
-                self.require_admin(state, &me)?;
-                self.require_member(state, &target)?;
-                if role != MemberRole::Admin {
-                    self.require_other_admin(state, &target)?;
-                }
                 self.make_and_upload_entry(StoreChange::ChangeRole {
                     member: target,
                     role,
@@ -312,10 +312,6 @@ impl StoreLogSync {
                 return Ok(Begun::Value(Output::Unit));
             }
             Command::RemoveDevice(device) => {
-                let target = effects::device(state, device).ok_or(SyncError::PermissionDenied)?;
-                if target.member != me {
-                    self.require_admin(state, &me)?;
-                }
                 let signout = self
                     .storage
                     .as_deref()
@@ -346,26 +342,36 @@ impl StoreLogSync {
                 return Ok(Begun::Value(Output::SignOut(signout)));
             }
             Command::RemoveMember(target) => {
-                self.check_removal(&local, &me, &target)?;
+                self.validate_administration(
+                    &local,
+                    &me,
+                    &StoreChange::RemoveMember {
+                        member: target.clone(),
+                    },
+                )?;
+                if !state.members.contains_key(&target) {
+                    return Ok(Begun::Value(Output::Removal(
+                        coven_storage::MemberRemoval::Revoked,
+                    )));
+                }
                 Intent::RemoveMember {
                     member: target.to_string(),
                 }
             }
             Command::CreateCircle(name) => {
-                self.require_member(state, &me)?;
+                Authority::Member.check(state, &me)?;
                 Intent::CreateCircle {
                     circle: CircleId(self.ids.new_id()),
                     name,
                 }
             }
             Command::RenameCircle(circle, name) => {
-                self.require_circle(state, circle, &me)?;
                 self.make_and_upload_entry(StoreChange::RenameCircle { circle, name })
                     .await?;
                 return Ok(Begun::Value(Output::Unit));
             }
             Command::DeleteCircle(circle) => {
-                self.require_circle(state, circle, &me)?;
+                self.validate_administration(&local, &me, &StoreChange::DeleteCircle { circle })?;
                 let id = self
                     .database
                     .delete_circle_rows(circle, move |write| {
@@ -391,15 +397,28 @@ impl StoreLogSync {
                 return Ok(Begun::Operation(id));
             }
             Command::AddCircleMember(circle, target) => {
-                self.require_circle(state, circle, &me)?;
-                self.require_member(state, &target)?;
+                self.validate_administration(
+                    &local,
+                    &me,
+                    &StoreChange::AddCircleMember {
+                        circle,
+                        member: target.clone(),
+                    },
+                )?;
                 Intent::AddCircleMember {
                     circle,
                     member: target.to_string(),
                 }
             }
             Command::RemoveCircleMember(circle, target) => {
-                self.require_circle(state, circle, &me)?;
+                self.validate_administration(
+                    &local,
+                    &me,
+                    &StoreChange::RemoveCircleMember {
+                        circle,
+                        member: target.clone(),
+                    },
+                )?;
                 Intent::RemoveCircleMember {
                     circle,
                     member: target.to_string(),
@@ -448,86 +467,30 @@ impl StoreLogSync {
             .ok_or_else(|| coven_storage::StorageFailure::MemberKeysMissing.into())
     }
 
-    pub(super) fn check_removal(
+    /// Replay owns membership rejection; storage ownership is a separate provider rule.
+    pub(super) fn validate_administration(
         &self,
         local: &LocalStoreLog,
         author: &MemberId,
-        target: &MemberId,
+        change: &StoreChange,
     ) -> Result<(), SyncError> {
-        let state = &local.log.replay.state;
-        self.require_admin(state, author)?;
-        self.require_member(state, target)?;
-        let access = &state.members[target].access;
-        if matches!(access, coven_format::MemberAccess::ProviderAccount(_))
-            && self
-                .owner_access(&local.log)
-                .is_some_and(|owner| same_access(owner, access))
-        {
-            return Err(SyncError::StoreOwner);
+        effects::validate_change(&local.log.replay.state, author, change)?;
+        if let StoreChange::RemoveMember { member } = change {
+            if let Some(target) = effects::member(&local.log.replay.state, member) {
+                if matches!(
+                    target.access,
+                    coven_format::MemberAccess::ProviderAccount(_)
+                ) && self
+                    .owner_access(&local.log)
+                    .is_some_and(|owner| same_access(owner, &target.access))
+                {
+                    return Err(SyncError::StoreOwner);
+                }
+            }
         }
-        self.require_other_admin(state, target)?;
         Ok(())
     }
 
-    pub(super) fn require_reset(
-        &self,
-        state: &StoreLogState,
-        audience: &coven_merge::Audience,
-        member: &MemberId,
-    ) -> Result<(), SyncError> {
-        match audience {
-            coven_merge::Audience::Store => self.require_admin(state, member),
-            coven_merge::Audience::Circle(circle) => self.require_circle(state, *circle, member),
-        }
-    }
-
-    pub(super) fn require_admin(
-        &self,
-        state: &StoreLogState,
-        member: &MemberId,
-    ) -> Result<(), SyncError> {
-        if !effects::member(state, member).is_some_and(|m| m.role == MemberRole::Admin) {
-            return Err(SyncError::PermissionDenied);
-        }
-        Ok(())
-    }
-    pub(super) fn require_member(
-        &self,
-        state: &StoreLogState,
-        member: &MemberId,
-    ) -> Result<(), SyncError> {
-        if effects::member(state, member).is_none() {
-            return Err(SyncError::NotStoreMember(member.clone()));
-        }
-        Ok(())
-    }
-    pub(super) fn require_other_admin(
-        &self,
-        state: &StoreLogState,
-        target: &MemberId,
-    ) -> Result<(), SyncError> {
-        if !state
-            .members
-            .iter()
-            .any(|(id, m)| id != target && !m.removed && m.role == MemberRole::Admin)
-        {
-            return Err(SyncError::LastAdmin);
-        }
-        Ok(())
-    }
-    pub(super) fn require_circle(
-        &self,
-        state: &StoreLogState,
-        circle: CircleId,
-        member: &MemberId,
-    ) -> Result<(), SyncError> {
-        let circle_state =
-            effects::circle(state, circle).ok_or(SyncError::CircleDeleted(circle))?;
-        if !circle_state.members.contains(member) || effects::member(state, member).is_none() {
-            return Err(SyncError::CircleNotMember(circle));
-        }
-        Ok(())
-    }
     pub(super) fn owner_access<'a>(
         &self,
         log: &'a StoreLog,
@@ -577,8 +540,8 @@ impl StoreLogSync {
             return Err(SyncError::NotPending(id));
         }
         if !discard
-            && (pending.reason.retry() == Retry::Never
-                || (pending.reason.retry() == Retry::AfterUpdate
+            && (pending.retry() == Retry::Never
+                || (pending.retry() == Retry::AfterUpdate
                     && !self.operation_can_retry(&record).await?))
         {
             return Err(SyncError::Pending(Box::new(pending)));

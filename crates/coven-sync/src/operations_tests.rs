@@ -24,6 +24,9 @@ fn pending_kind(record: &PendingRecord) -> OperationKind {
     kind
 }
 
+#[path = "operation_calls_tests.rs"]
+mod calls;
+
 fn file_owner(d: &Device) -> Files {
     Files::new(
         coven_database::FileDatabase::new(d.db.clone()),
@@ -315,50 +318,6 @@ async fn restart_after_each_step_uses_the_committed_entry_and_keys() {
     }
 }
 
-#[tokio::test]
-async fn cancelled_app_future_keeps_running_and_permanent_failure_retries_or_discards() {
-    let storage = storage();
-    let mut d = device(storage.clone(), 1, member(1), store(1)).await;
-    d.create(key(1)).await;
-    d.add(&member(2), MemberRole::Member).await;
-    d.sync.storage = None;
-    let files = file_owner(&d);
-    let operations = { operation_owner(d.sync, files) };
-    let mut waiting = Box::pin(operations.create_circle("offline"));
-    std::future::poll_fn(|cx| {
-        use std::future::Future;
-        assert!(waiting.as_mut().poll(cx).is_pending());
-        std::task::Poll::Ready(())
-    })
-    .await;
-    operations.get_members().await.unwrap();
-    assert_eq!(d.db.operations().await.unwrap().len(), 1);
-    drop(waiting);
-    operations.set_storage(Some(storage.clone())).await.unwrap();
-    assert_eq!(operations.circles().await.unwrap()[0].name, "offline");
-    // Invalid names fail during format validation, after their intent is durable.
-    assert!(matches!(
-        operations.create_circle("").await,
-        Err(SyncError::Failed {
-            failure: LocalFailure::Database,
-            ..
-        })
-    ));
-    let conditions = pending(&operations, &d.db).await;
-    assert_eq!(conditions.len(), 1);
-    let id = pending_id(&conditions[0]);
-    assert!(matches!(
-        operations.retry_pending_operation(id).await,
-        Err(SyncError::Failed {
-            failure: LocalFailure::Database,
-            ..
-        })
-    ));
-    operations.discard_pending_operation(id).await.unwrap();
-    assert!(pending(&operations, &d.db).await.is_empty());
-    operations.close().await.unwrap();
-}
-
 #[path = "operation_invites_tests.rs"]
 mod invites;
 
@@ -446,7 +405,7 @@ async fn circle_membership_rotates_and_shares_history() {
         b.sync
             .begin_operation_call(Command::RenameCircle(circle, "Forbidden".into()))
             .await,
-        Err(SyncError::CircleNotMember(_))
+        Err(SyncError::Rejected(coven_database::DropReason::NotAllowed))
     ));
 }
 
@@ -642,7 +601,7 @@ async fn plain_device_removal_preserves_member_keys_and_returns_provider_sign_ou
         c.sync
             .begin_operation_call(Command::RemoveDevice(b_id))
             .await,
-        Err(SyncError::PermissionDenied)
+        Err(SyncError::Rejected(coven_database::DropReason::NotAllowed))
     ));
     let previous_key = a.log().await.replay.state.store.unwrap().key;
     assert!(matches!(
@@ -697,12 +656,12 @@ async fn role_changes_preserve_an_admin_and_owner_accounts_cannot_be_removed() {
     ));
     assert!(matches!(
         c.set_member_role(&admin, MemberRole::Member).await,
-        Err(SyncError::PermissionDenied)
+        Err(SyncError::Rejected(coven_database::DropReason::NotAllowed))
     ));
     b.set_member_role(&owner, MemberRole::Member).await.unwrap();
     assert!(matches!(
         b.set_member_role(&admin, MemberRole::Member).await,
-        Err(SyncError::LastAdmin)
+        Err(SyncError::Rejected(coven_database::DropReason::NoAdminLeft))
     ));
     a.sync_store_log().await.unwrap();
     assert!(a
@@ -714,11 +673,11 @@ async fn role_changes_preserve_an_admin_and_owner_accounts_cannot_be_removed() {
     let circle = a.create_circle("Members' circle").await.unwrap();
     assert!(matches!(
         a.add_circle_member(circle, &member(99).member_id()).await,
-        Err(SyncError::NotStoreMember(id)) if id == member(99).member_id()
+        Err(SyncError::Rejected(coven_database::DropReason::TargetGone(coven_database::EntryTarget::Member(id)))) if id == member(99).member_id()
     ));
     assert!(matches!(
         a.circle_members(super::circle(99)).await,
-        Err(SyncError::CircleDeleted(id)) if id == super::circle(99)
+        Err(SyncError::Rejected(coven_database::DropReason::TargetGone(coven_database::EntryTarget::Circle(id)))) if id == super::circle(99)
     ));
     a.close().await.unwrap();
     b.close().await.unwrap();
@@ -779,13 +738,13 @@ async fn store_reset_requires_admin_and_circle_reset_requires_membership() {
     let c = { operation_owner(c.sync, files) };
     assert!(matches!(
         c.reset_store().await,
-        Err(SyncError::PermissionDenied)
+        Err(SyncError::Rejected(coven_database::DropReason::NotAllowed))
     ));
     let circle = c.create_circle("Gifts").await.unwrap();
     a.sync_store_log().await.unwrap();
     assert!(matches!(
         a.reset_circle(circle).await,
-        Err(SyncError::CircleNotMember(id)) if id == circle
+        Err(SyncError::Rejected(coven_database::DropReason::NotAllowed))
     ));
     c.reset_circle(circle).await.unwrap();
     a.sync_store_log().await.unwrap();

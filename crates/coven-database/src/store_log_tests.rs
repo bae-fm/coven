@@ -516,7 +516,9 @@ async fn removed_identities_keys_versions_resets_and_every_drop_reason_round_tri
         .removed = true;
     replay.state.store.as_mut().unwrap().key = key(u128::MAX);
     for (index, reason) in [
-        DropReason::TargetGone,
+        DropReason::TargetGone(EntryTarget::Member(keys(2).signing)),
+        DropReason::TargetGone(EntryTarget::Device(DeviceId(u64::MAX))),
+        DropReason::TargetGone(EntryTarget::Circle(circle)),
         DropReason::NoAdminLeft,
         DropReason::NotAllowed,
         DropReason::BeatenBy(expected.entries[0].entry.position),
@@ -545,7 +547,7 @@ async fn removed_identities_keys_versions_resets_and_every_drop_reason_round_tri
         audience: Audience::Store,
     };
     let schema = entry(
-        10,
+        11,
         StoreChange::RaiseSchema {
             version: u32::MAX,
             snapshot: snapshot.clone(),
@@ -574,7 +576,7 @@ async fn removed_identities_keys_versions_resets_and_every_drop_reason_round_tri
             audience: audience.clone(),
         };
         let reset = entry(
-            index as u64 + 11,
+            index as u64 + 12,
             StoreChange::Reset {
                 snapshot: snapshot.clone(),
             },

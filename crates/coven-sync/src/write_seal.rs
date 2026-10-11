@@ -48,7 +48,12 @@ pub(crate) fn current(
             .get(circle)
             .map(|circle| circle.key),
     }
-    .ok_or(SyncError::Rejected(coven_database::DropReason::TargetGone))?;
+    .ok_or_else(|| match audience {
+        Audience::Store => SyncError::NoStorage,
+        Audience::Circle(circle) => SyncError::Rejected(coven_database::DropReason::TargetGone(
+            coven_database::EntryTarget::Circle(*circle),
+        )),
+    })?;
     if crate::store_log_keys::holds(Some(ring), audience, selected) {
         return Ok(selected);
     }

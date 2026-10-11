@@ -139,7 +139,7 @@ impl StoreLogSync {
         let local = self.database.local_store_log().await?;
         self.check_stopped(&local, &self.operation_member()?)?;
         if !self.snapshot_audiences(&local.log)?.contains_key(&audience) {
-            return Err(SyncError::PermissionDenied);
+            return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed));
         }
         let record = self
             .start_snapshot_task(SnapshotJob::Write {
@@ -340,6 +340,9 @@ impl StoreLogSync {
         else {
             unreachable!("snapshot writing step")
         };
+        if matches!(trigger, SnapshotTrigger::Reset) && record.last_step == 0 {
+            self.catch_up().await?;
+        }
         if !matches!(trigger, SnapshotTrigger::Raise { .. }) {
             if let Some(id) = self.pending_reload().await? {
                 return Err(SyncError::ReloadPending(id));
@@ -349,7 +352,8 @@ impl StoreLogSync {
         let member = self.operation_member()?;
         self.check_stopped(&local, &member)?;
         if matches!(trigger, SnapshotTrigger::Reset) {
-            self.require_reset(&local.log.replay.state, &audience, &member.member_id())?;
+            crate::effects::Authority::reset(&audience)
+                .check(&local.log.replay.state, &member.member_id())?;
         }
         let id = SnapshotId {
             audience: audience.clone(),
@@ -409,7 +413,7 @@ impl StoreLogSync {
         let current = self.snapshot_audiences(log)?;
         let key_id = *current
             .get(&id.audience)
-            .ok_or(SyncError::PermissionDenied)?;
+            .ok_or(SyncError::Rejected(coven_database::DropReason::NotAllowed))?;
         let ring = self
             .store_keys
             .read()?
@@ -636,7 +640,7 @@ pub(super) fn audiences_for_member(
     let state = &log.replay.state;
     let mut audiences = BTreeMap::new();
     if state.members.get(member).is_none_or(|m| m.removed) {
-        return Err(SyncError::PermissionDenied);
+        return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed));
     }
     if let Some(store) = &state.store {
         audiences.insert(Audience::Store, store.key);

@@ -248,3 +248,32 @@ async fn circle_causes_and_author_view_classifications_survive_reopening() {
         database.close().await.unwrap();
     }
 }
+
+#[test]
+fn concurrent_addition_refills_a_collectively_emptied_circle() {
+    let mut h = circle_history();
+    let past: Vec<_> = (0..8).collect();
+    h.push(0, 0, &past, leave(0, 1));
+    h.push(0, 2, &past, remove(0));
+    h.push(1, 1, &past, join(0, 2));
+    h.every_order(|r| {
+        assert!(h.drops(r).is_empty());
+        assert_eq!(r.state.circles[&circle(0)].members, [member(2)].into());
+        assert!(!r.state.circle_deletions.contains_key(&circle(0)));
+    });
+}
+
+#[test]
+fn circle_deletion_outranks_an_earlier_shared_member_removal() {
+    let mut h = gifts();
+    h.push(0, 0, &[0, 1, 2, 3, 4], leave(0, 1));
+    h.push(1, 1, &[0, 1, 2, 3, 4], delete(0));
+    h.every_order(|r| {
+        assert!(r.state.circle_deletions.contains_key(&circle(0)));
+        assert_eq!(h.drops(r), [5]);
+        assert_eq!(
+            r.entries[&h.entries[5].position],
+            EntryOutcome::Dropped(DropReason::BeatenBy(h.entries[6].position))
+        );
+    });
+}

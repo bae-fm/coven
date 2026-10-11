@@ -48,24 +48,9 @@ pub enum SyncError {
     /// This call requires connected storage; durable work remains queued.
     #[error("storage is not connected")]
     NoStorage,
-    /// The caller has no authority for this change.
-    #[error("permission denied")]
-    PermissionDenied,
-    /// The change would remove the final admin.
-    #[error("the store must retain an admin")]
-    LastAdmin,
     /// The account holding the store cannot be removed.
     #[error("the store owner cannot be removed")]
     StoreOwner,
-    /// Circle membership is required by this operation.
-    #[error("not a member of circle {0}")]
-    CircleNotMember(coven_foundation::id_source::CircleId),
-    /// A circle operation named a deleted or absent circle.
-    #[error("circle {0} is deleted")]
-    CircleDeleted(coven_foundation::id_source::CircleId),
-    /// Only current members can be invited into a circle.
-    #[error("{0} is not a store member")]
-    NotStoreMember(coven_crypto::MemberId),
     /// The request or invitation is absent, expired, or no longer matches.
     #[error("invitation or join request is no longer current")]
     InvitationChanged,
@@ -167,6 +152,12 @@ pub enum SyncFailure {
     /// Any other failure, retaining its typed cause.
     #[error("sync failed: {0}")]
     Other(#[source] Arc<dyn std::error::Error + Send + Sync>),
+}
+
+impl From<DropReason> for SyncError {
+    fn from(reason: DropReason) -> Self {
+        Self::Rejected(reason)
+    }
 }
 
 impl From<StorageFailure> for SyncError {

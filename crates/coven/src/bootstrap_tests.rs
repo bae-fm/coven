@@ -689,7 +689,7 @@ async fn removal_lists_every_recorded_key_including_a_dropped_replacement() {
             let (resume, resumed) = tokio::sync::oneshot::channel();
             owner
                 .storage
-                .hold_next_listing(
+                .hold_next_creation(
                     ObjectPrefix::store_logs(owner.directory.id()),
                     listed,
                     resumed,

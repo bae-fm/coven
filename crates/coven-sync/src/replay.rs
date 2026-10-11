@@ -115,21 +115,20 @@ fn settle(
             if dropped.contains_key(&entry.position) {
                 continue;
             }
-            if views[index] == StoreLogCheck::NotAllowed {
-                dropped.insert(entry.position, DropReason::NotAllowed);
-                continue;
-            }
-            if effects::already_in_place(&state, entry) {
-                kept.push(index);
-                devices
-                    .entry(entry.position.device)
-                    .or_default()
-                    .push(index);
-                continue;
-            }
-            if let Err(reason) = effects::check_effect(&state, &views[index], entry) {
-                dropped.insert(entry.position, reason);
-                continue;
+            match effects::validate_effect(&state, &views[index], &entry.author, &entry.change) {
+                Err(reason) => {
+                    dropped.insert(entry.position, reason);
+                    continue;
+                }
+                Ok(true) => {
+                    kept.push(index);
+                    devices
+                        .entry(entry.position.device)
+                        .or_default()
+                        .push(index);
+                    continue;
+                }
+                Ok(false) => (),
             }
             // Had-read positions cover a prefix of each device's entries.
             // Keep the remaining candidates in reverse timestamp order so the

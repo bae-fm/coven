@@ -225,9 +225,20 @@ pub enum Retry {
     /// Recompute on replay, without retrying the subject.
     Never,
 }
-impl PendingReason {
-    /// Derive retry policy from the category, including transient storage failures.
+impl PendingRecord {
+    /// Derive retry policy from the reason and its subject. A dropped entry or
+    /// write is final, but an operation whose attempt replay dropped runs again
+    /// on an explicit retry, validating against the current replay (§18).
     pub fn retry(&self) -> Retry {
+        match (&self.subject, &self.reason) {
+            (PendingSubject::Operation { .. }, PendingReason::Dropped(_)) => Retry::AppAction,
+            (_, reason) => reason.retry(),
+        }
+    }
+}
+
+impl PendingReason {
+    fn retry(&self) -> Retry {
         match self {
             Self::Missing { .. }
             | Self::Waits(_)
@@ -281,7 +292,7 @@ impl PendingValue for PendingRecord {
             PendingReason::UpdateRequired(RequiredUpdate::CovenFormat { version }) => {
                 coven_format::FORMAT_VERSION >= *version
             }
-            _ => self.reason.retry() == Retry::Automatic,
+            _ => self.retry() == Retry::Automatic,
         }
     }
 }
@@ -360,3 +371,7 @@ impl PartialOrd for PendingSubject {
         Some(self.cmp(other))
     }
 }
+
+#[cfg(test)]
+#[path = "pending_tests.rs"]
+mod tests;

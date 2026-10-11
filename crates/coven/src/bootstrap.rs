@@ -349,7 +349,7 @@ async fn prepare_and_load(
         } else {
             status("Opening member keys and the store log");
             if !sync.bootstrap_member().await? {
-                return Err(SyncError::NotStoreMember(member.member_id()).into());
+                return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed).into());
             }
         }
         status("Loading snapshots and later writes");

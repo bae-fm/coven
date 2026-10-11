@@ -604,35 +604,6 @@ fn expected(
 }
 
 #[test]
-fn concurrent_addition_refills_a_collectively_emptied_circle() {
-    let mut h = circle_history();
-    let past: Vec<_> = (0..8).collect();
-    h.push(0, 0, &past, leave(0, 1));
-    h.push(0, 2, &past, remove(0));
-    h.push(1, 1, &past, join(0, 2));
-    h.every_order(|r| {
-        assert!(h.drops(r).is_empty());
-        assert_eq!(r.state.circles[&circle(0)].members, [member(2)].into());
-        assert!(!r.state.circle_deletions.contains_key(&circle(0)));
-    });
-}
-
-#[test]
-fn circle_deletion_outranks_an_earlier_shared_member_removal() {
-    let mut h = gifts();
-    h.push(0, 0, &[0, 1, 2, 3, 4], leave(0, 1));
-    h.push(1, 1, &[0, 1, 2, 3, 4], delete(0));
-    h.every_order(|r| {
-        assert!(r.state.circle_deletions.contains_key(&circle(0)));
-        assert_eq!(h.drops(r), [5]);
-        assert_eq!(
-            r.entries[&h.entries[5].position],
-            EntryOutcome::Dropped(DropReason::BeatenBy(h.entries[6].position))
-        );
-    });
-}
-
-#[test]
 #[ignore = "requires COVEN_STORELOG_LEAN, supplied by scripts/check.sh"]
 fn lean_differential_circle_replay() {
     let mut refill = circle_history();
@@ -964,4 +935,58 @@ async fn every_author_view_check_is_durable_and_reused_after_reopening() {
             .into()
         )
     );
+}
+
+#[test]
+#[ignore = "requires COVEN_STORELOG_LEAN, supplied by scripts/check.sh"]
+fn lean_differential_online_administration() {
+    let mut cases = Vec::new();
+    for base in [History::new(), circle_history()] {
+        for author in 0..5 {
+            for change in [
+                add(4, MemberRole::Member),
+                role(0, MemberRole::Member),
+                role(4, MemberRole::Admin),
+                remove(0),
+                remove(4),
+                device(20),
+                StoreChange::RemoveDevice {
+                    device: DeviceId(0),
+                },
+                make(2, "Private"),
+                rename(0, "Renamed"),
+                rename(2, "Absent"),
+                delete(0),
+                join(0, 4),
+                leave(0, 1),
+                StoreChange::Reset {
+                    snapshot: snapshot(40, Audience::Store),
+                },
+                StoreChange::Reset {
+                    snapshot: snapshot(40, Audience::Circle(circle(0))),
+                },
+            ] {
+                let current = replay(&base.entries);
+                let validated =
+                    crate::effects::validate_change(&current.state, &member(author), &change);
+                let mut h = base.clone();
+                h.all(author, u64::from(author), change);
+                let replayed = replay(&h.entries);
+                let entry = h.entries.last().unwrap();
+                match &replayed.entries[&entry.position] {
+                    EntryOutcome::Kept => {
+                        assert!(validated.is_ok(), "{:?}: {validated:?}", entry.change)
+                    }
+                    EntryOutcome::Dropped(reason) => assert_eq!(validated, Err(reason.clone())),
+                }
+                let received = vec![(0..h.entries.len()).collect()];
+                let query = input(&h, &sequential_times(&h), &received);
+                cases.push((projected(&h, &replayed), query));
+            }
+        }
+    }
+    let queries: Vec<_> = cases.iter().map(|(_, query)| query.clone()).collect();
+    for ((expected, query), actual) in cases.into_iter().zip(lean_results(&queries)) {
+        assert_eq!(actual, vec![expected], "{query}");
+    }
 }

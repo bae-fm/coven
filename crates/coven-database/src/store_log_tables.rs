@@ -45,7 +45,15 @@ pub(crate) fn outcome(row: &Row<'_>, start: usize) -> rusqlite::Result<EntryOutc
             row,
             start + 1,
         )?))),
-        "target" => Ok(EntryOutcome::Dropped(DropReason::TargetGone)),
+        "target-member" => Ok(EntryOutcome::Dropped(DropReason::TargetGone(
+            EntryTarget::Member(member(row, start + 3)?),
+        ))),
+        "target-device" => Ok(EntryOutcome::Dropped(DropReason::TargetGone(
+            EntryTarget::Device(DeviceId(counter(row.get(start + 3)?))),
+        ))),
+        "target-circle" => Ok(EntryOutcome::Dropped(DropReason::TargetGone(
+            EntryTarget::Circle(CircleId(uuid::Uuid::from_bytes(row.get(start + 3)?))),
+        ))),
         "admin" => Ok(EntryOutcome::Dropped(DropReason::NoAdminLeft)),
         "authority" => Ok(EntryOutcome::Dropped(DropReason::NotAllowed)),
         _ => Err(rusqlite::Error::InvalidQuery),
@@ -66,7 +74,7 @@ pub(crate) fn deleted_circles(
 pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
     let mut log = StoreLog::default();
     for (entry, outcome) in database.query(
-        "SELECT record,outcome,beaten_device,beaten_number,author_view FROM _coven_store_log",
+        "SELECT record,outcome,beaten_device,beaten_number,target,author_view FROM _coven_store_log",
         [],
         |row| {
             let Object::StoreLog(entry) = decoded(Object::decode(&row.get::<_, Vec<u8>>(0)?))?
@@ -74,8 +82,8 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
                 return Err(rusqlite::Error::InvalidQuery);
             };
             let outcome = outcome(row, 1)?;
-            let check = StoreLogCheck::decode(&row.get::<_, Vec<u8>>(4)?)
-                .map_err(|error| decode_failure(4, Type::Blob, error))?;
+            let check = StoreLogCheck::decode(&row.get::<_, Vec<u8>>(5)?)
+                .map_err(|error| decode_failure(5, Type::Blob, error))?;
             Ok((ReplayEntry { entry, check }, outcome))
         },
     )? {
@@ -232,22 +240,33 @@ pub(crate) fn replace(
         .iter()
         .filter(|(id, outcome)| previous.get(id) != Some(outcome))
     {
-        let (tag, beaten) = match outcome {
-            EntryOutcome::Kept => ("kept", None),
+        let (tag, beaten, target) = match outcome {
+            EntryOutcome::Kept => ("kept", None, None),
             EntryOutcome::Dropped(reason) => match reason {
-                DropReason::BeatenBy(entry) => ("beaten", Some(entry)),
-                DropReason::TargetGone => ("target", None),
-                DropReason::NoAdminLeft => ("admin", None),
-                DropReason::NotAllowed => ("authority", None),
+                DropReason::BeatenBy(entry) => ("beaten", Some(entry), None),
+                DropReason::TargetGone(target) => match target {
+                    EntryTarget::Member(id) => {
+                        ("target-member", None, Some(id.to_bytes().to_vec()))
+                    }
+                    EntryTarget::Device(id) => {
+                        ("target-device", None, Some(id.0.to_be_bytes().to_vec()))
+                    }
+                    EntryTarget::Circle(id) => {
+                        ("target-circle", None, Some(id.0.as_bytes().to_vec()))
+                    }
+                },
+                DropReason::NoAdminLeft => ("admin", None, None),
+                DropReason::NotAllowed => ("authority", None, None),
             },
         };
         database.internal_execute(
-            "UPDATE _coven_store_log SET outcome=?1,beaten_device=?2,beaten_number=?3
-             WHERE device=?4 AND number=?5",
+            "UPDATE _coven_store_log SET outcome=?1,beaten_device=?2,beaten_number=?3,target=?4
+             WHERE device=?5 AND number=?6",
             params![
                 tag,
                 beaten.map(|e| e.device.0.to_be_bytes().to_vec()),
                 beaten.map(|e| e.number.to_be_bytes().to_vec()),
+                target,
                 entry.device.0.to_be_bytes().as_slice(),
                 entry.number.to_be_bytes().as_slice()
             ],

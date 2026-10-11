@@ -58,7 +58,7 @@ impl StoreLogSync {
         }
     }
 
-    /// Compose a store that can journal operations before storage connects.
+    /// Compose a disconnected store that can read local state and resume retained work.
     pub fn disconnected(
         database: Database,
         store_keys: Arc<KeySession<StoreKeyring>>,
@@ -104,7 +104,9 @@ impl StoreLogSync {
 
     /// Fix and publish a new entry. Existing queued entries go first. The change's
     /// key introductions name material already in custody and commit its hash.
-    /// After a failed upload, call `sync_store_log` to retry that same entry.
+    /// Administrative callers must complete online catch-up before calling this
+    /// authoring primitive. After a failed upload, call `sync_store_log` to retry
+    /// that same entry.
     pub async fn make_and_upload_entry(
         &mut self,
         change: StoreChange,
@@ -169,7 +171,22 @@ impl StoreLogSync {
         Ok(id)
     }
 
+    async fn catch_up(&self) -> Result<(), SyncError> {
+        let damages = self.scan_store_log(true).await?;
+        if let Some(damage) = damages.into_iter().next() {
+            return Err(damage.into());
+        }
+        Ok(())
+    }
+
     async fn step(&self) -> Result<Vec<DamagedObject>, SyncError> {
+        self.scan_store_log(false).await
+    }
+
+    async fn scan_store_log(
+        &self,
+        require_complete: bool,
+    ) -> Result<Vec<DamagedObject>, SyncError> {
         let mut local = self.database.local_store_log().await?;
         let member = self
             .member_keys
@@ -203,6 +220,14 @@ impl StoreLogSync {
             );
         }
         let stuck = crate::pending_logs::local_refusals(&self.database).await?;
+        if require_complete {
+            if let Some(refusal) = stuck
+                .iter()
+                .find(|refusal| matches!(refusal.object, coven_database::LogObject::Entry(_)))
+            {
+                return Err(crate::pending_logs::required(&self.database, *refusal).await?);
+            }
+        }
         entries.retain(|id, _| {
             !stuck
                 .iter()
@@ -227,7 +252,7 @@ impl StoreLogSync {
                     continue;
                 }
                 if !cache.contains_key(id) {
-                    let Some(bytes) = self.read_entry(stored).await? else {
+                    let Some(bytes) = self.read_entry(stored, require_complete).await? else {
                         pending_devices.insert(id.device);
                         continue;
                     };
@@ -255,6 +280,12 @@ impl StoreLogSync {
                     .acquire(&Audience::Store, *key, &member, &mut ring, &mut damages)
                     .await?
                 {
+                    if require_complete {
+                        if let Some(damage) = damages.into_iter().next() {
+                            return Err(damage.into());
+                        }
+                        return Err(SyncError::KeyUnavailable(*key));
+                    }
                     continue;
                 }
                 let entry = match object::open(
@@ -287,14 +318,42 @@ impl StoreLogSync {
                 break;
             }
         }
+        if require_complete {
+            if let Some(refusal) = crate::pending_logs::local_refusals(&self.database)
+                .await?
+                .into_iter()
+                .find(|refusal| matches!(refusal.object, coven_database::LogObject::Entry(_)))
+            {
+                return Err(crate::pending_logs::required(&self.database, refusal).await?);
+            }
+            if let Some(id) = entries.keys().find(|id| {
+                !local.log.replay.entries.contains_key(id) && !pending_devices.contains(&id.device)
+            }) {
+                return Err(StorageFailure::NotFound
+                    .with_source(format!(
+                        "store-log catch-up is missing an entry or its prerequisites at {}",
+                        object::path(self.directory.id(), *id).as_str()
+                    ))
+                    .into());
+            }
+        }
         Ok(damages)
     }
 
     async fn read_entry(
         &self,
         object: &coven_storage::StoredObject,
+        require_present: bool,
     ) -> Result<Option<Vec<u8>>, SyncError> {
         let bytes = self.read(&object.path).await?;
+        if require_present && bytes.is_none() {
+            return Err(StorageFailure::NotFound
+                .with_source(format!(
+                    "store-log catch-up could not read {}",
+                    object.path.as_str()
+                ))
+                .into());
+        }
         if bytes
             .as_ref()
             .is_some_and(|bytes| bytes.len() as u64 != object.size)

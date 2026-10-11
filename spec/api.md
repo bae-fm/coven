@@ -1878,12 +1878,15 @@ pub enum Retry {
     Never,
 }
 
-impl PendingReason {
+impl PendingRecord {
     /// Automatic: missing objects, prerequisites, keys, pending provider/owner
     /// work, shared-account waits, invalid replaceable positions, and storage
     /// Network/RateLimited/NotFound/SessionExpired.
     /// AfterUpdate: Refused and UpdateRequired.
     /// Never: a dropped entry or write, or this device's removal.
+    /// An operation whose attempt replay dropped is AppAction: an explicit
+    /// retry catches up and validates again, and a cause that still stands
+    /// drops it again (§18).
     /// AppAction: every other reason, including source files and disagreements.
     /// A replay change can clear a replay-dependent reason without retrying
     /// its subject. It cannot undo an entry's LandedTooLate, but can undo a

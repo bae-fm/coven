@@ -115,7 +115,7 @@ async fn approve_seals_store_history_and_removes_the_request() {
 }
 
 #[tokio::test]
-async fn invite_cursor_uses_its_writer_publications_and_excludes_reserved_copies() {
+async fn invite_cursor_excludes_reserved_copies_until_the_invites_catch_up_publishes_them() {
     let storage = storage();
     let mut a = device(storage.clone(), 1, member(1), store(1)).await;
     a.create(key(9)).await;
@@ -147,6 +147,8 @@ async fn invite_cursor_uses_its_writer_publications_and_excludes_reserved_copies
             .await
             .unwrap();
         assert_eq!(reserved.number.get(), expected + 1);
+        // Reserved bytes are not a publication.
+        assert_eq!(d.db.published_key_copy_number().await.unwrap(), expected);
         d.restart(storage.clone()).await;
         let operation = begin(
             d,
@@ -165,8 +167,13 @@ async fn invite_cursor_uses_its_writer_publications_and_excludes_reserved_copies
         let code = InviteCode::from_text(&invite.code).unwrap();
         assert_eq!(code.initial_key, key(9));
         assert_eq!(code.inviting_writer, d.device().await);
-        assert_eq!(code.key_copy_number, expected);
-        assert_eq!(d.db.key_uploads().await.unwrap(), [reserved]);
+        // The invite's catch-up publishes the reserved copy before the code is made.
+        assert_eq!(code.key_copy_number, reserved.number.get());
+        assert!(d.db.key_uploads().await.unwrap().is_empty());
+        assert_eq!(
+            d.db.published_key_copy_number().await.unwrap(),
+            reserved.number.get()
+        );
     }
 }
 
@@ -437,8 +444,12 @@ async fn cancelling_keeps_retained_provider_grants_visible_until_acknowledged() 
 #[tokio::test]
 async fn a_failed_invite_is_retained_and_expiry_finishes_on_reconnect() {
     let storage = google();
-    let [mut a, _b, _c] = accounts(storage.clone()).await;
-    a.sync.storage = None;
+    let [a, _b, _c] = accounts(storage.clone()).await;
+    let (started, observed) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    storage
+        .hold_next_listing(ObjectPrefix::store_logs(store(1)), started, held)
+        .await;
     let files = file_owner(&a);
     let operations = { operation_owner(a.sync, files) };
     let mut pending = Box::pin(operations.create_invite(
@@ -453,13 +464,23 @@ async fn a_failed_invite_is_retained_and_expiry_finishes_on_reconnect() {
         std::task::Poll::Ready(())
     })
     .await;
+    observed.await.unwrap();
+    storage.set_online(false);
+    resume.send(()).unwrap();
     operations.get_members().await.unwrap();
-    assert!(matches!(pending.await, Err(SyncError::NoStorage)));
+    assert!(matches!(
+        pending.await,
+        Err(SyncError::Storage(error)) if error.failure() == StorageFailure::Network
+    ));
     assert_eq!(
         a.db.pending::<PendingRecord>().await.unwrap()[0].reason,
-        PendingReason::NoStorage
+        PendingReason::Storage {
+            provider: coven_storage::CloudProvider::GoogleDrive,
+            failure: StorageFailure::Network,
+        }
     );
     a.clock.set(UNIX_EPOCH + Duration::from_secs(86402));
+    storage.set_online(true);
     operations.set_storage(Some(storage.clone())).await.unwrap();
     assert!(a.db.operations().await.unwrap().is_empty());
     operations.close().await.unwrap();

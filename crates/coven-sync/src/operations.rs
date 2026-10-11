@@ -570,7 +570,7 @@ impl OperationRun {
                             .sync
                             .record_operation_condition(&record, reason)
                             .await?;
-                        if pending.reason.retry() != Retry::Automatic {
+                        if pending.retry() != Retry::Automatic {
                             if let Some(reply) = self.waiters.remove(&record.id) {
                                 let _ = reply.send(Err(SyncError::Pending(Box::new(pending))));
                             }

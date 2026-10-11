@@ -2,7 +2,7 @@
 
 use coven_crypto::MemberId;
 use coven_database::{
-    CircleRemoval, DropReason, StoreCircle, StoreDevice, StoreIdentity, StoreLogCheck,
+    CircleRemoval, DropReason, EntryTarget, StoreCircle, StoreDevice, StoreIdentity, StoreLogCheck,
     StoreLogState, StoreMember, StoreVersion,
 };
 use coven_format::store_log::{MemberRole, StoreChange, StoreLogEntry};
@@ -33,39 +33,79 @@ fn in_circle(state: &StoreLogState, id: CircleId, who: &MemberId) -> bool {
         && circle(state, id).is_some_and(|circle| circle.members.contains(who))
 }
 
+/// Authority shared by replay and work that precedes an entry's payload,
+/// such as inviting a member or writing a reset snapshot.
+pub(crate) enum Authority {
+    Creation,
+    Admin,
+    Member,
+    Circle(CircleId),
+    Device(DeviceId),
+}
+
+impl Authority {
+    pub(crate) fn reset(audience: &Audience) -> Self {
+        match audience {
+            Audience::Store => Self::Admin,
+            Audience::Circle(circle) => Self::Circle(*circle),
+        }
+    }
+
+    pub(crate) fn check(&self, state: &StoreLogState, author: &MemberId) -> Result<(), DropReason> {
+        let allowed = match self {
+            Self::Creation => state.store.is_none(),
+            Self::Admin => admin(state, author),
+            Self::Member => member(state, author).is_some(),
+            Self::Circle(id) => in_circle(state, *id, author),
+            Self::Device(id) => device(state, *id).is_some_and(|device| {
+                member(state, author).is_some()
+                    && (device.member == *author || admin(state, author))
+            }),
+        };
+        if allowed {
+            Ok(())
+        } else {
+            Err(DropReason::NotAllowed)
+        }
+    }
+
+    fn for_change(change: &StoreChange) -> Self {
+        use StoreChange::*;
+        match change {
+            CreateStore { .. } => Self::Creation,
+            AddMember { .. } | RemoveMember { .. } | ChangeRole { .. } => Self::Admin,
+            SetAccess { .. } | AddDevice { .. } | CreateCircle { .. } => Self::Member,
+            RotateKey { audience, .. } => Self::audience(audience),
+            RaiseSchema { snapshot, .. } => Self::audience(&snapshot.audience),
+            RemoveDevice { device } => Self::Device(*device),
+            RenameCircle { circle, .. }
+            | DeleteCircle { circle }
+            | AddCircleMember { circle, .. }
+            | RemoveCircleMember { circle, .. } => Self::Circle(*circle),
+            Reset { snapshot } => Self::reset(&snapshot.audience),
+        }
+    }
+
+    fn audience(audience: &Audience) -> Self {
+        match audience {
+            Audience::Store => Self::Member,
+            Audience::Circle(circle) => Self::Circle(*circle),
+        }
+    }
+}
+
 pub(crate) fn check(view: &StoreLogState, entry: &StoreLogEntry) -> StoreLogCheck {
+    check_change(view, &entry.author, &entry.change)
+}
+
+fn check_change(view: &StoreLogState, author: &MemberId, change: &StoreChange) -> StoreLogCheck {
     #[cfg(test)]
     crate::replay::tests::author_check();
     use StoreChange::*;
-    let author = &entry.author;
-    let allowed = match &entry.change {
-        CreateStore { .. } => view.store.is_none(),
-        AddMember { .. } | RemoveMember { .. } | ChangeRole { .. } => admin(view, author),
-        SetAccess { .. } | AddDevice { .. } | CreateCircle { .. } => member(view, author).is_some(),
-        RotateKey { audience, .. } => match audience {
-            Audience::Store => member(view, author).is_some(),
-            Audience::Circle(circle) => in_circle(view, *circle, author),
-        },
-        RaiseSchema { snapshot, .. } => match snapshot.audience {
-            Audience::Store => member(view, author).is_some(),
-            Audience::Circle(circle) => in_circle(view, circle, author),
-        },
-        RemoveDevice { device: id } => device(view, *id).is_some_and(|device| {
-            member(view, author).is_some() && (device.member == *author || admin(view, author))
-        }),
-        RenameCircle { circle, .. }
-        | DeleteCircle { circle }
-        | AddCircleMember { circle, .. }
-        | RemoveCircleMember { circle, .. } => in_circle(view, *circle, author),
-        Reset { snapshot } => match snapshot.audience {
-            Audience::Store => admin(view, author),
-            Audience::Circle(circle) => in_circle(view, circle, author),
-        },
-    };
-    if !allowed {
+    if Authority::for_change(change).check(view, author).is_err() {
         return StoreLogCheck::NotAllowed;
     }
-    match &entry.change {
+    match change {
         RemoveDevice { device: id } => StoreLogCheck::DeviceOwner(
             device(view, *id)
                 .expect("authorized device removal")
@@ -77,7 +117,7 @@ pub(crate) fn check(view: &StoreLogState, entry: &StoreLogEntry) -> StoreLogChec
                 .circles
                 .iter()
                 .filter_map(|(id, circle)| {
-                    let targets = match &entry.change {
+                    let targets = match change {
                         RemoveCircleMember { circle, .. } => circle == id,
                         _ => true,
                     };
@@ -101,25 +141,30 @@ pub(crate) fn check(view: &StoreLogState, entry: &StoreLogEntry) -> StoreLogChec
 }
 
 pub(crate) fn already_in_place(state: &StoreLogState, entry: &StoreLogEntry) -> bool {
+    change_in_place(state, &entry.author, &entry.change)
+}
+
+pub(crate) fn change_in_place(
+    state: &StoreLogState,
+    author: &MemberId,
+    change: &StoreChange,
+) -> bool {
     use StoreChange::*;
-    match &entry.change {
+    match change {
         RotateKey { .. } => false,
         CreateStore { .. } => state.store.is_some(),
         AddMember { keys, role, .. } => {
             member(state, &keys.signing).is_some_and(|m| m.role == *role)
         }
-        SetAccess { access } => member(state, &entry.author).is_some_and(|m| m.access == *access),
+        SetAccess { access } => member(state, author).is_some_and(|m| m.access == *access),
         ChangeRole { member: id, role } => member(state, id).is_some_and(|m| m.role == *role),
         RemoveMember { member: id, .. } => member(state, id).is_none(),
-        AddDevice { device: id, .. } => {
-            device(state, *id).is_some_and(|d| d.member == entry.author)
-        }
+        AddDevice { device: id, .. } => device(state, *id).is_some_and(|d| d.member == *author),
         RemoveDevice { device: id } => device(state, *id).is_none(),
         CreateCircle {
             circle: id, name, ..
-        } => circle(state, *id).is_some_and(|c| {
-            c.name == *name && c.members.len() == 1 && c.members.contains(&entry.author)
-        }),
+        } => circle(state, *id)
+            .is_some_and(|c| c.name == *name && c.members.len() == 1 && c.members.contains(author)),
         RenameCircle { circle: id, name } => circle(state, *id).is_some_and(|c| c.name == *name),
         DeleteCircle { circle: id } => circle(state, *id).is_none(),
         AddCircleMember { circle, member } => in_circle(state, *circle, member),
@@ -133,55 +178,97 @@ pub(crate) fn already_in_place(state: &StoreLogState, entry: &StoreLogEntry) -> 
     }
 }
 
-pub(crate) fn check_effect(
+/// A candidate reading the entire current log has no concurrent opponents.
+/// These are exactly the authority, no-op, target and admin checks used by replay.
+pub(crate) fn validate_change(
+    state: &StoreLogState,
+    author: &MemberId,
+    change: &StoreChange,
+) -> Result<bool, DropReason> {
+    validate_effect(state, &check_change(state, author, change), author, change)
+}
+
+/// Returns whether the authorized change is already in place.
+pub(crate) fn validate_effect(
     state: &StoreLogState,
     view: &StoreLogCheck,
-    entry: &StoreLogEntry,
-) -> Result<(), DropReason> {
+    author: &MemberId,
+    change: &StoreChange,
+) -> Result<bool, DropReason> {
     use StoreChange::*;
-    let targets_exist = match &entry.change {
-        RotateKey { .. } => true,
-        CreateStore { .. } => state.store.is_none(),
-        AddMember { .. } => state.store.is_some(),
-        SetAccess { .. } => member(state, &entry.author).is_some(),
-        RemoveMember { member: id, .. } | ChangeRole { member: id, .. } => {
-            member(state, id).is_some()
-        }
+    if *view == StoreLogCheck::NotAllowed {
+        return Err(DropReason::NotAllowed);
+    }
+    if change_in_place(state, author, change) {
+        return Ok(true);
+    }
+    let missing = match change {
+        RotateKey { .. } | CreateStore { .. } | AddMember { .. } => None,
+        SetAccess { .. } => member(state, author)
+            .is_none()
+            .then(|| EntryTarget::Member(author.clone())),
+        RemoveMember { member: id } | ChangeRole { member: id, .. } => member(state, id)
+            .is_none()
+            .then(|| EntryTarget::Member(id.clone())),
         AddDevice { device: id, .. } => {
-            member(state, &entry.author).is_some() && device(state, *id).is_none()
+            if member(state, author).is_none() {
+                Some(EntryTarget::Member(author.clone()))
+            } else {
+                device(state, *id)
+                    .is_some()
+                    .then_some(EntryTarget::Device(*id))
+            }
         }
         RemoveDevice { device: id } => {
             let StoreLogCheck::DeviceOwner(owner) = view else {
                 unreachable!("authorized removal has an observed owner")
             };
-            device(state, *id).is_some_and(|device| device.member == *owner)
+            device(state, *id)
+                .is_none_or(|device| device.member != *owner)
+                .then_some(EntryTarget::Device(*id))
         }
         CreateCircle { circle: id, .. } => {
-            member(state, &entry.author).is_some() && circle(state, *id).is_none()
+            if member(state, author).is_none() {
+                Some(EntryTarget::Member(author.clone()))
+            } else {
+                circle(state, *id)
+                    .is_some()
+                    .then_some(EntryTarget::Circle(*id))
+            }
         }
-        RenameCircle { circle: id, .. } | DeleteCircle { circle: id } => {
-            circle(state, *id).is_some()
-        }
+        RenameCircle { circle: id, .. } | DeleteCircle { circle: id } => circle(state, *id)
+            .is_none()
+            .then_some(EntryTarget::Circle(*id)),
         AddCircleMember {
             circle: id,
             member: who,
-        } => circle(state, *id).is_some() && member(state, who).is_some(),
-        RemoveCircleMember {
+        }
+        | RemoveCircleMember {
             circle: id,
             member: who,
-            ..
-        } => circle(state, *id).is_some_and(|circle| circle.members.contains(who)),
+        } => match circle(state, *id) {
+            None => Some(EntryTarget::Circle(*id)),
+            Some(circle) => {
+                let exists = match change {
+                    AddCircleMember { .. } => member(state, who).is_some(),
+                    _ => circle.members.contains(who),
+                };
+                (!exists).then(|| EntryTarget::Member(who.clone()))
+            }
+        },
         RaiseSchema { snapshot, .. } | Reset { snapshot } => match snapshot.audience {
-            Audience::Store => state.store.is_some(),
-            Audience::Circle(id) => circle(state, id).is_some(),
+            Audience::Store => None,
+            Audience::Circle(id) => circle(state, id)
+                .is_none()
+                .then_some(EntryTarget::Circle(id)),
         },
     };
-    if !targets_exist {
-        return Err(DropReason::TargetGone);
+    if let Some(target) = missing {
+        return Err(DropReason::TargetGone(target));
     }
     // Evaluate the resulting admin set before conflicts, without copying state
     // for an effect that might lose or cause the scan to restart.
-    let removed_admin = match &entry.change {
+    let removed_admin = match change {
         CreateStore { .. }
         | AddMember {
             role: MemberRole::Admin,
@@ -190,7 +277,7 @@ pub(crate) fn check_effect(
         | ChangeRole {
             role: MemberRole::Admin,
             ..
-        } => return Ok(()),
+        } => return Ok(false),
         RemoveMember { member, .. } | ChangeRole { member, .. } => Some(member),
         AddMember { keys, .. } => Some(&keys.signing),
         _ => None,
@@ -202,7 +289,7 @@ pub(crate) fn check_effect(
     {
         return Err(DropReason::NoAdminLeft);
     }
-    Ok(())
+    Ok(false)
 }
 
 /// Apply an effect only after its targets, remaining admin and conflicts pass.

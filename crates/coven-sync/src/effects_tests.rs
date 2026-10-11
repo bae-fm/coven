@@ -306,3 +306,27 @@ fn concurrent_circle_deletion_does_not_drop_an_authorized_rotation() {
         assert!(r.state.circles[&circle(0)].members.is_empty());
     });
 }
+
+#[test]
+fn replay_rejections_identify_each_target() {
+    use crate::{replay, replay::circles::tests::circle_history};
+    use coven_database::{DropReason, EntryOutcome, EntryTarget};
+    for (change, target) in [
+        (role(4, Admin), EntryTarget::Member(member(4))),
+        (device(1), EntryTarget::Device(DeviceId(1))),
+        (make(0, "Collision"), EntryTarget::Circle(circle(0))),
+    ] {
+        let mut h = circle_history();
+        let current = replay(&h.entries);
+        let expected = DropReason::TargetGone(target);
+        assert_eq!(
+            crate::effects::validate_change(&current.state, &member(0), &change),
+            Err(expected.clone())
+        );
+        h.all(0, 0, change);
+        assert_eq!(
+            replay(&h.entries).entries[&h.entries.last().unwrap().position],
+            EntryOutcome::Dropped(expected)
+        );
+    }
+}

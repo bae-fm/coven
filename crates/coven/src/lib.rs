@@ -45,6 +45,7 @@ pub use coven_database::{
     ReconfigurableLiveQueryEvent, RemovalRule, Replacement, Row, RowChange, RowIdentity, RowKey,
     SchemaError, SqlContext, SqlReadContext, SyncedTable, ToSql, UserFile, WriteBatch, WriteId,
 };
+pub use coven_database::{DropReason, EntryTarget};
 pub use coven_database::{LogObject, LogRefusal};
 pub use coven_format::pending::RefusalCode;
 pub use coven_format::value::EntryId;

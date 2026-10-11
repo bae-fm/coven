@@ -3,6 +3,8 @@
 use crate::{Circle, CircleId, CircleMemberInfo, MemberId, SyncError};
 
 /// A borrowed namespace whose work remains owned by the open store.
+/// Changes require online catch-up and use replay's `SyncError::Rejected`
+/// reasons. Failed catch-up starts no operation and reserves no entry.
 pub struct Circles<'a> {
     operations: &'a coven_sync::Operations,
 }

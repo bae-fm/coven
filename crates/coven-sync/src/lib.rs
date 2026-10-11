@@ -23,7 +23,7 @@ mod posted_positions;
 mod store_log_keys;
 mod store_log_object;
 mod store_log_sync;
-pub use coven_database::DropReason;
+pub use coven_database::{DropReason, EntryTarget};
 pub use device_log_sync::DeviceLogSync;
 pub use error::{DamagedObject, SyncError, SyncFailure};
 mod pending;
