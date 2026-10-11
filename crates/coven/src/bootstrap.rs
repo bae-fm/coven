@@ -179,7 +179,8 @@ async fn bootstrap_device(
     status("Preparing this device");
     let pending = builder
         .layout
-        .begin_bootstrap(id, name, builder.ids.as_ref())?;
+        .begin_bootstrap(id, name, builder.ids.as_ref())
+        .await?;
     let result = prepare_and_load(&mut builder, &pending, &request, &status, cancel).await;
     match result {
         Ok(Some((code, credentials, ring, database, storage))) => {

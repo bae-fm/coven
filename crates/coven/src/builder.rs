@@ -162,10 +162,7 @@ impl CovenBuilder {
     /// committed file work. Empty custody is allowed; an unlock failure prevents
     /// opening. No sync loop starts, and local database calls need no key material.
     pub async fn open(self, store: StoreId) -> CovenResult<CovenHandle> {
-        crate::coven::blocking(move || self.open_graph(store, false))
-            .await?
-            .open()
-            .await
+        self.open_graph(store, false).await?.open().await
     }
 
     /// Recover a damaged database from storage, preserving readable waiting work.
@@ -179,7 +176,7 @@ impl CovenBuilder {
         store: StoreId,
         device_name: &str,
     ) -> Result<CovenHandle, RecoveryError> {
-        crate::coven::blocking(move || self.open_graph(store, true))
+        self.open_graph(store, true)
             .await?
             .open_reloading(device_name)
             .await
@@ -260,30 +257,36 @@ impl CovenBuilder {
         Keychain::registered()
     }
 
-    fn open_graph(self, store: StoreId, recovering: bool) -> CovenResult<OpeningStore> {
+    async fn open_graph(self, store: StoreId, recovering: bool) -> CovenResult<OpeningStore> {
         let directory = self.layout.store_dir(&store);
         let database = self.database(directory.clone())?;
-        let lock = directory.lock_exclusive()?;
-        let settings = lock.settings()?;
-        let keychain = Arc::new(StoreKeychain::new(self.keychain()?, settings.id));
-        let new_recovery = recovering
-            && match directory.check_database_recovery() {
-                Ok(()) => true,
-                Err(StoreLockError::RecoveryPending(_)) => false,
-                Err(error) => return Err(error.into()),
-            };
-        if new_recovery || keychain.device_id()? != Some(settings.device_id) {
-            let device = self.ids.new_device_id();
-            lock.set_device_id(device)?;
-            keychain.set_device_id(device)?;
-        }
-        Ok(OpeningStore {
-            database,
-            lock,
-            builder: self,
-            directory,
-            keychain,
+        let lock = directory.lock_for_open().await?;
+        let closing = lock.closing_guard();
+        let result = crate::coven::blocking(move || {
+            let settings = lock.settings()?;
+            let keychain = Arc::new(StoreKeychain::new(self.keychain()?, settings.id));
+            let new_recovery = recovering
+                && match directory.check_database_recovery() {
+                    Ok(()) => true,
+                    Err(StoreLockError::RecoveryPending(_)) => false,
+                    Err(error) => return Err(error.into()),
+                };
+            if new_recovery || keychain.device_id()? != Some(settings.device_id) {
+                let device = self.ids.new_device_id();
+                lock.set_device_id(device)?;
+                keychain.set_device_id(device)?;
+            }
+            Ok(OpeningStore {
+                database,
+                lock,
+                builder: self,
+                directory,
+                keychain,
+            })
         })
+        .await;
+        closing.disarm();
+        result
     }
 
     fn owners(

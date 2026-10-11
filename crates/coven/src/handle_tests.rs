@@ -15,6 +15,67 @@ fn builder(app: &TestCoven, layout: StoreLayout) -> CovenBuilder {
 }
 
 #[tokio::test]
+async fn reopening_waits_after_the_last_handle_drops_or_close_starts() {
+    use std::{
+        future::{poll_fn, Future},
+        task::Poll,
+    };
+    for close in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::new(root.path().into());
+        let app = TestCoven::new();
+        let directory = app
+            .create_store(&layout, "Reopen", Arc::new(UuidIds))
+            .await
+            .unwrap();
+        let handle = builder(&app, layout.clone())
+            .open(directory.id())
+            .await
+            .unwrap();
+        let clone = handle.clone();
+        drop(handle);
+        assert!(matches!(
+            builder(&app, layout.clone()).open(directory.id()).await,
+            Err(CovenError::Lock(StoreLockError::AlreadyOpen(_)))
+        ));
+        let (entered, entry) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let mut read = Box::pin(clone.read(move |_| {
+            entered.send(()).unwrap();
+            released
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            Ok(())
+        }));
+        tokio::select! {
+            result = &mut read => panic!("held read returned: {result:?}"),
+            result = entry => result.unwrap(),
+        }
+        drop(read);
+        if close {
+            let mut closing = Box::pin(clone.close());
+            poll_fn(|cx| {
+                assert!(closing.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            drop(closing);
+        }
+        drop(clone);
+        let mut reopen = Box::pin(builder(&app, layout.clone()).open(directory.id()));
+        poll_fn(|cx| {
+            assert!(reopen.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        release.send(()).unwrap();
+        let reopened = reopen.await.unwrap();
+        reopened.read(|_| Ok(())).await.unwrap();
+        reopened.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn kept_keys_survive_reopen_and_forgetting_preserves_identity() {
     let root = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(root.path().to_owned());

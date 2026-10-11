@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 /// A shared handle to the open store and its running work (§20.2).
 #[derive(Clone)]
 pub struct CovenHandle {
+    closing: Arc<coven_foundation::files::StoreClosingGuard>,
     database: Database,
     operations: coven_sync::Operations,
     files: coven_sync::Files,
@@ -37,6 +38,7 @@ impl CovenHandle {
         codes: coven_sync::RestoreCodes,
     ) -> Self {
         Self {
+            closing: Arc::new(database.closing_guard()),
             database,
             operations,
             files,
@@ -400,6 +402,7 @@ impl CovenHandle {
     /// database calls on any clone fail with `DbError::StoreClosed`; custody
     /// calls fail with `KeyError::StoreClosed`. Closing reports every failure.
     pub async fn close(&self) -> Result<(), DbError> {
+        self.closing.begin_close();
         let handle = self.clone();
         crate::coven::completion(tokio::spawn(async move {
             handle.storage.close().await;

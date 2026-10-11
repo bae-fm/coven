@@ -12,6 +12,48 @@ use std::{
     time::Duration,
 };
 
+#[tokio::test]
+async fn reopen_after_drop_waits_only_for_a_subscriptions_active_read() {
+    use std::{
+        future::{poll_fn, Future},
+        task::Poll,
+    };
+    let store = TestStore::new();
+    let database = store.builder(vec![], vec![]).open().await.unwrap();
+    let (entered, entry) = tokio::sync::oneshot::channel();
+    let entered = Mutex::new(Some(entered));
+    let (release, released) = mpsc::channel();
+    let released = Mutex::new(released);
+    let mut query = database.subscribe(move |_| {
+        entered.lock().unwrap().take().unwrap().send(()).unwrap();
+        released
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap();
+        Ok(17)
+    });
+    tokio::select! {
+        result = query.next() => panic!("held query returned: {result:?}"),
+        result = entry => result.unwrap(),
+    }
+    drop(database);
+    let mut reopen = Box::pin(store.builder(vec![], vec![]).open());
+    let waiting = poll_fn(|cx| Poll::Ready(reopen.as_mut().poll(cx).is_pending())).await;
+    release.send(()).unwrap();
+    assert!(
+        waiting,
+        "a subscription must not keep its dropped instance live"
+    );
+    let reopened = reopen.await.unwrap();
+    assert_eq!(query.next().await.unwrap(), 17);
+    assert!(matches!(
+        query.next().await,
+        Err(crate::CovenError::Database(DbError::StoreClosed))
+    ));
+    reopened.close().await.unwrap();
+}
+
 async fn next<T: Clone + PartialEq + Send + 'static>(query: &mut LiveQuery<T>) -> CovenResult<T> {
     tokio::time::timeout(Duration::from_secs(3), query.next())
         .await

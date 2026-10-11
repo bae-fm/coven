@@ -66,15 +66,14 @@ impl DatabaseBuilder {
     /// Open one writer under the store lock and four read-only connections.
     /// Always migrate coven's internal tables before the app's schema.
     pub async fn open(self) -> CovenResult<Database> {
-        finish_blocking(tokio::task::spawn_blocking(move || self.open_graph(None, None)).await)
+        let lock = self.directory.lock_for_open().await?;
+        self.open_locked(lock).await
     }
 
     /// Open under a lock already held by the facade while checking restored
     /// device identity. The lock must protect this builder's directory.
     pub async fn open_locked(self, lock: StoreLock) -> CovenResult<Database> {
-        finish_blocking(
-            tokio::task::spawn_blocking(move || self.open_graph(Some(lock), None)).await,
-        )
+        self.open_with_archive(lock, None).await
     }
 
     /// Start an explicitly requested replacement, archiving the damaged SQLite
@@ -85,9 +84,22 @@ impl DatabaseBuilder {
         lock: StoreLock,
         archive: coven_foundation::files::FileName,
     ) -> CovenResult<Database> {
-        finish_blocking(
-            tokio::task::spawn_blocking(move || self.open_graph(Some(lock), Some(archive))).await,
-        )
+        self.open_with_archive(lock, Some(archive)).await
+    }
+
+    async fn open_with_archive(
+        self,
+        lock: StoreLock,
+        archive: Option<coven_foundation::files::FileName>,
+    ) -> CovenResult<Database> {
+        let closing = lock.closing_guard();
+        let result = finish_blocking(
+            tokio::task::spawn_blocking(move || self.open_graph(lock, archive)).await,
+        );
+        // Cancellation drops the guard while SQLite can still be opening.
+        // A returned database carries its own guard across its owning clones.
+        closing.disarm();
+        result
     }
 
     /// Open read-only connections under a shared deletion guard, without
@@ -98,7 +110,7 @@ impl DatabaseBuilder {
 
     fn open_graph(
         self,
-        lock: Option<StoreLock>,
+        lock: StoreLock,
         archive: Option<coven_foundation::files::FileName>,
     ) -> CovenResult<Database> {
         let tables = self.tables.ok_or(CovenError::MissingConfiguration {
@@ -108,13 +120,7 @@ impl DatabaseBuilder {
             field: "migrations",
         })?;
         // Refuse a directory that is not a store before creating its database.
-        let lock = match lock {
-            Some(lock) => {
-                self.directory.verify_lock(&lock)?;
-                lock
-            }
-            None => self.directory.lock_exclusive()?,
-        };
+        self.directory.verify_lock(&lock)?;
         let mut recovery = match archive {
             Some(name) => Some(self.directory.recover_database(&lock, &name)?),
             None => {
@@ -201,6 +207,7 @@ impl DatabaseBuilder {
             recovery.prepared().map_err(DbError::from)?;
         }
         Ok(Database {
+            closing: Arc::new(lock.closing_guard()),
             file_tasks: Arc::new(tokio::sync::RwLock::new(())),
             inner: Arc::new(RwLock::new(Some(DatabaseInner {
                 observer,

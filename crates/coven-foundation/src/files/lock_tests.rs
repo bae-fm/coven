@@ -73,7 +73,7 @@ fn dropping_the_guard_unlocks_even_while_an_inherited_handle_survives() {
     let guard = store.lock_exclusive().unwrap();
     // A fork before exec retains a reference to this same open file. Duplicating
     // it makes that descriptor lifetime deterministic without racing a process.
-    let inherited = guard.store._file.file.try_clone().unwrap();
+    let inherited = guard.store._file.inherited_file();
     drop(guard);
     let next = store.lock_exclusive().unwrap();
     drop(inherited);

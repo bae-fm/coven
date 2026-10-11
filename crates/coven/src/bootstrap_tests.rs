@@ -148,38 +148,48 @@ async fn join_accepts_provider_access_and_approval_then_loads_the_store() {
 
 #[tokio::test]
 async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
+    use std::{
+        future::{poll_fn, Future},
+        task::Poll,
+    };
     let owner = Owner::new(CloudProvider::S3, false).await;
     let invite = owner.invite().await;
     let install = Installation::new();
     let (_, cancel) = watch::channel(false);
-    let (sleeping, mut asleep) = watch::channel(false);
-    let (_resume, resumed) = watch::channel(false);
-    let clock = Arc::new(JoinClock {
-        clock: crate::tests::PollingClock(owner.clock.clone()),
-        sleeping,
-        resume: resumed,
-    });
+    // Interrupt successive await points, including database opening and reads.
+    // Each next attempt starts immediately, with no approval-timer barrier.
+    for stop_at in 1..=12 {
+        let mut joining = Box::pin(join_with_invite(
+            install.builder(&owner, owner.recipient()),
+            &invite.code,
+            "New phone",
+            |_| {},
+            &cancel,
+        ));
+        let mut polls = 0;
+        poll_fn(|cx| {
+            assert!(joining.as_mut().poll(cx).is_pending());
+            polls += 1;
+            if polls == stop_at {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+        drop(joining);
+    }
     let mut joining = Box::pin(join_with_invite(
-        install.builder(&owner, owner.recipient()).clock(clock),
+        install.builder(&owner, owner.recipient()),
         &invite.code,
         "New phone",
         |_| {},
         &cancel,
     ));
     let request = tokio::time::timeout(Duration::from_secs(20), async {
-        let waiting = async {
-            // Receipt on the owner does not mean the joiner's database read
-            // has finished. Drop only once it is waiting on the approval timer.
-            let (request, sleeping) = tokio::join!(
-                next_join_request(&owner.handle),
-                asleep.wait_for(|sleeping| *sleeping),
-            );
-            sleeping.unwrap();
-            request
-        };
         tokio::select! {
             result = &mut joining => panic!("join returned before approval: {result:?}"),
-            request = waiting => request,
+            request = next_join_request(&owner.handle) => request,
         }
     })
     .await
@@ -193,6 +203,7 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
     let pending = install
         .layout
         .begin_bootstrap(owner.directory.id(), "Household", &UuidIds)
+        .await
         .unwrap();
     drop(pending.directory().lock_exclusive().unwrap());
     let device = pending.directory().settings().unwrap().device_id;

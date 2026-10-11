@@ -203,22 +203,24 @@ async fn settings_failure_remains_distinct() {
     ));
 }
 
-#[test]
-fn dropped_bootstrap_releases_its_locks_when_the_active_read_finishes() {
+#[tokio::test]
+async fn dropped_bootstrap_reopen_waits_for_the_active_read_to_finish() {
+    use std::{
+        future::{poll_fn, Future},
+        task::Poll,
+    };
     let temp = tempfile::tempdir().unwrap();
     let layout = coven_foundation::files::StoreLayout::new(temp.path().to_owned());
     let id = coven_foundation::id_source::StoreId(uuid::Uuid::from_u128(1));
-    let pending = layout.begin_bootstrap(id, "Household", &UuidIds).unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .build()
+    let pending = layout
+        .begin_bootstrap(id, "Household", &UuidIds)
+        .await
         .unwrap();
-    let database = runtime
-        .block_on(
-            DatabaseBuilder::new(pending.directory())
-                .synced_tables(vec![])
-                .migrations(vec![])
-                .open(),
-        )
+    let database = DatabaseBuilder::new(pending.directory())
+        .synced_tables(vec![])
+        .migrations(vec![])
+        .open()
+        .await
         .unwrap();
     let (entered, entry) = tokio::sync::oneshot::channel();
     let (release, released) = std::sync::mpsc::channel();
@@ -229,28 +231,219 @@ fn dropped_bootstrap_releases_its_locks_when_the_active_read_finishes() {
             .unwrap();
         Ok(())
     }));
-    runtime.block_on(async {
-        tokio::select! {
-            result = &mut read => panic!("held read returned: {result:?}"),
-            result = entry => result.unwrap(),
-        }
-    });
+    tokio::select! {
+        result = &mut read => panic!("held read returned: {result:?}"),
+        result = entry => result.unwrap(),
+    }
     drop(read);
     drop(database);
     drop(pending);
-    // Dropping the caller cannot release the directory underneath active IO.
-    assert!(matches!(
-        layout.begin_bootstrap(id, "Household", &UuidIds),
-        Err(coven_foundation::files::BootstrapDirectoryError::Lock(
-            StoreLockError::AlreadyOpen(_)
-        ))
-    ));
+    let mut reopen = Box::pin(layout.begin_bootstrap(id, "Household", &UuidIds));
+    poll_fn(|cx| {
+        assert!(
+            reopen.as_mut().poll(cx).is_pending(),
+            "reopen must await the held read"
+        );
+        Poll::Ready(())
+    })
+    .await;
     release.send(()).unwrap();
-    // Runtime shutdown joins the blocking work, without relying on a sleep.
-    runtime.shutdown_timeout(std::time::Duration::from_secs(10));
-    let resumed = layout.begin_bootstrap(id, "Household", &UuidIds).unwrap();
-    drop(resumed.directory().lock_exclusive().unwrap());
+    let resumed = reopen.await.unwrap();
+    let database = DatabaseBuilder::new(resumed.directory())
+        .synced_tables(vec![])
+        .migrations(vec![])
+        .open()
+        .await
+        .unwrap();
+    database.read(|_| Ok(())).await.unwrap();
+    database.close().await.unwrap();
     resumed.cancel().unwrap();
+}
+
+#[tokio::test]
+async fn reopening_a_dropped_or_closing_database_waits_for_its_active_read() {
+    use std::{
+        future::{poll_fn, Future},
+        task::Poll,
+    };
+    for close in [false, true] {
+        let store = TestStore::new();
+        let database = store
+            .builder(notes_tables(), notes_migrations())
+            .open()
+            .await
+            .unwrap();
+        let (entered, entry) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let read = database.start_read(move |_| {
+            entered.send(()).unwrap();
+            released
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            Ok(())
+        });
+        entry.await.unwrap();
+        if close {
+            let mut closing = Box::pin(database.close());
+            poll_fn(|cx| {
+                assert!(closing.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            // The close continues even when its caller stops awaiting it.
+            drop(closing);
+        }
+        drop(database);
+        let mut reopen = Box::pin(store.builder(notes_tables(), notes_migrations()).open());
+        poll_fn(|cx| {
+            assert!(reopen.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert_other_process_refuses_writer(&store);
+        release.send(()).unwrap();
+        read.await.unwrap().unwrap();
+        let reopened = reopen.await.unwrap();
+        assert_eq!(reopened.schema_version().await.unwrap(), 1);
+        reopened.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_dropped_open_waits_for_its_blocking_migration_before_reopening() {
+    use std::{
+        future::{poll_fn, Future},
+        task::Poll,
+    };
+    let store = TestStore::new();
+    let (entered, entry) = tokio::sync::oneshot::channel();
+    let entered = Mutex::new(Some(entered));
+    let (release, released) = std::sync::mpsc::channel();
+    let released = Mutex::new(released);
+    let mut opening = Box::pin(
+        store
+            .builder(
+                vec![],
+                vec![Migration::run(1, "held", move |_| {
+                    entered.lock().unwrap().take().unwrap().send(()).unwrap();
+                    released
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(std::time::Duration::from_secs(10))
+                        .unwrap();
+                    Ok(())
+                })],
+            )
+            .open(),
+    );
+    tokio::select! {
+        result = &mut opening => panic!("held migration returned: {:?}", result.err()),
+        result = entry => result.unwrap(),
+    }
+    drop(opening);
+    let mut reopen = Box::pin(
+        store
+            .builder(
+                vec![],
+                vec![Migration::run(1, "held", |_| {
+                    panic!("committed migration must not run again")
+                })],
+            )
+            .open(),
+    );
+    poll_fn(|cx| {
+        assert!(reopen.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    release.send(()).unwrap();
+    let reopened = reopen.await.unwrap();
+    assert_eq!(reopened.schema_version().await.unwrap(), 1);
+    reopened.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn dropping_a_write_caller_makes_reopen_wait_for_its_commit() {
+    use std::{
+        future::{poll_fn, Future},
+        task::Poll,
+    };
+    let store = TestStore::new();
+    let database = store
+        .builder(notes_tables(), notes_migrations())
+        .open()
+        .await
+        .unwrap();
+    let (entered, entry) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let mut write = Box::pin(database.write(move |sql| {
+        sql.execute(
+            "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','Title','Body')",
+            [],
+        )?;
+        entered.send(()).unwrap();
+        released
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        Ok(())
+    }));
+    tokio::select! {
+        result = &mut write => panic!("held write returned: {result:?}"),
+        result = entry => result.unwrap(),
+    }
+    drop(write);
+    drop(database);
+    let mut reopen = Box::pin(store.builder(notes_tables(), notes_migrations()).open());
+    let waiting = poll_fn(|cx| Poll::Ready(reopen.as_mut().poll(cx).is_pending())).await;
+    release.send(()).unwrap();
+    assert!(
+        waiting,
+        "blocking work must not keep its dropped caller live"
+    );
+    let reopened = reopen.await.unwrap();
+    assert_eq!(
+        reopened
+            .read(|sql| Ok(sql.query_row(
+                "SELECT title FROM notes WHERE id='00000000-0000-4000-8000-000000000001'",
+                [],
+                |row| row.get::<_, String>(0)
+            )?))
+            .await
+            .unwrap(),
+        "Title"
+    );
+    reopened.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelling_close_while_file_work_is_held_does_not_cancel_release() {
+    use std::{
+        future::{poll_fn, Future},
+        task::Poll,
+    };
+    let store = TestStore::new();
+    let database = store.builder(vec![], vec![]).open().await.unwrap();
+    let lease = database.file_tasks.clone().read_owned().await;
+    let mut closing = Box::pin(database.close());
+    poll_fn(|cx| {
+        assert!(closing.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    drop(closing);
+    let mut reopen = Box::pin(store.builder(vec![], vec![]).open());
+    poll_fn(|cx| {
+        assert!(reopen.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    drop(lease);
+    let reopened = reopen.await.unwrap();
+    assert!(matches!(
+        database.schema_version().await,
+        Err(DbError::StoreClosed)
+    ));
+    reopened.close().await.unwrap();
 }
 
 #[test]
@@ -260,6 +453,11 @@ fn another_process_can_read_while_the_writer_is_open() {
     let database = runtime
         .block_on(store.builder(notes_tables(), notes_migrations()).open())
         .unwrap();
+    assert_other_process_refuses_writer(&store);
+    runtime.block_on(database.close()).unwrap();
+}
+
+fn assert_other_process_refuses_writer(store: &TestStore) {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
@@ -277,7 +475,6 @@ fn another_process_can_read_while_the_writer_is_open() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    runtime.block_on(database.close()).unwrap();
 }
 
 #[test]
@@ -300,6 +497,17 @@ fn read_only_process() {
     );
     let directory = layout.store_dir(&store_id);
     let runtime = tokio::runtime::Runtime::new().unwrap();
+    assert!(matches!(
+        runtime.block_on(DatabaseBuilder::new(directory.clone())
+            .synced_tables(notes_tables()).migrations(notes_migrations()).open()),
+        Err(CovenError::Lock(StoreLockError::AlreadyOpen(id))) if id == store_id
+    ));
+    assert!(matches!(
+        runtime.block_on(layout.begin_bootstrap(store_id, "Store", &UuidIds)),
+        Err(coven_foundation::files::BootstrapDirectoryError::Lock(
+            StoreLockError::AlreadyOpen(id)
+        )) if id == store_id
+    ));
     let db = runtime
         .block_on(
             DatabaseBuilder::new(directory)

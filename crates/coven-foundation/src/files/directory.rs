@@ -159,10 +159,18 @@ impl StoreDir {
         settings::read(&self.path, self.id)
     }
 
-    /// Take the exclusive OS lock for a writable open. The returned guard must
-    /// outlive every writable owner and its database connections.
+    /// Probe the OS writer lock without waiting, for lifetime assertions in tests.
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn lock_exclusive(&self) -> Result<StoreLock, StoreLockError> {
         let guard = lock::acquire(&self.path, self.id)?;
+        self.check_published()?;
+        Ok(guard)
+    }
+
+    /// Take the writer lock, awaiting release by a closing instance in this
+    /// process. A live instance or another process still refuses immediately.
+    pub async fn lock_for_open(&self) -> Result<StoreLock, StoreLockError> {
+        let guard = lock::acquire_for_open(&self.path, self.id).await?;
         self.check_published()?;
         Ok(guard)
     }

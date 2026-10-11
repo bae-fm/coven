@@ -6,21 +6,32 @@ use std::path::{Path, PathBuf};
 use crate::files::{atomic_file, settings, FileError, SettingsError, StoreSettings};
 use crate::id_source::{DeviceId, StoreId};
 
+use super::lock_registry as registry;
+use registry::LockKind;
+pub(super) use registry::RegisteredLock;
+pub use registry::StoreClosingGuard;
+
 /// An exclusive writer lock. Dropping it unlocks and closes the OS handle.
 /// Readers use a separate shared lock so they can coexist with the writer.
 #[derive(Debug)]
 pub struct StoreLock {
-    store: LockedStore,
+    store: LockedStore<RegisteredLock>,
 }
 
 #[derive(Debug)]
-struct LockedStore {
-    _file: LockedFile,
+struct LockedStore<L> {
+    _file: L,
     directory: PathBuf,
     id: StoreId,
 }
 
 impl StoreLock {
+    /// Mark this instance as closing when the caller's owning scope ends.
+    /// This guard does not retain the OS lock or any database connection.
+    pub fn closing_guard(&self) -> StoreClosingGuard {
+        self.store._file.closing_guard()
+    }
+
     /// Read the settings while holding the store's writer lock.
     pub fn settings(&self) -> Result<StoreSettings, SettingsError> {
         settings::read(&self.store.directory, self.store.id)
@@ -52,7 +63,7 @@ pub struct StoreReadLock {
 /// Exclusive access to both the writer and readers, authorizing deletion.
 #[derive(Debug)]
 pub struct StoreDeletionLock {
-    store: LockedStore,
+    store: LockedStore<LockedFile>,
     _readers: LockedFile,
 }
 
@@ -105,7 +116,8 @@ fn sync_removal(directory: &Path) -> Result<(), FileError> {
 /// A store in use is distinct from a filesystem failure.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreLockError {
-    /// An open writer, reader or deletion prevents the requested access.
+    /// A live instance or another process prevents the requested access.
+    /// Async opens wait for a closing instance in this process to release it.
     #[error("store {0} is already open")]
     AlreadyOpen(StoreId),
     /// An explicit database recovery has not published its replacement.
@@ -132,6 +144,13 @@ impl Drop for LockedFile {
         // Closing alone leaves the lock held while a concurrently forked child
         // retains the open file before exec closes its inherited descriptors.
         self.file.unlock().expect("release owned store lock");
+    }
+}
+
+impl LockedFile {
+    #[cfg(test)]
+    pub(super) fn inherited_file(&self) -> File {
+        self.file.try_clone().unwrap()
     }
 }
 
@@ -174,8 +193,10 @@ pub(crate) fn lock_layout(root: &Path) -> Result<LockedFile, FileError> {
     Ok(LockedFile { file })
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn acquire(directory: &Path, id: StoreId) -> Result<StoreLock, StoreLockError> {
-    let (directory, file) = lock_existing(directory, id, false)?;
+    let directory = resolve_directory(directory)?;
+    let file = registry::try_acquire(&directory, id, LockKind::Writer)?;
     Ok(StoreLock {
         store: LockedStore {
             _file: file,
@@ -183,6 +204,33 @@ pub(crate) fn acquire(directory: &Path, id: StoreId) -> Result<StoreLock, StoreL
             id,
         },
     })
+}
+
+pub(crate) async fn acquire_for_open(
+    directory: &Path,
+    id: StoreId,
+) -> Result<StoreLock, StoreLockError> {
+    let directory = resolve_directory(directory)?;
+    let file = registry::acquire_registered(&directory, id, LockKind::Writer).await?;
+    Ok(StoreLock {
+        store: LockedStore {
+            _file: file,
+            directory,
+            id,
+        },
+    })
+}
+
+pub(super) async fn acquire_bootstrap(
+    directory: &Path,
+    id: StoreId,
+) -> Result<RegisteredLock, StoreLockError> {
+    registry::acquire_registered(directory, id, LockKind::Bootstrap).await
+}
+
+fn resolve_directory(directory: &Path) -> Result<PathBuf, FileError> {
+    std::fs::canonicalize(directory)
+        .map_err(|source| FileError::at("resolve store directory", directory, source))
 }
 
 pub(super) fn exclude_readers(directory: &Path, id: StoreId) -> Result<LockedFile, StoreLockError> {
@@ -198,7 +246,7 @@ pub(crate) fn acquire_reader(
     Ok(StoreReadLock { _file: file })
 }
 
-fn lock_existing(
+pub(super) fn lock_existing(
     directory: &Path,
     id: StoreId,
     shared: bool,

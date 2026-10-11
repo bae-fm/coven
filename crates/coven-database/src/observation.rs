@@ -133,6 +133,25 @@ struct ObserverState {
     closed: bool,
 }
 
+impl ObserverState {
+    fn close(&mut self) {
+        self.closed = true;
+        self.subscriptions.retain(|subscription| {
+            let Some(subscription) = subscription.upgrade() else {
+                return false;
+            };
+            subscription.state.send_modify(|state| state.closed = true);
+            true
+        });
+    }
+}
+
+impl Drop for ObserverState {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct CommitObserver {
     state: Arc<Mutex<ObserverState>>,
@@ -187,14 +206,6 @@ impl CommitObserver {
     }
 
     pub(crate) fn close(&self) {
-        let mut state = self.state.lock().expect("observer lock poisoned");
-        state.closed = true;
-        state.subscriptions.retain(|subscription| {
-            let Some(subscription) = subscription.upgrade() else {
-                return false;
-            };
-            subscription.state.send_modify(|state| state.closed = true);
-            true
-        });
+        self.state.lock().expect("observer lock poisoned").close();
     }
 }

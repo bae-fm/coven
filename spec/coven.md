@@ -2340,6 +2340,10 @@ Carol's tablet:
   coven commit final keys and credentials and publish it, without closing or
   moving the database. Cancellation closes it and removes its local work;
   dropping a waiting join preserves its encrypted request for an explicit retry.
+- Dropping a bootstrap marks its installation as closing. Its locks remain held
+  until its in-flight blocking work finishes. A bootstrap or open of the same
+  store in this process waits for their release ([E1](api.md#e1-opening)); a
+  still-live instance or another process's lock returns `AlreadyOpen` at once.
 
 ### 12.1 A person's new device
 
@@ -4186,6 +4190,15 @@ holds failures and rejected entries, without making either wait look completed.
   same list; there is no separate list of lifetime authorities.
 - E.g. only the sync owner starts the sync loop, so closing the store stops
   it, and nothing else can leave one running.
+- Closing a handle, or dropping its last clone, marks its store as closing
+  before releasing its owners. Blocking work retains the database connections
+  and writer lock until it finishes; subscriptions retain only their active
+  database reads. Opening or bootstrapping that store in the
+  same process waits for release, using a process-wide registry keyed by its
+  canonical directory and store id and a notification when the lock handles
+  close. There are no timeouts or polling sleeps. A live instance in this
+  process, or a lock held by another process, still returns `AlreadyOpen`
+  immediately ([E1](api.md#e1-opening)).
 - Opening leaves configured storage `Stopped`, or `Disconnected` when none is
   set up. `start_sync` asks the injected provider connector to build a client
   when absent, using custody credentials, then starts the loop. Tokens refresh

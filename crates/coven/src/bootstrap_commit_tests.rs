@@ -57,7 +57,10 @@ async fn prepared(
     keys: KeyCustody,
     identity: IdentityCustody,
 ) -> (BootstrapStore, OpeningOwners, Database) {
-    let pending = layout.begin_bootstrap(id, "Household", &UuidIds).unwrap();
+    let pending = layout
+        .begin_bootstrap(id, "Household", &UuidIds)
+        .await
+        .unwrap();
     let builder = Coven::builder(layout.clone())
         .synced_tables(Vec::new())
         .migrations(Vec::new())

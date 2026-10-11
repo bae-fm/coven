@@ -1,6 +1,6 @@
 //! File metadata operations through the owning database, never through app SQL.
 
-use super::{finish_blocking, Database, DatabaseReadHandle};
+use super::{finish_blocking, Database, DatabaseInner, DatabaseReadHandle};
 use crate::DatabaseChanges;
 use crate::{
     file_queue, file_ref, sqlite::DatabaseConnection, write_schema::WriteSchema, DbError, FileRef,
@@ -11,7 +11,10 @@ use coven_foundation::{
     files::{FileName, StoreDir},
     id_source::DeviceId,
 };
-use std::time::SystemTime;
+use std::{
+    sync::{Arc, RwLock},
+    time::SystemTime,
+};
 
 #[path = "file_cache.rs"]
 mod cache;
@@ -303,10 +306,9 @@ impl FileDatabase {
         let FileDatabaseAccess::Writer(database) = &self.access else {
             return Err(read_only());
         };
-        let database = database.clone();
         let lease = database.file_tasks.clone().read_owned().await;
+        let resources = database.inner.clone();
         database
-            .clone()
             .call(move |inner| {
                 inner.with_writer(|writer| {
                     writer.transaction(|db| {
@@ -333,7 +335,7 @@ impl FileDatabase {
                     Ok::<_, DbError>(())
                 })?;
                 Ok(CacheReservation {
-                    database,
+                    database: resources,
                     name,
                     lease: Some(lease),
                 })
@@ -524,7 +526,7 @@ impl FileDatabase {
 
 /// Bytes reserved for a verified whole-file cache pin.
 pub struct CacheReservation {
-    database: Database,
+    database: Arc<RwLock<Option<DatabaseInner>>>,
     name: FileName,
     lease: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
 }
@@ -537,11 +539,7 @@ impl CacheReservation {
         finish_blocking(
             tokio::task::spawn_blocking(move || {
                 {
-                    let slot = pending
-                        .database
-                        .inner
-                        .read()
-                        .expect("database lock poisoned");
+                    let slot = pending.database.read().expect("database lock poisoned");
                     let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
                     inner.with_writer(|writer| {
                         writer.transaction(|db| {
@@ -570,7 +568,9 @@ impl Drop for CacheReservation {
         let Some(_lease) = self.lease.take() else {
             return;
         };
-        self.database
+        let slot = self.database.read().expect("database lock poisoned");
+        slot.as_ref()
+            .expect("reservation holds close guard")
             .release_file_reservations(std::iter::once(&self.name));
     }
 }

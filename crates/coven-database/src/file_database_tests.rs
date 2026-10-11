@@ -5,6 +5,32 @@ use crate::{
     Provenance,
 };
 
+#[tokio::test]
+async fn reopen_waits_for_a_cache_reservation_after_its_database_owner_drops() {
+    use crate::file_write::tests::{local_count, SCHEMA};
+    use std::{future::Future, task::Poll};
+    let store = TestStore::new();
+    let db = store
+        .schema(tables(Provenance::AppProvided), SCHEMA)
+        .await
+        .unwrap();
+    let owner = FileDatabase::new(db.clone());
+    let reservation = owner
+        .reserve_cache_file(FileName::new("reserved").unwrap())
+        .await
+        .unwrap();
+    drop(db);
+    drop(owner);
+    let mut reopen = Box::pin(store.schema(tables(Provenance::AppProvided), SCHEMA));
+    let waiting =
+        std::future::poll_fn(|cx| Poll::Ready(reopen.as_mut().poll(cx).is_pending())).await;
+    drop(reservation);
+    assert!(waiting, "a reservation retains work, not a live owner");
+    let reopened = reopen.await.unwrap();
+    assert_eq!(local_count(&reopened, "_coven_file_removals"), 0);
+    reopened.close().await.unwrap();
+}
+
 #[test]
 fn cancelled_cache_reservations_drop_outside_a_runtime_and_record_cleanup_failures() {
     use crate::file_write::tests::{local_count, SCHEMA};

@@ -537,7 +537,12 @@ pub enum SettingsError {
 
 /// The requested writer, reader or deletion lock could not be taken (E1).
 pub enum StoreLockError {
-    /// Another handle or process holds the lock.
+    /// Another live instance in this process, or another process, holds the
+    /// lock: opening or bootstrapping returns this error immediately. If this
+    /// process's instance is closing, opening or bootstrapping the same store
+    /// waits until its last blocking work finishes and its lock handles close,
+    /// then tries to take the lock. The wait uses release notifications, with
+    /// no timeout or polling, keyed by canonical directory and store id.
     AlreadyOpen(StoreId),
     /// An unfinished installation must be resumed with restore, join or reset_device.
     BootstrapPending(StoreId),

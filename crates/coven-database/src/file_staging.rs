@@ -1,10 +1,11 @@
 //! Async sources are consumed without holding SQLite or a blocking worker.
 
-use super::{finish_blocking, Database};
+use super::{finish_blocking, DatabaseInner};
 use crate::file_hashes::FileHasher;
 use crate::{file_write::StagedFile, DbError, FileSource, Provenance, WriteBatch};
 use coven_foundation::files::{FileArea, FileName};
 use std::collections::{BTreeSet, VecDeque};
+use std::sync::{Arc, RwLock};
 use tokio::sync::OwnedRwLockReadGuard;
 
 struct StagingSource {
@@ -15,7 +16,7 @@ struct StagingSource {
 }
 
 pub(super) struct FileStaging {
-    database: Database,
+    database: Arc<RwLock<Option<DatabaseInner>>>,
     // Close waits until publication or cancellation releases the reservation.
     lease: Option<OwnedRwLockReadGuard<()>>,
     names: Vec<FileName>,
@@ -25,12 +26,12 @@ pub(super) struct FileStaging {
 
 impl FileStaging {
     pub(super) fn new<E: crate::WriteFailure>(
-        database: Database,
+        database: Arc<RwLock<Option<DatabaseInner>>>,
         lease: OwnedRwLockReadGuard<()>,
         build: impl FnOnce(&mut WriteBatch) -> Result<(), E>,
     ) -> Result<Self, E> {
         let sources = {
-            let slot = database.inner.read().expect("database lock poisoned");
+            let slot = database.read().expect("database lock poisoned");
             let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
             let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mut batch = WriteBatch::new();
@@ -139,7 +140,7 @@ impl FileStaging {
             let (next, writer) = finish_blocking(
                 tokio::task::spawn_blocking(move || {
                     let writer = (|| -> Result<_, DbError> {
-                        let slot = self.database.inner.read().expect("database lock poisoned");
+                        let slot = self.database.read().expect("database lock poisoned");
                         let inner = slot.as_ref().expect("staging holds close guard");
                         let lock = inner.access.directory.lock_read_only()?;
                         Ok(inner
@@ -190,7 +191,7 @@ impl FileStaging {
         S: FnOnce(crate::SqlContext<'_, '_>) -> Result<R, E>,
     {
         let database = self.database.clone();
-        let slot = database.inner.read().expect("database lock poisoned");
+        let slot = database.read().expect("database lock poisoned");
         let inner = slot.as_ref().expect("staging holds close guard");
         inner.with_files(std::mem::take(&mut self.staged), |writer, files| {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -203,12 +204,7 @@ impl FileStaging {
                     sql,
                 )
             }));
-            {
-                let mut active = inner.staging.lock().expect("file staging lock poisoned");
-                for name in &self.names {
-                    assert!(active.remove(name), "staging name is registered");
-                }
-            }
+            inner.release_file_reservations(&self.names);
             let _lease = self.lease.take();
             #[cfg(any(test, feature = "test-utils"))]
             writer.checkpoint(crate::test_utils::WriteCheckpoint::StagingReleased);
@@ -225,7 +221,10 @@ impl Drop for FileStaging {
         let Some(_lease) = self.lease.take() else {
             return;
         };
-        self.database.release_file_reservations(&self.names);
+        let slot = self.database.read().expect("database lock poisoned");
+        slot.as_ref()
+            .expect("reservation holds close guard")
+            .release_file_reservations(&self.names);
     }
 }
 

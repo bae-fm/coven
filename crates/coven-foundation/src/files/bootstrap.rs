@@ -28,6 +28,8 @@ pub enum BootstrapDirectoryError {
 /// Dropping preserves resumable work; `cancel` removes it after its database
 /// closes. Publication removes the marker without moving any open files.
 pub struct BootstrapStore {
+    // Drops before the lease so surviving directory clones are closing.
+    _closing: lock::StoreClosingGuard,
     path: PathBuf,
     id: StoreId,
     lease: Arc<BootstrapLease>,
@@ -35,7 +37,7 @@ pub struct BootstrapStore {
 
 /// Unpublished directory clones keep the lease until publication or cancellation.
 #[derive(Debug)]
-pub(super) struct BootstrapLease(Mutex<Option<lock::LockedFile>>);
+pub(super) struct BootstrapLease(Mutex<Option<lock::RegisteredLock>>);
 
 impl BootstrapLease {
     pub(super) fn is_held(&self) -> bool {
@@ -96,7 +98,7 @@ pub(super) fn is_pending(directory: &Path) -> Result<bool, FileError> {
     exists("inspect bootstrap path", &marker(directory))
 }
 
-pub(super) fn reserve_bootstrap_directory(
+pub(super) async fn reserve_bootstrap_directory(
     root: &Path,
     id: StoreId,
     name: &str,
@@ -106,12 +108,10 @@ pub(super) fn reserve_bootstrap_directory(
         .map_err(|source| FileError::at("create bootstrap layout", root, source))?;
     let root = fs::canonicalize(root)
         .map_err(|source| FileError::at("resolve bootstrap layout", root, source))?;
-    let lease = Arc::new(BootstrapLease(Mutex::new(Some(lock::try_lock(
-        &root.join(format!(".coven-bootstrap-{id}.lock")),
-        id,
-        false,
-    )?))));
     let path = root.join(id.to_string());
+    let lock = lock::acquire_bootstrap(&path, id).await?;
+    let closing = lock.closing_guard();
+    let lease = Arc::new(BootstrapLease(Mutex::new(Some(lock))));
     if !exists("inspect bootstrap path", &path)? {
         creation::create(&root, id, name, ids, |_| Ok(()), true)?;
     }
@@ -128,10 +128,18 @@ pub(super) fn reserve_bootstrap_directory(
         )
         .into());
     }
+    // A published or interrupted installation may still have a live writer,
+    // including one in another process. Refuse it before inspecting its data.
+    let _writer = lock::acquire_for_open(&path, id).await?;
     if !is_pending(&path)? {
         return Err(StoreCreationError::AlreadyExists(id).into());
     }
-    let store = BootstrapStore { path, id, lease };
+    let store = BootstrapStore {
+        _closing: closing,
+        path,
+        id,
+        lease,
+    };
     store
         .directory()
         .settings()

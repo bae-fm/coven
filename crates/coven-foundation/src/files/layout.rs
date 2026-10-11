@@ -109,15 +109,17 @@ impl StoreLayout {
     }
 
     /// Reserve a hidden, restartable new-device store. A second attempt for the
-    /// same id cannot run until the returned lease is dropped. Ordinary store
-    /// listings exclude it until `BootstrapStore::publish` succeeds.
-    pub fn begin_bootstrap(
+    /// same id waits for a dropped bootstrap's remaining work to release its
+    /// locks; a live bootstrap still refuses it. Ordinary store listings exclude
+    /// it until `BootstrapStore::publish` succeeds.
+    pub async fn begin_bootstrap(
         &self,
         id: StoreId,
         name: &str,
         ids: &dyn IdSource,
     ) -> Result<super::BootstrapStore, super::BootstrapDirectoryError> {
         super::bootstrap::reserve_bootstrap_directory(&self.app_dir.join("stores"), id, name, ids)
+            .await
     }
 
     /// Make and publish one store directory and its settings, with a fresh

@@ -107,6 +107,11 @@ pub(crate) const POLICY: Policy = Policy {
             "open_reloading_locked",
         ),
         (
+            "crates/coven-database/src/database_builder.rs",
+            "DatabaseBuilder",
+            "open_with_archive",
+        ),
+        (
             "crates/coven-database/src/file_database.rs",
             "CacheReservation",
             "publish",
@@ -151,6 +156,11 @@ pub(crate) const POLICY: Policy = Policy {
             "crates/coven-foundation/src/files/layout.rs",
             "StoreLayout",
             "stores",
+        ),
+        (
+            "crates/coven-foundation/src/files/lock_registry.rs",
+            "LockRegistration",
+            "open_on_worker",
         ),
         (
             "crates/coven-foundation/src/files/recovery.rs",
@@ -478,6 +488,12 @@ pub(crate) const POLICY: Policy = Policy {
             "crates/coven-foundation/src/files/directory.rs",
             "StoreDir",
             "lock_exclusive",
+            "StoreLock",
+        ),
+        (
+            "crates/coven-foundation/src/files/directory.rs",
+            "StoreDir",
+            "lock_for_open",
             "StoreLock",
         ),
         (

@@ -19,7 +19,7 @@ fn cancelled_staging_drops_outside_a_runtime_and_the_next_write_removes_its_byte
         .unwrap();
     let staging = runtime.block_on(async {
         let staging = super::FileStaging::new(
-            db.clone(),
+            db.inner.clone(),
             db.file_tasks.clone().read_owned().await,
             |batch| {
                 batch.put_file("files", "7", b"unclaimed".to_vec());

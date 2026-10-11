@@ -1,7 +1,7 @@
 //! Request revisions and cancellation-safe, demand-driven live results.
 
 use crate::observation::CommitSubscription;
-use crate::{CovenResult, Database, SqlReadContext};
+use crate::CovenResult;
 use std::{
     future::Future,
     pin::Pin,
@@ -10,7 +10,7 @@ use std::{
 use tokio::sync::Notify;
 
 type Run<T> = Pin<Box<dyn Future<Output = CovenResult<T>> + Send>>;
-type Query<Q, T> = Arc<dyn Fn(Database, Q) -> Run<T> + Send + Sync>;
+type Query<Q, T> = Arc<dyn Fn(Q) -> Run<T> + Send + Sync>;
 
 /// A request revision assigned by one live query.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -117,7 +117,6 @@ struct Running<Q, T> {
 
 /// A subscription whose request may be replaced while it runs.
 pub struct ReconfigurableLiveQuery<Q, T> {
-    database: Database,
     lifetime: QueryLifetime<Q>,
     query: Query<Q, T>,
     commits: CommitSubscription,
@@ -131,28 +130,8 @@ where
     Q: Clone + PartialEq + Send + Sync + 'static,
     T: Send + 'static,
 {
-    pub(crate) fn new<F>(
-        database: Database,
-        request: Q,
-        query: F,
-        commits: CommitSubscription,
-    ) -> Self
-    where
-        F: Fn(&Q, SqlReadContext<'_>) -> CovenResult<T> + Send + Sync + 'static,
-    {
-        let completion = commits.clone();
-        let query = Arc::new(query);
-        let runner: Query<Q, T> = Arc::new(move |database, request| {
-            let query = Arc::clone(&query);
-            let completion = completion.clone();
-            Box::pin(async move {
-                database
-                    .observed_read(move |sql| query(&request, sql), completion)
-                    .await
-            })
-        });
+    pub(crate) fn new(request: Q, query: Query<Q, T>, commits: CommitSubscription) -> Self {
         Self {
-            database,
             lifetime: QueryLifetime(Arc::new(RequestState {
                 requests: Mutex::new(Requests {
                     open: true,
@@ -162,7 +141,7 @@ where
                 }),
                 changed: Notify::new(),
             })),
-            query: runner,
+            query,
             commits,
             current: None,
             running: None,
@@ -220,7 +199,7 @@ where
                         Box::pin(async move { Err(error.into()) })
                     } else {
                         self.commits.begin();
-                        (self.query)(self.database.clone(), request.clone())
+                        (self.query)(request.clone())
                     };
                     self.running = Some(Running {
                         request,
@@ -292,7 +271,6 @@ impl<T: Send + 'static> LiveQuery<T> {
     {
         let process = Arc::new(process);
         let ReconfigurableLiveQuery {
-            database,
             lifetime,
             query,
             commits,
@@ -301,9 +279,8 @@ impl<T: Send + 'static> LiveQuery<T> {
             previous: _,
         } = self.inner;
         let next_process = Arc::clone(&process);
-        let mapped: Query<(), U> = Arc::new(move |database, request| {
-            process_run(query(database, request), Arc::clone(&next_process))
-        });
+        let mapped: Query<(), U> =
+            Arc::new(move |request| process_run(query(request), Arc::clone(&next_process)));
         let running = running.map(
             |Running {
                  request,
@@ -327,7 +304,6 @@ impl<T: Send + 'static> LiveQuery<T> {
         }
         LiveQuery {
             inner: ReconfigurableLiveQuery {
-                database,
                 lifetime,
                 query: mapped,
                 commits,

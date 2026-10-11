@@ -1,5 +1,6 @@
 //! Opening is the composition root; a shared handle owns all connections and
-//! the writer lock. Blocking calls keep that owner alive until they finish.
+//! the writer lock. Blocking calls retain these resources after its last owner
+//! drops, while another open waits for their release.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, RwLock};
@@ -46,6 +47,7 @@ pub use builder::DatabaseBuilder;
 /// Shared ownership of the database. Closing any clone closes them all.
 #[derive(Clone)]
 pub struct Database {
+    closing: Arc<coven_foundation::files::StoreClosingGuard>,
     inner: Arc<RwLock<Option<DatabaseInner>>>,
     file_tasks: Arc<tokio::sync::RwLock<()>>,
 }
@@ -146,6 +148,18 @@ fn with_connection<R>(
 }
 
 impl DatabaseInner {
+    // The caller retains its file-task lease until these names are released.
+    // Their durable removal records remain for the next write or open.
+    fn release_file_reservations<'a>(
+        &self,
+        names: impl IntoIterator<Item = &'a coven_foundation::files::FileName>,
+    ) {
+        let mut active = self.staging.lock().expect("file staging lock poisoned");
+        for name in names {
+            assert!(active.remove(name), "reserved name is registered");
+        }
+    }
+
     fn with_writer<R>(&self, run: impl FnOnce(&DatabaseConnection) -> R) -> R {
         with_connection(&self.access.writer, run)
     }
@@ -180,18 +194,10 @@ impl DatabaseInner {
 }
 
 impl Database {
-    // The caller retains its file-task lease until these names are released.
-    // Their durable removal records remain for the next write or open.
-    fn release_file_reservations<'a>(
-        &self,
-        names: impl IntoIterator<Item = &'a coven_foundation::files::FileName>,
-    ) {
-        let slot = self.inner.read().expect("database lock poisoned");
-        let inner = slot.as_ref().expect("reservation holds close guard");
-        let mut active = inner.staging.lock().expect("file staging lock poisoned");
-        for name in names {
-            assert!(active.remove(name), "reserved name is registered");
-        }
+    /// Track a facade's owning scope independently of database clones held by
+    /// workers. Ending that scope marks this instance as closing for reopen.
+    pub fn closing_guard(&self) -> coven_foundation::files::StoreClosingGuard {
+        self.closing.closing_guard()
     }
 
     async fn call<R, E>(
@@ -229,10 +235,10 @@ impl Database {
     /// Publish an explicitly recovered database after sync commits its snapshot
     /// reload. Until then, ordinary writer and reader opens refuse the store.
     pub async fn finish_recovery(&self) -> Result<(), DbError> {
-        let owner = self.clone();
+        let database = self.inner.clone();
         finish_blocking(
             tokio::task::spawn_blocking(move || {
-                let mut slot = owner.inner.write().expect("database lock poisoned");
+                let mut slot = database.write().expect("database lock poisoned");
                 let inner = slot.as_mut().ok_or(DbError::StoreClosed)?;
                 if let Some(recovery) = &inner.recovery {
                     inner.with_writer(|writer| {
@@ -321,7 +327,35 @@ impl Database {
             Some(inner) => inner.observer.subscribe(),
             None => CommitSubscription::closed(),
         };
-        ReconfigurableLiveQuery::new(self.clone(), initial_request, query, commits)
+        // A subscription retains a database only for its active blocking read.
+        // Idle queries and undelivered results cannot keep a closing lock held.
+        let database = Arc::downgrade(&self.inner);
+        let query = Arc::new(query);
+        let completion = commits.clone();
+        ReconfigurableLiveQuery::new(
+            initial_request,
+            Arc::new(move |request| {
+                let database = database.clone();
+                let query = query.clone();
+                let completion = completion.clone();
+                Box::pin(async move {
+                    let database = database.upgrade().ok_or(DbError::StoreClosed)?;
+                    finish_blocking(
+                        start_call(database, move |inner| {
+                            let (result, reads) = inner
+                                .access
+                                .readers
+                                .acquire_reader()
+                                .read_snapshot(move |sql| query(&request, sql));
+                            completion.finish(reads);
+                            result
+                        })
+                        .await,
+                    )
+                })
+            }),
+            commits,
+        )
     }
 
     /// Decode every lost cell and removed row in one snapshot.
@@ -362,23 +396,6 @@ impl Database {
         start_call(self.inner.clone(), move |inner| inner.access.read(read))
     }
 
-    pub(crate) async fn observed_read<F, R>(
-        &self,
-        read: F,
-        commits: CommitSubscription,
-    ) -> CovenResult<R>
-    where
-        F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
-        R: Send + 'static,
-    {
-        self.call(move |inner| {
-            let (result, reads) = inner.access.readers.acquire_reader().read_snapshot(read);
-            commits.finish(reads);
-            result
-        })
-        .await
-    }
-
     /// Run app SQL and commit its unsigned write record and merge metadata in
     /// one IMMEDIATE transaction (§5). The closure's result is returned after commit.
     pub async fn write<F, R>(&self, sql: F) -> Result<R, DbError>
@@ -400,7 +417,7 @@ impl Database {
         E: crate::WriteFailure + Send + 'static,
     {
         let lease = self.file_tasks.clone().read_owned().await;
-        let database = self.clone();
+        let database = self.inner.clone();
         let staging = finish_blocking(
             tokio::task::spawn_blocking(move || {
                 file_staging::FileStaging::new(database, lease, build)
@@ -429,17 +446,23 @@ impl Database {
     /// Wait for database calls, close all connections, then release the writer lock.
     /// Every subsequent database call, including close, reports `StoreClosed`.
     pub async fn close(&self) -> Result<(), DbError> {
-        let file_tasks = self.file_tasks.clone().write_owned().await;
+        self.closing.begin_close();
         let database = self.clone();
         finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let _file_tasks = file_tasks;
-                let mut slot = database.inner.write().expect("database lock poisoned");
-                let Some(inner) = slot.take() else {
-                    return Err(DbError::StoreClosed);
-                };
-                inner.observer.close();
-                inner.access.close()
+            tokio::spawn(async move {
+                let file_tasks = database.file_tasks.clone().write_owned().await;
+                finish_blocking(
+                    tokio::task::spawn_blocking(move || {
+                        let _file_tasks = file_tasks;
+                        let mut slot = database.inner.write().expect("database lock poisoned");
+                        let Some(inner) = slot.take() else {
+                            return Err(DbError::StoreClosed);
+                        };
+                        inner.observer.close();
+                        inner.access.close()
+                    })
+                    .await,
+                )
             })
             .await,
         )
