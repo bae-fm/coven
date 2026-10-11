@@ -80,13 +80,55 @@ bytes are refused; entry 2 remains unread. There is no failed provider request.
 Thus “no failed request” alone is insufficient. A completed terminal scan and
 successful durable retention are the conditions used in the theorems.
 
+**Snapshot positions name published writes — proved.**
+[`SnapshotWrites`](io/CovenIO/SnapshotWrites.lean) composes the existing
+`Publication.Writer` events across devices with snapshot capture, request and
+landing. A capture may include unuploaded own writes. A snapshot request waits
+until its own position is confirmed; remote positions come from published log
+prefixes or previously published snapshots. Crashes retain those facts, and
+later app commits may extend the queue without changing the captured cut.
+The same gate applies to ordinary and raise snapshots.
+
+`snapshot_covers_published` proves that every positive covered number has
+actual bytes in the historical publication sequence, even for a snapshot that
+later fails counting admission. `inherited_position_published` supplies the
+induction when another snapshot is the capture's remote input.
+`covered_miss_published` therefore rules out calling an unpublished local
+reservation a deleted hole on the strength of another audience's coverage.
+This is historical publication evidence: retention can remove the live object.
+
+`CommonReload.Source.selectedBound` is now a theorem, not a supplied field.
+The source supplies checked publication executions and catalog membership;
+its frontier is computed from those logs. `Source.numbered` obtains real bytes
+at every positive prefix number and applies the source's decoding/validation
+certificate. The existing common-cut safety and termination proofs use these
+derived bounds. Authentication, faithful snapshot contents, decoding and
+retention's absent-object certificate remain explicit source obligations.
+
+`SnapshotWriteExamples.pending_run` checks Ana's two-part write 1, captured in
+the store snapshot while its log path is absent. The request gate refuses it.
+Without that gate the same prefix passes `coveredMiss` while the other audience
+has no snapshot: this is the checked failure of publishing unuploaded coverage.
+`two_audience_raise_keeps_circle_part` publishes write 1 first; a loader gets
+its circle part from the actual log. The 2/1 replacement history in
+`replacement_fills_other_audience` also has checked publication/confirmation
+executions and still commits both audiences through 2, under all three orders.
+
+The [queue proposal](queue.md#spec-edits-required-by-this-proposal) keeps old
+upload records unchanged and drains the captured prefix before the raise.
+It includes the empty migration marker in that prefix; later app writes wait
+for a kept raise. This package proves the resulting publication and loader
+boundary, not the application migration or choice of the winning raise.
+
 **3. Snapshot coverage proposal — revision 4.** This checks a proposal;
 [§15](../coven.md#15-snapshots) and Rust are unchanged. The publication and
 deletion rules remain:
 
 > a) Publish a snapshot only immediately after a catch-up that reached every
 > writer's next-number miss with nothing pending. At preparation it must
-> cover the current newest snapshot of that audience.
+> cover the current newest snapshot of that audience. Before sending, confirm
+> every own write through its captured position; every remote position must
+> already have publication evidence. This applies to raise snapshots too.
 >
 > b) Its signed prefix records the storage sample T_c taken before catch-up
 > reads. A landing more than one day after T_c does not count for loading,
@@ -293,8 +335,9 @@ gaps, permanent refusal, clock and retirement examples are unchanged.
 `CommonReload.Source` supplies a fixed writer inventory, unique published
 numbered paths, exact finite prefix enumeration, validated snapshots, the
 `SnapshotHistory.Run` deletion invariant, retained deletion evidence and fresh
-complete certificates after absent GETs. Gap-free publication frontiers bound each
-selected cut; peer posted positions do not establish them. `availableFrom`
+complete certificates after absent GETs. Checked write/snapshot publication
+executions supply the gap-free frontiers and derive each selected cut's bound;
+peer posted positions do not establish them. `availableFrom`
 limits each prefix's missing-read obligation to times after it was selected,
 so later publication is not mistaken for earlier deletion. Writer discovery,
 unknown reservations, catalog pagination and snapshot-body availability remain
@@ -740,7 +783,11 @@ of revocation assume correct cryptography, including signatures and key derivati
 Atomic SQLite/cache publication and §2's provider behavior are assumed; modeled
 provider transitions do not prove that real providers satisfy them.
 
-Chosen readings: the proposed snapshot rule is checked at preparation, with
+Chosen readings: a snapshot can be captured before its own writes upload,
+but its request waits for confirmation through the captured position. A raise
+has the same gate as an ordinary snapshot, and does not wait for subsequent
+app writes. Remote coverage comes from published input. The other proposed
+snapshot rule is checked at preparation, with
 T_c sampled before catch-up reads, strict one-day deletion age, inclusive
 one-day upload admission, and historical covering evidence. Path ties choose
 the smaller path. Reload freezes its required lower bound and fills to the
@@ -757,3 +804,19 @@ uses a shared duration scale. Dropping one retirement restores admission only
 when no other kept retirement blocks it. Out-of-band file work means uploads;
 eager downloads remain in the pass. Numbering starts at 1, completion requires
 retained input and terminal observation, and byte receipt is not application.
+
+## Spec publication edit
+
+In §15, before “Before uploading a snapshot, its writer opens the sealed
+temporary file”, add: a snapshot may be captured with unuploaded own writes,
+but it must not be sent until storage confirms every own write through its
+captured position. Remote positions require publication evidence from checked
+log objects or snapshots obeying this same rule. The requirement applies to
+ordinary snapshots and snapshots named by a raise; later app writes do not
+extend the captured cut or delay its publication.
+
+Keep §15's inference that a covered missing number was published and deleted,
+with the existing fresh-catalog and retention requirements. A signed prefix
+alone is insufficient if its publisher can claim an unuploaded reservation.
+The queue write-up lists the §17.1 sentences and §18.1 sequencing that must
+change together. No spec files are edited by this proposal.

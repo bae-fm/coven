@@ -1,4 +1,5 @@
 import CovenIO.AtomicReload
+import CovenIO.SnapshotWrites
 
 namespace CovenIO.CommonReload
 open FixedReload
@@ -17,15 +18,42 @@ structure Source (order : SnapshotOrder) (writers : List Nat) where
   unique : ∀ u v, published u → published v → u.writer = v.writer → u.number = v.number → u = v
   runs : ∀ t, SnapshotHistory.Run published order (history t)
   deletedMono : ∀ s t, s ≤ t → (history s).deleted ⊆ (history t).deleted
-  frontier : Nat → Nat → Nat
-  frontierMono : ∀ s t, s ≤ t → ∀ w ∈ writers, frontier s w ≤ frontier t w
-  numbered : ∀ t writer, writer ∈ writers → ∀ number, 0 < number → number ≤ frontier t writer →
-    ∃ w, published w ∧ w.writer = writer ∧ w.number = number
-  selectedBound : ∀ t a w, w ∈ writers →
-    position (catalogCurrent order (history t).landed a) w ≤ frontier t w
-  absent : ∀ start cut, (∀ w ∈ writers, cut w ≤ frontier start w) →
+  publication : Nat → SnapshotWrites.State
+  publicationRuns : ∀ t, SnapshotWrites.Run (publication t)
+  catalogPublished : ∀ t snap, snap ∈ (history t).landed → snap ∈ (publication t).landed
+  frontierMono : ∀ s t, s ≤ t → ∀ w ∈ writers,
+    ((publication s).logs w).published.length ≤ ((publication t).logs w).published.length
+  /-- Decode and validate the bytes supplied by the publication history. -/
+  decoded : ∀ t writer, writer ∈ writers → ∀ number bytes, 0 < number →
+    ((publication t).logs writer).published[number - 1]? = some bytes →
+      ∃ w, published w ∧ w.writer = writer ∧ w.number = number
+  absent : ∀ start cut, (∀ w ∈ writers, cut w ≤ ((publication start).logs w).published.length) →
     ∀ t w, start ≤ t → w ∈ inventory cut → world t (.log .write w.writer w.number) = none →
       w ∈ (history (t + 1)).deleted
+
+def Source.frontier (source : Source order writers) (time writer : Nat) : Nat :=
+  ((source.publication time).logs writer).published.length
+
+/-- Derived from the publication history: a selected snapshot cannot carry
+unconfirmed own positions, including when it is a breaking raise snapshot. -/
+theorem Source.selectedBound (source : Source order writers) (t a w : Nat) :
+    position (catalogCurrent order (source.history t).landed a) w ≤ source.frontier t w := by
+  cases selected : catalogCurrent order (source.history t).landed a with
+  | none => simp [position]
+  | some snap =>
+      have member := (current_member order (source.history t).landed a snap selected).1
+      exact (SnapshotWrites.run_valid (source.publicationRuns t)).2.2.2 snap
+        (source.catalogPublished t snap member) w
+
+theorem Source.numbered (source : Source order writers) (t writer : Nat)
+    (known : writer ∈ writers) (number : Nat) (positive : 0 < number)
+    (within : number ≤ source.frontier t writer) :
+    ∃ w, source.published w ∧ w.writer = writer ∧ w.number = number := by
+  have index : number - 1 < ((source.publication t).logs writer).published.length := by
+    change number ≤ ((source.publication t).logs writer).published.length at within
+    omega
+  exact source.decoded t writer known number
+    ((source.publication t).logs writer).published[number - 1] positive (by simp [index])
 
 def Source.fixed (source : Source order writers) (cut : Nat → Nat) (start : Nat)
     (ready : ∀ w ∈ writers, cut w ≤ source.frontier start w) : FixedReload.Source order (source.inventory cut) where
@@ -81,7 +109,7 @@ theorem target_ready (source : Source order writers) (audiences : List Nat) (req
   apply Nat.max_le.mpr
   refine ⟨valid.2 w hw, maximum_le _ _ _ ?_⟩
   intro a ha
-  exact Nat.le_trans (source.selectedBound _ a w hw)
+  exact Nat.le_trans (source.selectedBound _ a w)
     (source.frontierMono _ _ (valid.1 a ha) w hw)
 
 inductive Result where

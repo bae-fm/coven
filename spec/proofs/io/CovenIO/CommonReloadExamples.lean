@@ -1,6 +1,7 @@
 import CovenIO.CommonReload
 import CovenIO.AudienceRetention
 import CovenIO.RepairedExamples
+import CovenIO.SnapshotWriteExamples
 
 namespace CovenIO.CommonReloadExamples
 open RepairedExamples SnapshotPublication FixedReload
@@ -60,26 +61,40 @@ def source (order : SnapshotOrder) : CommonReload.Source order [0] where
     · simp [hs, catalogState, firstCut] at member
     · have ht : t ≠ 0 := by omega
       simpa [hs, ht] using member
-  frontier := fun t _ => if t = 0 then 1 else 2
-  frontierMono := by intro s t later w _; split <;> split <;> omega
-  numbered := by
-    intro t writer hw number positive within
+  publication := fun t => if t = 0 then SnapshotWriteExamples.first else SnapshotWriteExamples.later
+  publicationRuns := by
+    intro t
+    split
+    · exact SnapshotWriteExamples.first_run
+    · exact SnapshotWriteExamples.later_run
+  catalogPublished := by
+    intro t snap member
+    by_cases ht : t = 0 <;>
+      simpa [ht, catalogState, firstCut, laterCut, SnapshotWriteExamples.first,
+        SnapshotWriteExamples.later, SnapshotWriteExamples.state] using member
+  frontierMono := by
+    intro s t later w member
+    have eq : w = 0 := by simpa using member
+    subst w
+    by_cases hs : s = 0 <;> by_cases ht : t = 0
+    all_goals simp [hs, ht, SnapshotWriteExamples.first, SnapshotWriteExamples.later,
+      SnapshotWriteExamples.state, SnapshotWriteExamples.oneWriter,
+      SnapshotWriteExamples.logOne, SnapshotWriteExamples.logTwo]
+    omega
+  decoded := by
+    intro t writer hw number bytes positive found
     have writerEq : writer = 0 := by simpa using hw
     subst writer
+    have within : number ≤ (if t = 0 then 1 else 2) := by
+      obtain ⟨bound, _⟩ := List.getElem?_eq_some_iff.mp found
+      by_cases ht : t = 0 <;>
+        simp [ht, SnapshotWriteExamples.first, SnapshotWriteExamples.later,
+          SnapshotWriteExamples.state, SnapshotWriteExamples.oneWriter,
+          SnapshotWriteExamples.logOne, SnapshotWriteExamples.logTwo] at bound ⊢ <;> omega
     by_cases one : number = 1
     · exact ⟨firstPart, Or.inl rfl, rfl, one.symm⟩
     · have two : number = 2 := by split at within <;> omega
       exact ⟨secondPart, Or.inr rfl, rfl, two.symm⟩
-  selectedBound := by
-    intro t a w member
-    have eq : w = 0 := by simpa using member
-    subst w
-    by_cases ht : t = 0 <;> by_cases ha : a = 0 <;> by_cases hb : a = 1
-    all_goals cases order <;>
-      simp_all [BEq.beq, catalogState, firstCut, laterCut,
-        audienceOne, audienceZero, catalogCurrent, newest,
-        Snapshot.counts, position, Snapshot.position]
-    all_goals simp [List.filter, Ne.symm ha, Ne.symm hb, newest]
   absent := by
     intro start cut ready t w _ member missing
     have choices := (List.mem_filter.mp member).1
@@ -116,7 +131,10 @@ example (order : SnapshotOrder) :
   · intro t ht; simp [source, show t ≠ 0 by omega]
   · constructor
     · intro a ha; simp [replacement, CommonReload.replace, initialLoader]; split <;> omega
-    · intro w hw; simp [source, replacement, CommonReload.replace]
+    · intro w hw; simp [CommonReload.Source.frontier, source, replacement, CommonReload.replace,
+        SnapshotWriteExamples.later, SnapshotWriteExamples.state, SnapshotWriteExamples.oneWriter,
+        SnapshotWriteExamples.logTwo]
+      split <;> simp_all
 
 /-- Bundles are sufficient when their common cut also reaches the frozen
 past. Independent circle readers need not provide any all-circle bundle;
