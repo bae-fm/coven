@@ -474,14 +474,23 @@ causal and online storage history.
 `unbound_copy_exposes_rotation` checks the rejection of a copy for a candidate
 credential that never became current, even though its named member is active.
 
-`OldWriteWithRotation` connects the old-write finality counterexample to
-first-send selection. Creation on day 0, replacement on day 1 and store-key
-rotation on day 2 leave the finality window [3, 33] empty. The old-key write
-lands late on day 32. On day 34 the current-key reader uses the new store key
-and makes the old write count. `reader_uses_fresh_rotation` checks publication
-and selection; `final_replacement_still_allows_rescue` checks the changed
-verdict with that same replay. Thus requiring rotation does not remove the
-counterexample; it adds one entry before the qualifying finality window.
+`OldWriteWithRotation` connects window-only old-write admission to first-send
+selection. Creation on day 0, replacement on day 1 and store-key rotation on
+day 2 leave the finality window [3, 33] empty. The old-key write lands late on
+day 32 and stays dropped when a current-key write arrives on day 34.
+`reader_uses_fresh_rotation` checks publication and selection;
+`final_replacement_keeps_late_write_dropped` checks admission and the current
+signing-key send gate against the same replay. The old signer is refused and
+the current signer may send; neither audience rotation nor another write
+changes the old write's deadline.
+
+An otherwise admitted change built on that dropped write becomes a recorded
+loss per change under the shared
+[`DataDependency.dependsOnDropped` rule](merge.md#b17-receive-order-progress-and-dropping-by-data)
+in the merge model. Actual generation sources and replaced cell setters
+determine dependence, not recorded reads. Other changes in the same write
+remain eligible. Old-key admission supplies a base verdict to that rule;
+these member-key examples do not re-prove its data accounting or convergence.
 
 These secrecy statements require all relevant disclosed audience keys to have
 copy evidence in the completed observation. They do not prove cryptography,
@@ -492,11 +501,12 @@ conservative rule. The receipt model does not inspect ciphertext or prove its
 hash; it treats the recorded recipient sealing key as the box's routing fact.
 Historical reads and exact-byte retries retain their old keys.
 
-The general IO/freshness and horizon theorems for the unkeyed model have not
-been transferred to this proposal. In particular, no claim is made that
-replacement finality finalizes old-key **write** admission: the storelog
-package's checked two-write counterexample proves otherwise under the
-counting-reader exception. SQL rebuilds and physical retention must retain
-that distinction. The exact spec/format changes, including credential-bearing
-copy prefixes and reports, are listed in
-[the checklist](storelog.md#c14-spec-and-format-checklist-for-stable-members).
+The storelog package proves old-key window finality from the stable kept
+entry prefix and separately proves the send gate's one-day-and-five-minute
+publication bound. The general IO discovery and horizon theorems for the
+unkeyed model have not been transferred to this proposal: complete catch-up,
+continued refusal of old credentials and the stable entry prefix remain
+explicit inputs. SQL rebuilds and physical retention remain outside these
+member-key proofs. The exact spec/format changes, including window-only
+admission, per-change losses and credential-bearing copy prefixes and reports,
+are listed in [the checklist](storelog.md#c14-spec-and-format-checklist-for-stable-members).

@@ -84,8 +84,8 @@ theorem unbound_copy_exposes_rotation :
 
 namespace OldWriteWithRotation
 
-/-- The admission counterexample can use the required fresh store key: one
-rotation on day 2, before the finality window, supplies the later reader. -/
+/-- A rotation on day 2, before the finality window, supplies the later
+current-key writer without changing the old write's admission. -/
 def H : Keyed.History := { Keyed.Examples.onlyAdmin with log := (fun e =>
   if e = 2 then ⟨0, 102, 0, [0, 1], .entry (.rotateKey .store (commitment 11)) ()⟩
   else Keyed.Examples.onlyAdmin.log e) }
@@ -97,12 +97,12 @@ def after : KeyPhases.MemberKeys.CaughtUp :=
   ⟨[0, 1, 2], ⟨[fresh, storeOld], [(storeOld, ⟨0, 200⟩), (fresh, ⟨0, 202⟩)]⟩⟩
 
 def writes : Keyed.OldKeyObjects.Writes
-  | 0 => ⟨0, 100, 0, [0], [], 32⟩
-  | _ => ⟨0, 102, 0, [0, 1, 2], [0], 34⟩
+  | 0 => ⟨0, 100, 0, [0], 32⟩
+  | _ => ⟨0, 102, 0, [0, 1, 2], 34⟩
 
 def counted (received : List Nat) (w : Nat) : Bool :=
   Keyed.OldKeyObjects.countInReplay H 30 3 (entrySet [0, 1, 2]) (fun _ => true)
-    writes 2 (entrySet received) w
+    writes (entrySet received) w
 
 theorem reader_uses_fresh_rotation :
     Keyed.metadataValid H 3 = true ∧
@@ -110,11 +110,15 @@ theorem reader_uses_fresh_rotation :
     KeyPhases.MemberKeys.firstSend H 30 3 0 .store after [9] = some ⟨fresh, [9]⟩ := by
   exact ⟨by decide, rfl, by decide⟩
 
-theorem final_replacement_still_allows_rescue :
+theorem final_replacement_keeps_late_write_dropped :
     H.stored 1 + 30 < 33 ∧
     (List.range 3).all (fun e => !(3 ≤ H.stored e && H.stored e ≤ 33)) = true ∧
     1 ∈ (Keyed.resolve H 30 3 (entrySet [0, 1, 2])).kept ∧
-    counted [0] 0 = false ∧ counted [0, 1] 1 = true ∧ counted [0, 1] 0 = true := by decide
+    counted [0] 0 = false ∧ counted [0, 1] 1 = true ∧ counted [0, 1] 0 = false ∧
+    Keyed.OldKeyObjects.writerCurrent (Keyed.resolve H 30 3 (entrySet after.received)).state
+      (writes 0) = false ∧
+    Keyed.OldKeyObjects.writerCurrent (Keyed.resolve H 30 3 (entrySet after.received)).state
+      (writes 1) = true := by decide
 
 end OldWriteWithRotation
 
