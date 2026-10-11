@@ -2,10 +2,6 @@ use super::*;
 use crate::providers::tests::{query, read, response, TestServer};
 use crate::test_utils::STORE_ID;
 use crate::{check_provider, StorageCheck};
-use aws_sdk_s3::{
-    error::ConnectorError,
-    operation::{get_object::GetObjectError, list_objects_v2::ListObjectsV2Error},
-};
 use axum::{
     body::{Body, Bytes},
     extract::State,
@@ -14,7 +10,6 @@ use axum::{
 };
 use coven_crypto::SecretText;
 use coven_foundation::{clock::FixedClock, id_source::SequentialIds};
-use std::error::Error;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -775,221 +770,68 @@ async fn provider_check_preserves_unrelated_contents() {
     );
 }
 
-fn sdk_error<E: Error + Send + Sync + 'static>(error: &StorageError) -> &SdkError<E> {
-    assert!(matches!(
-        error,
-        StorageError::Provider {
-            provider: CloudProvider::S3,
-            ..
-        }
-    ));
-    error
-        .source()
-        .unwrap()
-        .source()
-        .unwrap()
-        .downcast_ref()
-        .unwrap()
-}
+/// Conformance against a real S3-compatible service. Ignored by default: run with
+/// `COVEN_LIVE_S3_ENV=<file> cargo test -p coven-storage --all-features --lib s3_live -- --ignored`.
+/// The file holds `COVEN_LIVE_S3_{BUCKET,REGION,ENDPOINT,ACCESS_KEY_ID,SECRET_ACCESS_KEY}`;
+/// each run uses a fresh store id under the `coven-live/` prefix.
+mod live {
+    use super::*;
+    use coven_crypto::SecretText;
+    use coven_foundation::{
+        clock::SystemClock,
+        id_source::{StoreId, UuidIds},
+    };
+    use std::{collections::BTreeMap, sync::Arc};
 
-#[tokio::test]
-async fn timeout_and_storage_full_responses_preserve_their_classification_and_cause() {
-    use StorageFailure::{Network, PermissionDenied, QuotaExceeded, RateLimited, Refused};
-    let cases = [
-        ("RequestTimeout", 400, Network, true),
-        ("OverQuota", 403, QuotaExceeded, false),
-        ("QuotaExceeded", 403, QuotaExceeded, false),
-        ("InsufficientStorage", 507, QuotaExceeded, false),
-        ("XMinioStorageFull", 507, QuotaExceeded, false),
-        ("XMinioStorageFull", 400, QuotaExceeded, false),
-        ("UnknownStorageError", 507, QuotaExceeded, false),
-        ("UnknownProviderError", 400, Refused, false),
-        ("AccessDenied", 403, PermissionDenied, false),
-        ("SlowDown", 503, RateLimited, true),
-        ("ServiceUnavailable", 503, Network, true),
-    ];
-    let state = Arc::new(Mutex::new(Remote::default()));
-    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-    let storage = provider(&server.url);
-    let mut actual = Vec::new();
-    for (code, status, _, _) in cases {
-        state.lock().unwrap().forced_error = Some((code, status));
-        let error = storage
-            .list(&ObjectPrefix::all(STORE_ID))
-            .await
-            .unwrap_err();
-        let SdkError::ServiceError(native) = sdk_error::<ListObjectsV2Error>(&error) else {
-            panic!("expected the native service error");
+    fn settings() -> BTreeMap<String, String> {
+        let path = std::env::var("COVEN_LIVE_S3_ENV")
+            .expect("COVEN_LIVE_S3_ENV names the credentials file");
+        std::fs::read_to_string(&path)
+            .expect("credentials file")
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .map(|(key, value)| (key.trim().to_owned(), value.trim().to_owned()))
+            .collect()
+    }
+
+    fn live() -> StorageConnection<S3Storage> {
+        let settings = settings();
+        let value = |key: &str| {
+            settings
+                .get(key)
+                .unwrap_or_else(|| panic!("{key} missing"))
+                .clone()
         };
-        assert_eq!(native.err().code(), Some(code));
-        assert_eq!(native.err().message(), Some("credential-echo"));
-        assert_eq!(native.raw().status().as_u16(), status);
-        assert!(!format!("{error:?} {error}").contains("credential-echo"));
-        actual.push((code, status, error.failure(), error.retryable()));
-    }
-    assert_eq!(actual, cases);
-}
-
-#[tokio::test]
-async fn status_only_responses_distinguish_quota_from_transient_failures() {
-    for (status, failure, retryable) in [
-        (507, StorageFailure::QuotaExceeded, false),
-        (408, StorageFailure::Network, true),
-        (503, StorageFailure::Network, true),
-        (403, StorageFailure::PermissionDenied, false),
-    ] {
-        let server = TestServer::new(
-            Router::new().fallback(move || async move { response(status, Vec::new()) }),
+        let storage = S3Storage::new(
+            StorageConfig::S3 {
+                bucket: value("COVEN_LIVE_S3_BUCKET"),
+                region: value("COVEN_LIVE_S3_REGION"),
+                endpoint: settings
+                    .get("COVEN_LIVE_S3_ENDPOINT")
+                    .map(|url| url.parse().unwrap()),
+                prefix: "coven-live".into(),
+            },
+            S3Credentials {
+                access_key_id: value("COVEN_LIVE_S3_ACCESS_KEY_ID"),
+                secret_access_key: SecretText::new(value("COVEN_LIVE_S3_SECRET_ACCESS_KEY")),
+            },
+            Arc::new(SystemClock),
+            Arc::new(UuidIds),
         )
-        .await;
-        let error = provider(&server.url)
-            .list(&ObjectPrefix::all(STORE_ID))
+        .unwrap();
+        StorageConnection::from_provider(Arc::new(storage))
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn s3_live_conformance() {
+        let store = StoreId(uuid::Uuid::new_v4());
+        crate::test_utils::Conformance::new(Arc::new(live()), store)
+            .run()
             .await
-            .unwrap_err();
-        assert_eq!(error.failure(), failure, "status {status}");
-        assert_eq!(error.retryable(), retryable);
-        assert_eq!(
-            sdk_error::<ListObjectsV2Error>(&error)
-                .raw_response()
-                .unwrap()
-                .status()
-                .as_u16(),
-            status
-        );
+            .unwrap();
     }
 }
 
-#[tokio::test]
-async fn archived_object_is_a_refusal_with_its_native_archive_state() {
-    let server = TestServer::new(Router::new().fallback(|| async {
-        response(403, "<Error><Code>InvalidObjectState</Code><Message>credential-echo</Message><StorageClass>DEEP_ARCHIVE</StorageClass><AccessTier>ARCHIVE_ACCESS</AccessTier></Error>")
-    })).await;
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
-    let error = provider(&server.url).read(&path).await.unwrap_err();
-    assert_eq!(error.failure(), StorageFailure::Refused);
-    assert!(!error.retryable());
-    let SdkError::ServiceError(native) = sdk_error::<GetObjectError>(&error) else {
-        panic!("expected the native service error");
-    };
-    let GetObjectError::InvalidObjectState(archive) = native.err() else {
-        panic!("expected the native archive state");
-    };
-    assert_eq!(
-        archive.storage_class().map(|value| value.as_str()),
-        Some("DEEP_ARCHIVE")
-    );
-    assert_eq!(
-        archive.access_tier().map(|value| value.as_str()),
-        Some("ARCHIVE_ACCESS")
-    );
-    assert_eq!(archive.message(), Some("credential-echo"));
-    assert!(!format!("{error:?} {error}").contains("credential-echo"));
-}
-
-#[tokio::test]
-async fn malformed_sdk_responses_are_protocol_failures_with_the_original_bytes() {
-    for status in [200, 403, 500] {
-        let body = "<invalid credential-echo";
-        let server =
-            TestServer::new(Router::new().fallback(move || async move { response(status, body) }))
-                .await;
-        let error = provider(&server.url)
-            .list(&ObjectPrefix::all(STORE_ID))
-            .await
-            .unwrap_err();
-        assert_eq!(error.failure(), StorageFailure::Protocol, "status {status}");
-        assert!(!error.retryable());
-        let native = sdk_error::<ListObjectsV2Error>(&error);
-        assert!(native.source().is_some());
-        let raw = native.raw_response().unwrap();
-        assert_eq!(raw.status().as_u16(), status);
-        assert_eq!(raw.body().bytes().unwrap(), body.as_bytes());
-        assert!(!format!("{error:?} {error}").contains("credential-echo"));
-    }
-}
-
-#[tokio::test]
-async fn sdk_response_error_is_protocol_failure() {
-    let server = TestServer::new(
-        Router::new()
-            .fallback(|| async { response(500, "<Error><Code>InternalError</Code></Error>") }),
-    )
-    .await;
-    let storage = provider(&server.url);
-    let SdkError::ServiceError(native) = storage
-        .provider
-        .client
-        .list_objects_v2()
-        .bucket("bucket")
-        .send()
-        .await
-        .unwrap_err()
-    else {
-        panic!("expected the native service error");
-    };
-    let error = s3_error(SdkError::<ListObjectsV2Error>::response_error(
-        "credential-echo",
-        native.into_raw(),
-    ));
-    assert_eq!(error.failure(), StorageFailure::Protocol);
-    assert!(!error.retryable());
-    let native = sdk_error::<ListObjectsV2Error>(&error);
-    assert!(matches!(native, SdkError::ResponseError(_)));
-    assert_eq!(native.source().unwrap().to_string(), "credential-echo");
-    assert_eq!(native.raw_response().unwrap().status().as_u16(), 500);
-    assert!(!format!("{error:?} {error}").contains("credential-echo"));
-}
-
-#[tokio::test]
-async fn sdk_request_construction_is_invalid_configuration() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let requests = Arc::new(AtomicUsize::new(0));
-    let received = requests.clone();
-    let server = TestServer::new(Router::new().fallback(move || {
-        received.fetch_add(1, Ordering::SeqCst);
-        async {
-            response(
-                200,
-                "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>",
-            )
-        }
-    }))
-    .await;
-    let storage = provider(&server.url);
-    let native = storage
-        .provider
-        .client
-        .list_objects_v2()
-        .send()
-        .await
-        .unwrap_err();
-    assert!(matches!(native, SdkError::ConstructionFailure(_)));
-    assert_eq!(requests.load(Ordering::SeqCst), 0);
-    let error = s3_error(native);
-    assert_eq!(error.failure(), StorageFailure::InvalidConfiguration);
-    assert!(!error.retryable());
-    assert!(matches!(
-        sdk_error::<ListObjectsV2Error>(&error),
-        SdkError::ConstructionFailure(_)
-    ));
-    assert!(sdk_error::<ListObjectsV2Error>(&error).source().is_some());
-}
-
-#[test]
-fn sdk_transport_failures_remain_retryable_and_retain_native_causes() {
-    for native in [
-        SdkError::<ListObjectsV2Error>::timeout_error("credential-echo"),
-        SdkError::dispatch_failure(ConnectorError::io("credential-echo".into())),
-        SdkError::dispatch_failure(ConnectorError::timeout("credential-echo".into())),
-    ] {
-        let error = s3_error(native);
-        assert_eq!(error.failure(), StorageFailure::Network);
-        assert!(error.retryable());
-        assert!(sdk_error::<ListObjectsV2Error>(&error).source().is_some());
-        assert!(!format!("{error:?} {error}").contains("credential-echo"));
-    }
-}
+#[path = "s3_error_tests.rs"]
+mod errors;
