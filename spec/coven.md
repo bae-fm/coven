@@ -95,6 +95,9 @@
   - it sees object sizes, counts, timing, and which device writes.
 - A thief with storage credentials but not the store key may be hostile.
 - Deletion and withholding can't be prevented. No design can.
+  - Coven does not recover lost or damaged storage. The household starts a
+    new store by hand; the reset in §19.3 is for devices that disagree, not
+    for rebuilding storage.
 - Current members trust each other: each has access to the storage and
   isn't hostile on it.
 - An ex-member may keep a copy of the store key they had.
