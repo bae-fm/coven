@@ -9,9 +9,18 @@ use std::sync::Arc;
 /// A synchronization request failed; its durable queue, if any, remains retryable.
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
-    /// An explicit recovery or join requires an object from a stopped log.
-    #[error("operation requires a stuck log: {0:?}")]
-    StuckLog(coven_database::LogRefusal),
+    /// This call requires work that cannot yet advance.
+    #[error("pending: {0:?}")]
+    Pending(Box<crate::PendingRecord>),
+    /// An internal failure, classified without erasing its native cause.
+    #[error("{failure:?}: {source}")]
+    Failed {
+        /// Durable local category.
+        failure: crate::LocalFailure,
+        /// Original failure retained by the initiating call.
+        #[source]
+        source: Arc<dyn std::error::Error + Send + Sync>,
+    },
     /// Provider setup failed before replacing the active connection.
     #[error(transparent)]
     Setup(#[from] Box<coven_storage::StorageSetupError>),
@@ -77,14 +86,6 @@ pub enum SyncError {
     /// Store-log and snapshot publication wait for the retained reload (§18).
     #[error("snapshot reload {0:?} must finish before publishing entries or snapshots")]
     ReloadPending(crate::OperationId),
-    /// The reset's shared reload failed and must finish before the reset call can.
-    #[error("recovery operation {operation:?} failed: {failure}")]
-    RecoveryPending {
-        /// The failed reload operation.
-        operation: crate::OperationId,
-        /// Its retained cause.
-        failure: String,
-    },
     /// Decoding persisted operation data failed; its cause remains available.
     #[error("invalid operation data: {0}")]
     OperationData(#[from] serde_json::Error),
@@ -98,7 +99,7 @@ pub enum SyncError {
     Storage(#[from] StorageError),
     /// The local database failed.
     #[error(transparent)]
-    Database(#[from] DbError),
+    Database(DbError),
     /// Unlocking or keeping keys failed.
     #[error(transparent)]
     SecureStorage(#[from] KeyError),
@@ -136,16 +137,28 @@ pub enum SyncError {
     },
 }
 
-impl SyncError {
-    /// Network interruptions and unavailable prerequisites remain runnable.
-    pub(crate) fn blocks_operation(&self) -> bool {
-        match self {
-            Self::NoStorage
-            | Self::KeyUnavailable(_)
-            | Self::ReloadPending(_)
-            | Self::Stopped(SyncFailure::UpdateRequired) => false,
-            Self::Storage(error) => !error.retryable(),
-            _ => true,
+impl From<coven_database::CovenError> for SyncError {
+    fn from(error: coven_database::CovenError) -> Self {
+        match error {
+            coven_database::CovenError::Database(error) => error.into(),
+            error => Self::Failed {
+                failure: crate::LocalFailure::Database,
+                source: Arc::new(error),
+            },
+        }
+    }
+}
+
+impl From<DbError> for SyncError {
+    fn from(error: DbError) -> Self {
+        match error {
+            error @ (DbError::InvalidStoreLogEntry { .. }
+            | DbError::StoreLogEntriesChanged
+            | DbError::StoreLogEntryChanged(_)) => Self::Failed {
+                failure: crate::LocalFailure::Database,
+                source: Arc::new(error),
+            },
+            error => Self::Database(error),
         }
     }
 }
@@ -155,7 +168,7 @@ impl SyncError {
 pub enum SyncFailure {
     /// A schema or stored object format is newer than this implementation.
     #[error("an update is required")]
-    UpdateRequired,
+    UpdateRequired(crate::RequiredUpdate),
     /// This device or its member has been removed.
     #[error("this device or its member was removed")]
     Removed,
@@ -188,9 +201,9 @@ impl From<SyncError> for SyncFailure {
 
 impl From<coven_format::Error> for SyncError {
     fn from(error: coven_format::Error) -> Self {
-        match error {
-            error if newer_format(&error) => Self::Stopped(SyncFailure::UpdateRequired),
-            error => Self::Format(error),
+        match required_format(&error) {
+            Some(update) => Self::Stopped(SyncFailure::UpdateRequired(update)),
+            None => Self::Format(error),
         }
     }
 }
@@ -212,12 +225,20 @@ pub struct DamagedObject {
     pub failure: crate::Refusal,
 }
 
+pub(crate) fn required_format(
+    error: &(dyn std::error::Error + 'static),
+) -> Option<crate::RequiredUpdate> {
+    let version = match error.downcast_ref::<coven_format::Error>() {
+        Some(coven_format::Error::UnsupportedVersion(version)) => Some(*version),
+        _ => None,
+    }?;
+    (version > coven_format::FORMAT_VERSION)
+        .then_some(crate::RequiredUpdate::CovenFormat { version })
+}
+
 /// Older unsupported formats are damaged inputs; only newer ones require an update.
 pub(crate) fn newer_format(error: &(dyn std::error::Error + 'static)) -> bool {
-    matches!(
-        error.downcast_ref::<coven_format::Error>(),
-        Some(coven_format::Error::UnsupportedVersion(version)) if *version > coven_format::FORMAT_VERSION
-    )
+    required_format(error).is_some()
 }
 
 #[cfg(test)]

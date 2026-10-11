@@ -64,7 +64,7 @@ async fn deletion_write_and_operation_commit_together_and_wait_for_upload() {
     assert_eq!(a.db.test_queued_writes().await.unwrap().len(), 1);
     assert!(matches!(
         step(&mut a, deletion).await.unwrap(),
-        Progress::Waiting
+        Progress::Waiting(_)
     ));
     transfer(&a, &b).await;
     assert_eq!(count(&b).await, 0);
@@ -155,7 +155,7 @@ async fn restarted_circle_deletion_deletes_rows_that_arrived_during_its_first_at
     assert_eq!(count(&a).await, 1);
     loop {
         match step(&mut a, deletion).await.unwrap() {
-            Progress::Waiting => break,
+            Progress::Waiting(_) => break,
             Progress::Advanced => (),
             _ => panic!("restarted deletion must wait for its new row-delete write"),
         }
@@ -388,13 +388,16 @@ async fn a_retained_grant_on_old_access_blocks_removal_until_explicit_retry() {
             .list(&ObjectPrefix::all())
             .await, Err(error) if error.failure() == StorageFailure::PermissionDenied)
     );
-    let pending = operations.pending_operations().await.unwrap();
-    assert_eq!(pending.len(), 1);
+    let conditions = pending(&operations, &a.db).await;
+    assert_eq!(conditions.len(), 1);
+    assert!(
+        matches!(&conditions[0].reason, PendingReason::AccessRemains { account, .. } if account == "ben@example.com")
+    );
     storage
         .set_retained_access("ben@example.com", Vec::new())
         .await;
     operations
-        .retry_pending_operation(pending[0].id)
+        .retry_pending_operation(pending_id(&conditions[0]))
         .await
         .unwrap();
     assert!(

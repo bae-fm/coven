@@ -3,7 +3,9 @@
 use crate::{sqlite::DatabaseConnection, DbError};
 
 /// The local, never reused identity of an operation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct OperationId(pub i64);
 
 /// An S3 key awaiting deletion in the provider console (E5).
@@ -28,8 +30,6 @@ pub struct OperationRecord {
     pub data: Vec<u8>,
     /// The initiating app method or `coven`.
     pub started_by: String,
-    /// A permanent failure. Sync decides whether app action or its next pass retries it.
-    pub failure: Option<String>,
 }
 
 impl std::fmt::Debug for OperationRecord {
@@ -40,7 +40,6 @@ impl std::fmt::Debug for OperationRecord {
             .field("last_step", &self.last_step)
             .field("data", &"[REDACTED]")
             .field("started_by", &self.started_by)
-            .field("failure", &self.failure)
             .finish()
     }
 }
@@ -82,7 +81,7 @@ pub(crate) fn insert(db: &DatabaseConnection, new: &NewOperation) -> Result<Oper
 
 pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<OperationRecord>, DbError> {
     db.query(
-        "SELECT id,kind,last_step,data,started_by,failure FROM _coven_operations ORDER BY id",
+        "SELECT id,kind,last_step,data,started_by FROM _coven_operations ORDER BY id",
         [],
         record,
     )
@@ -94,7 +93,7 @@ pub(crate) fn find(
 ) -> Result<Option<OperationRecord>, DbError> {
     Ok(db
         .query(
-            "SELECT id,kind,last_step,data,started_by,failure FROM _coven_operations WHERE id=?1",
+            "SELECT id,kind,last_step,data,started_by FROM _coven_operations WHERE id=?1",
             [id.0],
             record,
         )?
@@ -106,7 +105,7 @@ pub(crate) fn first(
     kind: &str,
 ) -> Result<Option<OperationRecord>, DbError> {
     Ok(db.query(
-        "SELECT id,kind,last_step,data,started_by,failure FROM _coven_operations WHERE kind=?1 ORDER BY id LIMIT 1",
+        "SELECT id,kind,last_step,data,started_by FROM _coven_operations WHERE kind=?1 ORDER BY id LIMIT 1",
         [kind],
         record,
     )?.pop())
@@ -119,15 +118,21 @@ fn record(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationRecord> {
         last_step: row.get(2)?,
         data: row.get(3)?,
         started_by: row.get(4)?,
-        failure: row.get(5)?,
     })
 }
 
 pub(crate) fn advance(db: &DatabaseConnection, update: &OperationUpdate) -> Result<(), DbError> {
-    let changed = db.internal_execute("UPDATE _coven_operations SET last_step=?1,data=?2,failure=NULL WHERE id=?3 AND last_step=?4",
-        (&update.last_step, &update.data, update.id.0, update.previous))?;
+    let changed = db.internal_execute(
+        "UPDATE _coven_operations SET last_step=?1,data=?2 WHERE id=?3 AND last_step=?4",
+        (
+            &update.last_step,
+            &update.data,
+            update.id.0,
+            update.previous,
+        ),
+    )?;
     if changed != 1 {
         return Err(DbError::OperationChanged(update.id));
     }
-    Ok(())
+    crate::pending::clear_operation(db, update.id)
 }

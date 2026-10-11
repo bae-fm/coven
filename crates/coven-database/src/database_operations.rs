@@ -172,23 +172,41 @@ impl Database {
         .await
     }
 
-    /// Record a permanent failure, or clear it for an explicit retry.
-    pub async fn operation_failure(
+    /// Read the pending condition associated with a journal row.
+    pub async fn operation_pending<P: crate::PendingValue>(
         &self,
         id: OperationId,
-        failure: Option<String>,
+    ) -> Result<Option<P>, DbError> {
+        self.call(move |inner| inner.with_writer(|db| crate::pending::operation(db, id)))
+            .await
+    }
+
+    /// Clear a condition for an explicit retry; completed steps stay recorded.
+    pub async fn retry_operation(&self, id: OperationId) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.with_writer(|writer| {
+                writer.transaction(|db| crate::pending::clear_operation(db, id))
+            })
+        })
+        .await
+    }
+
+    /// Commit completed work and its first remaining condition in one transaction.
+    pub async fn advance_operation_pending<P: crate::PendingValue>(
+        &self,
+        update: OperationUpdate,
+        pending: P,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.with_writer(|writer| {
+                if pending.operation() != Some(update.id)
+                    || pending.reported_by() != inner.access.device
+                {
+                    return Err(DbError::DamagedDatabase);
+                }
                 writer.transaction(|db| {
-                    if db.internal_execute(
-                        "UPDATE _coven_operations SET failure=?1 WHERE id=?2",
-                        (failure, id.0),
-                    )? != 1
-                    {
-                        return Err(DbError::OperationChanged(id));
-                    }
-                    Ok(())
+                    crate::operation::advance(db, &update)?;
+                    crate::pending::save(db, &pending)
                 })
             })
         })
@@ -201,6 +219,7 @@ impl Database {
         self.call(move |inner| {
             inner.with_writer(|writer| {
                 writer.transaction(|db| {
+                    crate::pending::clear_operation(db, id)?;
                     db.internal_execute("DELETE FROM _coven_operations WHERE id=?1", [id.0])?;
                     Ok(())
                 })
@@ -211,10 +230,12 @@ impl Database {
 
     /// Persist public S3 key ids with their operation step. Previously confirmed
     /// ids remain confirmed even when another entry or invitation names them.
-    pub async fn record_access_key_deletions(
+    /// A retained-grant condition commits with the same completed step.
+    pub async fn record_access_key_deletions<P: crate::PendingValue>(
         &self,
         update: OperationUpdate,
         keys: Vec<crate::AccessKeyToDelete>,
+        pending: Option<P>,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.with_writer(|writer| {
@@ -222,7 +243,15 @@ impl Database {
                     for key in keys {
                         db.internal_execute("INSERT INTO _coven_access_keys_to_delete(access_key_id,member) VALUES(?1,?2) ON CONFLICT(access_key_id) DO UPDATE SET member=excluded.member WHERE excluded.member IS NOT NULL", (key.access_key_id, key.member.map(|m| m.to_bytes().to_vec())))?;
                     }
-                    crate::operation::advance(db, &update)
+                    crate::operation::advance(db, &update)?;
+                    if let Some(pending) = pending {
+                        if pending.operation() != Some(update.id)
+                            || pending.reported_by() != inner.access.device {
+                            return Err(DbError::DamagedDatabase);
+                        }
+                        crate::pending::save(db, &pending)?;
+                    }
+                    Ok(())
                 })
             })
         })

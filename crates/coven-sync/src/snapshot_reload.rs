@@ -41,17 +41,23 @@ impl StoreLogSync {
                     return Ok(Progress::Finished(Output::Unit));
                 }
                 let schema = self.database.schema_version().await?;
-                if local
-                    .log
-                    .replay
-                    .state
-                    .schema
-                    .iter()
-                    .any(|(audience, version)| {
-                        audiences.contains_key(audience) && version.number > schema
-                    })
+                if let Some((_, version)) =
+                    local
+                        .log
+                        .replay
+                        .state
+                        .schema
+                        .iter()
+                        .find(|(audience, version)| {
+                            audiences.contains_key(audience) && version.number > schema
+                        })
                 {
-                    return Err(crate::SyncFailure::UpdateRequired.into());
+                    return Err(crate::SyncFailure::UpdateRequired(
+                        crate::RequiredUpdate::AppSchema {
+                            version: version.number,
+                        },
+                    )
+                    .into());
                 }
                 let mut files = ReloadFiles {
                     snapshots: Vec::new(),
@@ -124,7 +130,7 @@ impl StoreLogSync {
                     &mut highest,
                     positions.iter().flat_map(|p| &p.0).chain(&required.0),
                 );
-                let stuck = self.database.sync_state(Vec::new()).await?.stuck;
+                let stuck = crate::pending_logs::local_refusals(&self.database).await?;
                 let mut objects = BTreeMap::new();
                 for object in self
                     .storage
@@ -172,7 +178,9 @@ impl StoreLogSync {
                             .iter()
                             .find(|record| record.blocks(coven_database::LogObject::Write(id)))
                         {
-                            return Err(SyncError::StuckLog(*record));
+                            return Err(
+                                crate::pending_logs::required(&self.database, *record).await?
+                            );
                         }
                         match objects.get(&id) {
                             Some(object) => needed.push(object),
@@ -290,12 +298,14 @@ impl StoreLogSync {
                             SyncError::Damaged(damage) => {
                                 // Its complete authenticated bytes were staged before
                                 // the atomic reload refused this particular write.
-                                self.database
-                                    .record_stuck_log(coven_database::LogRefusal {
+                                crate::pending_logs::record_refusal(
+                                    &self.database,
+                                    coven_database::LogRefusal {
                                         object: coven_database::LogObject::Write(write),
                                         failure: (&damage.failure).into(),
-                                    })
-                                    .await?;
+                                    },
+                                )
+                                .await?;
                                 tracing::warn!(?write, error = %damage, "reload write log is stuck");
                                 let SnapshotJob::Reload { files, .. } = &mut task.job else {
                                     unreachable!()

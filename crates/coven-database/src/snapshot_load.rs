@@ -58,11 +58,11 @@ pub(crate) fn load<R: Read, W: Read>(
             };
             if !resets(&boundaries).is_subset(&resets(&previous)) {
                 // Failed ciphertext can conceal every audience. A committed reset
-                // invalidates local judgments for both logs; peer reports remain theirs.
-                database.internal_execute(
-                    "DELETE FROM _coven_stuck_logs WHERE length(reporter)=0",
-                    [],
-                )?;
+                // clears all pending observations with the replacement.
+                database.pending_change(|| {
+                    database.internal_execute("DELETE FROM _coven_pending", [])?;
+                    Ok(())
+                })?;
             }
             if let Some(version) = boundaries
                 .iter()

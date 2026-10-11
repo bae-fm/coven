@@ -12,20 +12,22 @@ impl Database {
         callback: impl Fn(crate::test_utils::WriteCheckpoint) + Send + 'static,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.with_writer(|writer| writer.on_write_checkpoint(callback));
-            Ok(())
+            inner.with_writer(|writer| {
+                writer.on_write_checkpoint(callback);
+                Ok(())
+            })
         })
         .await
     }
 
     /// Model a database last judged by another library release before reopening it.
-    pub async fn test_stuck_version(&self, version: &'static str) -> Result<(), DbError> {
+    pub async fn test_pending_version(&self, version: &'static str) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.with_writer(|writer| {
                 writer.transaction(|db| {
                     db.internal_execute(
-                        "UPDATE _coven_stuck_logs SET coven_version=?1 WHERE length(reporter)=0",
-                        [version],
+                        "UPDATE _coven_pending SET coven_version=?1 WHERE reporter=?2",
+                        (version, inner.access.device.0.to_be_bytes().as_slice()),
                     )?;
                     Ok(())
                 })

@@ -67,7 +67,7 @@ pub(crate) async fn record_damage(
         object: coven_database::LogObject::Write(object.path.write_id().expect("write path")),
         failure: failure.into(),
     };
-    database.record_stuck_log(record).await?;
+    crate::pending_logs::record_refusal(database, record).await?;
     tracing::warn!(path = object.path.as_str(), error = %failure, "write log is stuck");
     Ok(record)
 }
@@ -429,7 +429,10 @@ pub(crate) fn database_failure(path: &ObjectPath, error: coven_database::DbError
         DbError::WriteFormat(error) | DbError::Snapshot(SnapshotError::Format(error))
             if crate::error::newer_format(&error) =>
         {
-            crate::SyncFailure::UpdateRequired.into()
+            crate::SyncFailure::UpdateRequired(
+                crate::error::required_format(&error).expect("newer format"),
+            )
+            .into()
         }
         DbError::InvalidWrite {
             error:
@@ -481,7 +484,10 @@ pub(crate) fn checked<T>(
 ) -> Result<T, SyncError> {
     match value {
         Err(error) if crate::error::newer_format(&error) => {
-            Err(crate::SyncFailure::UpdateRequired.into())
+            Err(crate::SyncFailure::UpdateRequired(
+                crate::error::required_format(&error).expect("newer format"),
+            )
+            .into())
         }
         value => value.map_err(|e| damaged(path, Refusal::from(e))),
     }

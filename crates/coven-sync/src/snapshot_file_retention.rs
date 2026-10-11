@@ -122,7 +122,7 @@ impl StoreLogSync {
             return Ok(());
         }
         let mut replays = ReplayCache::new(&local.log);
-        let stuck = self.database.sync_state(Vec::new()).await?.stuck;
+        let stuck = crate::pending_logs::local_refusals(&self.database).await?;
         for object in storage.list(&ObjectPrefix::device_logs()).await? {
             if eligible.iter().all(|path| references.contains(path)) {
                 return Ok(());

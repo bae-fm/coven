@@ -217,7 +217,7 @@ async fn opening_unlocks_once_and_sql_callback_failures_roll_back() {
         0
     );
     assert!(handle.access_keys_to_delete().await.unwrap().is_empty());
-    assert!(handle.pending_operations().await.unwrap().is_empty());
+    assert!(handle.pending().await.unwrap().is_empty());
     let reader = builder(&app, layout)
         .key_custody(KeyCustody::Custom(keys.clone()))
         .identity_custody(IdentityCustody::Custom(identity.clone()))
@@ -595,7 +595,7 @@ async fn closing_erases_custody_even_when_releasing_a_worker_fails() {
         .await
         .unwrap();
     handle.initialize_identity().unwrap();
-    handle.pending_operations().await.unwrap();
+    handle.access_keys_to_delete().await.unwrap();
     // Hold timer-driven work so closing encounters the damaged journal row.
     handle
         .database

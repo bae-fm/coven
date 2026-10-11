@@ -365,6 +365,16 @@ async fn authors_must_be_in_the_applied_store_log_and_remain_known_after_removal
     }
     a.sync().await;
     let registered = a.log().await;
+    let pending = a.db.pending::<crate::PendingRecord>().await.unwrap();
+    let crate::PendingSubject::Operation { id, .. } = pending[0].subject else {
+        panic!()
+    };
+    assert_eq!(
+        pending[0].reason,
+        crate::PendingReason::Failed(crate::LocalFailure::Database)
+    );
+    // Explicit retry checks author validation against the applied registration.
+    a.db.retry_operation(id).await.unwrap();
     assert!(a.sync.reload_from_snapshots().await.unwrap().is_empty());
     a.sync
         .make_and_upload_entry(StoreChange::RemoveDevice {

@@ -33,6 +33,9 @@ impl FileStaging {
         let sources = {
             let slot = database.read().expect("database lock poisoned");
             let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+            if let Some(error) = inner.observer.error() {
+                return Err(error.into());
+            }
             let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mut batch = WriteBatch::new();
                 build(&mut batch)?;

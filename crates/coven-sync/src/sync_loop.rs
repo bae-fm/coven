@@ -404,7 +404,7 @@ impl SyncRun {
                         }
                         Err(error) => {
                             let error = SyncFailure::from(error);
-                            self.started = !matches!(error, SyncFailure::Removed | SyncFailure::LocationTaken | SyncFailure::UpdateRequired);
+                            self.started = !matches!(error, SyncFailure::Removed | SyncFailure::LocationTaken | SyncFailure::UpdateRequired(_));
                             let reached = self.connection.as_ref().is_some_and(|connection| connection.reached());
                             let status = match error {
                                 SyncFailure::Storage(error) if !reached && error.failure() == StorageFailure::Network => SyncStatus::Offline { error },

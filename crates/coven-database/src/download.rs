@@ -104,6 +104,7 @@ pub(crate) fn apply(
         if let Some(wait) = prerequisite(database, header)? {
             return Ok(ApplyOutcome::Waiting(wait));
         }
+        crate::pending::clear_log(database, crate::LogObject::Write(header.position))?;
         let deleted = crate::store_log_tables::deleted_circles(database)?;
         let affected = apply_opened(database, schema, download, &deleted)?;
         files.retain_rows(affected, &deleted)?;
@@ -286,8 +287,6 @@ pub(crate) fn exclude_row(
 
 /// Agreement state read atomically for sync to post.
 pub struct SyncState {
-    /// This device's permanent judgments, to stop downloads and publish with positions.
-    pub stuck: Vec<crate::LogRefusal>,
     /// This install's device identity.
     pub device: DeviceId,
     /// Applied store-log positions from the same committed state.

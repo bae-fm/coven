@@ -60,6 +60,12 @@ impl From<rusqlite::Error> for CovenError {
 /// A failed database call or a write the database refuses (§5, §8, §14, §16).
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
+    /// A pending value could not be encoded or decoded.
+    #[error("invalid pending data: {0}")]
+    PendingEncoding(#[source] serde_json::Error),
+    /// Saving pending state failed; this handle refuses calls until reopened.
+    #[error("pending persistence failed: {0}")]
+    PendingPersistence(#[source] std::sync::Arc<DbError>),
     /// A streaming producer or its final authentication check failed.
     #[error("sync stream failed: {0}")]
     SyncStream(#[source] Box<dyn std::error::Error + Send + Sync>),

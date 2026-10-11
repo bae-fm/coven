@@ -857,7 +857,11 @@ async fn a_pass_reuses_loaded_snapshot_and_write_references() {
         let operations = operation_owner(a.sync, files.clone());
         let start = storage.reads().await.len();
         operations.sync().await.unwrap();
-        assert!(operations.pending_operations().await.unwrap().is_empty());
+        assert!(database
+            .pending::<crate::PendingRecord>()
+            .await
+            .unwrap()
+            .is_empty());
         let reads = storage.reads().await;
         let object = &objects[0];
         let bytes: u64 = reads[start..]

@@ -16,6 +16,12 @@ use coven_format::{store_log::StoreChange, MemberAccess};
 use coven_foundation::id_source::KeyId;
 use coven_storage::MemberRemoval;
 
+struct AccessResult {
+    result: MemberRemoval,
+    keys: Vec<String>,
+    pending: Option<PendingReason>,
+}
+
 impl StoreLogSync {
     pub(crate) async fn operation_step(
         &mut self,
@@ -32,21 +38,22 @@ impl StoreLogSync {
             return self.invite_step(record, data).await;
         }
         if let Data::Revoke { member, result } = &data {
-            if let Some(result) = result {
-                if let MemberRemoval::AccessRemains { shares } = result {
-                    return Err(SyncError::AccessRemains(shares.clone()));
-                }
+            if let Some(result) = result
+                .as_ref()
+                .filter(|result| !matches!(result, MemberRemoval::AccessRemains { .. }))
+            {
                 let result = result.clone();
                 self.database.finish_operation(record.id).await?;
                 return Ok(Progress::Finished(Output::Removal(result)));
             }
-            let (result, keys) = self.revoke_member_access(record.id, member).await?;
+            let access = self.revoke_member_access(record.id, member).await?;
             data = Data::Revoke {
                 member: member.clone(),
-                result: Some(result),
+                result: Some(access.result),
             };
-            self.save_access_result(record, &data, 1, keys).await?;
-            return Ok(Progress::Advanced);
+            return self
+                .save_access_result(record, &data, 1, access.keys, access.pending)
+                .await;
         }
         if record.last_step < data.entry_step_number(5) {
             return self.entry_step(record, data).await;
@@ -55,35 +62,33 @@ impl StoreLogSync {
             unreachable!()
         };
         let output = match &work.intent {
-            Intent::Reset { .. } => {
+            Intent::Reset { snapshot } => {
                 if let Some(id) = self.pending_reload().await? {
-                    let reload = self
-                        .database
-                        .operation(id)
-                        .await?
-                        .ok_or(coven_database::DbError::OperationChanged(id))?;
-                    if let Some(failure) = reload.failure {
-                        return Err(SyncError::RecoveryPending {
-                            operation: id,
-                            failure,
-                        });
+                    if let Some(pending) =
+                        self.database.operation_pending::<PendingRecord>(id).await?
+                    {
+                        return Err(SyncError::Pending(Box::new(pending)));
                     }
-                    return Ok(Progress::Waiting);
+                    return Ok(Progress::Waiting(PendingReason::Waits(
+                        Prerequisite::Reload(snapshot.audience.clone()),
+                    )));
                 }
                 Output::Unit
             }
             Intent::CreateCircle { circle, .. } => Output::CircleId(*circle),
             Intent::RemoveMember { member } => {
-                if let Some(result) = &work.removal {
-                    if let MemberRemoval::AccessRemains { shares } = result {
-                        return Err(SyncError::AccessRemains(shares.clone()));
-                    }
+                if let Some(result) = work
+                    .removal
+                    .as_ref()
+                    .filter(|result| !matches!(result, MemberRemoval::AccessRemains { .. }))
+                {
                     Output::Removal(result.clone())
                 } else {
-                    let (result, keys) = self.revoke_member_access(record.id, member).await?;
-                    work.removal = Some(result);
-                    self.save_access_result(record, &data, 6, keys).await?;
-                    return Ok(Progress::Advanced);
+                    let access = self.revoke_member_access(record.id, member).await?;
+                    work.removal = Some(access.result);
+                    return self
+                        .save_access_result(record, &data, 6, access.keys, access.pending)
+                        .await;
                 }
             }
             _ => Output::Unit,
@@ -102,8 +107,8 @@ impl StoreLogSync {
             // Fresh authoring always uses the latest available replay. No entry
             // number or introduced key id survives a dropped attempt's restart.
             self.step().await?;
-            if self.pending_reload().await?.is_some() {
-                return Ok(Progress::Waiting);
+            if let Some(id) = self.pending_reload().await? {
+                return Ok(Progress::Waiting(self.reload_condition(id).await?));
             }
             let local = self.database.local_store_log().await?;
             let mut ring = self.store_keys.read()?;
@@ -164,7 +169,9 @@ impl StoreLogSync {
                         .write_is_uploaded(coven_merge::WriteId { device, number })
                         .await?
                     {
-                        return Ok(Progress::Waiting);
+                        return Ok(Progress::Waiting(PendingReason::Waits(
+                            Prerequisite::OwnUploads,
+                        )));
                     }
                 }
             }
@@ -385,10 +392,27 @@ impl StoreLogSync {
         data: &Data,
         step: u32,
         keys: Vec<String>,
-    ) -> Result<(), SyncError> {
+        reason: Option<PendingReason>,
+    ) -> Result<Progress, SyncError> {
         let update = data.update(record, step)?;
+        let retained = match data {
+            Data::Revoke { result, .. } => result.as_ref(),
+            Data::Entry(work) => work.removal.as_ref(),
+            _ => None,
+        };
+        let pending = match reason {
+            Some(reason) => Some(self.operation_condition(record, reason).await?),
+            None => None,
+        };
         if keys.is_empty() {
-            self.database.advance_operation(update).await?;
+            match pending {
+                Some(pending) => {
+                    self.database
+                        .advance_operation_pending(update, pending)
+                        .await?
+                }
+                None => self.database.advance_operation(update).await?,
+            }
         } else {
             let member = match data {
                 Data::Revoke { member, .. } => Some(member.parse()?),
@@ -411,17 +435,22 @@ impl StoreLogSync {
                 })
                 .collect();
             self.database
-                .record_access_key_deletions(update, keys)
+                .record_access_key_deletions(update, keys, pending)
                 .await?
         }
-        Ok(())
+        Ok(match retained {
+            Some(MemberRemoval::AccessRemains { shares }) => {
+                Progress::Reply(Err(SyncError::AccessRemains(shares.clone())))
+            }
+            _ => Progress::Advanced,
+        })
     }
 
     async fn revoke_member_access(
         &self,
         operation: OperationId,
         member: &str,
-    ) -> Result<(MemberRemoval, Vec<String>), SyncError> {
+    ) -> Result<AccessResult, SyncError> {
         // Replay decides membership, but dropping an access entry cannot undo
         // its provider grant. Revoke every recorded access, including late entries.
         let local = self.database.local_store_log().await?;
@@ -444,6 +473,7 @@ impl StoreLogSync {
         }
         let mut keys = Vec::new();
         let mut retained = Vec::new();
+        let mut pending = None;
         let mut current_result = None;
         for access in accesses {
             let result = self.revoke_access(operation, &access).await?;
@@ -452,6 +482,15 @@ impl StoreLogSync {
                     keys.push(access_key_id.clone())
                 }
                 MemberRemoval::AccessRemains { shares } => {
+                    let MemberAccess::ProviderAccount(account) = &access else {
+                        return Err(coven_database::DbError::DamagedDatabase.into());
+                    };
+                    if pending.is_none() {
+                        pending = Some(PendingReason::AccessRemains {
+                            account: account.clone(),
+                            shares: shares.clone(),
+                        });
+                    }
                     for share in shares {
                         if !retained.contains(share) {
                             retained.push(share.clone());
@@ -471,7 +510,11 @@ impl StoreLogSync {
         } else {
             MemberRemoval::AccessRemains { shares: retained }
         };
-        Ok((result, keys))
+        Ok(AccessResult {
+            result,
+            keys,
+            pending,
+        })
     }
 
     pub(super) async fn revoke_access(

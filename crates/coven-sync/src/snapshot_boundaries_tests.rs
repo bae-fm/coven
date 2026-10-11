@@ -223,7 +223,12 @@ async fn queued_entries_wait_for_reload_and_finishing_a_queued_reset_blocks_new_
         a.db.start_operation(reload.new_operation("coven").unwrap())
             .await
             .unwrap();
-    a.db.operation_failure(pending, Some("reload failed".into()))
+    let record = a.db.operation(pending).await.unwrap().unwrap();
+    a.sync
+        .record_operation_condition(
+            &record,
+            crate::PendingReason::Waits(crate::Prerequisite::OwnUploads),
+        )
         .await
         .unwrap();
     a.sync.sync_store_log().await.unwrap();
@@ -288,8 +293,14 @@ async fn a_failed_internal_reload_prevents_snapshot_publication_until_it_can_res
             .await
             .unwrap()
             .iter()
-            .any(|r| r.id == pending && r.failure.is_some()));
+            .any(|r| r.id == pending));
     }
+    assert!(a
+        .db
+        .operation_pending::<crate::PendingRecord>(pending)
+        .await
+        .unwrap()
+        .is_some());
     storage.create(&snapshot, &bytes).await.unwrap();
     a.sync.write_snapshot(Audience::Store).await.unwrap();
     assert!(a.db.operations().await.unwrap().is_empty());
@@ -350,7 +361,7 @@ mod reset {
             match reset_step(d, id).await {
                 Progress::Finished(Output::Unit) => return,
                 Progress::Advanced => (),
-                Progress::Waiting => {
+                Progress::Waiting(_) => {
                     d.sync.sync_store_log().await.unwrap();
                 }
                 _ => panic!("unexpected reset result"),
@@ -465,7 +476,7 @@ mod reset {
                 match reset_step(&mut a, id).await {
                     Progress::Finished(crate::operations::Output::Unit) => break 'crashes,
                     Progress::Advanced => (),
-                    Progress::Waiting => {
+                    Progress::Waiting(_) => {
                         a.sync.sync_store_log().await.unwrap();
                     }
                     _ => panic!("unexpected reset progress"),

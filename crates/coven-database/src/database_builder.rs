@@ -183,7 +183,6 @@ impl DatabaseBuilder {
             Some(origin),
             self.migration_operation.as_deref(),
         )?;
-        crate::stuck::version_changed(&writer)?;
         if recovery.is_none() {
             crate::file_removals::FileRemovals::new(&writer, &self.directory, &BTreeSet::new())
                 .finish(Ok::<_, DbError>(()))?;
@@ -194,7 +193,7 @@ impl DatabaseBuilder {
         let observer = CommitObserver::new();
         #[cfg(test)]
         drop(profile);
-        writer.observe_commits(observer.clone())?;
+        writer.observe_commits(observer.clone(), settings.device_id)?;
         let mut readers = Vec::new();
         for _ in 0..4 {
             readers.push(Mutex::new(DatabaseConnection::open(

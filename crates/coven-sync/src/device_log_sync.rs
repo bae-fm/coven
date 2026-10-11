@@ -176,7 +176,7 @@ impl DeviceLogSync {
                 objects.insert(write, object);
             }
         }
-        let mut stuck = state.stuck;
+        let mut stuck = crate::pending_logs::local_refusals(&self.database).await?;
         let mut positions = state.positions;
         let mut replays = crate::replay_cache::ReplayCache::new(&local.log);
         loop {
@@ -371,7 +371,14 @@ impl DeviceLogSync {
                 }
             }
         }
-        self.database.replace_stuck_reports(reports).await?;
+        self.database
+            .replace_pending_reports(
+                reports
+                    .into_iter()
+                    .map(|(peer, record)| crate::PendingRecord::log_refusal(record, peer))
+                    .collect(),
+            )
+            .await?;
         Ok(())
     }
 
@@ -441,7 +448,7 @@ impl DeviceLogSync {
             })
             .collect();
         Ok(Some(PostedPositions {
-            pending: state.stuck.into_iter().map(Into::into).collect(),
+            pending: crate::pending_logs::reports(&self.database).await?,
             device: state.device,
             writes: state.positions,
             store_log: state.store_log,

@@ -992,6 +992,7 @@ dependencies = [
  "coven-foundation",
  "coven-merge",
  "rusqlite",
+ "serde",
  "serde_json",
  "sqlite3-parser",
  "tempfile",

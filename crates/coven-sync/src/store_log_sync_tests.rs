@@ -775,7 +775,7 @@ async fn only_newer_envelopes_require_an_update() {
             let mut b = device(storage.clone(), 2, member(1), store(1)).await;
             let result = b.sync.sync_store_log().await;
             if version == 2 {
-                assert!(matches!(result, Err(SyncFailure::UpdateRequired)));
+                assert!(matches!(result, Err(SyncFailure::UpdateRequired(_))));
             } else {
                 let damage = result.unwrap();
                 if sealed_key {
@@ -783,8 +783,8 @@ async fn only_newer_envelopes_require_an_update() {
                 } else {
                     assert!(damage.is_empty());
                     assert_eq!(
-                        b.db.stuck_logs().await.unwrap()[0].record.object,
-                        coven_database::LogObject::Entry(first)
+                        b.db.pending::<crate::PendingRecord>().await.unwrap()[0].subject,
+                        crate::PendingSubject::Entry(first)
                     );
                 }
             }

@@ -219,7 +219,12 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     let pending = db.operations().await.unwrap();
     let migration = pending.iter().find(|r| r.kind == "migrate-schema").unwrap();
     assert_eq!(migration.last_step, 1);
-    assert!(pending.iter().all(|r| r.failure.is_none()));
+    assert!(db
+        .pending::<PendingRecord>()
+        .await
+        .unwrap()
+        .iter()
+        .all(|r| matches!(r.reason, PendingReason::NoStorage | PendingReason::Waits(_))));
     db.close().await.unwrap();
     let handle = open()
         .migrations(updated())

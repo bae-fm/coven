@@ -28,19 +28,19 @@ pub(crate) fn reserved_name(name: &str) -> bool {
 // This is also the ownership checker's source of reserved table names.
 macro_rules! coven_tables {
     ($visit:ident) => {
-        $visit!(_coven_stuck_logs, "
-            CREATE TABLE _coven_stuck_logs (
-                kind INTEGER NOT NULL CHECK(kind IN (0,1)),
-                device BLOB NOT NULL CHECK(length(device)=8),
-                reporter BLOB NOT NULL CHECK(length(reporter) IN (0,8)),
-                number BLOB NOT NULL CHECK(length(number)=8 AND number>x'0000000000000000'),
-                failure INTEGER NOT NULL CHECK(failure IN (0,1,2,3,4,5,6)),
-                judged_at BLOB CHECK(length(judged_at)=13),
-                coven_version TEXT,
-                PRIMARY KEY(kind,device,reporter),
-                CHECK((length(reporter)=0 AND judged_at IS NOT NULL AND coven_version IS NOT NULL)
-                   OR (length(reporter)=8 AND judged_at IS NULL AND coven_version IS NULL))
+        $visit!(_coven_pending, "
+            CREATE TABLE _coven_pending (
+                subject BLOB NOT NULL,
+                reporter BLOB NOT NULL CHECK(length(reporter)=8),
+                value BLOB NOT NULL,
+                operation INTEGER REFERENCES _coven_operations(id),
+                object BLOB CHECK(object IS NULL OR length(object)=17),
+                coven_version TEXT NOT NULL,
+                PRIMARY KEY(subject,reporter)
             ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_pending_object ON _coven_pending(object,reporter);
+            CREATE INDEX _coven_pending_reporter ON _coven_pending(reporter);
+            CREATE UNIQUE INDEX _coven_pending_operation ON _coven_pending(operation) WHERE operation IS NOT NULL;
         ");
         $visit!(_coven_store_log, "
             CREATE TABLE _coven_store_log (
@@ -412,8 +412,7 @@ macro_rules! coven_tables {
                 kind TEXT NOT NULL,
                 last_step INTEGER NOT NULL,
                 data BLOB NOT NULL,
-                started_by TEXT NOT NULL,
-                failure TEXT
+                started_by TEXT NOT NULL
             );
         ");
     };

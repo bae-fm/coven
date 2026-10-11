@@ -550,7 +550,6 @@ async fn groceries_example_converges_in_every_arrival_order() {
 mod stuck {
     use super::writes::{publish, queued};
     use super::*;
-    use coven_database::StuckLog;
     use coven_format::pending::RefusalCode;
 
     async fn refuse(storage: &MemoryStorage, devices: &mut [Device], reload: bool) -> LogRefusal {
@@ -593,21 +592,23 @@ mod stuck {
     async fn a_refused_merge_is_observed_without_retries_and_reported_to_its_author() {
         let storage = storage();
         let mut devices = group(storage.clone(), 3).await;
-        let mut live = devices[1].db.subscribe_stuck_logs();
+        let mut live = devices[1].db.subscribe_pending::<crate::PendingRecord>();
         assert!(live.next().await.unwrap().is_empty());
         let record = refuse(&storage, &mut devices, false).await;
         assert_eq!(
             live.next().await.unwrap(),
-            vec![StuckLog {
-                record,
-                reported_by: None
-            }]
+            vec![crate::PendingRecord::log_refusal(record, DeviceId(2))]
         );
         let before = storage.reads().await;
         devices[1].writes.download_writes().await.unwrap();
         assert_eq!(storage.reads().await, before);
         devices[0].writes.download_writes().await.unwrap();
-        assert!(devices[0].db.stuck_logs().await.unwrap().is_empty());
+        assert!(devices[0]
+            .db
+            .pending::<crate::PendingRecord>()
+            .await
+            .unwrap()
+            .is_empty());
         for receiver in &mut devices[1..] {
             receiver.writes.download_writes().await.unwrap();
             receiver.writes.post_positions().await.unwrap();
@@ -618,20 +619,14 @@ mod stuck {
             "INSERT INTO notes VALUES('pending','local','body')",
         )
         .await;
-        let mut author = devices[0].db.subscribe_stuck_logs();
+        let mut author = devices[0].db.subscribe_pending::<crate::PendingRecord>();
         assert!(author.next().await.unwrap().is_empty());
         devices[0].writes.download_writes().await.unwrap();
         assert_eq!(
             author.next().await.unwrap(),
             vec![
-                StuckLog {
-                    record,
-                    reported_by: Some(DeviceId(2))
-                },
-                StuckLog {
-                    record,
-                    reported_by: Some(DeviceId(3))
-                },
+                crate::PendingRecord::log_refusal(record, DeviceId(2)),
+                crate::PendingRecord::log_refusal(record, DeviceId(3)),
             ]
         );
         devices[0].writes.upload_writes().await.unwrap();
@@ -672,19 +667,19 @@ mod stuck {
         assert_eq!(storage.reads().await, before);
         device
             .db
-            .test_stuck_version("previous-version")
+            .test_pending_version("previous-version")
             .await
             .unwrap();
         reopen(storage.clone(), device).await;
-        assert!(device.db.stuck_logs().await.unwrap().is_empty());
+        assert_eq!(
+            device.db.pending::<crate::PendingRecord>().await.unwrap(),
+            [crate::PendingRecord::log_refusal(record, DeviceId(2))]
+        );
         device.writes.download_writes().await.unwrap();
         assert!(storage.reads().await.len() > before.len());
         assert_eq!(
-            device.db.stuck_logs().await.unwrap(),
-            vec![StuckLog {
-                record,
-                reported_by: None
-            }]
+            device.db.pending::<crate::PendingRecord>().await.unwrap(),
+            vec![crate::PendingRecord::log_refusal(record, DeviceId(2))]
         );
         let before = storage.reads().await;
         device.writes.download_writes().await.unwrap();
@@ -700,7 +695,15 @@ mod stuck {
         refuse(&storage, &mut devices, false).await;
         devices[1].writes.post_positions().await.unwrap();
         devices[0].writes.download_writes().await.unwrap();
-        assert_eq!(devices[0].db.stuck_logs().await.unwrap().len(), 1);
+        assert_eq!(
+            devices[0]
+                .db
+                .pending::<crate::PendingRecord>()
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         let snapshot = devices[0]
             .sync
             .write_snapshot(Audience::Store)
@@ -712,15 +715,25 @@ mod stuck {
             .await
             .unwrap();
         devices[1].sync.sync_store_log().await.unwrap();
-        assert!(devices[1].db.stuck_logs().await.unwrap().is_empty());
+        assert!(devices[1]
+            .db
+            .pending::<crate::PendingRecord>()
+            .await
+            .unwrap()
+            .is_empty());
         assert_eq!(rows(&devices[1].db).await, rows(&devices[0].db).await);
         devices[1].writes.post_positions().await.unwrap();
         devices[0].writes.download_writes().await.unwrap();
-        assert!(devices[0].db.stuck_logs().await.unwrap().is_empty());
+        assert!(devices[0]
+            .db
+            .pending::<crate::PendingRecord>()
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
-    async fn retention_does_not_read_stuck_logs_or_delete_files_without_their_references() {
+    async fn retention_does_not_read_refused_logs_or_delete_files_without_their_references() {
         let storage = storage();
         let mut devices = group(storage.clone(), 2).await;
         refuse(&storage, &mut devices, false).await;
@@ -780,7 +793,12 @@ mod stuck {
                 matches!(result, Err(SyncError::Storage(_))),
                 "{failure}: {result:?}"
             );
-            assert!(devices[1].db.stuck_logs().await.unwrap().is_empty());
+            assert!(devices[1]
+                .db
+                .pending::<crate::PendingRecord>()
+                .await
+                .unwrap()
+                .is_empty());
             if failure != "network" {
                 storage.delete(&path).await.unwrap();
                 storage.create(&path, &original).await.unwrap();
@@ -796,11 +814,12 @@ mod stuck {
         let mut devices = group(storage.clone(), 2).await;
         let record = refuse(&storage, &mut devices, true).await;
         assert_eq!(
-            devices[1].db.stuck_logs().await.unwrap(),
-            vec![StuckLog {
-                record,
-                reported_by: None
-            }]
+            devices[1]
+                .db
+                .pending::<crate::PendingRecord>()
+                .await
+                .unwrap(),
+            vec![crate::PendingRecord::log_refusal(record, DeviceId(2))]
         );
         let before = storage.reads().await;
         devices[1].writes.download_writes().await.unwrap();
@@ -835,10 +854,18 @@ mod stuck {
             let before = storage.reads().await;
             assert!(matches!(
                 devices[1].sync.reload_from_snapshots().await,
-                Err(SyncError::StuckLog(record))
-                    if record.object == LogObject::Write(object.path.write_id().unwrap())
-                        && record.failure == RefusalCode::Signature
+                Err(SyncError::Pending(record))
+                    if record.reason == crate::PendingReason::Refused(RefusalCode::Signature.into())
             ));
+            assert!(devices[1]
+                .db
+                .pending::<crate::PendingRecord>()
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| r.subject
+                    == crate::PendingSubject::Write(object.path.write_id().unwrap())
+                    && r.reason == crate::PendingReason::Refused(RefusalCode::Signature.into())));
             if attempt == 1 {
                 assert_eq!(storage.reads().await, before);
             }
@@ -849,7 +876,7 @@ mod stuck {
 }
 
 #[tokio::test]
-async fn multiple_reported_subjects_in_one_log_keep_its_first_refusal() {
+async fn multiple_reported_subjects_in_one_log_retain_each_condition() {
     let storage = storage();
     let mut devices = group(storage.clone(), 2).await;
     for title in ["first", "second"] {
@@ -891,11 +918,15 @@ async fn multiple_reported_subjects_in_one_log_keep_its_first_refusal() {
         .unwrap();
     devices[0].writes.compare_fingerprints().await.unwrap();
     assert_eq!(
-        devices[0].db.stuck_logs().await.unwrap(),
-        vec![coven_database::StuckLog {
-            record: first,
-            reported_by: Some(DeviceId(2)),
-        }]
+        devices[0]
+            .db
+            .pending::<crate::PendingRecord>()
+            .await
+            .unwrap(),
+        vec![
+            crate::PendingRecord::log_refusal(first, DeviceId(2)),
+            crate::PendingRecord::log_refusal(second, DeviceId(2))
+        ]
     );
     assert!(devices[0]
         .writes
@@ -923,13 +954,16 @@ async fn oversized_reports_fail_publication_without_replacing_or_truncating_the_
     for writer in 2..66 {
         device
             .db
-            .record_stuck_log(coven_database::LogRefusal {
-                object: LogObject::Write(WriteId {
-                    device: DeviceId(writer),
-                    number: 1,
-                }),
-                failure: RefusalCode::Parse,
-            })
+            .record_pending(crate::PendingRecord::log_refusal(
+                coven_database::LogRefusal {
+                    object: LogObject::Write(WriteId {
+                        device: DeviceId(writer),
+                        number: 1,
+                    }),
+                    failure: RefusalCode::Parse,
+                },
+                DeviceId(1),
+            ))
             .await
             .unwrap();
     }

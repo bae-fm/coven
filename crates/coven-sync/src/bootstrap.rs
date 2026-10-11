@@ -54,15 +54,12 @@ impl StoreLogSync {
                 }
             }
         }
-        if let Some(record) = self
-            .database
-            .sync_state(Vec::new())
+        if let Some(record) = crate::pending_logs::local_refusals(&self.database)
             .await?
-            .stuck
             .into_iter()
             .find(|record| matches!(record.object, coven_database::LogObject::Entry(_)))
         {
-            return Err(SyncError::StuckLog(record));
+            return Err(crate::pending_logs::required(&self.database, record).await?);
         }
         Ok(false)
     }

@@ -26,6 +26,13 @@ mod store_log_sync;
 pub use coven_database::DropReason;
 pub use device_log_sync::DeviceLogSync;
 pub use error::{DamagedObject, SyncError, SyncFailure};
+mod pending;
+mod pending_encoding;
+mod pending_logs;
+pub use pending::{
+    FileMissingReason, FileSourceFailure, LocalFailure, PendingReason, PendingRecord,
+    PendingSubject, Prerequisite, ProviderAccessAction, RequiredUpdate, Retry,
+};
 mod refusal;
 pub use refusal::Refusal;
 pub use store_log_sync::{JoinOutcome, StoreLogSync};

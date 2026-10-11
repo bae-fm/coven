@@ -9,9 +9,15 @@ pub use coven_database::{AccessKeyToDelete, OperationId};
 /// An operation failure retains the same typed causes as an ordinary sync call.
 pub type OperationError = crate::SyncError;
 
-/// The app purpose of an unfinished operation; maintenance stays internal.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The purpose of an unfinished operation, including maintenance.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum OperationKind {
+    /// Write and verify a maintenance snapshot.
+    WriteSnapshot,
+    /// Delete covered history.
+    Retention,
     /// Publish the app's migrated schema and its audience snapshots.
     SchemaChange,
     /// Snapshot this device and reset one audience to that state.
@@ -32,17 +38,6 @@ pub enum OperationKind {
     Invite,
     /// The owner's device revokes recorded access after removal or a later access entry.
     RevokeAccess,
-}
-
-/// App work stopped by a permanent failure, awaiting retry or discard.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PendingOperation {
-    /// Local journal identity.
-    pub id: OperationId,
-    /// The work being performed.
-    pub kind: OperationKind,
-    /// The failure presented when no app call is waiting.
-    pub failure: String,
 }
 
 /// A live member and the devices still belonging to them.

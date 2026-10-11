@@ -670,7 +670,7 @@ async fn journal_lookups_read_current_steps_and_keep_failed_rows_in_order() {
     })
     .await
     .unwrap();
-    db.operation_failure(ids[1], Some("missing write".into()))
+    db.record_pending(crate::pending::tests::operation_record(&db, ids[1]).await)
         .await
         .unwrap();
     let first = db
@@ -685,7 +685,11 @@ async fn journal_lookups_read_current_steps_and_keep_failed_rows_in_order() {
         assert_eq!(record.last_step, 2);
         assert_eq!(record.data, [2, 3]);
         assert_eq!(record.started_by, "coven");
-        assert_eq!(record.failure.as_deref(), Some("missing write"));
+        assert!(db
+            .operation_pending::<crate::pending::tests::Record>(record.id)
+            .await
+            .unwrap()
+            .is_some());
     }
     assert_eq!(db.operation(ids[0]).await.unwrap().unwrap().data, [1]);
     db.finish_operation(ids[1]).await.unwrap();

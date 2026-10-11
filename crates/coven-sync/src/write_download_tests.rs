@@ -89,19 +89,23 @@ async fn damaged_objects_roll_back_and_block_only_their_device() {
         let before = storage.reads().await;
         devices[2].writes.download_writes().await.unwrap();
         assert_eq!(storage.reads().await, before);
-        let stuck = devices[2].db.stuck_logs().await.unwrap();
+        let stuck = devices[2]
+            .db
+            .pending::<crate::PendingRecord>()
+            .await
+            .unwrap();
         assert_eq!(stuck.len(), 1);
         assert_eq!(
             damage.failure,
-            crate::Refusal::from(stuck[0].record.failure)
+            crate::Refusal::from(stuck[0].as_log_refusal().unwrap().failure)
         );
         assert_eq!(
-            stuck[0].record.object,
+            stuck[0].as_log_refusal().unwrap().object,
             LogObject::Write(record.header.position)
         );
         use coven_format::pending::RefusalCode;
         assert_eq!(
-            stuck[0].record.failure,
+            stuck[0].as_log_refusal().unwrap().failure,
             match failure {
                 "decryption" | "moved" => RefusalCode::Decryption,
                 "signature" => RefusalCode::Signature,
@@ -226,7 +230,7 @@ async fn newer_store_stops_uploads_and_waits_for_newer_downloads() {
         .unwrap();
     assert!(matches!(
         devices[1].sync.sync_store_log().await,
-        Err(SyncFailure::UpdateRequired)
+        Err(SyncFailure::UpdateRequired(_))
     ));
     sql(
         &devices[1].db,
@@ -235,7 +239,7 @@ async fn newer_store_stops_uploads_and_waits_for_newer_downloads() {
     .await;
     assert!(matches!(
         devices[1].writes.upload_writes().await,
-        Err(SyncError::Stopped(SyncFailure::UpdateRequired))
+        Err(SyncError::Stopped(SyncFailure::UpdateRequired(_)))
     ));
     devices[1].writes.download_writes().await.unwrap();
     assert_eq!(
@@ -277,7 +281,7 @@ async fn only_a_newer_format_requires_an_update() {
         if version == 2 {
             assert!(matches!(
                 result,
-                Err(SyncError::Stopped(SyncFailure::UpdateRequired))
+                Err(SyncError::Stopped(SyncFailure::UpdateRequired(_)))
             ));
         } else {
             result.unwrap();
@@ -375,7 +379,14 @@ async fn a_cached_read_view_still_checks_each_writes_timestamp() {
     assert_eq!(rows(&devices[1].db).await[0].1, "before");
     devices[1].sync.reload_from_snapshots().await.unwrap();
     assert_eq!(
-        devices[1].db.stuck_logs().await.unwrap()[0].record.object,
+        devices[1]
+            .db
+            .pending::<crate::PendingRecord>()
+            .await
+            .unwrap()[0]
+            .as_log_refusal()
+            .unwrap()
+            .object,
         LogObject::Write(second.header.position)
     );
     assert_eq!(rows(&devices[1].db).await[0].1, "before");
@@ -533,16 +544,24 @@ async fn authorization_causality_and_identity_refusals_keep_their_report_tags() 
         );
         devices[1].writes.download_writes().await.unwrap();
         assert!(rows(&devices[1].db).await.is_empty());
-        let saved = devices[1].db.stuck_logs().await.unwrap();
+        let saved = devices[1]
+            .db
+            .pending::<crate::PendingRecord>()
+            .await
+            .unwrap();
         assert_eq!(saved.len(), 1);
         assert_eq!(
             damage.failure,
-            crate::Refusal::from(saved[0].record.failure)
+            crate::Refusal::from(saved[0].as_log_refusal().unwrap().failure)
         );
-        assert_eq!(u8::from(saved[0].record.failure), tag, "{defect}");
+        assert_eq!(
+            u8::from(saved[0].as_log_refusal().unwrap().failure),
+            tag,
+            "{defect}"
+        );
         devices[1].writes.post_positions().await.unwrap();
         let post = posted(&storage, &devices[1], 2).await;
-        assert_eq!(post.pending[0], saved[0].record.into());
+        assert_eq!(post.pending[0], saved[0].as_log_refusal().unwrap().into());
     }
 }
 
@@ -566,8 +585,12 @@ async fn a_write_with_incomplete_causal_history_is_refused_as_causality() {
     record.header.had_read.0.clear();
     publish(&storage, &record).await;
     devices[2].writes.download_writes().await.unwrap();
-    let refused = devices[2].db.stuck_logs().await.unwrap();
+    let refused = devices[2]
+        .db
+        .pending::<crate::PendingRecord>()
+        .await
+        .unwrap();
     assert_eq!(refused.len(), 1);
-    assert_eq!(u8::from(refused[0].record.failure), 5);
+    assert_eq!(u8::from(refused[0].as_log_refusal().unwrap().failure), 5);
     assert_eq!(rows(&devices[2].db).await[0].1, "second");
 }

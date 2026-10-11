@@ -263,6 +263,7 @@ pub(crate) fn succeeded(database: &DatabaseConnection, write: WriteId) -> Result
         if entry.keys.is_none() {
             return Err(DbError::UploadNotAttempted { write });
         }
+        crate::pending::clear_log(database, crate::LogObject::Write(write))?;
         database.internal_execute("DELETE FROM _coven_uploads WHERE rowid=?1", [entry.rowid])?;
         Ok(true)
     })

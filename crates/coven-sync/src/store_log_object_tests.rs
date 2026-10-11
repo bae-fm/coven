@@ -1,5 +1,4 @@
 use super::*;
-use coven_database::StuckLog;
 use coven_database::{LogObject, LogRefusal};
 use coven_format::pending::RefusalCode;
 
@@ -146,11 +145,8 @@ async fn damaged_entries_block_only_their_device_and_retain_each_cause() {
             },
         };
         assert_eq!(
-            c.db.stuck_logs().await.unwrap(),
-            vec![StuckLog {
-                record,
-                reported_by: None
-            }]
+            c.db.pending::<crate::PendingRecord>().await.unwrap(),
+            vec![crate::PendingRecord::log_refusal(record, DeviceId(3))]
         );
         let before = storage.reads().await;
         c.sync().await;
@@ -158,11 +154,8 @@ async fn damaged_entries_block_only_their_device_and_retain_each_cause() {
         c.writes().post_positions().await.unwrap();
         a.writes().download_writes().await.unwrap();
         assert_eq!(
-            a.db.stuck_logs().await.unwrap(),
-            vec![StuckLog {
-                record,
-                reported_by: Some(DeviceId(3))
-            }]
+            a.db.pending::<crate::PendingRecord>().await.unwrap(),
+            vec![crate::PendingRecord::log_refusal(record, DeviceId(3))]
         );
         assert!(c.log().await.replay.entries.contains_key(&independent));
         assert!(!c.log().await.replay.entries.contains_key(&broken));
@@ -171,11 +164,16 @@ async fn damaged_entries_block_only_their_device_and_retain_each_cause() {
         storage.create(&path, &original).await.unwrap();
         c.sync().await;
         assert!(!c.log().await.replay.entries.contains_key(&later));
-        c.db.test_stuck_version("previous-version").await.unwrap();
+        c.db.test_pending_version("previous-version").await.unwrap();
         c.restart(storage.clone()).await;
         c.sync().await;
         assert!(c.log().await.replay.entries.contains_key(&later));
-        assert!(c.db.stuck_logs().await.unwrap().is_empty());
+        assert!(c
+            .db
+            .pending::<crate::PendingRecord>()
+            .await
+            .unwrap()
+            .is_empty());
     }
 }
 
@@ -282,12 +280,15 @@ async fn invalid_causal_past_and_timestamps_are_damaged() {
         storage.create(&path, &bytes).await.unwrap();
         let c = device(storage.clone(), 3, member(1), store(1)).await;
         assert!(c.sync.step().await.unwrap().is_empty());
-        let records = c.db.stuck_logs().await.unwrap();
+        let records = c.db.pending::<crate::PendingRecord>().await.unwrap();
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].record.object, LogObject::Entry(bad.position));
-        assert_eq!(records[0].reported_by, None);
         assert_eq!(
-            u8::from(records[0].record.failure),
+            records[0].as_log_refusal().unwrap().object,
+            LogObject::Entry(bad.position)
+        );
+        assert_eq!(records[0].reported_by, DeviceId(3));
+        assert_eq!(
+            u8::from(records[0].as_log_refusal().unwrap().failure),
             match defect {
                 "closure" | "timestamp" => 5,
                 "author" => 6,
@@ -309,12 +310,12 @@ async fn bootstrap_reports_a_stuck_entry_instead_of_waiting_for_membership_forev
     storage.corrupt_byte(&path, size - 1).await.unwrap();
     let mut b = device(storage.clone(), 2, member(1), store(1)).await;
     assert!(
-        matches!(b.sync.bootstrap_member().await, Err(SyncError::StuckLog(record)) if record.object == LogObject::Entry(first))
+        matches!(b.sync.bootstrap_member().await, Err(SyncError::Pending(record)) if record.subject == crate::PendingSubject::Entry(first))
     );
     let reads = storage.reads().await;
     assert!(matches!(
         b.sync.bootstrap_member().await,
-        Err(SyncError::StuckLog(_))
+        Err(SyncError::Pending(_))
     ));
     assert_eq!(storage.reads().await, reads);
 }
@@ -363,7 +364,12 @@ async fn an_entry_that_cannot_be_read_after_listing_is_not_a_permanent_judgment(
         } else {
             assert!(matches!(result, Err(SyncError::Storage(_))));
         }
-        assert!(b.db.stuck_logs().await.unwrap().is_empty());
+        assert!(b
+            .db
+            .pending::<crate::PendingRecord>()
+            .await
+            .unwrap()
+            .is_empty());
         assert!(!b.log().await.replay.entries.contains_key(&entry));
         if missing {
             storage.create(&path, &bytes).await.unwrap();

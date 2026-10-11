@@ -116,29 +116,26 @@ impl Data {
         }
         Ok(data)
     }
-    /// The app purpose is independent of the journal's execution steps.
-    pub(crate) fn app_kind(&self, started_by: &str) -> Option<OperationKind> {
+    /// The purpose of every operation, including automatic maintenance.
+    pub(crate) fn kind(&self) -> OperationKind {
         match self {
-            Self::PublishSchema { .. } => Some(OperationKind::SchemaChange),
-            Self::Entry(work) => Some(work.intent.kind()),
+            Self::PublishSchema { .. } => OperationKind::SchemaChange,
+            Self::Entry(work) => work.intent.kind(),
             Self::Snapshots(task) => match task.job {
                 SnapshotJob::Write {
                     trigger: SnapshotTrigger::Raise { .. },
                     ..
-                } => Some(OperationKind::SchemaChange),
+                } => OperationKind::SchemaChange,
                 SnapshotJob::Write {
                     trigger: SnapshotTrigger::Reset,
                     ..
-                } => Some(OperationKind::Reset),
-                SnapshotJob::Reload { .. } if started_by != "coven" => {
-                    Some(OperationKind::ReloadFromSnapshot)
-                }
-                SnapshotJob::Write { .. } | SnapshotJob::Reload { .. } | SnapshotJob::Retain => {
-                    None
-                }
+                } => OperationKind::Reset,
+                SnapshotJob::Write { .. } => OperationKind::WriteSnapshot,
+                SnapshotJob::Reload { .. } => OperationKind::ReloadFromSnapshot,
+                SnapshotJob::Retain => OperationKind::Retention,
             },
-            Self::Invite(_) => Some(OperationKind::Invite),
-            Self::Revoke { .. } => Some(OperationKind::RevokeAccess),
+            Self::Invite(_) => OperationKind::Invite,
+            Self::Revoke { .. } => OperationKind::RevokeAccess,
         }
     }
 

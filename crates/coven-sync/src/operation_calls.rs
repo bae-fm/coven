@@ -16,14 +16,6 @@ impl StoreLogSync {
     pub(crate) async fn operation_records(&self) -> Result<Vec<OperationRecord>, SyncError> {
         Ok(self.database.operations().await?)
     }
-    pub(crate) async fn block_operation(
-        &self,
-        id: OperationId,
-        failure: String,
-    ) -> Result<(), SyncError> {
-        Ok(self.database.operation_failure(id, Some(failure)).await?)
-    }
-
     pub(crate) async fn begin_operation_call(
         &mut self,
         command: Command,
@@ -98,16 +90,29 @@ impl StoreLogSync {
             }
             Command::Storage(storage) => {
                 self.storage = storage;
+                if self.storage.is_some() {
+                    for pending in self.database.pending::<PendingRecord>().await? {
+                        let PendingSubject::Operation { id, .. } = pending.subject else {
+                            continue;
+                        };
+                        let record = self
+                            .database
+                            .operation(id)
+                            .await?
+                            .ok_or(coven_database::DbError::OperationChanged(id))?;
+                        if matches!(pending.reason, PendingReason::NoStorage)
+                            || (record.started_by == "coven"
+                                && matches!(pending.reason, PendingReason::Storage { .. }))
+                        {
+                            self.database.retry_operation(id).await?;
+                        }
+                    }
+                }
                 return Ok(Begun::Value(Output::Unit));
             }
             Command::ConfirmKey(key) => {
                 self.database.confirm_access_key_deleted(key).await?;
                 return Ok(Begun::Value(Output::Unit));
-            }
-            Command::PendingOperations => {
-                return Ok(Begun::Value(Output::PendingOperations(
-                    self.pending_operations().await?,
-                )))
             }
             Command::AccessKeysToDelete => {
                 return Ok(Begun::Value(Output::AccessKeysToDelete(
@@ -120,11 +125,11 @@ impl StoreLogSync {
                 return Ok(Begun::Value(Output::Unit));
             }
             Command::Retry(id) => {
-                let record = self.pending(id).await?;
+                let record = self.pending_operation(id, false).await?;
                 let mut data = Data::read(&record)?;
                 if data.completing_reset(&record) {
                     if let Some(reload) = self.pending_reload().await? {
-                        self.database.operation_failure(reload, None).await?;
+                        self.database.retry_operation(reload).await?;
                     }
                 }
                 let restart = match &mut data {
@@ -154,12 +159,12 @@ impl StoreLogSync {
                             .advance_operation(data.update(&record, step)?)
                             .await?
                     }
-                    None => self.database.operation_failure(id, None).await?,
+                    None => self.database.retry_operation(id).await?,
                 }
                 return Ok(Begun::Operation(id));
             }
             Command::Discard(id) => {
-                let record = self.pending(id).await?;
+                let record = self.pending_operation(id, true).await?;
                 let data = Data::read(&record)?;
                 if let Data::Snapshots(task) = &data {
                     self.discard_snapshot(&record, task.clone()).await?;
@@ -543,45 +548,34 @@ impl StoreLogSync {
         }
     }
 
-    async fn pending(&self, id: OperationId) -> Result<OperationRecord, SyncError> {
+    async fn pending_operation(
+        &self,
+        id: OperationId,
+        discard: bool,
+    ) -> Result<OperationRecord, SyncError> {
         let record = self
             .database
             .operation(id)
             .await?
-            .filter(|r| r.failure.is_some())
             .ok_or(SyncError::NotPending(id))?;
-        if Data::read(&record)?.app_kind(&record.started_by).is_none() {
+        let data = Data::read(&record)?;
+        let pending = self
+            .database
+            .operation_pending::<PendingRecord>(id)
+            .await?
+            .ok_or(SyncError::NotPending(id))?;
+        let app_owned = record.started_by != "coven" || data.kind() == OperationKind::SchemaChange;
+        if !app_owned && (discard || !matches!(data, Data::Revoke { .. })) {
             return Err(SyncError::NotPending(id));
         }
+        if !discard
+            && (pending.reason.retry() == Retry::Never
+                || (pending.reason.retry() == Retry::AfterUpdate
+                    && !self.operation_can_retry(&record).await?))
+        {
+            return Err(SyncError::Pending(Box::new(pending)));
+        }
         Ok(record)
-    }
-
-    pub(crate) async fn pending_operations(&self) -> Result<Vec<PendingOperation>, SyncError> {
-        let mut operations = Vec::new();
-        for record in self.database.operations().await? {
-            if let Some(failure) = &record.failure {
-                if let Some(kind) = Data::read(&record)?.app_kind(&record.started_by) {
-                    operations.push(PendingOperation {
-                        id: record.id,
-                        kind,
-                        failure: failure.clone(),
-                    });
-                }
-            }
-        }
-        Ok(operations)
-    }
-
-    /// A new sync pass retries failed maintenance from its retained step.
-    pub(crate) async fn retry_maintenance(&self) -> Result<(), SyncError> {
-        for record in self.database.operations().await? {
-            if record.failure.is_some()
-                && Data::read(&record)?.app_kind(&record.started_by).is_none()
-            {
-                self.database.operation_failure(record.id, None).await?;
-            }
-        }
-        Ok(())
     }
 
     pub(crate) async fn current_join_requests(&self) -> Result<Vec<JoinRequest>, SyncError> {

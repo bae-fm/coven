@@ -5,7 +5,7 @@ use crate::{
     operation_data::Data,
     operations::{Output, Progress},
     snapshot_data::*,
-    SyncError,
+    PendingReason, Prerequisite, SyncError,
 };
 use coven_database::{OperationRecord, StoreLogState};
 use coven_format::store_log::{SnapshotId, StoreChange};
@@ -36,15 +36,20 @@ impl StoreLogSync {
         version: u32,
     ) -> Result<Progress, SyncError> {
         let local = self.database.local_store_log().await?;
-        if local.log.replay.state.store.is_none() || self.pending_reload().await?.is_some() {
-            return Ok(Progress::Waiting);
+        if local.log.replay.state.store.is_none() {
+            return Ok(Progress::Waiting(PendingReason::NoStorage));
         }
-        if self
+        if let Some(id) = self.pending_reload().await? {
+            return Ok(Progress::Waiting(self.reload_condition(id).await?));
+        }
+        if let Some(audience) = self
             .snapshot_audiences(&local.log)?
-            .keys()
-            .any(|a| !schema_in_place(&local.log.replay.state, a, version))
+            .into_keys()
+            .find(|a| !schema_in_place(&local.log.replay.state, a, version))
         {
-            return Ok(Progress::Waiting);
+            return Ok(Progress::Waiting(PendingReason::Waits(
+                Prerequisite::SchemaPublication { audience, version },
+            )));
         }
         self.database.finish_operation(record.id).await?;
         Ok(Progress::Finished(Output::Unit))
@@ -140,8 +145,10 @@ impl StoreLogSync {
         // migrations. Its reserved number must finish before preparing a raise.
         self.publish(&mut local, &member, &mut ring, &mut damages)
             .await?;
-        if local.upload.is_some() {
-            return Ok(Progress::Waiting);
+        if let Some(upload) = &local.upload {
+            return Ok(Progress::Waiting(PendingReason::Waits(
+                Prerequisite::Object(crate::store_log_object::path(upload.entry.position)),
+            )));
         }
         if let Some(damaged) = damages.into_iter().next() {
             return Err(damaged.into());

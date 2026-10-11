@@ -231,7 +231,12 @@ impl Network {
                 &*status.borrow()
             )
         });
-        assert!(handle.pending_operations().await.unwrap().is_empty());
+        assert!(handle
+            .pending()
+            .await
+            .unwrap()
+            .iter()
+            .all(|record| !matches!(record.subject, PendingSubject::Operation { .. })));
     }
 
     async fn quiet(&self) {
@@ -638,7 +643,7 @@ async fn reconnecting_with_a_replacement_key_records_the_access_that_removal_rev
             member: Some(member),
         }]
     );
-    assert!(owner.pending_operations().await.unwrap().is_empty());
+    assert!(owner.pending().await.unwrap().is_empty());
     network.close().await;
 }
 
@@ -723,7 +728,18 @@ async fn an_internal_reload_failure_reports_sync_status_and_retries_without_app_
     .await
     .unwrap()
     .unwrap();
-    assert!(reader.pending_operations().await.unwrap().is_empty());
+    assert!(reader
+        .pending()
+        .await
+        .unwrap()
+        .iter()
+        .any(|record| matches!(
+            record.subject,
+            PendingSubject::Operation {
+                kind: OperationKind::ReloadFromSnapshot,
+                ..
+            }
+        )));
     assert_eq!(storage.read(&positions).await.unwrap(), before);
     storage.create(path, &bytes).await.unwrap();
     network.sync(1).await;
@@ -731,11 +747,11 @@ async fn an_internal_reload_failure_reports_sync_status_and_retries_without_app_
     network.close().await;
 }
 
-mod stuck_logs {
+mod pending_records {
     use super::*;
 
     #[tokio::test]
-    async fn stuck_logs_are_live_while_sync_succeeds_and_reset_withdraws_the_report() {
+    async fn pending_records_are_live_while_sync_succeeds_and_reset_withdraws_the_report() {
         let network = Network::new(2).await;
         let reader = &network.devices[1].handle;
         reader.stop_sync();
@@ -744,7 +760,7 @@ mod stuck_logs {
             .wait_for(|s| matches!(s, SyncStatus::Stopped))
             .await
             .unwrap();
-        let mut received = reader.subscribe_stuck_logs();
+        let mut received = reader.subscribe_pending();
         assert!(received.next().await.unwrap().is_empty());
         let owner = &network.devices[0].handle;
         owner
@@ -768,17 +784,17 @@ mod stuck_logs {
             .unwrap();
         reader.start_sync().await.unwrap();
         network.sync(1).await;
-        let record = LogRefusal {
-            object: LogObject::Write(object.path.write_id().unwrap()),
-            failure: RefusalCode::Signature,
+        let record = PendingRecord {
+            subject: PendingSubject::Write(object.path.write_id().unwrap()),
+            reason: PendingReason::Refused(Refusal::Signature { cause: None }),
+            reported_by: network.devices[1]
+                .layout
+                .store_dir(&network.devices[1].store)
+                .settings()
+                .unwrap()
+                .device_id,
         };
-        assert_eq!(
-            received.next().await.unwrap(),
-            vec![StuckLog {
-                record,
-                reported_by: None
-            }]
-        );
+        assert_eq!(received.next().await.unwrap(), vec![record.clone()]);
         let before = network.devices[1]
             .storage
             .reads()
@@ -798,21 +814,15 @@ mod stuck_logs {
             before
         );
         network.sync(0).await;
-        let report = owner.subscribe_stuck_logs().next().await.unwrap();
+        let report = owner.subscribe_pending().next().await.unwrap();
         assert_eq!(report.len(), 1);
-        assert_eq!(report[0].record, record);
-        assert!(report[0].reported_by.is_some());
+        assert_eq!(report[0], record);
         assert!(network.rows(1).await.0.is_empty());
         owner.reset_store().await.unwrap();
         network.sync(1).await;
         network.sync(0).await;
         assert!(received.next().await.unwrap().is_empty());
-        assert!(owner
-            .subscribe_stuck_logs()
-            .next()
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(owner.subscribe_pending().next().await.unwrap().is_empty());
         network.assert_converged().await;
         network.close().await;
     }

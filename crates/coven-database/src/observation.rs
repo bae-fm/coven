@@ -41,11 +41,15 @@ impl TableRead {
 pub(crate) struct CommitState {
     pub(crate) changed: bool,
     closed: bool,
+    failure: Option<Arc<DbError>>,
 }
 
 impl CommitState {
     pub(crate) fn error(&self) -> Option<DbError> {
-        self.closed.then_some(DbError::StoreClosed)
+        self.failure
+            .as_ref()
+            .map(|e| DbError::PendingPersistence(e.clone()))
+            .or_else(|| self.closed.then_some(DbError::StoreClosed))
     }
 }
 
@@ -66,10 +70,11 @@ pub(crate) struct CommitSubscription {
 }
 
 impl CommitSubscription {
-    fn new(closed: bool) -> Self {
+    fn new(closed: bool, failure: Option<Arc<DbError>>) -> Self {
         let (state, receiver) = watch::channel(CommitState {
             changed: false,
             closed,
+            failure,
         });
         Self {
             shared: Arc::new(SubscriptionState {
@@ -81,7 +86,7 @@ impl CommitSubscription {
     }
 
     pub(crate) fn closed() -> Self {
-        Self::new(true)
+        Self::new(true, None)
     }
 
     pub(crate) fn state(&self) -> CommitState {
@@ -131,6 +136,7 @@ fn affected(reads: &ReadSet, changes: &[RowChange]) -> bool {
 struct ObserverState {
     subscriptions: Vec<Weak<SubscriptionState>>,
     closed: bool,
+    failure: Option<Arc<DbError>>,
 }
 
 impl ObserverState {
@@ -163,13 +169,14 @@ impl CommitObserver {
             state: Arc::new(Mutex::new(ObserverState {
                 subscriptions: Vec::new(),
                 closed: false,
+                failure: None,
             })),
         }
     }
 
     pub(crate) fn subscribe(&self) -> CommitSubscription {
         let mut state = self.state.lock().expect("observer lock poisoned");
-        let subscription = CommitSubscription::new(state.closed);
+        let subscription = CommitSubscription::new(state.closed, state.failure.clone());
         state
             .subscriptions
             .retain(|subscription| subscription.strong_count() != 0);
@@ -203,6 +210,29 @@ impl CommitObserver {
                 }
                 true
             });
+    }
+
+    pub(crate) fn error(&self) -> Option<DbError> {
+        self.state
+            .lock()
+            .expect("observer lock poisoned")
+            .failure
+            .as_ref()
+            .map(|error| DbError::PendingPersistence(error.clone()))
+    }
+
+    pub(crate) fn fail(&self, error: Arc<DbError>) {
+        let mut state = self.state.lock().expect("observer lock poisoned");
+        let error = state.failure.get_or_insert(error).clone();
+        state.subscriptions.retain(|subscription| {
+            let Some(subscription) = subscription.upgrade() else {
+                return false;
+            };
+            subscription
+                .state
+                .send_modify(|state| state.failure = Some(error.clone()));
+            true
+        });
     }
 
     pub(crate) fn close(&self) {

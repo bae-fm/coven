@@ -119,6 +119,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_lost",
                 "_coven_members",
                 "_coven_operations",
+                "_coven_pending",
                 "_coven_positions",
                 "_coven_reference_values",
                 "_coven_references",
@@ -129,7 +130,6 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_store_log",
                 "_coven_store_log_key_uploads",
                 "_coven_store_log_uploads",
-                "_coven_stuck_logs",
                 "_coven_uploads",
                 "_coven_user_files",
                 "_coven_versions",
@@ -155,7 +155,7 @@ async fn only_the_spec_tables_are_created() {
             .unwrap();
         assert_eq!(
             fields,
-            ["id", "kind", "last_step", "data", "started_by", "failure"]
+            ["id", "kind", "last_step", "data", "started_by"]
         );
     });
     db.close().await.unwrap();

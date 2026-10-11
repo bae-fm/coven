@@ -91,7 +91,7 @@ impl StoreLogSync {
             }
         }
         let positions = self.retention_positions(&local.log, damages).await?;
-        let mut stuck = self.database.sync_state(Vec::new()).await?.stuck;
+        let mut stuck = crate::pending_logs::local_refusals(&self.database).await?;
         for object in storage.list(&ObjectPrefix::device_logs()).await? {
             let id = object
                 .path

@@ -19,7 +19,7 @@ fn newer_key_envelopes_require_an_update_at_the_sync_boundary() {
         } else {
             assert!(matches!(
                 error,
-                SyncError::Stopped(SyncFailure::UpdateRequired)
+                SyncError::Stopped(SyncFailure::UpdateRequired(_))
             ));
         }
     }

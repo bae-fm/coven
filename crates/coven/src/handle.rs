@@ -125,9 +125,14 @@ impl CovenHandle {
         self.sync.subscribe()
     }
 
-    /// Observe stuck logs, including this device's objects named by a peer's signed report.
-    pub fn subscribe_stuck_logs(&self) -> LiveQuery<Vec<StuckLog>> {
-        self.database.subscribe_stuck_logs()
+    /// Current local conditions and authenticated peer reports, including while disconnected.
+    pub async fn pending(&self) -> CovenResult<Vec<PendingRecord>> {
+        self.database.pending().await
+    }
+
+    /// Observe the same committed pending query.
+    pub fn subscribe_pending(&self) -> LiveQuery<Vec<PendingRecord>> {
+        self.database.subscribe_pending()
     }
 
     /// This member's current restore code, for their other devices (§12.1).
@@ -190,11 +195,6 @@ impl CovenHandle {
     /// Reset the store audience from this device as an admin, then reload locally (§19.3).
     pub async fn reset_store(&self) -> Result<(), SyncError> {
         self.operations.reset_store().await
-    }
-    /// Failed app work awaiting retry or discard, also available while stopped.
-    /// Maintenance failures appear through sync status and retry on the next pass.
-    pub async fn pending_operations(&self) -> Result<Vec<PendingOperation>, OperationError> {
-        self.operations.pending_operations().await
     }
     /// Retry a permanently failed operation from its next unfinished step.
     pub async fn retry_pending_operation(

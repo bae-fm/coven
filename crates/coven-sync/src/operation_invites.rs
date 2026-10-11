@@ -188,15 +188,23 @@ impl StoreLogSync {
                     request: None,
                 };
                 let value = self.invite_value(&local, work)?;
+                let pending = self
+                    .operation_condition(
+                        record,
+                        PendingReason::Missing {
+                            path: ObjectPath::join_request(value.id),
+                        },
+                    )
+                    .await?;
                 self.database
-                    .advance_operation(data.update(record, 1)?)
+                    .advance_operation_pending(data.update(record, 1)?, pending)
                     .await?;
                 Ok(Progress::Reply(Ok(Output::Invite(value))))
             }
             InviteState::Waiting { .. } => {
                 let path = ObjectPath::join_request(work.id);
                 let Some(bytes) = self.read(&path).await? else {
-                    return Ok(Progress::Waiting);
+                    return Ok(Progress::Waiting(PendingReason::Missing { path }));
                 };
                 let request = self.open_request(work, &bytes)?;
                 let InviteState::Waiting {
@@ -206,11 +214,14 @@ impl StoreLogSync {
                     unreachable!()
                 };
                 if *current == Some(request.clone()) {
-                    return Ok(Progress::Waiting);
+                    return Ok(Progress::Waiting(PendingReason::Paused));
                 }
                 *current = Some(request);
+                let pending = self
+                    .operation_condition(record, PendingReason::Paused)
+                    .await?;
                 self.database
-                    .advance_operation(data.update(record, 1)?)
+                    .advance_operation_pending(data.update(record, 1)?, pending)
                     .await?;
                 Ok(Progress::Advanced)
             }
@@ -236,9 +247,8 @@ impl StoreLogSync {
                     _ => None,
                 };
                 work.state = InviteState::Settled;
-                self.save_access_result(record, &data, 5, key.into_iter().collect())
-                    .await?;
-                Ok(Progress::Advanced)
+                self.save_access_result(record, &data, 5, key.into_iter().collect(), None)
+                    .await
             }
             InviteState::Settled => {
                 // Provider deletes are idempotent, including an already absent request.

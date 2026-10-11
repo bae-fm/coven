@@ -68,7 +68,6 @@ pub(crate) enum Command {
         String,
         crate::StorageCommit,
     ),
-    PendingOperations,
     AccessKeysToDelete,
     Storage(Option<Arc<dyn Storage>>),
     Close,
@@ -83,7 +82,6 @@ pub(crate) enum Output {
     Circles(Vec<Circle>),
     CircleMembers(Vec<CircleMemberInfo>),
     Invite(Invite),
-    PendingOperations(Vec<PendingOperation>),
     AccessKeysToDelete(Vec<AccessKeyToDelete>),
 }
 
@@ -98,7 +96,7 @@ pub(crate) enum Begun {
     Operation(OperationId),
 }
 pub(crate) enum Progress {
-    Waiting,
+    Waiting(PendingReason),
     Advanced,
     Reply(Result<Output, SyncError>),
     Finished(Output),
@@ -211,14 +209,6 @@ impl Operations {
     /// reloads, writes and snapshots cannot interleave with another operation.
     pub async fn sync(&self) -> Result<(), SyncError> {
         self.unit(Command::SyncAll).await
-    }
-    /// Read failed app work, including while stopped. Maintenance failures go
-    /// through the sync pass and retry on its next invocation.
-    pub async fn pending_operations(&self) -> Result<Vec<PendingOperation>, SyncError> {
-        match self.call(Command::PendingOperations).await? {
-            Output::PendingOperations(operations) => Ok(operations),
-            _ => unreachable!("pending operations result"),
-        }
     }
     /// Read S3 key deletions still awaiting confirmation, including while stopped.
     pub async fn access_keys_to_delete(&self) -> Result<Vec<AccessKeyToDelete>, SyncError> {
@@ -440,7 +430,7 @@ impl OperationRun {
                             self.writes.set_storage(Some(storage));
                         }
                         let _ = reply.send(result.map(|()| Output::Unit));
-                    } else if matches!(command, Command::PendingOperations | Command::AccessKeysToDelete) {
+                    } else if matches!(command, Command::AccessKeysToDelete) {
                         query = Some((reply, command));
                     } else if matches!(command, Command::SyncAll) {
                         response = Some((reply, self.sync_pass().await.map(|()| Output::Unit)));
@@ -528,7 +518,7 @@ impl OperationRun {
         let mut maintenance_failure = None;
         loop {
             match self.sync.schedule_version_changes().await {
-                Ok(()) | Err(SyncError::Stopped(SyncFailure::UpdateRequired)) => (),
+                Ok(()) | Err(SyncError::Stopped(SyncFailure::UpdateRequired(_))) => (),
                 Err(error) => return Err(error),
             }
             let records = self
@@ -558,7 +548,9 @@ impl OperationRun {
                 .iter()
                 .any(|(data, record)| Some(record.id) == writer && data.raises_version());
             for (data, record) in records {
-                if record.failure.is_some() && !self.sync.invite_expired(&data) {
+                if !self.sync.operation_can_retry(&record).await?
+                    && !self.sync.invite_expired(&data)
+                {
                     continue;
                 }
                 if raising_first && data.is_reload() {
@@ -570,10 +562,20 @@ impl OperationRun {
                 {
                     continue;
                 }
-                let maintenance = data.app_kind(&record.started_by).is_none();
+                let maintenance = record.started_by == "coven";
                 let step = self.sync.operation_step(&record, data).await;
                 match step {
-                    Ok(Progress::Waiting) => (),
+                    Ok(Progress::Waiting(reason)) => {
+                        let pending = self
+                            .sync
+                            .record_operation_condition(&record, reason)
+                            .await?;
+                        if pending.reason.retry() != Retry::Automatic {
+                            if let Some(reply) = self.waiters.remove(&record.id) {
+                                let _ = reply.send(Err(SyncError::Pending(Box::new(pending))));
+                            }
+                        }
+                    }
                     Ok(Progress::Advanced) => advanced = true,
                     Ok(Progress::Reply(result)) => {
                         advanced = true;
@@ -587,27 +589,12 @@ impl OperationRun {
                             let _ = reply.send(Ok(value));
                         }
                     }
-                    Err(SyncError::Stopped(SyncFailure::UpdateRequired)) => {
-                        // The committed operation waits for the next app open;
-                        // an update requirement is not a permanent step failure.
-                        if let Some(reply) = self.waiters.remove(&record.id) {
-                            let _ = reply.send(Err(SyncFailure::UpdateRequired.into()));
-                        }
-                    }
-                    Err(error) if !error.blocks_operation() => {
-                        tracing::debug!(operation = record.id.0, error = %error, "operation waiting for storage or prerequisites");
-                    }
                     Err(error) => {
-                        self.sync
-                            .block_operation(record.id, error.to_string())
-                            .await?;
-                        if maintenance {
-                            tracing::warn!(operation = record.id.0, error = %error, "maintenance failed; retained for the next pass");
-                            if maintenance_failure.is_none() {
-                                maintenance_failure = Some(error);
-                            }
-                        } else if let Some(reply) = self.waiters.remove(&record.id) {
+                        self.sync.record_operation_error(&record, &error).await?;
+                        if let Some(reply) = self.waiters.remove(&record.id) {
                             let _ = reply.send(Err(error));
+                        } else if maintenance && maintenance_failure.is_none() {
+                            maintenance_failure = Some(error);
                         }
                     }
                 }

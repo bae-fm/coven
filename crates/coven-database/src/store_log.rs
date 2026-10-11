@@ -247,6 +247,7 @@ pub(crate) fn apply(
         for operation in operations {
             crate::operation::insert(database, operation)?;
         }
+        crate::pending::clear_log(database, crate::LogObject::Entry(entry.position))?;
         Ok(())
     })
 }

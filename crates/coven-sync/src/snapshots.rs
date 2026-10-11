@@ -165,6 +165,15 @@ impl StoreLogSync {
         &self,
         job: SnapshotJob,
     ) -> Result<OperationRecord, SyncError> {
+        for record in self.database.operations().await? {
+            if record.started_by == "coven" {
+                if let Data::Snapshots(task) = Data::read(&record)? {
+                    if task.job.same_work(&job) {
+                        return Ok(record);
+                    }
+                }
+            }
+        }
         let data = Data::Snapshots(SnapshotTask {
             job,
             temporary: Vec::new(),
@@ -178,13 +187,12 @@ impl StoreLogSync {
 
     pub(super) async fn resume_snapshots(&mut self) -> Result<Vec<DamagedObject>, SyncError> {
         let _reads = self.reads.enter();
-        self.retry_maintenance().await?;
         let mut damages = Vec::new();
         loop {
             let mut work = Vec::new();
             for record in self.database.operations().await? {
                 if let Data::Snapshots(task) = Data::read(&record)? {
-                    if record.failure.is_none()
+                    if self.operation_can_retry(&record).await?
                         && !matches!(
                             task.job,
                             SnapshotJob::Write {
@@ -267,24 +275,31 @@ impl StoreLogSync {
     ) -> Result<bool, SyncError> {
         loop {
             let record = self.snapshot_record(id).await?;
+            if !self.operation_can_retry(&record).await? {
+                let pending = self
+                    .database
+                    .operation_pending::<crate::PendingRecord>(id)
+                    .await?
+                    .ok_or(coven_database::DbError::DamagedDatabase)?;
+                return Err(SyncError::Pending(Box::new(pending)));
+            }
             let data = Data::read(&record)?;
-            let maintenance = data.app_kind(&record.started_by).is_none();
             let Data::Snapshots(task) = data else {
                 return Err(coven_database::DbError::DamagedDatabase.into());
             };
             let progress = match self.snapshot_step(&record, task, damages).await {
                 Ok(progress) => progress,
                 Err(error) => {
-                    // The operation worker records app failures and replies to their callers.
-                    if maintenance && error.blocks_operation() {
-                        self.block_operation(record.id, error.to_string()).await?;
-                    }
+                    self.record_operation_error(&record, &error).await?;
                     return Err(error);
                 }
             };
             match progress {
                 Progress::Finished(_) => return Ok(true),
-                Progress::Waiting => return Ok(false),
+                Progress::Waiting(reason) => {
+                    self.record_operation_condition(&record, reason).await?;
+                    return Ok(false);
+                }
                 Progress::Advanced => (),
                 _ => unreachable!("snapshot steps complete or return a typed failure"),
             }
@@ -429,7 +444,8 @@ impl StoreLogSync {
             ),
             None => (WritePositions(Vec::new()), 1024 * 1024),
         };
-        let mut state = self.database.sync_state(Vec::new()).await?;
+        let state = self.database.sync_state(Vec::new()).await?;
+        let mut stuck = crate::pending_logs::local_refusals(&self.database).await?;
         let waiting = self.database.waiting_snapshot_headers().await?;
         let waiting_ids: std::collections::BTreeSet<_> =
             waiting.iter().map(|h| h.header.position).collect();
@@ -454,8 +470,7 @@ impl StoreLogSync {
             if positions.covers(write)
                 || !state.positions.covers(write)
                 || waiting_ids.contains(&write)
-                || state
-                    .stuck
+                || stuck
                     .iter()
                     .any(|record| record.blocks(coven_database::LogObject::Write(write)))
             {
@@ -464,7 +479,7 @@ impl StoreLogSync {
             let header = match self.open_write_header(&object).await {
                 Ok(header) => header,
                 Err(SyncError::Damaged(damage)) => {
-                    state.stuck.push(coven_database::LogRefusal {
+                    stuck.push(coven_database::LogRefusal {
                         object: coven_database::LogObject::Write(write),
                         failure: (&damage.failure).into(),
                     });

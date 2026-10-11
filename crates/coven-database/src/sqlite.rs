@@ -34,6 +34,7 @@ pub(crate) struct DatabaseConnection {
     authorization: SqlAuthorization,
     observation: Option<WriterObservation>,
     streaming: std::cell::Cell<bool>,
+    pending_changed: std::cell::Cell<bool>,
     #[cfg(any(test, feature = "test-utils"))]
     write_checkpoint: std::cell::RefCell<Option<crate::test_utils::WriteCheckpointObserver>>,
     #[cfg(test)]
@@ -43,6 +44,7 @@ pub(crate) struct DatabaseConnection {
 }
 
 struct WriterObservation {
+    device: DeviceId,
     observer: CommitObserver,
     supplemental: Arc<BTreeMap<String, Option<String>>>,
 }
@@ -119,6 +121,7 @@ impl DatabaseConnection {
             authorization,
             observation: None,
             streaming: std::cell::Cell::new(false),
+            pending_changed: std::cell::Cell::new(false),
             #[cfg(any(test, feature = "test-utils"))]
             write_checkpoint: std::cell::RefCell::new(None),
             #[cfg(test)]
@@ -386,9 +389,45 @@ impl DatabaseConnection {
         })
     }
 
+    pub(crate) fn pending_transaction<T>(
+        &self,
+        run: impl FnOnce(&Self) -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
+        self.transaction(run)
+            .map_err(|error| self.pending_failure(error))
+    }
+
+    pub(crate) fn pending_device(&self) -> Option<DeviceId> {
+        self.observation.as_ref().map(|o| o.device)
+    }
+
+    pub(crate) fn pending_change<T>(
+        &self,
+        run: impl FnOnce() -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
+        self.pending_changed.set(true);
+        run().map_err(|error| self.pending_failure(error))
+    }
+
+    fn pending_failure(&self, error: DbError) -> DbError {
+        if matches!(error, DbError::PendingPersistence(_)) {
+            return error;
+        }
+        let error = Arc::new(error);
+        if let Some(observation) = &self.observation {
+            observation.observer.fail(error.clone());
+        }
+        DbError::PendingPersistence(error)
+    }
+
     pub(crate) fn batch(&self, sql: &str) -> Result<(), DbError> {
         let _scope = self.authorization.internal();
-        self.connection.execute_batch(sql).map_err(Into::into)
+        let result = self.connection.execute_batch(sql).map_err(DbError::from);
+        if sql == "COMMIT" && self.pending_changed.get() {
+            result.map_err(|error| self.pending_failure(error))
+        } else {
+            result
+        }
     }
 
     pub(crate) fn columns_read(&self, sql: &str) -> Result<Vec<String>, DbError> {
@@ -618,12 +657,17 @@ impl DatabaseConnection {
         self.authorization.app_result(result)
     }
 
-    pub(crate) fn observe_commits(&mut self, observer: CommitObserver) -> Result<(), DbError> {
+    pub(crate) fn observe_commits(
+        &mut self,
+        observer: CommitObserver,
+        device: DeviceId,
+    ) -> Result<(), DbError> {
         assert!(
             self.observation.is_none(),
             "commit observation installed once"
         );
         self.observation = Some(WriterObservation {
+            device,
             observer,
             supplemental: Arc::new(crate::change_capture::supplemental_tables(self)?),
         });
@@ -742,6 +786,7 @@ impl DatabaseConnection {
         streaming: bool,
         run: impl FnOnce(&Self) -> Result<T, E>,
     ) -> Result<T, E> {
+        self.pending_changed.set(false);
         self.batch("BEGIN IMMEDIATE")?;
         self.streaming.set(streaming);
         let mut guard = SqlTransaction {
@@ -764,12 +809,19 @@ impl DatabaseConnection {
             let result = run(self)?;
             self.require_transaction()?;
             let changes = match &mut capture {
-                Some(capture) => capture.take_changes()?,
+                Some(capture) => capture.take_changes(),
                 None => match &tables {
-                    Some(tables) => tables.changes()?,
-                    None => Vec::new(),
+                    Some(tables) => tables.changes(),
+                    None => Ok(Vec::new()),
                 },
-            };
+            }
+            .map_err(|error| {
+                if self.pending_changed.get() {
+                    self.pending_failure(error)
+                } else {
+                    error
+                }
+            })?;
             self.batch("COMMIT")?;
             #[cfg(any(test, feature = "test-utils"))]
             self.checkpoint(crate::test_utils::WriteCheckpoint::Committed);

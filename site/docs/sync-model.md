@@ -395,9 +395,10 @@ Once any provider operation succeeds, a later failed pass reports `Failed`.
 The receiver immediately contains the current value and survives starts and
 stops. Intermediate values may be coalesced. `Failed` preserves the typed cause
 of a whole-pass failure; `Synced` carries only the pass's completion time. Live
-queries notify the app when rows change. Waiting writes, damaged objects,
-fingerprint disagreements and device progress remain internal. The handle's
-`pending_operations()` and `access_keys_to_delete()` calls expose failures and
-revocation actions that need attention. Removal, a location taken by another store,
+queries notify the app when rows change. The handle's `pending()` and
+`subscribe_pending()` expose the same persisted typed conditions, keyed by
+subject and reporting device, including while disconnected. A new reason replaces
+that reporter's previous reason; committed progress clears its condition.
+`access_keys_to_delete()` lists provider-console revocation actions. Removal, a location taken by another store,
 or a required update stops further passes; other pass failures retry on the idle
 interval or an explicit request.

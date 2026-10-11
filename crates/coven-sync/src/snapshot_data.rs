@@ -60,7 +60,7 @@ pub(crate) struct SavedWrite {
 
 pub(crate) mod audience {
     use super::*;
-    pub(super) fn serialize<S: serde::Serializer>(
+    pub(crate) fn serialize<S: serde::Serializer>(
         value: &Audience,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
@@ -69,7 +69,7 @@ pub(crate) mod audience {
             Audience::Circle(id) => serializer.serialize_str(&id.to_string()),
         }
     }
-    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+    pub(crate) fn deserialize<'de, D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Audience, D::Error> {
         let value = String::deserialize(deserializer)?;
@@ -87,7 +87,7 @@ mod audiences {
     use super::*;
     #[derive(Serialize, Deserialize)]
     struct Item(#[serde(with = "audience")] Audience);
-    pub(super) fn serialize<S: serde::Serializer>(
+    pub(crate) fn serialize<S: serde::Serializer>(
         values: &[Audience],
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
@@ -98,7 +98,7 @@ mod audiences {
             .collect::<Vec<_>>()
             .serialize(serializer)
     }
-    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+    pub(crate) fn deserialize<'de, D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Vec<Audience>, D::Error> {
         Ok(Vec::<Item>::deserialize(deserializer)?
@@ -143,5 +143,43 @@ pub(crate) mod snapshot_id {
         ObjectPath::deserialize(deserializer)?
             .snapshot_id()
             .ok_or_else(|| serde::de::Error::custom("not a snapshot path"))
+    }
+}
+
+impl SnapshotJob {
+    pub(crate) fn same_work(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Write {
+                    audience: a,
+                    trigger: ta,
+                    ..
+                },
+                Self::Write {
+                    audience: b,
+                    trigger: tb,
+                    ..
+                },
+            ) => {
+                a == b
+                    && match (ta, tb) {
+                        (
+                            SnapshotTrigger::Raise { version: a, .. },
+                            SnapshotTrigger::Raise { version: b, .. },
+                        ) => a == b,
+                        (SnapshotTrigger::Growth, SnapshotTrigger::Growth)
+                        | (SnapshotTrigger::Requested, SnapshotTrigger::Requested)
+                        | (SnapshotTrigger::Reset, SnapshotTrigger::Reset) => true,
+                        _ => false,
+                    }
+            }
+            (Self::Reload { scope: a, .. }, Self::Reload { scope: b, .. }) => match (a, b) {
+                (ReloadScope::All, ReloadScope::All) => true,
+                (ReloadScope::Changed(a), ReloadScope::Changed(b)) => a == b,
+                _ => false,
+            },
+            (Self::Retain, Self::Retain) => true,
+            _ => false,
+        }
     }
 }

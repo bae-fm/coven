@@ -85,14 +85,19 @@ pub(crate) fn check_member(
 }
 
 pub(crate) fn check_upload_version(log: &StoreLog, schema: u32) -> Result<(), SyncError> {
-    if log
+    if let Some(version) = log
         .replay
         .state
         .schema
         .get(&Audience::Store)
-        .is_some_and(|v| v.number > schema)
+        .filter(|v| v.number > schema)
     {
-        return Err(SyncFailure::UpdateRequired.into());
+        return Err(
+            SyncFailure::UpdateRequired(crate::RequiredUpdate::AppSchema {
+                version: version.number,
+            })
+            .into(),
+        );
     }
     Ok(())
 }

@@ -7,6 +7,23 @@ use crate::{
 };
 use coven_storage::MemberRemoval;
 
+async fn pending(operations: &Operations, db: &coven_database::Database) -> Vec<PendingRecord> {
+    operations.get_members().await.unwrap();
+    db.pending().await.unwrap()
+}
+fn pending_id(record: &PendingRecord) -> OperationId {
+    let PendingSubject::Operation { id, .. } = record.subject else {
+        panic!("{record:?}")
+    };
+    id
+}
+fn pending_kind(record: &PendingRecord) -> OperationKind {
+    let PendingSubject::Operation { kind, .. } = record.subject else {
+        panic!("{record:?}")
+    };
+    kind
+}
+
 fn file_owner(d: &Device) -> Files {
     Files::new(
         coven_database::FileDatabase::new(d.db.clone()),
@@ -107,7 +124,7 @@ async fn finish(d: &mut Device, id: OperationId) -> Output {
             Progress::Finished(value) | Progress::Reply(Ok(value)) => return value,
             Progress::Reply(Err(error)) => panic!("operation call failed: {error}"),
             Progress::Advanced => (),
-            Progress::Waiting => panic!("unexpected wait"),
+            Progress::Waiting(_) => panic!("unexpected wait"),
         }
     }
 }
@@ -207,10 +224,10 @@ async fn another_admin_cannot_share_and_owner_applies_their_revocation() {
     let recipient = MemoryStorage::for_recipient(&storage, "cat@example.com").unwrap();
     assert!(recipient.list(&ObjectPrefix::store_logs()).await.is_ok());
     a.sync().await;
-    let pending = a.db.operations().await.unwrap();
-    assert_eq!(pending.len(), 1);
+    let records = a.db.operations().await.unwrap();
+    assert_eq!(records.len(), 1);
     assert!(matches!(
-        finish(&mut a, pending[0].id).await,
+        finish(&mut a, records[0].id).await,
         Output::Removal(MemberRemoval::Revoked)
     ));
     assert!(
@@ -323,17 +340,23 @@ async fn cancelled_app_future_keeps_running_and_permanent_failure_retries_or_dis
     // Invalid names fail during format validation, after their intent is durable.
     assert!(matches!(
         operations.create_circle("").await,
-        Err(SyncError::Database(_))
+        Err(SyncError::Failed {
+            failure: LocalFailure::Database,
+            ..
+        })
     ));
-    let pending = operations.pending_operations().await.unwrap();
-    assert_eq!(pending.len(), 1);
-    let pending = pending[0].id;
+    let conditions = pending(&operations, &d.db).await;
+    assert_eq!(conditions.len(), 1);
+    let id = pending_id(&conditions[0]);
     assert!(matches!(
-        operations.retry_pending_operation(pending).await,
-        Err(SyncError::Database(_))
+        operations.retry_pending_operation(id).await,
+        Err(SyncError::Failed {
+            failure: LocalFailure::Database,
+            ..
+        })
     ));
-    operations.discard_pending_operation(pending).await.unwrap();
-    assert!(operations.pending_operations().await.unwrap().is_empty());
+    operations.discard_pending_operation(id).await.unwrap();
+    assert!(pending(&operations, &d.db).await.is_empty());
     operations.close().await.unwrap();
 }
 
@@ -470,18 +493,24 @@ async fn permanent_storage_failure_preserves_fixed_bytes_for_retry_and_discard()
         ));
         let files = file_owner(&a);
         let operations = { operation_owner(a.sync, files) };
-        let pending = operations.pending_operations().await.unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].id, id);
-        assert_eq!(pending[0].kind, OperationKind::CreateCircle);
-        assert!(!pending[0].failure.is_empty());
+        let conditions = pending(&operations, &a.db).await;
+        assert_eq!(conditions.len(), 1);
+        assert_eq!(pending_id(&conditions[0]), id);
+        assert_eq!(pending_kind(&conditions[0]), OperationKind::CreateCircle);
+        assert!(matches!(
+            conditions[0].reason,
+            PendingReason::Storage {
+                failure: StorageFailure::PermissionDenied,
+                ..
+            }
+        ));
         assert!(matches!(
             storage.read(&object::path(fixed.entry.position)).await,
             Err(error) if error.failure() == StorageFailure::NotFound
         ));
         operations.set_storage(Some(storage.clone())).await.unwrap();
         operations.sync_store_log().await.unwrap();
-        assert_eq!(operations.pending_operations().await.unwrap().len(), 1);
+        assert_eq!(pending(&operations, &a.db).await.len(), 1);
         assert!(a.db.local_store_log().await.unwrap().upload.is_some());
         if discard {
             operations.discard_pending_operation(id).await.unwrap();
@@ -531,17 +560,17 @@ async fn retained_provider_grants_block_both_requested_and_remote_revocations() 
                 }
             );
         }
-        let pending = operations.pending_operations().await.unwrap();
-        assert_eq!(pending.len(), 1);
+        let conditions = pending(&operations, &a.db).await;
+        assert_eq!(conditions.len(), 1);
         assert_eq!(
-            pending[0].kind,
+            pending_kind(&conditions[0]),
             if remote {
                 OperationKind::RevokeAccess
             } else {
                 OperationKind::RemoveMember
             }
         );
-        let id = pending[0].id;
+        let id = pending_id(&conditions[0]);
         assert!(
             matches!(operations.retry_pending_operation(id).await, Err(SyncError::AccessRemains(found)) if found == shares)
         );
@@ -554,7 +583,7 @@ async fn retained_provider_grants_block_both_requested_and_remote_revocations() 
             .set_retained_access("cat@example.com", Vec::new())
             .await;
         operations.retry_pending_operation(id).await.unwrap();
-        assert!(operations.pending_operations().await.unwrap().is_empty());
+        assert!(pending(&operations, &a.db).await.is_empty());
         assert!(
             matches!(MemoryStorage::for_recipient(&storage, "cat@example.com")
             .unwrap()
@@ -766,225 +795,5 @@ async fn store_reset_requires_admin_and_circle_reset_requires_membership() {
     }
 }
 
-#[tokio::test]
-async fn maintenance_failures_are_hidden_and_retry_on_the_next_pass() {
-    for job in [
-        SnapshotJob::Write {
-            audience: Audience::Store,
-            device: DeviceId(1),
-            trigger: SnapshotTrigger::Requested,
-            session: None,
-        },
-        SnapshotJob::Reload {
-            scope: ReloadScope::All,
-            files: None,
-        },
-        SnapshotJob::Retain,
-    ] {
-        let storage = Arc::new(
-            MemoryStorage::builder()
-                .provider(coven_storage::CloudProvider::GoogleDrive)
-                .transfer_limits(65536, 65536)
-                .build()
-                .unwrap(),
-        );
-        let [mut a, _b, _c] = accounts(storage.clone()).await;
-        let id =
-            a.db.start_operation(
-                Data::Snapshots(SnapshotTask {
-                    job,
-                    temporary: Vec::new(),
-                })
-                .new_operation("coven")
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-        a.sync.storage = Some(Arc::new(
-            MemoryStorage::for_recipient(&storage, "uninvited@example.com").unwrap(),
-        ));
-        let files = file_owner(&a);
-        let operations = operation_owner(a.sync, files);
-        assert!(operations.pending_operations().await.unwrap().is_empty());
-        let failed = a.db.operations().await.unwrap().remove(0);
-        assert_eq!(failed.id, id);
-        assert!(failed.failure.is_some());
-        assert!(
-            matches!(operations.retry_pending_operation(id).await, Err(SyncError::NotPending(found)) if found == id)
-        );
-        assert!(
-            matches!(operations.discard_pending_operation(id).await, Err(SyncError::NotPending(found)) if found == id)
-        );
-        let error = operations.sync().await.unwrap_err();
-        assert!(
-            matches!(&error, SyncError::Stopped(SyncFailure::Storage(error)) if error.failure() == StorageFailure::PermissionDenied),
-            "{error:?}"
-        );
-        operations.set_storage(Some(storage)).await.unwrap();
-        assert!(a.db.operations().await.unwrap()[0].failure.is_some());
-        operations.sync().await.unwrap();
-        assert!(!a.db.operations().await.unwrap().iter().any(|r| r.id == id));
-        operations.close().await.unwrap();
-    }
-}
-
-#[tokio::test]
-async fn app_reload_and_reset_stay_pending_until_explicit_retry() {
-    for (command, kind) in [
-        (Command::Reload, OperationKind::ReloadFromSnapshot),
-        (Command::Reset(Audience::Store), OperationKind::Reset),
-    ] {
-        let storage = Arc::new(
-            MemoryStorage::builder()
-                .provider(coven_storage::CloudProvider::GoogleDrive)
-                .transfer_limits(65536, 65536)
-                .build()
-                .unwrap(),
-        );
-        let [mut a, _b, _c] = accounts(storage.clone()).await;
-        let id = begin(&mut a, command).await;
-        a.sync.storage = Some(Arc::new(
-            MemoryStorage::for_recipient(&storage, "uninvited@example.com").unwrap(),
-        ));
-        let files = file_owner(&a);
-        let operations = operation_owner(a.sync, files);
-        let pending = operations.pending_operations().await.unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].id, id);
-        assert_eq!(pending[0].kind, kind);
-        assert!(!pending[0].failure.is_empty());
-        operations.set_storage(Some(storage.clone())).await.unwrap();
-        if kind == OperationKind::ReloadFromSnapshot {
-            assert!(
-                matches!(operations.sync().await, Err(SyncError::ReloadPending(found)) if found == id)
-            );
-        } else {
-            operations.sync().await.unwrap();
-        }
-        assert_eq!(operations.pending_operations().await.unwrap(), pending);
-        operations.close().await.unwrap();
-        a.sync = StoreLogSync::new(
-            storage.clone(),
-            a.db.clone(),
-            a.custody.clone(),
-            a.identity.clone(),
-            a.clock.clone(),
-            Arc::new(coven_foundation::id_source::UuidIds),
-            a.directory.clone(),
-        );
-        let files = file_owner(&a);
-        let operations = operation_owner(a.sync, files);
-        assert_eq!(operations.pending_operations().await.unwrap(), pending);
-        operations.retry_pending_operation(id).await.unwrap();
-        assert!(operations.pending_operations().await.unwrap().is_empty());
-        operations.close().await.unwrap();
-    }
-}
-
-#[tokio::test]
-async fn migration_and_audience_publication_share_the_schema_change_purpose() {
-    let storage = storage();
-    let mut a = device(storage, 1, member(1), store(1)).await;
-    a.create(key(1)).await;
-    for operation in [
-        StoreLogSync::migration_operation(2).unwrap(),
-        Data::Snapshots(SnapshotTask {
-            job: SnapshotJob::Write {
-                audience: Audience::Store,
-                device: a.device().await,
-                trigger: SnapshotTrigger::Raise {
-                    version: 2,
-                    entry: None,
-                },
-                session: None,
-            },
-            temporary: Vec::new(),
-        })
-        .new_operation("coven")
-        .unwrap(),
-    ] {
-        let id = a.db.start_operation(operation).await.unwrap();
-        a.db.operation_failure(id, Some("publication refused".into()))
-            .await
-            .unwrap();
-        assert_eq!(
-            a.sync.pending_operations().await.unwrap(),
-            [PendingOperation {
-                id,
-                kind: OperationKind::SchemaChange,
-                failure: "publication refused".into(),
-            }]
-        );
-        a.sync
-            .begin_operation_call(Command::Discard(id))
-            .await
-            .unwrap();
-    }
-}
-
-#[tokio::test]
-async fn a_reload_failure_during_sync_reaches_its_waiting_app_call() {
-    let storage = storage();
-    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
-    a.create(key(1)).await;
-    let (sleeps, mut sleeping) = tokio::sync::watch::channel(0);
-    a.sync.clock = Arc::new(invites::RetryClock {
-        time: a.clock.clone(),
-        sleeps,
-    });
-    let files = file_owner(&a);
-    let operations = operation_owner(a.sync, files);
-    // Consume the initial retry before reconnecting storage; only the sync call
-    // below may encounter the missing snapshot.
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        sleeping.wait_for(|count| *count == 2),
-    )
-    .await
-    .expect("operation worker did not schedule its injected retry")
-    .unwrap();
-    operations.reset_store().await.unwrap();
-    let snapshot = storage
-        .list(&ObjectPrefix::snapshots())
-        .await
-        .unwrap()
-        .remove(0)
-        .path;
-    storage.set_online(false);
-    let mut waiting = Box::pin(operations.reload_from_snapshot());
-    std::future::poll_fn(|cx| {
-        use std::future::Future;
-        assert!(waiting.as_mut().poll(cx).is_pending());
-        std::task::Poll::Ready(())
-    })
-    .await;
-    operations.get_members().await.unwrap();
-    let retained = a.db.operations().await.unwrap();
-    assert_eq!(retained.len(), 1);
-    assert!(retained[0].failure.is_none());
-    storage.set_online(true);
-    storage.delete(&snapshot).await.unwrap();
-    let error = operations.sync().await.unwrap_err();
-    assert!(
-        matches!(&error, SyncError::Stopped(SyncFailure::Storage(error)) if error.failure() == StorageFailure::NotFound),
-        "{error:?}"
-    );
-    std::future::poll_fn(|cx| {
-        use std::future::Future;
-        assert!(
-            matches!(
-                waiting.as_mut().poll(cx),
-                std::task::Poll::Ready(Err(SyncError::Storage(error)))
-                    if error.failure() == StorageFailure::NotFound
-            ),
-            "the waiting reload call must receive its failure"
-        );
-        std::task::Poll::Ready(())
-    })
-    .await;
-    let pending = operations.pending_operations().await.unwrap();
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].id, retained[0].id);
-    assert_eq!(pending[0].kind, OperationKind::ReloadFromSnapshot);
-    operations.close().await.unwrap();
-}
+#[path = "operation_pending_tests.rs"]
+mod pending_records;

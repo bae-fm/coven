@@ -148,6 +148,17 @@ fn with_connection<R>(
 }
 
 impl DatabaseInner {
+    fn call<R, E: From<DbError>>(&self, run: impl FnOnce(&Self) -> Result<R, E>) -> Result<R, E> {
+        if let Some(error) = self.observer.error() {
+            return Err(error.into());
+        }
+        let result = run(self);
+        if let Some(error) = self.observer.error() {
+            return Err(error.into());
+        }
+        result
+    }
+
     // The caller retains its file-task lease until these names are released.
     // Their durable removal records remain for the next write or open.
     fn release_file_reservations<'a>(
@@ -160,8 +171,16 @@ impl DatabaseInner {
         }
     }
 
-    fn with_writer<R>(&self, run: impl FnOnce(&DatabaseConnection) -> R) -> R {
-        with_connection(&self.access.writer, run)
+    fn with_writer<R, E: From<DbError>>(
+        &self,
+        run: impl FnOnce(&DatabaseConnection) -> Result<R, E>,
+    ) -> Result<R, E> {
+        with_connection(&self.access.writer, |writer| {
+            if let Some(error) = self.observer.error() {
+                return Err(error.into());
+            }
+            run(writer)
+        })
     }
 
     fn with_files<R, E: crate::WriteFailure>(
@@ -208,7 +227,12 @@ impl Database {
         R: Send + 'static,
         E: From<DbError> + Send + 'static,
     {
-        finish_blocking(start_call(self.inner.clone(), run).await)
+        finish_blocking(
+            start_call(self.inner.clone(), move |inner: &DatabaseInner| {
+                inner.call(run)
+            })
+            .await,
+        )
     }
     /// Observe committed changes to the outgoing write queue. Register before
     /// the first sync to include writes committed while a pass is running.
@@ -240,6 +264,9 @@ impl Database {
             tokio::task::spawn_blocking(move || {
                 let mut slot = database.write().expect("database lock poisoned");
                 let inner = slot.as_mut().ok_or(DbError::StoreClosed)?;
+                if let Some(error) = inner.observer.error() {
+                    return Err(error);
+                }
                 if let Some(recovery) = &inner.recovery {
                     inner.with_writer(|writer| {
                         crate::file_removals::FileRemovals::new(
@@ -342,13 +369,15 @@ impl Database {
                     let database = database.upgrade().ok_or(DbError::StoreClosed)?;
                     finish_blocking(
                         start_call(database, move |inner| {
-                            let (result, reads) = inner
-                                .access
-                                .readers
-                                .acquire_reader()
-                                .read_snapshot(move |sql| query(&request, sql));
-                            completion.finish(reads);
-                            result
+                            inner.call(|inner| {
+                                let (result, reads) = inner
+                                    .access
+                                    .readers
+                                    .acquire_reader()
+                                    .read_snapshot(move |sql| query(&request, sql));
+                                completion.finish(reads);
+                                result
+                            })
                         })
                         .await,
                     )
@@ -393,7 +422,9 @@ impl Database {
         F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static,
     {
-        start_call(self.inner.clone(), move |inner| inner.access.read(read))
+        start_call(self.inner.clone(), move |inner| {
+            inner.call(|inner| inner.access.read(read))
+        })
     }
 
     /// Run app SQL and commit its unsigned write record and merge metadata in
@@ -436,11 +467,11 @@ impl Database {
     /// The migrations this open committed, classified individually.
     pub fn applied_migrations(&self) -> Result<Vec<MigrationOutcome>, DbError> {
         let inner = self.inner.read().expect("database lock poisoned");
-        Ok(inner
-            .as_ref()
-            .ok_or(DbError::StoreClosed)?
-            .migrations
-            .clone())
+        let inner = inner.as_ref().ok_or(DbError::StoreClosed)?;
+        if let Some(error) = inner.observer.error() {
+            return Err(error);
+        }
+        Ok(inner.migrations.clone())
     }
 
     /// Wait for database calls, close all connections, then release the writer lock.

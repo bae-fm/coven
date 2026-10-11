@@ -124,11 +124,11 @@ async fn rename_holds_uploads_then_converts_or_loses_offline_edits_everywhere() 
             assert_eq!(log.replay.state.schema[&Audience::Store].number, 2);
             assert!(matches!(
                 devices[1].sync.sync_store_log().await,
-                Err(SyncFailure::UpdateRequired)
+                Err(SyncFailure::UpdateRequired(_))
             ));
             assert!(matches!(
                 devices[1].writes.upload_writes().await,
-                Err(SyncError::Stopped(SyncFailure::UpdateRequired))
+                Err(SyncError::Stopped(SyncFailure::UpdateRequired(_)))
             ));
             for device in devices.iter_mut().skip(1) {
                 update(device, storage.clone(), true, convert).await;
@@ -190,7 +190,7 @@ async fn an_old_write_uploaded_without_being_read_by_the_change_is_lost_everywhe
         for device in devices.iter_mut().skip(1) {
             assert!(matches!(
                 device.sync.sync_store_log().await,
-                Err(SyncFailure::UpdateRequired)
+                Err(SyncFailure::UpdateRequired(_))
             ));
             update(device, storage.clone(), true, true).await;
         }
@@ -237,7 +237,7 @@ async fn concurrent_raises_choose_the_earlier_timestamp_even_when_it_arrives_las
     devices[1].writes.upload_writes().await.unwrap();
     assert!(matches!(
         devices[2].sync.sync_store_log().await,
-        Err(SyncFailure::UpdateRequired)
+        Err(SyncFailure::UpdateRequired(_))
     ));
     update(&mut devices[2], storage.clone(), true, true).await;
     sync_all(&mut devices).await;
@@ -301,7 +301,7 @@ async fn a_raise_resumes_after_reopening_at_every_publication_step() {
         assert!(device.db.operations().await.unwrap().is_empty());
         assert!(matches!(
             devices[1].sync.sync_store_log().await,
-            Err(SyncFailure::UpdateRequired)
+            Err(SyncFailure::UpdateRequired(_))
         ));
         update(&mut devices[1], storage.clone(), true, true).await;
         sync_all(&mut devices).await;
@@ -406,7 +406,7 @@ async fn a_circle_is_raised_by_its_first_updating_member_after_the_store() {
         if index != 2 {
             assert!(matches!(
                 devices[index].sync.sync_store_log().await,
-                Err(SyncFailure::UpdateRequired)
+                Err(SyncFailure::UpdateRequired(_))
             ));
         }
         reopen(&mut devices[index], storage.clone(),
@@ -610,7 +610,7 @@ async fn reference_checks_do_not_reject_writes_from_before_a_table_rename() {
 use crate::operation_data::Data;
 
 #[tokio::test]
-async fn a_newer_snapshot_format_requires_an_update_and_can_resume_after_replacement() {
+async fn a_newer_snapshot_format_stays_pending_until_the_required_update() {
     let storage = storage();
     let mut devices = group(storage.clone(), 2).await;
     seed(&mut devices).await;
@@ -627,13 +627,25 @@ async fn a_newer_snapshot_format_requires_an_update_and_can_resume_after_replace
     storage.create(&path, &future).await.unwrap();
     assert!(matches!(
         devices[1].sync.reload_from_snapshots().await,
-        Err(SyncError::Stopped(SyncFailure::UpdateRequired))
+        Err(SyncError::Stopped(SyncFailure::UpdateRequired(_)))
     ));
     storage.delete(&path).await.unwrap();
     storage.create(&path, &original).await.unwrap();
     devices[1].sync.sync_store_log().await.unwrap();
     assert_eq!(rows(&devices[0].db).await, rows(&devices[1].db).await);
-    assert!(devices[1].db.operations().await.unwrap().is_empty());
+    let pending = devices[1]
+        .db
+        .pending::<crate::PendingRecord>()
+        .await
+        .unwrap();
+    assert!(matches!(
+        pending.as_slice(),
+        [crate::PendingRecord {
+            reason: crate::PendingReason::UpdateRequired(crate::RequiredUpdate::CovenFormat { .. }),
+            ..
+        }]
+    ));
+    assert_eq!(devices[1].db.operations().await.unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -712,7 +724,12 @@ async fn a_migration_waits_for_an_operation_that_already_reserved_the_entry_numb
             device.clock.clone(),
         );
         operations.get_members().await.unwrap();
-        assert!(operations.pending_operations().await.unwrap().is_empty());
+        assert!(device
+            .db
+            .pending::<crate::PendingRecord>()
+            .await
+            .unwrap()
+            .is_empty());
         assert_eq!(operations.circles().await.unwrap()[0].name, "waiting");
         assert_eq!(
             device.db.store_log().await.unwrap().replay.state.schema[&Audience::Store].number,

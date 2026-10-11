@@ -4,37 +4,112 @@ use super::Database;
 use crate::{CovenResult, DbError};
 
 impl Database {
-    /// Current local judgments and signed peer reports, including while disconnected.
-    pub async fn stuck_logs(&self) -> CovenResult<Vec<crate::StuckLog>> {
-        self.read(|sql| sql.stuck_logs()).await
+    /// Current pending records, decoded as the sync owner's typed values.
+    pub async fn pending<P: crate::PendingValue>(&self) -> CovenResult<Vec<P>> {
+        self.read(|sql| sql.pending()).await
     }
 
-    /// Observe committed changes to stopped logs and the peers reporting our objects.
-    pub fn subscribe_stuck_logs(&self) -> crate::LiveQuery<Vec<crate::StuckLog>> {
-        self.subscribe(|sql| sql.stuck_logs())
+    /// The same pre-built pending query, observing committed changes.
+    pub fn subscribe_pending<P: crate::PendingValue>(&self) -> crate::LiveQuery<Vec<P>> {
+        self.subscribe(|sql| sql.pending())
     }
 
-    /// Record the first permanent refusal of a log, with this version and the injected clock.
-    pub async fn record_stuck_log(&self, record: crate::LogRefusal) -> Result<(), DbError> {
-        self.call(move |inner| {
-            inner.with_writer(|writer| crate::stuck::record(writer, record, inner.clock.now()))
-        })
-        .await
-    }
-
-    /// Replace reports from the completed signed-positions scan atomically. These do
-    /// not stop local downloads and are never republished as this device's judgments.
-    pub async fn replace_stuck_reports(
-        &self,
-        reports: Vec<(coven_foundation::id_source::DeviceId, crate::LogRefusal)>,
-    ) -> Result<(), DbError> {
+    /// Record one local first unmet condition, replacing its previous reason.
+    pub async fn record_pending<P: crate::PendingValue>(&self, record: P) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.with_writer(|writer| {
-                crate::stuck::peer_reports(writer, inner.access.device, reports)
+                if record.reported_by() != inner.access.device {
+                    return Err(DbError::DamagedDatabase);
+                }
+                if let Some(id) = record.operation() {
+                    if crate::operation::find(writer, id)?.is_none() {
+                        return Err(DbError::OperationChanged(id));
+                    }
+                }
+                writer.pending_transaction(|db| crate::pending::save(db, &record))
             })
         })
         .await
     }
+
+    /// Clear this device's observation when its subject advances.
+    pub async fn clear_pending<S: serde::Serialize + Send + 'static>(
+        &self,
+        subject: S,
+    ) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.with_writer(|writer| {
+                writer.pending_transaction(|db| {
+                    crate::pending::clear(db, &subject, inner.access.device)
+                })
+            })
+        })
+        .await
+    }
+
+    /// Replace a completed authenticated peer scan atomically, preserving local records.
+    /// The sync owner selects reports relevant to this installation before calling.
+    pub async fn replace_pending_reports<P: crate::PendingValue>(
+        &self,
+        reports: Vec<P>,
+    ) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.with_writer(|writer| {
+                let mut identities = std::collections::BTreeSet::new();
+                for report in &reports {
+                    if report.reported_by() == inner.access.device
+                        || report.operation().is_some()
+                        || !identities.insert((report.subject(), report.reported_by()))
+                    {
+                        return Err(DbError::DamagedDatabase);
+                    }
+                }
+                let previous = crate::pending::read::<P>(writer)?
+                    .into_iter()
+                    .filter(|r| r.reported_by() != inner.access.device)
+                    .map(|r| serde_json::to_vec(&r).map_err(DbError::PendingEncoding))
+                    .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+                let next = reports
+                    .iter()
+                    .map(|r| serde_json::to_vec(r).map_err(DbError::PendingEncoding))
+                    .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+                if previous == next {
+                    return Ok(());
+                }
+                writer.pending_transaction(|db| {
+                    db.pending_change(|| {
+                        db.internal_execute(
+                            "DELETE FROM _coven_pending WHERE reporter!=?1",
+                            [inner.access.device.0.to_be_bytes().as_slice()],
+                        )?;
+                        Ok(())
+                    })?;
+                    for report in reports {
+                        crate::pending::save(db, &report)?;
+                    }
+                    Ok(())
+                })
+            })
+        })
+        .await
+    }
+
+    /// Apply the persisted condition's retry policy to this installed version.
+    pub async fn pending_can_retry<P: crate::PendingValue>(
+        &self,
+        subject: P::Subject,
+    ) -> Result<bool, DbError>
+    where
+        P::Subject: Send + 'static,
+    {
+        self.call(move |inner| {
+            inner.with_writer(|writer| {
+                crate::pending::retry::<P>(writer, &subject, inner.access.device)
+            })
+        })
+        .await
+    }
+
     /// Consume bounded plaintext streams inside one transaction. `authenticate`
     /// runs after every stream ends and must confirm the complete sealed object,
     /// including its signature. Any stream or final-check error rolls back all
@@ -306,7 +381,6 @@ impl Database {
                     })
                     .collect::<Result<_, _>>()?;
                 Ok(crate::SyncState {
-                    stuck: crate::stuck::local(writer)?,
                     device: inner.access.device,
                     store_log: crate::store_log::positions(writer)?,
                     uploads_pending: writer.query_row(

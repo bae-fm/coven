@@ -36,7 +36,6 @@ pub use coven_crypto::{
     CircleKey, CryptoError, MaterialError, MemberId, MemberKeys, SecretBytes, SecretText, StoreKey,
     StoreKeyring,
 };
-pub use coven_database::StuckLog;
 pub use coven_database::{
     named_params, params, prepare_user_file, types, CacheFill, ChangeOp, ColumnChange, CovenError,
     CovenMigrationError, CovenResult, DbError, FileDecl, FileLocation, FileRef, FileSource,
@@ -77,9 +76,10 @@ pub use circles::Circles;
 pub use coven_format::store_log::MemberRole;
 pub use coven_storage::{MemberRemoval, ProviderSignOut, RetainedAccess, RetainedAccessReason};
 pub use coven_sync::{
-    AccessKeyToDelete, Circle, CircleMemberInfo, DamagedObject, Invite, InviteAccess, JoinRequest,
-    MemberInfo, OperationError, OperationId, OperationKind, PendingOperation, Refusal, SyncError,
-    SyncFailure, SyncStatus,
+    AccessKeyToDelete, Circle, CircleMemberInfo, DamagedObject, FileMissingReason,
+    FileSourceFailure, Invite, InviteAccess, JoinRequest, LocalFailure, MemberInfo, OperationError,
+    OperationId, OperationKind, PendingReason, PendingRecord, PendingSubject, Prerequisite,
+    ProviderAccessAction, Refusal, RequiredUpdate, Retry, SyncError, SyncFailure, SyncStatus,
 };
 
 #[cfg(not(any(target_os = "ios", target_os = "android")))]

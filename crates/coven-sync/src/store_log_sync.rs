@@ -192,7 +192,7 @@ impl StoreLogSync {
                 stored,
             );
         }
-        let stuck = self.database.sync_state(Vec::new()).await?.stuck;
+        let stuck = crate::pending_logs::local_refusals(&self.database).await?;
         entries.retain(|id, _| {
             !stuck
                 .iter()
@@ -360,15 +360,20 @@ impl StoreLogSync {
     ) -> Result<(), SyncError> {
         if let Refusal::Parse { cause: Some(error) } = &failure {
             if crate::error::newer_format(error.as_ref()) {
-                return Err(SyncFailure::UpdateRequired.into());
+                return Err(SyncFailure::UpdateRequired(
+                    crate::error::required_format(error.as_ref()).expect("newer format"),
+                )
+                .into());
             }
         }
-        self.database
-            .record_stuck_log(coven_database::LogRefusal {
+        crate::pending_logs::record_refusal(
+            &self.database,
+            coven_database::LogRefusal {
                 object: coven_database::LogObject::Entry(entry),
                 failure: (&failure).into(),
-            })
-            .await?;
+            },
+        )
+        .await?;
         tracing::warn!(path = path.as_str(), error = %failure, "store log is stuck");
         Ok(())
     }
@@ -410,7 +415,7 @@ impl StoreLogSync {
                 return Ok(());
             }
             for record in self.database.operations().await? {
-                if record.failure.is_some()
+                if !self.operation_can_retry(&record).await?
                     && crate::operation_data::Data::read(&record)?
                         .entry()?
                         .is_some_and(|entry| entry.position == upload.entry.position)
@@ -494,7 +499,7 @@ impl StoreLogSync {
         let mut updates = Vec::new();
         for record in self.database.operations().await? {
             let data = crate::operation_data::Data::read(&record)?;
-            if record.failure.is_none()
+            if self.operation_can_retry(&record).await?
                 && record.last_step < data.entry_step_number(4)
                 && data
                     .entry()?
@@ -710,7 +715,10 @@ impl StoreLogSync {
     ) -> Result<(), SyncError> {
         if let Refusal::Parse { cause: Some(error) } = &failure {
             if crate::error::newer_format(error.as_ref()) {
-                return Err(SyncFailure::UpdateRequired.into());
+                return Err(SyncFailure::UpdateRequired(
+                    crate::error::required_format(error.as_ref()).expect("newer format"),
+                )
+                .into());
             }
         }
         tracing::warn!(path = path.as_str(), error = %failure, "damaged object; will reread on sync");
@@ -732,6 +740,8 @@ pub(crate) mod tests;
 mod operation_calls;
 #[path = "operation_invites.rs"]
 mod operation_invites;
+#[path = "operation_pending.rs"]
+mod operation_pending;
 #[path = "operation_steps.rs"]
 mod operation_steps;
 

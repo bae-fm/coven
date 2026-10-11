@@ -72,8 +72,8 @@ impl<'connection> SqlReadContext<'connection> {
         self.database.lost_values()
     }
 
-    pub(crate) fn stuck_logs(&self) -> CovenResult<Vec<crate::StuckLog>> {
-        Ok(crate::stuck::read(self.database)?)
+    pub(crate) fn pending<P: crate::PendingValue>(&self) -> CovenResult<Vec<P>> {
+        Ok(crate::pending::read(self.database)?)
     }
 
     pub(crate) fn store_log(&self) -> CovenResult<crate::StoreLog> {

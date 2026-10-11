@@ -77,6 +77,10 @@ impl<R: Read> DownloadedWriteStream<R> {
                 &deleted,
                 files,
             )?;
+            crate::pending::clear_log(
+                database,
+                crate::LogObject::Write(self.header.header.position),
+            )?;
             files.before_commit()?;
             Ok(crate::ApplyOutcome::Applied)
         })

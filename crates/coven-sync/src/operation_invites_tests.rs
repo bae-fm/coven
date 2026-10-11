@@ -307,9 +307,9 @@ async fn failed_join_request_still_expires_and_live_requests_are_delivered() {
         .create(&ObjectPath::join_request(invite.id), &[0])
         .await
         .unwrap();
-    assert_eq!(operations.pending_operations().await.unwrap().len(), 1);
+    assert_eq!(pending(&operations, &a.db).await.len(), 1);
     a.clock.set(invite.expires_at);
-    assert!(operations.pending_operations().await.unwrap().is_empty());
+    assert!(pending(&operations, &a.db).await.is_empty());
     assert!(
         matches!(joining.list(&ObjectPrefix::store_logs()).await, Err(error) if error.failure() == StorageFailure::PermissionDenied)
     );
@@ -348,13 +348,13 @@ async fn cancelling_keeps_retained_provider_grants_visible_until_acknowledged() 
         operations.cancel_invite(&invite.id).await,
         Err(SyncError::AccessRemains(_))
     ));
-    let pending = operations.pending_operations().await.unwrap();
-    assert_eq!(pending.len(), 1);
+    let conditions = pending(&operations, &a.db).await;
+    assert_eq!(conditions.len(), 1);
     storage
         .set_retained_access("join@example.com", Vec::new())
         .await;
     operations
-        .retry_pending_operation(pending[0].id)
+        .retry_pending_operation(pending_id(&conditions[0]))
         .await
         .unwrap();
     assert!(a.db.operations().await.unwrap().is_empty());
@@ -362,7 +362,7 @@ async fn cancelling_keeps_retained_provider_grants_visible_until_acknowledged() 
 }
 
 #[tokio::test]
-async fn invitation_expiring_while_its_create_call_waits_returns_a_failure() {
+async fn a_failed_invite_is_retained_and_expiry_finishes_on_reconnect() {
     let storage = google();
     let [mut a, _b, _c] = accounts(storage.clone()).await;
     a.sync.storage = None;
@@ -381,9 +381,13 @@ async fn invitation_expiring_while_its_create_call_waits_returns_a_failure() {
     })
     .await;
     operations.get_members().await.unwrap();
+    assert!(matches!(pending.await, Err(SyncError::NoStorage)));
+    assert_eq!(
+        a.db.pending::<PendingRecord>().await.unwrap()[0].reason,
+        PendingReason::NoStorage
+    );
     a.clock.set(UNIX_EPOCH + Duration::from_secs(86402));
     operations.set_storage(Some(storage.clone())).await.unwrap();
-    assert!(matches!(pending.await, Err(SyncError::InvitationChanged)));
     assert!(a.db.operations().await.unwrap().is_empty());
     operations.close().await.unwrap();
 }
