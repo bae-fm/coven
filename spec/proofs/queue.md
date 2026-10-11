@@ -269,6 +269,15 @@ and after snapshot verification but before its completion transaction.
 
 ## Readings and boundaries of the proof
 
+**§3 coverage:** this model proves crash preservation and fixed retries, eventual
+queue settlement and completion of one recorded publication attempt under
+fairness, verdict agreement, and receiver atomicity at an assumed transaction
+boundary. Authentication, sealing and opening are supplied inputs; interpreting
+its eligible-key results as secrecy requires correct cryptography. It proves
+neither confidentiality nor forgery resistance. Atomic, durable SQLite
+transactions, durable file/custody writes and §2's provider behavior are assumed,
+with eventual provider success stated separately in the progress hypotheses.
+
 - Operation proofs concern one writer and one recorded publication attempt.
   Membership, authorization, reserved paths, valid sealed-copy construction,
   retained keys and replay verdicts are supplied inputs. The storage state

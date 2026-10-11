@@ -174,6 +174,15 @@ redone against the new text, and found:
 
 ## What it doesn't cover
 
+**§3 coverage:** the [merge model](merge.md#b11-what-lean-checks-and-what-is-outside-the-model)
+proves convergence, causal winners and value accounting under its valid-input
+hypotheses. The [other models](../coven.md#3-guarantees) cover replay, queues,
+retention and IO under their own limits. None proves ciphers, signatures or key
+derivation: authentication and sealing are inputs, so confidentiality, forgery
+resistance and the secrecy interpretation of revocation assume correct
+cryptography. Atomic SQLite transactions and §2's provider behavior are assumed,
+not consequences of Lean checking a model.
+
 - The model treats a removal rule's inputs, such as which rows are
   present or which references are stale, as any function of the merged
   state. That coven's code computes them as the spec says is argued, not

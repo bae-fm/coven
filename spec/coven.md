@@ -102,30 +102,70 @@
   a screen ([§12](#12-joining-and-restore)); anyone who sees it can open
   the store.
 
+The guarantees assume correct ciphers, signatures, hashes, key derivation,
+random generation and secret custody ([§11.1](#111-cryptography)). No Lean
+model proves their security: authentication and sealing are supplied inputs.
+Atomic, durable SQLite transactions and durable file/custody writes are also
+assumed. The provider behavior above and in §4, §10 and §13—including complete
+reads, immutable publication, clock bounds, request duration and confirmed
+access cut-off—is assumed, not established for real providers by the models.
+
 ## 3. Guarantees
 
+Proof links below cover the stated model results under their hypotheses, not
+the whole Rust implementation. Cryptographic and environmental assumptions
+are those of [§2](#2-threat-model); the write-ups state their additional limits.
+
 - **Availability:** the app reads and writes with no network; writes never
-  wait on sync.
+  wait on sync. Assumed by the [queue model](proofs/queue.md#readings-and-boundaries-of-the-proof),
+  not proved as an application-level availability theorem.
 - **Confidentiality:** members' data can't be read by those it isn't for:
-  - the provider and outsiders can't read any of it;
+  - the provider and outsiders can't read any of it — assumed cryptography,
+    not proved in Lean;
   - nothing the provider sees is computed from content without a secret
-    key, so it can't test whether you store a file or value it knows;
+    key, so it can't test whether you store a file or value it knows — assumed
+    cryptography and correct use of §11.1, not proved in Lean;
   - a circle's contents are readable only by its members
-    ([§14](#14-audiences)).
+    ([§14](#14-audiences)). Secrecy assumes cryptography; the
+    [key-access and revocation results](proofs/storelog-data.md#results-and-their-assumptions)
+    prove conditions on key receipts, with §11's historical disclosures and
+    observation window, not encryption security.
 - **Integrity:** members' data can't be tampered with:
-  - members: no member can write as another member;
-  - outsiders: nobody without the store key can alter or forge it.
+  - members: no member can write as another member — assumed signature
+    security; [store-log authority checks](proofs/storelog.md#c9-what-lean-checks-and-what-is-prose)
+    start with an authenticated author;
+  - outsiders: nobody without the store key can alter or forge it — assumed
+    authenticated encryption, signatures and key derivation, not proved in Lean.
 - **Authorization:** only admins ([§9](#9-members-and-roles)) change
-  membership, and every device enforces it.
+  membership, and every device enforces it. The [store-log model](proofs/storelog.md#c7-invariants)
+  proves the recorded-past authority checks given authenticated authors;
+  [current replay](proofs/storelog.md#c11-key-free-removals-and-circles-left-empty-after-replay)
+  uses those checks. Signature security and implementation enforcement are assumed.
 - **Atomicity:** another device applies a write in one transaction, so a
   write is never half visible
   ([queue proof: `AtomicReceive.never_half_visible`](proofs/queue.md#what-is-proved)).
+  This is proved at the transaction boundary; SQLite's atomic commit and rollback
+  are assumed, not proved.
 - **Convergence:** every device ends up with the same data:
-  - a write made after seeing another wins over it on every device;
-  - no device sees a write before the writes its author had seen;
+  - a write made after seeing another wins over it on every device
+    ([merge: `write_after_read_wins`](proofs/merge.md#b6-proof-for-the-merged-state));
+  - no device sees a write before the writes its author had seen — the
+    [receive proofs](proofs/merge.md#b17-receive-order-progress-and-the-retirement-gap)
+    derive causal application from receive steps, distinguishing consumed
+    positions from retained effects. The checked retirement counterexamples
+    leave an open limit: the rule for writes that depend on a write excluded
+    by its author's retirement deadline is undecided. The
+    [queue verdict proofs](proofs/queue.md#what-is-proved) check discarded
+    inputs under resets and schema changes;
   - when a concurrent write replaces or deletes a value, that value is
     recorded, not silently dropped. Values computed by a breaking migration
     that lost to a concurrent one are replaced by the winner's (§17.1).
+    [Merge's value accounting](proofs/merge.md#b14-where-every-value-goes) proves
+    these dispositions for valid inputs and supplied boundary verdicts.
+  [Merge convergence](proofs/merge.md#b8-proof-for-the-removal-rules) and
+  [store-log/data convergence](proofs/storelog-data.md#results-and-their-assumptions)
+  require the same eligible, readable inputs; eventual receipt additionally
+  needs successful [discovery](proofs/io.md#discovery-obligations), keys and readers.
 - **Durability:** committed writes and recorded operation progress survive
   a crash while this device's database and identity remain usable
   ([queue proof: `crash_keeps_committed`, `Operations.crash_preserves_operation`](proofs/queue.md#what-is-proved)):
@@ -135,7 +175,8 @@
     ([queue proof: `every_queued_write_settles`](proofs/queue.md#what-is-proved));
   - a damaged local database or restored stale copy starts again from
     storage. Edits it had not uploaded are lost, and the app is told
-    (§10, §19.2);
+    (§10, §19.2). The [storage model](proofs/storage.md#restore-another-live-copy-and-writes)
+    checks the loss and reset boundary, not successful recovery or app notification;
   - a recorded rotation or snapshot publication resumes with the same data
     within one attempt, and finishes under §18's prerequisites and fair
     progress assumptions
@@ -147,6 +188,8 @@
     ([checked history: `restart_changes_key`](proofs/queue.md#checked-histories-and-limits)).
     Finishing does not promise recovery from permanent rejection without
     the applicable update or app action (§19.1).
+  These model results assume durable local artifacts and atomic journal commits;
+  their progress assumptions are stated above and in §18.
 - **Revocation:** before sending a write for the first time, a device
   catches up on membership changes and new sealed key copies at sync-pass
   start, then seals with the newest usable key. Every send also requires
@@ -158,10 +201,15 @@
   member's device that already knew of their exclusion, provided no copy of
   the sealing key is made for them after that pass's copy observation (§11;
   [queue proof: `first_key_never_delivered`](proofs/queue.md#what-is-proved)).
+  [Store-log/data revocation](proofs/storelog-data.md#results-and-their-assumptions)
+  proves absence of a key copy under that window hypothesis; unreadability
+  additionally assumes correct cryptography. The [IO send-gate proofs](proofs/io.md#requests-and-retained-observations)
+  check the catch-up deadline given the clock and observation inputs.
   - A tried write retains its first attempt's key and bytes on every retry
     ([queue proof: `Run.retries_identical`](proofs/queue.md#what-is-proved)).
     Nothing is dropped or rewritten for revocation; storage access is cut
-    off separately (§13).
+    off separately (§13). The retry proof assumes a deterministic sealer;
+    provider cut-off is assumed.
   - The removed member's own pre-removal circle writes are outside this
     promise (§14.6). E.g. Ben queues a Gifts edit, then learns Ana removed
     him. He may still first-send that edit with the old key he already has;
@@ -172,10 +220,20 @@
   snapshots cover them and the store-log decisions they depend on are final
   (§9, §15). An absent device does not hold finality back.
   - A store whose admins keep racing settles once more than 30 storage days
-    have passed since its last late entry (§9).
+    have passed since its last late entry (§9), given complete storage-time
+    observations ([store-log finality](proofs/storelog.md#one-horizon-for-current-9)).
   - The store log, sealed keys and still-required boundary snapshots remain.
+  [Store-log/data retention](proofs/storelog-data.md#results-and-their-assumptions)
+  proves a bound relative to required inputs given coverage, finality and complete
+  dependencies. Successful cleanup and provider behavior are assumed; the
+  [IO model](proofs/io.md#discovery-obligations) proves a deletion deadline under
+  explicit coverage, scheduling and completion bounds, not an unconditional
+  deadline or snapshot-suffix availability.
 - **Nothing waits silently:** whatever coven cannot apply or deliver is in
   the pending list, with its subject and typed reason (§19.1).
+  [Store-log/data pending proofs](proofs/storelog-data.md#results-and-their-assumptions)
+  and [IO download proofs](proofs/io.md#downloads-and-their-visible-outcomes)
+  cover modeled subjects; complete failure reporting by Rust is not proved.
 
 ### 3.1 IO bounds
 
@@ -185,6 +243,10 @@ store. Discovery reads each undrained writer's next number (§6). Idle request c
 depend on devices, not accumulated history. All read, transfer, retry and
 local work limits below apply without a change feed or history listing.
 The confidentiality, integrity, finality and atomicity rules still apply.
+The [IO model](proofs/io.md#requests-and-retained-observations) proves the
+modeled request, reuse and wait bounds under its stated inputs. Native provider
+requests and local implementation work remain [verification obligations](proofs/io.md#rust-checks-outside-the-model),
+not Lean-proved bounds on Rust.
 
 A *steady store* has a complete local catalog, unchanged storage and local
 work, no evicted input needed by this pass, and no due retry, finality,

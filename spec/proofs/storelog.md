@@ -336,6 +336,15 @@
 
 ### C9 What Lean checks, and what is prose
 
+**§3 coverage:** this model proves replay agreement and authority checks (C6–C7,
+C11), storage-time finality (C10), and key acceptance/selection conditions (C12).
+Authorization assumes an authenticated author; turning key-copy conditions into
+confidentiality or revocation requires correct cryptography. Neither §3's first
+two confidentiality claims nor outsider/member forgery resistance is proved.
+Authentication, sealing, key derivation, atomic SQLite transactions and §2's
+provider behavior are assumed; C12's hash uniqueness results additionally take
+an explicit injectivity hypothesis, not a proof of SHA-256 security.
+
 - Lean checks the modeled replay, termination, convergence, invariants,
   entry accounting, admission ordering, and store-log example outcomes above.
   `CovenStorelog/Axioms.lean` prints the theorems' axioms; their union is

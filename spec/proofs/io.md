@@ -730,6 +730,19 @@ no Rust behavior.
   access epoch requires a new scan, and rows, losses, history and non-final effects
   continue protecting file deletion.
 
+## Readings and limits
+
+**§3 coverage:** this model proves conditional discovery, send gates, retention
+eligibility, modeled pending outcomes and §3.1 request/reuse/wait bounds. Its
+snapshot proposal has conditional coverage and reload-progress results, and a
+deletion deadline under explicit coverage, scheduling and completion bounds.
+Neither snapshot-suffix availability nor a cleanup deadline is proved unconditionally.
+Its delivery results stop at validated inputs: authentication and sealing are
+supplied, so confidentiality, forgery resistance and the secrecy interpretation
+of revocation assume correct cryptography, including signatures and key derivation.
+Atomic SQLite/cache publication and §2's provider behavior are assumed; modeled
+provider transitions do not prove that real providers satisfy them.
+
 Chosen readings: the proposed snapshot rule is checked at preparation, with
 T_c sampled before catch-up reads, strict one-day deletion age, inclusive
 one-day upload admission, and historical covering evidence. Path ties choose

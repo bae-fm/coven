@@ -305,6 +305,15 @@ outside the application-clock model.
 
 ## Readings and boundaries
 
+**§3 coverage:** this model proves preservation of stored bytes, duplicate-free
+receipt and fixed retries, and checks durability's explicit reset losses. Its
+clock results supply causal stamp ordering; its nonce results separate symbolic
+inputs, not real cipher outputs. Confidentiality and forgery resistance assume
+correct ciphers, signatures, hashes and key derivation; authenticated objects
+and sealing are inputs. Atomic SQLite transactions, durable custody and §2's
+provider behavior are assumed. Eventual delivery and full data convergence
+require the [other models' hypotheses](../coven.md#3-guarantees).
+
 - A backup may restore the database on an installation whose custody survives.
   A known restore routed through new-device bootstrap is a different case.
 - The no-loss claim is tested literally. The proved preservation claims cover

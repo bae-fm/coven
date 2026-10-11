@@ -437,6 +437,16 @@ at.
 
 ### B11 What Lean checks, and what is outside the model
 
+**§3 coverage:** this model proves merge convergence, causal winners and value
+accounting for valid causal inputs and supplied boundary verdicts (B6, B8,
+B12–B14). B17 derives causal application from receive steps; its checked
+retirement counterexamples leave the rule for dependent writes undecided.
+Applying those results to stored objects assumes correct authentication
+and sealing; it proves neither confidentiality nor signature or cipher security.
+Atomic SQLite installation and §2's provider behavior are assumed, not proved.
+Delivery and the other §3 guarantees belong to the [separate models and their
+limits](../coven.md#3-guarantees), not this convergence theorem.
+
 Lean checks the theorems named in this appendix. `CovenMerge/Axioms.lean`
 prints their axioms; only Lean's `propext`, `Classical.choice` and
 `Quot.sound` are allowed. `scripts/check.sh` rebuilds the package, audits

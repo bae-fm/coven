@@ -359,6 +359,15 @@ The current spec resolves or narrows the historical witnesses as follows:
 
 ## Readings and limits
 
+**§3 coverage:** this model proves conditional data convergence, revocation's
+key-copy condition, retention safety/bounds and visibility of modeled pending
+subjects, under the inputs listed above. The unreadability interpretation of
+revocation and circle access assumes correct cryptography: receipts supply
+authentication, sealing and opening, not proofs of ciphers, signatures or key
+derivation. §3's provider/outsider confidentiality and forgery resistance are
+assumed, as are atomic SQLite transactions and §2's provider behavior; the model
+does not establish these properties for the implementation.
+
 “Usable” combines device custody with complete copy observations and current
 replay. Each writer's miss bounds that observation; storage can still
 change afterward. Historical-key sharing follows the sharing device's current
