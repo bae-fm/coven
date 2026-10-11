@@ -34,7 +34,8 @@ theorem finish_advances (q : Queue) (a : Attempt) (h : q.head = some a) :
 theorem step_monotone {encode : Seal} {s t : World} (h : Step encode s t) :
     s.queue.settled ≤ t.queue.settled ∧ s.queue.reserved ≤ t.queue.reserved := by
   cases h with
-  | commit => simp [Queue.commit, Queue.reserved]
+  | beginWrite | receive | crash => exact ⟨Nat.le_refl _, Nat.le_refl _⟩
+  | commit => simp [World.commitWrite, Queue.commit, Queue.reserved]
   | prepare f requests keys =>
     obtain ⟨hs, hr⟩ := prepare_counters s.queue f (keys.map Key.id)
     simp only [hs, hr, Nat.le_refl, and_self]
@@ -62,6 +63,7 @@ theorem landing_retains (encode : Seal) (s : World) (a : Attempt) (n : Nat) (byt
 theorem step_stored_prefix {encode : Seal} {s t : World}
     (h : Step encode s t) (hv : s.queue.Valid) (hs : StoredPrefix s) : StoredPrefix t := by
   cases h with
+  | beginWrite | receive | crash => exact hs
   | commit => exact hs
   | prepare =>
     intro n hn hp
@@ -76,7 +78,7 @@ theorem step_stored_prefix {encode : Seal} {s t : World}
     rw [hq] at hp
     obtain ⟨bytes, hb⟩ := hs n hn hp
     exact ⟨bytes, landing_retains _ _ _ _ _ hb⟩
-  | acknowledge a ha stored =>
+  | acknowledge a ha _ stored =>
     intro n hn hp
     have next := head_next s.queue hv a ha
     have advance := finish_advances s.queue a ha
@@ -89,7 +91,7 @@ theorem step_stored_prefix {encode : Seal} {s t : World}
       exact ⟨encode a, by simpa [number, eq] using stored⟩
   | wait => exact hs
 
-def World.empty (device : Nat) : World := ⟨⟨device, 0, []⟩, fun _ => none, []⟩
+def World.empty (device : Nat) : World := ⟨⟨device, 0, []⟩, fun _ => none, [], .empty⟩
 
 inductive Reachable (encode : Seal) (device : Nat) : World → Prop where
   | start : Reachable encode device (.empty device)
@@ -137,14 +139,17 @@ theorem Run.monotone {encode : Seal} (run : Run encode) {t u : Nat} (h : t ≤ u
 /-- These are environmental assumptions, not axioms. The installation remains
 usable and syncing. Required app updates, raises, reloads and keys eventually
 permit an untried head's first attempt. Retried bytes eventually reach storage,
-and confirmation reads and their local transactions eventually succeed. -/
-structure Fair {encode : Seal} (run : Run encode) : Prop where
-  prepare : ∀ t, (run.state t).queue.settled < (run.state t).queue.reserved →
+and confirmation reads and their local transactions eventually succeed.
+Only the suffix starting at `after` must be fair; the earlier prefix may
+crash anywhere. Taking `after` after the last crash suffices. Safety does
+not require finitely many crashes. -/
+structure Fair {encode : Seal} (run : Run encode) (after : Nat := 0) : Prop where
+  prepare : ∀ t, after ≤ t → (run.state t).queue.settled < (run.state t).queue.reserved →
     ∃ u, t ≤ u ∧ ((run.state t).queue.settled < (run.state u).queue.settled ∨
       ∃ a, (run.state u).queue.head = some a)
-  storageAccepts : ∀ t a, (run.state t).queue.head = some a →
+  storageAccepts : ∀ t a, after ≤ t → (run.state t).queue.head = some a →
     ∃ u, t ≤ u ∧ (run.state u).stored a.record.identity.id.number = some (encode a)
-  confirm : ∀ t a, (run.state t).queue.head = some a →
+  confirm : ∀ t a, after ≤ t → (run.state t).queue.head = some a →
     (run.state t).stored a.record.identity.id.number = some (encode a) →
     ∃ u, t ≤ u ∧ (run.state u).queue.head = some a ∧
       (run.state (u + 1)).queue = (run.state u).queue.finish
@@ -153,19 +158,20 @@ theorem step_preserves_attempt {encode : Seal} {s t : World} (h : Step encode s 
     (a : Attempt) (ha : s.queue.head = some a)
     (same : s.queue.settled = t.queue.settled) : t.queue.head = some a := by
   cases h with
+  | beginWrite | receive | crash => exact ha
   | commit =>
     cases hp : s.queue.waiting with
     | nil => simp [Queue.head, hp] at ha
     | cons p rest =>
       cases p with
       | untried _ => simp [Queue.head, hp] at ha
-      | tried _ => simpa [Queue.head, Queue.commit, hp] using ha
+      | tried _ => simpa [Queue.head, World.commitWrite, Queue.commit, hp] using ha
   | prepare f requests keys app store r rest hp =>
     simp [Queue.head, hp] at ha
   | convert => exact head_attempt_preserved _ _ _ _ ha
   | send => unfold World.send; split <;> exact ha
   | land => simp only [World.land]; split <;> exact ha
-  | acknowledge a' ha' _ =>
+  | acknowledge a' ha' _ _ =>
     have advance := finish_advances s.queue a' ha'
     change s.queue.settled = s.queue.finish.settled at same
     omega
@@ -184,19 +190,29 @@ theorem Run.attempt_persists {encode : Seal} (run : Run encode) {t u : Nat} (htu
     have same' : (run.state t).queue.settled = (run.state u).queue.settled := by omega
     exact step_preserves_attempt (run.step u) a (ih same') (by omega)
 
-theorem head_eventually_settles {encode : Seal} (run : Run encode) (fair : Fair run)
-    (t : Nat) (hp : (run.state t).queue.settled < (run.state t).queue.reserved) :
+theorem Run.retries_identical {encode : Seal} (run : Run encode) {t u : Nat}
+    (htu : t ≤ u) (a b : Attempt) (ha : (run.state t).queue.head = some a)
+    (hb : (run.state u).queue.head = some b)
+    (same : (run.state t).queue.settled = (run.state u).queue.settled) :
+    b = a ∧ encode b = encode a := by
+  have persisted := run.attempt_persists htu a ha same
+  have equal : b = a := Option.some.inj (hb.symm.trans persisted)
+  exact ⟨equal, congrArg encode equal⟩
+
+theorem head_eventually_settles {encode : Seal} (run : Run encode) {after : Nat}
+    (fair : Fair run after) (t : Nat) (ht : after ≤ t)
+    (hp : (run.state t).queue.settled < (run.state t).queue.reserved) :
     ∃ u, t ≤ u ∧ (run.state t).queue.settled < (run.state u).queue.settled := by
-  obtain ⟨u, htu, advanced | ⟨a, ha⟩⟩ := fair.prepare t hp
+  obtain ⟨u, htu, advanced | ⟨a, ha⟩⟩ := fair.prepare t ht hp
   · exact ⟨u, htu, advanced⟩
-  · obtain ⟨v, huv, stored⟩ := fair.storageAccepts u a ha
+  · obtain ⟨v, huv, stored⟩ := fair.storageAccepts u a (by omega) ha
     have mt := run.monotone htu
     have mu := run.monotone huv
     by_cases adv : (run.state t).queue.settled < (run.state v).queue.settled
     · exact ⟨v, Nat.le_trans htu huv, adv⟩
     · have same : (run.state u).queue.settled = (run.state v).queue.settled := by omega
       have hav := run.attempt_persists huv a ha same
-      obtain ⟨z, hvz, haz, finish⟩ := fair.confirm v a hav stored
+      obtain ⟨z, hvz, haz, finish⟩ := fair.confirm v a (by omega) hav stored
       have mz := run.monotone hvz
       have advance := finish_advances (run.state z).queue a haz
       refine ⟨z + 1, by omega, ?_⟩
@@ -206,18 +222,29 @@ theorem head_eventually_settles {encode : Seal} (run : Run encode) (fair : Fair 
 /-- Every committed number settles, even if commits keep extending the tail.
 Storage merely resolving attempts is insufficient: `Fair.storageAccepts`
 specifically requires the original bytes to become stored. -/
-theorem every_queued_write_settles {encode : Seal} (run : Run encode) (fair : Fair run)
-    (t n : Nat) (hn : n ≤ (run.state t).queue.reserved) :
+theorem every_queued_write_settles_from {encode : Seal} (run : Run encode) {after : Nat}
+    (fair : Fair run after) (t n : Nat) (ht : after ≤ t)
+    (hn : n ≤ (run.state t).queue.reserved) :
     ∃ u, t ≤ u ∧ n ≤ (run.state u).queue.settled := by
   generalize hd : n - (run.state t).queue.settled = remaining
   induction remaining using Nat.strongRecOn generalizing t with
   | ind remaining ih =>
     by_cases settled : n ≤ (run.state t).queue.settled
     · exact ⟨t, Nat.le_refl _, settled⟩
-    · obtain ⟨u, htu, advanced⟩ := head_eventually_settles run fair t (by omega)
+    · obtain ⟨u, htu, advanced⟩ := head_eventually_settles run fair t ht (by omega)
       have hm := run.monotone htu
       have less : n - (run.state u).queue.settled < remaining := by omega
-      obtain ⟨v, huv, hs⟩ := ih _ less u (by omega) rfl
+      obtain ⟨v, huv, hs⟩ := ih _ less u (by omega) (by omega) rfl
       exact ⟨v, Nat.le_trans htu huv, hs⟩
+
+/-- Includes writes committed before the fair suffix, despite any intervening
+crashes, discarded replies, late accepts or newly committed tail records. -/
+theorem every_queued_write_settles {encode : Seal} (run : Run encode) {after : Nat}
+    (fair : Fair run after) (t n : Nat) (hn : n ≤ (run.state t).queue.reserved) :
+    ∃ u, t ≤ u ∧ n ≤ (run.state u).queue.settled := by
+  have m := run.monotone (Nat.le_max_left t after)
+  obtain ⟨u, hu, settled⟩ := every_queued_write_settles_from run fair (max t after) n
+    (Nat.le_max_right _ _) (Nat.le_trans hn m.2)
+  exact ⟨u, Nat.le_trans (Nat.le_max_left _ _) hu, settled⟩
 
 end CovenQueue

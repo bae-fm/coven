@@ -135,7 +135,8 @@ def landed : World := converted.land encode attempt
 def settled : World := { landed with queue := landed.queue.finish }
 
 theorem committed_reachable : Reachable encode 0 committed :=
-  .next .start (.commit _ _ [.ready ⟨none, none, []⟩ (.load [])]
+  .next (.next .start (.beginWrite _ firstRecord))
+    (.commit _ _ [.ready ⟨none, none, []⟩ (.load [])] rfl
     (by intro a ha; simp only [List.mem_singleton] at ha; subst a; exact ⟨_, rfl⟩))
 
 theorem prepared_reachable : Reachable encode 0 prepared := by
@@ -160,7 +161,34 @@ theorem failed_then_landed :
 theorem settled_reachable : Reachable encode 0 settled := by
   have hc : Reachable encode 0 converted := .next sent_reachable (.convert _ _ _)
   have hl : Reachable encode 0 landed := .next hc (.land _ attempt (by decide))
-  exact .next hl (.acknowledge _ attempt (by decide) (by decide))
+  exact .next (.next hl (.receive _ attempt (by decide) (by decide)))
+    (.acknowledge _ attempt (by decide) rfl (by decide))
+
+/-- A crash before commit rolls back the draft; after commit it cannot erase
+the queued record or its first attempt. Storage need not have accepted it. -/
+example : ((World.empty 0).beginWrite firstRecord).crash.memory = .empty ∧
+    ((World.empty 0).beginWrite firstRecord).crash.queue.reserved = 0 ∧
+    committed.crash.queue.reserved = 1 ∧
+    sent.crash.queue.head = some attempt ∧ sent.crash.stored 1 = none := by decide
+
+/-- The provider accepts after the process dies. A reply then arrives, but
+another crash loses it before acknowledgement. A new comparison settles. -/
+theorem crash_late_accept_and_lost_reply :
+    Reachable encode 0 ((sent.crash.land encode attempt).crash) ∧
+    (sent.crash.land encode attempt).crash.queue.head = some attempt ∧
+    (sent.crash.land encode attempt).crash.stored 1 = some (encode attempt) ∧
+    (sent.crash.land encode attempt).crash.memory.reply = none := by
+  have hc := Reachable.next sent_reachable (.crash _)
+  have hl := Reachable.next hc (.land _ attempt (by decide))
+  have hr := Reachable.next hl (.receive _ attempt (by decide) (by decide))
+  exact ⟨.next hr (.crash _), by decide, by decide, rfl⟩
+
+theorem crash_retry_settles : Reachable encode 0
+    { (sent.crash.land encode attempt).crash with
+      queue := (sent.crash.land encode attempt).crash.queue.finish } := by
+  have hr := Reachable.next crash_late_accept_and_lost_reply.1
+    (.receive _ attempt (by decide) (by decide))
+  exact .next hr (.acknowledge _ attempt (by decide) rfl (by decide))
 
 /-- A raise snapshot can cover the author's unuploaded head. It says nothing
 about the still-empty storage slot, and the queue remains attempted. -/

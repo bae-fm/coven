@@ -24,6 +24,11 @@ deterministic encoding function produces the bytes. Sending, storage accepting
 the bytes, and the device learning that they are stored are separate events.
 An earlier request can land after a failure or a read that found nothing.
 An occupied path succeeds only after a complete equal-byte comparison.
+The process also has an uncommitted write and a received reply in memory.
+`Step.crash` discards both and preserves the committed queue and storage.
+Requests already handed to the provider can land before or after the crash;
+they need not land at all. Receiving an equal-byte reply and committing the
+acknowledgement are separate steps. A lost reply requires another comparison.
 
 Each audience has its own selected raise and reset. The received history
 supplies checked author authority and immutable-object validation results.
@@ -80,13 +85,15 @@ over every queue event. `uploads_in_order` then proves a send cannot pass an
 earlier unstored write. `conversion_preserves_identity` covers all conversions.
 `Run.attempt_persists` proves that, until its number settles, a tried head keeps
 the same complete attempt across any sequence of commits, migrations, sends,
-late landings and failures. `retries_identical` applies any deterministic sealer
+late landings, failures and crashes. `Run.retries_identical` applies any deterministic sealer
 to those fixed choices. `confirmation_requires_equal` checks settlement;
 `occupied_never_replaced` checks create-only storage.
 
 **Queued writes eventually settle under explicit assumptions.**
 `every_queued_write_settles` applies to an infinite run, even while new commits
-extend its tail. `Fair` states all three assumptions:
+extend its tail. Its `Fair` assumptions apply only after a supplied time,
+which can be after the last crash. Writes committed before that time still
+settle. Safety holds even with infinitely many crashes; progress requires:
 
 - The installation remains usable and syncing. Required updates, published
   raises, reloads and keys eventually let each waiting head become tried.
@@ -151,6 +158,10 @@ snapshot-covered duplicate delivery; failed reload; stale custody, counters
 and replacement; an upload that seems to fail and lands later; failed and
 unequal comparison reads; and a covered write whose storage slot is still
 empty. The late-landing history is also proved reachable by the queue events.
+`crash_late_accept_and_lost_reply` checks acceptance after a crash and a
+second crash between reply receipt and acknowledgement. `crash_retry_settles`
+checks the subsequent confirmation. Another example distinguishes a draft
+lost before commit from a committed write retained after it.
 
 **Storage acceptance alone fails.** `storage_acceptance_alone_insufficient`
 has one untried queued write that never reaches a first attempt. Every retried write
@@ -189,6 +200,9 @@ The adjacent remaining-member example selects the replacement key instead.
   Store-log replay, boundary selection, finality, retention, full multi-audience
   snapshot alignment, cryptography, byte parsing, SQLite and Rust behavior
   are outside this package. It retains all inputs and deletes no stored objects.
+  Database transitions model atomic commits: a crash before one preserves
+  its input, and a crash after one preserves its entire result. Database
+  corruption and loss of device custody are outside this crash model.
 - Permanent refusal stops that log and its dependents. Unknown prerequisites
   wait. The total-verdict theorem applies when the required history is
   available and not stopped by a permanent refusal; progress does not promise

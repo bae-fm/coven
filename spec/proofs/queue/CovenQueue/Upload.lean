@@ -174,10 +174,36 @@ abbrev Bytes := List Nat
 any such function; encryption and actual format bytes are outside this model. -/
 abbrev Seal := Attempt → Bytes
 
+/-- Neither an uncommitted app write nor a checked request reply survives
+process death. The committed attempt belongs to `Queue`, not this memory. -/
+structure Memory where
+  transaction : Option Record
+  reply : Option Attempt
+  deriving DecidableEq, Repr
+
+def Memory.empty : Memory := ⟨none, none⟩
+
 structure World where
   queue : Queue
   stored : Nat → Option Bytes
+  /-- Requests handed to the provider, not a local in-memory request list.
+  A crash cannot recall them; any may still land, or may never land. -/
   sent : List Attempt
+  memory : Memory := .empty
+
+def World.beginWrite (s : World) (r : Record) : World :=
+  { s with memory := { s.memory with transaction := some r } }
+
+def World.commitWrite (s : World) (r : Record) : World :=
+  { s with
+    queue := s.queue.commit r
+    memory := { s.memory with transaction := none } }
+
+def World.crash (s : World) : World := { s with memory := .empty }
+
+theorem crash_keeps_committed (s : World) :
+    s.crash.queue = s.queue ∧ s.crash.stored = s.stored ∧
+    s.crash.sent = s.sent ∧ s.crash.memory = .empty := ⟨rfl, rfl, rfl, rfl⟩
 
 def World.send (s : World) : World :=
   match s.queue.head with
@@ -226,14 +252,18 @@ theorem retries_identical (encode : Seal) (c : Conversion) (bad : Bool) (a : Att
       | .tried retried => encode retried
       | .untried _ => []) = encode a := rfl
 
-/-- Events that change this queue. Network failure and coverage are genuine
-stutters. A send requires the completed §10 check; proof of that check is
-supplied by `Identity.lean`. An acknowledgement is possible only for equal
-complete bytes. Storage landing is independent of acknowledgement. -/
+/-- Local database transitions are transactions: a crash before one leaves
+its input state, and a crash after one keeps its whole result. An app write
+can be staged without committing. Reply receipt and its acknowledgement
+transaction are separate, so a crash between them requires a new read.
+Provider acceptance may occur before or after any crash, independently of
+reply receipt. A send requires a fresh supplied §10 identity check. -/
 inductive Step (encode : Seal) : World → World → Prop where
+  | beginWrite (s r) : Step encode s (s.beginWrite r)
   | commit (s r) (audiences : List AudienceState) :
+      s.memory.transaction = some r →
       AudiencesReady audiences →
-      Step encode s { s with queue := s.queue.commit r }
+      Step encode s (s.commitWrite r)
   | prepare (s f) (requests : List KeyRequest) (keys : List Key)
       (appVersion storeVersion : Nat) (r : Record) (rest : List Pending) :
       s.queue.waiting = .untried r :: rest →
@@ -248,20 +278,28 @@ inductive Step (encode : Seal) : World → World → Prop where
       checkIdentity s.queue.device reserved e = .ready →
       storeVersion ≤ appVersion → Step encode s s.send
   | land (s a) : a ∈ s.sent → Step encode s (s.land encode a)
-  | acknowledge (s a) : s.queue.head = some a →
+  | receive (s a) : s.queue.head = some a →
       s.stored a.record.identity.id.number = some (encode a) →
-      Step encode s { s with queue := s.queue.finish }
+      Step encode s { s with memory := { s.memory with reply := some a } }
+  | acknowledge (s a) : s.queue.head = some a →
+      s.memory.reply = some a →
+      s.stored a.record.identity.id.number = some (encode a) →
+      Step encode s { s with
+        queue := s.queue.finish
+        memory := { s.memory with reply := none } }
+  | crash (s) : Step encode s s.crash
   | wait (s) : Step encode s s
 
 theorem step_queue_valid {encode : Seal} {s t : World}
     (h : Step encode s t) (hs : s.queue.Valid) : t.queue.Valid := by
   cases h with
+  | beginWrite | receive | crash => exact hs
   | commit => exact commit_valid _ hs _
   | prepare => exact prepare_valid _ hs _ _
   | convert c bad => exact convert_valid _ hs _ _
   | send => unfold World.send; split <;> exact hs
   | land a _ => simp only [World.land]; split <;> exact hs
-  | acknowledge a _ _ => exact finish_valid _ hs
+  | acknowledge a _ _ _ => exact finish_valid _ hs
   | wait => exact hs
 
 theorem head_attempt_preserved (q : Queue) (c : Conversion) (bad : Record → Bool)

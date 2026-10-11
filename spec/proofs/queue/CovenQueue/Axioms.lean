@@ -19,6 +19,7 @@ import CovenQueue
 #print axioms CovenQueue.confirmation_requires_equal
 #print axioms CovenQueue.occupied_never_replaced
 #print axioms CovenQueue.retries_identical
+#print axioms CovenQueue.crash_keeps_committed
 #print axioms CovenQueue.step_queue_valid
 #print axioms CovenQueue.head_attempt_preserved
 #print axioms CovenQueue.own_cause
@@ -43,6 +44,7 @@ import CovenQueue
 #print axioms CovenQueue.reachable_invariants
 #print axioms CovenQueue.uploads_in_order
 #print axioms CovenQueue.Run.attempt_persists
+#print axioms CovenQueue.Run.retries_identical
 #print axioms CovenQueue.head_eventually_settles
 #print axioms CovenQueue.every_queued_write_settles
 #print axioms CovenQueue.provisional_circle_not_retired
@@ -59,6 +61,8 @@ import CovenQueue
 #print axioms CovenQueue.Examples.failed_then_landed
 #print axioms CovenQueue.Examples.conversion_uses_actual_predecessor
 #print axioms CovenQueue.Examples.settled_reachable
+#print axioms CovenQueue.Examples.crash_late_accept_and_lost_reply
+#print axioms CovenQueue.Examples.crash_retry_settles
 #print axioms CovenQueue.Examples.coverage_is_not_storage
 #print axioms CovenQueue.Examples.remaining_member_rotates
 #print axioms CovenQueue.Examples.departed_member_counterexample
