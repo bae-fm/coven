@@ -44,6 +44,14 @@ impl StoreKey {
         Sha256::digest(self.bytes.as_ref()).into()
     }
 
+    /// Check the hash committed by an authorized introduction before accepting this key.
+    pub fn check_hash(&self, expected: &[u8; 32]) -> Result<(), MaterialError> {
+        if !bool::from(self.hash().ct_eq(expected)) {
+            return Err(MaterialError::StoreKeyConflict(self.id));
+        }
+        Ok(())
+    }
+
     /// Derive separate encryption and fingerprint keys.
     pub fn derive(&self) -> DerivedKeys {
         DerivedKeys::new(&self.bytes)
@@ -106,6 +114,16 @@ impl CircleKey {
     /// SHA-256 of the exact key bytes, committed inside its introducing entry (§11).
     pub fn hash(&self) -> [u8; 32] {
         self.key.hash()
+    }
+
+    /// Check the hash committed by an authorized introduction before accepting this key.
+    pub fn check_hash(&self, expected: &[u8; 32]) -> Result<(), MaterialError> {
+        self.key
+            .check_hash(expected)
+            .map_err(|_| MaterialError::CircleKeyConflict {
+                circle: self.circle,
+                key: self.id(),
+            })
     }
 
     /// Derive separate encryption and fingerprint keys.

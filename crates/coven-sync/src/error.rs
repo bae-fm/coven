@@ -197,10 +197,7 @@ impl From<coven_format::Error> for SyncError {
 
 impl From<CryptoError> for SyncError {
     fn from(error: CryptoError) -> Self {
-        match error {
-            error if newer_format(&error) => Self::Stopped(SyncFailure::UpdateRequired),
-            error => Self::Crypto(error),
-        }
+        Self::Crypto(error)
     }
 }
 
@@ -220,9 +217,6 @@ pub(crate) fn newer_format(error: &(dyn std::error::Error + 'static)) -> bool {
     matches!(
         error.downcast_ref::<coven_format::Error>(),
         Some(coven_format::Error::UnsupportedVersion(version)) if *version > coven_format::FORMAT_VERSION
-    ) || matches!(
-        error.downcast_ref::<CryptoError>(),
-        Some(CryptoError::UnsupportedVersion(version)) if *version > coven_format::FORMAT_VERSION
     )
 }
 

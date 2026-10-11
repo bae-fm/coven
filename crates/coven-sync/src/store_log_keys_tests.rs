@@ -221,8 +221,9 @@ async fn a_missing_or_damaged_holder_copy_waits_and_a_later_copy_enables_sharing
         ana.sync().await;
         let copy = storage.read(&recipient).await.unwrap();
         assert_eq!(
-            erin.member
-                .open_store_key(recipient.as_str(), &copy)
+            coven_format::sealed_key::SealedKey::decode(&copy)
+                .unwrap()
+                .open_store_key(&erin.member, recipient.as_str())
                 .unwrap()
                 .id(),
             key(3)
@@ -279,7 +280,12 @@ async fn two_holders_race_to_store_the_same_key_for_one_member() {
         );
         let keys: Vec<_> = attempts
             .iter()
-            .map(|bytes| erin.member.open_store_key(path.as_str(), bytes).unwrap())
+            .map(|bytes| {
+                coven_format::sealed_key::SealedKey::decode(bytes)
+                    .unwrap()
+                    .open_store_key(&erin.member, path.as_str())
+                    .unwrap()
+            })
             .collect();
         let encrypted = keys[0]
             .derive()

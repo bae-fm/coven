@@ -87,7 +87,9 @@ async fn approve_seals_store_history_and_removes_the_request() {
     for key in expected {
         let path = ObjectPath::store_key(key, &keys.member_id());
         assert_eq!(
-            keys.open_store_key(path.as_str(), &joining.read(&path).await.unwrap())
+            coven_format::sealed_key::SealedKey::decode(&joining.read(&path).await.unwrap())
+                .unwrap()
+                .open_store_key(&keys, path.as_str())
                 .unwrap()
                 .id(),
             key

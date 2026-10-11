@@ -4,6 +4,7 @@ use crate::{write_object::invalid, Refusal, SyncError};
 use coven_crypto::{MemberKeys, ObjectHasher, StoreKey, StoreKeyring};
 use coven_database::{DbError, StoreLog, StoreLogKeyUpload, StoreLogUpload};
 use coven_format::{
+    sealed_key::SealedKey,
     sealed_single::{SingleChunkObject, SingleChunkPrefix, StoreOrigin},
     store_log::{StoreChange, StoreLogEntry},
     value::EntryId,
@@ -35,7 +36,7 @@ pub(crate) fn seal_upload(
     }
     let id = upload.sealing.key;
     let creation;
-    let key = if matches!(upload.entry.change, StoreChange::CreateStore { .. }) {
+    let key = if let StoreChange::CreateStore { key_hash, .. } = &upload.entry.change {
         // Creation precedes custody: its queued sealed copy holds the key.
         let path = ObjectPath::store_key(id, &upload.entry.author);
         let copy = upload
@@ -44,7 +45,8 @@ pub(crate) fn seal_upload(
             .iter()
             .find(|key| key.path == path.as_str())
             .ok_or(DbError::DamagedDatabase)?;
-        creation = member.open_store_key(path.as_str(), &copy.bytes)?;
+        creation = SealedKey::decode(&copy.bytes)?.open_store_key(member, path.as_str())?;
+        creation.check_hash(key_hash)?;
         if creation.id() != id {
             return Err(DbError::DamagedDatabase.into());
         }

@@ -21,9 +21,20 @@ fn wrong_key_lengths_are_refused_before_opening_the_box() {
     let mut store_bytes = Zeroizing::new(Vec::with_capacity(48));
     store.encode_into(&mut store_bytes);
     store_bytes.pop();
-    let sealed = seal_box(b"store", &recipient, "keys/store/1/member", &store_bytes).unwrap();
+    let sealed = seal_box(
+        b"store",
+        &recipient,
+        "10101010-1010-1010-1010-101010101010/keys/7/9",
+        b"clear routing prefix",
+        &store_bytes,
+    )
+    .unwrap();
     assert!(matches!(
-        member.open_store_key("keys/store/1/member", &sealed),
+        member.open_store_key(
+            "10101010-1010-1010-1010-101010101010/keys/7/9",
+            b"clear routing prefix",
+            &sealed
+        ),
         Err(CryptoError::Malformed)
     ));
     let mut circle_bytes = Zeroizing::new(Vec::with_capacity(64));
@@ -32,12 +43,17 @@ fn wrong_key_lengths_are_refused_before_opening_the_box() {
     let sealed = seal_box(
         b"circle",
         &recipient,
-        "keys/circle/11/1/member",
+        "10101010-1010-1010-1010-101010101010/keys/7/9",
+        b"clear routing prefix",
         &circle_bytes,
     )
     .unwrap();
     assert!(matches!(
-        member.open_circle_key("keys/circle/11/1/member", &sealed),
+        member.open_circle_key(
+            "10101010-1010-1010-1010-101010101010/keys/7/9",
+            b"clear routing prefix",
+            &sealed
+        ),
         Err(CryptoError::Malformed)
     ));
 }
@@ -131,15 +147,28 @@ fn anonymous_store_boxes_bind_recipient_path_and_all_ciphertext_bytes() {
     let member = MemberKeys::generate().unwrap();
     let foreign = MemberKeys::generate().unwrap();
     let store = StoreKey::generate(KeyId(key_ids.new_id())).unwrap();
-    let path = format!("keys/store/{}/{}", store.id(), member.member_id());
-    let sealed = seal_store_key(&store, &member.sealing_public_key(), &path).unwrap();
-    assert_eq!(&sealed[..3], &[37, 0, 1]);
-    assert_eq!(sealed.len(), 123);
+    let path = "10101010-1010-1010-1010-101010101010/keys/7/9".to_owned();
+    let sealed = seal_store_key(
+        &store,
+        &member.sealing_public_key(),
+        &path,
+        b"clear routing prefix",
+    )
+    .unwrap();
+    assert_eq!(sealed.len(), 120);
     assert_ne!(
         sealed,
-        seal_store_key(&store, &member.sealing_public_key(), &path).unwrap()
+        seal_store_key(
+            &store,
+            &member.sealing_public_key(),
+            &path,
+            b"clear routing prefix"
+        )
+        .unwrap()
     );
-    let opened = member.open_store_key(&path, &sealed).unwrap();
+    let opened = member
+        .open_store_key(&path, b"clear routing prefix", &sealed)
+        .unwrap();
     assert_eq!(opened.id(), store.id());
     let ciphertext = store
         .derive()
@@ -152,20 +181,34 @@ fn anonymous_store_boxes_bind_recipient_path_and_all_ciphertext_bytes() {
             .unwrap(),
         b"secret"
     );
-    assert!(foreign.open_store_key(&path, &sealed).is_err());
-    assert!(member
-        .open_store_key("keys/store/8/member", &sealed)
+    assert!(foreign
+        .open_store_key(&path, b"clear routing prefix", &sealed)
         .is_err());
-    assert!(member.open_circle_key(&path, &sealed).is_err());
+    assert!(member
+        .open_store_key(
+            "10101010-1010-1010-1010-101010101010/keys/8/9",
+            b"clear routing prefix",
+            &sealed
+        )
+        .is_err());
+    assert!(member
+        .open_circle_key(&path, b"clear routing prefix", &sealed)
+        .is_err());
     for index in 0..sealed.len() {
         let mut changed = sealed.clone();
         changed[index] ^= 1;
-        assert!(member.open_store_key(&path, &changed).is_err());
-        assert!(member.open_store_key(&path, &sealed[..index]).is_err());
+        assert!(member
+            .open_store_key(&path, b"clear routing prefix", &changed)
+            .is_err());
+        assert!(member
+            .open_store_key(&path, b"clear routing prefix", &sealed[..index])
+            .is_err());
     }
     let mut trailing = sealed;
     trailing.push(0);
-    assert!(member.open_store_key(&path, &trailing).is_err());
+    assert!(member
+        .open_store_key(&path, b"clear routing prefix", &trailing)
+        .is_err());
 }
 
 #[test]
@@ -177,11 +220,16 @@ fn anonymous_circle_boxes_preserve_circle_and_id() {
     let sealed = seal_circle_key(
         &circle,
         &member.sealing_public_key(),
-        "keys/circle/11/3/member",
+        "10101010-1010-1010-1010-101010101010/keys/7/9",
+        b"clear routing prefix",
     )
     .unwrap();
     let opened = member
-        .open_circle_key("keys/circle/11/3/member", &sealed)
+        .open_circle_key(
+            "10101010-1010-1010-1010-101010101010/keys/7/9",
+            b"clear routing prefix",
+            &sealed,
+        )
         .unwrap();
     assert_eq!(opened.circle(), circle.circle());
     assert_eq!(opened.id(), circle.id());
@@ -197,15 +245,27 @@ fn anonymous_circle_boxes_preserve_circle_and_id() {
         b"circle secret"
     );
     assert!(member
-        .open_circle_key("keys/circle/12/3/member", &sealed)
+        .open_circle_key(
+            "10101010-1010-1010-1010-101010101010/keys/7/10",
+            b"clear routing prefix",
+            &sealed
+        )
         .is_err());
     assert!(member
-        .open_store_key("keys/circle/11/3/member", &sealed)
+        .open_store_key(
+            "10101010-1010-1010-1010-101010101010/keys/7/9",
+            b"clear routing prefix",
+            &sealed
+        )
         .is_err());
     let mut tampered = sealed;
     tampered[64] ^= 1;
     assert!(matches!(
-        member.open_circle_key("keys/circle/11/3/member", &tampered),
+        member.open_circle_key(
+            "10101010-1010-1010-1010-101010101010/keys/7/9",
+            b"clear routing prefix",
+            &tampered
+        ),
         Err(CryptoError::Authentication)
     ));
 }
@@ -222,15 +282,25 @@ fn low_order_x25519_keys_are_rejected_in_both_directions() {
             seal_store_key(
                 &store,
                 &SealingPublicKey::from_bytes(low),
-                "keys/store/1/member"
+                "10101010-1010-1010-1010-101010101010/keys/7/9",
+                b"clear routing prefix"
             ),
             Err(CryptoError::WeakSealingKey)
         ));
-        let mut sealed =
-            seal_store_key(&store, &member.sealing_public_key(), "keys/store/1/member").unwrap();
-        sealed[3..35].copy_from_slice(&low);
+        let mut sealed = seal_store_key(
+            &store,
+            &member.sealing_public_key(),
+            "10101010-1010-1010-1010-101010101010/keys/7/9",
+            b"clear routing prefix",
+        )
+        .unwrap();
+        sealed[..32].copy_from_slice(&low);
         assert!(matches!(
-            member.open_store_key("keys/store/1/member", &sealed),
+            member.open_store_key(
+                "10101010-1010-1010-1010-101010101010/keys/7/9",
+                b"clear routing prefix",
+                &sealed
+            ),
             Err(CryptoError::WeakSealingKey)
         ));
     }

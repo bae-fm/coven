@@ -4,6 +4,7 @@ use super::{keys, object, StoreLogSync};
 use crate::{StorageCommit, SyncError};
 use coven_crypto::StoreKeyring;
 use coven_format::{
+    sealed_key::SealedKey,
     sealed_single::SingleChunkObject,
     store_log::{MemberPublicKeys, StoreChange},
 };
@@ -188,8 +189,8 @@ impl StoreLogSync {
         let mut creation = None;
         for (path, bytes, key) in origins {
             let key_path = ObjectPath::store_key(key, &member.member_id());
-            let opened =
-                member.open_store_key(key_path.as_str(), &storage.read(&key_path).await?)?;
+            let opened = SealedKey::decode(&storage.read(&key_path).await?)?
+                .open_store_key(&member, key_path.as_str())?;
             if opened.id() != key {
                 return Err(occupied());
             }
@@ -222,8 +223,8 @@ impl StoreLogSync {
         }
         if let Some(store) = &local.log.replay.state.store {
             let key_path = ObjectPath::store_key(store.key, &member.member_id());
-            let opened =
-                member.open_store_key(key_path.as_str(), &storage.read(&key_path).await?)?;
+            let opened = SealedKey::decode(&storage.read(&key_path).await?)?
+                .open_store_key(&member, key_path.as_str())?;
             if opened.id() != store.key {
                 return Err(occupied());
             }

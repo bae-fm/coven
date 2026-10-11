@@ -531,18 +531,28 @@ async fn far_future_entry_waits_for_missing_or_damaged_sealed_keys() {
     ));
     assert!(b.log().await.entries.is_empty());
     storage.delete(&path).await.unwrap();
-    let wrong = coven_crypto::seal_store_key(
-        &StoreKey::generate(key(2)).unwrap(),
-        &a.member.sealing_public_key(),
-        path.as_str(),
-    )
-    .unwrap();
-    storage.create(&path, &wrong).await.unwrap();
-    assert!(matches!(
-        b.sync.step().await.unwrap()[0].failure,
-        Refusal::WrongIdentity { cause: None }
-    ));
-    storage.delete(&path).await.unwrap();
+    for claimed_key in [key(1), key(2)] {
+        let prefix = coven_format::sealed_key::KeyCopyPrefix {
+            audience: Audience::Store,
+            key: claimed_key,
+            member: a.member.member_id(),
+        };
+        let wrong = coven_crypto::seal_store_key(
+            &StoreKey::generate(key(2)).unwrap(),
+            &a.member.sealing_public_key(),
+            path.as_str(),
+            &prefix.encode().unwrap(),
+        )
+        .unwrap();
+        let wrong = prefix.encode_box(&wrong).unwrap();
+        storage.create(&path, &wrong).await.unwrap();
+        assert!(matches!(
+            b.sync.step().await.unwrap()[0].failure,
+            Refusal::WrongIdentity { .. }
+        ));
+        assert!(b.custody.read().unwrap().is_none());
+        storage.delete(&path).await.unwrap();
+    }
     storage.create(&path, &original).await.unwrap();
     b.sync().await;
     assert_eq!(a.log().await, b.log().await);

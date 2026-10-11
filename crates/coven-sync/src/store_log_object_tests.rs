@@ -4,6 +4,47 @@ use coven_database::{LogObject, LogRefusal};
 use coven_format::pending::RefusalCode;
 
 #[tokio::test]
+async fn queued_creation_rejects_a_copy_with_the_right_identity_and_wrong_material() {
+    let storage = storage();
+    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
+    let key_hash = a.sync.test_key(Audience::Store, key(1));
+    storage
+        .set_faults(Faults {
+            lose_completion_reply: true,
+            ..Faults::none()
+        })
+        .await;
+    assert!(matches!(
+        a.sync
+            .make_and_upload_entry(StoreChange::CreateStore {
+                store: store(1),
+                name: "Home".into(),
+                admin: public(&a.member),
+                access: coven_format::MemberAccess::S3AccessKey {
+                    access_key_id: "owner".into()
+                },
+                device_name: "Ana".into(),
+                key: key(1),
+                key_hash,
+            })
+            .await,
+        Err(SyncError::Storage(_))
+    ));
+    let mut upload = a.db.local_store_log().await.unwrap().upload.unwrap();
+    object::seal_upload(&upload, None, &a.member).unwrap();
+    let wrong = StoreKey::from_bytes(key(1), [0x91; 32]);
+    assert_ne!(wrong.hash(), key_hash);
+    upload.sealing.keys[0] = keys::store_copy(
+        &wrong,
+        &a.member.member_id(),
+        &a.member.sealing_public_key(),
+    )
+    .unwrap();
+    assert!(matches!(object::seal_upload(&upload, None, &a.member),
+        Err(SyncError::Key(coven_crypto::MaterialError::StoreKeyConflict(id))) if id == key(1)));
+}
+
+#[tokio::test]
 async fn damaged_entries_block_only_their_device_and_retain_each_cause() {
     for damage in ["decryption", "signature", "moved", "parse"] {
         let storage = Arc::new(

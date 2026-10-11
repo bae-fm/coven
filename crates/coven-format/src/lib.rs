@@ -19,6 +19,7 @@ pub mod objects;
 pub mod path;
 pub mod pending;
 mod sealed;
+pub mod sealed_key;
 pub mod sealed_single;
 pub mod sealed_snapshot;
 pub mod sealed_write;

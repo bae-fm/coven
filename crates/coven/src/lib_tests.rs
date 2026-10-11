@@ -392,13 +392,11 @@ pub(crate) async fn posted(device: &Device) -> coven_format::objects::PostedPosi
         panic!("positions object")
     };
     let key_path = ObjectPath::store_key(*key, &member.id);
-    let key = code
-        .member_keys
-        .open_store_key(
-            key_path.as_str(),
-            &device.storage.read(&key_path).await.unwrap(),
-        )
-        .unwrap();
+    let key =
+        coven_format::sealed_key::SealedKey::decode(&device.storage.read(&key_path).await.unwrap())
+            .unwrap()
+            .open_store_key(&code.member_keys, key_path.as_str())
+            .unwrap();
     let mut hash = coven_crypto::ObjectHasher::new();
     hash.update(&bytes[..bytes.len() - 64]);
     member

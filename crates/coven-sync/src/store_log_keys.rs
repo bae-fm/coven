@@ -6,7 +6,10 @@ use coven_crypto::{
     StoreKeyring,
 };
 use coven_database::{EntryOutcome, StoreLog, StoreLogKeyUpload, StoreLogSealing};
-use coven_format::store_log::{StoreChange, StoreLogEntry};
+use coven_format::{
+    sealed_key::KeyCopyPrefix,
+    store_log::{StoreChange, StoreLogEntry},
+};
 use coven_foundation::id_source::KeyId;
 use coven_merge::Audience;
 use coven_storage::ObjectPath;
@@ -85,26 +88,38 @@ pub(crate) fn check_shared_keys(
     Ok(())
 }
 
-fn store_copy(
+pub(crate) fn store_copy(
     key: &StoreKey,
     member: &MemberId,
     recipient: &SealingPublicKey,
 ) -> Result<StoreLogKeyUpload, SyncError> {
     let path = ObjectPath::store_key(key.id(), member);
+    let prefix = KeyCopyPrefix {
+        audience: Audience::Store,
+        key: key.id(),
+        member: member.clone(),
+    };
+    let sealed = seal_store_key(key, recipient, path.as_str(), &prefix.encode()?)?;
     Ok(StoreLogKeyUpload {
-        bytes: seal_store_key(key, recipient, path.as_str())?,
+        bytes: prefix.encode_box(&sealed)?,
         path: path.into(),
     })
 }
 
-fn circle_copy(
+pub(crate) fn circle_copy(
     key: &CircleKey,
     member: &MemberId,
     recipient: &SealingPublicKey,
 ) -> Result<StoreLogKeyUpload, SyncError> {
     let path = ObjectPath::circle_key(key.circle(), key.id(), member);
+    let prefix = KeyCopyPrefix {
+        audience: Audience::Circle(key.circle()),
+        key: key.id(),
+        member: member.clone(),
+    };
+    let sealed = seal_circle_key(key, recipient, path.as_str(), &prefix.encode()?)?;
     Ok(StoreLogKeyUpload {
-        bytes: seal_circle_key(key, recipient, path.as_str())?,
+        bytes: prefix.encode_box(&sealed)?,
         path: path.into(),
     })
 }
@@ -169,9 +184,7 @@ pub(crate) fn seal(
             ..
         } => {
             let material = ring.store_key(*key)?;
-            if material.hash() != *key_hash {
-                return Err(coven_crypto::MaterialError::StoreKeyConflict(*key).into());
-            }
+            material.check_hash(key_hash)?;
             keys.push(store_copy(material, &admin.signing, &admin.sealing)?);
         }
         StoreChange::CreateCircle {
@@ -181,13 +194,7 @@ pub(crate) fn seal(
             ..
         } => {
             let material = ring.circle_key(*circle, *key)?;
-            if material.hash() != *key_hash {
-                return Err(coven_crypto::MaterialError::CircleKeyConflict {
-                    circle: *circle,
-                    key: *key,
-                }
-                .into());
-            }
+            material.check_hash(key_hash)?;
             keys.push(circle_copy(
                 material,
                 &entry.author,
@@ -201,22 +208,14 @@ pub(crate) fn seal(
         } => match audience {
             Audience::Store => {
                 let material = ring.store_key(*key)?;
-                if material.hash() != *key_hash {
-                    return Err(coven_crypto::MaterialError::StoreKeyConflict(*key).into());
-                }
+                material.check_hash(key_hash)?;
                 for (id, recipient) in recipients(log, audience) {
                     keys.push(store_copy(material, id, recipient)?);
                 }
             }
             Audience::Circle(circle) => {
                 let material = ring.circle_key(*circle, *key)?;
-                if material.hash() != *key_hash {
-                    return Err(coven_crypto::MaterialError::CircleKeyConflict {
-                        circle: *circle,
-                        key: *key,
-                    }
-                    .into());
-                }
+                material.check_hash(key_hash)?;
                 for (id, recipient) in recipients(log, audience) {
                     keys.push(circle_copy(material, id, recipient)?);
                 }

@@ -4,11 +4,10 @@ use crate::{
     store_log_keys as keys, store_log_object as object, DamagedObject, Refusal, SyncError,
     SyncFailure,
 };
-use coven_crypto::{
-    custody::KeySession, seal_circle_key, seal_store_key, MemberKeys, SealedKey, StoreKeyring,
-};
+use coven_crypto::{custody::KeySession, MemberKeys, StoreKeyring};
 use coven_database::{Database, LocalStoreLog, StoreLog};
 use coven_format::{
+    sealed_key::SealedKey,
     sealed_single::SingleChunkObject,
     store_log::{StoreChange, StoreLogEntry},
     value::EntryId,
@@ -549,17 +548,15 @@ impl StoreLogSync {
                 let path = keys::path(audience, key, member);
                 if self.read(&path).await?.is_none() {
                     let recipient = *recipient;
-                    let sealed_path = path.clone();
+                    let member = member.clone();
                     let bytes = match *audience {
                         Audience::Store => {
                             let key = ring.store_key(key)?.clone();
                             self.database
                                 .prepare_key_upload(path.as_str().into(), move || {
-                                    Ok::<_, SyncError>(seal_store_key(
-                                        &key,
-                                        &recipient,
-                                        sealed_path.as_str(),
-                                    )?)
+                                    Ok::<_, SyncError>(
+                                        keys::store_copy(&key, &member, &recipient)?.bytes,
+                                    )
                                 })
                                 .await?
                         }
@@ -567,11 +564,9 @@ impl StoreLogSync {
                             let key = ring.circle_key(circle, key)?.clone();
                             self.database
                                 .prepare_key_upload(path.as_str().into(), move || {
-                                    Ok::<_, SyncError>(seal_circle_key(
-                                        &key,
-                                        &recipient,
-                                        sealed_path.as_str(),
-                                    )?)
+                                    Ok::<_, SyncError>(
+                                        keys::circle_copy(&key, &member, &recipient)?.bytes,
+                                    )
                                 })
                                 .await?
                         }
@@ -625,50 +620,67 @@ impl StoreLogSync {
         let Some(bytes) = self.read(&path).await? else {
             return Ok(false);
         };
-        if let Err(error) = SealedKey::decode(&bytes) {
-            Self::damage(
-                damages,
-                &path,
-                Refusal::Parse {
-                    cause: Some(Arc::new(error)),
-                },
-            )?;
-            return Ok(false);
-        }
+        let envelope = match SealedKey::decode(&bytes) {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                Self::damage(
+                    damages,
+                    &path,
+                    Refusal::Parse {
+                        cause: Some(Arc::new(error)),
+                    },
+                )?;
+                return Ok(false);
+            }
+        };
         let opened = match audience {
-            Audience::Store => member.open_store_key(path.as_str(), &bytes).map(|opened| {
-                if opened.id() != key {
-                    return Err(Refusal::WrongIdentity { cause: None });
-                }
-                match ring {
-                    Some(ring) => {
-                        ring.insert_store_key(opened)
+            Audience::Store => envelope
+                .open_store_key(member, path.as_str())
+                .map(|opened| {
+                    if opened.id() != key {
+                        return Err(Refusal::WrongIdentity { cause: None });
+                    }
+                    match ring {
+                        Some(ring) => {
+                            ring.insert_store_key(opened)
+                                .map_err(|e| Refusal::WrongIdentity {
+                                    cause: Some(Arc::new(e)),
+                                })
+                        }
+                        None => {
+                            *ring = Some(StoreKeyring::new(opened));
+                            Ok(())
+                        }
+                    }
+                }),
+            Audience::Circle(circle) => {
+                envelope
+                    .open_circle_key(member, path.as_str())
+                    .map(|opened| {
+                        if opened.id() != key || opened.circle() != *circle {
+                            return Err(Refusal::WrongIdentity { cause: None });
+                        }
+                        // A circle introduction follows an opened store-log entry.
+                        ring.as_mut()
+                            .expect("circle key follows an opened store key")
+                            .insert_circle_key(opened)
                             .map_err(|e| Refusal::WrongIdentity {
                                 cause: Some(Arc::new(e)),
                             })
-                    }
-                    None => {
-                        *ring = Some(StoreKeyring::new(opened));
-                        Ok(())
-                    }
-                }
-            }),
-            Audience::Circle(circle) => {
-                member.open_circle_key(path.as_str(), &bytes).map(|opened| {
-                    if opened.id() != key || opened.circle() != *circle {
-                        return Err(Refusal::WrongIdentity { cause: None });
-                    }
-                    // A circle introduction follows an opened store-log entry.
-                    ring.as_mut()
-                        .expect("circle key follows an opened store key")
-                        .insert_circle_key(opened)
-                        .map_err(|e| Refusal::WrongIdentity {
-                            cause: Some(Arc::new(e)),
-                        })
-                })
+                    })
             }
         };
         match opened {
+            Err(error @ coven_crypto::CryptoError::KeyIdentity) => {
+                Self::damage(
+                    damages,
+                    &path,
+                    Refusal::WrongIdentity {
+                        cause: Some(Arc::new(error)),
+                    },
+                )?;
+                Ok(false)
+            }
             Err(error) => {
                 Self::damage(
                     damages,

@@ -456,7 +456,10 @@ async fn permanent_storage_failure_preserves_fixed_bytes_for_retry_and_discard()
             panic!("circle creation")
         };
         let copy = &fixed.sealing.keys[0];
-        let material = a.member.open_circle_key(&copy.path, &copy.bytes).unwrap();
+        let material = coven_format::sealed_key::SealedKey::decode(&copy.bytes)
+            .unwrap()
+            .open_circle_key(&a.member, &copy.path)
+            .unwrap();
         assert_eq!(
             (material.circle(), material.id(), material.hash()),
             (*circle, *key, *key_hash)

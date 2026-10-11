@@ -347,11 +347,6 @@ pub(super) fn snapshot_damage(
                 cause: Some(Arc::new(error)),
             }
         }
-        SyncError::Crypto(error @ coven_crypto::CryptoError::UnsupportedVersion(_)) => {
-            crate::Refusal::Parse {
-                cause: Some(Arc::new(error)),
-            }
-        }
         SyncError::Crypto(error) => crate::Refusal::Decryption {
             cause: Some(Arc::new(error)),
         },

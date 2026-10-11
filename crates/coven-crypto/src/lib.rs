@@ -26,7 +26,7 @@ pub use file_key::FileKey;
 pub use hashing::{ContentHash, ContentHasher, Fingerprint, FingerprintHasher};
 pub use keys::{CircleKey, InviteSecret, StoreKey, StoreKeyring};
 pub use member::{
-    seal_circle_key, seal_store_key, MemberId, MemberKeys, SealedKey, SealingPublicKey, Signature,
+    seal_circle_key, seal_store_key, MemberId, MemberKeys, SealingPublicKey, Signature,
 };
 pub use object_digest::{ObjectDigest, ObjectHasher};
 pub use secret::{SecretBytes, SecretText};

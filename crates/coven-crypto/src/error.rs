@@ -12,12 +12,9 @@ pub enum CryptoError {
     /// A sealed value was truncated or had invalid framing.
     #[error("invalid sealed value")]
     Malformed,
-    /// The stored object has an unrecognized kind.
-    #[error("unknown sealed object kind {0}")]
-    UnknownKind(u8),
-    /// The stored object uses a format version this reader does not support.
-    #[error("unsupported sealed object format version {0}")]
-    UnsupportedVersion(u16),
+    /// The opened key's audience or identity disagrees with its clear routing prefix.
+    #[error("sealed key payload disagrees with its routing prefix")]
+    KeyIdentity,
     /// X25519 produced a non-contributory shared secret.
     #[error("X25519 public key has low order")]
     WeakSealingKey,
