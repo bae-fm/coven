@@ -265,3 +265,37 @@ import CovenIO
 #print axioms CovenIO.RepairedExamples.no_first_witness
 #print axioms CovenIO.RepairedExamples.replacement_exceeds_target
 #print axioms CovenIO.RepairedExamples.old_races_preserved
+
+#print axioms CovenIO.FixedReload.scan_retry_time
+#print axioms CovenIO.FixedReload.scan_received_subset
+
+#print axioms CovenIO.RetentionDeadline.service_covers
+
+#print axioms CovenIO.CommonReload.maximum_member
+#print axioms CovenIO.CommonReload.maximum_le
+#print axioms CovenIO.CommonReload.target_ready
+#print axioms CovenIO.CommonReload.scan_spec
+#print axioms CovenIO.CommonReload.retry_stale
+#print axioms CovenIO.CommonReload.replace_valid
+#print axioms CovenIO.CommonReload.stale_decreases
+#print axioms CovenIO.CommonReload.terminates
+#print axioms CovenIO.CommonReload.common_cut_commits
+#print axioms CovenIO.CommonReload.committed_prefix
+#print axioms CovenIO.CommonReload.bundle_complete
+
+#print axioms CovenIO.AudienceRetention.first_witness
+#print axioms CovenIO.AudienceRetention.audience_deadline
+#print axioms CovenIO.AudienceRetention.bounded_storage
+
+#print axioms CovenIO.CommonReloadExamples.snapshots_sound
+#print axioms CovenIO.CommonReloadExamples.catalog_runs
+#print axioms CovenIO.CommonReloadExamples.replacement_fills_other_audience
+#print axioms CovenIO.CommonReloadExamples.offline_reachable
+#print axioms CovenIO.CommonReloadExamples.first_coverage_sound
+#print axioms CovenIO.CommonReloadExamples.first_snapshot_deleted
+#print axioms CovenIO.CommonReloadExamples.first_snapshot_deadline
+
+#print axioms CovenIO.CommonReload.eventually_terminates
+#print axioms CovenIO.CommonReload.loads_complete
+#print axioms CovenIO.CommonReload.committed_safe
+#print axioms CovenIO.CommonReload.committed_number

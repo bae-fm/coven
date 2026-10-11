@@ -7,17 +7,17 @@ def historical (ss : List Snapshot) (w : Write) (a : Nat) : Bool :=
   ss.any (fun s => s.counts && decide (s.covers w a))
 
 /-- The coverage deficit itself also detects an audience's first snapshot. -/
-def coverageDue (order : SnapshotOrder) (s : State) (posted : List (Nat × Nat × Nat))
+def refreshDue (order : SnapshotOrder) (s : State) (posted : List (Nat × Nat × Nat))
     (final readable : Bool) (w : Write) (a : Nat) : Bool :=
   final && readable && decide (a ∈ w.audiences) &&
     decide ((∀ reader ∈ s.writers, w.number ≤ postedPosition posted reader w.writer) ∨
       w.storedAt + month ≤ s.time) &&
     !(match catalogCurrent order s.landed a with | none => false | some snap => decide (snap.covers w a))
 
-/-- The proposed repair requires historical coverage as well as a deficit. -/
-def refreshDue (order : SnapshotOrder) (s : State) (posted : List (Nat × Nat × Nat))
+/-- Historical-witness-only trigger, retained for its checked counterexample. -/
+def witnessedRefreshDue (order : SnapshotOrder) (s : State) (posted : List (Nat × Nat × Nat))
     (final readable : Bool) (w : Write) (a : Nat) : Bool :=
-  coverageDue order s posted final readable w a && historical s.landed w a
+  refreshDue order s posted final readable w a && historical s.landed w a
 
 /-- At the due pass, keep existing coverage or perform the required refresh
 in that pass or the next. The final catalog retains that observation and all
@@ -35,6 +35,46 @@ structure Service (order : SnapshotOrder) (writers : List Nat) (catalog : List S
     fresh.audience = a ∧ fresh.counts = true ∧ Normalized writers fresh ∧
     Dominates fresh previous ∧ ready ≤ fresh.caughtAt ∧ fresh.caughtAt ≤ fresh.storedAt ∧
     fresh.storedAt ≤ ready + 2 * passGap + upload
+
+/-- Once witness age has elapsed, the bounded refresh makes this audience's
+current selection cover the write; coverage is a conclusion of the service. -/
+theorem service_covers (order : SnapshotOrder) (writers : List Nat) (catalog : List Snapshot)
+    (published : Write → Prop) (w : Write) (pub : published w) (writer : w.writer ∈ writers)
+    (a bound ready passGap upload : Nat) (ha : a ∈ w.audiences)
+    (sound : ∀ snap ∈ catalog, SnapshotHistory.Sound published snap)
+    (normalized : ∀ snap ∈ catalog, Normalized writers snap)
+    (stored : w.storedAt ≤ bound) (mature : bound + day < ready)
+    (action : Service order writers catalog w a ready passGap upload) :
+    ∃ chosen, catalogCurrent order catalog a = some chosen ∧ chosen.covers w a := by
+  have newCoverage : ∀ snap ∈ action.added, snap.audience = a → snap.counts = true → snap.covers w a := by
+    intro snap member audience counted
+    have inCatalog : snap ∈ catalog := by rw [action.inventory]; exact List.mem_append_left _ member
+    have cov := fresh_covers published w pub snap (sound snap inCatalog) (audience ▸ ha)
+      counted bound ready stored mature (action.afterReady snap member)
+    simpa [audience] using cov
+  have oldMember : action.previous ∈ catalog := by
+    have member := List.mem_append_right action.added (current_member order action.base a action.previous action.selected).1
+    simpa only [← action.inventory] using member
+  have oldFacts := current_member order action.base a action.previous action.selected
+  have covered : ∃ chosen, catalogCurrent order catalog a = some chosen ∧ chosen.covers w a := by
+    rcases action.outcome with already | ⟨fresh, member, audience, counted, form, dominates, caught, clock, _⟩
+    · rw [action.inventory]
+      exact covered_selection_preserved order action.base action.added a w
+        ⟨action.previous, action.selected, already⟩ newCoverage
+    · by_cases already : action.previous.covers w a
+      · rw [action.inventory]
+        exact covered_selection_preserved order action.base action.added a w
+          ⟨action.previous, action.selected, already⟩ newCoverage
+      · have cov := newCoverage fresh member audience counted
+        have wins := refresh_outranks order writers published w pub writer action.previous fresh
+          (by simpa only [oldFacts.2.1] using ha) (sound action.previous oldMember) oldFacts.2.2
+          (normalized action.previous oldMember) form dominates
+          (by simpa [oldFacts.2.1] using already) (by simpa [audience] using cov)
+          bound ready stored mature caught clock
+        rw [action.inventory]
+        exact refresh_selected order action.base action.added a action.previous fresh w action.selected
+          member audience counted newCoverage wins
+  exact covered
 
 /-- This joins the publication repair, all part audiences, historical age,
 retention scheduling and DELETE completion. It assumes historical witnesses,
@@ -65,35 +105,8 @@ theorem bounded_witnessed_storage (order : SnapshotOrder) (s : State)
     ((sound witness member).causal w pub (covers.1 ▸ ha) (by simpa [covers.1] using covers)) age
   have current : Covered (catalogCurrent order s.landed) w := by
     intro a ha
-    let action := service a ha
-    have newCoverage : ∀ snap ∈ action.added, snap.audience = a → snap.counts = true → snap.covers w a := by
-      intro snap member audience counted
-      have inCatalog : snap ∈ s.landed := by rw [action.inventory]; exact List.mem_append_left _ member
-      have cov := fresh_covers published w pub snap (sound snap inCatalog) (audience ▸ ha)
-        counted bound ready stored mature (action.afterReady snap member)
-      simpa [audience] using cov
-    have oldMember : action.previous ∈ s.landed := by
-      have member := List.mem_append_right action.added (current_member order action.base a action.previous action.selected).1
-      simpa only [← action.inventory] using member
-    have oldFacts := current_member order action.base a action.previous action.selected
-    have covered : ∃ chosen, catalogCurrent order s.landed a = some chosen ∧ chosen.covers w a := by
-      rcases action.outcome with already | ⟨fresh, member, audience, counted, form, dominates, caught, clock, _⟩
-      · rw [action.inventory]
-        exact covered_selection_preserved order action.base action.added a w
-          ⟨action.previous, action.selected, already⟩ newCoverage
-      · by_cases already : action.previous.covers w a
-        · rw [action.inventory]
-          exact covered_selection_preserved order action.base action.added a w
-            ⟨action.previous, action.selected, already⟩ newCoverage
-        · have cov := newCoverage fresh member audience counted
-          have wins := refresh_outranks order s.writers published w pub writer action.previous fresh
-            (by simpa only [oldFacts.2.1] using ha) (sound action.previous oldMember) oldFacts.2.2
-            (normalized action.previous oldMember) form dominates
-            (by simpa [oldFacts.2.1] using already) (by simpa [audience] using cov)
-            bound ready stored mature caught clock
-          rw [action.inventory]
-          exact refresh_selected order action.base action.added a action.previous fresh w action.selected
-            member audience counted newCoverage wins
+    have covered := service_covers order s.writers s.landed published w pub writer a bound ready
+      passGap upload ha sound normalized stored mature (service a ha)
     obtain ⟨chosen, selected, cov⟩ := covered
     simpa [selected] using cov
   have due : eligible order s w posted (final w) = true := by

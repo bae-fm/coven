@@ -75,7 +75,7 @@ def raceSource (order : SnapshotOrder) : Source order [anaWrite, laterWrite] whe
     · have ht : t ≠ 0 := by omega
       simpa [hs, ht] using member
   absent := by
-    intro t w member missing
+    intro t w _ member missing
     rcases List.mem_cons.mp member with rfl | rest
     · contradiction
     · have eq : w = laterWrite := by simpa using rest
@@ -245,8 +245,8 @@ theorem busy_cleanup_runs (order : SnapshotOrder) (n : Nat) (aged : day < n) :
     exact ⟨ana, (busy_retains_first n).1, by decide, by decide,
       by simpa [ana, busyState] using aged⟩
 
-/-- One write with no snapshot is final and aged, but the proposed repair
-never requests its first witness, even with an online reader every pass. -/
+/-- One final aged write with no snapshot defeats the historical-only
+refresh trigger, even with an online reader every pass. -/
 def withoutWitness : State := ⟨month, [0], [anaWrite], [], [], [], []⟩
 
 def unwitnessedPasses (order : SnapshotOrder) : Nat → State
@@ -255,7 +255,7 @@ def unwitnessedPasses (order : SnapshotOrder) : Nat → State
 
 theorem no_first_witness (order : SnapshotOrder) (n : Nat) :
     unwitnessedPasses order n = { withoutWitness with time := month + n } ∧
-    refreshDue order (unwitnessedPasses order n) [] true true anaWrite 0 = false := by
+    witnessedRefreshDue order (unwitnessedPasses order n) [] true true anaWrite 0 = false := by
   have keeps : ∀ time, retainPass order { withoutWitness with time := time } [] true =
       { withoutWitness with time := time } := by
     intro time
@@ -267,22 +267,22 @@ theorem no_first_witness (order : SnapshotOrder) (n : Nat) :
         simp [unwitnessedPasses, ih.1, keeps, Nat.add_assoc]
       refine ⟨eq, ?_⟩
       rw [eq]
-      simp [refreshDue, coverageDue, historical, withoutWitness]
+      simp [witnessedRefreshDue, refreshDue, historical, withoutWitness]
 
 example (order : SnapshotOrder) (deadline : Nat) :
     ∃ s, Run order [0] s ∧ deadline < s.time ∧
-      anaWrite ∉ s.deleted ∧ refreshDue order s [] true true anaWrite 0 = false ∧
+      anaWrite ∉ s.deleted ∧ witnessedRefreshDue order s [] true true anaWrite 0 = false ∧
       s = unwitnessedPasses order (deadline + 1) := by
   refine ⟨{ withoutWitness with time := month + (deadline + 1) }, ?_, by dsimp; omega,
-    by simp [withoutWitness], by simp [refreshDue, coverageDue, historical, withoutWitness], (no_first_witness order _).1.symm⟩
+    by simp [withoutWitness], by simp [witnessedRefreshDue, refreshDue, historical, withoutWitness], (no_first_witness order _).1.symm⟩
   refine ⟨[(0, .write 0 [0]), (month + (deadline + 1), .tick)], ?_⟩
   simp [execute, step, act, initial, withoutWitness, anaWrite]
 
 /-- Removing only the historical-witness precondition requests the missing
-first snapshot in the counterexample. This extension is not part of the proposal. -/
+first snapshot in the counterexample. This is the current retention trigger. -/
 example (order : SnapshotOrder) :
-    refreshDue order withoutWitness [] true true anaWrite 0 = false ∧
-    coverageDue order withoutWitness [] true true anaWrite 0 = true := by
+    witnessedRefreshDue order withoutWitness [] true true anaWrite 0 = false ∧
+    refreshDue order withoutWitness [] true true anaWrite 0 = true := by
   cases order <;> decide
 
 /-- The old quiet-store history is also permitted forever when nobody who
@@ -290,7 +290,7 @@ can read its missing audience is online. Retention itself still runs. -/
 example (order : SnapshotOrder) (n : Nat) :
     otherWrite ∉ (quietPasses order n).deleted ∧
     refreshDue order (quietPasses order n) [] true false otherWrite 0 = false := by
-  exact ⟨(every_pass_retains_uncovered order n).2.2.2, by simp [refreshDue, coverageDue]⟩
+  exact ⟨(every_pass_retains_uncovered order n).2.2.2, by simp [refreshDue]⟩
 
 /-- A checked publication history behind the multi-audience overrun. At the
 initial selection only audience 1 has a snapshot, through write 1. -/

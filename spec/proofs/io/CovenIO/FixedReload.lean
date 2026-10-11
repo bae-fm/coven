@@ -13,7 +13,8 @@ structure Source (order : SnapshotOrder) (target : List Write) where
   unique : ∀ u v, published u → published v → u.writer = v.writer → u.number = v.number → u = v
   runs : ∀ t, SnapshotHistory.Run published order (history t)
   deletedMono : ∀ s t, s ≤ t → (history s).deleted ⊆ (history t).deleted
-  absent : ∀ t w, w ∈ target → world t (.log .write w.writer w.number) = none →
+  availableFrom : Nat := 0
+  absent : ∀ t w, availableFrom ≤ t → w ∈ target → world t (.log .write w.writer w.number) = none →
     w ∈ (history (t + 1)).deleted
 
 def position (snap : Option Snapshot) (writer : Nat) : Nat :=
@@ -65,6 +66,58 @@ def scan (world : World) (history : Nat → SnapshotHistory.State) (order : Snap
             else scan world history order audience loaded knownDeleted rest (time + 1)
           else .uncertified w
 
+/-- A replacement catalog is observed after the round's missing GET. -/
+theorem scan_retry_time (world : World) (history : Nat → SnapshotHistory.State) (order : SnapshotOrder)
+    (audience : Nat) (loaded : Option Snapshot) (knownDeleted todo : List Write)
+    (time next : Nat) (missing : Write)
+    (result : scan world history order audience loaded knownDeleted todo time = .retry next missing) :
+    time < next := by
+  induction todo generalizing time with
+  | nil => cases result
+  | cons w rest ih =>
+      simp only [scan] at result
+      split at result
+      · exact ih time result
+      · split at result
+        · cases h : scan world history order audience loaded knownDeleted rest (time + 1) with
+          | complete received => simp [h] at result
+          | retry t v =>
+              simp only [h] at result
+              cases result
+              exact Nat.lt_of_succ_lt (ih (time + 1) h)
+          | uncertified v => simp [h] at result
+        · split at result
+          · split at result
+            · cases result; omega
+            · exact Nat.lt_of_succ_lt (ih (time + 1) result)
+          · contradiction
+
+/-- A finite scan retains no write beyond the enumerated cut. -/
+theorem scan_received_subset (world : World) (history : Nat → SnapshotHistory.State) (order : SnapshotOrder)
+    (audience : Nat) (loaded : Option Snapshot) (knownDeleted todo : List Write)
+    (time : Nat) (received : List Write)
+    (result : scan world history order audience loaded knownDeleted todo time = .complete received) :
+    received ⊆ todo := by
+  induction todo generalizing time received with
+  | nil => cases result; exact List.Subset.refl []
+  | cons w rest ih =>
+      simp only [scan] at result
+      split at result
+      · exact List.Subset.trans (ih time received result) (by intro v hv; exact List.mem_cons_of_mem _ hv)
+      · split at result
+        · cases h : scan world history order audience loaded knownDeleted rest (time + 1) with
+          | complete got =>
+              simp only [h] at result
+              cases result
+              exact List.cons_subset_cons _ (ih (time + 1) got h)
+          | retry t v => simp [h] at result
+          | uncertified v => simp [h] at result
+        · split at result
+          · split at result
+            · contradiction
+            · exact List.Subset.trans (ih (time + 1) received result) (by intro v hv; exact List.mem_cons_of_mem _ hv)
+          · contradiction
+
 theorem scan_covered (world : World) (history : Nat → SnapshotHistory.State) (order : SnapshotOrder)
     (audience : Nat) (loaded : Option Snapshot) (knownDeleted target : List Write) (time : Nat)
     (covered : ∀ w ∈ target, w.number ≤ position loaded w.writer) :
@@ -103,7 +156,7 @@ theorem skipped_has_no_part (source : Source order target) (audience time : Nat)
 /-- The result carries actual log receipts or snapshot coverage. Every retry
 spends a previously undeleted target number; cross-audience skips are safe. -/
 theorem scan_spec (source : Source order target) (audience start time : Nat)
-    (afterStart : start ≤ time) (todo : List Write) (subset : todo ⊆ target) :
+    (afterStart : start ≤ time) (available : source.availableFrom ≤ time) (todo : List Write) (subset : todo ⊆ target) :
     match scan source.world source.history order audience (selected source audience start)
         (source.history start).deleted todo time with
     | .complete received =>
@@ -119,7 +172,7 @@ theorem scan_spec (source : Source order target) (audience start time : Nat)
       simp only [scan, deleted_number source start w (subset (by simp))]
       by_cases already : w.number ≤ position (selected source audience start) w.writer ∨ w ∈ (source.history start).deleted
       · simp only [ite_eq_left already]
-        have result := ih time afterStart tailSubset
+        have result := ih time afterStart available tailSubset
         cases h : scan source.world source.history order audience (selected source audience start)
             (source.history start).deleted rest time with
         | complete received =>
@@ -137,7 +190,7 @@ theorem scan_spec (source : Source order target) (audience start time : Nat)
         have notDeleted : w ∉ (source.history start).deleted := fun h => already (Or.inr h)
         cases found : source.world time (.log .write w.writer w.number) with
         | some object =>
-            have result := ih (time + 1) (by omega) tailSubset
+            have result := ih (time + 1) (by omega) (by omega) tailSubset
             cases h : scan source.world source.history order audience (selected source audience start)
                 (source.history start).deleted rest (time + 1) with
             | complete received =>
@@ -158,7 +211,7 @@ theorem scan_spec (source : Source order target) (audience start time : Nat)
                 exact ⟨result.1, List.mem_cons_of_mem _ result.2.1, result.2.2⟩
             | uncertified missing => simp [h] at result
         | none =>
-            have deleted := source.absent time w (subset (by simp)) found
+            have deleted := source.absent time w available (subset (by simp)) found
             simp only [deleted_number source (time + 1) w (subset (by simp)), deleted, ↓reduceIte]
             by_cases covered : w.number ≤ position (selected source audience (time + 1)) w.writer
             · simp only [selected] at covered
@@ -167,7 +220,7 @@ theorem scan_spec (source : Source order target) (audience start time : Nat)
             · have irrelevant := skipped_has_no_part source audience (time + 1) w deleted covered
               simp only [selected] at covered
               simp only [ite_eq_right covered]
-              have result := ih (time + 1) (by omega) tailSubset
+              have result := ih (time + 1) (by omega) (by omega) tailSubset
               cases h : scan source.world source.history order audience (selected source audience start)
                   (source.history start).deleted rest (time + 1) with
               | complete received =>
@@ -224,7 +277,8 @@ inductive Loads (source : Source order target) (audience : Nat) : Nat → Nat �
 /-- Combined termination and committed-prefix theorem. Successful GETs, fresh
 catalogs and snapshot bodies are finite operations; no duration bound is used.
 The finite target is unchanged by every retry and by concurrent publication. -/
-theorem terminates (source : Source order target) (audience start : Nat) :
+theorem terminates (source : Source order target) (audience start : Nat)
+    (available : source.availableFrom ≤ start) :
     ∃ retries selectedAt received, Loads source audience start retries selectedAt received ∧
       retries ≤ (remaining source start).length ∧
       (∀ w ∈ target, Realized audience (selected source audience selectedAt) received w) ∧
@@ -232,7 +286,7 @@ theorem terminates (source : Source order target) (audience start : Nat) :
   generalize measure : (remaining source start).length = n
   induction n using Nat.strongRecOn generalizing start with
   | ind n ih =>
-      have spec := scan_spec source audience start start (Nat.le_refl _) target (fun _ h => h)
+      have spec := scan_spec source audience start start (Nat.le_refl _) available target (fun _ h => h)
       change (match round source audience start with | .complete r => _ | .retry t w => _ | .uncertified _ => _) at spec
       cases h : round source audience start with
       | complete received =>
@@ -243,18 +297,19 @@ theorem terminates (source : Source order target) (audience start : Nat) :
           simp only [h] at spec
           have smaller := deletion_decreases source start next w (by omega) spec.2.1 spec.2.2.1 spec.2.2.2
           obtain ⟨retries, selectedAt, received, run, bound, complete⟩ :=
-            ih (remaining source next).length (by omega) next rfl
+            ih (remaining source next).length (by omega) next (by omega) rfl
           exact ⟨retries + 1, selectedAt, received, .retry start next selectedAt retries w received h run,
             by omega, complete⟩
 
 /-- Turn the coverage-or-receipt result into an actual snapshot or GET witness.
 Number zero is not a published log object. -/
-theorem committed_contains (source : Source order target) (audience start : Nat) :
+theorem committed_contains (source : Source order target) (audience start : Nat)
+    (available : source.availableFrom ≤ start) :
     ∃ retries selectedAt received, Loads source audience start retries selectedAt received ∧
       retries ≤ target.length ∧ ∀ w ∈ target, 0 < w.number → audience ∈ w.audiences →
         (∃ snap, selected source audience selectedAt = some snap ∧ snap.covers w audience) ∨
         (w ∈ received ∧ ∃ t o, selectedAt ≤ t ∧ source.world t (.log .write w.writer w.number) = some o) := by
-  obtain ⟨retries, selectedAt, received, run, bound, complete, receipts⟩ := terminates source audience start
+  obtain ⟨retries, selectedAt, received, run, bound, complete, receipts⟩ := terminates source audience start available
   refine ⟨retries, selectedAt, received, run,
     Nat.le_trans bound (List.length_filter_le _ _), ?_⟩
   intro w hw positive relevant
@@ -271,7 +326,7 @@ theorem committed_contains (source : Source order target) (audience start : Nat)
 turns the finite-list result into the per-writer prefix guarantee. Writer
 registration discovery and unpublished local reservations are separate inputs. -/
 theorem prefix_committed (source : Source order target) (audience start : Nat)
-    (writers : List Nat) (limit : Nat → Nat)
+    (writers : List Nat) (limit : Nat → Nat) (available : source.availableFrom ≤ start)
     (enumerated : ∀ w, source.published w → w.writer ∈ writers → 0 < w.number →
       w.number ≤ limit w.writer → w ∈ target) :
     ∃ retries selectedAt received, Loads source audience start retries selectedAt received ∧
@@ -279,7 +334,7 @@ theorem prefix_committed (source : Source order target) (audience start : Nat)
         0 < w.number → w.number ≤ limit w.writer → audience ∈ w.audiences →
         (∃ snap, selected source audience selectedAt = some snap ∧ snap.covers w audience) ∨
         (w ∈ received ∧ ∃ t o, selectedAt ≤ t ∧ source.world t (.log .write w.writer w.number) = some o) := by
-  obtain ⟨retries, selectedAt, received, run, bound, complete⟩ := committed_contains source audience start
+  obtain ⟨retries, selectedAt, received, run, bound, complete⟩ := committed_contains source audience start available
   exact ⟨retries, selectedAt, received, run, bound, fun w pub writer positive within relevant =>
     complete w (enumerated w pub writer positive within) positive relevant⟩
 
