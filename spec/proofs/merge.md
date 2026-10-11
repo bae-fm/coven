@@ -983,3 +983,274 @@ readiness function. `lean_differential_receive` calls the real database
 prerequisite function across three logs and consumed prefixes. The Boolean,
 reset and schema runners retain their existing paths and comparison scope.
 No Rust implementation or differential for the data-loss proposal is added.
+
+### B18 Owner tables and row authenticity
+
+This is a proposal, not a change to the normative spec or Rust. `Ownership`,
+`OwnerProtection` and `OwnerEvaluation` check the owner filter, state-based
+protection tests and an executable, terminating rejection procedure.
+`OwnerDeleteContexts` checks deletion against rebuilt reference generations
+and the complete removal passes. `OwnerExamples`, `OwnerFilterExamples`,
+`OwnerDeleteExamples` and `OwnerReinsertExamples` check races and rejected
+alternatives. The signed-root argument is in
+[the storage model](storage.md#signed-roots-and-row-authorship).
+SQL extraction and store-log authority remain outside the model.
+
+**Owner changes and value accounting are proved.** `Policy` makes ownership
+an opt-in table declaration and derives a row's owner from its creating
+write's member. The creator is retained evidence, independent of generation,
+current setters, removed rows, loss dismissal and audience copies. `owner_fixed`
+covers copies sharing that creation identity; `creator_allowed`, `opt_out`
+and `non_owner_denied` check the policy. Selecting and authenticating the
+original creation is an admission requirement, not something inferred from
+an arbitrary snapshot creator field. `accepted_owner_matches_filter` connects
+the storage proof of a signed creation to the owner this filter enforces,
+when both use the authenticated write authors. The reading for competing
+original creations is B4's smallest timestamp at generation one, selected
+before owner filtering. `selected_creation` proves this record identifies an
+actual generation-zero insert; `creation_selection_converges` proves agreement
+in every causal order. `later_change_preserves_creation` proves that later
+generation updates, deletes and reinsertions cannot change it. Audience
+transfers carry that original identity rather than selecting a new creator.
+A newly discovered competing original creation can change which creation is
+shown for a shared key; that is rejection of the losing creation, not changing
+its author. The policy receives the selected authenticated identity; missing
+creation evidence is a validation failure, never an arbitrary default.
+`first_arrival_owner_diverges` checks two members independently creating the
+same shared key: preserving each device's first owner gives different owners.
+`immutable_first_arrivals_incompatible` proves that accepting both solo owners,
+never revising either during conflict resolution, and convergence cannot all
+hold. One creation agrees (`one_creation_agrees`). This rejects first receipt
+as the identity rule, not owner tables with an authenticated creation identity.
+
+`base` rejects each unauthorized change separately. It uses the exact
+`DataDependency.retained` and `dependsOnDropped` definitions of B17, with the
+original generation and replaced-setter evidence. It does not use a new
+notion of read dependence. `non_owner_no_effect` proves that change absent
+from the effective merge. `non_owner_recorded`, `guard_recorded`,
+`dependent_recorded` and `excluded_recorded` preserve its original identity,
+generation and values, including empty deletes. `Loss` extends the existing
+`LossRecord` envelope with a typed owner/protection/dependency cause and the
+excluded write; these records are held separately from ordinary active losses.
+A later replacement cannot acknowledge them away.
+
+`converges`, `loss_converges` and `result_converges` prove equality of the core
+merge, displayed rows, ordinary rule/cell losses and owner/dependency losses
+for every causal order of the same writes and verdicts. `value_accounted`
+extends B14 to every original setter, including directly rejected setters:
+it has an ordinary B14 outcome or its original value in a change loss.
+Validity after filtering is derived by `DataDependency.effective_valid`,
+not assumed. The examples check two causal orders: Ben edits Ana's owned row
+and an unowned row in one write; Ana then builds on Ben's owned-row setter
+while independently editing the unowned row. The unauthorized change and its
+dependent change are recorded separately, and the unowned changes survive.
+
+**Moves include merged descendants and replayed membership.** `carried` takes
+the root's transitive closure through the merged declared audience-parent
+links. `carried_root` and `carried_child` prove inclusion at arbitrary depth.
+`carried_order_independent` and `move_order_independent` allow any enumeration
+of the same merged row set, not only a canonical row order.
+`moveDenied` examines every present owned row in that closure, even if an
+ordinary removal rule hides it. The destination's read permission comes from
+the replayed membership state, not the mover's authored view.
+`unread_owner_blocks_move` and `move_safe` prove the exact veto and its
+converse; `move_reason_complete` supplies its protected row and owner, and
+`move_recorded` puts that cause in the per-change loss. `concurrent_child_blocks`
+checks an unseen child insertion;
+`concurrent_membership_blocks` checks a concurrent removal of its owner's
+access. A parent move and a root audience edit use the same closure.
+
+These results require the complete relevant merged graph and the same
+membership result. They do not prove that a reader restricted to one audience
+can discover unseen descendants elsewhere. Extracting links, pairing the old
+and new halves of a move, and enumerating generated descendant copies are
+outside the model. Carrying an authenticated descendant is read as transport
+of its original creator/setters, not permission for the parent's author to
+forge new child values. The model does not silently exempt an ordinary
+non-owner child edit from the owner filter.
+
+**The rejection/removal order terminates and converges conditionally.**
+The procedure tested by `OwnerProtection` is:
+
+1. Filter owner-invalid changes and their data dependents. Build merged
+   candidate inputs from retained originals and replayed membership.
+2. Judge each active move against that round's merged descendants and
+   membership. For each delete, enumerate every subsequence of active
+   candidates, holding non-delete operations and the protected owner's own
+   deletes fixed. Rebuild from original writes before and after adding the
+   delete. Compare two projections: reference/audience removal with independent
+   CHECK and unique losses suppressed, and all three ordinary removal passes.
+   Reject if either projection shows a foreign-owned row before and hides it
+   afterward. Reference generations and null substitution come from each
+   rebuilt state; logical row keys alone do not identify deletion effects.
+3. Reject all failing candidates together. Rebuild core merge and trials with
+   those changes and their data dependents excluded. Keep every rejection
+   within this evaluation. Repeat until no active candidate fails.
+4. Record excluded changes, then install the rebuilt core and the result of
+   the same three removal passes together. No intermediate database is public.
+
+`settle` executes the rejection procedure over a canonical candidate list;
+its list order is not arrival order. `settle_permutation` also allows arbitrary
+candidate permutations when trials depend only on the active set.
+`rounds_bounded` proves at most one
+strict round per initial candidate. `settles_subset`, `settles_safe` and
+`settle_idempotent` prove that it only excludes candidates, ends with every
+active trial safe, and needs no later repair. `rejected_has_witness` gives an
+actual rejecting round for every excluded candidate. `rejectionReason`
+retains its first rejecting cause; `rejection_record_exact` proves records
+exist exactly for excluded candidates, and `rejection_reason_witness` proves
+each recorded cause came from an actual round. It is not guessed from the
+final state, where its original blocker may have disappeared.
+`any_order_removal` supplies the existing proof for all three final removal
+passes in either protection projection. `protection_converges`
+and `guarded_result_converges` compose equal merged inputs with deterministic
+trial/record derivation and the real owner-filtered merge.
+
+`OwnerEvaluation` connects these operations to the actual original-write
+merge. `roundState` rebuilds it in each round using the shared data-dependency
+filter. `unretained_not_tried` excludes changes already removed by ownership
+or data dependency from protection trials. `settled_admission` and
+`settled_merge` prove that retaining recorded
+reasons gives exactly the settled candidate state. `settled_safe` proves
+retained surviving candidates pass against that final rebuilt state.
+`protectedResult` returns that merge, all three removal passes and both kinds
+of losses together. `protected_result_converges` proves equality in every
+causal write order, including recorded causes. B14's `value_accounted`
+applies to its `settledGuard` without any extra assumption about retained
+generations. The trial receives the actual merge builder for every candidate
+subset, so full-pass comparisons use original writes and the shared dependency
+filter too. Graph/membership extraction remains a supplied function of each
+rebuilt state; grouping move halves or store-log entry effects into
+per-change candidates remains outside this executor. Purity alone does not
+prove those supplied facts match the required SQL effects.
+
+A new set of received writes or changed membership starts a fresh atomic
+evaluation from retained originals. There is no persistent arrival-dependent
+“once rejected, always rejected” rule. Verdicts may change with the input set,
+just as existing unique losses may change.
+
+**Delete contexts protect rows through the removal passes.**
+`deletionContexts` enumerates every subsequence (`context_complete`).
+`ownerDeletesFixed` keeps the protected owner's own deletes and all non-delete
+candidates in every trial. Both `ProtectionView` cases run the existing removal
+engine on generation-aware inputs. The reference projection suppresses
+independent CHECK and unique losses so they cannot mask harm to a hidden
+child. The full projection catches indirect effects such as set-null changing
+a unique claim and hiding another owner's row.
+
+`context_delete_exact` characterizes the veto. `context_delete_safe` proves
+that a passing delete preserves an owned row in either projection and every
+permitted context. `context_reason_witness` gives a before/after witness for
+the row and owner actually named by a rejection. `all_deletes_preserve` proves
+their combination safe: if every active candidate passes the context guard,
+any owned row visible with only its owner's deletes and the non-delete
+candidates stays visible with all candidates. This holds separately for each
+projection. The input builder must depend on the active set;
+`round_state_by_set` proves that contract for the real original-write merge.
+`deleteTrial` binds the contexts to one authenticated policy and that merge
+builder. `guard_recorded` records the resulting cause per original change.
+
+The examples cover another-owner child, a CHECK-hidden child, nullable
+references, an owner's own deletion and audience removal.
+`concurrent_deletes_blocked` rejects both parent deletes and restores the
+parent and child. `null_unique_delete_blocked` catches the indirect unique
+loss; `duplicate_null_unique_deletes_blocked` catches duplicate deletes with
+that effect. `explicit_owner_delete_not_resurrected` keeps Ana's own explicit
+delete fixed and permits Ben's parent deletion. A rejected delete is undone
+in the merge; restoration still obeys independent rules. One owned row with
+an independent CHECK failure disproves unconditional display after restoration.
+
+This is a conservative reading: a delete must be safe in every remaining
+foreign-delete context, not only with all other deletes present. Enumeration
+is exponential in candidate count; no equivalent efficient implementation is
+proved. SQL extraction must supply reference generations, null substitutions,
+CHECK results, unique claims and audience effects from each rebuilt state.
+Missing evidence is not an empty reference list. Store-log authority and
+operation-to-change grouping remain separate obligations.
+
+**Four incomplete procedures fail.** `ViewComparison` deliberately models a
+single before/after comparison to exhibit the failures; it runs the actual
+removal engine.
+
+An unrestricted remove/restore loop cycles with one owned row and one foreign
+circle-deletion entry: apply the entry, reject it for hiding the row, observe
+no active violation, then re-enable it. `restoration_cycle` and
+`no_fixed_rejection` check both states. Removing the row or deletion eliminates
+the cycle (`no_row_no_cycle`, `no_delete_no_cycle`), so this is the least
+nonempty row/deletion example for that loop. Retaining rejections within one
+atomic `settle` evaluation prevents it.
+
+Comparing all deletes against all except this write misses duplicate deletes.
+Ben's two devices delete the same parent concurrently with Ana inserting an
+owned child. Removing either delete leaves the other; the child is hidden in
+both views. `concurrent_deletes_mask` checks that both pass even through the
+terminating rejection procedure. `one_delete_cannot_mask` checks that either
+alone is rejected. The context guard finds the empty foreign-delete context
+and rejects both. Two deletes and one parent/foreign-owner child suffice.
+
+Following references by logical key alone misses indirect unique losses.
+Ben's parent deletion substitutes null in his child's reference. The child's
+`coalesce(parent_id, -1)` claim then conflicts with Ana's row, and Ben's earlier
+stamp wins. No retained reference reaches Ana, but the full passes hide her
+row (`null_unique_escapes_reference_guard`). This needs the full projection,
+not only reference protection.
+
+The same logical-key algorithm can also reject a valid generation history.
+Ben creates, deletes and reinserts his parent; Ana then creates a child
+referencing generation three. Rejecting Ben's earlier delete drops the
+reinsertion through the shared dependency rule, leaving generation one and a
+stale child reference. `OwnerReinsertExamples.old_delete_supports_child`
+checks both rebuilt states; `row_key_guard_rejects_valid_history` checks the
+failed key-only guard. The context guard permits the old delete and preserves
+the actual protected result (`old_delete_allowed`, `generations_preserved`).
+These are four original writes with valid authoring and dependency evidence.
+
+`OwnerDeleteExamples` also executes `protectedResult` on original writes:
+Ben creates a parent; Ana inserts its child concurrently with two Ben devices
+deleting the parent. Both deletes name Ana's child in their recorded causes,
+and parent and child return through the actual merge and removal passes
+(`rows_restored_and_losses_recorded`). `orders_agree` checks child-first and
+child-last arrival after the parent. Transport buffering and store-log replay
+remain separate models.
+
+**Spec, format and API edit checklist.** No normative files were edited.
+
+- E2: an explicit opt-in owner declaration, with its schema compatibility
+  rules. Specify creator identity for shared keys, concurrent creation,
+  deletion/reinsertion and cross-audience copies; keep it permanently in
+  authenticated retained state.
+- E1/E3/E5/E7/E12: commit errors identifying `NotOwner`, an unreadable owner on a
+  move, and an owner protected from a delete. Apply the checks atomically to
+  direct changes, triggers, cascades and audience operations; name the
+  conflicting row/member and roll back the whole write on refusal. Circle
+  deletion needs its corresponding typed `SyncError::Rejected` reason.
+- E4: read APIs for the creator and each cell's last writer, returning stable
+  member and write identities. Distinguish original signed values from
+  reference-null substitution and schema conversion. Loss reads need the
+  original excluded operation and its owner/move/delete/dependency cause.
+  Dismissing a removed owned row obeys the same delete protection; dismissing
+  a loss cannot erase the original creation's authentication evidence.
+- §§3, 5, 8, 14 and 15: per-change owner rejection, the shared data-dependency
+  rule, merged descendant/membership evaluation, atomic recomputation, the
+  precise protection/removal order, generation-aware delete contexts and
+  qualified restoration. Specify circle-entry feedback and extraction of SQL
+  effects for both protection projections.
+- D5/D9/D11 and §11.1: a signature binding the write identity and header,
+  including one domain-separated Merkle root per audience part, keyed by that
+  part's audience key (32 bytes per part). Specify canonical row order, tree
+  shape, empty writes and operation/column encoding. Readers verify the header
+  without opening unreadable parts and verify each readable part against its
+  own root; envelope authentication must remain intact.
+- D7/§15: contributing-write signatures, original creation and setter openings,
+  positions/tree shape and maximal absent-subtree hashes. Preserve provenance,
+  historical schemas and proof bytes across retention and conversion; a final
+  merged row is not necessarily an original signed leaf. Verify all required
+  openings before installing the snapshot. The storage write-up states the
+  proved hash bounds and the failed “final rows plus absent-row hashes” reading.
+- D11: include authenticated creator identity and the added loss causes in
+  agreement, with a defined treatment of retained proof/provenance records.
+- §2: members cannot forge another member's authenticated creation or cell
+  values in owner tables under the stated signature/hash assumptions and
+  acceptance checks. This does not prevent storage deletion, resolve stolen
+  member keys, authenticate snapshot completeness, or prove that a publisher
+  included the latest state. Those limits must remain explicit.

@@ -26,3 +26,11 @@ import CovenMerge.ReceiveExamples
 import CovenMerge.Retirement
 import CovenMerge.ResetCounterexample
 import CovenMerge.MigrationCounterexample
+import CovenMerge.Ownership
+import CovenMerge.OwnerProtection
+import CovenMerge.OwnerEvaluation
+import CovenMerge.OwnerDeleteContexts
+import CovenMerge.OwnerExamples
+import CovenMerge.OwnerFilterExamples
+import CovenMerge.OwnerDeleteExamples
+import CovenMerge.OwnerReinsertExamples

@@ -234,12 +234,12 @@ inductive LossCause (W : Type) where
 
 /-- One loss record. Values are identified with their setters, as in `St`:
 a cell names its column; a whole row has no column. -/
-structure LossRecord (W Row Col : Type) where
+structure LossRecord (W Row Col : Type) (Reason : Type := LossCause W) where
   row : Row
   generation : Nat
   column : Option Col
   values : Col → Option W
-  cause : LossCause W
+  cause : Reason
 
 /-- A device's merged state, view and common records for active losses. -/
 structure Device (W Row Col : Type) where
