@@ -18,7 +18,7 @@ fn two_circles() -> History {
 }
 
 #[test]
-fn circle_removals_in_different_audiences_both_apply() {
+fn different_member_circle_removals_both_apply_in_shared_or_separate_audiences() {
     for second_circle in [0, 1] {
         let mut h = two_circles();
         h.push(0, 0, &(0..11).collect::<Vec<_>>(), leave(0, 1));
@@ -32,25 +32,21 @@ fn circle_removals_in_different_audiences_both_apply() {
             },
         );
         h.every_order(|r| {
-            assert_eq!(
-                r.state.circles[&circle(0)].members,
-                [member(0), member(2)].into()
-            );
-            assert_eq!(r.state.circles[&circle(0)].key, key(10));
-            if second_circle == 0 {
-                assert_eq!(h.drops(r), [12]);
-                assert_eq!(
-                    r.entries[&h.entries[12].position],
-                    EntryOutcome::Dropped(DropReason::BeatenBy(h.entries[11].position))
-                );
+            let remaining = if second_circle == 0 {
+                [member(0)].into()
             } else {
+                [member(0), member(2)].into()
+            };
+            assert_eq!(r.state.circles[&circle(0)].members, remaining);
+            assert_eq!(r.state.circles[&circle(0)].key, key(10));
+            if second_circle == 1 {
                 assert_eq!(
                     r.state.circles[&circle(1)].members,
                     [member(0), member(1)].into()
                 );
                 assert_eq!(r.state.circles[&circle(1)].key, key(11));
-                assert!(h.drops(r).is_empty());
             }
+            assert!(h.drops(r).is_empty());
         });
     }
 }
@@ -287,6 +283,191 @@ fn access_entries_conflict_by_member_and_combine_only_equal_access() {
                     coven_format::MemberAccess::ProviderAccount("first@example.com".into())
                 );
             });
+        }
+    }
+}
+
+pub(crate) fn independent_histories() -> Vec<History> {
+    let access = StoreChange::SetAccess {
+        access: coven_format::MemberAccess::ProviderAccount("ben@example.com".into()),
+    };
+    let remove_device = |id| StoreChange::RemoveDevice {
+        device: coven_foundation::id_source::DeviceId(id),
+    };
+    let pairs = [
+        [(1, device(8)), (1, device(9))],
+        [(1, device(8)), (1, access.clone())],
+        [
+            (1, device(8)),
+            (0, role(1, coven_format::store_log::MemberRole::Member)),
+        ],
+        [(1, device(8)), (0, join(0, 1))],
+        [(1, device(8)), (0, remove_device(1))],
+        [(0, remove_device(1)), (0, remove_device(4))],
+        [(1, access.clone()), (0, join(0, 1))],
+        [
+            (1, access),
+            (0, role(1, coven_format::store_log::MemberRole::Member)),
+        ],
+        [(0, join(0, 1)), (2, join(1, 1))],
+        [(0, join(0, 1)), (2, leave(0, 2))],
+        [(0, join(0, 1)), (2, leave(1, 2))],
+        [(0, add(3, Admin)), (2, remove(1))],
+        [(0, remove(1)), (2, remove(2))],
+        [(0, leave(0, 0)), (2, leave(0, 2))],
+    ];
+    pairs
+        .into_iter()
+        .flat_map(|pair| {
+            [false, true].map(|reverse| {
+                let mut h = household(Admin, Admin);
+                h.all(1, 1, device(4));
+                for c in [0, 1] {
+                    h.all(0, 0, make(c, "Shared"));
+                    h.all(0, 0, join(c, 2));
+                }
+                let past: Vec<_> = (0..h.entries.len()).collect();
+                let mut pair = pair.clone();
+                if reverse {
+                    pair.swap(0, 1);
+                }
+                for ((author, change), writer) in pair.into_iter().zip([20, 21]) {
+                    h.push(author, writer, &past, change);
+                }
+                h
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn independent_changes_commute_in_timestamp_and_arrival_order() {
+    for pair in independent_histories().chunks_exact(2) {
+        let states: Vec<_> = pair
+            .iter()
+            .map(|h| {
+                let base = h.entries.len() - 2;
+                let view = crate::replay(&h.entries[..base]).state;
+                let a = &h.entries[base];
+                let b = &h.entries[base + 1];
+                let va = crate::effects::check(&view, a);
+                let vb = crate::effects::check(&view, b);
+                assert!(!super::conflict(a, &va, b, &vb));
+                assert!(!super::conflict(b, &vb, a, &va));
+                h.every_order(|r| {
+                    assert!(h.drops(r).is_empty(), "{:?}", h.entries);
+                })
+                .state
+            })
+            .collect();
+        assert_eq!(states[0], states[1]);
+    }
+}
+
+#[test]
+fn same_members_concurrent_device_additions_both_survive() {
+    let mut h = household(Admin, Admin);
+    h.push(1, 8, &[0, 1, 2, 3, 4], device(8));
+    h.push(1, 9, &[0, 1, 2, 3, 4], device(9));
+    h.every_order(|r| {
+        assert!(h.drops(r).is_empty());
+        for id in [8, 9] {
+            let added = &r.state.devices[&coven_foundation::id_source::DeviceId(id)];
+            assert_eq!(added.member, member(1));
+            assert!(!added.removed);
+        }
+    });
+}
+
+pub(crate) fn contradictory_histories() -> Vec<(History, usize)> {
+    let mut histories = Vec::new();
+    for (addition, removal) in [
+        ((0, add(1, Admin)), (2, remove(1))),
+        (
+            (1, device(1)),
+            (
+                0,
+                StoreChange::RemoveDevice {
+                    device: coven_foundation::id_source::DeviceId(1),
+                },
+            ),
+        ),
+        ((0, join(0, 1)), (2, leave(0, 1))),
+    ] {
+        for removal_first in [false, true] {
+            let mut h = two_circles();
+            h.all(0, 0, role(1, coven_format::store_log::MemberRole::Member));
+            let base = h.entries.len();
+            let past: Vec<_> = (0..base).collect();
+            let pair = if removal_first {
+                [removal.clone(), addition.clone()]
+            } else {
+                [addition.clone(), removal.clone()]
+            };
+            for ((author, change), writer) in pair.into_iter().zip([20, 21]) {
+                h.push(author, writer, &past, change);
+            }
+            histories.push((h, base + usize::from(removal_first)));
+        }
+    }
+    histories
+}
+
+#[test]
+fn contradictory_membership_changes_keep_the_removal_in_either_timestamp_order() {
+    for (h, loser) in contradictory_histories() {
+        let winner = if loser == h.entries.len() - 1 {
+            loser - 1
+        } else {
+            loser + 1
+        };
+        h.every_order(|r| {
+            assert_eq!(h.drops(r), [loser]);
+            assert_eq!(
+                r.entries[&h.entries[loser].position],
+                EntryOutcome::Dropped(DropReason::BeatenBy(h.entries[winner].position))
+            );
+        });
+    }
+}
+
+#[test]
+fn removing_a_member_contradicts_only_changes_requiring_that_member() {
+    let base = two_circles();
+    let view = crate::replay(&base.entries).state;
+    for (author, change, contradicts) in [
+        (1, device(8), true),
+        (0, role(1, Admin), true),
+        (0, join(0, 1), true),
+        (0, leave(0, 1), true),
+        (
+            0,
+            StoreChange::RemoveDevice {
+                device: coven_foundation::id_source::DeviceId(1),
+            },
+            true,
+        ),
+        (1, make(2, "Ben's notes"), true),
+        (1, delete(0), true),
+        (1, rename(0, "Renamed"), false),
+        (1, raise(2, 30, Audience::Circle(circle(0))), false),
+        (
+            1,
+            crate::effects::tests::rotation(Audience::Circle(circle(0)), 30),
+            false,
+        ),
+        (1, remove(2), false),
+    ] {
+        let mut h = base.clone();
+        let past: Vec<_> = (0..h.entries.len()).collect();
+        h.push(0, 20, &past, remove(1));
+        h.push(author, 21, &past, change);
+        let a = &h.entries[past.len()];
+        let b = &h.entries[past.len() + 1];
+        let va = crate::effects::check(&view, a);
+        let vb = crate::effects::check(&view, b);
+        for (a, va, b, vb) in [(a, &va, b, &vb), (b, &vb, a, &va)] {
+            assert_eq!(super::conflict(a, va, b, vb), contradicts, "{:?}", b.change);
         }
     }
 }

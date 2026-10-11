@@ -364,7 +364,7 @@ async fn cancelled_app_future_keeps_running_and_permanent_failure_retries_or_dis
 mod invites;
 
 #[tokio::test]
-async fn dropped_removal_restarts_against_the_new_member_list() {
+async fn independent_removals_keep_their_original_attempts() {
     let storage = google();
     let [mut a, mut b, c] = accounts(storage.clone()).await;
     a.clock.set(UNIX_EPOCH + Duration::from_secs(2));
@@ -373,25 +373,28 @@ async fn dropped_removal_restarts_against_the_new_member_list() {
         step(&mut a, a_op).await.unwrap(),
         Progress::Advanced
     ));
-    let abandoned = a.db.local_store_log().await.unwrap().upload.unwrap();
+    let attempted = a.db.local_store_log().await.unwrap().upload.unwrap();
     let b_op = begin(&mut b, Command::RemoveMember(c.member.member_id())).await;
     finish(&mut b, b_op).await;
-    let winner = b.log().await.entries.last().unwrap().entry.position;
+    let concurrent = b.log().await.entries.last().unwrap().entry.position;
     assert!(matches!(
         finish(&mut a, a_op).await,
         Output::Removal(MemberRemoval::Revoked)
     ));
     let log = a.log().await;
-    assert!(matches!(
-        log.replay.entries[&abandoned.entry.position],
-        coven_database::EntryOutcome::Dropped(_)
-    ));
+    for position in [attempted.entry.position, concurrent] {
+        assert_eq!(
+            log.replay.entries[&position],
+            coven_database::EntryOutcome::Kept
+        );
+    }
     let removal = &log.entries.last().unwrap().entry;
-    assert!(removal.had_read.0.contains(&winner));
+    assert_eq!(removal, &attempted.entry);
+    assert!(!removal.had_read.0.contains(&concurrent));
     assert!(log.replay.state.members[&b.member.member_id()].removed);
     assert!(log.replay.state.members[&c.member.member_id()].removed);
     assert_eq!(log.replay.state.store.unwrap().key, key(1));
-    assert!(abandoned.sealing.keys.is_empty());
+    assert!(attempted.sealing.keys.is_empty());
     assert!(keys::introduced(&removal.change).is_none());
 }
 

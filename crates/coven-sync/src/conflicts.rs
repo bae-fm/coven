@@ -1,4 +1,4 @@
-//! Appendix C's conflict predicates and total preference order.
+//! §9 and Appendix C11's contradictions, with the replay's preference order.
 
 use coven_crypto::MemberId;
 use coven_database::StoreLogCheck;
@@ -31,20 +31,39 @@ pub(crate) fn before(a: &StoreLogEntry, b: &StoreLogEntry) -> bool {
     (priority(&a.change), a.timestamp) < (priority(&b.change), b.timestamp)
 }
 
-fn member_target<'a>(entry: &'a StoreLogEntry, view: &'a StoreLogCheck) -> Option<&'a MemberId> {
+fn membership_state(change: &StoreChange) -> Option<&MemberId> {
+    match change {
+        StoreChange::AddMember { keys, .. } => Some(&keys.signing),
+        StoreChange::RemoveMember { member } | StoreChange::ChangeRole { member, .. } => {
+            Some(member)
+        }
+        _ => None,
+    }
+}
+
+// These are membership requirements of the change, not its author's authority.
+// Authority remains fixed by the recorded past even if the author is removed.
+fn required_member<'a>(entry: &'a StoreLogEntry, view: &'a StoreLogCheck) -> Option<&'a MemberId> {
     use StoreChange::*;
     match &entry.change {
-        AddMember { keys, .. } => Some(&keys.signing),
-        RemoveMember { member, .. }
-        | ChangeRole { member, .. }
+        ChangeRole { member, .. }
         | AddCircleMember { member, .. }
         | RemoveCircleMember { member, .. } => Some(member),
-        SetAccess { .. } | AddDevice { .. } => Some(&entry.author),
+        SetAccess { .. } | AddDevice { .. } | CreateCircle { .. } | DeleteCircle { .. } => {
+            Some(&entry.author)
+        }
         RemoveDevice { .. } => match view {
             StoreLogCheck::DeviceOwner(owner) => Some(owner),
             _ => unreachable!("authorized device removal has an observed owner"),
         },
         _ => None,
+    }
+}
+
+fn removes_required(a: &StoreLogEntry, b: &StoreLogEntry, vb: &StoreLogCheck) -> bool {
+    match &a.change {
+        StoreChange::RemoveMember { member } => required_member(b, vb) == Some(member),
+        _ => false,
     }
 }
 
@@ -108,7 +127,7 @@ fn same_meaning(
             d == e && a.author == b.author
         }
         (RemoveDevice { device: d }, RemoveDevice { device: e }) => {
-            d == e && member_target(a, va) == member_target(b, vb)
+            d == e && required_member(a, va) == required_member(b, vb)
         }
         (
             CreateCircle {
@@ -159,13 +178,6 @@ fn same_meaning(
     }
 }
 
-fn removes_from_circle(change: &StoreChange, circle: CircleId) -> bool {
-    match change {
-        StoreChange::RemoveCircleMember { circle: id, .. } => *id == circle,
-        _ => false,
-    }
-}
-
 fn deletes_circle(view: &StoreLogCheck, change: &StoreChange, circle: CircleId) -> bool {
     use StoreChange::*;
     match change {
@@ -178,15 +190,35 @@ fn deletes_circle(view: &StoreLogCheck, change: &StoreChange, circle: CircleId) 
     }
 }
 
-fn special(va: &StoreLogCheck, a: &StoreChange, vb: &StoreLogCheck, b: &StoreChange) -> bool {
+fn contradiction(
+    a: &StoreLogEntry,
+    va: &StoreLogCheck,
+    b: &StoreLogEntry,
+    vb: &StoreLogCheck,
+) -> bool {
     use StoreChange::*;
-    let membership_and_snapshots = match (a, b) {
-        (AddMember { .. }, RemoveMember { .. }) | (RemoveMember { .. }, AddMember { .. }) => true,
-        (RemoveMember { .. }, RemoveMember { .. }) => true,
-        (AddCircleMember { circle, .. }, _) => removes_from_circle(b, *circle),
-        (_, AddCircleMember { circle, .. }) => removes_from_circle(a, *circle),
-        (RemoveCircleMember { circle, .. }, _) => removes_from_circle(b, *circle),
-        (_, RemoveCircleMember { circle, .. }) => removes_from_circle(a, *circle),
+    let access_membership_and_snapshots = match (&a.change, &b.change) {
+        (SetAccess { .. }, SetAccess { .. }) => a.author == b.author,
+        (
+            AddCircleMember {
+                circle: c,
+                member: m,
+            },
+            RemoveCircleMember {
+                circle: d,
+                member: n,
+            },
+        )
+        | (
+            RemoveCircleMember {
+                circle: c,
+                member: m,
+            },
+            AddCircleMember {
+                circle: d,
+                member: n,
+            },
+        ) => c == d && m == n,
         (
             RaiseSchema {
                 version: v,
@@ -202,9 +234,14 @@ fn special(va: &StoreLogCheck, a: &StoreChange, vb: &StoreLogCheck, b: &StoreCha
         | (RaiseSchema { snapshot: t, .. }, Reset { snapshot: s }) => s.audience == t.audience,
         _ => false,
     };
-    membership_and_snapshots
-        || circle_target(b).is_some_and(|circle| deletes_circle(va, a, circle))
-        || circle_target(a).is_some_and(|circle| deletes_circle(vb, b, circle))
+    !same_meaning(a, va, b, vb)
+        && (same_target(membership_state(&a.change), membership_state(&b.change))
+            || same_target(device_target(&a.change), device_target(&b.change))
+            || removes_required(a, b, vb)
+            || removes_required(b, a, va)
+            || access_membership_and_snapshots
+            || circle_target(&b.change).is_some_and(|circle| deletes_circle(va, &a.change, circle))
+            || circle_target(&a.change).is_some_and(|circle| deletes_circle(vb, &b.change, circle)))
 }
 
 pub(crate) fn conflict(
@@ -213,15 +250,9 @@ pub(crate) fn conflict(
     b: &StoreLogEntry,
     vb: &StoreLogCheck,
 ) -> bool {
-    a.position != b.position
-        && !had_read(a, b)
-        && !had_read(b, a)
-        && !same_meaning(a, va, b, vb)
-        && (same_target(member_target(a, va), member_target(b, vb))
-            || same_target(device_target(&a.change), device_target(&b.change))
-            || special(va, &a.change, vb, &b.change))
+    a.position != b.position && !had_read(a, b) && !had_read(b, a) && contradiction(a, va, b, vb)
 }
 
 #[cfg(test)]
 #[path = "conflicts_tests.rs"]
-mod tests;
+pub(crate) mod tests;

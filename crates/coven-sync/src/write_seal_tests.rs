@@ -136,7 +136,7 @@ async fn unreadable_circle_parts_are_skipped_but_missing_members_keys_wait() {
 }
 
 #[tokio::test]
-async fn a_circle_restored_after_deletion_keeps_a_previously_skipped_part_missing() {
+async fn a_circle_restored_and_rejoined_after_deletion_reloads_previously_skipped_parts() {
     let storage = storage();
     let mut devices = household(storage.clone()).await;
     let mut tablet = circle_device(storage.clone(), 4, 3).await;
@@ -219,18 +219,26 @@ async fn a_circle_restored_after_deletion_keeps_a_previously_skipped_part_missin
     ana.sync.sync_store_log().await.unwrap();
     assert!(ana.db.store_log().await.unwrap().replay.state.circles[&circle].deleted);
 
-    // Ana's tablet still has the common prefix. Its earlier removal beats
-    // Ben's removal and deletion; Carol can share the rotation's key.
+    // Ana's tablet still has the common prefix. Its earlier store removal
+    // defeats Ben's deletion. The two membership removals both survive.
     tablet.clock.set(UNIX_EPOCH + Duration::from_secs(2));
     tablet
         .sync
-        .make_and_upload_entry(StoreChange::RemoveCircleMember {
-            circle,
+        .make_and_upload_entry(StoreChange::RemoveMember {
             member: identity(4).member_id(),
         })
         .await
         .unwrap();
     carol.sync.sync_store_log().await.unwrap();
+    // Carol explicitly readmits Ana and shares the rotation's key.
+    carol
+        .sync
+        .make_and_upload_entry(StoreChange::AddCircleMember {
+            circle,
+            member: identity(3).member_id(),
+        })
+        .await
+        .unwrap();
     for device in [&mut *ana, &mut tablet] {
         device.sync.sync_store_log().await.unwrap();
         device.writes.download_writes().await.unwrap();
@@ -239,10 +247,10 @@ async fn a_circle_restored_after_deletion_keeps_a_previously_skipped_part_missin
         assert!(log.replay.state.circles[&circle]
             .members
             .contains(&identity(3).member_id()));
-        assert!(matches!(
+        assert_eq!(
             log.replay.entries[&removal],
-            coven_database::EntryOutcome::Dropped(_)
-        ));
+            coven_database::EntryOutcome::Kept
+        );
         assert!(crate::store_log_keys::holds(
             Some(&device.custody.read().unwrap().unwrap()),
             &Audience::Circle(circle),
@@ -260,7 +268,7 @@ async fn a_circle_restored_after_deletion_keeps_a_previously_skipped_part_missin
         ana.db.store_log().await.unwrap().replay,
         tablet.db.store_log().await.unwrap().replay
     );
-    assert_eq!(count(&ana.db).await, 0);
+    assert_eq!(count(&ana.db).await, 1);
     assert_eq!(count(&tablet.db).await, 1);
     assert!(ana.db.lost_values().await.unwrap().is_empty());
 }
@@ -363,11 +371,11 @@ async fn posted_fingerprints_stop_when_a_member_leaves_the_circle() {
 
 #[tokio::test]
 async fn reversed_removal_parts_wait_for_redistributed_keys_and_converge() {
-    for store_removal in [false, true] {
+    for store_rotation in [false, true] {
         for carol_applies_before_drop in [false, true] {
             for ben_reads_before_copy in [false, true] {
                 reversed_removal_parts(
-                    store_removal,
+                    store_rotation,
                     carol_applies_before_drop,
                     ben_reads_before_copy,
                 )
@@ -378,7 +386,7 @@ async fn reversed_removal_parts_wait_for_redistributed_keys_and_converge() {
 }
 
 async fn reversed_removal_parts(
-    store_removal: bool,
+    store_rotation: bool,
     carol_applies_before_drop: bool,
     ben_reads_before_copy: bool,
 ) {
@@ -395,23 +403,26 @@ async fn reversed_removal_parts(
         })
         .await
         .unwrap();
+    // With two admins, the later mutual removal would leave none and drops.
+    ana.sync
+        .make_and_upload_entry(StoreChange::ChangeRole {
+            member: identity(5).member_id(),
+            role: MemberRole::Member,
+        })
+        .await
+        .unwrap();
     for device in [&mut *ben, &mut *carol] {
         device.sync.sync_store_log().await.unwrap();
     }
-    let removal = |member| {
-        if store_removal {
-            StoreChange::RemoveMember { member }
-        } else {
-            StoreChange::RemoveCircleMember { circle, member }
-        }
-    };
     ana.clock.set(UNIX_EPOCH + Duration::from_secs(3));
     let dropped = ana
         .sync
-        .make_and_upload_entry(removal(identity(4).member_id()))
+        .make_and_upload_entry(StoreChange::RemoveMember {
+            member: identity(4).member_id(),
+        })
         .await
         .unwrap();
-    let audience = if store_removal {
+    let audience = if store_rotation {
         Audience::Store
     } else {
         Audience::Circle(circle)
@@ -432,7 +443,9 @@ async fn reversed_removal_parts(
     ben.clock.set(UNIX_EPOCH + Duration::from_secs(2));
     let winner = ben
         .sync
-        .make_and_upload_entry(removal(identity(3).member_id()))
+        .make_and_upload_entry(StoreChange::RemoveMember {
+            member: identity(3).member_id(),
+        })
         .await
         .unwrap();
     let rotation_key = KeyId(Uuid::from_u128(2));
@@ -445,8 +458,7 @@ async fn reversed_removal_parts(
         ben.sync.sync_store_log().await.unwrap();
         assert!(matches!(
             ben.db.store_log().await.unwrap().replay.entries[&dropped],
-            coven_database::EntryOutcome::Dropped(coven_database::DropReason::BeatenBy(id))
-                if id == winner
+            coven_database::EntryOutcome::Dropped(coven_database::DropReason::NoAdminLeft)
         ));
         assert!(!crate::store_log_keys::holds(
             Some(&ben.custody.read().unwrap().unwrap()),
@@ -456,7 +468,7 @@ async fn reversed_removal_parts(
         for time in [2, 4] {
             ben.clock.set(UNIX_EPOCH + Duration::from_secs(time));
             let download = ben.writes.download_writes().await;
-            if store_removal {
+            if store_rotation {
                 assert!(
                     matches!(download, Err(SyncError::KeyUnavailable(key)) if key == rotation_key)
                 );
@@ -478,7 +490,7 @@ async fn reversed_removal_parts(
             .positions
             .covers(writes[0]));
         let post = ben.writes.post_positions().await;
-        if store_removal {
+        if store_rotation {
             assert!(matches!(post, Err(SyncError::KeyUnavailable(key)) if key == rotation_key));
             assert!(matches!(
                 storage.read(&ObjectPath::positions(DeviceId(2))).await,
@@ -495,9 +507,12 @@ async fn reversed_removal_parts(
     assert!(!storage.read(&copy).await.unwrap().is_empty());
     assert!(matches!(
         carol.db.store_log().await.unwrap().replay.entries[&dropped],
-        coven_database::EntryOutcome::Dropped(coven_database::DropReason::BeatenBy(id))
-            if id == winner
+        coven_database::EntryOutcome::Dropped(coven_database::DropReason::NoAdminLeft)
     ));
+    assert_eq!(
+        carol.db.store_log().await.unwrap().replay.entries[&winner],
+        coven_database::EntryOutcome::Kept
+    );
     if carol_applies_before_drop {
         assert_eq!(rows(&carol.db).await, rows(&ana.db).await);
         assert_eq!(count(&carol.db).await, 1);

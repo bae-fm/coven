@@ -404,15 +404,16 @@ an explicit injectivity hypothesis, not a proof of SHA-256 security.
 - The agreement corpus covers 2,048 generated histories, every prefix of three
   causal arrival orders, and the current checked examples for creation,
   rotations, recorded authority, explicit deletion, an empty circle and the
-  last admin. Duration units are days; generated landings include ties and
+  last admin. Independent device additions and store/circle membership changes
+  agree in both timestamp orders, as do contradictory membership additions and
+  removals. Duration units are days; generated landings include ties and
   remain within the 30-day window. Separate cases exercise exactly 30 days,
   31 days, and witnesses outside the received set.
-- Rust still uses shared-member conflicts, the combined removal tier, eager
-  empty-circle deletion, and has no storage-time admission. The suite asserts
-  exact counterexamples for independent device additions, independent store
-  removals, an emptied circle's concurrent addition, circle-removal versus
-  deletion priority, and an unread late-drop witness. These compare complete
-  expected states and fates on both sides; a passing check does not claim
+- Rust uses C11's contradiction predicate. The combined removal tier, eager
+  empty-circle deletion, and missing storage-time admission still differ.
+  The suite asserts exact counterexamples for an emptied circle's concurrent
+  addition, circle-removal versus deletion priority, and an unread late-drop witness.
+  These compare complete expected states and fates on both sides; a passing check does not claim
   agreement on those policies. Replacing Rust's policy requires changing those
   counterexamples into agreement assertions.
 - Drop reasons, retained device names and public keys, cryptographic bytes,

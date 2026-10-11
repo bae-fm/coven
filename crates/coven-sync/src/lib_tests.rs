@@ -47,8 +47,8 @@ impl Generator {
         }
         // Arbitrary actions use a complete past. Concurrent branches exercise
         // boundaries, renames, deletion and rotations, whose policies agree.
-        // Member contradictions, removal tiers and late admission have explicit
-        // counterexamples below.
+        // Independent membership changes are compared below; removal tiers and
+        // late admission retain explicit counterexamples.
         for _ in 0..3 {
             let author = self.pick(5) as u8;
             let change = self.action(&replay(&h.entries).state);
@@ -500,6 +500,63 @@ fn lean_differential_checked_examples() {
     );
     histories.push(last_admins);
 
+    let mut devices = History::new();
+    devices.push(0, 0, &[0], device(1));
+    devices.push(0, 2, &[0], device(2));
+    assert_eq!(
+        projected(&devices, &replay(&devices.entries)),
+        expected(
+            &[[0, 0]],
+            &[0],
+            &[[0, 0], [1, 0], [2, 0]],
+            json!([]),
+            &[0, 1, 2],
+            &[],
+        )
+    );
+    histories.push(devices);
+
+    // CurrentKeyExamples.removals: both admins remove a different member,
+    // then the remaining circle member and an admin rotate their audiences.
+    let mut removals = History::new();
+    removals.all(0, 0, add(1, MemberRole::Admin));
+    removals.all(0, 0, add(2, MemberRole::Member));
+    removals.all(0, 0, add(3, MemberRole::Member));
+    for m in 1..=3 {
+        removals.all(m, u64::from(m), device(u64::from(m)));
+    }
+    removals.all(1, 1, make(0, "Gifts"));
+    removals.all(1, 1, join(0, 2));
+    removals.all(1, 1, join(0, 3));
+    let past: Vec<_> = (0..10).collect();
+    removals.push(0, 0, &past, remove(2));
+    removals.push(1, 1, &past, remove(3));
+    removals.all(1, 1, rotation(Audience::Circle(circle(0)), 2));
+    removals.all(0, 0, rotation(Audience::Store, 3));
+    removals.all(1, 1, rotation(Audience::Store, 4));
+    for n in [12, 14, 15] {
+        let prefix = removals.prefix(n);
+        assert_eq!(
+            projected(&prefix, &replay(&prefix.entries)),
+            expected(
+                &[[0, 0], [1, 0]],
+                &[0, 1, 2, 3],
+                &[[0, 0], [1, 1]],
+                json!([[0, "Gifts", [1]]]),
+                &(0..n).collect::<Vec<_>>(),
+                &[],
+            )
+        );
+        histories.push(prefix);
+    }
+
+    histories.extend(crate::conflicts::tests::independent_histories());
+    histories.extend(
+        crate::conflicts::tests::contradictory_histories()
+            .into_iter()
+            .map(|(h, _)| h),
+    );
+
     let inputs: Vec<_> = histories
         .iter()
         .map(|h| input(h, &sequential_times(h), &received_prefixes(&orders(h))))
@@ -547,29 +604,6 @@ fn expected(
 #[test]
 #[ignore = "requires COVEN_STORELOG_LEAN, supplied by scripts/check.sh"]
 fn lean_differential_policy_counterexamples() {
-    // Independent devices of one member: historical shared-member conflict.
-    let mut devices = History::new();
-    devices.push(0, 0, &[0], device(1));
-    devices.push(0, 2, &[0], device(2));
-    counterexample(
-        &devices,
-        &[0, 1, 1],
-        vec![0, 1, 2],
-        expected(&[[0, 0]], &[0], &[[0, 0], [1, 0]], json!([]), &[0, 1], &[2]),
-        expected(
-            &[[0, 0]],
-            &[0],
-            &[[0, 0], [1, 0], [2, 0]],
-            json!([]),
-            &[0, 1, 2],
-            &[],
-        ),
-    );
-    assert_eq!(
-        replay(&devices.entries).entries[&devices.entries[2].position],
-        EntryOutcome::Dropped(DropReason::BeatenBy(devices.entries[1].position))
-    );
-
     // CurrentExamples: a concurrent addition repopulates the circle after two
     // removals empty it. Rust deletes the empty circle before the addition.
     let mut refill = circle_history();
@@ -631,52 +665,6 @@ fn lean_differential_policy_counterexamples() {
     assert_eq!(
         replay(&tiers.entries).entries[&tiers.entries[6].position],
         EntryOutcome::Dropped(DropReason::BeatenBy(tiers.entries[5].position))
-    );
-
-    // CurrentKeyExamples.removals: both admins remove a different member,
-    // then the remaining circle member and an admin rotate their audiences.
-    let mut removals = History::new();
-    removals.all(0, 0, add(1, MemberRole::Admin));
-    removals.all(0, 0, add(2, MemberRole::Member));
-    removals.all(0, 0, add(3, MemberRole::Member));
-    for m in 1..=3 {
-        removals.all(m, u64::from(m), device(u64::from(m)));
-    }
-    removals.all(1, 1, make(0, "Gifts"));
-    removals.all(1, 1, join(0, 2));
-    removals.all(1, 1, join(0, 3));
-    let past: Vec<_> = (0..10).collect();
-    removals.push(0, 0, &past, remove(2));
-    removals.push(1, 1, &past, remove(3));
-    removals.all(1, 1, rotation(Audience::Circle(circle(0)), 2));
-    removals.all(0, 0, rotation(Audience::Store, 3));
-    removals.all(1, 1, rotation(Audience::Store, 4));
-    for n in [12, 14, 15] {
-        counterexample(
-            &removals,
-            &sequential_times(&removals),
-            (0..n).collect(),
-            expected(
-                &[[0, 0], [1, 0], [3, 1]],
-                &[0, 1, 2, 3],
-                &[[0, 0], [1, 1], [3, 3]],
-                json!([[0, "Gifts", [1, 3]]]),
-                &(0..n).filter(|&i| i != 11).collect::<Vec<_>>(),
-                &[11],
-            ),
-            expected(
-                &[[0, 0], [1, 0]],
-                &[0, 1, 2, 3],
-                &[[0, 0], [1, 1]],
-                json!([[0, "Gifts", [1]]]),
-                &(0..n).collect::<Vec<_>>(),
-                &[],
-            ),
-        );
-    }
-    assert_eq!(
-        replay(&removals.entries).entries[&removals.entries[11].position],
-        EntryOutcome::Dropped(DropReason::BeatenBy(removals.entries[10].position))
     );
 }
 
