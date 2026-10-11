@@ -17,3 +17,4 @@ import CovenMerge.Reset
 import CovenMerge.Accounting
 import CovenMerge.Boundary
 import CovenMerge.IntegrityExamples
+import CovenMerge.EntryCounterexample

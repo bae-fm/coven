@@ -107,12 +107,15 @@ proofs() {
     lean_proof "device upload queues" spec/proofs/queue CovenQueue covenQueue
     lean_proof "sync IO and discovery" spec/proofs/io CovenIO covenIO
 
-    step "Rust / Lean differential merge test"
+    step "Rust / Lean Boolean merge differential"
     runner="$(cd spec/proofs/merge && pwd)/.lake/build/bin/mergeRunner"
     if [ -f "$runner.exe" ]; then
         runner="$runner.exe"
     fi
     COVEN_MERGE_LEAN="$runner" cargo test -p coven-merge --all-features lean_differential -- --ignored
+
+    step "Rust / Lean circle-entry counterexample"
+    COVEN_MERGE_LEAN="$runner" cargo test -p coven-merge --all-features entry_differential_counterexample -- --ignored
 
     step "Rust / Lean differential store-log test"
     runner="$(cd spec/proofs/storelog && pwd)/.lake/build/bin/storelogRunner"

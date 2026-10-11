@@ -119,3 +119,9 @@ open CovenMerge
 #print axioms snapshot_valid
 #print axioms snapshot_causal
 #print axioms snapshot_inputs_converge
+
+-- the missing Rust circle-deletion identity
+#print axioms EntryCounterexample.writes_valid
+#print axioms EntryCounterexample.entry_identity_gap
+#print axioms EntryCounterexample.no_row_no_gap
+#print axioms EntryCounterexample.no_entry_no_gap

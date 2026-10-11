@@ -577,10 +577,41 @@ mod differential {
             Rule::Unique(_) => 4,
         }
     }
-    fn compare(runner: &std::ffi::OsStr, writes: &[Write<String>], order: &[usize], seed: u64) {
+    struct Comparison {
+        input: Value,
+        rust: Value,
+    }
+
+    fn comparison(
+        writes: &[Write<String>],
+        order: &[usize],
+        seed: u64,
+        entries: Option<&BTreeMap<Audience, u64>>,
+    ) -> Comparison {
         let history = History::new(writes.to_vec()).unwrap();
         let states = fold(writes, order);
         let mut view = generated_view(&states, &history, seed);
+        if let Some(entries) = entries {
+            for (r, data) in &mut view.data {
+                if let RemovalRow::Present { deleted_circle, .. } = data {
+                    *deleted_circle = entries.contains_key(&r.audience);
+                }
+            }
+            // Keep absent reference targets, but omit unrelated, never-written rows.
+            let parents: BTreeSet<_> = view
+                .data
+                .values()
+                .flat_map(|data| match data {
+                    RemovalRow::Present { references, .. } => references
+                        .values()
+                        .map(|reference| reference.parent.row.clone())
+                        .collect::<Vec<_>>(),
+                    RemovalRow::Absent { .. } => Vec::new(),
+                })
+                .collect();
+            view.data
+                .retain(|r, _| states.contains_key(r) || parents.contains(r));
+        }
         let mut rng = Generator::new(seed);
         view.order = view.data.keys().cloned().collect();
         rng.shuffle(&mut view.order);
@@ -656,8 +687,17 @@ mod differential {
             json!({"id": write_ids[&w.id], "ts": scalar(w.timestamp).to_string(),
                 "past": w.had_read.iter().map(|id| write_ids[id]).collect::<Vec<_>>(), "changes": changes})
         }).collect();
-        let input =
-            json!({"writes": input_writes, "order": order, "rows": input_rows, "columns": 3});
+        let named_entries: Vec<_> = rows
+            .iter()
+            .filter_map(|r| {
+                entries
+                    .and_then(|entries| entries.get(&r.audience))
+                    .map(|entry| json!([row_ids[r], entry]))
+            })
+            .collect();
+        let input = json!({"mode": if entries.is_some() { "entries" } else { "boolean" },
+            "writes": input_writes, "order": order, "rows": input_rows, "columns": 3,
+            "entries": named_entries});
         let expected: Vec<_> = view
             .order
             .iter()
@@ -694,10 +734,27 @@ mod differential {
                     .flatten()
                     .map(rule_number)
                     .collect();
+                // Rust's rule carries no entry identity. Do not fill one in from
+                // the test input: doing so would hide the difference from Lean.
+                let rules = if entries.is_some() {
+                    json!(rules
+                        .into_iter()
+                        .map(|kind| json!({"kind": kind}))
+                        .collect::<Vec<_>>())
+                } else {
+                    json!(rules)
+                };
                 json!({"id": row_ids[r], "gen": state.generation(), "gw": gw, "cells": cells,
                 "lost": lost, "removed": removed.removed.contains_key(r), "rules": rules})
             })
             .collect();
+        Comparison {
+            input,
+            rust: json!(expected),
+        }
+    }
+
+    fn run_lean(runner: &std::ffi::OsStr, input: &Value) -> Value {
         let mut child = Command::new(runner)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -713,15 +770,176 @@ mod differential {
         let output = child.wait_with_output().unwrap();
         assert!(
             output.status.success(),
-            "Lean runner failed, seed {seed}: {}",
+            "Lean runner failed, input {input}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let actual: Value = serde_json::from_slice(&output.stdout).expect("Lean JSON result");
+        serde_json::from_slice(&output.stdout).expect("Lean JSON result")
+    }
+
+    fn compare(runner: &std::ffi::OsStr, writes: &[Write<String>], order: &[usize], seed: u64) {
+        let case = comparison(writes, order, seed, None);
         assert_eq!(
-            actual,
-            json!(expected),
-            "Lean differential, seed {seed}, order {order:?}, input {input}"
+            run_lean(runner, &case.input),
+            case.rust,
+            "Lean differential, seed {seed}, order {order:?}, input {}",
+            case.input
         );
+    }
+
+    fn entry_mismatch(
+        runner: &std::ffi::OsStr,
+        writes: &[Write<String>],
+        entries: &BTreeMap<Audience, u64>,
+        seed: u64,
+    ) -> bool {
+        let case = comparison(
+            writes,
+            &(0..writes.len()).collect::<Vec<_>>(),
+            seed,
+            Some(entries),
+        );
+        run_lean(runner, &case.input) != case.rust
+    }
+
+    /// Remove writes, row changes, and values while preserving a valid history.
+    /// A rejected candidate is not a test failure: it is not a valid reduction.
+    fn reduce_entry_history(
+        runner: &std::ffi::OsStr,
+        mut writes: Vec<Write<String>>,
+        mut entries: BTreeMap<Audience, u64>,
+        seed: u64,
+    ) -> (Vec<Write<String>>, BTreeMap<Audience, u64>) {
+        let mut without_values = writes.clone();
+        for write in &mut without_values {
+            for change in write.changes.values_mut() {
+                match &mut change.operation {
+                    Operation::Insert(columns) | Operation::Update(columns) => columns.clear(),
+                    Operation::Delete => {}
+                }
+            }
+        }
+        if entry_mismatch(runner, &without_values, &entries, seed) {
+            writes = without_values;
+        }
+        loop {
+            let mut reduced = false;
+            for index in 0..writes.len() {
+                let mut candidate = writes.clone();
+                let removed = candidate.remove(index).id;
+                for write in &mut candidate {
+                    write.had_read.remove(&removed);
+                }
+                if History::new(candidate.clone()).is_ok()
+                    && entry_mismatch(runner, &candidate, &entries, seed)
+                {
+                    writes = candidate;
+                    reduced = true;
+                    break;
+                }
+            }
+            if reduced {
+                continue;
+            }
+            'changes: for index in 0..writes.len() {
+                for row in writes[index].changes.keys() {
+                    let mut candidate = writes.clone();
+                    candidate[index].changes.remove(row);
+                    if History::new(candidate.clone()).is_ok()
+                        && entry_mismatch(runner, &candidate, &entries, seed)
+                    {
+                        writes = candidate;
+                        reduced = true;
+                        break 'changes;
+                    }
+                }
+            }
+            if !reduced {
+                break;
+            }
+        }
+        for audience in entries.keys().cloned().collect::<Vec<_>>() {
+            let mut candidate = entries.clone();
+            candidate.remove(&audience);
+            if entry_mismatch(runner, &writes, &candidate, seed) {
+                entries = candidate;
+            }
+        }
+        (writes, entries)
+    }
+
+    #[test]
+    #[ignore = "requires the Lean executable; scripts/check.sh supplies COVEN_MERGE_LEAN"]
+    fn entry_differential_counterexample() {
+        let runner = std::env::var_os("COVEN_MERGE_LEAN")
+            .expect("COVEN_MERGE_LEAN must name the built Lean runner");
+        // One key-only circle row, then one kept circle deletion. Rust and
+        // Lean hide the same row, but only Lean names the responsible entry.
+        let row = circle(0, 1);
+        let writes = [write(1, 0, &[], vec![(row.clone(), change(0, 0, &[]))])];
+        let entries = BTreeMap::from([(row.audience, 1)]);
+        let case = comparison(&writes, &[0], 0, Some(&entries));
+        let rust = json!([{"id": 0, "gen": 1, "gw": [[1, 0]], "cells": [], "lost": [],
+            "removed": true, "rules": [{"kind": 2}]}]);
+        let lean = json!([{"id": 0, "gen": 1, "gw": [[1, 0]], "cells": [], "lost": [],
+            "removed": true, "rules": [{"kind": 2, "entry": 1}]}]);
+        assert_eq!(case.rust, rust);
+        assert_eq!(run_lean(&runner, &case.input), lean);
+        assert_ne!(rust, lean);
+        // Removing either event removes the discrepancy.
+        let no_write = comparison(&[], &[], 0, Some(&entries));
+        assert_eq!(no_write.rust, run_lean(&runner, &no_write.input));
+        let no_entry = comparison(&writes, &[0], 0, Some(&BTreeMap::new()));
+        assert_eq!(no_entry.rust, run_lean(&runner, &no_entry.input));
+    }
+
+    #[test]
+    #[ignore = "requires the Lean executable; scripts/check.sh supplies COVEN_MERGE_LEAN"]
+    fn entry_differential_histories() {
+        let runner = std::env::var_os("COVEN_MERGE_LEAN")
+            .expect("COVEN_MERGE_LEAN must name the built Lean runner");
+        for seed in 0..128 {
+            let mut rng = Generator::new(seed + 20_000);
+            let writes = rng.history(24);
+            let mut entries = BTreeMap::new();
+            // Apply, replace, and drop kept circle entries at different write
+            // prefixes. Entry numbers are identities, not Boolean sentinels.
+            for entry in 1..=8 {
+                let audience = circle(0, 1 + rng.pick(2) as u8).audience;
+                if rng.pick(3) == 0 {
+                    entries.remove(&audience);
+                } else {
+                    entries.insert(audience, entry);
+                }
+                let prefix = 1 + rng.pick(writes.len());
+                let writes = &writes[..prefix];
+                for _ in 0..3 {
+                    let order = rng.order(writes);
+                    let case = comparison(writes, &order, seed, Some(&entries));
+                    let lean = run_lean(&runner, &case.input);
+                    if lean != case.rust {
+                        let (reduced, entries) = reduce_entry_history(
+                            &runner,
+                            order.iter().map(|&index| writes[index].clone()).collect(),
+                            entries.clone(),
+                            seed,
+                        );
+                        let minimal = comparison(
+                            &reduced,
+                            &(0..reduced.len()).collect::<Vec<_>>(),
+                            seed,
+                            Some(&entries),
+                        );
+                        panic!(
+                            "EntryInputs differential mismatch, seed {seed}, order {order:?}\n\
+                            reduced history: {}\nRust: {}\nLean: {}",
+                            minimal.input,
+                            minimal.rust,
+                            run_lean(&runner, &minimal.input)
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

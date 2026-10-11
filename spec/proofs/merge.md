@@ -262,9 +262,10 @@ at.
   the steps end, and the unique or other-audience rule from step 2.
 - In Lean: `EntryInputs` and `entryView` carry the entry identity. They use
   `fires`, `rivalBefore`, `removal` and `view` in `Removal.lean` for the same
-  three passes. `Inputs` retains Boolean circle inputs for the existing Rust
-  differential runner; `EntryInputs.erase` supplies those Boolean tests from
-  the entry, so there is only one removal algorithm.
+  three passes. `Inputs` retains Boolean circle inputs for the Boolean Rust
+  differential; `EntryInputs.erase` supplies those Boolean tests from the
+  entry, so there is only one removal algorithm. The entry-aware runner calls
+  `entryView` and preserves the entry in its returned rules.
 
 ### B8 Proof for the removal rules
 
@@ -437,7 +438,8 @@ at.
 Lean checks the theorems named in this appendix. `CovenMerge/Axioms.lean`
 prints their axioms; only Lean's `propext`, `Classical.choice` and
 `Quot.sound` are allowed. `scripts/check.sh` rebuilds the package, audits
-these axioms, and runs the existing Rust differential tests.
+these axioms, and runs the Boolean and entry-aware Rust differential tests.
+The entry-aware comparison fails on the checked discrepancy in B16.
 
 Values are identified by their setters and cells. A column can be its old
 name, so a frozen record does not require that column in the new schema.
@@ -471,10 +473,14 @@ write validity, retained generation witnesses and snapshot correctness.
 Files, encryption, transport buffering, atomic SQLite installation, retention
 until finality, loss dismissal, fingerprint hashing and trigger execution are outside
 this model. The functions describe a completed atomic reload; they do not
-model a partially installed database. Rust still follows its previous
-behavior. The Boolean inputs and existing merge functions remain available
-for its differential tests and for the separate store-log/data package;
-those tests do not claim to check the new boundary behavior.
+model a partially installed database. Rust's merge functions use Boolean
+circle causes. The Boolean differential passes; the entry-aware differential
+exposes the missing deletion-entry identity in B16. Boundary, reset and
+migration comparisons have not been added: widening stopped at that first
+disagreement. Those operations are implemented outside `coven-merge`, in the
+database and sync crates; their execution is not checked by this runner.
+The Boolean inputs and existing merge functions also remain available to
+the separate store-log/data package.
 
 ### B12 Circle entries, migration deletes and frozen losses
 
@@ -621,3 +627,46 @@ The readings used are:
 - Setter-and-cell identity stands for the written scalar. Freezing captures
   that identity and the old column name; it never substitutes a current
   foreign-key value into a loss.
+
+### B16 Rust differential: missing circle-deletion identity
+
+`MergeRunner.lean` accepts Boolean removal inputs or `EntryInputs`. Both
+modes run the same core merge; the entry-aware mode returns each named
+circle-deletion cause without discarding its entry. The Rust adapter calls
+`apply` and `removals` and reports the rule Rust actually returns. It does
+not supply a missing identity from the test input.
+
+`entry_differential_histories` generates causal writes, random application
+orders and prefixes, and changes to kept circle-deletion entries. A mismatch
+stops the comparison. The reducer removes writes, changes, values and entries
+while retaining a history accepted by Rust's `History::new`.
+
+Seed 0 fails. Its history reduces to one insert of a key-only row in a
+circle, followed by one kept entry deleting that circle. The row stays at
+generation 1, its insertion record remains, and both implementations hide it.
+Rust returns `Rule::DeletedCircle`, with no entry. Lean returns
+`Rule.deletedCircleEntry 2`. There are no foreign keys, CHECK failures,
+competing rows or non-key values in the reduced history.
+
+`entry_differential_counterexample` checks the same discrepancy with entry 1
+and verifies that removing either the insert or the deletion removes the
+difference. Lean's `EntryCounterexample.entry_identity_gap` checks both model
+outputs; `writes_valid`, `no_row_no_gap` and `no_entry_no_gap` check the
+history's assumptions and those two reductions. This is a discrepancy with
+Rust's result type, not a counterexample to the current spec or the convergence
+proof. [§14.7](../coven.md#147-deleting-a-circle) requires the loss record to
+name the responsible entry; its identity is part of the cause.
+
+The Boolean differential passes. `scripts/check.sh` runs it and checks the
+fixed counterexample. The strict entry-aware comparison fails on this history
+and is not in `scripts/check.sh`; it joins the check when Rust names the
+deleting entry in its loss rule, and the fixed counterexample then fails. Boundary, reset and
+migration differential coverage was not attempted beyond source inspection
+after this discrepancy.
+
+From the repository root, after building `mergeRunner`:
+
+```sh
+COVEN_MERGE_LEAN="$PWD/spec/proofs/merge/.lake/build/bin/mergeRunner" \
+  cargo test -p coven-merge --all-features entry_differential -- --ignored --nocapture
+```

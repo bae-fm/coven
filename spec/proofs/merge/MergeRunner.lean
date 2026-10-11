@@ -1,4 +1,4 @@
-import CovenMerge.Removal
+import CovenMerge.Circles
 import Lean
 
 /-! JSON adapter for differential tests. All merge and removal computation calls
@@ -78,6 +78,11 @@ private def ruleNumber : Rule → Nat
   | .otherAudience => 3
   | .unique => 4
 
+private def namedRuleJson (rule : Rule) : Json :=
+  match rule with
+  | .deletedCircleEntry entry => Json.mkObj [("kind", toJson (2 : Nat)), ("entry", toJson entry)]
+  | rule => Json.mkObj [("kind", toJson (ruleNumber rule))]
+
 private def run (j : Json) : Except String Json := do
   let writes ← (← j.getObjValAs? (Array Json) "writes").mapM readWrite
   let order ← j.getObjValAs? (Array Nat) "order"
@@ -111,7 +116,17 @@ private def run (j : Json) : Except String Json := do
     rank := fun r => match rows.find? (·.id == r) with
       | some x => x.rank
       | none => 0 }
-  let v := view I
+  let mode ← j.getObjValAs? String "mode"
+  let v ← match mode with
+    | "boolean" => pure (view I)
+    | "entries" => do
+      let entries ← j.getObjValAs? (Array (Nat × Nat)) "entries"
+      for (r, _) in entries do
+        if !(rows.any (·.id == r)) then throw "entry names an unknown row"
+      let named : EntryInputs Nat Nat :=
+        { I with inDeletedCircle := fun r => (entries.find? (·.1 == r)).map (·.2) }
+      pure (entryView named)
+    | _ => throw "unknown merge runner mode"
   let output := rows.map fun r =>
     let generation := st.gen r.id
     let gw := (List.range (generation + 1)).filterMap fun g =>
@@ -124,7 +139,8 @@ private def run (j : Json) : Except String Json := do
       ("id", toJson r.id), ("gen", toJson generation),
       ("gw", toJson gw), ("cells", toJson cells), ("lost", toJson lost),
       ("removed", toJson (v.removed r.id)),
-      ("rules", toJson ((v.rules r.id).map ruleNumber))]
+      ("rules", if mode == "entries" then toJson ((v.rules r.id).map namedRuleJson)
+        else toJson ((v.rules r.id).map ruleNumber))]
   pure (toJson output)
 
 def main : IO UInt32 := do
