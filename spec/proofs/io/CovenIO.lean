@@ -9,3 +9,5 @@ import CovenIO.Downloads
 import CovenIO.Retired
 import CovenIO.Refinement
 import CovenIO.Examples
+import CovenIO.Revocation
+import CovenIO.RevocationExamples

@@ -154,3 +154,25 @@ import CovenIO
 #print axioms CovenIO.Examples.reader_race_despite_dominance
 #print axioms CovenIO.Examples.snapshot_age_boundaries
 #print axioms CovenIO.Examples.loaded_snapshot_advances
+
+#print axioms CovenIO.Revocation.observed_hit
+#print axioms CovenIO.Revocation.last_send_checked
+#print axioms CovenIO.Revocation.completed_catchup
+#print axioms CovenIO.Revocation.permanent_observed
+#print axioms CovenIO.Revocation.caughtUp_complete_old
+#print axioms CovenIO.Revocation.gated_first_send_revocation
+#print axioms CovenIO.Revocation.retired_copy_settles
+#print axioms CovenIO.RevocationExamples.send_trace
+#print axioms CovenIO.RevocationExamples.final_removal
+#print axioms CovenIO.RevocationExamples.scan_supplies_removal
+#print axioms CovenIO.RevocationExamples.caught_up_final_prefix
+#print axioms CovenIO.RevocationExamples.joined_guarantee_instantiated
+#print axioms CovenIO.RevocationExamples.reserved_copy_survives
+#print axioms CovenIO.RevocationExamples.in_flight_after_finality
+#print axioms CovenIO.RevocationExamples.removal_during_catchup
+#print axioms CovenIO.RevocationExamples.nonfinal_removal_blocks_exposed_key
+#print axioms CovenIO.RevocationExamples.nonfinal_removal_reverses
+#print axioms CovenIO.RevocationExamples.retired_write_lands
+#print axioms CovenIO.RevocationExamples.retired_in_flight_copy
+#print axioms CovenIO.RevocationExamples.storage_history_valid
+#print axioms CovenIO.RevocationExamples.prerequisite_copies_published

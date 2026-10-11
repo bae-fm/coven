@@ -240,3 +240,12 @@ import CovenStorelogData
 #print axioms CovenStorelogData.HistoricalExamples.replay_reversal_queues_regrant
 
 #print axioms CovenStorelogData.HistoricalExamples.membership_keeps_part_visible
+
+#print axioms CovenStorelogData.Revocation.rotation_retains
+#print axioms CovenStorelogData.Revocation.member_absent
+#print axioms CovenStorelogData.Revocation.effect_preserves_absence
+#print axioms CovenStorelogData.Revocation.applied_preserves_absence
+#print axioms CovenStorelogData.Revocation.applied_removal
+#print axioms CovenStorelogData.Revocation.suffix_preserves_absence
+#print axioms CovenStorelogData.Revocation.replay_removal
+#print axioms CovenStorelogData.Revocation.kept_removal_excludes

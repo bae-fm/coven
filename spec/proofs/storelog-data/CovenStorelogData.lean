@@ -32,3 +32,4 @@ import CovenStorelogData.CurrentExamples
 import CovenStorelogData.KeyPhases
 import CovenStorelogData.HistoricalKeys
 import CovenStorelogData.HistoricalExamples
+import CovenStorelogData.Revocation

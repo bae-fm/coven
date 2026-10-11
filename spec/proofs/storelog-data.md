@@ -40,13 +40,36 @@ runs; `rotation_requires_publication` proves that both receipts are required;
 Ana's key-free removal of Ben, then first-sending with K2. Provider access
 can remain pending while this protected data proceeds.
 
-Every send also requires §10's completed catch-up to have started less than
-five minutes ago, measured monotonically with sleep counted. This includes
-fixed retries and independent file uploads. The model does not represent
-that timer or the one-day provider-request duration assumption; they are
-[IO obligations](io.md#discovery-obligations), not consequences of the
-revocation theorems. Freshness bounds stale sending without eliminating
-copies published after the sender's observation.
+`CovenIO.Revocation.gated_first_send_revocation` joins this selection to the
+actual send in `IOTrace`. Its catch-up started less than five minutes before
+the request, including sleep, and the membership and copy scans finished
+inside that interval. `completed_catchup` supplies this package's existing
+`KeyPhases.CaughtUp` from retained receipts and the completed numbered reads.
+`rotation_retains` proves that a successful phase-two rotation preserves both
+observations, so selection can use a newly published replacement too.
+
+For a removal final before catch-up started, the joined theorem carries its
+kept verdict through §9's finality theorem. `kept_removal_excludes` derives
+absence from every audience by replaying the actual kept effects, provided
+no later kept addition restores that member. This is not an assumed membership
+verdict. With §11's no-later-copy condition, the selected key has no copy
+addressed to that member in the represented storage at the send.
+
+The hypotheses are named: causal history; the quiet finality window, old
+removal and complete old prefix at both observations; successful authenticated
+entry receipt and complete copy routing facts; custody; identity and freshness;
+no later kept membership addition; selection by `firstSend`; and copy coverage
+through the send, with no later copy of that key for that member. Provider
+publication times and the positive preceding-unit cutoff supply the old prefix
+in `caughtUp_complete_old`. The finality certificate's storage timestamp is
+distinct from the monotonic instant when it was established. The
+[IO write-up](io.md#joined-revocation) states the timing and decoding boundaries.
+
+§4's bound on storage-clock advance supports §15's recent-write catch-up;
+it is not needed to retain permanent entries and copies. §10's one-day remote
+request bound is used by `retired_copy_settles` for retirement drains, including
+lost replies. It does not establish the no-later-copy hypothesis. Freshness
+bounds stale sending without eliminating copies published after observation.
 
 `KeySelection.revocation_between_listings` and `KeyPhases.revocation` prove
 that a selected sealing key has no copy for an excluded member in the listed
@@ -73,6 +96,27 @@ orders, the intermediate drop and the allowed share; `storage_history_valid`
 checks online first attempts and storage landings. Extending `later` to the
 whole readable lifetime of a write strengthens the premise to that period;
 it cannot prevent later disclosure.
+
+`CovenIO.RevocationExamples.in_flight_after_finality` checks a five-entry
+history without a replay reversal. Ana registers a second device, then her
+devices concurrently add Ben and rotate to K1 without seeing his addition.
+Ben’s initial K0 copy precedes his admission; the rotation publishes K1 for Ana,
+its only recorded member. Historical sharing then reserves K1 for Ben before
+his removal. `prerequisite_copies_published` checks both publication conditions. The reservation survives until after removal
+is final. Its gated request starts before another device's copy miss, and lands
+after the miss but before that device's fresh first send with the same key.
+The remote request takes three seconds. `caught_up_final_prefix` checks the
+actual discovery-to-finality bridge, and `joined_guarantee_instantiated` applies
+the joined theorem before that delayed copy lands. Anonymous Lean examples
+also check the stronger claim's failure, removal during catch-up, non-final
+removal reversal, the retired-write boundary and fixed retries.
+
+None contradicts current §3: it expressly requires no copy after observation,
+and §11 accepts that residual window. A removal landing during a pass can
+follow its writer's miss; a non-final verdict can reverse; §10 admits an unread
+retirement's writes through the inclusive thirty-day landing deadline; retries
+keep their original key. Those sentences rule out an unconditional promise
+about every send after publication or finality.
 
 **Historical sharing and continued readability are proved.**
 `HistoricalExamples.removal_reversal_and_sharing` checks the history in

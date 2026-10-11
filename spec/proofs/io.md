@@ -389,6 +389,117 @@ transfer limits, worker scheduling and its independence from pass completion
 remain outside this trace model. Moving requests to the worker does not
 remove them from total IO accounting.
 
+### Joined revocation
+
+**The conditional §3 guarantee is proved across the two packages.**
+`Revocation.gated_first_send_revocation` takes an arbitrary `IOTrace` prefix
+ending in the request being proved. `last_send_checked` extracts that request's
+actual completed catch-up. `completed_catchup` joins its start and completion
+times to `CompletedPass` and constructs the existing `KeyPhases.CaughtUp`
+through `KeyPhases.begin`, using cached receipts plus decoded scan hits.
+There is no separate definition of key usability or selection.
+
+If an entry removing a member was final before that catch-up began, the entry
+remains kept in the view used for sealing. The data package's
+`Revocation.kept_removal_excludes` then derives exclusion from every audience,
+unless a later kept addition restores the member. The selected key has no copy
+addressed to that member in storage at the send, provided no such copy appears
+after the pass's observation. The sender differs from the removed member.
+Selection uses `KeyPhases.firstSend`, which chooses the newest usable held key;
+the request carries that attempt's bytes. A successful rotation can extend
+the caught-up view: `rotation_retains` proves it keeps both earlier receipt sets.
+The theorem takes those receipt-preservation conditions for the sealing view.
+
+The named hypotheses make the boundaries explicit:
+
+- **Receipt and storage:** complete writer discovery and terminal scans within
+  this catch-up, retained earlier entries and copies (including completed
+  drains), available permanent prefixes, exact immutable paths and publication
+  times, successful entry authentication, and all copy routing facts. A box
+  addressed to someone else is included without opening or accepting its key.
+  `permanent_observed` derives individual receipt from the actual scan and
+  provider evolution. `copyCoverage` accounts for every stored copy at the
+  request, dividing it between observed and later copies.
+- **Finality:** causal validity, a quiet qualifying thirty-day window, the
+  removal's strict old age and kept verdict, and both observations containing
+  the complete old prefix. `caughtUp_complete_old` supplies the catch-up's
+  prefix through `Refinement.finality_precondition`, using a positive provider
+  unit and a clock sample preceding the entry reads. Finality's storage cutoff
+  and the monotonic instant of its establishment are separate parameters.
+  No later kept addition may restore the removed membership.
+- **Sending:** the actual gate has accepted identity and active status, the
+  catch-up completed, and its start is less than five minutes before the send.
+  It is a new sealing attempt produced by `firstSend`, with custody supplied
+  by the caller. `noLaterCopy` covers the interval through this send. Taking
+  `later` over the write's whole readable lifetime gives the stronger lifetime
+  statement, with that stronger premise.
+
+The storage-clock rate assumption in §4 is needed for §15's recent-write
+availability test; permanent membership entries and copies need no age-based
+retention argument. §10's one-day bound is a bound on remote publication,
+including a lost reply, not a local timeout. `retired_copy_settles` connects an
+actual copy request in `IOTrace` to `Retired.publication_before_deadline`:
+with retirement observed by every catch-up starting at or after finality,
+its landing is strictly before finality plus one day and five minutes.
+That timing lemma names `storageDuration`, `requestBound` and `finalityStops`.
+As in `Retired.Publication`, those durations must share a scale; §4's allowance
+for forward drift alone does not identify storage age with monotonic elapsed
+time. Neither duration assumption is a substitute for `noLaterCopy`.
+
+**The unconditional claim fails, including after finality.**
+`RevocationExamples` contains checked histories and anonymous Lean examples:
+
+- `in_flight_after_finality` has five entries: creation, Ana’s second device,
+  concurrent addition of Ben and rotation to K1, then removal of Ben. Ben’s
+  initial K0 copy precedes admission. The rotation has not read his addition,
+  so its only required K1 copy is for Ana. After learning the addition, Ana
+  reserves a historical K1 copy for Ben; removal then occurs.
+  `prerequisite_copies_published` checks the initial-copy and rotation rules.
+  K1 has no published copy for Ben yet. After removal becomes final, its gated
+  request starts. Another device's catch-up misses that copy, selects K1, and
+  first-sends after it lands. The copy request takes three seconds; the sender's
+  catch-up is still fresh. `reserved_copy_survives` checks the allowed sharing
+  and the actual fixed reservation/publication transitions. The entry scan,
+  finality certificate, provider evolution and both request traces are checked.
+  `joined_guarantee_instantiated` applies the joined theorem at completion,
+  before that landing; the later send fails only its no-later-copy premise.
+- `removal_during_catchup` misses the removing writer's next entry at second 3.
+  Removal lands at 4, catch-up completes at 5, and the gate permits the old key.
+  Completing every scan does not mean reading everything published before
+  the last scan finishes.
+- `nonfinal_removal_blocks_exposed_key` refuses an exposed key immediately;
+  finality is not needed for that observation's protection.
+  `nonfinal_removal_reverses` checks two admins' concurrent removals: Ana is
+  initially absent, then returns when her earlier removal of Ben arrives.
+  A non-final verdict cannot supply the theorem's stable-removal premise.
+  The re-addition example keeps a final removal while a later addition returns
+  the member, demonstrating why the no-return condition is separate.
+- `retired_write_lands` checks a request started before retirement, landing
+  afterward within one day and admitted by §10. The same device cannot start
+  another send with a catch-up that reports retirement. A separate example
+  checks admission exactly thirty days after retirement and rejection one
+  second later; the admission deadline is not permission to keep sending.
+  `retired_in_flight_copy` checks the last allowed integer-second send and
+  the full one-day landing delay against the strict drain bound.
+- The retry example passes the fresh gate while retaining the old exposed
+  key. A retry is not a new sealing attempt.
+
+These do not contradict any sentence of current §3. Its promise explicitly
+requires “provided no copy of the sealing key is made for them after that
+pass's copy observation”; §11 says the later-copy window is accepted.
+For removal during catch-up, §11 explicitly permits old readability for writes
+sent before the sender learned of removal. §9 allows non-final replay reversal,
+§10 permits the retired write's bounded late landing, and §3 requires fixed
+retry bytes. These are counterexamples to removing those qualifications.
+
+Cryptographic sealing, decoding/authentication implementations, provider
+adapters, durable transactions and Rust equivalence remain outside these
+proofs. `IOTrace.checked` alone has no receipt payload; the bridge therefore
+requires the completed scans and their time bounds explicitly. It does not
+infer successful reads from the event's name. The key/bytes association is the
+existing receipt model's `Attempt`, not a proof about actual ciphertext.
+
+
 ## Downloads and their visible outcomes
 
 **10. Downloads and pending records — proved at the transaction boundary.**
