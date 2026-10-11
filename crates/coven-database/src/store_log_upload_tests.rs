@@ -74,6 +74,10 @@ async fn failed_sealing_reserves_nothing_and_pending_entry_blocks_another() {
         .unwrap();
     assert_eq!(id.number, 1);
     let fixed = db.local_store_log().await.unwrap().upload;
+    assert_eq!(
+        fixed.as_ref().unwrap().format,
+        coven_format::FormatVersion::V1
+    );
     assert!(matches!(
         db.prepare_store_log(entry.author, entry.change, |_, _| panic!(
             "must not reseal while pending"

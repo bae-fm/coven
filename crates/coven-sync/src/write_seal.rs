@@ -108,6 +108,7 @@ pub(crate) fn select(
     check_upload_version(log, schema)?;
     let store_key = current(log, ring, &Audience::Store, &member.member_id())?;
     Ok(WriteObjectPrefix {
+        format: coven_format::FormatVersion::CURRENT,
         store_key,
         part_keys: header
             .parts
@@ -132,6 +133,7 @@ pub(crate) fn seal(
     let prefix = keys.ok_or(DbError::UploadNotAttempted {
         write: header.header.position,
     })?;
+    let coven_format::FormatVersion::V1 = prefix.format;
     let mut layout = WriteObjectLayout::new(
         prefix,
         &header_frame,

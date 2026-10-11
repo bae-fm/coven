@@ -33,6 +33,8 @@ pub struct StoreLogSealing {
 /// A locally authored entry waiting for publication and atomic replay application.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreLogUpload {
+    /// The format recorded in the immutable frame before the first storage call.
+    pub format: coven_format::FormatVersion,
     /// The immutable entry whose number the queue reserves.
     pub entry: StoreLogEntry,
     /// Key choices retained across crashes and lost replies.
@@ -58,11 +60,13 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<Option<StoreLogUploa
             "SELECT record,sealing_key FROM _coven_store_log_uploads",
             [],
             |row| {
-                let Object::StoreLog(entry) = decoded(Object::decode(&row.get::<_, Vec<u8>>(0)?))?
-                else {
+                let record = row.get::<_, Vec<u8>>(0)?;
+                let format = decoded(coven_format::FormatVersion::decode(&record))?;
+                let Object::StoreLog(entry) = decoded(Object::decode(&record))? else {
                     return Err(rusqlite::Error::InvalidQuery);
                 };
                 Ok(StoreLogUpload {
+                    format,
                     entry,
                     sealing: StoreLogSealing {
                         key: KeyId(uuid::Uuid::from_bytes(row.get(1)?)),
@@ -165,7 +169,8 @@ pub(crate) fn retire(
         ),
         |row| row.get::<_, Vec<u8>>(0),
     )? {
-        if stored != record {
+        let format = coven_format::FormatVersion::decode(&stored)?;
+        if stored != Object::decode(record)?.encode_in(format)? {
             return Err(DbError::StoreLogEntryChanged(id));
         }
     }

@@ -602,6 +602,7 @@ pub fn encoded_examples() -> Vec<Zeroizing<Vec<u8>>> {
     let encoder = crate::write_stream::WriteEncoder::new(&record).unwrap();
     pieces.push(Zeroizing::new(
         crate::sealed_write::WriteObjectPrefix {
+            format: crate::FormatVersion::CURRENT,
             store_key: KeyId(Uuid::from_bytes([1; 16])),
             part_keys: vec![
                 KeyId(Uuid::from_bytes([1; 16])),

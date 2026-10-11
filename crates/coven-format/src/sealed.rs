@@ -24,10 +24,7 @@ pub(crate) fn prefix(bytes: &[u8], kind: u8) -> Result<(), Error> {
             tag: prefix[0],
         });
     }
-    let version = u16::from_be_bytes([prefix[1], prefix[2]]);
-    if version != crate::FORMAT_VERSION {
-        return Err(Error::UnsupportedVersion(version));
-    }
+    let crate::FormatVersion::V1 = crate::FormatVersion::decode(prefix)?;
     Ok(())
 }
 

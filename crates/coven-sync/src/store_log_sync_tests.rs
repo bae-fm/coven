@@ -331,6 +331,8 @@ async fn fixed_bytes_survive_restart_and_lost_create_reply() {
         assert!(matches!(result, Err(SyncError::Storage(_))));
         let fixed = a.db.local_store_log().await.unwrap().upload.unwrap();
         let expected = a.reseal(&fixed);
+        assert_eq!(fixed.format, coven_format::FormatVersion::V1);
+        assert_eq!(&expected[..3], &[33, 0, 1]);
         assert_eq!(fixed.entry.position.number, 2);
         if lost_reply {
             assert_eq!(
@@ -342,6 +344,9 @@ async fn fixed_bytes_survive_restart_and_lost_create_reply() {
             );
         }
         a.restart(storage.clone()).await;
+        let reopened = a.db.local_store_log().await.unwrap().upload.unwrap();
+        assert_eq!(reopened, fixed);
+        assert_eq!(a.reseal(&reopened), expected);
         a.sync().await;
         assert_eq!(
             storage
@@ -572,6 +577,7 @@ async fn key_objects_are_fixed_and_published_before_the_entry() {
         Err(SyncError::Storage(_))
     ));
     let pending = a.db.local_store_log().await.unwrap().upload.unwrap();
+    assert_eq!(pending.format, coven_format::FormatVersion::V1);
     assert!(storage
         .list(&ObjectPrefix::store_logs())
         .await
@@ -592,6 +598,9 @@ async fn key_objects_are_fixed_and_published_before_the_entry() {
         sealed_key.bytes
     );
     a.restart(storage.clone()).await;
+    let reopened = a.db.local_store_log().await.unwrap().upload.unwrap();
+    assert_eq!(reopened, pending);
+    assert_eq!(a.reseal(&reopened), expected);
     a.sync().await;
     assert_eq!(
         storage

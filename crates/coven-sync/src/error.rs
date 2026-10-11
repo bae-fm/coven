@@ -104,7 +104,7 @@ pub enum SyncError {
     SecureStorage(#[from] KeyError),
     /// Making encrypted or signed bytes failed.
     #[error(transparent)]
-    Crypto(#[from] CryptoError),
+    Crypto(CryptoError),
     /// The proposed entry violates its byte format.
     #[error(transparent)]
     Format(coven_format::Error),
@@ -191,6 +191,15 @@ impl From<coven_format::Error> for SyncError {
         match error {
             error if newer_format(&error) => Self::Stopped(SyncFailure::UpdateRequired),
             error => Self::Format(error),
+        }
+    }
+}
+
+impl From<CryptoError> for SyncError {
+    fn from(error: CryptoError) -> Self {
+        match error {
+            error if newer_format(&error) => Self::Stopped(SyncFailure::UpdateRequired),
+            error => Self::Crypto(error),
         }
     }
 }

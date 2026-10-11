@@ -231,6 +231,14 @@ async fn fixed_bytes_survive_restart_and_a_lost_completion_reply() {
     storage.set_faults(faults).await;
     assert!(device.writes.upload_writes().await.is_err());
     let expected = writes::resealed(device).await.1;
+    assert_eq!(&expected[..3], &[32, 0, 1]);
+    let fixed = device
+        .db
+        .read_oldest_upload(|upload| Ok::<_, DbError>(upload.keys.unwrap()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(fixed.format, coven_format::FormatVersion::V1);
     device
         .reopen(
             storage.clone(),
@@ -238,6 +246,23 @@ async fn fixed_bytes_survive_restart_and_a_lost_completion_reply() {
             vec![schema::initial()],
         )
         .await;
+    device
+        .db
+        .prepare_write_upload(|_, _, _| {
+            panic!("reopening an attempted write must not select a new format or keys")
+        })
+        .await
+        .unwrap();
+    assert_eq!(writes::resealed(device).await.1, expected);
+    assert_eq!(
+        device
+            .db
+            .read_oldest_upload(|upload| { Ok::<_, DbError>(upload.keys.unwrap()) })
+            .await
+            .unwrap()
+            .unwrap(),
+        fixed
+    );
     let mut faults = Faults::none();
     faults.lose_completion_reply = true;
     storage.set_faults(faults).await;
@@ -311,6 +336,7 @@ mod writes {
     ) -> Vec<u8> {
         let encoder = WriteEncoder::new(record).unwrap();
         let prefix = WriteObjectPrefix {
+            format: coven_format::FormatVersion::CURRENT,
             store_key: KeyId(Uuid::from_u128(1)),
             part_keys: vec![KeyId(Uuid::from_u128(1)); record.parts.len()],
         };

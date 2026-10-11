@@ -390,6 +390,7 @@ fn opaque_write_layout_uses_supplied_frame_lengths() {
         .map(|p| p.plaintext_length)
         .collect();
     let prefix = WriteObjectPrefix {
+        format: crate::FormatVersion::CURRENT,
         store_key: store_key().id(),
         part_keys: vec![store_key().id(), circle_key().id()],
     };

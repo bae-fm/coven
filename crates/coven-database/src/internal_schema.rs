@@ -9,8 +9,9 @@
 //! Loss targets name their row directly: a write excluded by a schema change
 //! or reset need not have an accepted generation in `_coven_rows`.
 //! An upload's `record` is one plaintext value: the write header frame followed
-//! by its audience parts' row-frame streams. Its first attempt fixes the key
-//! ids in `sealing_keys`, encoded as the D9 write prefix; no ciphertext is kept.
+//! by its audience parts' row-frame streams. Its first attempt fixes the format
+//! and key ids in `sealing_keys`, encoded as the D9 write prefix. A queued store-log
+//! entry keeps its format in `record`'s frame prefix. No ciphertext is kept for either.
 
 pub(crate) const VERSION: u32 = 1;
 pub(crate) const CACHE_HEADER: i64 = -1;

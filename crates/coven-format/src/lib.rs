@@ -27,6 +27,7 @@ pub mod snapshot_stream;
 pub mod store_log;
 pub mod stuck;
 pub mod value;
+mod version;
 mod wire;
 pub mod write;
 pub mod write_stream;
@@ -35,6 +36,7 @@ pub mod write_stream;
 pub mod test_utils;
 
 pub use error::Error;
+pub use version::FormatVersion;
 
 use error::bound;
 use objects::{JoinRequest, PostedPositions};
@@ -42,7 +44,7 @@ use store_log::StoreLogEntry;
 use wire::{decode_frame, Encoder, Wire, MAX_OBJECT};
 
 /// The newest object format written by coven; readers retain older versions (§17.2).
-pub const FORMAT_VERSION: u16 = 1;
+pub const FORMAT_VERSION: u16 = FormatVersion::CURRENT.number();
 /// The fixed prefix length: kind, format version, payload length.
 pub const FRAME_PREFIX_LEN: usize = 7;
 
@@ -62,11 +64,17 @@ pub enum Object {
 impl Object {
     /// Checks structure and returns the one canonical byte string for this value.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
+        self.encode_in(FormatVersion::CURRENT)
+    }
+
+    /// Encode in the format recorded for an attempted object, preserving its bytes.
+    pub fn encode_in(&self, format: FormatVersion) -> Result<Vec<u8>, Error> {
         self.validate()?;
+        let FormatVersion::V1 = format;
         match self {
-            Self::StoreLog(v) => encode_frame(4, v),
-            Self::JoinRequest(v) => encode_frame(9, v),
-            Self::PostedPositions(v) => encode_frame(8, v),
+            Self::StoreLog(v) => encode_frame_in(4, format, |out| v.put(out)),
+            Self::JoinRequest(v) => encode_frame_in(9, format, |out| v.put(out)),
+            Self::PostedPositions(v) => encode_frame_in(8, format, |out| v.put(out)),
         }
     }
     /// Decodes exactly one bounded frame, refusing unknown tags/versions, trailing
@@ -102,17 +110,15 @@ impl Object {
 /// 16 MiB, before a caller allocates or fetches its payload. Extra supplied bytes
 /// are ignored here; [`Object::decode`] requires exactly one complete frame.
 pub fn frame_length(prefix: &[u8]) -> Result<usize, Error> {
-    let bytes = prefix.get(..FRAME_PREFIX_LEN).ok_or(Error::Truncated)?;
+    let bytes = prefix.get(..3).ok_or(Error::Truncated)?;
     if !matches!(bytes[0], 1..=11) {
         return Err(Error::UnknownTag {
             field: "object kind",
             tag: bytes[0],
         });
     }
-    let version = u16::from_be_bytes([bytes[1], bytes[2]]);
-    if version != FORMAT_VERSION {
-        return Err(Error::UnsupportedVersion(version));
-    }
+    let FormatVersion::V1 = FormatVersion::decode(bytes)?;
+    let bytes = prefix.get(..FRAME_PREFIX_LEN).ok_or(Error::Truncated)?;
     let size = u32::from_be_bytes([bytes[3], bytes[4], bytes[5], bytes[6]]) as usize;
     bound(size, MAX_OBJECT - FRAME_PREFIX_LEN, "frame payload")?;
     Ok(size + FRAME_PREFIX_LEN)
@@ -126,9 +132,17 @@ pub(crate) fn encode_frame_with(
     kind: u8,
     put: impl FnOnce(&mut Encoder) -> Result<(), Error>,
 ) -> Result<Vec<u8>, Error> {
+    encode_frame_in(kind, FormatVersion::CURRENT, put)
+}
+
+fn encode_frame_in(
+    kind: u8,
+    format: FormatVersion,
+    put: impl FnOnce(&mut Encoder) -> Result<(), Error>,
+) -> Result<Vec<u8>, Error> {
     let mut out = Encoder::new();
     kind.put(&mut out)?;
-    FORMAT_VERSION.put(&mut out)?;
+    format.number().put(&mut out)?;
     0u32.put(&mut out)?;
     put(&mut out)?;
     let size = (out.bytes.len() - FRAME_PREFIX_LEN) as u32;

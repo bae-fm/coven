@@ -52,7 +52,7 @@ pub(crate) fn seal_upload(
     } else {
         ring.ok_or(SyncError::KeyUnavailable(id))?.store_key(id)?
     };
-    seal(&upload.entry, key, member)
+    seal(&upload.entry, upload.format, key, member)
 }
 
 /// Publish the sealed copies before the entry that introduces or shares them.
@@ -88,19 +88,21 @@ pub(crate) async fn upload_keys(
 
 pub(crate) fn seal(
     entry: &StoreLogEntry,
+    format: coven_format::FormatVersion,
     key: &StoreKey,
     member: &MemberKeys,
 ) -> Result<Vec<u8>, SyncError> {
+    let coven_format::FormatVersion::V1 = format;
     let path = path(entry.position);
     let prefix = SingleChunkPrefix::StoreLog {
         key: key.id(),
         origin: origin(entry),
     };
-    let plain = Object::StoreLog(entry.clone()).encode()?;
-    let chunk = key
-        .derive()
-        .reseal_object_chunk(path.as_str(), &prefix.encode()?, 0, 0, &plain);
-    let mut bytes = prefix.encode_chunk(&chunk)?;
+    let plain = Object::StoreLog(entry.clone()).encode_in(format)?;
+    let chunk =
+        key.derive()
+            .reseal_object_chunk(path.as_str(), &prefix.encode_in(format)?, 0, 0, &plain);
+    let mut bytes = prefix.encode_chunk_in(format, &chunk)?;
     let mut hash = ObjectHasher::new();
     hash.update(&bytes);
     bytes.extend_from_slice(member.sign_object(path.as_str(), &hash.finish()).as_bytes());

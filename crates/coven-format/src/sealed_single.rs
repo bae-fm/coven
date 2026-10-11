@@ -37,6 +37,12 @@ pub enum SingleChunkPrefix {
 impl SingleChunkPrefix {
     /// The complete cleartext prefix used as associated data.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
+        self.encode_in(crate::FormatVersion::CURRENT)
+    }
+
+    /// Encode the routing fields in the attempted object's recorded format.
+    pub fn encode_in(&self, format: crate::FormatVersion) -> Result<Vec<u8>, Error> {
+        let crate::FormatVersion::V1 = format;
         let mut out = Encoder::new();
         let kind = match self {
             Self::StoreLog { .. } => 33u8,
@@ -44,7 +50,7 @@ impl SingleChunkPrefix {
             Self::JoinRequest => 36,
         };
         kind.put(&mut out)?;
-        crate::FORMAT_VERSION.put(&mut out)?;
+        format.number().put(&mut out)?;
         match self {
             Self::StoreLog { key, origin } => {
                 key.put(&mut out)?;
@@ -63,8 +69,17 @@ impl SingleChunkPrefix {
 
     /// Encode every byte before a signature: prefix, length and sealed chunk.
     pub fn encode_chunk(&self, chunk: &[u8]) -> Result<Vec<u8>, Error> {
+        self.encode_chunk_in(crate::FormatVersion::CURRENT, chunk)
+    }
+
+    /// Encode the prefix and ciphertext in the attempted object's recorded format.
+    pub fn encode_chunk_in(
+        &self,
+        format: crate::FormatVersion,
+        chunk: &[u8],
+    ) -> Result<Vec<u8>, Error> {
         check_frame_length(chunk)?;
-        let mut bytes = self.encode()?;
+        let mut bytes = self.encode_in(format)?;
         bytes.extend_from_slice(&sealed::encode_chunk(chunk)?);
         Ok(bytes)
     }

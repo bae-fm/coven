@@ -5,6 +5,27 @@ use coven_storage::ObjectPath;
 use std::error::Error;
 
 #[test]
+fn newer_key_envelopes_require_an_update_at_the_sync_boundary() {
+    for version in [coven_format::FORMAT_VERSION + 1, 0] {
+        let mut bytes = vec![37];
+        bytes.extend_from_slice(&version.to_be_bytes());
+        let error = coven_crypto::SealedKey::decode(&bytes).unwrap_err();
+        let error = SyncError::from(error);
+        if version == 0 {
+            assert!(matches!(
+                error,
+                SyncError::Crypto(CryptoError::UnsupportedVersion(0))
+            ));
+        } else {
+            assert!(matches!(
+                error,
+                SyncError::Stopped(SyncFailure::UpdateRequired)
+            ));
+        }
+    }
+}
+
+#[test]
 fn merge_causality_refusal_preserves_its_native_cause() {
     let write = WriteId {
         device: DeviceId(1),

@@ -208,7 +208,8 @@ async fn invalid_causal_past_and_timestamps_are_damaged() {
         };
         let path = object::path(bad.position);
         let key = ring.store_key(key(1)).unwrap();
-        let mut bytes = object::seal(&bad, key, &signer).unwrap();
+        let mut bytes =
+            object::seal(&bad, coven_format::FormatVersion::CURRENT, key, &signer).unwrap();
         if defect == "own position" {
             let sealed = SingleChunkObject::decode(&bytes).unwrap();
             let prefix = sealed.prefix();

@@ -13,6 +13,7 @@ fn key(byte: u8) -> StoreKey {
 #[test]
 fn sealed_write_has_its_own_kind_outside_the_plaintext_frames() {
     let prefix = WriteObjectPrefix {
+        format: crate::FormatVersion::CURRENT,
         store_key: key(1).id(),
         part_keys: vec![key(1).id()],
     };
@@ -30,6 +31,7 @@ fn object() -> Vec<Vec<u8>> {
     let encoder = WriteEncoder::new(&record).unwrap();
     let mut layout = WriteObjectLayout::new(
         WriteObjectPrefix {
+            format: crate::FormatVersion::CURRENT,
             store_key: key(1).id(),
             part_keys: vec![key(1).id(), key(2).id()],
         },
@@ -167,6 +169,7 @@ fn layout_refuses_wrong_counts_lengths_signature_positions_and_trailing_bytes() 
     let record = test_utils::write();
     let encoder = WriteEncoder::new(&record).unwrap();
     let prefix = WriteObjectPrefix {
+        format: crate::FormatVersion::CURRENT,
         store_key: key(1).id(),
         part_keys: vec![key(1).id()],
     };
@@ -254,6 +257,7 @@ fn migration_object_authenticates_a_header_followed_directly_by_its_signature() 
     let encoder = WriteEncoder::new(&record).unwrap();
     let mut layout = WriteObjectLayout::new(
         WriteObjectPrefix {
+            format: crate::FormatVersion::CURRENT,
             store_key: key(1).id(),
             part_keys: vec![],
         },

@@ -51,6 +51,8 @@ fn validate_lengths(header_length: usize, part_lengths: &[u64]) -> Result<(), Er
 /// Cleartext key identities, authenticated by the object's final signature.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WriteObjectPrefix {
+    /// The format fixed with these keys before the first upload attempt.
+    pub format: crate::FormatVersion,
     /// The store key sealing section 0, the header frame.
     pub store_key: KeyId,
     /// Keys of the audience parts in header order; section i + 1 uses entry i.
@@ -65,9 +67,10 @@ impl WriteObjectPrefix {
 
     /// Encode kind, version, header key and the counted list of part keys.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
+        let crate::FormatVersion::V1 = self.format;
         let mut out = Encoder::new();
         32u8.put(&mut out)?;
-        crate::FORMAT_VERSION.put(&mut out)?;
+        self.format.number().put(&mut out)?;
         self.store_key.put(&mut out)?;
         self.part_keys.put(&mut out)?;
         Ok(out.bytes)
@@ -93,6 +96,7 @@ impl WriteObjectPrefix {
         }
         let mut input = Decoder::new(&bytes[3..])?;
         let result = Self {
+            format: crate::FormatVersion::decode(bytes)?,
             store_key: KeyId::get(&mut input)?,
             part_keys: Vec::get(&mut input)?,
         };

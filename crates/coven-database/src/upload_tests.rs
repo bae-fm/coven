@@ -17,6 +17,7 @@ pub(crate) async fn attempt(db: &Database, byte: u8) -> Result<Option<WriteId>, 
     db.prepare_write_upload(move |_, _, header| {
         let key = coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([byte; 16]));
         Ok(WriteObjectPrefix {
+            format: coven_format::FormatVersion::CURRENT,
             store_key: key,
             part_keys: vec![key; header.parts.len()],
         })
@@ -171,6 +172,7 @@ async fn key_selection_rolls_back_and_competing_attempts_keep_one_choice() {
     assert_eq!(selected(&db).await, (id, None));
     assert!(db
         .prepare_write_upload(|_, _, _| Ok(WriteObjectPrefix {
+            format: coven_format::FormatVersion::CURRENT,
             store_key: coven_foundation::id_source::KeyId(uuid::Uuid::nil()),
             part_keys: vec![],
         }))
@@ -248,6 +250,10 @@ fn a_crash_after_recording_an_attempt_keeps_its_plaintext_and_keys() {
     let db = runtime.block_on(store.schema(notes(), NOTES)).unwrap();
     let kept = runtime.block_on(selected(&db));
     assert_eq!(kept.0, expected);
+    assert_eq!(
+        kept.1.as_ref().unwrap().format,
+        coven_format::FormatVersion::V1
+    );
     assert_eq!(kept.1.as_ref().unwrap().store_key.0.as_bytes(), &[71; 16]);
     assert_eq!(records(&db), original);
     assert_eq!(count(&db, "_coven_uploads"), 1);
