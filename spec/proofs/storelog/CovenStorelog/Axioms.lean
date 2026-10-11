@@ -328,3 +328,7 @@ import CovenStorelog
 #print axioms CovenStorelog.CurrentKeyExamples.forged_foreign_box_costs_a_rotation
 #print axioms CovenStorelog.CurrentKeyExamples.forged_custody_never_selected
 #print axioms CovenStorelog.Horizon.key_free_horizon_stability
+
+#print axioms CovenStorelog.ReplayPolicy.authorViewTable_eq
+#print axioms CovenStorelog.ReplayPolicy.authorViews_eq_cached
+#print axioms CovenStorelog.CurrentReplay.resolveReceived_eq

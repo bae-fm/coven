@@ -1,7 +1,7 @@
 import CovenStorelog.FinalityReplay
 
-/-! D6's current action boundary. The historical action type remains the Rust
-runner's input; membership replay forgets cryptographic commitments. -/
+/-! D6's current action boundary, shared by the Rust differential runner.
+Membership replay forgets cryptographic commitments. -/
 namespace CovenStorelog.CurrentReplay
 
 abbrev KeyBytes := Vector UInt8 32

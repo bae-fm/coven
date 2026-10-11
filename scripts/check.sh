@@ -126,11 +126,24 @@ proofs() {
     step "Rust / Lean migration-selection counterexample"
     COVEN_MERGE_LEAN="$runner" cargo test -p coven-database --all-features migration_differential_counterexample -- --ignored
 
-    step "Rust / Lean differential store-log test"
+    step "Rust / Lean CurrentReplay: agreement and policy counterexamples"
     runner="$(cd spec/proofs/storelog && pwd)/.lake/build/bin/storelogRunner"
     if [ -f "$runner.exe" ]; then
         runner="$runner.exe"
     fi
+    local storelog_tests test
+    storelog_tests=$(cargo test -p coven-sync --all-features lean_differential -- --list)
+    for test in \
+        tests::lean_differential_generated \
+        tests::lean_differential_checked_examples \
+        tests::lean_differential_policy_counterexamples \
+        tests::lean_differential_storage_admission \
+        tests::lean_differential_rejects_invalid_inputs; do
+        if ! printf '%s\n' "$storelog_tests" | grep -qxF "$test: test"; then
+            echo "the Rust test binary is missing $test" >&2
+            exit 1
+        fi
+    done
     COVEN_STORELOG_LEAN="$runner" cargo test -p coven-sync --all-features lean_differential -- --ignored
 
     step "Rust / Lean differential clock test"

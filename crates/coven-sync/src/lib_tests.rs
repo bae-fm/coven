@@ -1,16 +1,19 @@
-//! Adapter and generated inputs for the independent Lean `resolve` executable.
+//! CurrentReplay adapter: modeled membership and fates, with Rust-only checks separate.
 
 use std::{
-    collections::BTreeSet,
     io::Write,
     process::{Command, Stdio},
 };
 
 use coven_crypto::MemberId;
 use coven_database::{
-    DatabaseBuilder, EntryOutcome, StoreLog, StoreLogCheck, StoreLogReplay, StoreLogState,
+    DatabaseBuilder, DropReason, EntryOutcome, StoreLog, StoreLogCheck, StoreLogReplay,
+    StoreLogState,
 };
-use coven_format::store_log::{MemberRole, StoreChange};
+use coven_format::{
+    store_log::{MemberRole, StoreChange},
+    Object,
+};
 use coven_foundation::{
     files::{StoreDir, StoreLayout},
     id_source::{CircleId, DeviceId, SequentialIds, StoreId},
@@ -19,7 +22,7 @@ use coven_merge::Audience;
 use serde_json::{json, Value};
 
 use crate::{
-    effects::tests::{raise, snapshot},
+    effects::tests::{raise, rotation, snapshot},
     replay,
     replay::tests::*,
     replay_entry,
@@ -42,49 +45,22 @@ impl Generator {
             h.all(0, 0, join(id, 1));
             h.all(0, 0, join(id, 2));
         }
-        if self.pick(2) == 0 {
+        // Arbitrary actions use a complete past. Concurrent branches exercise
+        // boundaries, renames, deletion and rotations, whose policies agree.
+        // Member contradictions, removal tiers and late admission have explicit
+        // counterexamples below.
+        for _ in 0..3 {
+            let author = self.pick(5) as u8;
+            let change = self.action(&replay(&h.entries).state);
+            h.all(author, u64::from(author), change);
+            let past: Vec<_> = (0..h.entries.len()).collect();
             let mut changes = self.concurrent_changes();
             if self.pick(2) == 0 {
                 changes.swap(0, 1);
             }
-            let past: Vec<_> = (0..h.entries.len()).collect();
             for (author, change) in [0, 2].into_iter().zip(changes) {
                 h.push(author, u64::from(author), &past, change);
             }
-        }
-        let size = 14 + self.pick(7);
-        while h.entries.len() < size {
-            let author = self.pick(5) as u8;
-            let device = self.pick(8) as u64;
-            let mut past = BTreeSet::from([0]);
-            for (i, entry) in h.entries.iter().enumerate() {
-                if entry.position.device == DeviceId(device) || self.pick(4) == 0 {
-                    past.insert(i);
-                }
-            }
-            for i in (0..h.entries.len()).rev() {
-                if past.contains(&i) {
-                    for (j, entry) in h.entries[..i].iter().enumerate() {
-                        if crate::replay::had_read(&h.entries[i], entry) {
-                            past.insert(j);
-                        }
-                    }
-                }
-            }
-            let view = replay(
-                &past
-                    .iter()
-                    .map(|&i| h.entries[i].clone())
-                    .collect::<Vec<_>>(),
-            )
-            .state;
-            let change = self.action(&view);
-            h.push(
-                author,
-                device,
-                &past.into_iter().collect::<Vec<_>>(),
-                change,
-            );
         }
         h
     }
@@ -102,10 +78,10 @@ impl Generator {
         };
         let audience = self.audience();
         match self.pick(12) {
-            0 => [remove(1), remove(2)],
-            1 => [leave(0, 1), leave(0, 2)],
-            2 => [remove(1), leave(0, 2)],
-            3 => [leave(0, 1), remove(2)],
+            0 => [rotation(audience.clone(), 100), rotation(audience, 101)],
+            1 => [delete(0), rotation(Audience::Circle(circle(0)), 102)],
+            2 => [rename(0, "Birthdays"), rotation(audience, 103)],
+            3 => [reset(audience.clone()), rotation(audience, 104)],
             4 => [
                 reset(audience.clone()),
                 raise(2, 30 + self.pick(2) as u64, audience),
@@ -207,34 +183,43 @@ fn role_number(role: MemberRole) -> u64 {
     }
 }
 
-fn input(h: &History) -> Value {
+fn input(h: &History, stored: &[u64], received: &[Vec<usize>]) -> Value {
+    assert_eq!(stored.len(), h.entries.len());
     let entries: Vec<_> = h.entries.iter().enumerate().map(|(i,entry)| {
+        if let StoreChange::RaiseSchema { snapshot, .. } | StoreChange::Reset { snapshot } = &entry.change {
+            assert_eq!(snapshot.device, DeviceId(900), "snapshot numbers identify one fixture writer");
+        }
         let past: Vec<_> = h.entries[..i].iter().enumerate().filter_map(|(j,e)| crate::replay::had_read(entry,e).then_some(j)).collect();
         let action = match &entry.change {
-            StoreChange::CreateStore { access, .. } => json!({"kind":0,"access":serde_json::to_string(access).unwrap()}),
+            StoreChange::CreateStore { access, key, key_hash, .. } => json!({"kind":0,"access":serde_json::to_string(access).unwrap(),"key":key_number(*key),"key_hash":key_hash}),
             StoreChange::AddMember { keys, role, access } => json!({"kind":1,"member":member_number(&keys.signing),"role":role_number(*role),"access":serde_json::to_string(access).unwrap()}),
-            StoreChange::RemoveMember { member } => json!({"kind":2,"member":member_number(member),"circles":[]}),
+            StoreChange::RemoveMember { member } => json!({"kind":2,"member":member_number(member)}),
             StoreChange::ChangeRole { member, role } => json!({"kind":3,"member":member_number(member),"role":role_number(*role)}),
-            StoreChange::AddDevice { device, .. } => json!({"kind":4,"member":member_number(&entry.author),"device":device.0}),
+            StoreChange::AddDevice { device, replaces, .. } => {
+                assert!(replaces.is_none(), "CurrentReplay does not model replacement registrations");
+                json!({"kind":4,"member":member_number(&entry.author),"device":device.0})
+            },
             StoreChange::RemoveDevice { device } => {
                 let view = replay(&past.iter().map(|&i| h.entries[i].clone()).collect::<Vec<_>>()).state;
                 let owner = &view.devices[device];
                 assert!(!owner.removed, "generator may remove only an observed device");
                 json!({"kind":5,"member":member_number(&owner.member),"device":device.0})
             }
-            StoreChange::CreateCircle { circle, name, .. } => json!({"kind":6,"circle":circle_number(*circle),"name":name}),
+            StoreChange::CreateCircle { circle, name, key, key_hash } => json!({"kind":6,"circle":circle_number(*circle),"name":name,"key":key_number(*key),"key_hash":key_hash}),
             StoreChange::RenameCircle { circle, name } => json!({"kind":7,"circle":circle_number(*circle),"name":name}),
             StoreChange::DeleteCircle { circle } => json!({"kind":8,"circle":circle_number(*circle)}),
             StoreChange::AddCircleMember { circle, member } => json!({"kind":9,"circle":circle_number(*circle),"member":member_number(member)}),
             StoreChange::RemoveCircleMember { circle, member, .. } => json!({"kind":10,"circle":circle_number(*circle),"member":member_number(member)}),
             StoreChange::RaiseSchema { version, snapshot } => json!({"kind":11,"version":version,"snapshot":{"audience":audience_number(&snapshot.audience),"number":snapshot.number}}),
             StoreChange::Reset { snapshot } => json!({"kind":13,"snapshot":{"audience":audience_number(&snapshot.audience),"number":snapshot.number}}),
-            StoreChange::RotateKey { audience, key, .. } => json!({"kind":15,"audience":audience_number(audience),"key":u64::try_from(key.0.as_u128()).unwrap()}),
+            StoreChange::RotateKey { audience, key, key_hash } => json!({"kind":15,"audience":audience_number(audience),"key":key_number(*key),"key_hash":key_hash}),
             StoreChange::SetAccess { access } => json!({"kind":14,"member":member_number(&entry.author),"access":serde_json::to_string(access).unwrap()}),
         };
-        json!({"author":member_number(&entry.author),"device":entry.position.device.0,"past":past,"action":action})
+        // Attempt at the latest observed landing; a later stored time is a retry.
+        let attempted = past.iter().map(|&p| stored[p]).max().unwrap_or(stored[0]);
+        json!({"author":member_number(&entry.author),"device":entry.position.device.0,"past":past,"action":action,"stored":stored[i],"attempted":attempted})
     }).collect();
-    json!({"entries":entries})
+    json!({"entries":entries,"window":30,"received":received})
 }
 
 fn projected(h: &History, replay: &StoreLogReplay) -> Value {
@@ -285,19 +270,32 @@ fn projected(h: &History, replay: &StoreLogReplay) -> Value {
         .entries
         .iter()
         .enumerate()
-        .filter_map(|(i, e)| (replay.entries[&e.position] == EntryOutcome::Kept).then_some(i))
+        .filter_map(|(i, e)| {
+            (replay.entries.get(&e.position) == Some(&EntryOutcome::Kept)).then_some(i)
+        })
         .collect();
-    json!({"created":state.store.is_some(),"members":members,"access":access,"devices":devices,"circles":circles,"versions":versions,"resets":resets,"kept":kept,"dropped":h.drops(replay)})
+    let dropped: Vec<_> = h
+        .entries
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| {
+            matches!(
+                replay.entries.get(&e.position),
+                Some(EntryOutcome::Dropped(_))
+            )
+            .then_some(i)
+        })
+        .collect();
+    json!({"created":state.store.is_some(),"members":members,"access":access,"devices":devices,"circles":circles,"versions":versions,"resets":resets,"kept":kept,"dropped":dropped})
 }
 
-#[test]
-#[ignore = "requires COVEN_STORELOG_LEAN, supplied by scripts/check.sh"]
-fn lean_differential() {
+fn key_number(id: coven_foundation::id_source::KeyId) -> u64 {
+    u64::try_from(id.0.as_u128()).unwrap()
+}
+
+fn run_lean(input: &Value) -> std::process::Output {
     let runner = std::env::var_os("COVEN_STORELOG_LEAN")
         .expect("COVEN_STORELOG_LEAN must name storelogRunner");
-    let histories: Vec<_> = (1..=2048).map(|seed| Generator(seed).history()).collect();
-    let inputs: Vec<_> = histories.iter().map(input).collect();
-    let input = json!({"histories":inputs});
     let mut child = Command::new(runner)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -310,33 +308,584 @@ fn lean_differential() {
         .unwrap()
         .write_all(input.to_string().as_bytes())
         .unwrap();
-    let output = child.wait_with_output().unwrap();
+    child.wait_with_output().unwrap()
+}
+
+fn lean_results(inputs: &[Value]) -> Vec<Vec<Value>> {
+    let output = run_lean(&json!({"histories": inputs}));
     assert!(
         output.status.success(),
         "Lean runner failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let actual: Vec<Value> = serde_json::from_slice(&output.stdout).expect("Lean result array");
-    assert_eq!(actual.len(), histories.len());
-    for (index, (history, actual)) in histories.iter().zip(actual).enumerate() {
-        let result = replay(&history.entries);
-        assert_eq!(
-            actual,
-            projected(history, &result),
-            "seed {}, input {}",
-            index + 1,
-            inputs[index]
-        );
-        let mut incremental = StoreLog::default();
-        for entry in &history.entries {
-            let (checked, replay) = crate::replay_entry(&incremental, entry.clone());
-            incremental.entries.push(checked);
-            incremental.replay = replay;
-        }
-        assert_eq!(incremental.replay, result, "incremental seed {}", index + 1);
-        let reversed: Vec<_> = history.entries.iter().rev().cloned().collect();
-        assert_eq!(replay(&reversed), result, "seed {}", index + 1);
+    let actual: Vec<Vec<Value>> =
+        serde_json::from_slice(&output.stdout).expect("Lean result array");
+    assert_eq!(actual.len(), inputs.len());
+    for (results, input) in actual.iter().zip(inputs) {
+        assert_eq!(results.len(), input["received"].as_array().unwrap().len());
     }
+    actual
+}
+
+fn arrival_order(h: &History, mut pick: impl FnMut(usize) -> usize) -> Vec<usize> {
+    let mut order = Vec::new();
+    while order.len() < h.entries.len() {
+        let ready: Vec<_> =
+            h.entries
+                .iter()
+                .enumerate()
+                .filter_map(|(i, e)| {
+                    (!order.contains(&i)
+                        && h.entries.iter().enumerate().all(|(j, prior)| {
+                            !crate::replay::had_read(e, prior) || order.contains(&j)
+                        }))
+                    .then_some(i)
+                })
+                .collect();
+        assert!(
+            !ready.is_empty(),
+            "history must admit a causal arrival order"
+        );
+        order.push(ready[pick(ready.len())]);
+    }
+    order
+}
+
+fn received_prefixes(orders: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    orders
+        .iter()
+        .flat_map(|order| (0..=order.len()).map(|n| order[..n].to_vec()))
+        .collect()
+}
+
+fn compare_arrivals(h: &History, orders: &[Vec<usize>], actual: &[Value], context: &Value) {
+    assert_eq!(actual.len(), orders.len() * (h.entries.len() + 1));
+    for (order, results) in orders.iter().zip(actual.chunks_exact(h.entries.len() + 1)) {
+        let mut log = StoreLog::default();
+        assert_eq!(results[0], projected(h, &log.replay));
+        for (n, &i) in order.iter().enumerate() {
+            let entries: Vec<_> = order[..=n].iter().map(|&j| h.entries[j].clone()).collect();
+            let result = replay(&entries);
+            let (checked, incremental) = replay_entry(&log, h.entries[i].clone());
+            assert_eq!(
+                incremental, result,
+                "cached replay, order {order:?}, prefix {n}"
+            );
+            assert_eq!(
+                results[n + 1],
+                projected(h, &result),
+                "order {order:?}, prefix {}, input {context}",
+                n + 1
+            );
+            log.entries.push(checked);
+            log.replay = incremental;
+        }
+        assert_eq!(log.replay, replay(&h.entries));
+    }
+}
+
+#[test]
+#[ignore = "requires COVEN_STORELOG_LEAN, supplied by scripts/check.sh"]
+fn lean_differential_generated() {
+    // Each batch sends complete histories and several received sets per history.
+    for first in (1..=2048).step_by(64) {
+        let cases: Vec<_> = (first..first + 64)
+            .map(|seed| {
+                let mut generator = Generator(seed);
+                let h = generator.history();
+                let orders = vec![
+                    arrival_order(&h, |_| 0),
+                    arrival_order(&h, |n| n - 1),
+                    arrival_order(&h, |n| generator.pick(n)),
+                ];
+                // Duration units are days; tied landings and gaps fit within the
+                // 30-day window. Late landings are asserted separately.
+                let mut time = seed * 100;
+                let stored: Vec<_> = h
+                    .entries
+                    .iter()
+                    .map(|_| {
+                        time += generator.pick(2) as u64;
+                        time
+                    })
+                    .collect();
+                let input = input(&h, &stored, &received_prefixes(&orders));
+                (h, orders, input)
+            })
+            .collect();
+        let inputs: Vec<_> = cases.iter().map(|(_, _, input)| input.clone()).collect();
+        let actual = lean_results(&inputs);
+        for ((h, orders, input), result) in cases.iter().zip(actual) {
+            compare_arrivals(h, orders, &result, input);
+        }
+    }
+}
+
+// CurrentExamples.emptyCircleLog's common prefix, with the Rust fixture's
+// public keys and storage-access spelling. Entry indices match the proof.
+fn circle_history() -> History {
+    let mut h = History::new();
+    h.all(0, 0, add(1, MemberRole::Member));
+    h.all(0, 0, add(2, MemberRole::Member));
+    h.all(0, 0, add(3, MemberRole::Admin));
+    h.all(1, 1, device(1));
+    h.all(0, 0, device(2));
+    h.all(0, 0, make(0, "Gifts"));
+    h.all(0, 0, join(0, 1));
+    h
+}
+
+fn orders(h: &History) -> Vec<Vec<usize>> {
+    vec![arrival_order(h, |_| 0), arrival_order(h, |n| n - 1)]
+}
+
+fn sequential_times(h: &History) -> Vec<u64> {
+    (0..h.entries.len() as u64).collect()
+}
+
+#[test]
+#[ignore = "requires COVEN_STORELOG_LEAN, supplied by scripts/check.sh"]
+fn lean_differential_checked_examples() {
+    let mut histories = vec![History::new()];
+    let mut creation = History::new();
+    creation.all(0, 0, make(0, "Gifts"));
+    histories.push(creation);
+
+    let mut rotations = circle_history();
+    let past: Vec<_> = (0..8).collect();
+    for (author, writer, id) in [(0, 0, 10), (1, 1, 11), (3, 3, 12)] {
+        rotations.push(
+            author,
+            writer,
+            &past,
+            rotation(Audience::Circle(circle(0)), id),
+        );
+    }
+    rotations.push(
+        1,
+        1,
+        &[0, 1, 2, 3, 4, 5, 6, 7, 9],
+        rotation(Audience::Store, 13),
+    );
+    assert_eq!(rotations.drops(&replay(&rotations.entries)), [10]);
+    histories.push(rotations);
+
+    for action in [remove(1), delete(0)] {
+        let mut h = circle_history();
+        h.push(0, 0, &past, action);
+        h.push(1, 1, &past, rotation(Audience::Circle(circle(0)), 11));
+        assert!(h.drops(&replay(&h.entries)).is_empty());
+        histories.push(h);
+    }
+    let mut deletion = circle_history();
+    deletion.push(0, 0, &past, delete(0));
+    deletion.push(1, 1, &past, join(0, 2));
+    assert_eq!(deletion.drops(&replay(&deletion.entries)), [9]);
+    histories.push(deletion);
+
+    let mut empty = circle_history();
+    empty.push(0, 0, &past, leave(0, 1));
+    empty.push(0, 2, &past, remove(0));
+    assert!(replay(&empty.entries).state.circles[&circle(0)].deleted);
+    histories.push(empty);
+
+    let mut last_admins = History::new();
+    last_admins.all(0, 0, add(1, MemberRole::Admin));
+    last_admins.push(0, 0, &[0, 1], remove(1));
+    last_admins.push(1, 1, &[0, 1], remove(0));
+    assert_eq!(last_admins.drops(&replay(&last_admins.entries)), [3]);
+    assert_eq!(
+        replay(&last_admins.entries).entries[&last_admins.entries[3].position],
+        EntryOutcome::Dropped(DropReason::NoAdminLeft)
+    );
+    histories.push(last_admins);
+
+    let inputs: Vec<_> = histories
+        .iter()
+        .map(|h| input(h, &sequential_times(h), &received_prefixes(&orders(h))))
+        .collect();
+    for ((h, input), actual) in histories.iter().zip(&inputs).zip(lean_results(&inputs)) {
+        compare_arrivals(h, &orders(h), &actual, input);
+    }
+}
+
+// Each discrepancy asserts the complete model result, the complete Rust
+// projection, and the Rust-only reason. No arbitrary mismatch is accepted.
+fn counterexample(
+    h: &History,
+    stored: &[u64],
+    received: Vec<usize>,
+    expected_rust: Value,
+    expected_lean: Value,
+) {
+    let entries: Vec<_> = received.iter().map(|&i| h.entries[i].clone()).collect();
+    let rust = projected(h, &replay(&entries));
+    let query = input(h, stored, &[received]);
+    let actual = lean_results(&[query]);
+    assert_eq!(rust, expected_rust);
+    assert_eq!(actual, vec![vec![expected_lean.clone()]]);
+    assert_ne!(rust, expected_lean);
+}
+
+fn expected(
+    members: &[[u64; 2]],
+    access_members: &[u64],
+    devices: &[[u64; 2]],
+    circles: Value,
+    kept: &[usize],
+    dropped: &[usize],
+) -> Value {
+    let access = serde_json::to_string(&coven_format::MemberAccess::S3AccessKey {
+        access_key_id: "fixture-access-key".into(),
+    })
+    .unwrap();
+    let access: Vec<_> = access_members.iter().map(|m| json!([m, access])).collect();
+    json!({"created":true,"members":members,"access":access,"devices":devices,
+        "circles":circles,"versions":[],"resets":[],"kept":kept,"dropped":dropped})
+}
+
+#[test]
+#[ignore = "requires COVEN_STORELOG_LEAN, supplied by scripts/check.sh"]
+fn lean_differential_policy_counterexamples() {
+    // Independent devices of one member: historical shared-member conflict.
+    let mut devices = History::new();
+    devices.push(0, 0, &[0], device(1));
+    devices.push(0, 2, &[0], device(2));
+    counterexample(
+        &devices,
+        &[0, 1, 1],
+        vec![0, 1, 2],
+        expected(&[[0, 0]], &[0], &[[0, 0], [1, 0]], json!([]), &[0, 1], &[2]),
+        expected(
+            &[[0, 0]],
+            &[0],
+            &[[0, 0], [1, 0], [2, 0]],
+            json!([]),
+            &[0, 1, 2],
+            &[],
+        ),
+    );
+    assert_eq!(
+        replay(&devices.entries).entries[&devices.entries[2].position],
+        EntryOutcome::Dropped(DropReason::BeatenBy(devices.entries[1].position))
+    );
+
+    // CurrentExamples: a concurrent addition repopulates the circle after two
+    // removals empty it. Rust deletes the empty circle before the addition.
+    let mut refill = circle_history();
+    let past: Vec<_> = (0..8).collect();
+    refill.push(0, 0, &past, leave(0, 1));
+    refill.push(0, 2, &past, remove(0));
+    refill.push(1, 1, &past, join(0, 2));
+    counterexample(
+        &refill,
+        &sequential_times(&refill),
+        (0..11).collect(),
+        expected(
+            &[[1, 1], [2, 1], [3, 0]],
+            &[0, 1, 2, 3],
+            &[[1, 1]],
+            json!([]),
+            &(0..10).collect::<Vec<_>>(),
+            &[10],
+        ),
+        expected(
+            &[[1, 1], [2, 1], [3, 0]],
+            &[0, 1, 2, 3],
+            &[[1, 1]],
+            json!([[0, "Gifts", [2]]]),
+            &(0..11).collect::<Vec<_>>(),
+            &[],
+        ),
+    );
+    assert_eq!(
+        replay(&refill.entries).entries[&refill.entries[10].position],
+        EntryOutcome::Dropped(DropReason::TargetGone)
+    );
+
+    // Removing one of two circle members has lower priority than deletion.
+    let mut tiers = gifts();
+    tiers.push(0, 0, &[0, 1, 2, 3, 4], leave(0, 1));
+    tiers.push(1, 1, &[0, 1, 2, 3, 4], delete(0));
+    counterexample(
+        &tiers,
+        &sequential_times(&tiers),
+        (0..7).collect(),
+        expected(
+            &[[0, 0], [1, 1]],
+            &[0, 1],
+            &[[0, 0], [1, 1]],
+            json!([[0, "Gifts", [0]]]),
+            &[0, 1, 2, 3, 4, 5],
+            &[6],
+        ),
+        expected(
+            &[[0, 0], [1, 1]],
+            &[0, 1],
+            &[[0, 0], [1, 1]],
+            json!([]),
+            &[0, 1, 2, 3, 4, 6],
+            &[5],
+        ),
+    );
+    assert_eq!(
+        replay(&tiers.entries).entries[&tiers.entries[6].position],
+        EntryOutcome::Dropped(DropReason::BeatenBy(tiers.entries[5].position))
+    );
+
+    // CurrentKeyExamples.removals: both admins remove a different member,
+    // then the remaining circle member and an admin rotate their audiences.
+    let mut removals = History::new();
+    removals.all(0, 0, add(1, MemberRole::Admin));
+    removals.all(0, 0, add(2, MemberRole::Member));
+    removals.all(0, 0, add(3, MemberRole::Member));
+    for m in 1..=3 {
+        removals.all(m, u64::from(m), device(u64::from(m)));
+    }
+    removals.all(1, 1, make(0, "Gifts"));
+    removals.all(1, 1, join(0, 2));
+    removals.all(1, 1, join(0, 3));
+    let past: Vec<_> = (0..10).collect();
+    removals.push(0, 0, &past, remove(2));
+    removals.push(1, 1, &past, remove(3));
+    removals.all(1, 1, rotation(Audience::Circle(circle(0)), 2));
+    removals.all(0, 0, rotation(Audience::Store, 3));
+    removals.all(1, 1, rotation(Audience::Store, 4));
+    for n in [12, 14, 15] {
+        counterexample(
+            &removals,
+            &sequential_times(&removals),
+            (0..n).collect(),
+            expected(
+                &[[0, 0], [1, 0], [3, 1]],
+                &[0, 1, 2, 3],
+                &[[0, 0], [1, 1], [3, 3]],
+                json!([[0, "Gifts", [1, 3]]]),
+                &(0..n).filter(|&i| i != 11).collect::<Vec<_>>(),
+                &[11],
+            ),
+            expected(
+                &[[0, 0], [1, 0]],
+                &[0, 1, 2, 3],
+                &[[0, 0], [1, 1]],
+                json!([[0, "Gifts", [1]]]),
+                &(0..n).collect::<Vec<_>>(),
+                &[],
+            ),
+        );
+    }
+    assert_eq!(
+        replay(&removals.entries).entries[&removals.entries[11].position],
+        EntryOutcome::Dropped(DropReason::BeatenBy(removals.entries[10].position))
+    );
+}
+
+#[test]
+#[ignore = "requires COVEN_STORELOG_LEAN, supplied by scripts/check.sh"]
+fn lean_differential_storage_admission() {
+    // Earlier author timestamp, later storage arrival. The unread witness is
+    // outside [0, 1], so admission must inspect the complete storage history.
+    let mut h = History::new();
+    h.push(
+        0,
+        1,
+        &[0],
+        StoreChange::Reset {
+            snapshot: snapshot(10, Audience::Store),
+        },
+    );
+    h.push(
+        0,
+        2,
+        &[0],
+        StoreChange::Reset {
+            snapshot: snapshot(20, Audience::Store),
+        },
+    );
+    let subsets = vec![
+        vec![],
+        vec![0],
+        vec![0, 1],
+        vec![0, 2],
+        vec![0, 1, 2],
+        vec![2, 0, 1],
+    ];
+    let mut rust = expected(&[[0, 0]], &[0], &[[0, 0]], json!([]), &[0, 1], &[]);
+    rust["resets"] = json!([[0, 10]]);
+    for (landing, too_late) in [(1, false), (31, false), (32, true)] {
+        let stored = [0, landing, 1];
+        let results = lean_results(&[input(&h, &stored, &subsets)]);
+        for (subset, actual) in subsets.iter().zip(&results[0]) {
+            let entries: Vec<_> = subset.iter().map(|&i| h.entries[i].clone()).collect();
+            if !too_late || !subset.contains(&1) {
+                assert_eq!(*actual, projected(&h, &replay(&entries)));
+            } else {
+                let mut expected = expected(&[[0, 0]], &[0], &[[0, 0]], json!([]), &[0], &[1]);
+                if subset.contains(&2) {
+                    expected["kept"] = json!([0, 2]);
+                    expected["resets"] = json!([[0, 20]]);
+                }
+                assert_eq!(*actual, expected);
+                assert_ne!(*actual, projected(&h, &replay(&entries)));
+            }
+        }
+    }
+    let late = expected(&[[0, 0]], &[0], &[[0, 0]], json!([]), &[0], &[1]);
+    counterexample(&h, &[0, 32, 1], vec![0, 1], rust, late);
+
+    // A rejected outsider entry is still a storage-time witness. Excluding
+    // the late addition must also exclude it from a later author's view.
+    let mut authority = History::new();
+    authority.push(0, 1, &[0], add(1, MemberRole::Member));
+    authority.push(4, 2, &[0], rotation(Audience::Store, 21));
+    authority.push(1, 3, &[0, 1, 2], device(3));
+    counterexample(
+        &authority,
+        &[0, 32, 1, 32],
+        vec![0, 1, 2, 3],
+        expected(
+            &[[0, 0], [1, 1]],
+            &[0, 1],
+            &[[0, 0], [3, 1]],
+            json!([]),
+            &[0, 1, 3],
+            &[2],
+        ),
+        expected(&[[0, 0]], &[0], &[[0, 0]], json!([]), &[0], &[1, 2, 3]),
+    );
+    assert_eq!(
+        replay(&authority.entries).entries[&authority.entries[2].position],
+        EntryOutcome::Dropped(DropReason::NotAllowed)
+    );
+
+    // HorizonExamples.currentTied: equal storage times stay equal, and the
+    // day-40 reset drops for its landing; Rust drops it for a concurrent reset.
+    let mut tied = History::new();
+    for i in 1..=3 {
+        tied.push(
+            0,
+            i,
+            &[0],
+            StoreChange::Reset {
+                snapshot: snapshot(i, Audience::Store),
+            },
+        );
+    }
+    let subsets = vec![vec![0, 1, 2], vec![0, 1, 2, 3]];
+    let results = lean_results(&[input(&tied, &[0, 1, 1, 40], &subsets)]);
+    for (subset, result) in subsets.iter().zip(&results[0]) {
+        let entries: Vec<_> = subset.iter().map(|&i| tied.entries[i].clone()).collect();
+        assert_eq!(*result, projected(&tied, &replay(&entries)));
+        assert_eq!(result["kept"], json!([0, 1]));
+    }
+}
+
+#[test]
+#[ignore = "requires COVEN_STORELOG_LEAN, supplied by scripts/check.sh"]
+fn lean_differential_rejects_invalid_inputs() {
+    let mut h = gifts();
+    h.all(0, 0, rotation(Audience::Store, 20));
+    let valid = input(&h, &sequential_times(&h), &[vec![0]]);
+    for index in [0, 3, 5] {
+        for hash in [json!([1]), json!(vec![256; 32])] {
+            let mut bad = valid.clone();
+            bad["entries"][index]["action"]["key_hash"] = hash;
+            let output = run_lean(&json!({"histories":[bad]}));
+            assert!(!output.status.success());
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("key hash must contain 32 bytes")
+            );
+        }
+    }
+    for (index, field, value, reason) in [
+        (1, "past", json!([1]), "violates Valid"),
+        (0, "attempted", json!(1), "attempt follows storage time"),
+        (
+            2,
+            "attempted",
+            json!(0),
+            "recorded read follows attempt time",
+        ),
+    ] {
+        let mut bad = valid.clone();
+        bad["entries"][index][field] = value;
+        let output = run_lean(&json!({"histories":[bad]}));
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(reason));
+    }
+    for (field, value, reason) in [
+        ("received", json!([[1]]), "not causally closed"),
+        ("received", json!([[99]]), "outside history"),
+        ("entries", json!([]), "must contain creation"),
+    ] {
+        let mut bad = valid.clone();
+        bad[field] = value;
+        let output = run_lean(&json!({"histories":[bad]}));
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(reason));
+    }
+}
+
+#[test]
+fn current_projection_preserves_commitments_and_rust_only_data() {
+    let mut h = circle_history();
+    h.all(0, 0, rotation(Audience::Store, 20));
+    h.all(0, 0, remove(1));
+    h.all(0, 0, leave(0, 0));
+    let query = input(&h, &sequential_times(&h), &[vec![0]]);
+    for i in [0, 6, 8] {
+        let (id, hash) = match &h.entries[i].change {
+            StoreChange::CreateStore { key, key_hash, .. }
+            | StoreChange::CreateCircle { key, key_hash, .. }
+            | StoreChange::RotateKey { key, key_hash, .. } => (key, key_hash),
+            _ => unreachable!(),
+        };
+        assert_eq!(query["entries"][i]["action"]["key"], json!(key_number(*id)));
+        assert_eq!(query["entries"][i]["action"]["key_hash"], json!(hash));
+    }
+    for i in [9, 10] {
+        let action = &query["entries"][i]["action"];
+        assert!(action.get("key").is_none());
+        assert!(action.get("key_hash").is_none());
+        assert!(action.get("circles").is_none());
+    }
+    for entry in &h.entries {
+        let object = Object::StoreLog(entry.clone());
+        assert_eq!(Object::decode(&object.encode().unwrap()).unwrap(), object);
+    }
+    let result = replay(&h.entries);
+    assert_eq!(result.state.store.as_ref().unwrap().name, "Home");
+    assert_eq!(result.state.members[&member(1)].sealing, keys(1).sealing);
+    assert_eq!(result.state.devices[&DeviceId(0)].name, "Ana’s phone");
+    assert_eq!(result.state.devices[&DeviceId(1)].name, "Device 1");
+    assert_eq!(result.state.store.as_ref().unwrap().key, key(20));
+    assert_eq!(result.state.circles[&circle(0)].key, key(10));
+}
+
+#[test]
+#[should_panic(expected = "CurrentReplay does not model replacement registrations")]
+fn projection_rejects_replacement_registrations() {
+    let mut h = History::new();
+    h.all(
+        0,
+        0,
+        StoreChange::AddDevice {
+            device: DeviceId(1),
+            name: "Replacement".into(),
+            replaces: Some(DeviceId(0)),
+        },
+    );
+    input(&h, &sequential_times(&h), &[vec![0, 1]]);
+}
+
+#[test]
+#[should_panic(expected = "snapshot numbers identify one fixture writer")]
+fn projection_rejects_an_unmapped_snapshot_writer() {
+    let mut h = History::new();
+    let mut boundary = snapshot(1, Audience::Store);
+    boundary.device = DeviceId(901);
+    h.all(0, 0, StoreChange::Reset { snapshot: boundary });
+    input(&h, &sequential_times(&h), &[vec![0, 1]]);
 }
 
 async fn open(directory: StoreDir) -> coven_database::Database {

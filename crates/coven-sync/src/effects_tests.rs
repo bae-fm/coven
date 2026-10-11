@@ -238,7 +238,7 @@ fn access_updates_are_member_authored_and_causal_replacements_keep_the_latest() 
     });
 }
 
-fn rotation(audience: Audience, id: u64) -> StoreChange {
+pub(crate) fn rotation(audience: Audience, id: u64) -> StoreChange {
     StoreChange::RotateKey {
         audience,
         key: key(id),

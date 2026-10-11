@@ -1,7 +1,7 @@
 ## Appendix C. Proof of the store log
 
 - Lean checks the store log's terminating replay and entry accounting.
-  C1–C9 describe the historical policy still compared with Rust; their key
+  C1–C9 describe the historical policy; their key
   conflicts and examples are not the current §9 policy. C10 proves finality
   for its stated policy. C11 models D6's key-free removals, key introductions
   and §14.6's empty circles. C12 checks key hashes, copy exposure and
@@ -371,14 +371,14 @@ an explicit injectivity hypothesis, not a proof of SHA-256 security.
   proves encryption.
 - Correspondence between these Lean functions and Rust is not proved.
   `scripts/check.sh` builds `storelogRunner` and runs Rust's generated
-  differential test against its `resolve`, comparing state, kept entries,
+  differential test against `CurrentReplay.resolve`, comparing state, kept entries,
   and dropped entries. State includes the current access of active and removed
   members; generated histories include access updates and repeated access values.
-  The histories include concurrent circle renames and renames against circle
-  deletions in both timestamp orders. They also include concurrent key
-  replacements and resets against version raises, in both timestamp orders,
-  for the store and circles. The comparison includes each audience's selected
-  versions and snapshots; generated histories also cover different versions of one audience,
+  Arbitrary generated actions read the complete past; concurrent branches cover
+  circle renames, deletion, rotations, and resets against version raises in
+  both timestamp orders, for the store and circles. The comparison includes each
+  audience's selected versions and snapshots; generated histories also cover
+  different versions of one audience,
   equal versions of different audiences, and circle deletions against raises.
 - Rust retains each applied entry's author-view check, observed device owner,
   and derived circle deletions with its immutable bytes. The recorded past is
@@ -389,6 +389,38 @@ an explicit injectivity hypothesis, not a proof of SHA-256 security.
   The differential test compares both batch and incremental Rust replay with
   Lean, and the Rust examples compare every causal arrival order through both
   paths. This optimization is not a separate Lean theorem.
+- The runner reads `CurrentReplay.History`: current key-free actions, key ids
+  and exact 32-byte commitments, immutable storage and attempt times, and
+  explicit causally closed received subsets. Storage admission sees the whole
+  supplied history, including unread entries outside a received subset.
+  The adapter validates causal metadata and observed device ownership, then
+  calls the model directly; it implements no replay or time-admission rule.
+  `ReplayPolicy.authorViewTable_eq` proves a materialized author-view table
+  equal to the recursive view function. The compiler uses `authorViews_eq_cached`
+  for view lookups; membership, conflicts, admission and replay still call the
+  same proved functions. `CurrentReplay.resolveReceived_eq`
+  proves that sharing this table across received subsets equals calling `resolve`
+  for each subset. These equalities are included in the axiom audit.
+- The agreement corpus covers 2,048 generated histories, every prefix of three
+  causal arrival orders, and the current checked examples for creation,
+  rotations, recorded authority, explicit deletion, an empty circle and the
+  last admin. Duration units are days; generated landings include ties and
+  remain within the 30-day window. Separate cases exercise exactly 30 days,
+  31 days, and witnesses outside the received set.
+- Rust still uses shared-member conflicts, the combined removal tier, eager
+  empty-circle deletion, and has no storage-time admission. The suite asserts
+  exact counterexamples for independent device additions, independent store
+  removals, an emptied circle's concurrent addition, circle-removal versus
+  deletion priority, and an unread late-drop witness. These compare complete
+  expected states and fates on both sides; a passing check does not claim
+  agreement on those policies. Replacing Rust's policy requires changing those
+  counterexamples into agreement assertions.
+- Drop reasons, retained device names and public keys, cryptographic bytes,
+  and codecs have separate Rust assertions. The model compares active
+  membership, retained access, audience boundaries and entry fates. Replacement
+  registrations are outside `CurrentReplay.Action`; the adapter rejects them
+  rather than silently forgetting `replaces`. Snapshot fixtures use one writer,
+  checked before projecting their writer/number identities to numbers.
 
 ### C10 Finality by storage time
 
@@ -531,8 +563,8 @@ duration units. A successful check means all entries through its observation
 time were read and judged, including unknown devices' logs. The model does
 not prove provider clock behavior, listing completeness, persistence of the
 saved number, physical cleanup, or Rust correspondence. All named horizon
-results are included in `Axioms.lean`; the Rust comparison retains its existing
-replay functions.
+results are included in `Axioms.lean`; the Rust comparison exercises current
+replay state and fates, not horizon persistence.
 
 ### C11 Key-free removals and circles left empty after replay
 
@@ -547,7 +579,8 @@ The current actions project to the membership engine's existing input. That
 projection carries no replacement keys for removals and forgets creation and
 rotation hashes, which do not affect membership. `ReplayPolicy` uses the
 shared `scan` and `settle`; it never uses the historical key-conflict rules.
-The C1–C9 functions and Rust runner retain their original actions and results.
+The C1–C9 functions retain their original actions and results. The Rust runner
+uses `CurrentReplay.History` directly.
 `ReplayCompatibility` also retains the data package's historical input:
 `Finality.History` selects its original key-list check; the key-free
 `CurrentReplay.History` selects no key check. The input type determines this
@@ -683,4 +716,6 @@ queues or physical deletion. The fresh-introduction sealing exception and
 identical attempted retries are outside this first-attempt selection model.
 Copies made after the listing remain §11's accepted residual window. All
 named current-policy, key and example results are audited in `Axioms.lean`;
-Rust correspondence remains the historical differential test.
+Rust correspondence is checked by the current-policy differential and explicit
+counterexamples described in C9; this replay adapter does not test key selection
+or cryptographic operations.

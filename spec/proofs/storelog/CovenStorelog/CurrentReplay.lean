@@ -15,6 +15,17 @@ def authorViews {α : Type} [ReplayInput α] (H : α) (W n k : Nat) : Nat → St
 def resolve {α : Type} [ReplayInput α] (H : α) (W n : Nat) (S : EntrySet) : Result :=
   ReplayPolicy.resolve (ReplayInput.membership H) W n S (ReplayInput.admission (α := α))
 
+/-- Several received sets share one complete storage history and author views. -/
+def resolveReceived (H : History) (W n : Nat) (received : Array (List Nat)) : Array Result :=
+  let table := ReplayPolicy.authorViewTable H.membership W n none n
+  let views := fun e => (lookup table e).getD State.empty
+  received.map fun subset => ReplayPolicy.materialize H.membership W n n (entrySet subset) views
+
+theorem resolveReceived_eq (H : History) (W n : Nat) (received : Array (List Nat)) :
+    resolveReceived H W n received = received.map (fun subset => resolve H W n (entrySet subset)) := by
+  simp only [resolveReceived, ReplayPolicy.authorViewTable_eq, resolve, ReplayPolicy.resolve]
+  rfl
+
 def circleCause {α : Type} [ReplayInput α] (H : α) (W n : Nat) (S : EntrySet) (c : Nat) : Option Nat :=
   ReplayPolicy.circleCause (ReplayInput.membership H) W n S c (ReplayInput.admission (α := α))
 

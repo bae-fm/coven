@@ -2,7 +2,7 @@ import CovenStorelog.Finality
 import CovenStorelog.Invariants
 
 /-! §9's contradiction rules use the terminating replay from Appendix C.
-The historical replay and its Rust differential interface remain separate. -/
+The historical replay retains its separate conflict policy. -/
 namespace CovenStorelog.ReplayPolicy
 open CovenStorelog
 
@@ -142,6 +142,39 @@ def authorViews (H : Finality.History) (W n k : Nat)
 def resolve (H : Finality.History) (W n : Nat) (S : EntrySet)
     (check : Option (State → Entry → Bool) := none) : Result :=
   materialize H W n n S (authorViews H W n n check) check
+
+/-- Materialize each immutable author view once. Keeping state values in a
+table prevents recursive replay on every lookup of the view function. -/
+def authorViewTable (H : Finality.History) (W n : Nat)
+    (check : Option (State → Entry → Bool)) : Nat → List (Nat × State)
+  | 0 => []
+  | k + 1 =>
+      let prior := authorViewTable H W n check k
+      let views := fun e => (lookup prior e).getD State.empty
+      (k, (materialize H W n k (hadRead H.log k) views check).state) :: prior
+
+theorem authorViewTable_eq (H : Finality.History) (W n k : Nat)
+    (check : Option (State → Entry → Bool)) :
+    (fun e => (lookup (authorViewTable H W n check k) e).getD State.empty) =
+      authorViews H W n k check := by
+  induction k with
+  | zero => rfl
+  | succ k ih =>
+      funext e
+      simp only [authorViewTable, lookup, authorViews]
+      rw [ih]
+      by_cases h : k = e
+      · subst e; simp
+      · simpa [h, Ne.symm h] using congrFun ih e
+
+def cachedAuthorViews (H : Finality.History) (W n k : Nat)
+    (check : Option (State → Entry → Bool)) : Nat → State :=
+  let table := authorViewTable H W n check k
+  fun e => (lookup table e).getD State.empty
+
+@[csimp] theorem authorViews_eq_cached : @authorViews = @cachedAuthorViews := by
+  funext H W n k check
+  exact (authorViewTable_eq H W n k check).symm
 
 def circleCause (H : Finality.History) (W n : Nat) (S : EntrySet) (circle : Nat)
     (check : Option (State → Entry → Bool) := none) : Option Nat :=
