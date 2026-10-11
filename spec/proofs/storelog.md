@@ -5,7 +5,9 @@
   conflicts and examples are not the current §9 policy. C10 proves finality
   for its stated policy. C11 models D6's key-free removals, key introductions
   and §14.6's empty circles. C12 checks key hashes, copy exposure and
-  first-attempt selection against the current replay.
+  first-attempt selection against the current replay. C13 adds the stable-member
+  proposal and its old-key finality counterexample; C14 lists the implied
+  spec and format changes.
 - The development is in `spec/proofs/storelog/`, without Mathlib, using
   the toolchain pinned by [Appendix B](merge.md).
 
@@ -722,3 +724,248 @@ named current-policy, key and example results are audited in `Axioms.lean`;
 Rust correspondence is checked by the current-policy differential and explicit
 counterexamples described in C9; this replay adapter does not test key selection
 or cryptographic operations.
+
+### C13 Stable members and replaceable keys — checked proposal
+
+`CurrentReplay.Keyed` models the stable-member decision separately from the
+unkeyed `CurrentReplay` interface used by Rust differential tests. Member ids,
+signing keys and sealing keys are independent abstract numbers; equality of
+ids does not mean equality of keys. Creation and addition carry initial keys.
+`InitialKeys` makes the payload required exactly for those actions. The new
+`replaceMemberKeys` action carries a target member and both new public keys.
+The signer is a verified public-key identity supplied at the cryptographic
+boundary, separate from the entry's stable author id.
+
+`equal_received` and `member_keys_converge` prove that equal received entry
+sets produce equal complete results and member keys, regardless of order or
+repetition. Author views replay exactly the recorded past using the same
+key-aware replay. `ReplayMachine.settleN_total` proves restart termination;
+`scan_matches_legacy` checks that its generalized scan specializes to the
+historical scan's exact behavior. That historical equation remains available
+to existing proofs and the Rust runner. Common membership effects, circle
+finishing and the permanent storage-time rejection use the existing functions.
+
+`kept_current_signature` proves that every kept entry uses the signing key
+current in its recorded view. `replacement_authority` requires that both the
+target and author exist there and that the author is the target or an admin.
+The creation signature instead verifies against the initial keys it carries.
+Adding an already-present id with different keys is refused; it cannot bypass
+replacement. `signer_uses_recorded_view`, `old_unread_entry_counts` and
+`addition_cannot_replace` check these distinctions through actual replay.
+
+Concurrent replacements of the same member conflict even with equal payloads.
+`replacements_conflict`, `admin_preferred` and `same_kind_timestamp` prove the
+comparison rules. A replacement whose author equals its target is self-replacement,
+even when that member is an admin; an authorized different author must be an
+admin in the recorded view. `other_admin_beats_admin_self` checks this case.
+Removal beats a replacement of that member. Replacements of different members, role/access
+changes, device changes and audience rotations do not acquire extra conflicts.
+`admin_beats_earlier_self`, `same_kind_earlier_wins` and
+`equal_payload_admin_wins` check complete replay outcomes, including restarts.
+`any_order` transfers the admin/self result to every receipt order.
+
+`replacement_preserves_membership` proves that replacement changes no role,
+device, circle or membership. `admin_remains` preserves the existing last-admin
+check throughout replay. `removed_cannot_be_replaced` refuses an absent target
+at the point of application, as well as the recorded-view authority check.
+`removed_stays_removed`, `removal_beats_replacement` and `last_admin_unaffected`
+check removal races, replacement after removal and demotion of the sole admin.
+`checked_metadata` checks causal closure, own-device predecessors, unique
+creation and online first-attempt/storage facts for the example histories.
+
+The reading requires fresh signing **and** sealing keys: replacing a leaked
+credential with itself cannot revoke it. Kept bindings retain their public-key
+history for the freshness check. Equal concurrent replacements remain events,
+so their winner is determined before publishing the resulting state. Reusing
+a previous signing or sealing key is refused. Random generation and collision
+resistance are outside this model.
+
+#### Old-key writes converge, but their verdicts are not final
+
+`OldKeyObjects` chooses the retired-write reading for writes: the signature
+must match the key current in `store_log_read`. Each unread kept replacement
+of that member installing a different signing key supplies a deadline. This
+includes keys from a losing concurrent replacement, not only the key preceding
+the winner. A write using the winner's keys is not an old-key write. Read
+earlier replacements do not retire later keys current in the recorded view.
+The write then needs either a complete publication at most 30 storage days
+after every such replacement,
+or a counting write that read it. The boundary is inclusive. A counting
+reader cannot excuse a bad signature, absent author, wrong device owner or
+failed ordinary schema/reset/content checks.
+
+The counting set is the least set generated by valid timely writes and their
+otherwise-valid recorded predecessors. `counting_reader` proves closure under
+a counting reader, assuming the recorded write past is transitive;
+`least_counting_rule` proves that an ungrounded cycle cannot supply acceptance.
+`counting_converges` proves equal verdicts for equal entries, writes and
+immutable storage facts. `rescue_never_bypasses_signature` preserves the
+recorded-view check.
+`unread_replacement_deadline` proves the bound without assuming which entry
+introduced the displaced signing key. `losing_binding_is_retired` checks an
+old write from the losing self-replacement; `equal_payload_is_current` checks
+that the same write remains current when the admin winner installs its keys.
+
+**Finality after replacement fails.** The checked history has one member,
+two entries and two writes:
+
+1. Day 0: create with signing key A.
+2. Day 1: replace A with B.
+3. Day 32: an A-signed write X lands, having read creation only. Its deadline
+   was day 31, so it does not count.
+4. Day 33: the complete entry history qualifies for finality; the replacement
+   is kept and the entry window [3, 33] is empty.
+5. Day 34: a B-signed write Y, which read the replacement and X, lands. Y
+   counts and makes X count. There are no new entries or changed replacement
+   decisions.
+
+`replacement_final_window`, `final_replacement_does_not_finalize_write` and a
+literal Lean `example` check this history. `boundary_inclusive` checks day 31
+versus day 32. `no_reader_no_rescue` proves that a lone late write cannot
+exhibit this failure: another counting write is necessary. Creation and one
+replacement are the minimum entry history containing a replacement. These are
+minimal object counts, not a claim that day 33 is the earliest possible time.
+They are the minimum for the admission rule. The data package also checks an
+honest first-send realization with a third entry: rotate the store key on day
+2, then use that fresh key for Y. The finality window stays empty and the same
+write verdict changes (`OldWriteWithRotation` in its member-key examples).
+
+This policy is sound as a deterministic counting rule, **not** as a promise
+that finalizing replacement fixes all old-key write verdicts or permits
+irreversible cleanup of every excluded old-key input. It also cannot prove
+immediate protection from forgery by someone holding the leaked old signing
+key: such a holder can sign an old recorded view, and the grace rule may accept
+it. A current-key reader can restore a late object's effects arbitrarily later.
+Replacement finality alone must not authorize deletion of those inputs.
+
+Entries keep §9's permanent rule against **any** unread stored entry, kept or
+dropped. The counting-write exception does not rescue entries.
+`entry_deadline` proves the inclusive bound for every kept unread entry; it
+does not even require the deadline's witness to be a kept replacement. This
+separation preserves the existing entry-finality premise. The general horizon
+proof has not been transferred to the key-aware replay; the counterexample
+needs no new entries after its replacement.
+
+Encryption, signature verification, entry path/device validation, complete
+provider discovery, random ids, SQL rebuilding and physical retention are
+outside this proposal. The old-key model checks write ownership itself;
+other ordinary write validation is a supplied predicate. Historical key-copy
+exposure and replacement rotation are proved in [storelog-data](storelog-data.md#member-key-replacement).
+No Rust correspondence is claimed for the new keyed interface.
+
+### C14 Spec and format checklist for stable members
+
+These are proposed changes; `spec/coven.md` and `spec/format.md` are unedited.
+The list distinguishes the chosen layouts from properties that the proofs
+show cannot be promised.
+
+- [ ] **§9, §11 and D2:** define `MemberId` as a random 16-byte UUID, like a
+  circle id, independent of keys. Add `SigningKey = 32-byte Ed25519 public
+  key` with the existing invalid/weak-point checks. Change `MemberKeys` to
+  `signing:SigningKey | sealing:SealingKey`. Keep `SealingKey` as 32-byte
+  X25519. All member references and their byte ordering use the UUID.
+- [ ] **D6 author and creation:** retain `author:MemberId` in the entry
+  header, now 16 bytes. Creation's existing `admin:MemberKeys` supplies that
+  author's initial keys; the header supplies its stable id, so no duplicate
+  admin-id field is needed. Verify creation against those keys and the store
+  path. For other entries, replay `had_read`, resolve `author` there, and
+  verify with that member's current signing key. The model's `signer` is
+  verified evidence, not an additional wire field.
+- [ ] **D6 addition and replacement:** tag 1 becomes
+  `member:MemberId | keys:MemberKeys | role:u8 | access:MemberAccess`.
+  Add tag **16**, Replace member keys:
+  `member:MemberId | keys:MemberKeys`. Leave tag 12 unused and retain all
+  existing tag numbers. Replacement carries no audience keys, role, access
+  or device changes. Creation/addition establish keys; replacement is the
+  only operation changing an active member's keys. Reject reusing previous
+  signing or sealing keys.
+- [ ] **§9 authority/conflicts:** allow the target's current signature or a
+  current admin's signature in the recorded view. Classify by stable ids:
+  author equal to target is self-replacement even for an admin; a different
+  authorized author is an admin replacement. All concurrent replacements of one id
+  conflict, including equal payloads; another admin beats self, then the
+  earlier timestamp wins. A removal of that member wins. Require the target
+  in both the recorded view and replay state; replacement never re-adds it.
+  Keep role, last-admin, device and circle rules otherwise unchanged.
+- [ ] **§7.1, §10, §13 and D5/D6/D9:** authenticate writes from the device's
+  stable owner and the current signing key in `store_log_read`; D5 needs no
+  extra author or key field. Retain historical public bindings for checking
+  past objects. Apply the inclusive old-key write deadline and the least
+  counting-reader rule above, including implicit own-write reads. Apply
+  that deadline to keys from losing replacements too: compare with each
+  unread winner's installed key, not only its preceding binding. Earlier
+  replacements already read do not retire later keys current in that past.
+  Preserve entry rejection under §9; a write's read cannot revive a too-late entry.
+- [ ] **§3, §9, §15, §16.5 and §19:** do not claim that replacement finality
+  finalizes excluded writes under the reader exception. Retain/rebuild inputs
+  when a later counting reader changes admission, even with a final replacement.
+  Describe the leaked-key grace period accurately; it is not immediate
+  signature revocation. The unbounded reader exception needs a separate
+  write/retention policy decision before a bounded-cleanup claim is possible.
+- [ ] **§11, D9 and D11 key copies:** keep `member:MemberId` as stable routing
+  identity and add the exact recipient `sealing:SealingKey` to the clear
+  prefix, after `member`. The complete layout is
+  `37:u8 | version:u16 | audience:Audience | key:uuid | member:MemberId |
+  sealing:SealingKey | ephemeral:32 | nonce:24 | ciphertext | tag:16`.
+  Authenticate that prefix in D11's existing context and require its sealing
+  key to match the recipient key actually used by the box. Discovery retains
+  both member and sealing key; opening an old copy uses its named credential,
+  not a guess from the latest binding. Historical copies never disappear.
+- [ ] **§11 exposure/selection and §12 sharing:** every kept replacement
+  exposes its previous sealing credential regardless of motive. Copies to it
+  retire their store/circle keys for first attempts even though the member is
+  still present. Catch-up precedes new sealing; route ordinary historical
+  and rotation copies to the current non-retired sealing key. Binding-entry
+  prerequisite copies instead use the validated candidate's fresh keys, as
+  required for bootstrap below. Copies to credentials that never became
+  current also expose their audience key, including a losing replacement's
+  prerequisite copies to an otherwise-active member id. Rotate each affected
+  audience when no safe held key exists; only its current members may rotate it. Historical sharing
+  to the new key does not make the old exposed audience key safe again.
+  Retried pre-existing ciphertext and copies arriving after observation retain
+  §11's residual-window limits.
+- [ ] **D8 key-copy reports:** distinguish credentials in the report subject:
+  `audience:Audience | key:uuid | member:MemberId | sealing:SealingKey`, ordered
+  in that field order. A report about an old copy must not satisfy a wait for
+  a copy to the replacement key.
+- [ ] **§12.2–12.3 and D8/D13 invites:** bind a chosen stable id into the
+  invite. For a new person the admin generates a fresh id; for recovery the
+  admin chooses an existing active member. Add `member:MemberId` after
+  `invite:uuid` in both the invite code and the signed join request. The
+  request becomes `invite:uuid | member:MemberId | keys:MemberKeys |
+  device_name:name`; verify it with its supplied new signing key and require
+  its member id to match the invite. Approval emits Add member for a new id,
+  or Replace member keys for the existing id, using the request's exact keys.
+  Do not let the requester choose which existing person to replace.
+- [ ] **§12 bootstrap and §13 access:** seal the initial and available
+  historical audience keys to the approved new sealing key before publishing
+  its binding entry. Bootstrap waits for a kept matching id-and-keys binding,
+  then registers the new device under that id. A losing replacement remains
+  a rejected join even if its prerequisite copies exist. Rebinding preserves
+  role, circle memberships and existing device ids; storage-credential changes
+  remain a separate access operation and require provider handling.
+- [ ] **§12.1 and D13 restore:** put `member:MemberId` after `name:name` in a
+  restore-code frame, before `member_keys:bytes`. Keep the existing private
+  signing/sealing key blob, now explicitly associated with that id. Refresh
+  restore codes and custody after replacement. An old code cannot bind its
+  old keys back to the id; recovery requires current keys or admin approval.
+- [ ] **D7–D9 other signatures:** use the snapshot's signed `store_log`
+  coverage as its key lookup view for both signatures, and posted positions'
+  signed `store_log` for their signer lookup. Add `store_log_read:EntryPositions`
+  after `device` in the clock frame so its signature also identifies a key
+  view. Treat unverified view fields only as lookup hints until signature
+  verification succeeds. Join requests remain authenticated by their supplied
+  keys. Admission/retention rules for old-key snapshots, positions and clock
+  objects are outside the checked entry/write rule and must be stated explicitly.
+- [ ] **D10:** render member ids as canonical lowercase hyphenated UUIDs,
+  replacing public-key hex wherever a member is spelled. Keep writer-specific
+  key-copy paths and their gap-free sequence; key versions do not create a
+  second log or overwrite old copies.
+- [ ] **D1, D14 and §17.2:** version the changed layouts and regenerate
+  member-bearing fixtures, signed objects, boxes, codes and mutation checks.
+  Resolve the appendix's existing inconsistency: its introduction says format
+  1, while its D9 example and D14 fixtures name version 2. Do not silently
+  reuse a released format number for the changed byte widths. Pin tag 16,
+  the stable author id, both key pairs, re-binding invites and copies to old
+  and new credentials. Cryptographic labels need not change merely because
+  the authenticated prefix now contains the additional fields.

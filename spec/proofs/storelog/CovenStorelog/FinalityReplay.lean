@@ -78,14 +78,17 @@ structure Valid (H : History) (n : Nat) : Prop where
     (hadRead H.log w a = true ↔ H.stored a < H.attempted w)
 
 /-- Rule 1 uses storage duration, never author timestamps or receipt time. -/
+def landingTooLate (stored : Nat → Nat) (read : Nat → Nat → Bool)
+    (W n : Nat) (S : EntrySet) (w : Nat) : Bool :=
+  (List.range n).any fun a => S a && decide (stored a + W < stored w) && !read w a
+
 def tooLate (H : History) (W n : Nat) (S : EntrySet) (w : Nat) : Bool :=
-  (List.range n).any fun a => S a &&
-    decide (H.stored a + W < H.stored w) && !hadRead H.log w a
+  landingTooLate H.stored (hadRead H.log) W n S w
 
 theorem tooLate_iff (H : History) (W n : Nat) (S : EntrySet) (w : Nat) :
     tooLate H W n S w = true ↔ ∃ a, a < n ∧ S a = true ∧
       H.stored a + W < H.stored w ∧ hadRead H.log w a = false := by
-  simp only [tooLate, List.any_eq_true, List.mem_range, Bool.and_eq_true,
+  simp only [tooLate, landingTooLate, List.any_eq_true, List.mem_range, Bool.and_eq_true,
     decide_eq_true_eq, Bool.not_eq_true']
   constructor
   · rintro ⟨a, ha, ⟨hs, ht⟩, hp⟩; exact ⟨a, ha, hs, ht, hp⟩
