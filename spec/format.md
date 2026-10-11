@@ -48,6 +48,7 @@
 | `MemberId` | 32 bytes | An Ed25519 public key; weak and invalid points refused. |
 | `SealingKey` | 32 bytes | An X25519 public key. |
 | `Timestamp` | `ms:u48 \| counter:u16 \| device:u64` | 16 bytes; byte order is timestamp order ([§7.2](coven.md#72-timestamps)). |
+| `StorageTime` | `seconds:u64 \| nanos:u32` | Unix seconds plus a nanosecond fraction from 0 through 999,999,999; retain the provider sample's precision without rounding forward. |
 | `WriteId`, `EntryId` | `device:u64 \| number:u64` | Number at least 1. |
 | `WritePositions`, `EntryPositions` | `[device:u64 \| number:u64]` | Strictly increasing by device; zero positions left out. |
 | `Audience` | `0`, or `1 \| circle:uuid` | The store sorts first, then circles by id. |
@@ -447,7 +448,7 @@
   | --- | --- | --- |
   | 32 | Write | `header_key:uuid \| part_keys:[uuid]` |
   | 33 | Store log entry | `key:uuid` |
-  | 34 | Snapshot | `audience:Audience \| key:uuid \| writes:WritePositions \| store_log:EntryPositions` |
+  | 34 | Snapshot | `audience:Audience \| key:uuid \| caught_at:StorageTime \| writes:WritePositions \| store_log:EntryPositions` |
   | 35 | Posted positions | `key:uuid` |
   | 36 | Join request | nothing |
   | 39 | Clock observation | `key:uuid` |
@@ -476,6 +477,16 @@
   kind:u8 (34) | version:u16 | prefix | prefix_signature:64 bytes | chunks | signature:64 bytes
   ```
 
+  - `caught_at` is §15's `T_c`, the provider storage sample taken before
+    the publication catch-up's reads; it is fixed with the captured prefix,
+    not the author's wall clock or the upload's start or completion time
+    ([`completed_catchup_covers_old`](proofs/io/CovenIO/Reload.lean)).
+  - Compare the complete object's first publication time from provider
+    metadata with `caught_at + 86,400 seconds`: equality counts, a later
+    landing is ignored for loading, selection and coverage
+    ([`late_snapshot_ignored`, `Snapshot.counts`](proofs/io/CovenIO/Retention.lean)).
+  - E.g. `caught_at = (100, 0)` admits a landing at `(86500, 0)`, but not
+    `(86501, 0)` ([`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean)).
   - `prefix_signature` signs the D11 context of `coven/prefix-signature/v1`,
     the path, and the exact cleartext `kind | version | prefix` bytes. The
     separate label distinguishes this message from a whole-object digest.
@@ -732,7 +743,8 @@
     across creation and addition, key-free removals, and all three kinds of
     key introduction with their key hashes;
   - a dismissal frame;
-  - a snapshot with every section and active, frozen and excluded losses;
+  - a snapshot with its signed catch-up storage time, every section and
+    active, frozen and excluded losses;
   - a migration write;
   - a clock frame and sealed clock object, with its path and author signature.
 - Every successful decode re-encodes to the same bytes; tests decode every

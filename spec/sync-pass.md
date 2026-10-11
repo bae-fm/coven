@@ -33,9 +33,12 @@ These local records survive reopening and have no pass-end expiry:
   authority. Keep the facts while the object or a reversible effect needs
   them. Snapshot growth is an indexed sum of these lengths; coverage is a
   join with checked snapshot positions.
-- **Snapshot prefixes:** the signed prefix, verified author, listed size
-  and derived plaintext length. Keep them while the snapshot or a boundary
-  names them. Selection, identity and coverage share them; a verified prefix
+- **Snapshot prefixes:** the signed prefix including `T_c`, verified author,
+  first complete publication time, listed size and derived plaintext length;
+  admit counting snapshots only through `T_c + one day`
+  ([`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean)). Keep them while
+  the snapshot or a boundary names them. Selection, identity and coverage
+  share them; a verified prefix
   is never a claim that the body passed its checks.
 - **Peer positions:** the last checked object identity and decoded positions,
   fingerprints and relevant reports, including invalid-position verdicts.
@@ -146,8 +149,10 @@ stored time T remains the age sample for retention, retirement drains and
 the return check. With no time sample yet, discovery and ordinary sync
 still proceed; finality and age-based deletion wait for qualifying evidence.
 From saved entry times and covered-log times, compute the next instant at
-which §9 finality or §15's 30-day age test could change. Include the last late
-entry's window and the strict boundary for finality; equality at 30 days
+which §9 finality or §15's age tests could change. Include snapshot upload
+expiry at `T_c + one day`
+([`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean)). Include the last
+late entry's window and the strict boundary for finality; equality at 30 days
 does not establish it, and the finality endpoint is T′, not T. Include
 §6's drain deadline, strictly more than one day and five minutes after the
 saved qualifying storage time F. Include §15's return interval: a new device
@@ -343,8 +348,8 @@ entry prerequisites are published by the ordered work in step 5.
 Only due operations whose prerequisites changed or whose retry delay
 elapsed run. All their catalog reads use steps 2–4. They issue their
 remaining requests in §18.1 order: prerequisite sealed-key creates or
-snapshot uploads, then the referencing entry create. Applying an entry
-records any access change; the owner's serialized access work performs it.
+snapshot uploads, then the referencing entry create. Applying an entry records any access change; the owner's serialized access
+work performs it.
 If a local entry changes membership, re-evaluate key eligibility before
 continuing to data first attempts, using this pass's copy observations and
 its own newly published copies. Never reserve a replacement entry without §9's
@@ -441,11 +446,26 @@ already performed for a reload. Read unchecked signed prefixes by range,
 then re-evaluate growth or coverage. A wait with unchanged prerequisites
 backs off; an idle pass performs no snapshot discovery. Create an operation
 only if an audience actually needs a snapshot.
+Prepare immediately after a complete write-log catch-up with nothing pending
+in that catch-up, using its storage sample from before the reads as the signed
+`T_c`, and require coverage of the audience's current newest counting
+snapshot at preparation (§15;
+[`completed_catchup_covers_old`](proofs/io/CovenIO/Reload.lean),
+[`SnapshotRefresh.refresh_outranks`](proofs/io/CovenIO/SnapshotRefresh.lean)).
+If this pass cannot supply that catch-up, leave publication pending
+([`SnapshotPublication.act`](proofs/io/CovenIO/Retention.lean)).
 Capture it, verify its sealed bytes locally as §15 requires, upload, and
 check the stored checksum, or fetch the stored bytes once if the provider
 has no complete-object checksum. That confirmation is shared with any
 occupied-path comparison. No snapshot task is created and deleted merely
 to record an idle check.
+Abandon an attempt that passes `T_c + one day` without confirmed counting
+publication and prepare afresh; every reader ignores an old attempt landing
+after that deadline
+([`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean)).
+For example, an attempt caught up at noon Monday and still unconfirmed after
+noon Tuesday cannot become usable by landing later
+([`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean)).
 
 From the same write, snapshot and positions catalogs, delete only objects
 whose coverage, finality, age/reader positions and ownership satisfy §15.

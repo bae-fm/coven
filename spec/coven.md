@@ -2935,9 +2935,9 @@ Carol's tablet:
     remain until that reset is final (§9).
   - Snapshots live at `<store>/snapshots/<audience>/<device>/<n>`, where the
     audience is `store` or a circle's id.
-  - Its prefix, outside its encryption, names its audience, its key and
-    its positions, so any device can choose one and decide what it
-    covers by verifying the prefix's own member signature, without opening
+  - Its prefix, outside its encryption, names its audience, its key,
+    its catch-up storage time `T_c` (D9), and its positions, so any device can
+    choose one and decide what it covers by verifying the prefix's own member signature, without opening
     its encrypted data. Unverified positions never establish coverage.
   - A snapshot is one object, encrypted in chunks like a write
     ([§6](#6-syncing-writes)), and written and loaded a chunk at a time.
@@ -3029,6 +3029,36 @@ Carol's tablet:
   A wait with unchanged prerequisites uses the shared backoff rather than
   listing again on every pass. Retention reads an uncatalogued candidate's
   header at its exact write path; it never lists historical write objects.
+- Prepare a snapshot only immediately after a catch-up has read every
+  writer's log through its next-number miss, with all required history
+  applied and nothing pending in that catch-up; a reload invalidates the
+  earlier terminal misses
+  ([`completed_catchup_covers_old`](proofs/io/CovenIO/Reload.lean)).
+  - Sample storage time `T_c` before those reads, and keep that sample in
+    the signed prefix throughout preparation and upload, including retries
+    ([`completed_catchup_covers_old`](proofs/io/CovenIO/Reload.lean),
+    [`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean)).
+  - At preparation, the new snapshot must cover every position of that
+    audience's current newest counting snapshot; this check does not lock
+    the remote catalog or require covering a concurrent arrival at landing
+    ([`SnapshotPublication.canPrepare`](proofs/io/CovenIO/Retention.lean),
+    [`SnapshotRefresh.refresh_outranks`](proofs/io/CovenIO/SnapshotRefresh.lean)).
+  - A snapshot *counts* only if its first complete publication time is at
+    most `T_c + one day`; readers ignore later landings for loading,
+    selection and coverage, including snapshots named by raises or resets
+    ([`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean)).
+  - Once an attempt passes that day without confirmed counting publication,
+    abandon it and catch up and prepare afresh at a new snapshot path;
+    stopping locally does not prevent the old request landing remotely
+    ([`late_snapshot_ignored`, `SnapshotPublication.act`](proofs/io/CovenIO/Retention.lean)).
+  - Exactly one day counts, but nothing here guarantees an upload duration
+    or eventual successful catch-up
+    ([`Snapshot.counts`](proofs/io/CovenIO/Retention.lean),
+    [`AudienceRetention.first_witness`](proofs/io/CovenIO/AudienceRetention.lean)).
+  - E.g. Ana samples noon Monday, completes the catch-up and prepares a
+    snapshot covering the current selection: a landing at noon Tuesday
+    counts, while a landing one second later is ignored
+    ([`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean)).
 - Before uploading a snapshot, its writer opens the sealed temporary file
   through the snapshot reader: decrypt, verify both signatures, and parse
   and check every record.
@@ -3048,8 +3078,12 @@ Carol's tablet:
     healthy laptop writes a newer snapshot; new devices load that one.
   - If Carol already loaded incorrect data, a person resets from Ben's
     trusted copy (§19.3). Keeping one older snapshot is not a recovery rule.
-- The *latest* snapshot of an audience is the one covering the most writes,
-  counted over every log; a tie goes to the smaller path.
+- The *latest* or *current newest* snapshot of an audience is its counting
+  snapshot covering the most writes, counted over every log; a tie goes to
+  the smaller path, and the existing schema, reset and reader checks still
+  decide usability
+  ([`catalogCurrent`](proofs/io/CovenIO/Retention.lean),
+  [`SnapshotHistory.deleted_stays_covered`](proofs/io/CovenIO/Reload.lean)).
 - Until an audience has a snapshot, a new device reads every log from the
   start; no log object is deleted before a snapshot covers it.
 - So loading a snapshot and the writes after it costs at most about twice
