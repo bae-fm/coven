@@ -31,6 +31,8 @@ fn in_circle(state: &StoreLogState, id: CircleId, who: &MemberId) -> bool {
 }
 
 pub(crate) fn check(view: &StoreLogState, entry: &StoreLogEntry) -> StoreLogCheck {
+    #[cfg(test)]
+    crate::replay::tests::author_check();
     use StoreChange::*;
     let author = &entry.author;
     let allowed = match &entry.change {

@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     time::Instant,
 };
@@ -17,7 +18,11 @@ use coven_foundation::{
 };
 use coven_merge::{Audience, Timestamp};
 
-use crate::replay;
+use crate::{replay, replay_entry};
+
+#[path = "../tests/fixtures/replay_history.rs"]
+mod history;
+pub(crate) use history::realistic_history;
 use MemberRole::{Admin, Member};
 
 pub(crate) fn keys(n: u8) -> MemberPublicKeys {
@@ -832,80 +837,83 @@ fn concurrent_store_removals_keep_the_earlier_keys_and_only_its_removed_devices(
     });
 }
 
-pub(crate) fn realistic_history() -> History {
-    let mut h = History::new();
-    for m in 1..20 {
-        h.all(
-            0,
-            0,
-            add(
-                m,
-                if m < 3 {
-                    MemberRole::Admin
-                } else {
-                    MemberRole::Member
-                },
-            ),
+#[derive(Debug, Default)]
+struct ReplayWork {
+    author_checks: usize,
+    entry_visits: usize,
+    causal_checks: usize,
+}
+
+thread_local! {
+    static WORK: RefCell<ReplayWork> = RefCell::new(ReplayWork::default());
+}
+
+pub(crate) fn author_check() {
+    WORK.with_borrow_mut(|work| work.author_checks += 1);
+}
+
+pub(super) fn visit_entry() {
+    WORK.with_borrow_mut(|work| work.entry_visits += 1);
+}
+
+pub(super) fn causal_check() {
+    WORK.with_borrow_mut(|work| work.causal_checks += 1);
+}
+
+impl ReplayWork {
+    fn take() -> Self {
+        WORK.take()
+    }
+
+    fn assert_bounded(
+        &self,
+        authors: usize,
+        selected: usize,
+        past: usize,
+        entries: usize,
+        writers: usize,
+    ) {
+        assert_eq!(self.author_checks, authors, "{self:?}");
+        // This history has three winning removals that can restart a scan.
+        // Each author view and received-set replay therefore visits its input
+        // at most four times. These are work bounds, independent of CPU speed.
+        assert!(self.entry_visits <= 4 * selected, "{self:?}");
+        // Finding concurrent opponents uses a binary search per writer, not
+        // a scan of all prior entries. At most one opponent exists per entry
+        // in this history, with two further causal checks inside conflict().
+        let per_entry = writers * (entries.ilog2() as usize + 2) + 2;
+        assert!(
+            self.causal_checks <= past + self.entry_visits * per_entry,
+            "{self:?}"
         );
-        h.all(m, u64::from(m), device(u64::from(m)));
-        h.all(m, u64::from(m), device(100 + u64::from(m)));
     }
-    for c in 0..10 {
-        h.all(c as u8, c, make(c, &format!("Circle {c}")));
-        h.all(c as u8, c, join(c, ((c + 1) % 10) as u8));
-        h.all(c as u8, c, join(c, (10 + c) as u8));
-    }
-    for m in 17..20 {
-        h.all(m, u64::from(m), make(u64::from(m), "Private notes"));
-    }
-    while h.entries.len() < 2_000 {
-        let n = h.entries.len();
-        let c = (n % 10) as u64;
-        match n {
-            600 | 1_200 | 1_800 => {
-                let m = 16 + (n / 600) as u8;
-                let past: Vec<_> = (0..n).collect();
-                h.push(
-                    m,
-                    u64::from(m),
-                    &past,
-                    rename(u64::from(m), "Offline rename"),
-                );
-                h.push(0, 0, &past, remove(m, &[u64::from(m - 10)]));
-            }
-            _ if n.is_multiple_of(50) && n + 1 < 2_000 => {
-                let past: Vec<_> = (0..n).collect();
-                h.push(c as u8, c, &past, rename(c, &format!("Plans {n}")));
-                let other = (c + 1) % 10;
-                h.push(other as u8, other, &past, rename(c, &format!("Trips {n}")));
-            }
-            _ if n % 100 == 25 => h.all(0, 0, device(1_000 + n as u64)),
-            _ if n % 100 == 75 => h.all(
-                0,
-                0,
-                StoreChange::RemoveDevice {
-                    device: DeviceId(1_000 + n as u64 - 50),
-                },
-            ),
-            _ if n % 80 == 40 => h.all(0, 0, join(0, 12)),
-            _ if n % 80 == 70 => h.all(0, 0, leave(0, 12)),
-            _ => h.all(c as u8, c, rename(c, &format!("Circle {c}, edit {n}"))),
-        }
-    }
-    h
 }
 
 #[tokio::test]
-#[ignore = "release timing, run by scripts/check.sh"]
+#[ignore = "release work bounds and timing, run by scripts/check.sh"]
 async fn replay_cost() {
     let h = realistic_history();
+    let count = h.entries.len();
+    let writers = h
+        .entries
+        .iter()
+        .map(|entry| entry.position.device)
+        .collect::<BTreeSet<_>>()
+        .len();
+    ReplayWork::take();
     let start = Instant::now();
     let result = replay(&h.entries);
     let elapsed = start.elapsed();
-    assert!(
-        elapsed < std::time::Duration::from_secs(5),
-        "2,000-entry replay took {elapsed:?}"
+    let full_work = ReplayWork::take();
+    // Author views select prefixes; the final received set adds one full scan.
+    full_work.assert_bounded(
+        count,
+        count * (count + 1) / 2,
+        count * (count - 1) / 2,
+        count,
+        writers,
     );
+    println!("2,000 entries: one full replay {elapsed:?}; {full_work:?}");
     let temporary = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(temporary.path().to_owned());
     let directory = layout
@@ -926,9 +934,15 @@ async fn replay_cost() {
     let mut last_replay = std::time::Duration::ZERO;
     let mut last_apply = std::time::Duration::ZERO;
     for entry in &h.entries {
+        ReplayWork::take();
         let start = Instant::now();
-        let (checked, replay) = crate::replay_entry(&applied, entry.clone());
+        let (checked, replay) = replay_entry(&applied, entry.clone());
         last_replay = start.elapsed();
+        let work = ReplayWork::take();
+        let count = applied.entries.len() + 1;
+        // Retained author checks are reused. Only the arriving author is
+        // checked, with at most its past and the resulting received set replayed.
+        work.assert_bounded(1, 2 * count - 1, count - 1, count, writers);
         database
             .apply_store_log(checked.clone(), replay.clone())
             .await
@@ -938,18 +952,7 @@ async fn replay_cost() {
         last_apply = start.elapsed();
     }
     let application = started.elapsed();
-    assert!(
-        application < std::time::Duration::from_secs(60),
-        "sequential application took {application:?}"
-    );
-    assert!(
-        last_replay < std::time::Duration::from_secs(1),
-        "last replay took {last_replay:?}"
-    );
-    assert!(
-        last_apply < std::time::Duration::from_secs(1),
-        "last application took {last_apply:?}"
-    );
+    println!("2,000 entries: sequential application {application:?}; last replay {last_replay:?}; last application {last_apply:?}");
     assert_eq!(applied.replay, result);
     let mut expected = applied;
     expected.entries.sort_by_key(|entry| entry.entry.timestamp);

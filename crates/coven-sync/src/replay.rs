@@ -88,6 +88,8 @@ pub(crate) fn at(
 }
 
 pub(crate) fn had_read_position(entry: &StoreLogEntry, prior: EntryId) -> bool {
+    #[cfg(test)]
+    tests::causal_check();
     (entry.position.device == prior.device && entry.position.number > prior.number)
         || entry.had_read.covers(prior)
 }
@@ -106,6 +108,8 @@ fn settle(
         let mut devices = BTreeMap::<DeviceId, Vec<usize>>::new();
         let mut restart = false;
         for &index in selected {
+            #[cfg(test)]
+            tests::visit_entry();
             let entry = entries[index];
             if dropped.contains_key(&entry.position) {
                 continue;
