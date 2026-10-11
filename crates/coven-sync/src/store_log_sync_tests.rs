@@ -475,7 +475,7 @@ async fn far_future_entry_waits_for_missing_or_damaged_sealed_keys() {
     assert_eq!(damages[0].path, path.as_str());
     assert!(matches!(
         damages[0].failure,
-        ObjectCheckFailure::Decryption(_)
+        Refusal::Decryption { cause: Some(_) }
     ));
     assert!(b.log().await.entries.is_empty());
     storage.delete(&path).await.unwrap();
@@ -488,7 +488,7 @@ async fn far_future_entry_waits_for_missing_or_damaged_sealed_keys() {
     storage.create(&path, &wrong).await.unwrap();
     assert!(matches!(
         b.sync.step().await.unwrap()[0].failure,
-        ObjectCheckFailure::Parse(_)
+        Refusal::WrongIdentity { cause: None }
     ));
     storage.delete(&path).await.unwrap();
     storage.create(&path, &original).await.unwrap();

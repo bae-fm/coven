@@ -22,11 +22,10 @@ pub(crate) fn past(database: &DatabaseConnection, header: &WriteHeader) -> Resul
         )?;
         let past = merge_fields::decode_write_positions(&bytes)?;
         if past.0.iter().any(|read| !causal_past.contains(read)) {
-            return Err(coven_format::Error::Invalid {
-                field: "write causal closure",
-                rule: coven_format::error::Rule::Coverage,
-            }
-            .into());
+            return Err(DbError::InvalidWrite {
+                write: header.position,
+                error: coven_merge::MergeError::CausalClosure(header.position),
+            });
         }
     }
     Ok(())

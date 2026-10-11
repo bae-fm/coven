@@ -33,7 +33,7 @@ macro_rules! coven_tables {
                 device BLOB NOT NULL CHECK(length(device)=8),
                 reporter BLOB NOT NULL CHECK(length(reporter) IN (0,8)),
                 number BLOB NOT NULL CHECK(length(number)=8 AND number>x'0000000000000000'),
-                failure INTEGER NOT NULL CHECK(failure IN (0,1,2,3)),
+                failure INTEGER NOT NULL CHECK(failure IN (0,1,2,3,4,5,6)),
                 judged_at BLOB CHECK(length(judged_at)=13),
                 coven_version TEXT,
                 PRIMARY KEY(kind,device,reporter),

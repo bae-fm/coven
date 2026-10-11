@@ -1,8 +1,8 @@
 //! The owner of the store-log storage step; no background tasks or sync loop.
 
 use crate::{
-    store_log_keys as keys, store_log_object as object, DamagedObject, ObjectCheckFailure,
-    SyncError, SyncFailure,
+    store_log_keys as keys, store_log_object as object, DamagedObject, Refusal, SyncError,
+    SyncFailure,
 };
 use coven_crypto::{
     custody::{MemberKeyCustody, StoreKeyCustody},
@@ -231,8 +231,7 @@ impl StoreLogSync {
                     }
                 },
                 Err(error) => {
-                    self.stuck_entry(*id, path, ObjectCheckFailure::Parse(Arc::new(error)))
-                        .await?;
+                    self.stuck_entry(*id, path, Refusal::from(error)).await?;
                     pending_devices.insert(id.device);
                 }
             }
@@ -280,8 +279,7 @@ impl StoreLogSync {
                 let envelope = match SingleChunkObject::decode(&cache[id]) {
                     Ok(envelope) => envelope,
                     Err(error) => {
-                        self.stuck_entry(*id, path, ObjectCheckFailure::Parse(Arc::new(error)))
-                            .await?;
+                        self.stuck_entry(*id, path, Refusal::from(error)).await?;
                         pending_devices.insert(id.device);
                         continue;
                     }
@@ -360,9 +358,9 @@ impl StoreLogSync {
         &self,
         entry: EntryId,
         path: &ObjectPath,
-        failure: ObjectCheckFailure,
+        failure: Refusal,
     ) -> Result<(), SyncError> {
-        if let ObjectCheckFailure::Parse(error) = &failure {
+        if let Refusal::Parse { cause: Some(error) } = &failure {
             if crate::error::newer_format(error.as_ref()) {
                 return Err(SyncFailure::UpdateRequired.into());
             }
@@ -370,7 +368,7 @@ impl StoreLogSync {
         self.database
             .record_stuck_log(coven_format::stuck::StuckRecord {
                 object: coven_format::stuck::LogObject::Entry(entry),
-                failure: failure.category(),
+                failure: (&failure).into(),
             })
             .await?;
         tracing::warn!(path = path.as_str(), error = %failure, "store log is stuck");
@@ -622,18 +620,27 @@ impl StoreLogSync {
             return Ok(false);
         };
         if let Err(error) = SealedKey::decode(&bytes) {
-            Self::damage(damages, &path, ObjectCheckFailure::Parse(Arc::new(error)))?;
+            Self::damage(
+                damages,
+                &path,
+                Refusal::Parse {
+                    cause: Some(Arc::new(error)),
+                },
+            )?;
             return Ok(false);
         }
         let opened = match audience {
             Audience::Store => member.open_store_key(path.as_str(), &bytes).map(|opened| {
                 if opened.id() != key {
-                    return Err(object::invalid("sealed key identity disagrees with path"));
+                    return Err(Refusal::WrongIdentity { cause: None });
                 }
                 match ring {
-                    Some(ring) => ring
-                        .insert_store_key(opened)
-                        .map_err(|e| ObjectCheckFailure::Parse(Arc::new(e))),
+                    Some(ring) => {
+                        ring.insert_store_key(opened)
+                            .map_err(|e| Refusal::WrongIdentity {
+                                cause: Some(Arc::new(e)),
+                            })
+                    }
                     None => {
                         *ring = Some(StoreKeyring::new(opened));
                         Ok(())
@@ -643,21 +650,27 @@ impl StoreLogSync {
             Audience::Circle(circle) => {
                 member.open_circle_key(path.as_str(), &bytes).map(|opened| {
                     if opened.id() != key || opened.circle() != *circle {
-                        return Err(object::invalid(
-                            "sealed circle key identity disagrees with path",
-                        ));
+                        return Err(Refusal::WrongIdentity { cause: None });
                     }
                     // A circle introduction follows an opened store-log entry.
                     ring.as_mut()
                         .expect("circle key follows an opened store key")
                         .insert_circle_key(opened)
-                        .map_err(|e| ObjectCheckFailure::Parse(Arc::new(e)))
+                        .map_err(|e| Refusal::WrongIdentity {
+                            cause: Some(Arc::new(e)),
+                        })
                 })
             }
         };
         match opened {
             Err(error) => {
-                Self::damage(damages, &path, ObjectCheckFailure::Decryption(error))?;
+                Self::damage(
+                    damages,
+                    &path,
+                    Refusal::Decryption {
+                        cause: Some(Arc::new(error)),
+                    },
+                )?;
                 Ok(false)
             }
             Ok(Err(failure)) => {
@@ -675,9 +688,9 @@ impl StoreLogSync {
     fn damage(
         damages: &mut Vec<DamagedObject>,
         path: &ObjectPath,
-        failure: ObjectCheckFailure,
+        failure: Refusal,
     ) -> Result<(), SyncError> {
-        if let ObjectCheckFailure::Parse(error) = &failure {
+        if let Refusal::Parse { cause: Some(error) } = &failure {
             if crate::error::newer_format(error.as_ref()) {
                 return Err(SyncFailure::UpdateRequired.into());
             }

@@ -1,6 +1,6 @@
 //! Authentication and causal checks before the replay's valid-input boundary.
 
-use crate::{ObjectCheckFailure, SyncError};
+use crate::{write_object::invalid, Refusal, SyncError};
 use coven_crypto::{MemberKeys, ObjectHasher, StoreKey, StoreKeyring};
 use coven_database::{DbError, StoreLog, StoreLogKeyUpload, StoreLogUpload};
 use coven_format::{
@@ -12,14 +12,6 @@ use coven_format::{
 use coven_foundation::id_source::StoreId;
 use coven_storage::{ObjectPath, Storage};
 use std::sync::Arc;
-
-#[derive(Debug, thiserror::Error)]
-#[error("invalid store-log object: {0}")]
-pub(crate) struct InvalidEntry(pub(crate) &'static str);
-
-pub(crate) fn invalid(reason: &'static str) -> ObjectCheckFailure {
-    ObjectCheckFailure::Parse(Arc::new(InvalidEntry(reason)))
-}
 
 pub(crate) fn origin(entry: &StoreLogEntry) -> Option<StoreOrigin> {
     match &entry.change {
@@ -125,7 +117,7 @@ pub(crate) fn path(id: EntryId) -> ObjectPath {
 pub(crate) fn check_origin(
     object: &SingleChunkObject<'_>,
     path: &ObjectPath,
-) -> Result<(), ObjectCheckFailure> {
+) -> Result<(), Refusal> {
     let SingleChunkObject::StoreLog {
         origin, signature, ..
     } = object
@@ -135,18 +127,16 @@ pub(crate) fn check_origin(
     if let Some(origin) = origin {
         let (device, number) = path.store_log_position().expect("listed store-log path");
         if number.get() != 1 || origin.timestamp.device() != device {
-            return Err(invalid("creation identity disagrees with its path"));
+            return Err(Refusal::WrongIdentity { cause: None });
         }
         let mut hash = ObjectHasher::new();
-        hash.update(
-            &object
-                .signed_bytes()
-                .map_err(|e| ObjectCheckFailure::Parse(Arc::new(e)))?,
-        );
+        hash.update(&object.signed_bytes().map_err(Refusal::from)?);
         origin
             .author
             .verify_object(path.as_str(), &hash.finish(), signature)
-            .map_err(ObjectCheckFailure::Signature)?;
+            .map_err(|error| Refusal::Signature {
+                cause: Some(Arc::new(error)),
+            })?;
     }
     Ok(())
 }
@@ -155,18 +145,15 @@ pub(crate) fn open(
     object: &SingleChunkObject<'_>,
     path: &ObjectPath,
     key: &StoreKey,
-) -> Result<StoreLogEntry, ObjectCheckFailure> {
-    let prefix = object
-        .prefix()
-        .encode()
-        .map_err(|e| ObjectCheckFailure::Parse(Arc::new(e)))?;
+) -> Result<StoreLogEntry, Refusal> {
+    let prefix = object.prefix().encode().map_err(Refusal::from)?;
     let plain = key
         .derive()
         .open_object_chunk(path.as_str(), &prefix, 0, 0, object.chunk())
-        .map_err(ObjectCheckFailure::Decryption)?;
-    let Object::StoreLog(entry) =
-        Object::decode(&plain).map_err(|e| ObjectCheckFailure::Parse(Arc::new(e)))?
-    else {
+        .map_err(|error| Refusal::Decryption {
+            cause: Some(Arc::new(error)),
+        })?;
+    let Object::StoreLog(entry) = Object::decode(&plain).map_err(Refusal::from)? else {
         return Err(invalid("expected a store-log frame"));
     };
     let SingleChunkObject::StoreLog {
@@ -178,22 +165,18 @@ pub(crate) fn open(
         return Err(invalid("expected a store-log envelope"));
     };
     let mut hash = ObjectHasher::new();
-    hash.update(
-        &object
-            .signed_bytes()
-            .map_err(|e| ObjectCheckFailure::Parse(Arc::new(e)))?,
-    );
+    hash.update(&object.signed_bytes().map_err(Refusal::from)?);
     entry
         .author
         .verify_object(path.as_str(), &hash.finish(), signature)
-        .map_err(ObjectCheckFailure::Signature)?;
+        .map_err(|error| Refusal::Signature {
+            cause: Some(Arc::new(error)),
+        })?;
     if *path != self::path(entry.position) {
-        return Err(invalid("entry position disagrees with its path"));
+        return Err(Refusal::WrongIdentity { cause: None });
     }
     if *declared != origin(&entry) {
-        return Err(invalid(
-            "creation identity disagrees with its encrypted entry",
-        ));
+        return Err(Refusal::WrongIdentity { cause: None });
     }
     Ok(entry)
 }
@@ -209,9 +192,9 @@ pub(crate) fn ready(
     log: &StoreLog,
     entry: &StoreLogEntry,
     store: StoreId,
-) -> Result<bool, ObjectCheckFailure> {
+) -> Result<bool, Refusal> {
     if !author_matches_device(log, entry) {
-        return Err(invalid("a device changed its author"));
+        return Err(Refusal::WrongIdentity { cause: None });
     }
     let contains = |id: EntryId| log.replay.entries.contains_key(&id);
     if entry.position.number > 1
@@ -227,7 +210,7 @@ pub(crate) fn ready(
     }
     if let StoreChange::CreateStore { store: id, .. } = &entry.change {
         if *id != store || !log.entries.is_empty() {
-            return Err(invalid("creation does not belong to this store"));
+            return Err(Refusal::WrongIdentity { cause: None });
         }
         return Ok(true);
     }
@@ -239,13 +222,13 @@ pub(crate) fn ready(
         return Ok(false);
     };
     if !crate::replay::had_read(entry, &creation.entry) {
-        return Err(invalid("entry did not read its store's creation"));
+        return Err(Refusal::InvalidCausality { cause: None });
     }
     for prior in &log.entries {
         let prior = &prior.entry;
         if crate::replay::had_read(entry, prior) {
             if prior.timestamp >= entry.timestamp {
-                return Err(invalid("timestamp does not follow the recorded past"));
+                return Err(Refusal::InvalidCausality { cause: None });
             }
             // Prefix positions already include this prior's own earlier entries.
             // Its other-device positions are exactly the additional closure checks.
@@ -255,7 +238,7 @@ pub(crate) fn ready(
                 .iter()
                 .any(|position| !crate::replay::had_read_position(entry, *position))
             {
-                return Err(invalid("recorded past is not causally closed"));
+                return Err(Refusal::InvalidCausality { cause: None });
             }
         }
     }

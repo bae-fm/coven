@@ -60,17 +60,25 @@ impl Wire for LogObject {
     }
 }
 
-/// The check that permanently refused an immutable log object (§19.1).
+/// The refusal variant stored in a report, without its process-local cause (§19.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StuckFailure {
     /// The authenticated encryption could not be opened.
     Decryption,
     /// The author's signature did not verify.
     Signature,
-    /// The bytes or causal metadata violate their format.
+    /// The bytes violate their format.
     Parse,
     /// The downloaded write violates the merge or application schema's checks.
     InvalidWrite,
+    /// The author was not authorized in its recorded view.
+    NotAuthorized,
+    /// The timestamp or recorded past violates causality.
+    InvalidCausality,
+    /// The object disagrees with its path, author or key identity.
+    WrongIdentity,
+    /// Authenticated file plaintext disagrees with its declared content hash.
+    ContentHash,
 }
 
 impl From<StuckFailure> for u8 {
@@ -80,6 +88,10 @@ impl From<StuckFailure> for u8 {
             StuckFailure::Signature => 1,
             StuckFailure::Parse => 2,
             StuckFailure::InvalidWrite => 3,
+            StuckFailure::NotAuthorized => 4,
+            StuckFailure::InvalidCausality => 5,
+            StuckFailure::WrongIdentity => 6,
+            StuckFailure::ContentHash => 7,
         }
     }
 }
@@ -92,6 +104,10 @@ impl TryFrom<u8> for StuckFailure {
             1 => Ok(Self::Signature),
             2 => Ok(Self::Parse),
             3 => Ok(Self::InvalidWrite),
+            4 => Ok(Self::NotAuthorized),
+            5 => Ok(Self::InvalidCausality),
+            6 => Ok(Self::WrongIdentity),
+            7 => Ok(Self::ContentHash),
             tag => Err(Error::UnknownTag {
                 field: "stuck failure",
                 tag,
@@ -130,6 +146,11 @@ impl StuckRecord {
     }
 
     pub(crate) fn validate(&self) -> Result<(), Error> {
-        require(self.object.number() > 0, "stuck object", Rule::Required)
+        require(self.object.number() > 0, "stuck object", Rule::Required)?;
+        require(
+            self.failure != StuckFailure::ContentHash,
+            "log refusal",
+            Rule::Kind,
+        )
     }
 }

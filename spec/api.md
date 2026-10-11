@@ -1803,7 +1803,10 @@ pub enum Prerequisite {
 }
 
 /// One vocabulary for failed object checks in calls and pending records.
-/// Immediate calls retain native causes. Persisted and peer reports retain
+/// Every check that produces a native error retains it as an optional cause,
+/// using its narrowest native type. Variants whose checks never produce a
+/// native error stay unit; direct verdicts on other variants use cause: None.
+/// Immediate calls retain those causes. Persisted and peer reports retain
 /// the same variant without a native cause; equality and D8 encode the
 /// variant only, never the process-local error object.
 pub enum Refusal {
@@ -1812,8 +1815,9 @@ pub enum Refusal {
     Parse { cause: Option<Arc<dyn std::error::Error + Send + Sync>> },
     InvalidWrite { cause: Option<Arc<DbError>> },
     NotAuthorized,
-    InvalidCausality,
-    WrongIdentity,
+    InvalidCausality { cause: Option<Arc<MergeError>> },
+    /// Identity checks can fail in the format, merge or key-material layer.
+    WrongIdentity { cause: Option<Arc<dyn std::error::Error + Send + Sync>> },
     /// Authenticated file plaintext disagrees with the row's content hash.
     ContentHash,
 }

@@ -3855,12 +3855,15 @@ holds failures and rejected entries, without making either wait look completed.
   decryption, authentication, signature, parsing, authorization, identity,
   causality or merge validation. Calls and pending records use the same
   `Refusal` type, including `InvalidCausality` and `WrongIdentity`; the
-  failing call also retains its native check cause when there is one.
-  Persisted and signed reports keep the same variant, never a serialized
-  process-local error.
+  failing call retains every native check cause in an optional field using
+  the narrowest native error type. A check with no native error supplies no
+  invented cause; variants whose checks never produce one stay unit variants.
+  Persisted and signed reports keep the same variant without the cause;
+  equality and D8 encode only that variant, never a process-local error.
   - Ben's write has a timestamp no later than Ana's write it read. Reading
-    it returns `DamagedObject { failure: Refusal::InvalidCausality, .. }`;
-    its pending reason is `Refused(InvalidCausality)`. Neither path turns
+    it returns `DamagedObject` with `Refusal::InvalidCausality` carrying
+    `Some(Arc<MergeError>)`; its persisted pending reason is
+    `Refused(InvalidCausality { cause: None })`. Neither path turns
     that permanent check into a network failure.
   - A refused write or entry stops its own log at that number. Later writes
     in that log and dependent work cannot pass it; independent logs continue.

@@ -45,6 +45,9 @@ fn stuck_records_are_typed_and_unique_per_ordered_log() {
         StuckFailure::Signature,
         StuckFailure::Parse,
         StuckFailure::InvalidWrite,
+        StuckFailure::NotAuthorized,
+        StuckFailure::InvalidCausality,
+        StuckFailure::WrongIdentity,
     ] {
         posted.stuck[0].failure = failure;
         let object = Object::PostedPositions(posted.clone());
@@ -63,5 +66,41 @@ fn stuck_records_are_typed_and_unique_per_ordered_log() {
         }),
         failure: StuckFailure::Parse,
     }];
+    assert!(Object::decode(&encode_frame(8, &posted).unwrap()).is_err());
+}
+
+#[test]
+fn every_refusal_tag_round_trips_and_file_hashes_cannot_refuse_a_log() {
+    use crate::stuck::StuckFailure;
+    use crate::wire::{Decoder, Encoder, Wire};
+    let failures = [
+        StuckFailure::Decryption,
+        StuckFailure::Signature,
+        StuckFailure::Parse,
+        StuckFailure::InvalidWrite,
+        StuckFailure::NotAuthorized,
+        StuckFailure::InvalidCausality,
+        StuckFailure::WrongIdentity,
+        StuckFailure::ContentHash,
+    ];
+    for (tag, failure) in failures.into_iter().enumerate() {
+        let mut out = Encoder::new();
+        failure.put(&mut out).unwrap();
+        assert_eq!(out.bytes, [tag as u8]);
+        assert_eq!(
+            StuckFailure::get(&mut Decoder::new(&out.bytes).unwrap()).unwrap(),
+            failure
+        );
+    }
+    assert!(StuckFailure::try_from(8).is_err());
+    let mut posted = crate::test_utils::objects()
+        .into_iter()
+        .find_map(|object| match object {
+            Object::PostedPositions(posted) => Some(posted),
+            _ => None,
+        })
+        .unwrap();
+    posted.stuck[0].failure = StuckFailure::ContentHash;
+    assert!(Object::PostedPositions(posted.clone()).encode().is_err());
     assert!(Object::decode(&encode_frame(8, &posted).unwrap()).is_err());
 }

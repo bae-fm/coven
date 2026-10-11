@@ -76,9 +76,9 @@ pub use circles::Circles;
 pub use coven_format::store_log::MemberRole;
 pub use coven_storage::{MemberRemoval, ProviderSignOut, RetainedAccess, RetainedAccessReason};
 pub use coven_sync::{
-    AccessKeyToDelete, Circle, CircleMemberInfo, Invite, InviteAccess, JoinRequest, MemberInfo,
-    OperationError, OperationId, OperationKind, PendingOperation, SyncError, SyncFailure,
-    SyncStatus,
+    AccessKeyToDelete, Circle, CircleMemberInfo, DamagedObject, Invite, InviteAccess, JoinRequest,
+    MemberInfo, OperationError, OperationId, OperationKind, PendingOperation, Refusal, SyncError,
+    SyncFailure, SyncStatus,
 };
 
 #[cfg(not(any(target_os = "ios", target_os = "android")))]

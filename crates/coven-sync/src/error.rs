@@ -203,36 +203,7 @@ pub struct DamagedObject {
     pub path: String,
     /// The failed check and its cause.
     #[source]
-    pub failure: ObjectCheckFailure,
-}
-
-/// Authentication and parsing failures retain their original causes.
-#[derive(Debug, thiserror::Error)]
-pub enum ObjectCheckFailure {
-    /// The authenticated write failed the merge or application schema's checks.
-    #[error("invalid write: {0}")]
-    InvalidWrite(#[source] Arc<DbError>),
-    /// Opening the object or its authenticated path failed.
-    #[error("decryption failed: {0}")]
-    Decryption(#[source] CryptoError),
-    /// The author's signature did not verify.
-    #[error("signature failed: {0}")]
-    Signature(#[source] CryptoError),
-    /// The bytes or their causal metadata violate the format.
-    #[error("parse failed: {0}")]
-    Parse(#[source] Arc<dyn std::error::Error + Send + Sync>),
-}
-
-impl ObjectCheckFailure {
-    pub(crate) fn category(&self) -> coven_format::stuck::StuckFailure {
-        use coven_format::stuck::StuckFailure;
-        match self {
-            Self::Decryption(_) => StuckFailure::Decryption,
-            Self::Signature(_) => StuckFailure::Signature,
-            Self::Parse(_) => StuckFailure::Parse,
-            Self::InvalidWrite(_) => StuckFailure::InvalidWrite,
-        }
-    }
+    pub failure: crate::Refusal,
 }
 
 /// Older unsupported formats are damaged inputs; only newer ones require an update.
@@ -245,3 +216,7 @@ pub(crate) fn newer_format(error: &(dyn std::error::Error + 'static)) -> bool {
         Some(CryptoError::UnsupportedVersion(version)) if *version > coven_format::FORMAT_VERSION
     )
 }
+
+#[cfg(test)]
+#[path = "error_tests.rs"]
+mod tests;

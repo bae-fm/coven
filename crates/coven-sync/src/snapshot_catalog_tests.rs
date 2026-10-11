@@ -334,7 +334,7 @@ async fn reset_boundaries_reject_another_members_prefix_before_changing_rows() {
     let before = tables(&a).await;
     assert!(matches!(a.sync.reload_from_snapshots().await,
         Err(SyncError::Damaged(object)) if object.path == path.as_str()
-            && matches!(object.failure, crate::ObjectCheckFailure::Signature(_))));
+            && matches!(object.failure, crate::Refusal::Signature { cause: Some(_) })));
     assert_eq!(tables(&a).await, before);
 }
 

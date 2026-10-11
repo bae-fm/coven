@@ -2,6 +2,7 @@ use super::writes::{publish, queued, seal};
 use super::*;
 use coven_format::value::EntryPositions;
 use coven_merge::Timestamp;
+use std::error::Error;
 
 #[tokio::test]
 async fn damaged_objects_roll_back_and_block_only_their_device() {
@@ -49,6 +50,37 @@ async fn damaged_objects_roll_back_and_block_only_their_device() {
         }
         storage.delete(&path).await.unwrap();
         storage.create(&path, &bytes).await.unwrap();
+        let object = storage
+            .list(&ObjectPrefix::device_logs())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|object| object.path == path)
+            .unwrap();
+        let log = devices[2].db.store_log().await.unwrap();
+        let ring = devices[2].custody.unlock().unwrap().unwrap();
+        let mut replays = crate::replay_cache::ReplayCache::new(&log);
+        let error = devices[2]
+            .writes
+            .receive_write(&object, &ring, &log, &mut replays, &member().member_id())
+            .await
+            .unwrap_err();
+        let SyncError::Damaged(damage) = error else {
+            panic!("{error:?}")
+        };
+        let cause = damage.failure.source().unwrap();
+        match failure {
+            "decryption" | "moved" => assert!(matches!(
+                cause.downcast_ref::<coven_crypto::CryptoError>(),
+                Some(coven_crypto::CryptoError::Authentication)
+            )),
+            "signature" => assert!(matches!(
+                cause.downcast_ref::<coven_crypto::CryptoError>(),
+                Some(coven_crypto::CryptoError::Signature)
+            )),
+            "parse" => assert!(cause.is::<coven_format::Error>()),
+            _ => unreachable!(),
+        }
         devices[2].writes.download_writes().await.unwrap();
         assert_eq!(
             rows(&devices[2].db).await,
@@ -59,6 +91,10 @@ async fn damaged_objects_roll_back_and_block_only_their_device() {
         assert_eq!(storage.reads().await, before);
         let stuck = devices[2].db.stuck_logs().await.unwrap();
         assert_eq!(stuck.len(), 1);
+        assert_eq!(
+            damage.failure,
+            crate::Refusal::from(stuck[0].record.failure)
+        );
         assert_eq!(
             stuck[0].record.object,
             LogObject::Write(record.header.position)
@@ -311,7 +347,7 @@ async fn a_newer_schema_does_not_hide_a_damaged_signature() {
             .receive_write(&object, &ring, &log, &mut replays, &member().member_id())
             .await,
         Err(SyncError::Damaged(crate::DamagedObject {
-            failure: crate::ObjectCheckFailure::Signature(_),
+            failure: crate::Refusal::Signature { cause: Some(_) },
             ..
         }))
     ));
@@ -448,4 +484,88 @@ async fn retention_waits_for_store_log_entries() {
             Err(error) if error.failure() == coven_storage::StorageFailure::NotFound
         ));
     }
+}
+
+#[tokio::test]
+async fn authorization_causality_and_identity_refusals_keep_their_report_tags() {
+    for (defect, tag) in [("authorization", 4), ("causality", 5), ("identity", 6)] {
+        let storage = storage();
+        let mut devices = group(storage.clone(), 2).await;
+        sql(
+            &devices[0].db,
+            "INSERT INTO notes VALUES('one','title','body')",
+        )
+        .await;
+        let mut record = queued(&devices[0].db).await;
+        let path = crate::write_seal::path(record.header.position);
+        match defect {
+            "authorization" => record.header.store_log_read.0.clear(),
+            "causality" => record.header.timestamp = Timestamp::new(0, 0, DeviceId(1)).unwrap(),
+            "identity" => record.header.position.number = 2,
+            _ => unreachable!(),
+        }
+        storage
+            .create(&path, &seal(&record, &path, |_, _| {}))
+            .await
+            .unwrap();
+        let object = storage
+            .list(&ObjectPrefix::device_logs())
+            .await
+            .unwrap()
+            .remove(0);
+        let log = devices[1].db.store_log().await.unwrap();
+        let ring = devices[1].custody.unlock().unwrap().unwrap();
+        let mut replays = crate::replay_cache::ReplayCache::new(&log);
+        let error = devices[1]
+            .writes
+            .receive_write(&object, &ring, &log, &mut replays, &member().member_id())
+            .await
+            .unwrap_err();
+        let SyncError::Damaged(damage) = error else {
+            panic!("{error:?}")
+        };
+        assert_eq!(
+            u8::from(coven_format::stuck::StuckFailure::from(&damage.failure)),
+            tag,
+            "{defect}"
+        );
+        devices[1].writes.download_writes().await.unwrap();
+        assert!(rows(&devices[1].db).await.is_empty());
+        let saved = devices[1].db.stuck_logs().await.unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(
+            damage.failure,
+            crate::Refusal::from(saved[0].record.failure)
+        );
+        assert_eq!(u8::from(saved[0].record.failure), tag, "{defect}");
+        devices[1].writes.post_positions().await.unwrap();
+        let post = posted(&storage, &devices[1], 2).await;
+        assert_eq!(post.stuck[0], saved[0].record);
+    }
+}
+
+#[tokio::test]
+async fn a_write_with_incomplete_causal_history_is_refused_as_causality() {
+    let storage = storage();
+    let mut devices = group(storage.clone(), 3).await;
+    sql(
+        &devices[0].db,
+        "INSERT INTO notes VALUES('one','first','body')",
+    )
+    .await;
+    devices[0].writes.upload_writes().await.unwrap();
+    devices[1].writes.download_writes().await.unwrap();
+    sql(&devices[1].db, "UPDATE notes SET title='second'").await;
+    devices[1].writes.upload_writes().await.unwrap();
+    devices[2].writes.download_writes().await.unwrap();
+    sql(&devices[1].db, "UPDATE notes SET title='third'").await;
+    let mut record = queued(&devices[1].db).await;
+    assert!(!record.header.had_read.0.is_empty());
+    record.header.had_read.0.clear();
+    publish(&storage, &record).await;
+    devices[2].writes.download_writes().await.unwrap();
+    let refused = devices[2].db.stuck_logs().await.unwrap();
+    assert_eq!(refused.len(), 1);
+    assert_eq!(u8::from(refused[0].record.failure), 5);
+    assert_eq!(rows(&devices[2].db).await[0].1, "second");
 }

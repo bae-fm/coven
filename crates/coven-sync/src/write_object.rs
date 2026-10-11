@@ -1,6 +1,6 @@
 //! Authenticated device-log objects shared by direct application and snapshot reload.
 
-use crate::{replay_cache::ReplayCache, DamagedObject, ObjectCheckFailure, SyncError};
+use crate::{replay_cache::ReplayCache, DamagedObject, Refusal, SyncError};
 use coven_crypto::{MemberId, ObjectHasher, StoreKeyring};
 use coven_database::{StoreLog, WriteWait};
 use coven_format::sealed_write::{WriteObjectLayout, WriteObjectPrefix};
@@ -40,7 +40,10 @@ async fn piece(
         .checked_add(length as u64)
         .ok_or_else(|| damaged(&object.path, invalid("object length overflow")))?;
     if end > object.size {
-        return Err(damaged(&object.path, parse(coven_format::Error::Truncated)));
+        return Err(damaged(
+            &object.path,
+            Refusal::from(coven_format::Error::Truncated),
+        ));
     }
     crate::object_range::read(storage, &object.path, ByteRange::new(offset, end)?)
         .await
@@ -57,12 +60,12 @@ pub(crate) async fn record_damage(
     database: &coven_database::Database,
     storage: &dyn coven_storage::Storage,
     object: &StoredObject,
-    failure: &ObjectCheckFailure,
+    failure: &Refusal,
 ) -> Result<coven_format::stuck::StuckRecord, SyncError> {
     read_complete(storage, object).await?;
     let record = coven_format::stuck::StuckRecord {
         object: coven_format::stuck::LogObject::Write(object.path.write_id().expect("write path")),
-        failure: failure.category(),
+        failure: failure.into(),
     };
     database.record_stuck_log(record).await?;
     tracing::warn!(path = object.path.as_str(), error = %failure, "write log is stuck");
@@ -120,12 +123,19 @@ pub(crate) async fn open(
     )?;
     let plain = key
         .open_object_chunk(object.path.as_str(), aad, 0, 0, sealed)
-        .map_err(|e| damaged(&object.path, ObjectCheckFailure::Decryption(e)))?;
+        .map_err(|e| {
+            damaged(
+                &object.path,
+                Refusal::Decryption {
+                    cause: Some(Arc::new(e)),
+                },
+            )
+        })?;
     let header = checked(&object.path, WriteHeaderFrame::decode(&plain))?;
     if crate::write_seal::path(header.header.position) != object.path {
         return Err(damaged(
             &object.path,
-            invalid("write position disagrees with path"),
+            Refusal::WrongIdentity { cause: None },
         ));
     }
     let expected = checked(
@@ -247,7 +257,14 @@ pub(crate) async fn finish<S: PartSink>(
                     coordinate.index,
                     sealed,
                 )
-                .map_err(|e| damaged(&object.path, ObjectCheckFailure::Decryption(e)))?;
+                .map_err(|e| {
+                    damaged(
+                        &object.path,
+                        Refusal::Decryption {
+                            cause: Some(Arc::new(e)),
+                        },
+                    )
+                })?;
             sink.chunk(part, plain).await?;
         }
         if opened
@@ -263,13 +280,20 @@ pub(crate) async fn finish<S: PartSink>(
     if opened.offset + 64 != object.size {
         return Err(damaged(
             &object.path,
-            parse(coven_format::Error::TrailingBytes),
+            Refusal::from(coven_format::Error::TrailingBytes),
         ));
     }
     checked(&object.path, opened.layout.finish(&[]))?;
     author
         .verify_object(object.path.as_str(), &opened.hash.finish(), &signature)
-        .map_err(|e| damaged(&object.path, ObjectCheckFailure::Signature(e)))
+        .map_err(|e| {
+            damaged(
+                &object.path,
+                Refusal::Signature {
+                    cause: Some(Arc::new(e)),
+                },
+            )
+        })
 }
 
 fn key_audience_contains(
@@ -364,7 +388,7 @@ fn authority(
     log: &StoreLog,
     replays: &mut ReplayCache<'_>,
     header: &coven_format::write::WriteHeader,
-) -> Result<MemberId, ObjectCheckFailure> {
+) -> Result<MemberId, Refusal> {
     for applied in &log.entries {
         let entry = &applied.entry;
         if !header.store_log_read.covers(entry.position) {
@@ -377,9 +401,7 @@ fn authority(
                 .iter()
                 .any(|id| !header.store_log_read.covers(*id))
         {
-            return Err(invalid(
-                "write's store-log past is not causally closed or precedes its timestamp",
-            ));
+            return Err(Refusal::InvalidCausality { cause: None });
         }
     }
     let view = replays.at(&header.store_log_read);
@@ -387,7 +409,7 @@ fn authority(
         .state
         .devices
         .get(&header.position.device)
-        .ok_or_else(|| invalid("authoring device was not a member"))?;
+        .ok_or(Refusal::NotAuthorized)?;
     if device.removed
         || view
             .state
@@ -395,7 +417,7 @@ fn authority(
             .get(&device.member)
             .is_none_or(|m| m.removed)
     {
-        return Err(invalid("write read its author's or device's removal"));
+        return Err(Refusal::NotAuthorized);
     }
     Ok(device.member.clone())
 }
@@ -403,20 +425,53 @@ fn authority(
 /// Only object checks become permanent; local database and input I/O failures propagate.
 pub(crate) fn database_failure(path: &ObjectPath, error: coven_database::DbError) -> SyncError {
     use coven_database::{DbError, SnapshotError};
+    use coven_merge::MergeError;
     match error {
         DbError::WriteFormat(error) | DbError::Snapshot(SnapshotError::Format(error))
             if crate::error::newer_format(&error) =>
         {
             crate::SyncFailure::UpdateRequired.into()
         }
+        DbError::InvalidWrite {
+            error:
+                error @ (MergeError::CausalTimestamp(_)
+                | MergeError::CausalClosure(_)
+                | MergeError::DuplicateTimestamp(_, _)),
+            ..
+        } => damaged(
+            path,
+            Refusal::InvalidCausality {
+                cause: Some(Arc::new(error)),
+            },
+        ),
+        DbError::InvalidWrite {
+            error: error @ MergeError::TimestampDevice(_),
+            ..
+        } => damaged(
+            path,
+            Refusal::WrongIdentity {
+                cause: Some(Arc::new(error)),
+            },
+        ),
+        DbError::WriteFormat(error) | DbError::Snapshot(SnapshotError::Format(error)) => {
+            damaged(path, Refusal::from(error))
+        }
         error @ (DbError::InvalidWrite { .. }
         | DbError::Schema(_)
         | DbError::Snapshot(
             SnapshotError::Inconsistent(_) | SnapshotError::Schema { .. },
-        )) => damaged(path, ObjectCheckFailure::InvalidWrite(Arc::new(error))),
-        error @ (DbError::WriteFormat(_)
-        | DbError::Snapshot(SnapshotError::Format(_))
-        | DbError::TooLarge { .. }) => damaged(path, ObjectCheckFailure::Parse(Arc::new(error))),
+        )) => damaged(
+            path,
+            Refusal::InvalidWrite {
+                cause: Some(Arc::new(error)),
+            },
+        ),
+        error @ DbError::TooLarge { .. } => damaged(
+            path,
+            Refusal::Parse {
+                cause: Some(Arc::new(error)),
+            },
+        ),
         error => error.into(),
     }
 }
@@ -429,19 +484,18 @@ pub(crate) fn checked<T>(
         Err(error) if crate::error::newer_format(&error) => {
             Err(crate::SyncFailure::UpdateRequired.into())
         }
-        value => value.map_err(|e| damaged(path, parse(e))),
+        value => value.map_err(|e| damaged(path, Refusal::from(e))),
     }
 }
-fn parse(error: coven_format::Error) -> ObjectCheckFailure {
-    ObjectCheckFailure::Parse(Arc::new(error))
+pub(crate) fn invalid(message: &'static str) -> Refusal {
+    Refusal::Parse {
+        cause: Some(Arc::new(io::Error::new(
+            io::ErrorKind::InvalidData,
+            message,
+        ))),
+    }
 }
-pub(crate) fn invalid(message: &'static str) -> ObjectCheckFailure {
-    ObjectCheckFailure::Parse(Arc::new(io::Error::new(
-        io::ErrorKind::InvalidData,
-        message,
-    )))
-}
-pub(crate) fn damaged(path: &ObjectPath, failure: ObjectCheckFailure) -> SyncError {
+pub(crate) fn damaged(path: &ObjectPath, failure: Refusal) -> SyncError {
     DamagedObject {
         path: path.as_str().to_owned(),
         failure,

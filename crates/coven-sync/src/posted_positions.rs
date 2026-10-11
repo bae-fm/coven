@@ -2,13 +2,14 @@
 
 use crate::{
     write_object::{checked, damaged, invalid},
-    ObjectCheckFailure, SyncError,
+    Refusal, SyncError,
 };
 use coven_crypto::{ObjectHasher, StoreKeyring};
 use coven_database::StoreLog;
 use coven_format::{objects::PostedPositions, sealed_single::SingleChunkObject, Object};
 use coven_merge::Audience;
 use coven_storage::ObjectPath;
+use std::sync::Arc;
 
 pub(crate) fn open(
     bytes: &[u8],
@@ -33,7 +34,14 @@ pub(crate) fn open(
     hash.update(&bytes[..bytes.len() - 64]);
     author
         .verify_object(path.as_str(), &hash.finish(), signature)
-        .map_err(|error| damaged(path, ObjectCheckFailure::Signature(error)))?;
+        .map_err(|error| {
+            damaged(
+                path,
+                Refusal::Signature {
+                    cause: Some(Arc::new(error)),
+                },
+            )
+        })?;
     let secret = crate::write_seal::derive(
         ring.ok_or(SyncError::KeyUnavailable(key))?,
         &Audience::Store,
@@ -41,7 +49,14 @@ pub(crate) fn open(
     )?;
     let plain = secret
         .open_object_chunk(path.as_str(), &object.prefix().encode()?, 0, 0, chunk)
-        .map_err(|error| damaged(path, ObjectCheckFailure::Decryption(error)))?;
+        .map_err(|error| {
+            damaged(
+                path,
+                Refusal::Decryption {
+                    cause: Some(Arc::new(error)),
+                },
+            )
+        })?;
     let Object::PostedPositions(positions) = checked(path, Object::decode(&plain))? else {
         return Err(damaged(
             path,
@@ -49,7 +64,7 @@ pub(crate) fn open(
         ));
     };
     if path.device() != Some(positions.device) {
-        return Err(damaged(path, invalid("positions path and device differ")));
+        return Err(damaged(path, Refusal::WrongIdentity { cause: None }));
     }
     Ok(positions)
 }

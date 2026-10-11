@@ -232,15 +232,19 @@ async fn invalid_causal_past_and_timestamps_are_damaged() {
         storage.create(&path, &bytes).await.unwrap();
         let c = device(storage.clone(), 3, member(1), store(1)).await;
         assert!(c.sync.step().await.unwrap().is_empty());
+        let records = c.db.stuck_logs().await.unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].record.object, LogObject::Entry(bad.position));
+        assert_eq!(records[0].reported_by, None);
         assert_eq!(
-            c.db.stuck_logs().await.unwrap(),
-            vec![StuckLog {
-                record: StuckRecord {
-                    object: LogObject::Entry(bad.position),
-                    failure: StuckFailure::Parse
-                },
-                reported_by: None,
-            }]
+            u8::from(records[0].record.failure),
+            match defect {
+                "closure" | "timestamp" => 5,
+                "author" => 6,
+                "own position" => 2,
+                _ => unreachable!(),
+            },
+            "{defect} must retain the refused check's D8 tag"
         );
     }
 }

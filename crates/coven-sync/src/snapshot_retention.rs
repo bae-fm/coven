@@ -113,7 +113,7 @@ impl StoreLogSync {
                     if let SyncError::Damaged(damage) = &error {
                         stuck.push(coven_format::stuck::StuckRecord {
                             object: coven_format::stuck::LogObject::Write(id),
-                            failure: damage.failure.category(),
+                            failure: (&damage.failure).into(),
                         });
                     }
                     snapshot_damage(damages, &object.path, error)?;

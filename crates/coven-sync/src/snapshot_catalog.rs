@@ -9,6 +9,7 @@ use coven_format::sealed_snapshot::{SnapshotObjectLayout, SnapshotObjectPrefix};
 use coven_merge::Audience;
 use coven_storage::{ObjectPath, ObjectPrefix, StoredObject};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 pub(super) struct Candidate {
     pub(super) object: StoredObject,
@@ -62,7 +63,7 @@ impl StoreLogSync {
                 snapshot_damage(
                     damages,
                     &object.path,
-                    inconsistent("snapshot path and audience differ"),
+                    damaged(&object.path, crate::Refusal::WrongIdentity { cause: None }),
                 )?;
                 continue;
             }
@@ -157,15 +158,19 @@ impl StoreLogSync {
         let (prefix, signature) = checked(path, SnapshotObjectPrefix::decode_signed(signed))?;
         author
             .verify_prefix(path.as_str(), &signed[..length], &signature)
-            .map_err(|error| damaged(path, crate::ObjectCheckFailure::Signature(error)))?;
+            .map_err(|error| {
+                damaged(
+                    path,
+                    crate::Refusal::Signature {
+                        cause: Some(Arc::new(error)),
+                    },
+                )
+            })?;
         if path
             .snapshot_id()
             .is_none_or(|id| id.audience != prefix.audience)
         {
-            return Err(damaged(
-                path,
-                crate::write_object::invalid("snapshot path and audience differ"),
-            ));
+            return Err(damaged(path, crate::Refusal::WrongIdentity { cause: None }));
         }
         Ok(Candidate {
             object: object.clone(),
@@ -338,24 +343,23 @@ pub(super) fn snapshot_damage(
             return Err(error.into())
         }
         SyncError::Crypto(error @ coven_crypto::CryptoError::Signature) => {
-            crate::ObjectCheckFailure::Signature(error)
+            crate::Refusal::Signature {
+                cause: Some(Arc::new(error)),
+            }
         }
         SyncError::Crypto(error @ coven_crypto::CryptoError::UnsupportedVersion(_)) => {
-            crate::ObjectCheckFailure::Parse(std::sync::Arc::new(error))
+            crate::Refusal::Parse {
+                cause: Some(Arc::new(error)),
+            }
         }
-        SyncError::Crypto(error) => crate::ObjectCheckFailure::Decryption(error),
-        SyncError::Format(error) => crate::ObjectCheckFailure::Parse(std::sync::Arc::new(error)),
-        SyncError::Database(coven_database::DbError::Snapshot(
-            error @ coven_database::SnapshotError::Read(_),
-        )) => {
-            return Err(coven_database::DbError::Snapshot(error).into());
-        }
-        SyncError::Database(coven_database::DbError::Snapshot(
-            coven_database::SnapshotError::Format(error),
-        )) => crate::ObjectCheckFailure::Parse(std::sync::Arc::new(error)),
-        SyncError::Database(coven_database::DbError::Snapshot(error)) => {
-            crate::ObjectCheckFailure::Parse(std::sync::Arc::new(error))
-        }
+        SyncError::Crypto(error) => crate::Refusal::Decryption {
+            cause: Some(Arc::new(error)),
+        },
+        SyncError::Format(error) => crate::Refusal::from(error),
+        SyncError::Database(error) => match crate::write_object::database_failure(path, error) {
+            SyncError::Damaged(object) => object.failure,
+            error => return Err(error),
+        },
         error => return Err(error),
     };
     StoreLogSync::damage(damages, path, failure)

@@ -466,7 +466,7 @@ impl StoreLogSync {
                 Err(SyncError::Damaged(damage)) => {
                     state.stuck.push(coven_format::stuck::StuckRecord {
                         object: coven_format::stuck::LogObject::Write(write),
-                        failure: damage.failure.category(),
+                        failure: (&damage.failure).into(),
                     });
                     continue;
                 }

@@ -293,7 +293,7 @@ impl StoreLogSync {
                                 self.database
                                     .record_stuck_log(coven_format::stuck::StuckRecord {
                                         object: coven_format::stuck::LogObject::Write(write),
-                                        failure: damage.failure.category(),
+                                        failure: (&damage.failure).into(),
                                     })
                                     .await?;
                                 tracing::warn!(?write, error = %damage, "reload write log is stuck");
